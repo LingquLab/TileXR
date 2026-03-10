@@ -13,6 +13,7 @@ TileXR — eXtreme Rendezvous for Asynchronous Tile Communication
 1. 支持的OS: Ubuntu 20.04LTS (安装系统依赖: apt install -y build-essential git git-lfs rdma-core kmod net-tools libssl-dev libz-dev libeigen3-dev python3 python3-pip)
 2. 驱动版本 **25.5.0** 以上, 请执行 `npu-smi info` 检查一下驱动的版本号
 3. 下载代码仓 `git clone --recursive -b 9.0.0-beta.1 https://gitcode.com/LingquLab/TileXR.git`
+4. 请在**root**用户下执行CANN安装和编译操作
 
 ### 1. 环境准备
 
