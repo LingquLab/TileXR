@@ -1,0 +1,8 @@
+build/
+build_out/
+build_device/
+build_hccd/
+scripts/
+third_party/
+utils/
+sign_tmp/
