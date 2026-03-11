@@ -32,7 +32,7 @@ echo "${ASCEND_PROCESS_LOG_PATH}" > ${TILEXR_PLOG_FILE_PATH}
 
 
 
-CMD="bash build.sh --run_example ${ops} eager -p ${TILEXR_CANN_HOME}/cann --soc=`soc_name`"
+CMD="bash build.sh --run_example ${ops} eager cust -p ${TILEXR_CANN_HOME}/cann --soc=`soc_name`"
 
 warn ${CMD}
 

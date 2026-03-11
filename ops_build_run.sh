@@ -46,7 +46,7 @@ cd ${TILEXR_OPS_HOME}
 
 echo "${ASCEND_PROCESS_LOG_PATH}" > ${TILEXR_PLOG_FILE_PATH}
 
-CMD="bash build.sh --run_example ${ops} eager -p ${TILEXR_CANN_HOME}/cann --soc=${TILEXR_SOC_NAME}"
+CMD="bash build.sh --run_example ${ops} eager cust -p ${TILEXR_CANN_HOME}/cann --soc=${TILEXR_SOC_NAME}"
 warn ${CMD}
 colorful_time ${CMD} | tee ${TILEXR_RUN_HOME}/ops.log
 
