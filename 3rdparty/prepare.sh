@@ -119,15 +119,19 @@ fi
 pkg_name=ripgrep
 if [[ ! -x "${TILEXR_UTIL_HOME}/${pkg_name}/rg" ]]; then
     mkdir -p ${TILEXR_UTIL_HOME}/${pkg_name}/
-    mkdir -p ${TILEXR_TEMP_HOME}/${pkg_name}/
-    colorful_time tar -xzf ${TILEXR_3RD_OPEN_HOME}/ripgrep-15.1.0.tar.gz --overwrite --strip-components=1 -C ${TILEXR_TEMP_HOME}/${pkg_name}/
-    cd ${TILEXR_TEMP_HOME}/${pkg_name}/
-    if ! command -v cargo >/dev/null 2>&1; then
-        error "install ${pkg_name} failed: cargo not found"
-        return 1
-    fi
-    colorful_time cargo build --release >> ${TILEXR_TEMP_HOME}/3rd.log
-    cp ${TILEXR_TEMP_HOME}/${pkg_name}/target/release/rg ${TILEXR_UTIL_HOME}/${pkg_name}/rg
+    case "${TILEXR_OS_ARCH}" in
+        x86_64)
+            rg_pkg="ripgrep-15.1.0-x86_64-unknown-linux-musl.tar.gz"
+            ;;
+        aarch64|arm64)
+            rg_pkg="ripgrep-15.1.0-aarch64-unknown-linux-gnu.tar.gz"
+            ;;
+        *)
+            error "unsupported arch for ripgrep: ${TILEXR_OS_ARCH}"
+            return 1
+            ;;
+    esac
+    colorful_time tar -xzf ${TILEXR_3RD_OPEN_HOME}/${rg_pkg} --overwrite --strip-components=1 -C ${TILEXR_UTIL_HOME}/${pkg_name}/
 
     if [ $? -eq 0 ]; then
         success "install ${pkg_name} success"
