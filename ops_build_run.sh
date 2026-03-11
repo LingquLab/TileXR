@@ -42,13 +42,13 @@ else
     success "install ops-transformer success in ${TILEXR_CANN_HOME}"
 fi
 
-cd ${OPS_HOME}
+cd ${TILEXR_OPS_HOME}
 
-echo "${ASCEND_PROCESS_LOG_PATH}" > ${PLOG_FILE_PATH}
+echo "${ASCEND_PROCESS_LOG_PATH}" > ${TILEXR_PLOG_FILE_PATH}
 
 CMD="bash build.sh --run_example ${ops} eager -p ${TILEXR_CANN_HOME}/cann --soc=${TILEXR_SOC_NAME}"
 warn ${CMD}
-colorful_time ${CMD} | tee ${RUN_HOME}/ops.log
+colorful_time ${CMD} | tee ${TILEXR_RUN_HOME}/ops.log
 
 cd ${TILEXR_HOME}
 

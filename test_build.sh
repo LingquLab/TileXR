@@ -7,7 +7,7 @@ cd ${TILEXR_HCCL_TEST_HOME}
 
 colorful_time make
 
-cd ${HELPER_HOME}
+cd ${TILEXR_HOME}
 
 if [ $? -ne 0 ]; then
     error "build hccl_test failed"
