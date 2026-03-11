@@ -1,1 +1,1 @@
-3rdparty/open_source/* text !filter !merge !diff
+3rdparty/open_source/* -text !filter !merge !diff
