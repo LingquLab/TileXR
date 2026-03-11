@@ -36,7 +36,7 @@ CMD="bash build.sh --run_example ${ops} eager -p ${TILEXR_CANN_HOME}/cann --soc=
 
 warn ${CMD}
 
-colorful_time ${CMD} | tee ${RUN_HOME}/ops.log
+colorful_time ${CMD} | tee ${TILEXR_RUN_HOME}/ops.log
 
 
 
@@ -55,4 +55,3 @@ else
     success "run ops-transformer success in ${TILEXR_CANN_HOME}"
 
 fi
-
