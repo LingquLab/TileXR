@@ -93,13 +93,27 @@ else
 fi
 
 pkg_name=cmake
-if [[ ! -x "${TILEXR_UTIL_HOME}/${pkg_name}/bin/cmake" ]]; then
+cmake_bin="${TILEXR_UTIL_HOME}/${pkg_name}/bin/cmake"
+cmake_pkg="cmake-3.22.6.tar.gz"
+cmake_expected_prefix="3.22."
+need_install_cmake=1
+
+if [[ -x "${cmake_bin}" ]]; then
+    cmake_current_version=$(${cmake_bin} --version 2>/dev/null | awk '/version/{print $3; exit}')
+    if [[ "${cmake_current_version}" == ${cmake_expected_prefix}* ]]; then
+        need_install_cmake=0
+    else
+        warn "${pkg_name} version mismatch (${cmake_current_version}), reinstall ${cmake_expected_prefix}x"
+    fi
+fi
+
+if [[ ${need_install_cmake} -eq 1 ]]; then
     warn "install ${pkg_name} begin"
 
     mkdir -p ${TILEXR_UTIL_HOME}/${pkg_name}/
     mkdir -p ${TILEXR_TEMP_HOME}/${pkg_name}/
 
-    colorful_time tar -xzf ${TILEXR_3RD_OPEN_HOME}/cmake-3.31.11.tar.gz --overwrite --strip-components=1 -C ${TILEXR_TEMP_HOME}/${pkg_name}/
+    colorful_time tar -xzf ${TILEXR_3RD_OPEN_HOME}/${cmake_pkg} --overwrite --strip-components=1 -C ${TILEXR_TEMP_HOME}/${pkg_name}/
 
     cd ${TILEXR_TEMP_HOME}/${pkg_name}/
 
@@ -113,7 +127,7 @@ if [[ ! -x "${TILEXR_UTIL_HOME}/${pkg_name}/bin/cmake" ]]; then
         error "install ${pkg_name} failed."
     fi
 else
-    warn "${pkg_name} already installed, skip."
+    warn "${pkg_name} already installed (${cmake_current_version}), skip."
 fi
 
 pkg_name=ripgrep
