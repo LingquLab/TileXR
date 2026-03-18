@@ -31,6 +31,7 @@ rm -f ${TILEXR_OPS_HOME}/build_out/cann-ops*.run
 echo "${ASCEND_PROCESS_LOG_PATH}" > ${TILEXR_PLOG_FILE_PATH}
 
 
+export LD_LIBRARY_PATH="/usr/local/lib:$LD_LIBRARY_PATH"
 
 CMD="bash build.sh --run_example ${ops} eager cust -p ${TILEXR_CANN_HOME}/cann --soc=`soc_name`"
 

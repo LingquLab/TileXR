@@ -7,6 +7,18 @@ env_print
 
 cp ${TILEXR_HOME}/.ops_gitignore ${TILEXR_OPS_HOME}/.gitignore
 
+cd ${TILEXR_HOME}
+cmake .
+make
+make install
+
+if [ $? -ne 0 ]; then
+    error "install tilexr-comm failed in ${TILEXR_HOME}"
+    exit 1
+else
+    success "install tilexr-comm success in ${TILEXR_HOME}"
+fi
+
 cd ${TILEXR_OPS_HOME}
 
 ops=${1:-all_gather_matmul}
@@ -20,6 +32,20 @@ rm -f ${TILEXR_OPS_HOME}/build_out/cann-ops*.run
 # mkdir -p ${TILEXR_HOME}/lib
 # \cp ${TILEXR_OPS_HOME}/build/libopapi_*.so ${ASCEND_HOME_PATH}/lib64/
 
+opsdir=${TILEXR_OPS_HOME}/mc2/${ops}
+if [ ! -d "$opsdir" ]; then
+    cp -rf ${TILEXR_HOME}/mc2/${ops} ${TILEXR_OPS_HOME}/mc2
+fi
+
+commargs=${TILEXR_OPS_HOME}/common/include/kernel/comm_args.h
+if [ ! -f "$commargs" ]; then
+    cp -rf ${TILEXR_HOME}/include/comm_args.h ${TILEXR_OPS_HOME}/common/include/kernel
+fi
+tilexrsync=${TILEXR_OPS_HOME}/common/include/kernel/tilexr_sync.h
+if [ ! -f "$tilexrsync" ]; then
+    cp -rf ${TILEXR_HOME}/include/tilexr_sync.h ${TILEXR_OPS_HOME}/common/include/kernel
+fi
+cp -f ${TILEXR_HOME}/mc2/build.sh ${TILEXR_OPS_HOME}/build.sh
 CMD="bash build.sh --pkg -j`nproc` -p ${TILEXR_CANN_HOME}/cann --soc=${TILEXR_SOC_NAME} --ops=${ops}"
 warn ${CMD}
 colorful_time ${CMD}
@@ -45,6 +71,8 @@ fi
 cd ${TILEXR_OPS_HOME}
 
 echo "${ASCEND_PROCESS_LOG_PATH}" > ${TILEXR_PLOG_FILE_PATH}
+
+export LD_LIBRARY_PATH="/usr/local/lib:$LD_LIBRARY_PATH"
 
 CMD="bash build.sh --run_example ${ops} eager cust -p ${TILEXR_CANN_HOME}/cann --soc=${TILEXR_SOC_NAME}"
 warn ${CMD}
