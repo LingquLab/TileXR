@@ -10,20 +10,21 @@
 #ifndef TILEXR_API_H
 #define TILEXR_API_H
 
-#include <comm_args.h>
+#include <string>
+#include "comm_args.h"
 #ifdef __cplusplus
 extern "C" {
 #endif // __cplusplus
 
 typedef void *TileXRCommPtr;
-#define TILEXR_UNIQUE_ID_BYTES 128
-typedef struct { char internal[TILEXR_UNIQUE_ID_BYTES]; } UniqueId;
+#define TILEXRUNIQUE_ID_BYTES 128
+typedef struct { char internal[TILEXRUNIQUE_ID_BYTES]; } TileXRUniqueId;
 
-int TileXRGetUniqueId(UniqueId *uniqueId, int commDomain);
+int TileXRGetUniqueId(TileXRUniqueId *uniqueId, int commDomain);
 
 int TileXRCommInitRankLocal(int rankSize, int rank, TileXRCommPtr *comm);
 
-int TileXRCommInitRank(UniqueId commId, int rankSize, int rank, TileXRCommPtr *comm);
+int TileXRCommInitRank(TileXRUniqueId commId, int rankSize, int rank, TileXRCommPtr *comm);
 
 int TileXRCommInitRankWithCustDomainSize(int commDomain, int bufferSize, int rankSize, int rank, TileXRCommPtr *comm);
 

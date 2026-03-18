@@ -7,13 +7,14 @@
  * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
  * See LICENSE in the root of the software repository for the full text of the License.
  */
-#ifndef TILEXR_INTERNAL_H
-#define TILEXR_INTERNAL_H
 
-#include <string>
-#include <unordered_map>
-#include <acl/acl_base.h>
+#ifndef TILEXR_CCL_KERNEL_ARGS_H
+#define TILEXR_CCL_KERNEL_ARGS_H
+
 #include "../include/tilexr_types.h"
+#include "../include/comm_args.h"
+
+namespace TileXR {
 struct AscendCCLKernelArgs {
     const void *input = nullptr;  // input
     const void *output = nullptr; // output
@@ -27,16 +28,15 @@ struct AscendCCLKernelArgs {
     const void *offset = nullptr; // offset
 };
 
-namespace TileXR {
-// Common functions
-int RegistKernel(const bool enableProfiling = false);
+struct CCLGatherArgs {
+    const void *embTable = nullptr; // emb表首地址
+    const void *lookup = nullptr;   // lookup首地址
+    const void *revData = nullptr;  // 输出连续地址
+    int64_t lookupLen = 0;
+    int64_t embTableLen = 0;
+    int64_t embTableDim = 0;
+};
 
-int64_t Count2Size(int64_t count, const HcclDataType &dataType);
+}
 
-int LoadMTE(TileXRType cclType, AscendCCLKernelArgs &args, uint32_t blockDim, HcclDataType dataType, aclrtStream stream);
-
-ChipName GetChipName();
-
-uint32_t GetCoreNum(ChipName chipName);
-} // namespace TileXR
-#endif // TILEXR_INTERNAL_H
+#endif // TILEXR_CCL_KERNEL_ARGS_H

@@ -12,9 +12,9 @@
 
 #include <vector>
 #include <string>
-#include "tilexr_types.h"
-#include "tilexr_api.h"
-#include "comm_args.h"
+#include "../include/tilexr_types.h"
+#include "../include/tilexr_api.h"
+#include "../include/comm_args.h"
 
 namespace TileXR {
 constexpr int IPC_NAME_SIZE = 65;
@@ -24,7 +24,7 @@ class TileXRComm {
 public:
     TileXRComm(int rank, int rankSize);
     TileXRComm(int rank, int rankSize, int commDomain, int bufferSize);
-    TileXRComm(int rank, int rankSize, UniqueId commId);
+    TileXRComm(int rank, int rankSize, TileXRUniqueId commId);
     ~TileXRComm();
     TileXRComm(const TileXRComm &) = delete;
     TileXRComm &operator=(const TileXRComm &) = delete;
@@ -79,7 +79,7 @@ private:
     PhysicalInfo physicalInfo_ = {};
     CommArgs commArgs_ = {};    // host侧
     GM_ADDR commArgsPtr_ = nullptr; // device侧
-    UniqueId commId_ = {};
+    TileXRUniqueId commId_ = {};
     TileXRSockExchange *socketExchange_ = nullptr;
     bool isEnableMsprofOp_ = false;
 };

@@ -27,14 +27,15 @@ constexpr int AI_CORE_NUM_2 = 2;
 using namespace std;
 using namespace Mki;
 
-extern const int TILEXR_CCE_BIN_STR[];
-asm(R"(.section .rodata, "a", @progbits
-TILEXR_CCE_BIN_STR:.incbin "/tmp/tilexr_cce.o"
-.byte 0
-.previous)");
+extern const int TILEXR_CCE_BIN_STR[] = {0};
+// asm(R"(.section .rodata, "a", @progbits
+// TILEXR_CCE_BIN_STR:.incbin "/tmp/tilexr_cce.o"
+// .byte 0
+// .previous)");
 
 constexpr int LCCL_RT_DEV_BINARY_MAGIC_ELF_AIVEC = 0x41415246;
 constexpr int COC_RT_DEV_BINARY_MAGIC_ELF = 0x43554245;
+constexpr int TILEXR_1OP_BIN_SIZE = 3000000;
 
 namespace TileXR {
 const std::map<HcclDataType, std::string> DATATYPE2NAME = {
