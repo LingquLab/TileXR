@@ -7,7 +7,7 @@
  * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
  * See LICENSE in the root of the software repository for the full text of the License.
  */
-#include "sock_exchange.h"
+#include "tilexr_sock_exchange.h"
 
 #include <unistd.h>
 #include <sys/types.h>
@@ -71,7 +71,7 @@ TileXRSockExchange::TileXRSockExchange(int rank, int rankSize, int commDomain)
 {
 }
 
-TileXRSockExchange::TileXRSockExchange(int rank, int rankSize, UniqueId tilexrCommId)
+TileXRSockExchange::TileXRSockExchange(int rank, int rankSize, TileXRUniqueId tilexrCommId)
     : rank_(rank), rankSize_(rankSize)
 {
     tilexrCommId_.uid = tilexrCommId;
