@@ -52,3 +52,12 @@ env/temp/
 env/
 **/build_device/
 **/build/
+
+CMakeCache.txt
+CMakeFiles/
+Makefile
+cmake_install.cmake
+comm/CMakeFiles/
+comm/Makefile
+comm/cmake_install.cmake
+install_manifest.txt
