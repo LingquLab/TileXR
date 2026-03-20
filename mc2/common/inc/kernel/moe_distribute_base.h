@@ -334,8 +334,8 @@ struct HcclA2CombineOpParam {
     CombinedCapability* capability;             // address of the communication capability information structure on the Device
     uint64_t capabilitySize;                    // size of the communication capability information structure
 	
-	// cwh add tilexr context for mc2WorkSpace
-	u64 tileXrContext = 0;
+    // cwh add tilexr context for mc2WorkSpace
+    uint64_t tileXrContext = 0;
 };
 enum class DataplaneMode : uint32_t {
     HOST = 0,
