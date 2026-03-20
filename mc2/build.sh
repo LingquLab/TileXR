@@ -460,6 +460,10 @@ function build_example()
             echo "${EXAMPLE_NAME} do not have eager example"
             return 2
         fi
+
+        # cwh add tilexr includes
+        TILEXR_INCS="-I${ASCEND_HOME_PATH}/pkg_inc"
+
         ABSOLUTE_MC2_PATH=$(realpath ${BUILD_PATH}/../mc2) # mc2目录绝对路径
         ABSOLUTE_EXAMPLES_MC2_PATH=$(realpath ${BUILD_PATH}/../examples/mc2)
         ABSOLUTE_EXPERIMENTAL_MC2_PATH=$(realpath ${BUILD_PATH}/../experimental/mc2)
@@ -471,7 +475,7 @@ function build_example()
                 MC2_APPEND_INCLUDE_AND_LIBRARY="-lpthread -Wl,--no-as-needed -lhccl -lhccl_fwk"
             fi
             if [[ "${PKG_MODE}" == "" ]]; then
-                g++ ${file} -I ${INCLUDE_PATH} -I ${ACLNN_INCLUDE_PATH} -I ${EAGER_INCLUDE_OPP_ACLNNOP_PATH} -L ${EAGER_LIBRARY_OPP_PATH} -L ${EAGER_LIBRARY_PATH} -lopapi_math -lopapi_transformer -lascendcl -lnnopbase -lc_sec ${MC2_APPEND_INCLUDE_AND_LIBRARY} -o test_aclnn_${EXAMPLE_NAME}
+                g++ ${file} ${TILEXR_INCS} -I ${INCLUDE_PATH} -I ${ACLNN_INCLUDE_PATH} -I ${EAGER_INCLUDE_OPP_ACLNNOP_PATH} -L ${EAGER_LIBRARY_OPP_PATH} -L ${EAGER_LIBRARY_PATH} -lopapi_math -lopapi_transformer -lascendcl -lnnopbase -lc_sec ${MC2_APPEND_INCLUDE_AND_LIBRARY} -o test_aclnn_${EXAMPLE_NAME}
             elif [[ "${PKG_MODE}" == "cust" ]]; then
                 if [[ "${vendor_name}" == "" ]]; then
                     vendor_name="custom"
@@ -484,7 +488,7 @@ function build_example()
                     CUST_LIBRARY_PATH="${CUST_VENDORS_PATH}/${vendor_name}_transformer/op_api/lib"
                     CUST_INCLUDE_PATH="${CUST_VENDORS_PATH}/${vendor_name}_transformer/op_api/include"
                 fi
-                g++ ${file} -I ${CUST_INCLUDE_PATH} -I ${INCLUDE_PATH} -I /usr/local/mpich-3.2.1/include -L /usr/local/mpich-3.2.1/lib -L ${CUST_LIBRARY_PATH} -L ${EAGER_LIBRARY_PATH} -lopapi_math -lcust_opapi -lascendcl -lnnopbase -lmpi -lmpicxx -ltile-comm -I ${EAGER_INCLUDE_OPP_ACLNNOP_PATH} -lc_sec ${MC2_APPEND_INCLUDE_AND_LIBRARY} -o test_aclnn_${EXAMPLE_NAME} -Wl,-rpath=${CUST_LIBRARY_PATH}:/usr/local/mpich-3.2.1/lib
+                g++ ${file} ${TILEXR_INCS} -I ${CUST_INCLUDE_PATH} -I ${INCLUDE_PATH} -I /usr/local/mpich-3.2.1/include -L /usr/local/mpich-3.2.1/lib -L ${CUST_LIBRARY_PATH} -L ${EAGER_LIBRARY_PATH} -lopapi_math -lcust_opapi -lascendcl -lnnopbase -lmpi -lmpicxx -ltile-comm -I ${EAGER_INCLUDE_OPP_ACLNNOP_PATH} -lc_sec ${MC2_APPEND_INCLUDE_AND_LIBRARY} -o test_aclnn_${EXAMPLE_NAME} -Wl,-rpath=${CUST_LIBRARY_PATH}:/usr/local/mpich-3.2.1/lib
             else
                 echo "Error: pkg_mode(${PKG_MODE}) must be cust."
                 help_info "run_example"
