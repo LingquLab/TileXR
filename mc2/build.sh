@@ -488,7 +488,7 @@ function build_example()
                     CUST_LIBRARY_PATH="${CUST_VENDORS_PATH}/${vendor_name}_transformer/op_api/lib"
                     CUST_INCLUDE_PATH="${CUST_VENDORS_PATH}/${vendor_name}_transformer/op_api/include"
                 fi
-                g++ ${file} ${TILEXR_INCS} -I ${CUST_INCLUDE_PATH} -I ${INCLUDE_PATH} -I /usr/local/mpich-3.2.1/include -L /usr/local/mpich-3.2.1/lib -L ${CUST_LIBRARY_PATH} -L ${EAGER_LIBRARY_PATH} -lopapi_math -lcust_opapi -lascendcl -lnnopbase -lmpi -lmpicxx -ltile-comm -I ${EAGER_INCLUDE_OPP_ACLNNOP_PATH} -lc_sec ${MC2_APPEND_INCLUDE_AND_LIBRARY} -o test_aclnn_${EXAMPLE_NAME} -Wl,-rpath=${CUST_LIBRARY_PATH}:/usr/local/mpich-3.2.1/lib
+                g++ ${file} ${TILEXR_INCS} -I ${CUST_INCLUDE_PATH} -I ${INCLUDE_PATH} -I ${MPI_HOME}/include -L ${MPI_HOME}/lib -L ${CUST_LIBRARY_PATH} -L ${EAGER_LIBRARY_PATH} -lopapi_math -lcust_opapi -lascendcl -lnnopbase -lmpi -lmpicxx -ltile-comm -I ${EAGER_INCLUDE_OPP_ACLNNOP_PATH} -lc_sec ${MC2_APPEND_INCLUDE_AND_LIBRARY} -o test_aclnn_${EXAMPLE_NAME} -Wl,-rpath=${CUST_LIBRARY_PATH}:${MPI_HOME}/lib
             else
                 echo "Error: pkg_mode(${PKG_MODE}) must be cust."
                 help_info "run_example"
