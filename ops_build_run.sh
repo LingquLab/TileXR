@@ -69,23 +69,6 @@ else
     success "install ops-transformer success in ${TILEXR_CANN_HOME}"
 fi
 
-cd ${TILEXR_OPS_HOME}
-
-echo "${ASCEND_PROCESS_LOG_PATH}" > ${TILEXR_PLOG_FILE_PATH}
-
-export LD_LIBRARY_PATH="/usr/local/lib:$LD_LIBRARY_PATH"
-
-CMD="bash build.sh --run_example ${ops} eager cust -p ${TILEXR_CANN_HOME}/cann --soc=${TILEXR_SOC_NAME}"
-warn ${CMD}
-colorful_time ${CMD} | tee ${TILEXR_RUN_HOME}/ops.log
-
 cd ${TILEXR_HOME}
 
-if [ $? -ne 0 ]; then
-    error "run ops-transformer failed in ${TILEXR_CANN_HOME}"
-    error "logpath: ${ASCEND_PROCESS_LOG_PATH}"
-    exit 1
-else
-    success "run ops-transformer success in ${TILEXR_CANN_HOME}"
-    success "logpath: ${ASCEND_PROCESS_LOG_PATH}"
-fi
+bash ${script_path}/ops_only_run.sh ${ops}
