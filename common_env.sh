@@ -28,7 +28,7 @@ mkdir -p ${TILEXR_UTIL_HOME}
 export TILEXR_HCCL_TEST_HOME=${TILEXR_CANN_HOME}/cann/tools/hccl_test
 
 export ASCEND_DIR=${TILEXR_CANN_HOME}/cann
-export MPI_HOME=${TILEXR_UTIL_HOME}/mpich/
+export MPI_HOME=${TILEXR_UTIL_HOME}/mpich
 
 export TILEXR_HCOMM_HOME=${TILEXR_3RD_HOME}/hcomm
 export TILEXR_OPS_HOME=${TILEXR_3RD_HOME}/ops-transformer
@@ -60,6 +60,9 @@ export PATH=${MPI_HOME}/bin:${PATH}
 export PATH=${TILEXR_UTIL_HOME}/cmake/bin:${PATH}
 export PATH=${TILEXR_UTIL_HOME}/ccache:${TILEXR_UTIL_HOME}/ripgrep:${TILEXR_UTIL_HOME}/sshpass/bin:${PATH}
 export PATH=${TILEXR_UTIL_HOME}/time/bin:${TILEXR_UTIL_HOME}/patch/bin:${TILEXR_UTIL_HOME}/pigz:${PATH}
+
+export LD_LIBRARY_PATH=${MPI_HOME}/lib:${LD_LIBRARY_PATH}
+
 env_print() {
     line
     success "TILEXR_OS_ARCH = ${TILEXR_OS_ARCH}"

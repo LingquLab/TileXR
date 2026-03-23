@@ -36,6 +36,7 @@ opsdir=${TILEXR_OPS_HOME}/mc2/${ops}
 if [ ! -d "$opsdir" ]; then
     cp -rf ${TILEXR_HOME}/mc2/${ops} ${TILEXR_OPS_HOME}/mc2
 fi
+cp -rf ${TILEXR_HOME}/mc2/* ${TILEXR_OPS_HOME}/mc2/
 
 commargs=${TILEXR_OPS_HOME}/common/include/kernel/comm_args.h
 if [ ! -f "$commargs" ]; then
