@@ -10,16 +10,6 @@ mkdir -p ${TILEXR_TEMP_HOME}
 
 line
 
-fix_path=${TILEXR_CANN_HOME}
-while [ "${fix_path}" != "/" ] && [ "${fix_path}" != "/home" ]; do
-    perm=`stat -c "%a" ${fix_path}`
-    if [ "${perm}" != "755" ]; then
-        warn "fix permission to 755 for ${fix_path}"
-	chmod 755 ${fix_path}
-    fi
-    fix_path=$(dirname "${fix_path}")
-done
-
 toolkit_run=Ascend-cann_${TILEXR_CANN_VER}_linux-${TILEXR_OS_ARCH}.run
 ops_run=Ascend-cann-${TILEXR_OPS_NAME}-ops_${TILEXR_CANN_VER}_linux-${TILEXR_OS_ARCH}.run
 
@@ -28,47 +18,69 @@ ops_url=https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%209.0.T2/$
 
 success "TILEXR_OS_ARCH = ${TILEXR_OS_ARCH}"
 success "TILEXR_CANN_VER = ${TILEXR_CANN_VER}"
-# success "cann_url = ${cann_url}"
-# success "toolkit_run = ${toolkit_run}"
-# success "ops_url = ${ops_url}"
-# success "ops_run = ${ops_run}"
 
-cd ${TILEXR_TEMP_HOME}
+# 检查 PID 文件中记录的进程是否仍是 curl，决定是否接管或重新 fork
+# 用法: _ensure_curl_running <pid_file> <url> <log_file>
+# 返回: 设置全局变量 _curl_pid
+_ensure_curl_running() {
+    local pid_file=$1
+    local url=$2
+    local log_file=$3
+
+    if [ -f "${pid_file}" ]; then
+        local stored_pid
+        stored_pid=$(cat "${pid_file}")
+        if kill -0 "${stored_pid}" 2>/dev/null; then
+            local comm
+            comm=$(cat /proc/${stored_pid}/comm 2>/dev/null)
+            if [ "${comm}" = "curl" ]; then
+                success "curl already running (pid=${stored_pid}), resuming wait"
+                _curl_pid=${stored_pid}
+                return
+            else
+                warn "pid ${stored_pid} is not curl (comm=${comm}), restarting download"
+            fi
+        else
+            warn "pid ${stored_pid} no longer alive, restarting download"
+        fi
+        rm -f "${pid_file}"
+    fi
+
+    cd ${TILEXR_TEMP_HOME}
+    curl -k -C - -O ${url} > ${log_file} 2>&1 &
+    _curl_pid=$!
+    echo ${_curl_pid} > "${pid_file}"
+    cd ${TILEXR_HOME}
+}
+
+toolkit_pid_file=${TILEXR_TEMP_HOME}/cann_toolkit.pid
+ops_pid_file=${TILEXR_TEMP_HOME}/cann_ops.pid
 
 success "start download cann from ${cann_url}"
-curl -k -C - -O ${cann_url} > ${TILEXR_TEMP_HOME}/toolkit.log 2>&1 &
-pid_cann=$!
+_ensure_curl_running "${toolkit_pid_file}" "${cann_url}" "${TILEXR_TEMP_HOME}/toolkit.log"
+pid_cann=${_curl_pid}
 
 success "start download ops from ${ops_url}"
-curl -k -C - -O ${ops_url} > ${TILEXR_TEMP_HOME}/ops.log 2>&1 &
-pid_ops=$!
-
-cd ${TILEXR_HOME}
+_ensure_curl_running "${ops_pid_file}" "${ops_url}" "${TILEXR_TEMP_HOME}/ops.log"
+pid_ops=${_curl_pid}
 
 while kill -0 ${pid_cann} 2>/dev/null; do
-    cat ${TILEXR_TEMP_HOME}/toolkit.log | tail -n1 | awk '{printf "\r%s", $0; fflush()}'
+    tail -n1 ${TILEXR_TEMP_HOME}/toolkit.log | awk '{printf "\r%s", $0; fflush()}'
     sleep 1
 done
-# colorful_time wait ${pid_cann}
 echo ""
-
-success "cann downloaded, begin install."
-
-chmod +x ${TILEXR_TEMP_HOME}/${toolkit_run}
-
-colorful_time bash ${TILEXR_TEMP_HOME}/${toolkit_run} --full --whitelist=toolkit -q --force --install-path=${TILEXR_CANN_HOME}
+rm -f "${toolkit_pid_file}"
+success "cann downloaded."
 
 while kill -0 ${pid_ops} 2>/dev/null; do
-    cat ${TILEXR_TEMP_HOME}/ops.log | tail -n1 | awk '{printf "\r%s", $0; fflush()}'
+    tail -n1 ${TILEXR_TEMP_HOME}/ops.log | awk '{printf "\r%s", $0; fflush()}'
     sleep 1
 done
-# colorful_time wait ${pid_ops}
 echo ""
+rm -f "${ops_pid_file}"
+success "ops downloaded."
 
-success "ops downloaded, begin install."
-chmod +x ${TILEXR_TEMP_HOME}/${ops_run}
-
-colorful_time bash ${TILEXR_TEMP_HOME}/${ops_run} --install -q --install-path=${TILEXR_CANN_HOME}
+success "begin install."
+bash ${script_path}/cann_local_install.sh
 
 line
-
