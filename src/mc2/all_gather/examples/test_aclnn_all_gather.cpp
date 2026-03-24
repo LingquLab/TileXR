@@ -27,9 +27,9 @@
 #include "hccl/hccl.h"
 #include "aclnn/opdev/fp16_t.h"
 #include "../op_host/op_api/aclnn_all_gather.h"
-#include "../../../../../include/tilexr_api.h"
-#include "../../../../../comm/tilexr_comm.h"
-#include "../../../../../comm/tilexr_internal.h"
+#include "tilexr_api.h"
+#include "tilexr_comm.h"
+#include "tilexr_internal.h"
 
 #define CHECK_RET(cond, return_expr) \
     do {                             \

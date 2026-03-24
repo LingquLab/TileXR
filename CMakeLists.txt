@@ -34,7 +34,7 @@ message("== ASCEND_HOME_PATH: ${ASCEND_HOME_PATH}")
 message("== ASCEND_DRIVER_PATH: ${ASCEND_DRIVER_PATH}")
 
 include_directories(
-        ${CMAKE_CURRENT_LIST_DIR}/include/
+        ${CMAKE_CURRENT_LIST_DIR}/src/include/
         ${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc/runtime/
         ${ASCEND_HOME_PATH}/${ARCH}-linux/include/
         ${ASCEND_HOME_PATH}/${ARCH}-linux/include/hccl/
@@ -44,4 +44,4 @@ include_directories(
         ${CMAKE_SOURCE_DIR}/3rdparty/spdlog/include
         ${CMAKE_SOURCE_DIR}/3rdparty/
 )
-add_subdirectory(comm)
+add_subdirectory(src/comm)
