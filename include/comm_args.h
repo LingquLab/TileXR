@@ -8,8 +8,8 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
-#ifndef LCCL_COMM_ARGS_H
-#define LCCL_COMM_ARGS_H
+#ifndef TILEXR_COMM_ARGS_H
+#define TILEXR_COMM_ARGS_H
 #include <cstdint>
 
 #if !defined(__DAV_C220_VEC__) && !defined(__DAV_C310__) && !defined(__DAV_C220_CUBE__)
@@ -131,4 +131,4 @@ enum LogId : int {
 };
 
 }
-#endif // LCCL_COMM_ARGS_H
+#endif // TILEXR_COMM_ARGS_H

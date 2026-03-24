@@ -7,7 +7,7 @@
  * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
  * See LICENSE in the root of the software repository for the full text of the License.
  */
-#include <tilexr_api.h>
+#include "tilexr_api.h"
 #include <vector>
 #include <thread>
 #include <atomic>
@@ -15,7 +15,7 @@
 
 #include "tilexr_comm.h"
 #include "mki/utils/log/log.h"
-#include "tools/socket/sock_exchange.h"
+#include "tools/socket/tilexr_sock_exchange.h"
 
 using namespace std;
 using namespace TileXR;
@@ -41,7 +41,7 @@ int TileXRCommInitRankLocal(int rankSize, int rank, TileXRCommPtr *comm)
     return TILEXR_SUCCESS;
 }
 
-int TileXRGetUniqueId(UniqueId *uniqueId, int commDomain)
+int TileXRGetUniqueId(TileXRUniqueId *uniqueId, int commDomain)
 {
     if (uniqueId == nullptr) {
         MKI_LOG(ERROR) << "uniqueId is nullptr!";
@@ -55,7 +55,7 @@ int TileXRGetUniqueId(UniqueId *uniqueId, int commDomain)
     return TILEXR_SUCCESS;
 }
 
-int TileXRCommInitRank(UniqueId commId, int rankSize, int rank, TileXRCommPtr *comm)
+int TileXRCommInitRank(TileXRUniqueId commId, int rankSize, int rank, TileXRCommPtr *comm)
 {
     MKI_LOG(INFO) << "using tilexr c++ api! rank" << rank;
     if (comm == nullptr) {

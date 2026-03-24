@@ -61,6 +61,19 @@ ops_name() {
     echo "${OPS_MAP[$name]}"
 }
 
+# 修复指定路径及其所有祖先目录的权限为 755（直至 / 或 /home）
+fix_permissions() {
+    local fix_path=$1
+    while [ "${fix_path}" != "/" ] && [ "${fix_path}" != "/home" ]; do
+        local perm=`stat -c "%a" ${fix_path}`
+        if [ "${perm}" != "755" ]; then
+            warn "fix permission to 755 for ${fix_path}"
+            chmod 755 ${fix_path}
+        fi
+        fix_path=$(dirname "${fix_path}")
+    done
+}
+
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     success "test success" 1 2 3
     error "test error"

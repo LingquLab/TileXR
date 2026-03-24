@@ -180,7 +180,7 @@ int TileXRComm::InitCommon()
         commArgs_.extraFlag |= ExtraFlag::IS_GREATER_THAN_40_AIV;
     }
 
-    RegistKernel(isEnableMsprofOp_);
+    // RegistKernel(isEnableMsprofOp_);
 
     localRank_ = rank_ % localRankSize_;
     return TILEXR_SUCCESS;
@@ -663,7 +663,7 @@ TileXRComm::TileXRComm(int rank, int rankSize, int commDomain, int bufferSize)
 {
 }
 
-TileXRComm::TileXRComm(int rank, int rankSize, UniqueId commId)
+TileXRComm::TileXRComm(int rank, int rankSize, TileXRUniqueId commId)
     : rank_(rank), rankSize_(rankSize), commId_(commId)
 {
 }

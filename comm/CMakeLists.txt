@@ -10,8 +10,10 @@
 
 set(TILEXR_SOURCE_FILE tilexr_comm.cpp
         comm_wrap.cpp
-        tools/socket/sock_exchange.h
-        tools/socket/sock_exchange.cpp
+        tilexr_internal.cpp
+        tilexr_internal.h
+        tools/socket/tilexr_sock_exchange.h
+        tools/socket/tilexr_sock_exchange.cpp
 )
 
 add_library(tile-comm SHARED ${TILEXR_SOURCE_FILE})
@@ -23,6 +25,7 @@ target_include_directories(tile-comm
 target_link_directories(tile-comm
         PUBLIC
         ${ASCEND_DRIVER_PATH}/lib64/driver
+        ${ASCEND_HOME_PATH}/${ARCH}-linux/lib64
 )
 
 target_link_libraries(tile-comm ascendcl runtime profapi ascend_hal)

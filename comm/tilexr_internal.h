@@ -13,7 +13,7 @@
 #include <string>
 #include <unordered_map>
 #include <acl/acl_base.h>
-#include "tilexr_types.h"
+#include "../include/tilexr_types.h"
 struct AscendCCLKernelArgs {
     const void *input = nullptr;  // input
     const void *output = nullptr; // output

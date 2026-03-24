@@ -40,7 +40,7 @@ struct TileXRBootstrapHandle {
 };
 union TileXRBootstrap {
     TileXRBootstrapHandle handle;
-    UniqueId uid;
+    TileXRUniqueId uid;
 };
 
 int BootstrapGetUniqueId(TileXRBootstrapHandle *handle, int commDomain);
@@ -48,7 +48,7 @@ int BootstrapGetUniqueId(TileXRBootstrapHandle *handle, int commDomain);
 class TileXRSockExchange {
 public:
     TileXRSockExchange(int rank, int rankSize, int commDomain);
-    TileXRSockExchange(int rank, int rankSize, UniqueId tilexrCommId);
+    TileXRSockExchange(int rank, int rankSize, TileXRUniqueId tilexrCommId);
     ~TileXRSockExchange();
 
     /* *
@@ -73,7 +73,7 @@ public:
 
     int GetNodeNum();
 
-    static bool CheckValid(UniqueId tilexrCommId)
+    static bool CheckValid(TileXRUniqueId tilexrCommId)
     {
         TileXRBootstrap id {};
         id.uid = tilexrCommId;
