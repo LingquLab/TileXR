@@ -13,8 +13,8 @@
 
 #include <string>
 #include "aclnn/aclnn_base.h"
-#include "../../../../../../include/comm_args.h"
-#include "../../../../../../comm/tilexr_comm.h"
+#include "comm_args.h"
+#include "tilexr_comm.h"
 #include "aclnnop/aclnn_util.h"
 #include "hccl/hccl_types.h"
 
