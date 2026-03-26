@@ -13,8 +13,9 @@ line
 toolkit_run=Ascend-cann_${TILEXR_CANN_VER}_linux-${TILEXR_OS_ARCH}.run
 ops_run=Ascend-cann-${TILEXR_OPS_NAME}-ops_${TILEXR_CANN_VER}_linux-${TILEXR_OS_ARCH}.run
 
-cann_url=https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%209.0.T2/${toolkit_run}
-ops_url=https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%209.0.T2/${ops_run}
+obs_base="https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%20${TILEXR_CANN_OBS_DIR}"
+cann_url=${obs_base}/${toolkit_run}
+ops_url=${obs_base}/${ops_run}
 
 success "TILEXR_OS_ARCH = ${TILEXR_OS_ARCH}"
 success "TILEXR_CANN_VER = ${TILEXR_CANN_VER}"
