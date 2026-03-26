@@ -17,6 +17,8 @@
 #include "tilexr_comm.h"
 #include "aclnnop/aclnn_util.h"
 #include "hccl/hccl_types.h"
+#include "hccl/hccl.h"
+#include "hccl/hccl_ex.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -34,7 +36,7 @@ extern "C" {
  * @param [out] executor: 返回op执行器，包含了算子计算流程。
  * @return aclnnStatus: 返回状态码
  */
-ACLNN_API aclnnStatus aclnnAllGatherGetWorkspaceSize(const aclTensor *a, int64_t group,
+ACLNN_API aclnnStatus aclnnAllGatherGetWorkspaceSize(const aclTensor *a, int64_t group, int64_t group_comm,
                                                         int64_t rankSize, const aclTensor *gatherOutOut,
                                                         uint64_t *workspaceSize, aclOpExecutor **executor);
 
@@ -49,7 +51,7 @@ ACLNN_API aclnnStatus aclnnAllGatherGetWorkspaceSize(const aclTensor *a, int64_t
 ACLNN_API aclnnStatus aclnnAllGather(void* workspace, uint64_t workspaceSize, aclOpExecutor* executor,
                                         aclrtStream stream);
 
-int AllGather(void *sendBuf, void *recvBuf, int64_t sendCount, aclDataType dataType, TileXR::TileXRComm* comm,
+int AllGather(void *sendBuf, void *recvBuf, int64_t sendCount, aclDataType dataType, TileXR::TileXRComm* comm, HcclComm hcclComm, 
                 aclrtStream stream);
 
 #ifdef __cplusplus

@@ -29,7 +29,8 @@ class AllGather : public OpDef {
         .Format({ge::FORMAT_ND, ge::FORMAT_ND})
         .UnknownShapeFormat({ge::FORMAT_ND, ge::FORMAT_ND});
 
-    this->Attr("group").AttrType(REQUIRED).Int(0); 
+    this->Attr("group").AttrType(REQUIRED).String(); // 通算融合算子属性，表示通信域名称
+    this->Attr("group_comm").AttrType(REQUIRED).Int(0); 
     this->Attr("rank_size").AttrType(REQUIRED).Int(0);
 
     OpAICoreConfig aicoreConfig;
@@ -42,7 +43,7 @@ class AllGather : public OpDef {
             .ExtendCfgInfo("opFile.value", "all_gather");    // 这里制定的值会对应到kernel入口文件名.cpp
     this->AICore().AddConfig("ascend910b", aicoreConfig);
     this->AICore().AddConfig("ascend910_93", aicoreConfig);
-    // this->MC2().HcclGroup("group"); // group 属性配置为该算子的通信域名称
+    this->MC2().HcclGroup("group"); // group 属性配置为该算子的通信域名称
   }
 };
 
