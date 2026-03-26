@@ -13,8 +13,8 @@
 
 #include <string>
 #include "aclnn/aclnn_base.h"
-#include "comm_args.h"
-#include "tilexr_comm.h"
+#include "../../../../../../src/include/comm_args.h"
+#include "../../../../../../src/comm/tilexr_comm.h"
 #include "aclnnop/aclnn_util.h"
 #include "hccl/hccl_types.h"
 #include "hccl/hccl.h"
@@ -36,7 +36,7 @@ extern "C" {
  * @param [out] executor: 返回op执行器，包含了算子计算流程。
  * @return aclnnStatus: 返回状态码
  */
-ACLNN_API aclnnStatus aclnnAllGatherGetWorkspaceSize(const aclTensor *a, int64_t group, int64_t group_comm,
+ACLNN_API aclnnStatus aclnnAllGatherGetWorkspaceSize(const aclTensor *a, char* group, int64_t group_comm,
                                                         int64_t rankSize, const aclTensor *gatherOutOut,
                                                         uint64_t *workspaceSize, aclOpExecutor **executor);
 

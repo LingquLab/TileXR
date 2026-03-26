@@ -123,7 +123,7 @@ static int CreateAclTensor(const void *hostData, const std::vector<int64_t> &sha
     return 0;
 }
 
-aclnnStatus aclnnAllGatherGetWorkspaceSize(const aclTensor *a, int64_t group, int64_t group_comm,
+aclnnStatus aclnnAllGatherGetWorkspaceSize(const aclTensor *a, char* group, int64_t group_comm,
                                               int64_t rankSize, 
                                               const aclTensor *gatherOutOut, uint64_t *workspaceSize,
                                               aclOpExecutor **executor) 
