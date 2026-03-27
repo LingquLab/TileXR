@@ -46,6 +46,11 @@ tilexrsync=${TILEXR_OPS_HOME}/common/include/kernel/tilexr_sync.h
 if [ ! -f "$tilexrsync" ]; then
     cp -rf ${TILEXR_HOME}/src/include/tilexr_sync.h ${TILEXR_OPS_HOME}/common/include/kernel
 fi
+moedisbase=${TILEXR_OPS_HOME}/common/include/kernel/moe_distribute_base.h
+if [ ! -f "$moedisbase" ]; then
+    cp -rf ${TILEXR_HOME}/src/mc2/common/inc/kernel/moe_distribute_base.h ${TILEXR_OPS_HOME}/common/include/kernel
+    cp -rf ${TILEXR_HOME}/src/mc2/common/inc/kernel/moe_distribute_comm_ctx.h ${TILEXR_OPS_HOME}/common/include/kernel
+fi
 cp -f ${TILEXR_HOME}/src/mc2/build.sh ${TILEXR_OPS_HOME}/build.sh
 CMD="bash build.sh --pkg -j`nproc` -p ${TILEXR_CANN_HOME}/cann --soc=${TILEXR_SOC_NAME} --ops=${ops}"
 warn ${CMD}

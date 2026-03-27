@@ -42,7 +42,7 @@ int TileXRCommInitAll(uint32_t ndev, int32_t* devices, TileXRCommPtr *comms);
 
 int TileXRCommInitThread(int rank, int rankSize, const char *uid, TileXRCommPtr *comms);
 
-int LcclCommDestroy(TileXRCommPtr comm);
+int TileXRCommDestroy(TileXRCommPtr comm);
 
 #ifdef __cplusplus
 }

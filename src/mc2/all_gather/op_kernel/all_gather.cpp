@@ -27,14 +27,14 @@ __global__ __aicore__ void all_gather(GM_ADDR aGM, GM_ADDR gatherGM, GM_ADDR wor
     GET_TILING_DATA(tilingData, tilingGM);
 
     TPipe pipe;
-    // GM_ADDR contextGM = GetHcclContext<HCCL_GROUP_ID_0>();
+    GM_ADDR contextGM = GetHcclContext<HCCL_GROUP_ID_0>();
     if (dType == DTYPE_TPL_FP16) {
         AllGather<half> allGather;
-        allGather.Init(aGM, gatherGM, workspaceGM, &tilingData, &pipe);
+        allGather.Init(aGM, gatherGM, workspaceGM, contextGM, &tilingData, &pipe);
         allGather.Process();
     } else if (dType == DTYPE_TPL_FP32) {
         AllGather<float> allGather;
-        allGather.Init(aGM, gatherGM, workspaceGM, &tilingData, &pipe);
+        allGather.Init(aGM, gatherGM, workspaceGM, contextGM, &tilingData, &pipe);
         allGather.Process();
     }
 }

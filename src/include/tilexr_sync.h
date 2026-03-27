@@ -149,6 +149,20 @@ public:
         WaitOneRankAllFlag((__gm__ int64_t*)(shareAddrs[waitRank]), value);
     }
 
+    // 等待整个rank内所有卡内同步标志（内存A）
+    __aicore__ inline void WaitRankInnerFlag(int32_t magic, int32_t eventID, int64_t waitRank, int64_t flagNum)
+    {
+        int64_t value = MergeMagicWithValue(magic, eventID);
+        WaitOneRankPartFlag((__gm__ int64_t*)(shareAddrs[waitRank]), flagNum, value);
+    }
+
+    // 等待整个rank内单个同步标志（内存A）
+    __aicore__ inline void WaitRankInnerOneFlag(int32_t magic, int32_t eventID, int64_t waitRank, int64_t flagNum)
+    {
+        int64_t value = MergeMagicWithValue(magic, eventID);
+        WaitOneRankOneFlag((__gm__ int64_t*)(shareAddrs[waitRank]), flagNum, value);
+    }
+
     // 检验整个rank内所有卡内同步标志（内存A）
     __aicore__ inline bool CheckRankInnerFlag(int32_t magic, int32_t eventID, int64_t waitRank)
     {
@@ -345,6 +359,30 @@ private:
                 checkedFlagNum++;
             }
         } while (!isSync);
+    }
+
+    /**
+     * @brief 等待一个rank内单个同步标志
+     * @param int64_t waitAddr  等待的首个标志位的地址（含）
+     * @param int64_t flagNum   等待的标志位
+     * @param int64_t checkValue    checkValue
+     * @param bool mustEqual   用于当远端flagValue大于等于当前checkValue时，控制进一步判断逻辑。<br>
+     *                      true表示相等，即MAGIC_MASK掩码部分必须严格相等；false表示可以接受远端的掩码部分大于等于checkValue的掩码部分。
+     * @return
+     */
+    __aicore__ inline void WaitOneRankOneFlag(__gm__ int64_t* waitAddr, int64_t flagNum, int64_t checkValue,
+                                               bool mustEqual = true)
+    {
+        __gm__ int64_t* basicSyncAddr = waitAddr + flagNum * FLAG_UNIT_INT_NUM;
+        GlobalTensor<uint64_t> globalWait;
+        globalWait.SetGlobalBuffer(reinterpret_cast<__gm__ uint64_t *>(basicSyncAddr));
+        LocalTensor<uint64_t> localWait = tBuf.GetWithOffset<uint64_t>(FLAG_UNIT_INT_NUM, 0);
+        while (true) {
+            DataCopy(localWait, globalWait, FLAG_UNIT_INT_NUM);
+            if (localWait.GetValue(0) == checkValue) {
+                break;
+            }
+        }
     }
 
     // 等待一个rank内所有同步标志

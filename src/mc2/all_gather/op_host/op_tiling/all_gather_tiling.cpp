@@ -75,7 +75,7 @@ static ge::graphStatus AllGatherTilingFunc(gert::TilingContext *context) {
 
     tilingData->commTurn = COMM_TURN;
     tilingData->tileNum = TILE_NUM;
-    uint32_t rankSize = *context->GetAttrs()->GetAttrPointer<uint32_t>(static_cast<int>(1));
+    uint32_t rankSize = *context->GetAttrs()->GetAttrPointer<uint32_t>(static_cast<int>(2));
     tilingData->totalElemNum = context->GetInputTensor(0)->GetShapeSize() * rankSize;
     tilingData->blockElemNum = tilingData->totalElemNum / context->GetBlockDim();
     tilingData->addTileElemNum = tilingData->blockElemNum / tilingData->tileNum;
@@ -103,9 +103,11 @@ static ge::graphStatus AllGatherTilingFunc(gert::TilingContext *context) {
         return ge::GRAPH_FAILED;
     }
 
-    auto group = context->GetAttrs()->GetAttrPointer<int64_t>(static_cast<int>(0));
+    auto group = context->GetAttrs()->GetAttrPointer<int64_t>(static_cast<int>(1));
     tilingData->commDataPtr = static_cast<uint64_t>(*group);
-    // InitHcclParam(tilingData, group);
+    auto groupP2P = context->GetAttrs()->GetAttrPointer<char>(static_cast<int>(0));
+
+    InitHcclParam(tilingData, groupP2P);
     return ge::GRAPH_SUCCESS;
 }
 

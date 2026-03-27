@@ -55,6 +55,7 @@ int64_t GetShapeSize(const std::vector<int64_t> &shape)
 const uint32_t MACHINE_NUM = 1;
 const uint32_t NPU_NUM_PER_MACHINE = 2;
 
+const uint32_t ITER_NUM = 10;
 constexpr int RANK_DIM = MACHINE_NUM * NPU_NUM_PER_MACHINE;
 const std::vector<int64_t> aShape = {64, 1};
 const std::vector<int64_t> outShape = {64*RANK_DIM, 1};
@@ -132,6 +133,7 @@ struct Args {
     int localRankId;
     int globalRankId;
     TileXR::TileXRComm* comm;
+    HcclComm hcclCommP2P;
     aclrtStream stream;
     aclrtContext context;
   };
@@ -143,6 +145,10 @@ int LaunchOneThreadAllGather(Args &args, TestData &testData)
 //    CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("[ERROR] aclrtSetCurrentContext failed. ret: %d\n", ret); return ret);
     LOG_PRINT("[INFO] rank = %d, LaunchOneThreadAllGather\n", args.globalRankId);
 
+    char hcomNameP2P[128] = {0};
+    ret = HcclGetCommName(args.hcclCommP2P, hcomNameP2P);
+    CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("[ERROR] P2P HcclGetCommName failed. ret: %d\n", ret); return -1);
+    LOG_PRINT("[INFO] rank = %d, hcomNameP2P = %s, stream = %p\n", args.globalRankId, hcomNameP2P, args.stream);
 
     void *deviceAddr = nullptr;
     void *outDeviceAddr = nullptr;
@@ -159,24 +165,32 @@ int LaunchOneThreadAllGather(Args &args, TestData &testData)
     // 根据随机生成的测试数据填充host侧输入
     std::copy(testData.input[args.globalRankId].begin(), testData.input[args.globalRankId].end(), hostData.begin());
 
-
-    for (int iter=0; iter < 1; iter++) {
+    // 启动初始化 SDMA 任务的 aicpu kernel
+	void *tileXrCtx;
+	ret = TileXrInit(args.hcclCommP2P, args.stream, &tileXrCtx);
+	CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("[ERROR] TileXrInit failed. ret: %d\n", ret); return ret);
+     
+    for (int iter=0; iter < ITER_NUM; iter++) {
+        // 启动轮询检查 SDMA 任务的 aicpu kernel
+        aclrtStream tileXrDaemonStream;
+        aclrtCreateStream(&tileXrDaemonStream);
+        ret = TileXrDaemon(args.hcclCommP2P, tileXrDaemonStream, tileXrCtx);
+        CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("[ERROR] TileXrDaemon failed. ret: %d\n", ret); return ret);
         std::vector<op::fp16_t> outputData(outShapeSize, 0);
-        ret = AllGather(hostData.data(), outputData.data(), shapeSize, aclDataType::ACL_FLOAT16, args.comm, args.stream);
+        ret = AllGather(hostData.data(), outputData.data(), shapeSize, aclDataType::ACL_FLOAT16, args.comm, args.hcclCommP2P, args.stream);
         CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("[ERROR] Allgather failed. ret = %d \n", ret););
         // 比较AllReduceDirect结果
         if(args.globalRankId == 0){
-            // std::vector<int> first_n_elements(outputData.begin()+16*1024, outputData.begin() + 16*1024 +64);
-            // std::cout<<"outputData data" << std::endl;
-            // print_vector(first_n_elements);
-            //    std::cout<<"outputData data" << std::endl;
-            //    print_vector(outputData);
-            //    std::cout<<"testData.out" << std::endl;
-            //    print_vector(testData.out);
+               std::cout<<"outputData data" << std::endl;
+               print_vector(outputData);
+               std::cout<<"testData.out" << std::endl;
+               print_vector(testData.out);
         }
         ret = CompareVector(outputData, testData.out);
-        CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("[ERROR] output compare failed. dev %d \n", args.globalRankId););
-        LOG_PRINT("[INFO] device_%d aclnnAllReduceDirect golden compare successfully.\n", args.globalRankId);
+        CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("[ERROR] output compare failed. dev %d \n", args.globalRankId));
+        if (ret == ACL_SUCCESS) {
+            LOG_PRINT("[INFO] device_%d aclnnAllReduceDirect golden compare successfully.\n", args.globalRankId);
+        }
         if (input != nullptr) {
             aclDestroyTensor(input);
         }
@@ -192,8 +206,16 @@ int LaunchOneThreadAllGather(Args &args, TestData &testData)
         if (workspaceSize > 0) {
             aclrtFree(workspaceAddr);
         }
+        // wait tilexr stream done
+        ret = aclrtSynchronizeStreamWithTimeout(tileXrDaemonStream, 10000);
+        CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("[ERROR] aclrtSynchronizeStreamWithTimeout failed for tileXrDaemonStream. ret = %d \n", ret);
+            return ret);
+        ret = aclrtDestroyStream(tileXrDaemonStream);
+        CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("[ERROR] aclrtDestroyStream tileXrDaemonStream failed. ret = %d \n", ret); return ret);
     }
 
+    auto hcclRet = HcclCommDestroy(args.hcclCommP2P);
+    CHECK_RET(hcclRet == HCCL_SUCCESS, LOG_PRINT("[ERROR] P2P HcclCommDestroy failed. ret = %d \n", hcclRet));
 
     ret = aclrtDestroyStream(args.stream);
     CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("[ERROR] aclrtDestroyStream failed. ret = %d \n", ret); return ret);
@@ -262,7 +284,7 @@ int GenerateTestData(TestData &testData)
 }
 
 
-int run_example_on_A2(int mpi_rank, TileXR::TileXRComm* comm, int rankId, TestData &testData)
+int run_example_on_A2(int mpi_rank, HcclRootInfo rootInfo, TileXR::TileXRComm* comm, int rankId, TestData &testData)
 {
     Args args;
     aclrtStream stream;
@@ -276,12 +298,22 @@ int run_example_on_A2(int mpi_rank, TileXR::TileXRComm* comm, int rankId, TestDa
     ret = aclrtCreateStream(&stream);
     CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("[ERROR] aclrtCreateStream failed. ret = %d", ret));
 
+    HcclComm hcclCommP2P = nullptr;
     int rank_id = rankId;
+
+    ret = HcclCommInitRootInfo(NPU_NUM_PER_MACHINE*MACHINE_NUM, &rootInfo, rank_id, &hcclCommP2P);
+    if (ret != HCCL_SUCCESS) {
+        std::cout << "[ERROR] rank "<< rank_id << " HCCL P2P CommInitClusterInfo failed. ret = " << ret << std::endl;
+        return ret;
+    }
+    std::cout << "[INFO] mpi_rank "<< mpi_rank << "P2P HcclCommInitClusterInfo success, rank_id:" << rank_id << ", rankSize:" << RANK_DIM
+              << ", hcclComm:" << hcclCommP2P << std::endl;
 
 
     args.localRankId = rankId;
     args.globalRankId = rank_id;
     args.comm = comm;
+    args.hcclCommP2P = hcclCommP2P;
     args.stream = stream;
     args.context = context;
     LaunchOneThreadAllGather(args, testData);
@@ -349,6 +381,16 @@ int main(int argc, char *argv[])
 
     LOG_PRINT("[INFO] %s are identified and example on <Atlas A2> will be executed!\n", env_var_name);
     
+    ret = aclrtSetDevice(0);
+    CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("[ERROR] aclrtSetDevice failed. ret = %d", ret));
+
+    HcclRootInfo rootInfo;
+    if (mpi_rank == 0) {
+        ret = HcclGetRootInfo(&rootInfo);
+        CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("[ERROR] HcclGetRootInfo failed. ret = %d", ret));
+    }
+    MPI_Bcast(&rootInfo, sizeof(rootInfo), MPI_BYTE, 0, MPI_COMM_WORLD);
+
     int devId = 0;
     LcclExpectEq(SetDev(mpi_rank, devId, 0), TileXR::TILEXR_SUCCESS);
     TileXR::TileXRComm *comm = nullptr;
@@ -362,9 +404,11 @@ int main(int argc, char *argv[])
         MPI_Finalize();
         return -1;
     }
-    run_example_on_A2(mpi_rank, comm, mpi_rank, testData);
+    run_example_on_A2(mpi_rank, rootInfo, comm, mpi_rank, testData);
 
-    
+
+    ret = TileXRCommDestroy(reinterpret_cast<TileXRCommPtr>(comm));
+    CHECK_RET(ret == TileXR::TILEXR_SUCCESS, LOG_PRINT("[ERROR] TileXRCommDestroy failed. ret = %d", ret));
     aclFinalize();
     LOG_PRINT("[INFO] aclFinalize success\n");
     MPI_Finalize();

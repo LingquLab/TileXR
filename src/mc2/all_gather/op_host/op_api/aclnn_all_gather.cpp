@@ -12,13 +12,13 @@
 #include "securec.h"
 #include "acl/acl.h"
 #include <vector>
-#include "../../../../../common/stub/op_api/aclnn_kernels/common/op_error_check.h"
+#include "aclnn_kernels/common/op_error_check.h"
 #include "opdev/common_types.h"
-#include "../../../../../tests/ut/framework_normal/op_api/stub/opdev/make_op_executor.h"
+#include "opdev/make_op_executor.h"
 #include "opdev/op_executor.h"
 #include "opdev/op_log.h"
-#include "../../../../../tests/ut/framework_special/utils/inc/tests/utils/platform.h"
-#include "../../../../../mc2/common/inc/hccl_util.h"
+#include "opdev/platform.h"
+#include "hccl_util.h"
 
 using namespace op;
 
@@ -32,7 +32,7 @@ enum NnopbaseHcclServerType : uint32_t {
   NNOPBASE_HCCL_SERVER_TYPE_END
 };
 
-extern aclnnStatus aclnnInnerAllGatherGetWorkspaceSize(const aclTensor *a, int64_t group,
+extern aclnnStatus aclnnInnerAllGatherGetWorkspaceSize(const aclTensor *a, char* group, int64_t group_comm,
                                                           int64_t rankSize, 
                                                           const aclTensor *gatherOutOut, uint64_t *workspaceSize,
                                                           aclOpExecutor **executor);
@@ -123,7 +123,7 @@ static int CreateAclTensor(const void *hostData, const std::vector<int64_t> &sha
     return 0;
 }
 
-aclnnStatus aclnnAllGatherGetWorkspaceSize(const aclTensor *a, int64_t group,
+aclnnStatus aclnnAllGatherGetWorkspaceSize(const aclTensor *a, char* group, int64_t group_comm,
                                               int64_t rankSize, 
                                               const aclTensor *gatherOutOut, uint64_t *workspaceSize,
                                               aclOpExecutor **executor) 
@@ -134,7 +134,7 @@ aclnnStatus aclnnAllGatherGetWorkspaceSize(const aclTensor *a, int64_t group,
     OP_LOGD("A is %s.", a->ToString().GetString());
     OP_LOGD("GatherOut is %s.", gatherOutOut->ToString().GetString());
 
-    aclnnStatus ret = aclnnInnerAllGatherGetWorkspaceSize(a, group, rankSize,
+    aclnnStatus ret = aclnnInnerAllGatherGetWorkspaceSize(a, group, group_comm, rankSize,
                                                              gatherOutOut, workspaceSize, executor);
     OP_LOGD("AllGather, aclnnInnerGetWorkspaceSize ret = %d.", ret);
 
@@ -157,9 +157,13 @@ aclnnStatus aclnnAllGather(void *workspace, uint64_t workspaceSize, aclOpExecuto
 
 
 
-int AllGather(void *sendBuf, void *recvBuf, int64_t sendCount, aclDataType dataType, TileXR::TileXRComm* comm,
+int AllGather(void *sendBuf, void *recvBuf, int64_t sendCount, aclDataType dataType, TileXR::TileXRComm* comm, HcclComm hcclComm, 
                 aclrtStream stream)
 {
+    char hcomNameP2P[128] = {0};
+    int ret = HcclGetCommName(hcclComm, hcomNameP2P);
+    OP_API_CHECK(ret != ACL_SUCCESS, {OP_LOGE(ACLNN_ERR_INNER, "[ERROR] P2P HcclGetCommName failed. ret: %d\n", ret); return ret;});
+
     void *deviceAddr = nullptr;
     void *outDeviceAddr = nullptr;
     aclTensor *input = nullptr;
@@ -173,7 +177,7 @@ int AllGather(void *sendBuf, void *recvBuf, int64_t sendCount, aclDataType dataT
     const std::vector<int64_t> outShape = {sendCount*rankSize, 1};
     int64_t outShapeSize = sendCount*rankSize;
 
-    auto ret = CreateAclTensor(sendBuf, inShape, &deviceAddr, dataType, &input);
+    ret = CreateAclTensor(sendBuf, inShape, &deviceAddr, dataType, &input);
     OP_API_CHECK(ret != ACL_SUCCESS, {return ret;});
     ret = CreateAclTensor(recvBuf, outShape, &outDeviceAddr, dataType, &out);
     OP_API_CHECK(ret != ACL_SUCCESS, {return ret;});
@@ -183,7 +187,7 @@ int AllGather(void *sendBuf, void *recvBuf, int64_t sendCount, aclDataType dataT
 
     // 调用第一阶段接口
     ret = aclnnAllGatherGetWorkspaceSize(
-        input, commPtr, rankSize, out, &workspaceSize, &executor);
+        input, hcomNameP2P, commPtr, rankSize, out, &workspaceSize, &executor);
     OP_API_CHECK(ret != ACL_SUCCESS,
         {OP_LOGE(ACLNN_ERR_INNER, "aclnnAllGatherGetWorkspaceSize failed. ret = %d \n", ret); return ret;});
     // 根据第一阶段接口计算出的workspaceSize申请device内存
@@ -198,10 +202,25 @@ int AllGather(void *sendBuf, void *recvBuf, int64_t sendCount, aclDataType dataT
     ret = aclrtSynchronizeStreamWithTimeout(stream, 10000);
     OP_API_CHECK(ret != ACL_SUCCESS, {OP_LOGE(ACLNN_ERR_INNER, "aclrtSynchronizeStreamWithTimeout failed. ret = %d \n", ret);
           return ret;});
-    // 算子计算结果与golden数据进行对比
+    // 算子计算结果拷贝到host侧
    std::vector<op::fp16_t> outputData(outShapeSize, 0);
    ret = aclrtMemcpy(recvBuf, outShapeSize * getDataTypeSize(dataType), outDeviceAddr,
                      outShapeSize * getDataTypeSize(dataType), ACL_MEMCPY_DEVICE_TO_HOST);
+   if (input != nullptr) {
+        aclDestroyTensor(input);
+    }
+    if (out != nullptr) {
+        aclDestroyTensor(out);
+    }
+    if (deviceAddr != nullptr) {
+        aclrtFree(deviceAddr);
+    }
+    if (outDeviceAddr != nullptr) {
+        aclrtFree(outDeviceAddr);
+    }
+    if (workspaceSize > 0) {
+        aclrtFree(workspaceAddr);
+    }
    return ACL_SUCCESS;
 }
 
