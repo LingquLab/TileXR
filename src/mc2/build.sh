@@ -462,8 +462,8 @@ function build_example()
         fi
 
         # TileXR includes
-        TILEXR_SRC_INCLUDE=$(realpath "${CURRENT_DIR}/../include")
-        TILEXR_SRC_COMM=$(realpath "${CURRENT_DIR}/../comm")
+        TILEXR_SRC_INCLUDE=$(realpath "${CURRENT_DIR}/../../src/include")
+        TILEXR_SRC_COMM=$(realpath "${CURRENT_DIR}/../../src/comm")
         TILEXR_INCS="-I${ASCEND_HOME_PATH}/pkg_inc -I${TILEXR_SRC_INCLUDE} -I${TILEXR_SRC_COMM}"
 
         ABSOLUTE_MC2_PATH=$(realpath ${BUILD_PATH}/../mc2) # mc2目录绝对路径
