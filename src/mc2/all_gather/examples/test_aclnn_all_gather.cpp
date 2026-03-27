@@ -27,9 +27,9 @@
 #include "hccl/hccl.h"
 #include "aclnn/opdev/fp16_t.h"
 #include "../op_host/op_api/aclnn_all_gather.h"
-#include "../../../../../src/include/tilexr_api.h"
-#include "../../../../../src/comm/tilexr_comm.h"
-#include "../../../../../src/comm/tilexr_internal.h"
+#include "tilexr_api.h"
+#include "tilexr_comm.h"
+#include "tilexr_internal.h"
 
 #define CHECK_RET(cond, return_expr) \
     do {                             \
@@ -187,8 +187,10 @@ int LaunchOneThreadAllGather(Args &args, TestData &testData)
                print_vector(testData.out);
         }
         ret = CompareVector(outputData, testData.out);
-        CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("[ERROR] output compare failed. dev %d \n", args.globalRankId); return ret);    
-        LOG_PRINT("[INFO] device_%d aclnnAllReduceDirect golden compare successfully.\n", args.globalRankId);
+        CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("[ERROR] output compare failed. dev %d \n", args.globalRankId));
+        if (ret == ACL_SUCCESS) {
+            LOG_PRINT("[INFO] device_%d aclnnAllReduceDirect golden compare successfully.\n", args.globalRankId);
+        }
         if (input != nullptr) {
             aclDestroyTensor(input);
         }
