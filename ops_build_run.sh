@@ -47,7 +47,7 @@ if [ ! -f "$tilexrsync" ]; then
     cp -rf ${TILEXR_HOME}/src/include/tilexr_sync.h ${TILEXR_OPS_HOME}/common/include/kernel
 fi
 cp -f ${TILEXR_HOME}/src/mc2/build.sh ${TILEXR_OPS_HOME}/build.sh
-CMD="bash build.sh --pkg -j`nproc` -p ${TILEXR_CANN_HOME}/cann --soc=${TILEXR_SOC_NAME} --ops=${ops}"
+CMD="bash build.sh --pkg -j${TILEXR_HALF_NPROC} -p ${TILEXR_CANN_HOME}/cann --soc=${TILEXR_SOC_NAME} --ops=${ops}"
 warn ${CMD}
 colorful_time ${CMD}
 

@@ -67,6 +67,10 @@ export TILEXR_PLOG_FILE_PATH=${TILEXR_TEMP_HOME}/logfile
 # 机器的卡数
 export TILEXR_ASCEND_DEV_NUM=$((`lspci -n -D | grep -o '19e5:d[0-9a-f]\{3\}' | wc -l`))
 
+# 系统核心数
+export TILEXR_MAX_NPROC=$(nproc)
+export TILEXR_HALF_NPROC=$((TILEXR_MAX_NPROC / 2))
+
 date_str=`date '+%y%m%d%H%M'`
 export ASCEND_PROCESS_LOG_PATH=${TILEXR_PLOG_HOME}/$date_str
 export ASCEND_GLOBAL_LOG_LEVEL=3
@@ -106,7 +110,7 @@ env_print() {
 _hcomm_build() {
     local noclean_flag=${1:-""}
     rm -rf ${TILEXR_HCOMM_HOME}/build_out/cann-hcomm_*.run
-    local CMD="bash ${TILEXR_HCOMM_HOME}/build.sh -j`nproc` --full ${noclean_flag} -p ${TILEXR_CANN_HOME}/cann"
+    local CMD="bash ${TILEXR_HCOMM_HOME}/build.sh -j${TILEXR_HALF_NPROC} --full ${noclean_flag} -p ${TILEXR_CANN_HOME}/cann"
     warn ${CMD}
     colorful_time ${CMD}
     if [ $? -ne 0 ]; then
@@ -130,7 +134,7 @@ _install_autoconf_pkg() {
     colorful_time tar -xzf ${TILEXR_3RD_OPEN_HOME}/${tarball} --overwrite --strip-components=1 -C ${TILEXR_TEMP_HOME}/${pkg_name}/
     cd ${TILEXR_TEMP_HOME}/${pkg_name}/
     colorful_time ./configure --prefix=${TILEXR_UTIL_HOME}/${pkg_name}/ "$@" >> ${TILEXR_TEMP_HOME}/3rd.log
-    colorful_time make -j`nproc` >> ${TILEXR_TEMP_HOME}/3rd.log
+    colorful_time make -j${TILEXR_HALF_NPROC} >> ${TILEXR_TEMP_HOME}/3rd.log
     make install >> ${TILEXR_TEMP_HOME}/3rd.log
     if [ $? -eq 0 ]; then
         success "install ${pkg_name} success."

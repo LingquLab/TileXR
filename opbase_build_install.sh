@@ -7,7 +7,7 @@ cd ${TILEXR_OPBASE_HOME}
 
 rm -rf ${TILEXR_OPBASE_HOME}/build_out/cann-opbase_*.run
 
-CMD="bash ${TILEXR_OPBASE_HOME}/build.sh -j`nproc`"
+CMD="bash ${TILEXR_OPBASE_HOME}/build.sh -j${TILEXR_HALF_NPROC}"
 warn ${CMD}
 colorful_time ${CMD}
 
