@@ -461,7 +461,7 @@ function build_example()
             return 2
         fi
 
-        # cwh add tilexr includes
+        # TileXR includes
         TILEXR_SRC_INCLUDE=$(realpath "${CURRENT_DIR}/../../src/include")
         TILEXR_SRC_COMM=$(realpath "${CURRENT_DIR}/../../src/comm")
         TILEXR_INCS="-I${ASCEND_HOME_PATH}/pkg_inc -I${TILEXR_SRC_INCLUDE} -I${TILEXR_SRC_COMM}"
