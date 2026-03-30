@@ -362,30 +362,7 @@ __aicore__ inline void AllGather<T>::Process()
                     sync.WaitRankInnerOneFlag(magic, STEP2, rankId, queueIdx);
                 }
             }
-            for (int j = 0; j < rankSize; j++) {
-                if (j == rankId) {
-                    continue;
-                }
-                for (int queueIdx = 0; queueIdx < HCCL_AIV_STREAM_NUM; queueIdx++) {
-                    blockNumPerRank = HCCL_AIV_STREAM_NUM / rankSize;  // 均分core至每个rank，多余的core不使用
-                    useCoreNumToOutput = blockNumPerRank * rankSize;
-
-                    if (queueIdx >= useCoreNumToOutput) {
-                        // 不用的通道直接退出
-                        break;
-                    }
-                    GetBlockDataCount(tilingData_->gatherTileElemNum, blockNumPerRank, offsetFromShare, countToOutput, queueIdx);
-                    if (countToOutput > 0) {
-                        sync.WaitRankInnerOneFlag(magic, STEP2, j, queueIdx);
-                    }
-                }
-            }
-            //通知 aicpu 退出
-            for (uint32_t i = 0; i < tileXrContext->streamInfo.streamNum; i++) {
-                tileXrContext->streamInfo.statusList[i] = 1;
-            }
         }
-        hccl_.Finalize();
     }
 }
 }

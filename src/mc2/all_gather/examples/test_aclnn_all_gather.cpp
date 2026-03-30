@@ -169,13 +169,14 @@ int LaunchOneThreadAllGather(Args &args, TestData &testData)
 	void *tileXrCtx;
 	ret = TileXrInit(args.hcclCommP2P, args.stream, &tileXrCtx);
 	CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("[ERROR] TileXrInit failed. ret: %d\n", ret); return ret);
+
+    // 启动轮询检查 SDMA 任务的 aicpu kernel
+    aclrtStream tileXrDaemonStream;
+    aclrtCreateStream(&tileXrDaemonStream);
+    ret = TileXrDaemon(args.hcclCommP2P, tileXrDaemonStream, tileXrCtx);
+    CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("[ERROR] TileXrDaemon failed. ret: %d\n", ret); return ret);
      
     for (int iter=0; iter < ITER_NUM; iter++) {
-        // 启动轮询检查 SDMA 任务的 aicpu kernel
-        aclrtStream tileXrDaemonStream;
-        aclrtCreateStream(&tileXrDaemonStream);
-        ret = TileXrDaemon(args.hcclCommP2P, tileXrDaemonStream, tileXrCtx);
-        CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("[ERROR] TileXrDaemon failed. ret: %d\n", ret); return ret);
         std::vector<op::fp16_t> outputData(outShapeSize, 0);
         ret = AllGather(hostData.data(), outputData.data(), shapeSize, aclDataType::ACL_FLOAT16, args.comm, args.hcclCommP2P, args.stream);
         CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("[ERROR] Allgather failed. ret = %d \n", ret););
@@ -206,13 +207,15 @@ int LaunchOneThreadAllGather(Args &args, TestData &testData)
         if (workspaceSize > 0) {
             aclrtFree(workspaceAddr);
         }
-        // wait tilexr stream done
-        ret = aclrtSynchronizeStreamWithTimeout(tileXrDaemonStream, 10000);
-        CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("[ERROR] aclrtSynchronizeStreamWithTimeout failed for tileXrDaemonStream. ret = %d \n", ret);
-            return ret);
-        ret = aclrtDestroyStream(tileXrDaemonStream);
-        CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("[ERROR] aclrtDestroyStream tileXrDaemonStream failed. ret = %d \n", ret); return ret);
     }
+    ret = TileXrStopDaemon(args.hcclCommP2P, tileXrDaemonStream, tileXrCtx);
+    CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("[ERROR] TileXrStopDaemon failed. ret: %d\n", ret); return ret);
+    // wait tilexr stream done
+    ret = aclrtSynchronizeStreamWithTimeout(tileXrDaemonStream, 10000);
+    CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("[ERROR] aclrtSynchronizeStreamWithTimeout failed for tileXrDaemonStream. ret = %d \n", ret);
+        return ret);
+    ret = aclrtDestroyStream(tileXrDaemonStream);
+    CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("[ERROR] aclrtDestroyStream tileXrDaemonStream failed. ret = %d \n", ret); return ret);
 
     auto hcclRet = HcclCommDestroy(args.hcclCommP2P);
     CHECK_RET(hcclRet == HCCL_SUCCESS, LOG_PRINT("[ERROR] P2P HcclCommDestroy failed. ret = %d \n", hcclRet));
