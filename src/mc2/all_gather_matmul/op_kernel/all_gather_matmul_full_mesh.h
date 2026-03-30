@@ -82,6 +82,29 @@ __aicore__ inline void AllGatherMatmulFullMesh<A_TYPE, B_TYPE, C_TYPE, BIAS_TYPE
 		for (uint32_t i = 0; i < tileXrContext->streamInfo.streamNum; i++) {
 			tileXrContext->streamInfo.statusList[i] = 1;
 		}
+
+		// cwh dump HcclA2CombineOpParam for P2P and ibverbs verification
+		AscendC::printf("[cwh] rankId[%u] rankNum[%u] winSize[%lu]\n",
+			winContext_->rankId, winContext_->rankNum, winContext_->winSize);
+		for (uint32_t i = 0; i < winContext_->rankNum; i++) {
+			AscendC::printf("[cwh] windowsIn[%u]=0x%lx windowsOut[%u]=0x%lx\n",
+				i, winContext_->windowsIn[i], i, winContext_->windowsOut[i]);
+		}
+		AscendC::printf("[cwh] data[0x%lx] dataSize[%lu]\n",
+			(uint64_t)winContext_->data, winContext_->dataSize);
+		if ((uint64_t)winContext_->data != 0) {
+			__gm__ AscendC::IbVerbsData *ibvData = winContext_->data;
+			for (uint32_t i = 0; i < winContext_->rankNum; i++) {
+				AscendC::printf("[cwh] data[%u].remoteInput:  addr=0x%lx size=%lu key=%u\n",
+					i, ibvData[i].remoteInput.addr, ibvData[i].remoteInput.size, ibvData[i].remoteInput.key);
+				AscendC::printf("[cwh] data[%u].remoteOutput: addr=0x%lx size=%lu key=%u\n",
+					i, ibvData[i].remoteOutput.addr, ibvData[i].remoteOutput.size, ibvData[i].remoteOutput.key);
+				AscendC::printf("[cwh] data[%u].localInput:   addr=0x%lx size=%lu key=%u\n",
+					i, ibvData[i].localInput.addr, ibvData[i].localInput.size, ibvData[i].localInput.key);
+				AscendC::printf("[cwh] data[%u].localOutput:  addr=0x%lx size=%lu key=%u\n",
+					i, ibvData[i].localOutput.addr, ibvData[i].localOutput.size, ibvData[i].localOutput.key);
+			}
+		}
 	}
 }
 
