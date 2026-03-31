@@ -239,8 +239,18 @@ struct HcclOpResParam {
     uint64_t aicpuCustomParamAddr;
     uint64_t aicpuCustomParamSize;
 
-    MemDetails1 userMemRes[768];  // 下标为rank id
-    uint32_t userMemType = 0;
+    MemDetails1 userMemRes[768];     // 下标为rank id
+    uint32_t userMemType = 0;                             // 0:CCL Buffer; 1:user Mem
+
+    HcclStreamParam aicpuOrderStreamParam; // 按序下发的stream
+    uint64_t aicpuOrderNotifyAddr;
+    uint64_t aicpuOrderNotifySize;
+    uint64_t tileXrContext = 0;
+    // ARS算法属性
+    uint32_t multiSuperPodDiffDeviceNumMode;
+    bool isARSDoubleRing;
+    // 读取HCCL_ENTRY_LOG_ENABLE环境变量，用于增加算子kernel展开信息
+    bool opEntry{false};
 };
 
 // Transport 内存类型

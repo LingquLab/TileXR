@@ -119,7 +119,7 @@ private:
     GM_ADDR commArgs;
     GM_ADDR aGM_;
     GM_ADDR gatherGM_;
-    __gm__ HcclA2CombineOpParam *winContext_;
+    __gm__ HcclOpResParam *winContext_;
     __gm__ TileXrContext *tileXrContext;
 };
 
@@ -157,7 +157,7 @@ __aicore__ inline void AllGather<T>::Init(GM_ADDR aGM, GM_ADDR gatherGM,
     rankId = reinterpret_cast<__gm__ TileXR::CommArgs *>(commArgs)->localRank;
     rankSize = reinterpret_cast<__gm__ TileXR::CommArgs *>(commArgs)->localRankSize;
 
-    winContext_ = (__gm__ HcclA2CombineOpParam *)contextGM;
+    winContext_ = (__gm__ HcclOpResParam *)contextGM;
     if (blockIdx == 0) {
 		tileXrContext = (__gm__ TileXrContext *)winContext_->tileXrContext;
 
