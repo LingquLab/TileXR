@@ -40,12 +40,27 @@ src/hccd/
 ### HCCD 主接口（`hccd.cc`）
 
 ```cpp
-// 生成全局唯一的通信域 ID（基于时间戳 + 随机数 + 主机名）
+// 生成全局唯一通信域 ID
+// 实现：HccdComm::GetUniqueId() + snprintf(format="%s%s%s",  uniqueId + "-" + "hccl_heterog_group")
 HcclResult HccdGenerateCommId(HcclRootHandle* commId);
 
 // 通过 rank table 初始化通信（HCCD 模式下的入口）
-HcclResult HcclInitComm(const char* rankTable, u32 rank,
-    HcclComm* comm);
+HcclResult HcclInitComm(const char* rankTable, u32 rank, HcclComm* comm);
+```
+
+### HccdComm 初始化流程
+
+```cpp
+class HccdComm {
+    // 原子保护的初始化
+    HcclResult init() {
+        // AtomicInitSet() → impl_->Init()
+        // 失败时 AtomicInitClear()
+    }
+
+    // 生成唯一 ID（供 HccdGenerateCommId 使用）
+    HcclResult GetUniqueId(std::string& uniqueId);
+};
 ```
 
 ### 通信连接管理（`hccl_comm_conn_mgr.cc`）
@@ -102,7 +117,16 @@ class HccdImplPml {
 ## 6. 关键业务逻辑
 
 ### CommId 生成
-`HccdGenerateCommId()` 生成的 CommId 是 128 字节的唯一标识符，基于时间戳、随机数和主机名组合，确保在分布式环境中全局唯一。所有 rank 使用相同的 CommId 才能加入同一通信域。
+`HccdGenerateCommId()` 的实现路径：
+1. 调用 `HccdComm::GetUniqueId()` 获取唯一基础 ID
+2. 调用 `snprintf` 将 uniqueId + `"-"` + `"hccl_heterog_group"` 拼接为 CommId 字符串
+3. CommId 是 128 字节的结构体（`HcclRootHandle`），确保在分布式环境中全局唯一
+
+### HccdComm 初始化保护
+`HccdComm::init()` 使用原子操作保护：
+- `AtomicInitSet()` 设置初始化标志
+- 调用 `impl_->Init()` 执行实际初始化
+- 若失败，调用 `AtomicInitClear()` 回滚标志，保证线程安全
 
 ### HCCD 模式 vs 非 HCCD 模式
 - **HCCD 模式**：有独立的 HCCD 守护进程，负责协调；适合大规模集群（rank 数多）

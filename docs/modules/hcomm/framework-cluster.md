@@ -81,13 +81,37 @@ class Heartbeat {
 ### 连接异常检测
 
 ```cpp
-class DetectConnectAnomalies {
-    // 启动 CQE 错误监听（ibverbs 异步事件）
-    HcclResult Start(HcclNetDevCtx netDevCtx);
+class DetectConnectionAnomalies {
+    // 常量
+    static constexpr u32 DEST_MAX_LEN         = 128;
+    static constexpr u32 MAX_WHITE_LIST_ENTRY  = 16;  // 白名单最大条目数
+    static constexpr u32 ACCEPT_TIME_OF_USLEEP = 100000;  // 100ms
+    static constexpr u32 CLIENT_TIME_OF_USLEEP = 1500000; // 1.5s 客户端轮询间隔
 
-    // 检测到异常时回调
-    void OnAnomalyDetected(u32 remoteRank, AnomalyType type);
+    // 单例访问（每逻辑设备一个实例）
+    static DetectConnectionAnomalies& GetInstance(s32 deviceLogicID);
+
+    // 初始化（RegisterRanksToDca 中调用）
+    void Init(std::vector<RankInfo>& rankInfos, bool isNeedNic);
+
+    // 加入待检测的 IP 对（NIC 或 VNIC）
+    void AddIpQueue(RankInfo& localRankInfo, RankInfo& remoteRankInfo,
+        NicType nicType, s32 deviceLogicId);
+
+    // 发起异常检测
+    HcclResult Detect();
+
+    // 释放资源
+    void Deinit();
 };
+
+// 内部检测流程：
+// DetectMonitor() 线程每 10s 广播一次
+//   CreateServers() → 监听本端 socket
+//   CreateClients() → 对每个 remoteRank 建立连接
+//   processWhiteList() → 验证连接来源合法性
+//   GetStatus() → 轮询 socket 状态
+//   ProcessDetectionResults() → 报告 PrintDetectInfo() 错误信息
 ```
 
 ### Operator Retry

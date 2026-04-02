@@ -75,9 +75,38 @@ src/algorithm/base/
 
 ## 4. 核心函数 / 类 / 接口
 
-### AlgTemplateBase（`alg_template_base_pub.h`）
+### AlgTemplateBase（`alg_template_base_pub.h`，共 677 行）
 
 ```cpp
+// TemplateType 枚举：共 104 个具名值（0-103，跳过 9 和 14），用户自定义范围 1000-2000
+// 分类概览：
+//   AllGather(18):       HD/Ring/Mesh/NHR/NB/Pipeline/AHC/SlimRing/GraphPipeline 等
+//   ReduceScatter(22):   Ring/Mesh/HD/NHR/Pipeline/AHC/Slim/Plant/HCCS 等（最多）
+//   AllReduce(18):       Ring/Doubling/NHR/NB/Mesh/Pipeline/AHC/Graph 等
+//   Broadcast(9):        NHR/NB/HD/Ring/Star/Recursive 等
+//   AllToAll/V(9):       Direct/Pairwise/Staged/Pipeline/Continuous 等
+//   Scatter(8)/Gather(3)/Reduce(3)
+//   TEMPLATE_NATIVE_MAX_NUM（哨兵）
+//   TEMPLATE_CUSTOM_BEGIN = 1000 / TEMPLATE_CUSTOM_MAX_NUM = 2000（用户范围）
+
+// 代表性值
+enum class TemplateType {
+    TEMPLATE_ALL_GATHER_HD_STAGE                 = 0,
+    TEMPLATE_ALL_2_ALL_V_DIRECT_FULL_MESH        = 1,
+    TEMPLATE_ALL_REDUCE_REDUCE_BCAST             = 2,
+    TEMPLATE_BROADCAST_NHR_V1                    = 3,
+    TEMPLATE_BROADCAST_HD                        = 8,
+    TEMPLATE_BROADCAST_RECURSIVE_HD              = 10,
+    TEMPLATE_REDUCESCATTER_HDSTAGE               = 18,
+    TEMPLATE_REDUCESCATTER_NHR                   = 21,
+    // ...
+    TEMPLATE_ALLREDUCE_GRAPH_PIPELINE            = 90,
+    TEMPLATE_ALL_REDUCE_MULTI_DETERMINISTIC_PIPELINE = 103,
+    TEMPLATE_NATIVE_MAX_NUM,
+    TEMPLATE_CUSTOM_BEGIN  = 1000,
+    TEMPLATE_CUSTOM_MAX_NUM = 2000,
+};
+
 class AlgTemplateBase {
 public:
     // 异步执行（主接口）

@@ -37,51 +37,48 @@ src/algorithm/impl/legacy/
 
 ## 4. 核心函数 / 类 / 接口
 
-### CommFactory
+### CommBase（`comm_base_pub.h`）
 
 ```cpp
-class CommFactory {
-    // 构造：注入所有依赖
-    CommFactory(const std::string& identifier, u32 userRank, u32 userRankSize,
-        HcclDispatcher dispatcher, const std::unique_ptr<NotifyPool>& notifyPool,
-        std::map<HcclIpAddress, HcclNetDevCtx>& netDevCtxMap,  // 引用传递
-        std::shared_ptr<TopoInfoExtractor> topoInfoEx,
-        bool isUsedRdmaLevel0 = false,
-        TopoType topoFlag = TOPO_TYPE_COMMON,
-        DevType deviceType = DEV_TYPE_910,
-        std::vector<RankInfo> rankVector = {},
-        NICDeployment nicDeployment = NIC_DEPLOYMENT_DEVICE,
-        ...);
+// 常量
+constexpr u32 MC2_PLANE_MODE_HOST      = 0; // HOST 调度 RoCE
+constexpr u32 MC2_PLANE_MODE_COMBINE   = 1; // 非层次链路模式
+constexpr u32 MC2_PLANE_MODE_HIERARCHY = 2; // 层次链路模式
 
-    // 创建单层通信域（核心接口）
-    HcclResult CreateCommPlane(const std::string& tag,
-        const DeviceMem& inputMem, const DeviceMem& outputMem,
-        const CommParaInfo& commParaInfo,
-        std::vector<std::unique_ptr<CommBase>>& commVec,
-        DeviceMem expMem = DeviceMem());
+class CommBase {
+    // 构造：注入所有依赖（collectiveId, userRank, rankSize, paraVector,
+    //   topoFlag, dispatcher, notifyPool, netDevCtxMap, exchanger,
+    //   inputMem, outputMem, isUsedRdmaLevel0, tag, nicDeployInner, ...)
+    explicit CommBase(...);
 
-    // 诊断接口（cwh 新增）
-    size_t GetNetDevCtxMapSize() const { return netDevCtxMap_.size(); }
+    // 生命周期
+    virtual HcclResult Init();
+    virtual HcclResult DeInit();
 
-    // 辅助查询
-    u32 GetSubRootUserRank(u32 userRank, u32 rootUserRank);
-    u32 GetLevel1CommRank(u32 ringIdx);
+    // Transport 访问
+    std::shared_ptr<Transport> GetTransportByRank(u32 dstRank);
+    HcclResult GetRankByUserRank(u32 userRank, u32& rank);
+    HcclResult GetUserRankByRank(u32 rank, u32& userRank);
 
-private:
-    // RDMA 路径决策（已修复：含 forceRdma）
-    HcclResult GetIsUsedRdma(const CommParaInfo& commParaInfo, bool& isUsedRdma);
-    // isUsedRdma = isInterSuperPod || (isInterServer && !isUsedInterHccsMode_)
-    //           || (isConnectedWithPcie && isUsedRdmaLevel0_)
-    //           || commParaInfo.forceRdma;  ← 修复点
+    // 异步建连
+    HcclResult BuildAsync(u32& status);
+    HcclResult BuildQuerry(u32& status);
 
-    // 各拓扑创建函数
-    HcclResult CreateCommRing(...);   // Ring 拓扑
-    HcclResult CreateCommHD(...);     // Halving-Doubling 拓扑
-    HcclResult CreateCommStar(...);   // Star 拓扑
-    HcclResult CreateCommMesh(...);   // Mesh 拓扑
-    HcclResult CreateCommP2P(...);    // P2P 拓扑
+    // 算法执行
+    HcclResult RunTemplateAlg(std::unique_ptr<AlgTemplateBase>& tempAlg);
+    HcclResult RunTemplateAlgStaged(std::unique_ptr<AlgTemplateBase>&, u32 stage);
 
+    // MC2 支持查询
+    HcclResult IsSupportMC2(const std::string& tag);
+
+    // 中断所有连接
+    void Break();
+
+    // 关键成员（protected）
+    std::vector<std::shared_ptr<Transport>> transportInfo_;  // 每 peer rank 一个 transport
     std::map<HcclIpAddress, HcclNetDevCtx>& netDevCtxMap_;  // 引用，非拷贝
+    std::vector<RankInfo> paraVector_;                       // 子通信域 rank 信息
+    std::shared_ptr<Transport> linkDummy_;                   // 无效 rank 查询时返回
 };
 ```
 
@@ -98,23 +95,69 @@ struct CommParaInfo {
 };
 ```
 
-### hcclImpl
+### hcclImpl（`hccl_impl.h`）
 
 ```cpp
+// 关键常量
+constexpr u32 LEVEL0_PLANE_NUM_IN_NPRING_DOUBLE = 2;  // 双 ring 场景 level0 平面数
+constexpr u32 RDMA_PLANE_NUM_IN_NPRING_DOUBLE   = 2;  // 双 ring RDMA 平面数
+constexpr f32 BASE_COMM_LATENCY = 13.0f;              // 基础通信延迟(μs)
+
+// Pipeline 切片信息
+struct PiplineSliceInfo {
+    std::vector<Slice>              piplineDataSegsSlice;    // 每 stage 数据切片
+    std::vector<std::vector<Slice>> piplineMultiStreamSlice; // 每 stream 每 stage 切片
+    u64 count  {0};
+    u64 offset {0};
+};
+
 class hcclImpl {
-    // 根据算法类型创建所有通信域（并行线程）
+    // 初始化
+    HcclResult Init(bool isHeterogComm = false);
+
+    // 根据算法类型并行创建所有通信域（commLevel0/Rdma/Level1 各一线程）
     HcclResult CreateCommByAlg(const std::string& tag,
         const AlgType algType, CommInfo& commInfo,
         DeviceMem& inputMem, DeviceMem& outputMem, DeviceMem& expMem,
         u32 root, bool isAicpuModeEn, bool meshSinglePlane, bool isA2MC2MultiServer);
 
-    // 单机 ibverbs 控制标志（由上层设置）
-    bool isA2MC2NeedIbverbs_ = false;
+    // 多流资源创建（两个重载）
+    HcclResult CreateMutiStreamRes(const std::string& tag, Stream& stream,
+        const AlgType& algType, ...);
+    HcclResult CreateMutiStreamRes(const std::string& tag, Stream& stream,
+        level1StreamInfo_t& streamInfo, const AlgType& algType, ...);
 
-    // 通信域线程指针
+    // 创建并缓存通信域（tag-based）
+    HcclResult CreateComm(const std::string& tag,
+        DeviceMem& inputMem, DeviceMem& outputMem,
+        const AlgType& algType, CommInfo& commInfo, ...);
+
+    // 释放 tag 对应的所有资源
+    HcclResult ClearOpResource(const std::string& tag);
+
+    // 中断所有通信
+    void Break();
+
+    // 检查 tag 是否已有通信资源
+    bool IsExistCommRes(const std::string& tag);
+
+    // 关键成员
+    bool isA2MC2NeedIbverbs_ = false;    // 单机 ibverbs 控制标志（上层设置）
+    u64  piplineSliceNum_ = 0;           // 流水线切片数（0=关闭，1=无流水，N=流水）
+    bool isAlltoAllZCopyMode_ = false;   // 全局零拷贝 AllToAll 标志
+
+    // 通信域线程（并行建连）
     std::unique_ptr<std::thread> commThreadPtrLevel0_;
     std::unique_ptr<std::thread> commThreadPtrLevel0Rdma_;
     std::unique_ptr<std::thread> commThreadPtrLevel1_;
+    std::unique_ptr<std::thread> commThreadPtrLevel2_;
+
+    // per-tag 通信域缓存（由 commLock_ 保护）
+    tagCommInfo_t tagCommInfo_;
+    std::mutex commLock_;
+
+    // scratch 内存
+    std::map<std::string, DeviceMem> scratchMemMap_;
 };
 ```
 

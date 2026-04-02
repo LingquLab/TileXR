@@ -57,23 +57,18 @@ class TransportManager {
         bool isBackup, u32 subCommIndex, TransportLinkType linkType);
     // 关键路径：netDevCtx = netDevCtxMap_[devIpAddr_[0]]（若为空则 nullptr）
 
+    // 为每个有效 rank 并行创建 Transport 链路线程
+    HcclResult createSubCommLinkThreads(const std::string& tag,
+        std::vector<u32>& rankList, CommInfo& commInfo, ...);
+    // 跳过条件：无效 rank / 已存在链路 / 非 RDMA 的备份链路
+    // 每个有效 rank 创建独立线程调用 CreateLink(rankId, ...)
+
     // 获取已建立的 transport 对象
     std::shared_ptr<Transport> GetTransportByRank(RankId rank) const;
 
     // 关键常量
-    // AICPU_RETRY_BACKUP_PORT = 16667
-    // MASSIVE_IBV_CONNECTION_COUNT = 1000（大规模 ibverbs 连接阈值）
-};
-
-// TransportData：描述一条 transport 链路的完整参数
-struct TransportData {
-    TransportLinkMode linkMode;    // P2P / IBV / SOCKET
-    HcclIpAddress localIp;
-    HcclIpAddress remoteIp;
-    u32 devicePhyId;
-    DeviceMem localMem;
-    DeviceMem remoteMem;
-    // ...
+    // AICPU_RETRY_BACKUP_PORT     = 16667
+    // MASSIVE_IBV_CONNECTION_COUNT = 1000（大规模 ibverbs 连接阈值，超过后切换批量建连模式）
 };
 ```
 

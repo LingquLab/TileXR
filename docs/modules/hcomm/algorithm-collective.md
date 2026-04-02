@@ -65,86 +65,191 @@ src/algorithm/impl/
 
 ## 4. 核心函数 / 类 / 接口
 
-### AlgConfigurator（`alg_configurator.h`）
+### CollExecutorBase（`coll_executor_base.h`）
 
 ```cpp
-class AlgConfigurator {
-    // 为指定命令类型选择算法
-    HcclResult SelectAlgType(HcclCMDType cmdType, AlgType& algType);
+class CollExecutorBase {
+    // 构造
+    CollExecutorBase(const HcclDispatcher dispatcher,
+        std::unique_ptr<TopoMatcher>& topoMatcher);
 
-    // Level0/1/2 独立配置
-    HcclResult CheckAlgType(const AlgType& algType);
+    // 配置（构造后必须调用 SetAlgType）
+    void SetAlgType(AlgType);
+    void SetCCLInBuffer(u64 cclbufferSize);
+    void SetIsSupportSDMAReduce(bool);
+    void SetAlgOpContext(AlgOpContext);
+    void SetAivClearEnable(bool);
+    void SetRmaInfo(void*);
+    void SetNumBlocks(const u32&);
+    void SetOpCounter(const OpCounterInfo&);
 
-    // 特性开关
-    bool isDetermEnable_;      // 确定性训练
-    bool isAivModeEnable_;     // AIV 模式
-    bool isAicpuUnfoldEnable_; // AICPU 展开
+    // 纯虚接口（子类必须实现）
+    virtual HcclResult CalcResRequest(const OpParam& param,
+        AlgResourceRequest& resourceRequest) = 0;
+    virtual HcclResult Orchestrate(OpParam& param,
+        AlgResourceResponse& algRes) = 0;
 
-    // 所有命令类型的默认算法映射
-    std::map<HcclCMDType, AlgType> defaultAlgMap_;
+    // 静态辅助
+    static HcclResult RunTemplate(const std::unique_ptr<AlgTemplateBase>& tempAlg,
+        const SubCommInfo& commInfo);
 };
 ```
 
-### TopoMatcher（`topo_matcher.h`）
+### CollNativeExecutorBase（`coll_native_executor_base.h`）
 
 ```cpp
-struct HcclExternalEnable {
-    bool isEnableFFTS;          // FFTS（高频传输）
-    bool isEnableDetermistic;   // 确定性训练
-    bool isEnableAiv;           // AIV 模式
-    bool isEnableRdmaLevel0;    // Level0 RDMA
-    // ...
+// 常量
+constexpr u64 HCCL_INPLACE_MEMCOPY_SIZE   = 131072; // 128 KB
+constexpr u64 HCCL_POST_SYNC_MEMCOPY_SIZE = 131072; // 128 KB
+
+// 内存上下文（每次 KernelRun 传入）
+struct ExecMem {
+    u64       count     = 0;
+    DeviceMem inputMem;    // 单算子: InCCLMem;  图模式: InUserMem
+    DeviceMem outputMem;   // 单算子: OutCCLMem; 图模式: OutUserMem
+    DeviceMem scratchMem;  // scratch/temp buffer
+    void*     inputPtr  = nullptr;
+    void*     outputPtr = nullptr;
+};
+
+class CollNativeExecutorBase : public CollExecutorBase {
+    // 资源计算（子类按需重写）
+    virtual HcclResult CalcCommInfo(std::vector<LevelNSubCommTransport>& opTransport);
+    virtual HcclResult CalcLevel0CommInfo(TransportMemType, TransportMemType,
+        std::vector<LevelNSubCommTransport>&);
+    virtual HcclResult CalcLevel1CommInfo(TransportMemType, TransportMemType,
+        std::vector<LevelNSubCommTransport>&);
+    virtual HcclResult CalcLevel2CommInfo(TransportMemType, TransportMemType,
+        std::vector<LevelNSubCommTransport>&);
+    virtual HcclResult CalcStreamNum(u32& streamNum);
+    virtual HcclResult CalcScratchMemSize(u64& scratchMemSize);
+    virtual HcclResult CalcNotifyNum(u32 streamNum, u32& notifyNum);
+
+    // 执行路径（子类实现）
+    virtual HcclResult KernelRun(const OpParam& param, ExecMem& execMem);
+    // 零拷贝三段式（可选重写）
+    virtual HcclResult KernelRunIntraServerPre(const OpParam&, ExecMem&);
+    virtual HcclResult KernelRunInterServer(const OpParam&, ExecMem&);
+    virtual HcclResult KernelRunIntraServerPost(const OpParam&, ExecMem&);
+
+    // 子流同步辅助
+    HcclResult ActiveSlaveStreams(const Stream& stream);
+    HcclResult NotifySubStreamStart(Stream&, std::vector<Stream>&, ...);
+    HcclResult WaitSubStreamFinish(Stream&, std::vector<Stream>&, ...);
+};
+```
+
+### TopoMatcher（`topo_matcher.h`）—— 参见 hcomm/topo.md 中的完整接口
+
+```cpp
+// HcclExternalEnable：运行时特性开关（完整字段）
+using HcclExternalEnable = struct HcclExternalEnableDef {
+    u32  enableFfts;        // FFTS 开关（默认 1）
+    u32  deterministic;     // 确定性计算（默认 0）
+    u32  intraRoceSwitch;   // 片内 RoCE（默认 0）
+    u32  dumpDebug;         // 调试 dump（默认 0）
+    u32  interHccsDisable;  // 禁用跨机 HCCS（默认 0）
+    bool aivMode;           // AIV 模式（默认 false）
+    bool aicpuUnfold;       // AICPU 展开（默认 false）
+    bool isOnlyAiv;         // 仅 AIV 模式（默认 false）
+    s32  execTimeOut;       // 执行超时
+    std::map<HcclCMDType, std::vector<HcclAlgoType>> algoConfig; // 每算子算法配置
 };
 
 class TopoMatcher {
-    // 计算通信平面（level0/1/2 的 rank 分组）
     HcclResult CalcCommPlaneInfo(const std::string& tag,
         const CommParaInfo& commParaInfo,
-        std::vector<std::vector<std::vector<RankInfo>>>& commPlanes);
+        std::vector<SingleSubCommTransport>& commTransport,
+        TransportMemType inputMemType, TransportMemType outputMemType);
 
-    // 查询两 rank 间链路类型
-    LinkTypeInServer GetLinkTypeByRank(u32 rankA, u32 rankB) const;
-
-    // 是否是 bridge rank（多环中的桥接节点）
-    bool IsBridgeRank(u32 rank, u32 ringIdx) const;
+    // 特性开关（读/写）
+    u32  GetExternalInputHcclEnableFfts();
+    bool GetAivModeConfig() const;
+    bool GetAicpuUnfoldConfig() const;
+    HcclResult SetDeterministicConfig(u8 deterministic);
+    HcclResult SetAlgoConfig(const std::map<HcclCMDType, std::vector<HcclAlgoType>>&);
 };
 ```
 
-### CollNativeExecutorBase（`coll_native_executor_base.cc`）
+### CollAlgExecRegistry（`coll_alg_exec_registry.h`）—— 执行器注册表
 
 ```cpp
-class CollNativeExecutorBase {
-protected:
-    // 获取算子可用的 stream 列表
-    HcclResult GetSubStreamInfo(std::vector<Stream>& streams);
+// 工厂函数类型
+using CollExecCreator = std::function<
+    CollExecutorBase*(const HcclDispatcher, std::unique_ptr<TopoMatcher>&)>;
 
-    // 挂载 profiling（算子开始/结束时间戳）
-    HcclResult AttachProfiling(const std::string& tag, HcclRtStream stream);
+// 默认模板工厂（静态方法）
+template<typename P>
+static CollExecutorBase* DefaultExecCreator(const HcclDispatcher dispatcher,
+    std::unique_ptr<TopoMatcher>& topoMatcher) {
+    static_assert(std::is_base_of<CollExecutorBase, P>::value, ...);
+    return new (std::nothrow) P(dispatcher, topoMatcher);
+}
 
-    // 分配 scratch 内存
-    HcclResult AllocScratchMem(u64 size, DeviceMem& mem);
+// 单例注册表
+class CollAlgExecRegistry {
+    static CollAlgExecRegistry& Instance();
 
-    // 核心执行（由子类实现）
-    virtual HcclResult RunLoop(const std::string& tag,
-        DeviceMem& inputMem, DeviceMem& outputMem,
-        u64 count, HcclDataType dataType, HcclReduceOp op,
-        u32 root, HcclRtStream stream) = 0;
+    // 注册（重复 tag 返回 HCCL_E_INTERNAL）
+    HcclResult Register(const std::string& tag, const CollExecCreator& creator);
+
+    // 查找并实例化（tag 不存在返回 nullptr）
+    std::unique_ptr<CollExecutorBase> GetAlgExec(const std::string& tag,
+        const HcclDispatcher dispatcher, std::unique_ptr<TopoMatcher>& topoMatcher);
 };
+
+// 注册宏（在各 executor .cc 文件中使用）
+// REGISTER_EXEC(tag, name, CollExecutorSubclass)
+// 展开为文件作用域 static 变量，在程序启动时自动调用 Register()
+#define REGISTER_EXEC(tag, name, collExecBase) \
+    static HcclResult g_func_##name##_<N> = \
+        CollAlgExecRegistry::Instance().Register(tag, DefaultExecCreator<collExecBase>)
+
+// 使用示例：
+// REGISTER_EXEC("AllReduce_Ring_A800", MyAllReduceExecutor, MyAllReduceExecutor);
 ```
 
-### CollCommExecutor（`coll_comm_executor.cc`）
+### CollCommExecutor（`coll_comm_executor.h`）—— 多 Ring 执行器
 
 ```cpp
 class CollCommExecutor : public CollNativeExecutorBase {
-    // 多 ring AllReduce（并行多个 ring 提升带宽）
-    HcclResult MultiRingAllReduce(const std::string& tag,
-        DeviceMem& inputMem, DeviceMem& outputMem,
-        u64 count, HcclDataType dataType, HcclReduceOp op,
-        HcclRtStream stream);
+    // 多 ring AllReduce（带切片参数）
+    HcclResult MultiRingAllReduce(
+        const std::string& tag, DeviceMem& inputMem, DeviceMem& outputMem,
+        u64 count, HcclDataType dataType, HcclReduceOp reductionOp,
+        const std::vector<std::vector<Slice>>& multRingsSliceZero,
+        Stream stream, s32 profStage, u64 baseOffset = 0);
 
-    // 获取单 ring 的 sub-stream 信息
-    HcclResult GetSubStreamInfoOnOneRing(u32 ringIdx,
-        std::vector<SubStreamInfo>& subStreams);
+    // 多 ring ReduceScatter（支持并发版本）
+    HcclResult MultiRingReduceScatter(...);
+    HcclResult MultiRingReduceScatterConcurrent(...);
+    HcclResult Level1ReduceScatterConcurrent(...);
+
+    // 多 ring AllGather（支持并发版本）
+    HcclResult MultiRingAllGather(...);
+    HcclResult MultiRingAllGatherConcurrent(...);
+    HcclResult Level1AllGatherConcurrent(...);
+
+    // Mesh 多流 ReduceScatter
+    HcclResult MultiStreamReduceScatterMesh(...);
+    HcclResult MultiStreamReduceScatterMeshAtomic(...);
+
+    // AnyPath 路径选择（基于 NIC 拓扑动态选 ring 顺序）
+    std::vector<std::vector<u32>> GetRingsOrderForAnyPath(
+        u32 ranksSize, TopoType topoType, std::vector<u32>& nicList);
+    std::vector<std::vector<Slice>> AnyPathPrepareMultiRingSlice(
+        const std::vector<Slice>& dataSegsSlice, const std::string& tag, ...);
+
+    // Ring 顺序计算
+    std::vector<std::vector<u32>> GetRingsOrderByTopoType(
+        u32 ranksSize, TopoType topoType, std::vector<u32>& nicList);
+    std::vector<std::vector<Slice>> PrepareMultiRingSlice(
+        const std::vector<Slice>& dataSegsSlice, const std::string& tag, ...);
+
+    // 拓扑查询辅助
+    bool Is910BSingleMesh();
+    bool NeedCreateSingleMeshPlane(bool isInlineReduce);
+    u64  GetReduceAttr(DeviceMem&, DeviceMem&, HcclDataType, HcclReduceOp);
 };
 ```
 

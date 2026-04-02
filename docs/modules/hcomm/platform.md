@@ -54,14 +54,37 @@ src/platform/
 ### HAL 适配（`adapter_hal.cc`）
 
 ```cpp
-// 获取当前进程的 group ID 和 device ID
-HcclResult hrtGetgrpId(u32* grpId, u32* deviceId);
+// 常量
+// PRE_FETCH_THREADS_NUM      = 24
+// PRE_FETCH_MEMORY_THRESHOLD = 268435456 (256 MB)
+// MEMORY_PAGE_SIZE           = 4096
 
-// 注册 group ID 回调（用于多进程场景）
-void HcclSetGrpIdCallback(std::function<HcclResult(u32*, u32*)> callback);
+// 回调注册
+HcclResult HcclSetGrpIdCallback(int (*grpIdCallback)(int tag, int* grpId, int* devId));
 
-// 内存预取（后台线程，提升首次访问性能）
-// PRE_FETCH_THREADS_NUM = 24, PRE_FETCH_MEMORY_THRESHOLD = 256MB
+// HAL 事件与设备管理
+HcclResult hrtHalSubmitEvent(u32 devId, u32 eventId, u32 groupId);
+HcclResult hrtHalEschedAttachDevice(unsigned int devId);
+HcclResult hrtHalEschedCreateGrp(unsigned int devId, unsigned int grpId, GROUP_TYPE type);
+HcclResult hrtHalGetDeviceType(const uint32_t devId, DevType& devType);
+
+// 内存预取（后台线程，减少首次 page fault）
+HcclResult MemoryPreFetch(u64 size, void* hostPtr);
+
+// Host 内存注册（用于 RDMA 零拷贝）
+HcclResult hrtHalHostRegister(void* hostPtr, u64 size, u32 flag, u32 devid, void*& devPtr);
+HcclResult hrtHalHostUnregister(void* hostPtr, u32 devid);
+
+// 带宽查询（level=0 片内, 1 跨机, 2 超节点间, 3 HBM）
+HcclResult GetBandWidthPerNPU(u32 level, u32 userRankSize,
+    u32 deviceNumPerAggregation, float& bandWidth);
+
+// MC2 维护线程
+HcclResult hrtHalStartMC2MaintenanceThread(mc2Funcs f1, void* p1, mc2Funcs f2, void* p2);
+
+// 资源 ID 恢复（重试场景）
+HcclResult hrtHalResourceIdRestore(u32 devId, u32 tsId,
+    drvIdType_t resType, u32 resId, u32 flag);
 ```
 
 ### RTS 适配（`adapter_rts.cc`）
@@ -85,26 +108,65 @@ HcclResult hrtKernelLaunch(const char* funcName, dim3 blockDim,
 ### ibverbs 适配（`adapter_verbs.cc`）
 
 ```cpp
-// QP 生命周期
+// NIC 设备生命周期
 HcclResult HcclNetOpenDev(HcclNetDevCtx* ctx, NicType nicType,
     u32 devicePhyId, u32 deviceLogicId, HcclIpAddress ip);
 HcclResult HcclNetCloseDev(HcclNetDevCtx ctx);
-
-// 连接建立
 HcclResult HcclNetDevGetNicType(HcclNetDevCtx ctx, SocketType* type);
+
+// ibverbs 底层操作（封装 libibverbs 动态加载函数）
+HcclResult hrtIbvPostSrqRecv(struct ibv_srq* srq,
+    struct ibv_recv_wr* wr, struct ibv_recv_wr** badWr);
+HcclResult hrtIbvPostRecv(struct ibv_qp* qp,
+    struct ibv_recv_wr* wr, struct ibv_recv_wr** badWr);
+HcclResult hrtIbvPostSend(struct ibv_qp* qp,
+    struct ibv_send_wr* wr, struct ibv_send_wr** badWr);
+HcclResult hrtIbvPollCq(struct ibv_cq* cq, int maxNum,
+    struct ibv_wc* wc, s32& num);
+HcclResult hrtIbvReqNotifyCq(struct ibv_cq* cq, int solicitedOnly);
+HcclResult hrtIbvGetCqEvent(struct ibv_comp_channel* channel,
+    struct ibv_cq** cq, void** cq_context);
+void       hrtIbvAckCqEvent(struct ibv_cq* qp, unsigned int nevents);
+HcclResult hrtIbvQueryQp(struct ibv_qp* qp);
+// HNS 扩展发送（带 expRsp 响应）
+HcclResult HrtHnsIbvExpPostSend(struct ibv_qp* qp,
+    struct ibv_send_wr* wr, struct ibv_send_wr** badWr, struct WrExpRsp* expRsp);
 ```
 
-### 动态加载模式
+### 设备能力查询（`device_capacity.cc`）
 
 ```cpp
-// dlibv_function.cc 示例：运行时加载 ibverbs
-using ibv_open_device_fn = ibv_context*(*)(ibv_device*);
-static ibv_open_device_fn g_ibv_open_device = nullptr;
+// 带宽常量（GB/s，有效利用率 = 标称 × 效率因子）
+// BANDWIDTH_HCCS_910A = 10.0f,  BANDWIDTH_HCCS_910B = 18.3f
+// BANDWIDTH_RDMA_910A = 10.0f,  BANDWIDTH_RDMA_910B = 20.0f
+// BANDWIDTH_HBM_910_93 = 585.0f (650 × 0.9)
+// BANDWIDTH_SIO_910_93 = 204.0f (240 × 0.85)
+// BANDWIDTH_PCIE_GEN4  = 27.2f, BANDWIDTH_PCIE_GEN5 = 54.4f
 
-HcclResult LoadIbverbsLib() {
-    void* handle = dlopen("libibverbs.so.1", RTLD_LAZY);
-    g_ibv_open_device = (ibv_open_device_fn)dlsym(handle, "ibv_open_device");
-}
+// AIV 能力检查
+bool IsSupportAIVCopy(HcclDataType dataType);       // FP16/INT16/FP32/INT8/BFP16 等
+bool IsSupportAIVReduce(HcclDataType dataType, HcclReduceOp op); // SUM/MAX/MIN
+
+// 地址对齐检查（按芯片类型差异化）
+bool IsAddressAlign(const void* inputPtr, const void* outputPtr, DevType devType);
+// 数据类型与 Reduce 操作支持（按芯片查表）
+bool IsDataTypeSupport(HcclDataType dataType, DevType devType);
+bool IsRedOpSupport(HcclReduceOp op, DevType devType);
+
+// SDMA/RDMA reduce 能力组合检查
+bool IsSupportSDMAReduce(const void* inputPtr, const void* outputPtr,
+    HcclDataType dataType, HcclReduceOp op);
+bool IsSupportRDMAReduce(HcclDataType dataType, HcclReduceOp op);
+
+// 硬件能力查询
+HcclResult GetBandWidthPerNPU(u32 level, u32 userRankSize,
+    u32 deviceNumPerAggregation, float& bandWidth);   // 带宽查找表（level 0-3）
+HcclResult GetMaxDevNum(u32& MaxDevNum);              // 310P3=32, 其他=16（带缓存）
+HcclResult IsSupportAtomicWrite(DevType deviceType,
+    u32 devicePhyId, bool& isSupportAtomicWrite);     // 仅 910_93 支持
+
+// 通知超时（设备类型相关）
+u32 GetNotifyMaxWaitTime();
 ```
 
 ---

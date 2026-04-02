@@ -39,13 +39,33 @@ src/framework/communicator/impl/
 
 ```cpp
 class HcclCommunicator {
-    // 初始化（顺序调用）
-    HcclResult Init(HcclCommParams params, HcclRootHandle handle);
-      ├── InitRaResource()       // 网络资源：HcclNetInit + InitSocketManager + InitNic
-      ├── InitTransportManager() // TransportManager 初始化
-      ├── InitMemoryManagerSubGroup()
-      ├── InitHcclAlg()          // hcclImpl 初始化
-      └── LoadAICPUKernel()
+    // =========================================================
+    // Init 重载 1：从完整 RankTable_t 初始化（主进程/world group）
+    // =========================================================
+    HcclResult Init(HcclCommParams& params, const RankTable_t& rankTable);
+    // 调用顺序（约 20 步）：
+    //   InitCommParams → attrCollector_.Init → InitRankInfo → InitNetResource
+    //   → InitDebug → InitNotifyManager → InitStreamManager → InitProfiler
+    //   → InitDispatcher → InitTransportManager → InitMemoryManager
+    //   → InitCombinOpara → RegisterRanksToDca → RegistTaskExceptionHandler
+    //   → InitPara → RegisterKernel → LoadAICPUKernel → LoadCustomKernel
+    //   → InitHDCommunicate → InitOpRetry → InitOpResPara
+    //   → InitOneSidedService → rankGraph_.Init → SaveTopoDesc → RegisterToSnapshot
+
+    // =========================================================
+    // Init 重载 2：从 rankList + WorldGroupInfo 初始化（子组/SubGroup）
+    // =========================================================
+    HcclResult Init(HcclCommParams& params,
+        const std::vector<RankInfo>& rankList, WorldGroupInfo& groupCommonData);
+    // 调用顺序（17 步，SubGroup 场景）：
+    //   InitCommParams → attrCollector_.Init(SubGroup) → InitRankInfoSubGroup
+    //   → InitDebugSubGroup → InitNotifyManager → InitDispatcher
+    //   → InitStreamManager → InitRaResource → InitTransportManager
+    //   → InitMemoryManagerSubGroup → InitHcclAlg → LoadAICPUKernel
+    //   → LoadCustomKernel → InitHDCommunicate → InitOpRetry
+    //   → InitOpResPara → RegisterRanksToDca
+    //   → OrderLaunch::GetInstance(deviceLogicId_).RegisterOrderLaunch
+    //   → rankGraph_.Init → SaveTopoDesc → RegisterToSnapshot
 
     // 销毁
     HcclResult Destroy();
@@ -63,7 +83,26 @@ class HcclCommunicator {
 // isMC2ReInit=true 时绕过单机早退逻辑
 HcclResult InitNic(bool isMC2ReInit = false);
 // 早退条件：!IntraRoceSwitch && servRankInfo_.size()==1 && isDiffDeviceModule_ && !isMC2ReInit
-// 主流程：HcclNetOpenDev → netDevCtxMap_[ip] = ctx → socketManager_->ServerInit
+// 主流程：HcclNetOpenDev(NicType, ...) → netDevCtxMap_[ip] = ctx → socketManager_->ServerInit
+// 完成后设置：isNeedInitNic_ = true; attrCollector_.SetNeedInitNicFlag(true); nicInitialized_++;
+// DeinitNic：只在 nicInitialized_ - 1 <= 0 时才真正关闭 netDevCtx
+```
+
+### Rank 到 DCA 注册
+
+```cpp
+HcclResult RegisterRanksToDca();
+// 最后一步调用 DetectConnectionAnomalies::GetInstance(deviceLogicId_).Init(rankInfoList_, isNeedInitNic_)
+// 启动连接异常检测（仅在 isNeedInitNic_=true 时激活 ibverbs CQE 监听）
+```
+
+### MC2 资源创建
+
+```cpp
+// CreateCommResource：检测 tag 后缀判断是否多机
+HcclResult CreateCommResource(const std::string& tag, ...);
+// tag 含 HCCL_MC2_MULTISERVER_SUFFIX → isA2MC2MultiServer_ = true
+// 单机 ibverbs 场景：调用 InitNic(isMC2ReInit=true) → CreateCommAndStreamRes → Mc2CreateAndLaunchContext
 ```
 
 ### MC2 双传输通道资源
@@ -74,10 +113,15 @@ HcclResult SetCommResource(HcclA2CombineOpParam& param);
   ├── commLevel0（P2P）→ GetTransportByRank(i) → windowsIn/Out
   └── commLevel0Rdma（ibverbs）→ GetTransportByRank(i) → transDevIbverbsDataMem_
 
-// 构建 kernel Context 并 launch
+// 构建 kernel Context 并 launch AICPU 内核
 HcclResult Mc2CreateAndLaunchContext(HcclA2CombineOpParam& param);
+  ├── InitWorkSpace()
+  ├── AICPU notify 初始化
   ├── 多机：H2D 拷贝 windowsIn/Out
-  └── 单机：H2D 拷贝 transDevIbverbsDataMem_ → combinOpara.ibverbsData
+  ├── 单机：H2D 拷贝 transDevIbverbsDataMem_ → combinOpara.ibverbsData
+  ├── combinOparaPtr->tileXrContext = reinterpret_cast<u64>(tileXrCtxDev_.ptr())
+  └── AiCpuKernelLaunch(stream, commContext_, "RunAicpuKfcResInit")
+      // RunAicpuKfcResInitV2 用于部分场景
 ```
 
 ### 关键成员变量
@@ -86,6 +130,8 @@ HcclResult Mc2CreateAndLaunchContext(HcclA2CombineOpParam& param);
 // 网络资源
 std::map<HcclIpAddress, HcclNetDevCtx> netDevCtxMap_;  // IP → NIC 上下文
 std::vector<HcclIpAddress> devIpAddr_;                  // 本 rank 的 NIC IP 列表
+bool isNeedInitNic_ = false;           // InitNic 是否已被调用
+int  nicInitialized_ = 0;             // NIC 初始化引用计数
 
 // 通信域
 CommInfo commInfo_;                    // 持有 commLevel0 / commLevel0Rdma / commLevel1

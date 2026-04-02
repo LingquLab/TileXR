@@ -39,16 +39,44 @@ src/framework/common/src/topo/          # 约 30 个文件
 
 ```cpp
 struct HcclTopoInfo {
-    u32 userRank;
-    u32 userRankSize;
-    u32 devicePhyId;
-    u32 serverIdx;
-    u32 superPodIdx;
-    std::string serverId;
-    std::vector<HcclIpAddress> nicIp;         // 设备 NIC IP 列表
-    std::vector<HcclIpAddress> backupNicIp;
-    LinkTypeInServer deviceToNextRankLinkType; // 与相邻 rank 的链路类型
-    // ... 更多字段
+    u32  userRank;
+    u32  userRankSize;
+    u32  devicePhyId;
+    s32  deviceLogicId;
+    std::vector<u32> nicList;
+    bool isSingleMeshAggregation;
+    u32  deviceNumPerAggregation;  // 每模块设备数
+    u32  superPodNum;              // 超节点总数
+    DevType  deviceType;
+    TopoType topoType;
+    bool is310P3Common;
+    u32  serverNum;
+    u32  meshAggregationRankSize;
+    u32  moduleNum;
+    bool useSuperPodMode;
+    bool isDiffDeviceModule;
+    bool isDiffDeviceType;
+    bool isARSDoubleRing;          // 默认 true
+    std::unordered_map<u32, bool>  isUsedRdmaMap;
+    std::unordered_map<u32, u32>   pairLinkCounter; // 片内链路类型计数
+    std::vector<std::vector<std::vector<std::vector<u32>>>> CommPlaneSubGroupVector;
+};
+```
+
+### `HcclExternalEnable` 结构体（`topo_matcher.h`）
+
+```cpp
+using HcclExternalEnable = struct HcclExternalEnableDef {
+    u32  enableFfts;          // FFTS 开关（默认 1）
+    u32  deterministic;       // 确定性计算（默认 0）
+    u32  intraRoceSwitch;     // 片内 RoCE 开关（默认 0）
+    u32  dumpDebug;           // 调试 dump（默认 0）
+    u32  interHccsDisable;    // 禁用跨机 HCCS（默认 0）
+    bool aivMode;             // AIV 执行模式（默认 false）
+    bool aicpuUnfold;         // AICPU 展开模式（默认 false）
+    bool isOnlyAiv;           // 仅 AIV 模式（默认 false）
+    s32  execTimeOut;         // 执行超时
+    std::map<HcclCMDType, std::vector<HcclAlgoType>> algoConfig; // 每算子类型的算法配置
 };
 ```
 
@@ -56,42 +84,126 @@ struct HcclTopoInfo {
 
 ```cpp
 class TopoMatcher {
-    // 计算各层通信平面（level0/level1/level2）的 rank 分组
+    // 构造：注入通信平面、bridge rank、拓扑/算法/特性开关
+    explicit TopoMatcher(
+        const std::vector<std::vector<std::vector<u32>>> CommPlaneRanks,
+        const std::vector<bool> isBridgeVector,
+        HcclTopoInfo& topoInfo, HcclAlgoInfo& algoInfo,
+        HcclExternalEnable& externalEnable,
+        std::vector<std::vector<std::vector<u32>>>& serverAndsuperPodToRank);
+
+    // 计算通信平面（核心接口）
     HcclResult CalcCommPlaneInfo(const std::string& tag,
         const CommParaInfo& commParaInfo,
-        std::vector<std::vector<std::vector<RankInfo>>>& commPlanes);
+        std::vector<SingleSubCommTransport>& commTransport,
+        TransportMemType inputMemType, TransportMemType outputMemType);
 
-    // 查询两个 rank 之间的链路类型
-    LinkTypeInServer GetLinkTypeByRank(u32 rankA, u32 rankB) const;
+    // 特性开关读取/设置
+    u32  GetExternalInputHcclEnableFfts();
+    u32  GetExternalInputIntraRoceSwitch();
+    bool GetAivModeConfig() const;
+    bool GetAicpuUnfoldConfig() const;
+    HcclResult SetDeterministicConfig(u8 deterministic);
+    HcclResult SetAlgoConfig(const std::map<HcclCMDType, std::vector<HcclAlgoType>>&);
 
-    // 是否是 bridge rank（多环拓扑中的桥接节点）
-    bool IsBridgeRank(u32 rank, u32 ringIdx) const;
+    // 超节点/服务器级 rank 分组
+    HcclResult GetLocalSuperPodRankSize(u32 userRank, u32& devNum, u32& rankIdx);
+    HcclResult GetLocalServerRankSize(u32 userRank, u32& devNum, u32& rankIdx);
+    u32  GetSubRootUserRank(u32 userRank, u32 rootUserRank);
+    u32  GetSubRootWithSuperPod(u32 userRank, u32 rootUserRank);
 
-    // SuperPod 场景下的 rank 分组
-    HcclResult CalcSuperPodCommPlane(...);
+    // 拓扑拓展/AHC
+    void GetAHCAlgOption(std::map<AHCConcOpType, TemplateType>&);
+    void SetAHCAlgOption(std::map<AHCConcOpType, TemplateType>&);
+    bool CheckSdmaWithRohTopo(const std::vector<u32>& nicList, std::vector<u32>& topoList);
 };
 ```
 
 ### `TopoInfoParse`（`topoinfo_parse.cc`）
 
 ```cpp
-class TopoInfoParse {
-    // 解析 rank table（支持 JSON v1/v2 等多种格式）
-    HcclResult Parse(const std::string& rankTableContent,
-        std::vector<RankInfo>& rankInfoList);
+class TopoInfoRanktableParser {  // 基类
+    virtual HcclResult Init();
+    virtual HcclResult GetClusterInfo(RankTable_t&);
+    HcclResult GetRanktableVersion(std::string&);
 
-    // 校验 rank table 合法性（rank 数量、IP 格式、设备 ID 唯一性等）
-    HcclResult Validate(const std::vector<RankInfo>& rankInfoList);
+    // rank table 版本常量
+    // HCCL_CLUSTER_VERSION   = "1.0"  标准 HCCL 集群
+    // HETEROG_CLUSTER_VERSION = "1.1" 异构集群（CPU+NPU rank 混合）
+    // SUPERPOD_CLUSTER_VERSION = "1.2" 超节点集群
 };
 ```
 
-### 拓扑交换流程（Exchange）
+### `HcclBasicRankInfo`（`topoinfo_exchange_agent.h`）
 
 ```cpp
-// Dispatcher 协调 agent 和 server
-class TopoInfoExchangeDispatcher {
-    HcclResult Exchange(std::vector<HcclTopoInfo>& localInfos,
-        std::vector<HcclTopoInfo>& globalInfos);
+// 拓扑交换前每个 rank 上报的基本信息
+using HcclBasicRankInfo = struct HcclBasicRankInfoDef {
+    HcclIpAddress             hostIP;
+    u32                       hostPort       {HCCL_INVALID_PORT};
+    u32                       rank           {0};
+    u32                       rankSize       {0};
+    NICDeployment             nicDeploy      {NICDeployment::NIC_DEPLOYMENT_DEVICE};
+    DevType                   deviceType     {DevType::DEV_TYPE_910};
+    s32                       deviceLogicID  {0};
+    u32                       devicePhysicID {0};
+    std::vector<HcclIpAddress> deviceIP;
+    std::vector<HcclIpAddress> backupDeviceIP;
+    u32                       deviceNicPort  {HCCL_INVALID_PORT};
+    u32                       deviceVnicPort {HCCL_INVALID_PORT};
+    u32                       superDeviceId  {INVALID_UINT};
+    std::string               superPodId;
+    TlsStatus                 tlsStatus;
+};
+```
+
+### 拓扑交换 Dispatcher（`topoinfo_exchange_dispatcher.h`）
+
+```cpp
+// epoll 驱动的异步广播
+class TopoInfoExchangeDispather {
+    // 常量
+    static constexpr u32 DEFAULT_THREAD_NUM      = 1;
+    static constexpr u32 MAX_THREAD_NUM          = 4;   // 最多 4 个 worker 线程
+    static constexpr s32 RANK_CAPACITY_PER_THREAD = 512; // 每线程处理 rank 数
+    static constexpr s32 EPOLL_TIMEOUT_MS         = 100;
+    static constexpr s32 LAST_EPOLL_TIMEOUT_MS    = 5;
+
+    // FdContext：epoll 事件关联的 socket + 发送状态
+    struct FdContext {
+        std::shared_ptr<HcclSocket> socket;
+        SendState txState;
+    };
+
+    // SendState：单次非阻塞发送进度跟踪
+    struct SendState {
+        u32    rankId;
+        size_t headerLen;    // 头部总长度
+        size_t headerSended; // 已发送头部字节
+        size_t bodyLen;      // 载荷总长度
+        size_t bodySended;   // 已发送载荷字节
+        void*  data;
+        bool IsOk(); // bodyLen≠0 && 头部/载荷均已发完
+    };
+
+    // 广播接口
+    HcclResult BroadcastRankTable(connectSockets, clusterInfo, failedAgentIdList);
+    HcclResult BroadcastGroupLeaderInfo(connectSockets, leaderInfo);
+};
+```
+
+### 拓扑交换 Agent（`topoinfo_exchange_agent.h`）
+
+```cpp
+class TopoInfoExchangeAgent {
+    // 完整初始化并获取全局拓扑
+    HcclResult Setup();
+    // 拆除连接
+    HcclResult Teardown();
+    // 获取拓扑结果
+    HcclResult GetClusterTopoInfo(RankTable_t& clusterInfo);
+    // 获取分组 Leader
+    HcclResult GetGroupLeader(HcclRankHandle& rankHandle);
 };
 ```
 
@@ -124,16 +236,24 @@ HcclCommunicator::Init()
 ## 6. 关键业务逻辑
 
 ### Rank Table 格式兼容
-`topoinfo_ranktable_*.cc` 系列文件处理不同版本的 rank table 格式（v1/v2/legacy/cluster），通过工厂模式根据 JSON 中的 `version` 字段选择对应解析器。
+`topoinfo_ranktable_*.cc` 系列文件处理不同版本的 rank table 格式，通过工厂模式根据 JSON 中的 `version` 字段选择对应解析器：
+- **`"1.0"`**（`HCCL_CLUSTER_VERSION`）：标准 HCCL 集群
+- **`"1.1"`**（`HETEROG_CLUSTER_VERSION`）：异构集群（CPU rank 与 NPU rank 混合）
+- **`"1.2"`**（`SUPERPOD_CLUSTER_VERSION`）：超节点（SuperPod）集群
+
+合法性校验通过 `JsonUniqueInfoType` 枚举（DEVICE_IP/SERVER_ID/ETH_IP/SUPER_POD_ID 等 8 类）确保唯一性。
 
 ### 链路类型探测
 `TopoInfoDetect` 通过 HCCP 驱动接口枚举物理链路（HCCS/PCIe），结合设备 ID 映射确定 `LinkTypeInServer`。这个结果直接影响算法选择（HCCS → ring allreduce，PCIe → RDMA allreduce）。
 
 ### 4P/8P 有效组合校验
-`topoinfo_parse.cc` 中内嵌了 AIServer 上 4P rank 的合法组合表（`VALID_4P_RANK_COMBINATIONS`），用于验证用户提供的 rank table 在硬件上是否可行。
+`topoinfo_parse.cc` 中使用 `HCCL_AISERVER_VAILD_4P_RANKS`（hardcoded set）存储 AIServer 上 4P rank 的合法组合，用于验证用户提供的 rank table 在硬件上是否可行。
 
 ### 多层级通信平面计算
-`TopoMatcher::CalcCommPlaneInfo()` 将全局 rank 按服务器边界划分为 level0（片内）、level1（跨机同超节点）、level2（超节点间）三层，为 `CommFactory` 提供各层的 rank 分组。
+`TopoMatcher::CalcCommPlaneInfo()` 将全局 rank 按服务器边界划分为 level0（片内）、level1（跨机同超节点）、level2（超节点间）三层，为 `CommFactory` 提供各层的 rank 分组。内部通过 `serverAndsuperPodToRank_` 二维向量：`[0]` 存放每个超节点内的服务器 rank 列表，`[1]` 存放每个超节点的 rank 列表。
+
+### Dispatcher epoll 广播机制
+`TopoInfoExchangeDispather` 使用 1~4 个 worker 线程（每线程最多处理 512 个 rank）通过 epoll 驱动非阻塞发送。每个连接的 socket 被封装为 `FdContext`（含 `SendState` 进度跟踪），所有发送完成后用原子计数器 `sendDoneCount_` 确认广播完毕。
 
 ---
 
