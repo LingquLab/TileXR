@@ -12,6 +12,7 @@
 
 #include <vector>
 #include <string>
+#include "acl/acl_rt.h"
 #include "../include/tilexr_types.h"
 #include "../include/tilexr_api.h"
 #include "../include/comm_args.h"
@@ -25,6 +26,7 @@ public:
     TileXRComm(int rank, int rankSize);
     TileXRComm(int rank, int rankSize, int commDomain, int bufferSize);
     TileXRComm(int rank, int rankSize, TileXRUniqueId commId);
+    TileXRComm(int rank, int rankSize, TileXRUniqueId commId, uint64_t hostAddr, uint64_t hostMemAddr);
     ~TileXRComm();
     TileXRComm(const TileXRComm &) = delete;
     TileXRComm &operator=(const TileXRComm &) = delete;
@@ -49,6 +51,7 @@ private:
     int GetDevThread(const std::string &uid = "");
     int EnablePeerAccess();
     int InitCommMem();
+    int InitHostMem();
     int InitCommon();
     void CloseIpcMem();
     void FreePeerMem(GM_ADDR &mem) const;
@@ -67,6 +70,7 @@ private:
     uint32_t localRankSize_ = 0;
     int devId_ = 0;
     int64_t magic_ = 1;
+    void *hostMemAddr_ = nullptr;
     bool inited_ = false;
     bool ipcMemInited_ = false;
     std::string uid_ = {};
@@ -76,6 +80,8 @@ private:
 
     // shared ping pong buff，这个地址就是一开始申请在HBM上的，所以host上可以取到，但不能直接修改。
     GM_ADDR peerMem_[TILEXR_MAX_RANK_SIZE] = {};
+    GM_ADDR hostMappingAddr_[TILEXR_MAX_RANK_SIZE] = {};
+    aclrtMemFabricHandle share_handles[TILEXR_MAX_RANK_SIZE] = {};
     PhysicalInfo physicalInfo_ = {};
     CommArgs commArgs_ = {};    // host侧
     GM_ADDR commArgsPtr_ = nullptr; // device侧

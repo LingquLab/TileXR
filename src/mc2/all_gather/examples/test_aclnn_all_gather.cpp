@@ -317,7 +317,7 @@ inline void LcclExpectEq(const T& a, const T& b, int line = -1)
     }
 }
 
-TileXR::TileXRComm* InitComm(int rank, int rankSize)
+TileXR::TileXRComm* InitComm(int rank, int rankSize, uint64_t svmMem, uint64_t hostMem)
 {
     TileXR::TileXRComm *comm = nullptr;
     TileXRUniqueId uniqueId;
@@ -326,7 +326,7 @@ TileXR::TileXRComm* InitComm(int rank, int rankSize)
         LcclExpectEq(ret, TileXR::TILEXR_SUCCESS, __LINE__);
     }
     MPI_Bcast(&uniqueId, TILEXRUNIQUE_ID_BYTES, MPI_CHAR, 0, MPI_COMM_WORLD);
-    int ret = TileXRCommInitRank(uniqueId, rankSize, rank, reinterpret_cast<TileXRCommPtr*>(&comm));
+    int ret = TileXRCommInitRank(uniqueId, rankSize, rank, reinterpret_cast<TileXRCommPtr*>(&comm), svmMem, hostMem);
     LcclExpectEq(ret, TileXR::TILEXR_SUCCESS, __LINE__);
     return comm;
 }
@@ -383,7 +383,53 @@ int main(int argc, char *argv[])
     int devId = 0;
     LcclExpectEq(SetDev(mpi_rank, devId, 0), TileXR::TILEXR_SUCCESS);
     TileXR::TileXRComm *comm = nullptr;
-    comm = InitComm(mpi_rank, mpi_size);
+    void *host_mem = nullptr;
+    int hostMemSize = 2*1024*1024;
+    void *svmMem = nullptr;
+    aclrtDrvMemHandle handle;
+    aclrtDrvMemHandle imported_pa_handle;
+    aclrtMemFabricHandle share_handle = {};
+    aclrtPhysicalMemProp prop={};
+    prop.handleType=ACL_MEM_HANDLE_TYPE_NONE;
+    prop.allocationType = ACL_MEM_ALLOCATION_TYPE_PINNED;
+    prop.location.type=ACL_MEM_LOCATION_TYPE_HOST;
+    prop.memAttr= ACL_DDR_MEM_HUGE;
+
+
+    ret = aclrtReserveMemAddress(&host_mem, hostMemSize, 0, nullptr, 1);
+    CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("[ERROR] aclrtReserveMemAddress host_mem failed. ret = %d", ret));
+
+    ret = aclrtMallocPhysical(&handle, hostMemSize, &prop, 0);
+    CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("[ERROR] aclrtMallocPhysical failed. ret = %d", ret));                    
+
+    ret = aclrtMapMem(host_mem, hostMemSize, 0, handle, 0);
+
+    CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("[ERROR] aclrtMapMem failed. ret = %d", ret));
+
+    aclrtMemAccessDesc des;
+    des.location.type = ACL_MEM_LOCATION_TYPE_HOST;
+    des.location.id = 0;
+    des.flags = ACL_RT_MEM_ACCESS_FLAGS_READWRITE;
+    ret = aclrtMemSetAccess(host_mem, hostMemSize, &des, 1);
+    CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("[ERROR] aclrtMemSetAccess failed. ret = %d", ret));
+
+
+    // ret = aclrtMemExportToShareableHandleV2(handle, ACL_RT_VMM_EXPORT_FLAG_DISABLE_PID_VALIDATION,
+    // ACL_MEM_SHARE_HANDLE_TYPE_FABRIC, &share_handle);
+    // CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("[ERROR] aclrtMemExportToShareableHandleV2 failed. ret = %d", ret));
+
+    // ret = aclrtReserveMemAddress(&svmMem, hostMemSize, 0, nullptr, 1);
+    // CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("[ERROR] aclrtReserveMemAddress svmMem failed. ret = %d", ret));
+
+    // ret = aclrtMemImportFromShareableHandleV2(&share_handle, ACL_MEM_SHARE_HANDLE_TYPE_FABRIC, 0U,
+    //   &imported_pa_handle);
+    // CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("[ERROR] aclrtMemImportFromShareableHandleV2 failed. ret = %d", ret));
+    // ret = aclrtMapMem(svmMem, hostMemSize, 0, imported_pa_handle, 0);
+    // CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("[ERROR] aclrtMapMem import failed. ret = %d", ret));
+    // ret = aclrtMemSetAccess(svmMem, hostMemSize, &des, 1);
+    // CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("[ERROR] aclrtMemSetAccess svmMem failed. ret = %d", ret));
+
+    comm = InitComm(mpi_rank, mpi_size, (uint64_t)host_mem, (uint64_t)host_mem);
 
     ret = comm->Init();
     LcclExpectEq(ret, TileXR::TILEXR_SUCCESS, __LINE__);
@@ -395,6 +441,7 @@ int main(int argc, char *argv[])
     }
     run_example_on_A2(mpi_rank, rootInfo, comm, mpi_rank, testData);
 
+    LOG_PRINT("[INFO] rank: %d, devMem:%d", mpi_rank, static_cast<int*>(host_mem)[0]);
 
     ret = TileXRCommDestroy(reinterpret_cast<TileXRCommPtr>(comm));
     CHECK_RET(ret == TileXR::TILEXR_SUCCESS, LOG_PRINT("[ERROR] TileXRCommDestroy failed. ret = %d", ret));

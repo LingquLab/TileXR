@@ -24,7 +24,7 @@ int TileXRGetUniqueId(TileXRUniqueId *uniqueId, int commDomain);
 
 int TileXRCommInitRankLocal(int rankSize, int rank, TileXRCommPtr *comm);
 
-int TileXRCommInitRank(TileXRUniqueId commId, int rankSize, int rank, TileXRCommPtr *comm);
+int TileXRCommInitRank(TileXRUniqueId commId, int rankSize, int rank, TileXRCommPtr *comm, uint64_t svmMem, uint64_t hostMem);
 
 int TileXRCommInitRankWithCustDomainSize(int commDomain, int bufferSize, int rankSize, int rank, TileXRCommPtr *comm);
 

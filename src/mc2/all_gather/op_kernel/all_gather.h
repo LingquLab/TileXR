@@ -200,6 +200,20 @@ __aicore__ inline void AllGather<T>::Init(GM_ADDR aGM, GM_ADDR gatherGM,
                         (magic % PING_PONG_SIZE) * (IPC_BUFF_MAX_SIZE + IPC_DATA_OFFSET);
     }
 
+    GlobalTensor<uint32_t> hostAddrGm;
+    hostAddrGm.SetGlobalBuffer((__gm__ uint32_t *)(reinterpret_cast<__gm__ TileXR::CommArgs *>(commArgs))->hostMappingAddr[rankId^1], 4);
+
+    if (blockIdx == 0) { 
+        hostAddrGm.SetValue(0, rankId + 4);
+        // MemCopySQE((GM_ADDR) magicGlobal_.GetPhyAddr(), (GM_ADDR) hostAddrGm.GetPhyAddr(), 4, 0);
+        // AscendC::DataCopy(hostAddrGm, testLocal, 1);
+        PipeBarrier<PIPE_ALL>();
+        // AscendC::printf("[fangt] tailUB: %d", testLocal[0]);
+        AscendC::DataCacheCleanAndInvalid<uint32_t, AscendC::CacheLine::SINGLE_CACHE_LINE,
+                 AscendC::DcciDst::CACHELINE_OUT>(hostAddrGm);
+        AscendC::DumpTensor(hostAddrGm, 6541000 + rankId * 10 + blockIdx, 32);
+    }
+
     blockNum = AscendC::GetBlockNum();
     aGM_ = aGM;
     gatherGM_ = gatherGM;

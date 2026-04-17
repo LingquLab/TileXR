@@ -88,6 +88,7 @@ struct CommArgs {
     int localRankSize = -1;  // 此参数是指fullmesh互联的卡数
     uint32_t extraFlag = 0; // 32 bit map，具体每一位的含义就在此文件正上方
     GM_ADDR peerMems[TILEXR_MAX_RANK_SIZE] = {}; // 传入初始化获得的buff，所有allreduce都是同一个参数
+    GM_ADDR hostMappingAddr[TILEXR_MAX_RANK_SIZE] = {};
     /**
      * @param sendCountMatrix 大小是rankSize*rankSize的一维数组
      * eg: sendCountMatrix[1] 的数值，对应二维数组的[0][1]，表示 卡0 要给 卡1 发送的数据个数

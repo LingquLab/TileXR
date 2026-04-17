@@ -125,6 +125,10 @@ int TileXRComm::SyncCommArgs()
     for (int i = 0; i < rankSize_; ++i) {
         commArgs_.peerMems[i] = peerMem_[i];    // 这里不会越界，之前有逻辑校验过越界了
     }
+    for (int i = 0; i < rankSize_; ++i) {
+        commArgs_.hostMappingAddr[i] = hostMappingAddr_[i];    // 这里不会越界，之前有逻辑校验过越界了
+        MKI_LOG(INFO) << "rank: " << rank_ << "hostMappingAddr " << (uint64_t) commArgs_.hostMappingAddr[i];
+    }
 
     if (isEnableMsprofOp_) {
         if (InitDumpAddr() != TILEXR_SUCCESS) {
@@ -247,6 +251,12 @@ int TileXRComm::Init()
         MKI_LOG(ERROR) << "InitCommMem failed!";
         return TILEXR_ERROR_INTERNAL;
     }
+    if (InitHostMem() != TILEXR_SUCCESS) {
+        MKI_LOG(ERROR) << "InitHostMem failed!";
+        return TILEXR_ERROR_INTERNAL;
+    }
+
+
     MKI_LOG(DEBUG) << "InitCommMem " << rank_ << "/" << rankSize_ << ", localRank_ : " << localRank_ <<
             ", localRankSize_ : " << localRankSize_ << " success";
 
@@ -516,6 +526,56 @@ int TileXRComm::GetName(string &name, char names[TILEXR_MAX_RANK_SIZE][IPC_NAME_
     return TILEXR_SUCCESS;
 }
 
+int TileXRComm::InitHostMem()
+{
+    aclrtDrvMemHandle pa_handle = nullptr;
+    aclrtMemFabricHandle share_handle = {};
+    int ret = aclrtMemRetainAllocationHandle(hostMemAddr_, &pa_handle);
+    if (ret != ACL_SUCCESS) {
+        MKI_LOG(ERROR) << "aclrtMemRetainAllocationHandle error! ret: " << ret;
+        return ret;
+    }
+    ret = aclrtMemExportToShareableHandleV2(pa_handle, ACL_RT_VMM_EXPORT_FLAG_DISABLE_PID_VALIDATION,
+        ACL_MEM_SHARE_HANDLE_TYPE_FABRIC, &share_handle);
+    if (ret != ACL_SUCCESS) {
+        MKI_LOG(ERROR) << "aclrtMemExportToShareableHandleV2 error! ret: " << ret;
+        return ret;
+    }
+    ret = socketExchange_->AllGather<aclrtMemFabricHandle>(&share_handle, 1, share_handles);
+    if (ret != TILEXR_SUCCESS) {
+        MKI_LOG(ERROR) << "TileXRSockExchange AllGather error! ret: " << ret;
+        return TILEXR_ERROR_INTERNAL;
+    }
+    int hostMemSize = 2*1024*1024;
+    for (int i = 0; i < rankSize_; i++) {
+        if (i == rank_) {
+            continue;
+        }
+        aclrtMemFabricHandle import_share_handle = share_handles[i];
+        void *import_va = nullptr;
+        ret = aclrtReserveMemAddress(&import_va, hostMemSize, 0, nullptr, 1);
+        if (ret != ACL_SUCCESS) {
+            MKI_LOG(ERROR) << "aclrtReserveMemAddress error! ret: " << ret << " for rank: " << i;
+            continue;
+        }
+        aclrtDrvMemHandle imported_pa_handle = nullptr;
+        ret = aclrtMemImportFromShareableHandleV2(&import_share_handle, ACL_MEM_SHARE_HANDLE_TYPE_FABRIC, 0U,
+            &imported_pa_handle);
+        if (ret != ACL_SUCCESS) {
+            MKI_LOG(ERROR) << "aclrtMemImportFromShareableHandleV2 error! ret: " << ret << " for rank: " << i;
+            continue;
+        }
+        ret = aclrtMapMem(import_va, hostMemSize, 0, imported_pa_handle, 0);
+        if (ret != ACL_SUCCESS) {
+            MKI_LOG(ERROR) << "aclrtMapMem error! ret: " << ret << " for rank: " << i;
+            continue;
+        }
+        hostMappingAddr_[i] = (GM_ADDR) import_va;
+    }
+    MKI_LOG(INFO) << "rank " << rank_ << " InitHostMem success";
+    return TILEXR_SUCCESS;
+}
+
 int TileXRComm::InitCommMem()
 {
     int ret = InitMem();
@@ -666,6 +726,15 @@ TileXRComm::TileXRComm(int rank, int rankSize, int commDomain, int bufferSize)
 TileXRComm::TileXRComm(int rank, int rankSize, TileXRUniqueId commId)
     : rank_(rank), rankSize_(rankSize), commId_(commId)
 {
+}
+
+TileXRComm::TileXRComm(int rank, int rankSize, TileXRUniqueId commId, uint64_t hostAddr, uint64_t hostMemAddr)
+    : rank_(rank), rankSize_(rankSize), commId_(commId)
+{
+    uint64_t alignAddr = ((hostAddr >> 25) + 1) << 25;
+    hostMemAddr_ = (void *)hostMemAddr;
+    hostMappingAddr_[rank] = (GM_ADDR) hostAddr;
+    MKI_LOG(INFO) << "rank: " << rank_ << "enter hostMappingAddr_ " << (uint64_t) hostMappingAddr_[rank];
 }
 
 int TileXRComm::GetRank() const

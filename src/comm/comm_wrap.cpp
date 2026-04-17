@@ -55,14 +55,14 @@ int TileXRGetUniqueId(TileXRUniqueId *uniqueId, int commDomain)
     return TILEXR_SUCCESS;
 }
 
-int TileXRCommInitRank(TileXRUniqueId commId, int rankSize, int rank, TileXRCommPtr *comm)
+int TileXRCommInitRank(TileXRUniqueId commId, int rankSize, int rank, TileXRCommPtr *comm, uint64_t svmMem, uint64_t hostMem)
 {
     MKI_LOG(INFO) << "using tilexr c++ api! rank" << rank;
     if (comm == nullptr) {
         MKI_LOG(ERROR) << "tilexr comm ptr is nullptr!";
         return TILEXR_ERROR_INTERNAL;
     }
-    auto* c = new (std::nothrow) TileXRComm(rank, rankSize, commId);
+    auto* c = new (std::nothrow) TileXRComm(rank, rankSize, commId, svmMem, hostMem);
     if (c == nullptr) {
         MKI_LOG(ERROR) << "TileXRComm create failed. rank : " << rank << ", rankSize : " << rankSize;
         return TILEXR_ERROR_INTERNAL;
