@@ -221,6 +221,7 @@ __aicore__ inline void AllGather<T>::MemCopySQE(GM_ADDR srcAddr, GM_ADDR dstAddr
     uint16_t taskId = (uint16_t const)tileXrContext->streamInfo.taskIdList[queueIdx];
     __gm__ uint32_t * const headGm = (__gm__ uint32_t * const)tileXrContext->streamInfo.headList + queueIdx;
     __gm__ uint32_t * const tailGm = (__gm__ uint32_t * const)tileXrContext->streamInfo.tailList + queueIdx;
+    __gm__ uint32_t * const sqRegBaseGm = (__gm__ uint32_t * const)(((__gm__ uint8_t *)(tileXrContext->streamInfo.sqRegBaseList[queueIdx])) + 8);
     uint32_t tail = tailUb_.GetValue(tailIdx);
     uint32_t const depth = tileXrContext->streamInfo.depthList[queueIdx];
 
@@ -241,8 +242,11 @@ __aicore__ inline void AllGather<T>::MemCopySQE(GM_ADDR srcAddr, GM_ADDR dstAddr
     copy_ubuf_to_gm_align_b8(sqe + tail, sqeUb, 0, 1, sizeof(TileXrStarsMemcpyAsyncSqe), 0, 0, 0, 0);
     PipeBarrier<PIPE_MTE3>();
 
-    // 敲DB
     copy_ubuf_to_gm_align_b8(tailGm, (__ubuf__ uint32_t *)tailUb_.GetPhyAddr(tailIdx), 0, 1, sizeof(uint32_t), 0, 0, 0, 0);
+    PipeBarrier<PIPE_MTE3>();
+    PipeBarrier<PIPE_ALL>();
+    // 敲DB
+    copy_ubuf_to_gm_align_b8(sqRegBaseGm, (__ubuf__ uint32_t *)tailUb_.GetPhyAddr(tailIdx), 0, 1, sizeof(uint32_t), 0, 0, 0, 0);
     PipeBarrier<PIPE_MTE3>();
     PipeBarrier<PIPE_ALL>();
 }
