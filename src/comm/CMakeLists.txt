@@ -8,6 +8,9 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 #
 
+# shmem 依赖配置
+set(SHMEM_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/shmem")
+
 set(TILEXR_SOURCE_FILE tilexr_comm.cpp
         comm_wrap.cpp
         tilexr_internal.cpp
@@ -18,9 +21,16 @@ set(TILEXR_SOURCE_FILE tilexr_comm.cpp
 
 add_library(tile-comm SHARED ${TILEXR_SOURCE_FILE})
 
+# 查找 shmem host 库
+find_library(SHMEM_HOST_LIB aclshmem
+    HINTS "${SHMEM_ROOT}/lib" "${SHMEM_ROOT}/build/lib"
+    REQUIRED)
+
 target_include_directories(tile-comm
         PUBLIC
         ${ASCEND_DRIVER_PATH}/kernel/inc
+        PRIVATE
+        ${SHMEM_ROOT}/include
 )
 target_link_directories(tile-comm
         PUBLIC
@@ -28,6 +38,6 @@ target_link_directories(tile-comm
         ${ASCEND_HOME_PATH}/${ARCH}-linux/lib64
 )
 
-target_link_libraries(tile-comm ascendcl runtime profapi ascend_hal)
+target_link_libraries(tile-comm ascendcl runtime profapi ascend_hal ${SHMEM_HOST_LIB})
 
 install(TARGETS tile-comm LIBRARY DESTINATION ${CMAKE_INSTALL_PREFIX}/lib)
