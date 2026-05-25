@@ -37,6 +37,18 @@ Sets `TILEXR_HOME`, `TILEXR_CANN_HOME`, `TILEXR_TEMP_HOME`, detects CPU arch, de
 
 ## Build
 
+### Dependencies
+
+TileXR requires the following dependencies:
+
+- **CANN toolkit** (9.0.0-beta.1): Installed via `cann_download_install.sh`
+- **hcomm**: Git submodule, built via `hcomm_build_install.sh`
+- **opbase**: Git submodule, installed via `opbase_build_install.sh`
+- **ops-transformer**: Git submodule, built via `ops_build_run.sh`
+- **spdlog**: Git submodule (header-only logging)
+- **mki**: Git submodule (matrix kernel interface)
+- **shmem** (optional): Git submodule at `3rdparty/shmem`, provides UDMA capability for cross-node URMA communication. If unavailable or initialization fails, TileXR silently falls back to IPC-only mode.
+
 ### First-time setup (in order):
 
 ```bash
@@ -83,10 +95,33 @@ Logs: `bash plog_grep.sh ERROR` filters device logs.
 
 ### Core Communication (`comm/`)
 
-- **`tilexr_comm.h/cpp`** — `TileXRComm` class: comm init, IPC shared memory (100 MB buffer + 2 MB flag space per rank), peer memory access between ranks.
+- **`tilexr_comm.h/cpp`** — `TileXRComm` class: comm init, IPC shared memory (100 MB buffer + 2 MB flag space per rank), peer memory access between ranks, UDMA integration via shmem.
 - **`tilexr_internal.h/cpp`** — Internal helpers: `RegistKernel`, `LoadMTE`, `GetChipName`, `GetCoreNum`.
 - **`comm_wrap.cpp`** — C wrapper exposing the C++ class via the public C API.
 - **`tools/socket/sock_exchange.*`** — Socket-based rank-to-rank synchronization during setup.
+
+### UDMA Integration (`comm/` + `3rdparty/shmem`)
+
+TileXR integrates UDMA (User-space Direct Memory Access) for high-performance inter-chip communication:
+
+- **shmem dependency**: Uses modified shmem library with custom API `aclshmemx_get_udma_info()`
+- **Device-side pointer**: UDMA queue information is maintained in device memory by shmem
+- **Graceful degradation**: Falls back to MTE/RDMA if UDMA initialization fails
+- **Memory management**: shmem manages UDMA device memory lifecycle, TileXR only holds pointer reference
+
+### UDMA Transport (`comm/` + `include/tilexr_udma.h`)
+
+- **UDMA 能力**：通过 shmem 库（`3rdparty/shmem`）提供跨节点 URMA 直驱通信
+- **初始化**：`TileXRComm::InitUDMA()` 在 `Init()`/`InitThread()` 中透明调用，失败时静默降级
+- **设备侧 API**：`include/tilexr_udma.h` 提供 `UDMAPutNbi`、`UDMAGetNbi`、`UDMAPutSignalNbi`、`UDMAQuiet`、原子操作等封装
+- **CommArgs 扩展**：
+  - `ExtraFlag::UDMA` (bit 10)：标识 UDMA 已初始化
+  - `udmaInfoPtr`：指向设备 HBM 上的 `ACLSHMEMAIVUDMAInfo` 结构体（QP 上下文）
+- **使用约定**：
+  - 目标地址必须是通过 `aclshmem_malloc` 分配的对称内存
+  - UB 暂存区最小 64 字节
+  - `peerMems[]` 中的 IPC 地址不适用 UDMA 接口
+- **降级行为**：UDMA 硬件不可用或 shmem init 失败时，`udmaInfoPtr` 保持 `nullptr`，现有集合通信路径不受影响
 
 ### Public API (`include/`)
 
@@ -115,3 +150,57 @@ Functional and performance simulation of AICore kernels without physical hardwar
 - **Git submodules** must be initialized: `git submodule update --init --recursive`
 - `mc2/` and `comm/` can be built independently via their own `CMakeLists.txt`
 - `mc2/build.sh` handles the mc2 standalone build
+
+### CANN Version Compatibility
+
+**Current version**: CANN 9.1.0 (cann-9.1.0)
+
+**Important changes from CANN 9.0.0**:
+- Directory structure: headers now in `${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc/` (added root `pkg_inc/`)
+- Library location: `ascend_hal` moved to `${ASCEND_HOME_PATH}/${ARCH}-linux/devlib/`
+- AscendC API changes: Some SIMT-related APIs may have been removed or restructured
+
+**Build requirements**:
+```cmake
+# Include paths must include pkg_inc root
+include_directories(
+    ${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc/
+    ${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc/runtime/
+)
+
+# Link directories must include devlib
+target_link_directories(
+    ${ASCEND_HOME_PATH}/${ARCH}-linux/devlib
+)
+```
+
+### shmem Integration Notes
+
+**Modified shmem library**: TileXR uses a custom-patched version of shmem with additional API:
+- **Branch**: `tilexr-udma-integration` (on shmem repository)
+- **Custom API**: `aclshmemx_get_udma_info()` - exposes UDMA device memory pointer
+- **Build requirement**: Must build with `SOC_TYPE=Ascend950` to enable UDMA support
+- **Location**: `3rdparty/shmem/install/shmem/lib/libshmem.so`
+
+**Build shmem**:
+```bash
+cd 3rdparty/shmem
+bash scripts/build.sh -soc_type Ascend950
+```
+
+**API usage in TileXR**:
+```cpp
+// Initialize shmem with UDMA engine
+shmemAttr.option_attr.data_op_engine_type = ACLSHMEM_DATA_OP_UDMA;
+aclshmemx_init_attr(ACLSHMEMX_INIT_WITH_UNIQUEID, &shmemAttr);
+
+// Get UDMA device pointer
+void* udmaInfoPtr = nullptr;
+size_t udmaInfoSize = 0;
+aclshmemx_get_udma_info(&udmaInfoPtr, &udmaInfoSize);
+```
+
+**Runtime environment**:
+```bash
+export LD_LIBRARY_PATH=/path/to/shmem/install/shmem/lib:$LD_LIBRARY_PATH
+```

@@ -58,6 +58,7 @@ private:
     int GetName(std::string &name, char names[TILEXR_MAX_RANK_SIZE][IPC_NAME_SIZE]) const;
     int SyncCommArgs();
     int InitDumpAddr();
+    int InitUDMA();  // 新增：初始化 shmem UDMA
 
 private:
     int rank_ = 0;  // global rank id
@@ -82,6 +83,7 @@ private:
     TileXRUniqueId commId_ = {};
     TileXRSockExchange *socketExchange_ = nullptr;
     bool isEnableMsprofOp_ = false;
+    GM_ADDR udmaInfoDev_ = nullptr;  // 新增：设备侧 UDMA QP 上下文指针
 };
 } // TileXR
 

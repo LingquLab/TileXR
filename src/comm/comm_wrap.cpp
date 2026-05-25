@@ -16,6 +16,7 @@
 #include "tilexr_comm.h"
 #include "mki/utils/log/log.h"
 #include "tools/socket/tilexr_sock_exchange.h"
+#include <shmem/include/shmem.h>
 
 using namespace std;
 using namespace TileXR;
@@ -224,6 +225,15 @@ int TileXRCommDestroy(TileXRCommPtr comm)
         return TILEXR_INVALID_VALUE;
     }
     auto *c = static_cast<TileXRComm *>(comm);
+
+    // 新增：清理 UDMA 资源
+    CommArgs* commArgs = c->GetCommArgs();
+    if (commArgs != nullptr && commArgs->udmaInfoPtr != nullptr) {
+        aclshmem_finalize();
+        aclrtFree(commArgs->udmaInfoPtr);
+        commArgs->udmaInfoPtr = nullptr;
+    }
+
     delete c;
     return TILEXR_SUCCESS;
 }

@@ -29,6 +29,9 @@
 #include "runtime/dev.h"
 #include "runtime/rt_ffts.h"
 
+#include <shmem/include/shmem.h>
+#include <shmem/include/host_device/shmem_common_types.h>
+
 enum TopologyType : int {
     TOPOLOGY_HCCS = 0,
     TOPOLOGY_PIX,
@@ -46,6 +49,7 @@ using namespace Mki;
 namespace TileXR {
 constexpr int HCCL_IPC_PID_ARRAY_SIZE = 1; // 固定每次只传一个PID数据
 constexpr int TILEXR_INIT_TIMEOUT = 600;
+constexpr size_t TILEXR_SHMEM_MIN_MEM = 1 * 1024 * 1024;  // 1 MB，仅供 shmem 内部 sync
 
 static map<string, GM_ADDR [TILEXR_MAX_RANK_SIZE]> g_localPeerMemMap;
 static map<string, int[TILEXR_MAX_RANK_SIZE]> g_devList;
@@ -113,6 +117,75 @@ int TileXRComm::InitDumpAddr()
     std::free(memory);
  
     commArgs_.dumpAddr = dumpAddr;
+    return TILEXR_SUCCESS;
+}
+
+int TileXRComm::InitUDMA()
+{
+    // Step 1: rank 0 生成 shmem UID
+    aclshmemx_uniqueid_t shmemUid;
+    if (rank_ == 0) {
+        int ret = aclshmemx_get_uniqueid(&shmemUid);
+        if (ret != ACLSHMEM_SUCCESS) {
+            MKI_LOG(WARN) << "aclshmemx_get_uniqueid failed: " << ret << ", UDMA disabled";
+            return TILEXR_SUCCESS;  // 优雅降级
+        }
+    }
+
+    // Step 2: AllGather UID，所有 rank 获得相同 UID
+    int ret = socketExchange_->AllGather(
+        reinterpret_cast<char*>(&shmemUid),
+        sizeof(aclshmemx_uniqueid_t),
+        reinterpret_cast<char*>(&shmemUid)
+    );
+    if (ret != TILEXR_SUCCESS) {
+        MKI_LOG(WARN) << "AllGather shmem UID failed: " << ret << ", UDMA disabled";
+        return TILEXR_SUCCESS;  // 优雅降级
+    }
+
+    // Step 3: 设置 shmem 初始化属性，指定 UDMA 引擎
+    aclshmemx_init_attr_t shmemAttr;
+    ret = aclshmemx_set_attr_uniqueid_args(
+        rank_,
+        rankSize_,
+        TILEXR_SHMEM_MIN_MEM,
+        &shmemUid,
+        &shmemAttr
+    );
+    if (ret != ACLSHMEM_SUCCESS) {
+        MKI_LOG(WARN) << "aclshmemx_set_attr_uniqueid_args failed: " << ret << ", UDMA disabled";
+        return TILEXR_SUCCESS;  // 优雅降级
+    }
+
+    // 设置 UDMA 引擎
+    shmemAttr.option_attr.data_op_engine_type = ACLSHMEM_DATA_OP_UDMA;
+
+    // Step 4: 初始化 shmem，失败时优雅降级
+    ret = aclshmemx_init_attr(ACLSHMEMX_INIT_WITH_UNIQUEID, &shmemAttr);
+    if (ret != ACLSHMEM_SUCCESS) {
+        MKI_LOG(WARN) << "aclshmemx_init_attr failed: " << ret << ", UDMA disabled";
+        return TILEXR_SUCCESS;  // 优雅降级
+    }
+
+    // Step 5: 从 shmem 获取 UDMA 信息（设备侧指针）
+    void* udmaInfoPtr = nullptr;
+    size_t udmaInfoSize = 0;
+    ret = aclshmemx_get_udma_info(&udmaInfoPtr, &udmaInfoSize);
+    if (ret != ACLSHMEM_SUCCESS || udmaInfoPtr == nullptr) {
+        MKI_LOG(WARN) << "aclshmemx_get_udma_info failed: " << ret << ", UDMA disabled";
+        aclshmem_finalize();
+        return TILEXR_SUCCESS;  // 优雅降级
+    }
+
+    // Step 6: 直接使用 shmem 返回的设备侧指针
+    // 注意：udmaInfoPtr 已经是设备内存地址，无需再次拷贝
+    udmaInfoDev_ = reinterpret_cast<uint8_t*>(udmaInfoPtr);
+
+    // Step 7: 设置 commArgs_ 字段
+    commArgs_.udmaInfoPtr = udmaInfoDev_;
+    commArgs_.extraFlag |= ExtraFlag::UDMA;
+
+    MKI_LOG(INFO) << "InitUDMA success, rank " << rank_ << "/" << rankSize_;
     return TILEXR_SUCCESS;
 }
 
@@ -250,6 +323,12 @@ int TileXRComm::Init()
     MKI_LOG(DEBUG) << "InitCommMem " << rank_ << "/" << rankSize_ << ", localRank_ : " << localRank_ <<
             ", localRankSize_ : " << localRankSize_ << " success";
 
+    // 新增：初始化 UDMA
+    ret = InitUDMA();
+    if (ret != TILEXR_SUCCESS) {
+        return ret;
+    }
+
     // set comm args in device.
     SyncCommArgs();
     MKI_LOG(INFO) << "TileXRCommInit " << rank_ << "/" << rankSize_ << " success. extraFlag:" << commArgs_.extraFlag <<
@@ -306,6 +385,11 @@ int TileXRComm::InitThread(const std::string &uid)
     }
     localRank_ = rank_;
     localRankSize_ = rankSize_;
+
+    // 注意：InitThread 为单进程多线程模式，不支持 UDMA（需要 socketExchange_ 进行跨进程协调）
+    // UDMA 主要用于跨进程/跨节点通信，线程模式使用进程内共享内存即可
+    MKI_LOG(DEBUG) << "Thread mode: UDMA initialization skipped (single-process multi-thread scenario)";
+
     SyncCommArgs();
     MKI_LOG(INFO) << "Lccl init multi thread " << rank_ << "/" << rankSize_ << " success, uid:" << uid;
     inited_ = true;
@@ -652,6 +736,13 @@ TileXRComm::~TileXRComm()
     FreePeerMem(commArgs_.dumpAddr);
     FreePeerMem(peerMem_[rank_]);
     FreePeerMem(commArgsPtr_);
+
+    // 清理 UDMA 资源（如果已初始化）
+    if (udmaInfoDev_ != nullptr) {
+        // udmaInfoDev_ 指向 shmem 管理的设备内存，由 shmem finalize 释放
+        aclshmem_finalize();
+        udmaInfoDev_ = nullptr;
+    }
 }
 
 TileXRComm::TileXRComm(int rank, int rankSize) : rank_(rank), rankSize_(rankSize)
