@@ -397,6 +397,11 @@ int TileXRComm::InitThread(const std::string &uid)
     }
     localRank_ = rank_;
     localRankSize_ = rankSize_;
+
+    // 注意：InitThread 为单进程多线程模式，不支持 UDMA（需要 socketExchange_ 进行跨进程协调）
+    // UDMA 主要用于跨进程/跨节点通信，线程模式使用进程内共享内存即可
+    MKI_LOG(DEBUG) << "Thread mode: UDMA initialization skipped (single-process multi-thread scenario)";
+
     SyncCommArgs();
     MKI_LOG(INFO) << "Lccl init multi thread " << rank_ << "/" << rankSize_ << " success, uid:" << uid;
     inited_ = true;
