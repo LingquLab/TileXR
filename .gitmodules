@@ -7,3 +7,7 @@
 [submodule "3rdparty/opbase"]
 	path = 3rdparty/opbase
 	url = https://gitcode.com/cann/opbase.git
+[submodule "3rdparty/shmem"]
+	path = 3rdparty/shmem
+	url = https://gitcode.com/LingquLab/shmem.git
+	branch = feature/CrossPOD_fix_2_ops_transformer
