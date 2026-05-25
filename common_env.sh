@@ -9,17 +9,18 @@ script_path=`realpath $(dirname "${BASH_SOURCE[0]}")`
 source ${script_path}/common_util.sh
 
 export TILEXR_OS_ARCH=`uname -m`
-export TILEXR_CANN_VER="9.0.0-beta.1"
+export TILEXR_CANN_VER="9.1.0"
 
 # OBS 目录名查找表（版本号 → OBS 目录，T 编号无规律，新版本发布时在此追加）
 _cann_obs_dir() {
     case "$1" in
+        9.1.0)        echo "9.1.T1"  ;;
         9.0.0-beta.1) echo "9.0.T2"  ;;
         8.5.0)        echo "8.5.T63" ;;
         *) echo "" ;;
     esac
 }
-_TILEXR_SUPPORTED_CANN_VERS=("8.5.0" "9.0.0-beta.1")
+_TILEXR_SUPPORTED_CANN_VERS=("8.5.0" "9.0.0-beta.1" "9.1.0")
 _cann_ver_supported() {
     local ver=$1
     for v in "${_TILEXR_SUPPORTED_CANN_VERS[@]}"; do
