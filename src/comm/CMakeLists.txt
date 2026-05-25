@@ -22,15 +22,15 @@ set(TILEXR_SOURCE_FILE tilexr_comm.cpp
 add_library(tile-comm SHARED ${TILEXR_SOURCE_FILE})
 
 # 查找 shmem host 库
-find_library(SHMEM_HOST_LIB aclshmem
-    HINTS "${SHMEM_ROOT}/lib" "${SHMEM_ROOT}/build/lib"
+find_library(SHMEM_HOST_LIB shmem
+    HINTS "${SHMEM_ROOT}/install/shmem/lib" "${SHMEM_ROOT}/build/lib"
     REQUIRED)
 
 target_include_directories(tile-comm
         PUBLIC
         ${ASCEND_DRIVER_PATH}/kernel/inc
         PRIVATE
-        ${SHMEM_ROOT}/include
+        ${SHMEM_ROOT}/install/shmem/include
 )
 target_link_directories(tile-comm
         PUBLIC
