@@ -36,6 +36,7 @@ target_link_directories(tile-comm
         PUBLIC
         ${ASCEND_DRIVER_PATH}/lib64/driver
         ${ASCEND_HOME_PATH}/${ARCH}-linux/lib64
+        ${ASCEND_HOME_PATH}/${ARCH}-linux/devlib
 )
 
 target_link_libraries(tile-comm ascendcl runtime profapi ascend_hal ${SHMEM_HOST_LIB})
