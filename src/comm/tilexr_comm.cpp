@@ -158,7 +158,7 @@ int TileXRComm::InitUDMA()
     }
 
     // 设置 UDMA 引擎
-    shmemAttr.data_op_engine_type = ACLSHMEM_DATA_OP_UDMA;
+    shmemAttr.option_attr.data_op_engine_type = ACLSHMEM_DATA_OP_UDMA;
 
     // Step 4: 初始化 shmem，失败时优雅降级
     ret = aclshmemx_init_attr(ACLSHMEMX_INIT_WITH_UNIQUEID, &shmemAttr);
@@ -167,33 +167,21 @@ int TileXRComm::InitUDMA()
         return TILEXR_SUCCESS;  // 优雅降级
     }
 
-    // Step 5: 从 shmem 状态获取 QP 信息，拷贝到设备侧
-    aclshmem_instance_ctx* ctx = aclshmemx_instance_ctx_get();
-    if (ctx == nullptr || ctx->udma_info == nullptr) {
-        MKI_LOG(WARN) << "shmem instance ctx or udma_info is null, UDMA disabled";
+    // Step 5: 从 shmem 获取 UDMA 信息（设备侧指针）
+    void* udmaInfoPtr = nullptr;
+    size_t udmaInfoSize = 0;
+    ret = aclshmemx_get_udma_info(&udmaInfoPtr, &udmaInfoSize);
+    if (ret != ACLSHMEM_SUCCESS || udmaInfoPtr == nullptr) {
+        MKI_LOG(WARN) << "aclshmemx_get_udma_info failed: " << ret << ", UDMA disabled";
         aclshmem_finalize();
         return TILEXR_SUCCESS;  // 优雅降级
     }
 
-    // 分配设备侧内存并拷贝 UDMA QP 上下文
-    size_t udmaInfoSize = ctx->udma_info_size;
-    ret = aclrtMalloc(reinterpret_cast<void**>(&udmaInfoDev_), udmaInfoSize, ACL_MEM_MALLOC_HUGE_FIRST);
-    if (ret != ACL_SUCCESS) {
-        MKI_LOG(WARN) << "aclrtMalloc for UDMA info failed: " << ret << ", UDMA disabled";
-        aclshmem_finalize();
-        return TILEXR_SUCCESS;  // 优雅降级
-    }
+    // Step 6: 直接使用 shmem 返回的设备侧指针
+    // 注意：udmaInfoPtr 已经是设备内存地址，无需再次拷贝
+    udmaInfoDev_ = reinterpret_cast<uint8_t*>(udmaInfoPtr);
 
-    ret = aclrtMemcpy(udmaInfoDev_, udmaInfoSize, ctx->udma_info, udmaInfoSize, ACL_MEMCPY_HOST_TO_DEVICE);
-    if (ret != ACL_SUCCESS) {
-        MKI_LOG(WARN) << "aclrtMemcpy for UDMA info failed: " << ret << ", UDMA disabled";
-        aclrtFree(udmaInfoDev_);
-        udmaInfoDev_ = nullptr;
-        aclshmem_finalize();
-        return TILEXR_SUCCESS;  // 优雅降级
-    }
-
-    // Step 6: 设置 commArgs_ 字段
+    // Step 7: 设置 commArgs_ 字段
     commArgs_.udmaInfoPtr = udmaInfoDev_;
     commArgs_.extraFlag |= ExtraFlag::UDMA;
 
@@ -748,6 +736,13 @@ TileXRComm::~TileXRComm()
     FreePeerMem(commArgs_.dumpAddr);
     FreePeerMem(peerMem_[rank_]);
     FreePeerMem(commArgsPtr_);
+
+    // 清理 UDMA 资源（如果已初始化）
+    if (udmaInfoDev_ != nullptr) {
+        // udmaInfoDev_ 指向 shmem 管理的设备内存，由 shmem finalize 释放
+        aclshmem_finalize();
+        udmaInfoDev_ = nullptr;
+    }
 }
 
 TileXRComm::TileXRComm(int rank, int rankSize) : rank_(rank), rankSize_(rankSize)
