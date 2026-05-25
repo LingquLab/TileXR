@@ -335,6 +335,12 @@ int TileXRComm::Init()
     MKI_LOG(DEBUG) << "InitCommMem " << rank_ << "/" << rankSize_ << ", localRank_ : " << localRank_ <<
             ", localRankSize_ : " << localRankSize_ << " success";
 
+    // 新增：初始化 UDMA
+    ret = InitUDMA();
+    if (ret != TILEXR_SUCCESS) {
+        return ret;
+    }
+
     // set comm args in device.
     SyncCommArgs();
     MKI_LOG(INFO) << "TileXRCommInit " << rank_ << "/" << rankSize_ << " success. extraFlag:" << commArgs_.extraFlag <<
