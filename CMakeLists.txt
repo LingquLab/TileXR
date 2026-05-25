@@ -35,6 +35,7 @@ message("== ASCEND_DRIVER_PATH: ${ASCEND_DRIVER_PATH}")
 
 include_directories(
         ${CMAKE_CURRENT_LIST_DIR}/src/include/
+        ${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc/
         ${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc/runtime/
         ${ASCEND_HOME_PATH}/${ARCH}-linux/include/
         ${ASCEND_HOME_PATH}/${ARCH}-linux/include/hccl/
