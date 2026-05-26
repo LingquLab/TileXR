@@ -7,7 +7,7 @@
 #define TILEXR_UDMA_H
 
 #include "comm_args.h"
-#include "shmem/include/device/udma.h"
+#include "shmem/include/device/gm2gm/engine/shmem_device_udma.h"
 
 /**
  * @file tilexr_udma.h
@@ -48,9 +48,10 @@ __aicore__ inline void UDMAPutNbi(const CommArgs& args, int target_rank,
                                    size_t count) {
     if (!UDMAEnabled(args)) return;
 
-    void* remote_addr = static_cast<char*>(args.peer_mem_ptrs[target_rank]) +
-                        remote_offset * sizeof(T);
-    shmem::udma_put_nbi(remote_addr, local_src, count * sizeof(T), target_rank);
+    auto remote_addr = reinterpret_cast<__gm__ T*>(
+        static_cast<char*>(args.peer_mem_ptrs[target_rank]) + remote_offset * sizeof(T));
+    aclshmemx_udma_put_nbi(remote_addr, const_cast<__gm__ T*>(local_src),
+                           static_cast<__ubuf__ T*>(nullptr), static_cast<uint32_t>(count), target_rank);
 }
 
 /**
@@ -68,9 +69,10 @@ __aicore__ inline void UDMAGetNbi(const CommArgs& args, int source_rank,
                                    size_t count) {
     if (!UDMAEnabled(args)) return;
 
-    const void* remote_addr = static_cast<const char*>(args.peer_mem_ptrs[source_rank]) +
-                              remote_offset * sizeof(T);
-    shmem::udma_get_nbi(local_dst, remote_addr, count * sizeof(T), source_rank);
+    auto remote_addr = reinterpret_cast<__gm__ T*>(
+        static_cast<char*>(args.peer_mem_ptrs[source_rank]) + remote_offset * sizeof(T));
+    aclshmemx_udma_get_nbi(reinterpret_cast<__gm__ T*>(local_dst), remote_addr,
+                           static_cast<__ubuf__ T*>(nullptr), static_cast<uint32_t>(count), source_rank);
 }
 
 /**
@@ -89,21 +91,21 @@ __aicore__ inline void UDMAPutSignalNbi(const CommArgs& args, int target_rank,
                                          size_t count, size_t flag_offset) {
     if (!UDMAEnabled(args)) return;
 
-    void* remote_addr = static_cast<char*>(args.peer_mem_ptrs[target_rank]) +
-                        remote_offset * sizeof(T);
-    uint64_t* remote_flag = static_cast<uint64_t*>(args.peer_flag_ptrs[target_rank]) +
-                            flag_offset;
+    auto remote_addr = reinterpret_cast<__gm__ T*>(
+        static_cast<char*>(args.peer_mem_ptrs[target_rank]) + remote_offset * sizeof(T));
+    auto remote_flag = reinterpret_cast<__gm__ uint64_t*>(
+        static_cast<uint64_t*>(args.peer_flag_ptrs[target_rank]) + flag_offset);
 
-    shmem::udma_put_nbi(remote_addr, local_src, count * sizeof(T), target_rank);
-    shmem::udma_atomic_add(remote_flag, 1UL, target_rank);
+    aclshmemx_udma_put_signal_nbi(remote_addr, const_cast<__gm__ T*>(local_src),
+                                  static_cast<uint32_t>(count), remote_flag, 1UL, target_rank);
 }
 
 /**
  * @brief Wait for all outstanding UDMA operations to complete
  * @note Must be called before flag-based synchronization to ensure visibility
  */
-__aicore__ inline void UDMAQuiet() {
-    shmem::udma_quiet();
+__aicore__ inline void UDMAQuiet(int target_rank) {
+    aclshmemx_udma_quiet(target_rank);
 }
 
 /**
@@ -119,8 +121,9 @@ __aicore__ inline void UDMAAtomicAdd(const CommArgs& args, int target_rank,
                                       size_t flag_offset, T value) {
     if (!UDMAEnabled(args)) return;
 
-    T* remote_flag = static_cast<T*>(args.peer_flag_ptrs[target_rank]) + flag_offset;
-    shmem::udma_atomic_add(remote_flag, value, target_rank);
+    auto remote_flag = reinterpret_cast<__gm__ T*>(
+        static_cast<T*>(args.peer_flag_ptrs[target_rank]) + flag_offset);
+    aclshmemx_udma_atomic_add(remote_flag, value, target_rank);
 }
 
 /**
@@ -137,8 +140,9 @@ __aicore__ inline T UDMAAtomicFetchAdd(const CommArgs& args, int target_rank,
                                         size_t flag_offset, T value) {
     if (!UDMAEnabled(args)) return 0;
 
-    T* remote_flag = static_cast<T*>(args.peer_flag_ptrs[target_rank]) + flag_offset;
-    return shmem::udma_atomic_fetch_add(remote_flag, value, target_rank);
+    auto remote_flag = reinterpret_cast<__gm__ T*>(
+        static_cast<T*>(args.peer_flag_ptrs[target_rank]) + flag_offset);
+    return aclshmemx_udma_atomic_fetch_add(remote_flag, value, target_rank);
 }
 
 /**
@@ -156,8 +160,9 @@ __aicore__ inline T UDMAAtomicCompareSwap(const CommArgs& args, int target_rank,
                                            size_t flag_offset, T expected, T desired) {
     if (!UDMAEnabled(args)) return expected;
 
-    T* remote_flag = static_cast<T*>(args.peer_flag_ptrs[target_rank]) + flag_offset;
-    return shmem::udma_atomic_compare_swap(remote_flag, expected, desired, target_rank);
+    auto remote_flag = reinterpret_cast<__gm__ T*>(
+        static_cast<T*>(args.peer_flag_ptrs[target_rank]) + flag_offset);
+    return aclshmemx_udma_atomic_compare_swap(remote_flag, expected, desired, target_rank);
 }
 
 } // namespace TileXR

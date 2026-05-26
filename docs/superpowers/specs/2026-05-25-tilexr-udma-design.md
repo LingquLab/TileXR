@@ -9,7 +9,7 @@
 
 TileXR 当前通过 `CommArgs.peerMems[]` 提供 IPC 共享内存，集合算子（AllReduce、AllGather 等）依赖 HCCS/MTE 引擎在节点内通信。跨节点场景需要 URMA/RDMA 能力，目前 `ExtraFlag::RDMA` 位已定义但未在传输层实际分发。
 
-shmem（`3rdparty/shmem`，fork 自 `https://gitcode.com/LingquLab/shmem`，branch `feature/CrossPOD_fix_2_ops_transformer`）提供了完整的 UDMA 设备侧 API（`aclshmemx_udma_put_nbi` 等），以及 QP 初始化基础设施。
+shmem（`3rdparty/shmem`，fork 自 `https://github.com/LingquLab/shmem`，branch `tilexr-udma-integration`）提供了完整的 UDMA 设备侧 API（`aclshmemx_udma_put_nbi` 等），以及 QP 初始化基础设施。
 
 ---
 
@@ -201,8 +201,8 @@ __aicore__ inline T UDMAAtomicCompareSwap(__gm__ T *dst, T cond, T val, int pe) 
 ```ini
 [submodule "3rdparty/shmem"]
     path   = 3rdparty/shmem
-    url    = https://gitcode.com/LingquLab/shmem.git
-    branch = feature/CrossPOD_fix_2_ops_transformer
+    url    = https://github.com/LingquLab/shmem.git
+    branch = tilexr-udma-integration
 ```
 
 根目录现有 `shmem/` 目录在 submodule 就位后删除。

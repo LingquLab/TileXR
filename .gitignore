@@ -37,8 +37,10 @@ __pycache__
 MANIFEST.in
 
 .codemate
+.claude/.DS_Store
 .claude/memory/
 .claude/scheduled_tasks.json
+.claude/settings.local.json
 
 # custom
 op-simulator/build

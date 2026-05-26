@@ -49,9 +49,10 @@ message(STATUS "Found tile-comm: ${TILEXR_LIB}")
 include_directories(
     ${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc/
     ${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc/runtime/
+    ${ASCEND_HOME_PATH}/${ARCH}-linux/include/
     ${ASCEND_DRIVER_PATH}/kernel/inc
     ${SHMEM_ROOT}/install/shmem/include
-    ${TILEXR_ROOT}/include
+    ${TILEXR_ROOT}/src/include
 )
 
 # 链接目录

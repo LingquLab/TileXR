@@ -8,11 +8,10 @@ env_print
 cp ${TILEXR_HOME}/.ops_gitignore ${TILEXR_OPS_HOME}/.gitignore
 
 cd ${TILEXR_HOME}
-cmake .
-make
-make install
+cmake . && make && make install
+comm_build_status=$?
 
-if [ $? -ne 0 ]; then
+if [ ${comm_build_status} -ne 0 ]; then
     error "install tilexr-comm failed in ${TILEXR_HOME}"
     exit 1
 else
@@ -50,17 +49,18 @@ cp -f ${TILEXR_HOME}/src/mc2/build.sh ${TILEXR_OPS_HOME}/build.sh
 CMD="bash build.sh --pkg -j`nproc` -p ${TILEXR_CANN_HOME}/cann --soc=${TILEXR_SOC_NAME} --ops=${ops}"
 warn ${CMD}
 colorful_time ${CMD}
+ops_build_status=$?
 
 cd ${TILEXR_HOME}
 
-if [ $? -ne 0 ]; then
+if [ ${ops_build_status} -ne 0 ]; then
     error "build ops-transformer failed in ${TILEXR_CANN_HOME}"
     exit 1
 else
     success "build ops-transformer success in ${TILEXR_CANN_HOME}"
 fi
 
-bash ${TILEXR_OPS_HOME}/build_out/cann-ops*.run --install-path=${TILEXR_CANN_HOME}/cann
+LD_LIBRARY_PATH=${TILEXR_OPS_HOME}/build:${LD_LIBRARY_PATH} bash ${TILEXR_OPS_HOME}/build_out/cann-ops*.run --install-path=${TILEXR_CANN_HOME}/cann
 
 if [ $? -ne 0 ]; then
     error "install ops-transformer failed in ${TILEXR_CANN_HOME}"
