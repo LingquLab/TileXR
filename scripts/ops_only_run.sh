@@ -20,10 +20,11 @@ export LD_LIBRARY_PATH="/usr/local/lib:$LD_LIBRARY_PATH"
 CMD="bash build.sh --run_example ${ops} eager cust -p ${TILEXR_CANN_HOME}/cann --soc=${TILEXR_SOC_NAME}"
 warn ${CMD}
 colorful_time ${CMD} | tee ${TILEXR_RUN_HOME}/ops.log
+ops_run_status=${PIPESTATUS[0]}
 
 cd ${TILEXR_HOME}
 
-if [ $? -ne 0 ]; then
+if [ ${ops_run_status} -ne 0 ]; then
     error "run ops-transformer failed in ${TILEXR_CANN_HOME}"
     exit 1
 else

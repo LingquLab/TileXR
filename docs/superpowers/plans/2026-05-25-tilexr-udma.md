@@ -35,16 +35,16 @@
 cat >> .gitmodules <<'EOF'
 [submodule "3rdparty/shmem"]
 	path = 3rdparty/shmem
-	url = https://gitcode.com/LingquLab/shmem.git
-	branch = feature/CrossPOD_fix_2_ops_transformer
+	url = https://github.com/LingquLab/shmem.git
+	branch = tilexr-udma-integration
 EOF
 ```
 
 - [ ] **Step 2: 初始化 submodule**
 
 ```bash
-git submodule add -b feature/CrossPOD_fix_2_ops_transformer \
-    https://gitcode.com/LingquLab/shmem.git 3rdparty/shmem
+git submodule add -b tilexr-udma-integration \
+    https://github.com/LingquLab/shmem.git 3rdparty/shmem
 git submodule update --init --recursive 3rdparty/shmem
 ```
 
@@ -791,9 +791,8 @@ git submodule update --init --recursive
 ```
 
 - **hcomm**：HCCS 通信库
-- **opbase**：算子基础库
 - **ops-transformer**：算子转换框架
-- **shmem**：UDMA 传输层（branch: `feature/CrossPOD_fix_2_ops_transformer`）
+- **shmem**：UDMA 传输层（branch: `tilexr-udma-integration`）
 ```
 
 - [ ] **Step 3: 提交文档更新**
@@ -933,4 +932,3 @@ maintaining full backward compatibility with existing code."
 - 所有 spec 要求均有对应任务
 - 降级行为在 InitUDMA 中实现
 - 线程模式在 Task 10 覆盖
-

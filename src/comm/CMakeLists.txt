@@ -30,6 +30,7 @@ target_include_directories(tile-comm
         PUBLIC
         ${ASCEND_DRIVER_PATH}/kernel/inc
         PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty
         ${SHMEM_ROOT}/install/shmem/include
 )
 target_link_directories(tile-comm

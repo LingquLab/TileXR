@@ -38,8 +38,8 @@ export TILEXR_CANN_OBS_DIR=`_cann_obs_dir ${TILEXR_CANN_VER}`
 
 export TILEXR_SOC_NAME=`soc_name`
 export TILEXR_OPS_NAME=`ops_name`
-export TILEXR_HOME=${script_path}
-export TILEXR_3RD_HOME=${script_path}/3rdparty
+export TILEXR_HOME=`realpath ${script_path}/..`
+export TILEXR_3RD_HOME=${TILEXR_HOME}/3rdparty
 export TILEXR_3RD_OPEN_HOME=${TILEXR_3RD_HOME}/open_source
 export TILEXR_ENV_HOME=${TILEXR_HOME}/env
 export TILEXR_CANN_HOME=${TILEXR_ENV_HOME}/cann
@@ -57,7 +57,7 @@ export MPI_HOME=${TILEXR_UTIL_HOME}/mpich
 
 export TILEXR_HCOMM_HOME=${TILEXR_3RD_HOME}/hcomm
 export TILEXR_OPS_HOME=${TILEXR_3RD_HOME}/ops-transformer
-export TILEXR_OPBASE_HOME=${TILEXR_3RD_HOME}/opbase
+export TILEXR_SHMEM_HOME=${TILEXR_3RD_HOME}/shmem
 
 # 运行日志相关目录
 export TILEXR_RUN_HOME=${TILEXR_HOME}/run
@@ -86,7 +86,7 @@ export PATH=${TILEXR_UTIL_HOME}/cmake/bin:${PATH}
 export PATH=${TILEXR_UTIL_HOME}/ccache:${TILEXR_UTIL_HOME}/ripgrep:${TILEXR_UTIL_HOME}/sshpass/bin:${PATH}
 export PATH=${TILEXR_UTIL_HOME}/time/bin:${TILEXR_UTIL_HOME}/patch/bin:${TILEXR_UTIL_HOME}/pigz:${PATH}
 
-export LD_LIBRARY_PATH=${MPI_HOME}/lib:${LD_LIBRARY_PATH}
+export LD_LIBRARY_PATH=${MPI_HOME}/lib:${TILEXR_SHMEM_HOME}/install/shmem/lib:${ASCEND_HOME_PATH}/${TILEXR_OS_ARCH}-linux/lib64:${ASCEND_HOME_PATH}/${TILEXR_OS_ARCH}-linux/devlib:${LD_LIBRARY_PATH}
 
 env_print() {
     line

@@ -116,12 +116,12 @@ void test_full_initialization() {
     cout << "UDMA Info Size: " << udmaInfoSize << " bytes" << endl;
 
     // Step 7: 验证指针是设备内存
-    aclrtPointerAttributes attr;
-    ret = aclrtPointerGetAttributes(&attr, udmaInfoPtr);
+    aclrtPtrAttributes attr = {};
+    ret = aclrtPointerGetAttributes(udmaInfoPtr, &attr);
     if (ret == ACL_SUCCESS) {
-        TEST_ASSERT(attr.memoryType == ACL_MEMTYPE_DEVICE,
+        TEST_ASSERT(attr.location.type == ACL_MEM_LOCATION_TYPE_DEVICE,
                     "UDMA info should be in device memory");
-        cout << "Memory Type: " << attr.memoryType << " (0=HOST, 1=DEVICE)" << endl;
+        cout << "Memory Location Type: " << attr.location.type << " (1=DEVICE)" << endl;
     } else {
         cout << "[WARN] aclrtPointerGetAttributes failed: " << ret << endl;
     }
