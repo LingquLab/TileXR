@@ -123,17 +123,6 @@ int launchOneThread_AllGatherMm(Args &args)
         aclDataType::ACL_FLOAT16, &gatherOut);
     CHECK_RET(ret == ACL_SUCCESS, return ret);
 	
-	// cwh - 启动初始化 SDMA 任务的 aicpu kernel
-	void *tileXrCtx;
-	ret = TileXrInit(args.hcclComm, args.stream, &tileXrCtx);
-	CHECK_RET(ret == ACL_SUCCESS, return ret);
-	
-	// cwh - 启动轮询检查 SDMA 任务的 aicpu kernel
-	aclrtStream tileXrDaemonStream;
-	aclrtCreateStream(&tileXrDaemonStream);
-	ret = TileXrDaemon(args.hcclComm, tileXrDaemonStream, tileXrCtx);
-	CHECK_RET(ret == ACL_SUCCESS, return ret);
-
     // 调用第一阶段接口
     ret = aclnnAllGatherMatmulGetWorkspaceSize(
         x1, x2, bias, hcomName, gatherIndex, commTurn, streamMode, out, gatherOut, &workspaceSize, &executor);
@@ -151,14 +140,6 @@ int launchOneThread_AllGatherMm(Args &args)
     ret = aclrtSynchronizeStreamWithTimeout(args.stream, 10000);
     CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("[ERROR] aclrtSynchronizeStreamWithTimeout failed. ret = %d \n", ret);
         return ret);
-	
-	// cwh - wait tilexr stream done
-	ret = aclrtSynchronizeStreamWithTimeout(tileXrDaemonStream, 10000);
-	CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("[cwh][ERROR] aclrtSynchronizeStreamWithTimeout failed for tileXrDaemonStream. ret = %d \n", ret);
-		return ret);
-	ret = aclrtDestroyStream(tileXrDaemonStream);
-	CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("[cwh][ERROR] aclrtDestroyStream tileXrDaemonStream failed. ret = %d \n", ret); return ret);
-	
     LOG_PRINT("[INFO] device_%d aclnnAllGatherMatmul execute successfully.\n", args.rankId);
     // 释放device资源，需要根据具体API的接口定义修改
     if (x1 != nullptr) {

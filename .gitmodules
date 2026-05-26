@@ -4,10 +4,7 @@
 [submodule "3rdparty/hcomm"]
 	path = 3rdparty/hcomm
 	url = https://gitcode.com/LingquLab/hcomm.git
-[submodule "3rdparty/opbase"]
-	path = 3rdparty/opbase
-	url = https://gitcode.com/cann/opbase.git
 [submodule "3rdparty/shmem"]
 	path = 3rdparty/shmem
-	url = https://gitcode.com/LingquLab/shmem.git
-	branch = feature/CrossPOD_fix_2_ops_transformer
+	url = https://github.com/LingquLab/shmem.git
+	branch = tilexr-udma-integration

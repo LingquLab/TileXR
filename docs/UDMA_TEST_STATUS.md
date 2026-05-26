@@ -11,7 +11,7 @@ The UDMA initialization test infrastructure **already exists** in the shmem subm
 ## Existing Test Infrastructure
 
 ### 1. UDMA Initialization Function
-**Location:** `/Users/kuro/repo/TileXR/shmem/tests/unittest/host/main_test.cpp` (lines 165-190)
+**Location:** `/Users/kuro/repo/TileXR/3rdparty/shmem/tests/unittest/host/main_test.cpp` (lines 165-190)
 
 ```cpp
 int32_t test_udma_init(int rank_id, int n_ranks, uint64_t local_mem_size, aclrtStream *st)
@@ -33,10 +33,10 @@ int32_t test_udma_init(int rank_id, int n_ranks, uint64_t local_mem_size, aclrtS
 **Test Framework:** Google Test (gtest)
 
 **Existing UDMA test files:**
-- `shmem/tests/unittest/host/mem/udma_mem/udma_mem_host_test.cpp` - Memory operations test
-- `shmem/tests/unittest/host/mem/udma_amo/udma_amo_host_test.cpp` - Atomic operations test
-- `shmem/tests/unittest/device/mem/udma_mem/udma_mem_kernel.cpp` - Device kernel test
-- `shmem/tests/unittest/device/mem/udma_amo/udma_amo_kernel.cpp` - Device atomic kernel test
+- `3rdparty/shmem/tests/unittest/host/mem/udma_mem/udma_mem_host_test.cpp` - Memory operations test
+- `3rdparty/shmem/tests/unittest/host/mem/udma_amo/udma_amo_host_test.cpp` - Atomic operations test
+- `3rdparty/shmem/tests/unittest/device/mem/udma_mem/udma_mem_kernel.cpp` - Device kernel test
+- `3rdparty/shmem/tests/unittest/device/mem/udma_amo/udma_amo_kernel.cpp` - Device atomic kernel test
 
 ### 3. Test Coverage
 
@@ -56,7 +56,7 @@ The `udma_mem_host_test.cpp` includes:
 - **Test runner:** Multi-process fork-based execution
 - **Synchronization:** `aclshmemi_control_barrier_all()`
 - **Validation:** ASSERT_EQ, ASSERT_NE, ASSERT_TRUE macros
-- **Header:** `shmem/tests/unittest/unittest_main_test.h` declares `test_udma_init()`
+- **Header:** `3rdparty/shmem/tests/unittest/unittest_main_test.h` declares `test_udma_init()`
 
 ## Conclusion
 
@@ -74,7 +74,7 @@ The `udma_mem_host_test.cpp` includes:
 
 ```bash
 # Build and run shmem unit tests
-cd shmem/tests/unittest
+cd 3rdparty/shmem/tests/unittest
 # Follow shmem test build instructions
 ```
 

@@ -50,7 +50,11 @@
     endif()
   endif()
   if(NOT ENABLE_TEST)
-   file(GLOB OPPROTO_SRCS)
+   file(GLOB OPPROTO_SRCS
+     src/mc2_common_infershape.cpp
+     src/mc2_hcom_topo_info.cpp
+     src/mc2_infer_tiling_utils.cpp
+   )
    if(OPPROTO_SRCS)
      add_infer_modules()
      target_sources(${OPHOST_NAME}_infer_obj PRIVATE ${OPPROTO_SRCS})

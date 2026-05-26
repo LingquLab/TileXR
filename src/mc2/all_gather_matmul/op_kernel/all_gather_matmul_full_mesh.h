@@ -18,8 +18,6 @@
 #include "all_gather_matmul_base.h"
 #include "adv_api/hccl/hccl.h"
 
-// cwh add define
-#include <hccl/hccl_types.h>
 #include "../../common/inc/kernel/moe_distribute_base.h"
 
 namespace AscendC {
@@ -49,9 +47,6 @@ private:
     Hccl<HCCL_SERVER_TYPE_AICPU> hccl_;
     HcclHandle handleId_{ INVALID_HANDLE_ID };
     HcclHandle tailHandleId_{ INVALID_HANDLE_ID };
-	
-	// cwh add define
-	__gm__ HcclA2CombineOpParam *winContext_;
 };
 
 template <class A_TYPE, class B_TYPE, class C_TYPE, class BIAS_TYPE, bool BNd2Nz, bool Bias2Float>
@@ -64,25 +59,6 @@ __aicore__ inline void AllGatherMatmulFullMesh<A_TYPE, B_TYPE, C_TYPE, BIAS_TYPE
     hccl_.SetCcTiling(mc2CcTiling);
     this->rankId_ = hccl_.GetRankId();
     this->rankDim_ = hccl_.GetRankDim();
-	
-	// cwh for tilexr aicpu test
-	winContext_ = (__gm__ HcclA2CombineOpParam *)contextGM;
-
-	// cwh notify tilexr aicpu exit
-	if (GetBlockIdx() == 0) {
-		__gm__ TileXrContext *tileXrContext = (__gm__ TileXrContext *)winContext_->tileXrContext;
-		AscendC::printf("[cwh] rankId[%u] tileXrContext[%p]\n", this->rankId_, tileXrContext);
-
-		if (!tileXrContext) return;
-
-		AscendC::printf("[cwh] rankId[%u] depth[%d] sqBase[%p]\n", this->rankId_,
-		tileXrContext->streamInfo.depthList[0], tileXrContext->streamInfo.sqBaseList[0]);
-
-		// cwh 通知 aicpu 退出
-		for (uint32_t i = 0; i < tileXrContext->streamInfo.streamNum; i++) {
-			tileXrContext->streamInfo.statusList[i] = 1;
-		}
-	}
 }
 
 template <class A_TYPE, class B_TYPE, class C_TYPE, class BIAS_TYPE, bool BNd2Nz, bool Bias2Float>
