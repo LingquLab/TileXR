@@ -9,7 +9,9 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 TILEXR_ROOT="${SCRIPT_DIR}/../.."
 
 # 加载环境
-source ${TILEXR_ROOT}/common_env.sh
+source "${TILEXR_ROOT}/scripts/common_env.sh"
+
+export ARCH="${TILEXR_OS_ARCH}"
 
 echo "=========================================="
 echo "  Building UDMA Tests"
@@ -19,14 +21,14 @@ echo "=========================================="
 BUILD_DIR="${SCRIPT_DIR}/build"
 INSTALL_DIR="${SCRIPT_DIR}/install"
 
-rm -rf ${BUILD_DIR}
-mkdir -p ${BUILD_DIR}
-mkdir -p ${INSTALL_DIR}
+rm -rf "${BUILD_DIR}"
+mkdir -p "${BUILD_DIR}"
+mkdir -p "${INSTALL_DIR}"
 
-cd ${BUILD_DIR}
+cd "${BUILD_DIR}"
 
 # 配置
-cmake -DCMAKE_INSTALL_PREFIX=${INSTALL_DIR} ..
+cmake -DCMAKE_INSTALL_PREFIX="${INSTALL_DIR}" ..
 
 # 构建
 make -j$(nproc)

@@ -10,13 +10,12 @@ mkdir -p ${TILEXR_TEMP_HOME}
 
 fix_permissions ${TILEXR_CANN_HOME}
 
-chmod +x ${TILEXR_TEMP_HOME}/Ascend-cann_*${TILEXR_CANN_VER}*${TILEXR_OS_ARCH}.run
+chmod +x ${TILEXR_TEMP_HOME}/Ascend-cann-toolkit_*${TILEXR_CANN_VER}*${TILEXR_OS_ARCH}.run
 
-colorful_time bash ${TILEXR_TEMP_HOME}/Ascend-cann_*${TILEXR_CANN_VER}*${TILEXR_OS_ARCH}.run --full -q --force --whitelist=toolkit --install-path=${TILEXR_CANN_HOME}
+colorful_time bash ${TILEXR_TEMP_HOME}/Ascend-cann-toolkit_*${TILEXR_CANN_VER}*${TILEXR_OS_ARCH}.run --full -q --force --install-path=${TILEXR_CANN_HOME}
 
 chmod +x ${TILEXR_TEMP_HOME}/Ascend-cann-${TILEXR_OPS_NAME}-ops*${TILEXR_CANN_VER}*${TILEXR_OS_ARCH}.run
 
 colorful_time bash ${TILEXR_TEMP_HOME}/Ascend-cann-${TILEXR_OPS_NAME}-ops*${TILEXR_CANN_VER}*${TILEXR_OS_ARCH}.run --install -q --install-path=${TILEXR_CANN_HOME}
 
 line
-

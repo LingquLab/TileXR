@@ -10,11 +10,11 @@ TILEXR_ROOT="${SCRIPT_DIR}/../.."
 INSTALL_DIR="${SCRIPT_DIR}/install"
 
 # 加载环境
-source ${TILEXR_ROOT}/common_env.sh
+source "${TILEXR_ROOT}/scripts/common_env.sh"
 
 # 设置 LD_LIBRARY_PATH
-export LD_LIBRARY_PATH=${TILEXR_ROOT}/3rdparty/shmem/install/shmem/lib:${LD_LIBRARY_PATH}
-export LD_LIBRARY_PATH=${TILEXR_ROOT}/install/lib:${LD_LIBRARY_PATH}
+export LD_LIBRARY_PATH="${TILEXR_ROOT}/3rdparty/shmem/install/shmem/lib:${LD_LIBRARY_PATH}"
+export LD_LIBRARY_PATH="${TILEXR_ROOT}/install/lib:${LD_LIBRARY_PATH}"
 
 echo "=========================================="
 echo "  Running UDMA Tests"
@@ -32,7 +32,7 @@ fi
 echo "=========================================="
 echo "Test 1: shmem API Unit Tests (Single Process)"
 echo "=========================================="
-${INSTALL_DIR}/bin/test_shmem_api
+"${INSTALL_DIR}/bin/test_shmem_api"
 TEST1_RESULT=$?
 echo ""
 
@@ -42,7 +42,7 @@ echo "Test 2: TileXR Integration Tests (Single Process)"
 echo "=========================================="
 export RANK=0
 export RANK_SIZE=1
-${INSTALL_DIR}/bin/test_tilexr_udma
+"${INSTALL_DIR}/bin/test_tilexr_udma"
 TEST2_RESULT=$?
 echo ""
 
@@ -57,9 +57,9 @@ if command -v mpirun &> /dev/null; then
     NPU_COUNT=$(lspci -n -D | grep -o '19e5:d[0-9a-f]\{3\}' | wc -l)
     echo "Detected ${NPU_COUNT} NPU(s)"
 
-    if [ ${NPU_COUNT} -ge 2 ]; then
+    if [ "${NPU_COUNT}" -ge 2 ]; then
         echo "Running 2-rank test..."
-        mpirun -n 2 ${INSTALL_DIR}/bin/test_tilexr_udma
+        mpirun -n 2 "${INSTALL_DIR}/bin/test_tilexr_udma"
         TEST3_RESULT=$?
     else
         echo "SKIP: Need at least 2 NPUs for multi-rank test"

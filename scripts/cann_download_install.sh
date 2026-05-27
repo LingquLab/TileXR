@@ -10,10 +10,10 @@ mkdir -p ${TILEXR_TEMP_HOME}
 
 line
 
-toolkit_run=Ascend-cann_${TILEXR_CANN_VER}_linux-${TILEXR_OS_ARCH}.run
+toolkit_run=Ascend-cann-toolkit_${TILEXR_CANN_VER}_linux-${TILEXR_OS_ARCH}.run
 ops_run=Ascend-cann-${TILEXR_OPS_NAME}-ops_${TILEXR_CANN_VER}_linux-${TILEXR_OS_ARCH}.run
 
-obs_base="https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%20${TILEXR_CANN_OBS_DIR}"
+obs_base="https://ascend.devcloud.huaweicloud.com/artifactory/cann-run-mirror/software/legacy/20260520000325981"
 cann_url=${obs_base}/${toolkit_run}
 ops_url=${obs_base}/${ops_run}
 
