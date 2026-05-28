@@ -12,12 +12,15 @@
 #define TILEXR_COMM_ARGS_H
 #include <cstdint>
 
-#if !defined(__DAV_C220_VEC__) && !defined(__DAV_C310__) && !defined(__DAV_C220_CUBE__)
+#ifndef GM_ADDR
 using GM_ADDR = uint8_t*;
-#else
-#define FORCE_INLINE_AICORE __attribute__((always_inline)) inline __aicore__
-#include "kernel_operator.h"
 #endif
+
+#if (defined(__DAV_C220_VEC__) || defined(__DAV_C310__) || defined(__DAV_C310_VEC__) || defined(__DAV_C220_CUBE__)) && \
+    !defined(FORCE_INLINE_AICORE)
+#define FORCE_INLINE_AICORE __attribute__((always_inline)) inline __aicore__
+#endif
+
 namespace TileXR {
 
 constexpr int TILEXR_MAX_RANK_SIZE = 128; // 最大支持的npu卡数
@@ -99,6 +102,7 @@ struct CommArgs {
     int32_t magics[TILEXR_MAX_RANK_SIZE] = {0};
     uint64_t fftsVal = 0;
     GM_ADDR udmaInfoPtr = nullptr;  // device-side ACLSHMEMAIVUDMAInfo*; nullptr 表示 UDMA 不可用
+    GM_ADDR udmaRegistryPtr = nullptr;  // device-side TileXRUDMARegistry* for user-registered UDMA memory
 };
 
 struct LcclDumpBlockInfo {

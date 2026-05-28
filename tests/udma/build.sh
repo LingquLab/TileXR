@@ -28,7 +28,14 @@ mkdir -p "${INSTALL_DIR}"
 cd "${BUILD_DIR}"
 
 # 配置
-cmake -DCMAKE_INSTALL_PREFIX="${INSTALL_DIR}" ..
+if command -v bisheng >/dev/null 2>&1; then
+    DEMO_OPTION="-DBUILD_TILEXR_UDMA_DEMO=ON"
+else
+    echo "WARN: bisheng not found; TileXR UDMA communication demo target will be skipped."
+    DEMO_OPTION="-DBUILD_TILEXR_UDMA_DEMO=OFF"
+fi
+
+cmake -DCMAKE_INSTALL_PREFIX="${INSTALL_DIR}" ${DEMO_OPTION} ..
 
 # 构建
 make -j$(nproc)
@@ -43,9 +50,16 @@ echo "=========================================="
 echo "Test binaries installed to: ${INSTALL_DIR}/bin"
 echo ""
 echo "Available tests:"
-echo "  - test_shmem_api       : shmem API unit tests"
+echo "  - test_tilexr_udma_registry : registered-memory metadata unit tests"
 echo "  - test_tilexr_udma     : TileXR integration tests"
+if [ -f "${INSTALL_DIR}/bin/tilexr_udma_demo" ]; then
+    echo "  - tilexr_udma_demo     : TileXR UDMA communication demo"
+else
+    echo "  - tilexr_udma_demo     : skipped (requires bisheng/AICore toolchain)"
+fi
 echo ""
 echo "Run tests with:"
 echo "  bash run_tests.sh"
+echo "Run demo with:"
+echo "  bash demo/run_tilexr_udma_demo.sh 0 2 16"
 echo "=========================================="

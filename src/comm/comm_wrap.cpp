@@ -130,6 +130,37 @@ int TileXRGetCommArgsHost(TileXRCommPtr comm, TileXR::CommArgs *&commArgsPtr)
     return TILEXR_SUCCESS;
 }
 
+int TileXRUDMARegister(TileXRCommPtr comm, GM_ADDR localPtr, size_t bytes, TileXRUDMAMemHandle *handle)
+{
+    if (comm == nullptr || localPtr == nullptr || handle == nullptr || bytes == 0) {
+        MKI_LOG(ERROR) << "TileXRUDMARegister invalid input";
+        return TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    auto* c = static_cast<TileXRComm *>(comm);
+    return c->RegisterUDMAMemory(localPtr, bytes, handle);
+}
+
+int TileXRUDMAUnregister(TileXRCommPtr comm, TileXRUDMAMemHandle handle)
+{
+    if (comm == nullptr) {
+        MKI_LOG(ERROR) << "TileXRUDMAUnregister invalid comm";
+        return TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    auto* c = static_cast<TileXRComm *>(comm);
+    return c->UnregisterUDMAMemory(handle);
+}
+
+int TileXRGetUDMARegistryDev(TileXRCommPtr comm, GM_ADDR &registryPtr)
+{
+    if (comm == nullptr) {
+        MKI_LOG(ERROR) << "TileXRGetUDMARegistryDev invalid comm";
+        return TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    auto* c = static_cast<TileXRComm *>(comm);
+    registryPtr = c->GetUDMARegistryPtr();
+    return TILEXR_SUCCESS;
+}
+
 void TileXRPrintDFX2Log(TileXRCommPtr comm)
 {
     if (comm == nullptr) {

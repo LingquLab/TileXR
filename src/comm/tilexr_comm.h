@@ -12,6 +12,7 @@
 
 #include <vector>
 #include <string>
+#include "../include/tilexr_udma_reg.h"
 #include "../include/tilexr_types.h"
 #include "../include/tilexr_api.h"
 #include "../include/comm_args.h"
@@ -36,6 +37,9 @@ public:
     const PhysicalInfo &GetPhysicalInfo() const;
     GM_ADDR GetCommArgsPtr();
     CommArgs* GetCommArgs();
+    int RegisterUDMAMemory(GM_ADDR localPtr, size_t bytes, TileXRUDMAMemHandle *handle);
+    int UnregisterUDMAMemory(TileXRUDMAMemHandle handle);
+    GM_ADDR GetUDMARegistryPtr() const;
     std::string PrintDFX();
     friend class Lccl;
     friend class Lcoc;
@@ -59,6 +63,8 @@ private:
     int SyncCommArgs();
     int InitDumpAddr();
     int InitUDMA();  // 新增：初始化 shmem UDMA
+    int UpdateCommArgsDev();
+    void FreeUDMARegistry();
 
 private:
     int rank_ = 0;  // global rank id
@@ -84,6 +90,9 @@ private:
     TileXRSockExchange *socketExchange_ = nullptr;
     bool isEnableMsprofOp_ = false;
     GM_ADDR udmaInfoDev_ = nullptr;  // 新增：设备侧 UDMA QP 上下文指针
+    GM_ADDR udmaRegistryDev_ = nullptr;
+    GM_ADDR udmaRegisteredPtr_ = nullptr;
+    TileXRUDMARegistry udmaRegistry_ = {};
 };
 } // TileXR
 
