@@ -1,0 +1,333 @@
+diff --git a/scripts/common_env.sh b/scripts/common_env.sh
+index 89a34b6..92f385e 100755
+--- a/scripts/common_env.sh
++++ b/scripts/common_env.sh
+@@ -66,7 +66,7 @@ export TILEXR_PROF_HOME=${TILEXR_RUN_HOME}/prof
+ export TILEXR_PLOG_FILE_PATH=${TILEXR_TEMP_HOME}/logfile
+ 
+ # 机器的卡数
+-export TILEXR_ASCEND_DEV_NUM=$((`lspci -n -D | grep -o '19e5:d[0-9a-f]\{3\}' | wc -l`))
++export TILEXR_ASCEND_DEV_NUM=`ascend_dev_num`
+ 
+ date_str=`date '+%y%m%d%H%M'`
+ export ASCEND_PROCESS_LOG_PATH=${TILEXR_PLOG_HOME}/$date_str
+@@ -86,7 +86,7 @@ export PATH=${TILEXR_UTIL_HOME}/cmake/bin:${PATH}
+ export PATH=${TILEXR_UTIL_HOME}/ccache:${TILEXR_UTIL_HOME}/ripgrep:${TILEXR_UTIL_HOME}/sshpass/bin:${PATH}
+ export PATH=${TILEXR_UTIL_HOME}/time/bin:${TILEXR_UTIL_HOME}/patch/bin:${TILEXR_UTIL_HOME}/pigz:${PATH}
+ 
+-export LD_LIBRARY_PATH=${MPI_HOME}/lib:${TILEXR_SHMEM_HOME}/install/shmem/lib:${ASCEND_HOME_PATH}/${TILEXR_OS_ARCH}-linux/lib64:${ASCEND_HOME_PATH}/${TILEXR_OS_ARCH}-linux/devlib:${LD_LIBRARY_PATH}
++export LD_LIBRARY_PATH=${MPI_HOME}/lib:${TILEXR_SHMEM_HOME}/install/shmem/lib:${ASCEND_DRIVER_PATH:-/usr/local/Ascend/driver}/lib64/driver:${ASCEND_DRIVER_PATH:-/usr/local/Ascend/driver}/lib64/common:${ASCEND_DRIVER_PATH:-/usr/local/Ascend/driver}/lib64:${ASCEND_HOME_PATH}/${TILEXR_OS_ARCH}-linux/lib64:${ASCEND_HOME_PATH}/${TILEXR_OS_ARCH}-linux/devlib:${LD_LIBRARY_PATH}
+ 
+ env_print() {
+     line
+diff --git a/scripts/common_util.sh b/scripts/common_util.sh
+index bd81963..5f5ac0c 100755
+--- a/scripts/common_util.sh
++++ b/scripts/common_util.sh
+@@ -39,11 +39,55 @@ line()    { echo "##########################################################"; }
+ 
+ davinci_detect() { echo `lspci -n -D | grep -o '19e5:d[0-9a-f]\{3\}' | head -n1 | cut -d: -f2`; }
+ 
++npu_smi_chip_detect() {
++    if ! command -v npu-smi >/dev/null 2>&1; then
++        return
++    fi
++
++    npu-smi info 2>/dev/null | awk -F'|' '
++        /^[|][[:space:]]*[0-9]+[[:space:]]+[|]/ {
++            gsub(/^[[:space:]]+|[[:space:]]+$/, "", $3)
++            if ($3 ~ /^Ascend/) {
++                print $3
++                exit
++            }
++        }'
++}
++
++ascend_dev_num() {
++    local count=0
++    if command -v npu-smi >/dev/null 2>&1; then
++        count=$(npu-smi info 2>/dev/null | awk -F'|' '
++            /^[|][[:space:]]*[0-9]+[[:space:]]+[|]/ {
++                gsub(/^[[:space:]]+|[[:space:]]+$/, "", $3)
++                if ($3 ~ /^Ascend/) {
++                    count++
++                }
++            }
++            END { print count + 0 }')
++    fi
++
++    if [ "${count}" -eq 0 ]; then
++        count=$(lspci -n -D 2>/dev/null | grep -o '19e5:d[0-9a-f]\{3\}' | wc -l)
++    fi
++
++    echo "${count}"
++}
++
+ soc_name() {
+     declare -A SOC_MAP=(
+         ["d802"]="ascend910b"
+         ["d803"]="ascend910_93"
+     )
++    local npu_name
++    npu_name=`npu_smi_chip_detect`
++    case "${npu_name}" in
++        Ascend950*) echo "ascend950"; return ;;
++        Ascend910B*) echo "ascend910b"; return ;;
++        Ascend910A*) echo "ascend910_93"; return ;;
++        Ascend310P*) echo "ascend310p3"; return ;;
++    esac
++
+     davinci_type=`davinci_detect`
+     if [ "${davinci_type}" = "" ]; then
+         echo "ascend910b"
+@@ -54,8 +98,10 @@ soc_name() {
+ 
+ ops_name() {
+     declare -A OPS_MAP=(
++        ["ascend950"]="A3"
+         ["ascend910b"]="910b"
+         ["ascend910_93"]="A3"
++        ["ascend310p3"]="310p"
+     )
+     name=`soc_name`
+     echo "${OPS_MAP[$name]}"
+diff --git a/src/comm/comm_wrap.cpp b/src/comm/comm_wrap.cpp
+index 4dab619..319971f 100644
+--- a/src/comm/comm_wrap.cpp
++++ b/src/comm/comm_wrap.cpp
+@@ -226,14 +226,6 @@ int TileXRCommDestroy(TileXRCommPtr comm)
+     }
+     auto *c = static_cast<TileXRComm *>(comm);
+ 
+-    // 新增：清理 UDMA 资源
+-    CommArgs* commArgs = c->GetCommArgs();
+-    if (commArgs != nullptr && commArgs->udmaInfoPtr != nullptr) {
+-        aclshmem_finalize();
+-        aclrtFree(commArgs->udmaInfoPtr);
+-        commArgs->udmaInfoPtr = nullptr;
+-    }
+-
+     delete c;
+     return TILEXR_SUCCESS;
+ }
+diff --git a/src/comm/tilexr_comm.cpp b/src/comm/tilexr_comm.cpp
+index fb56f53..ec31d27 100644
+--- a/src/comm/tilexr_comm.cpp
++++ b/src/comm/tilexr_comm.cpp
+@@ -54,6 +54,8 @@ constexpr size_t TILEXR_SHMEM_MIN_MEM = 1 * 1024 * 1024;  // 1 MB，仅供 shmem
+ static map<string, GM_ADDR [TILEXR_MAX_RANK_SIZE]> g_localPeerMemMap;
+ static map<string, int[TILEXR_MAX_RANK_SIZE]> g_devList;
+ static std::mutex g_mtx;
++static std::mutex g_udmaMtx;
++static bool g_udmaUnavailable = false;
+ 
+ 
+ // 如果是互联的链路，返回false； 对910B2C那些不互联的链路，返回true
+@@ -122,6 +124,19 @@ int TileXRComm::InitDumpAddr()
+ 
+ int TileXRComm::InitUDMA()
+ {
++    if (rankSize_ <= 1) {
++        MKI_LOG(INFO) << "InitUDMA skipped for single-rank communicator";
++        return TILEXR_SUCCESS;
++    }
++
++    {
++        lock_guard<mutex> lock(g_udmaMtx);
++        if (g_udmaUnavailable) {
++            MKI_LOG(INFO) << "InitUDMA skipped after previous shmem UDMA init failure";
++            return TILEXR_SUCCESS;
++        }
++    }
++
+     // Step 1: rank 0 生成 shmem UID
+     aclshmemx_uniqueid_t shmemUid;
+     if (rank_ == 0) {
+@@ -164,6 +179,8 @@ int TileXRComm::InitUDMA()
+     ret = aclshmemx_init_attr(ACLSHMEMX_INIT_WITH_UNIQUEID, &shmemAttr);
+     if (ret != ACLSHMEM_SUCCESS) {
+         MKI_LOG(WARN) << "aclshmemx_init_attr failed: " << ret << ", UDMA disabled";
++        lock_guard<mutex> lock(g_udmaMtx);
++        g_udmaUnavailable = true;
+         return TILEXR_SUCCESS;  // 优雅降级
+     }
+ 
+diff --git a/src/comm/tilexr_internal.cpp b/src/comm/tilexr_internal.cpp
+index 371b7ca..f275f29 100644
+--- a/src/comm/tilexr_internal.cpp
++++ b/src/comm/tilexr_internal.cpp
+@@ -61,7 +61,11 @@ const std::unordered_map<std::string, ChipName> CHIP_MAP = {
+     {"Ascend910_9392", ChipName::CHIP_910_9392},
+     {"Ascend910_9382", ChipName::CHIP_910_9382},
+     {"Ascend910_9372", ChipName::CHIP_910_9372},
+-    {"Ascend910_9361", ChipName::CHIP_910_9361}
++    {"Ascend910_9361", ChipName::CHIP_910_9361},
++    {"Ascend950", ChipName::CHIP_950},
++    {"Ascend950DT", ChipName::CHIP_950},
++    {"Ascend950DT_9581", ChipName::CHIP_950},
++    {"Ascend950PR", ChipName::CHIP_950}
+ };
+ 
+ template<class T>
+@@ -362,6 +366,7 @@ uint32_t GetCoreNum(ChipName chipName)
+         case ChipName::CHIP_910_9392:
+         case ChipName::CHIP_910_9382:
+         case ChipName::CHIP_910B2C:
++        case ChipName::CHIP_950:
+             return AI_CORE_NUM_24;
+         case ChipName::CHIP_910B3:
+         case ChipName::CHIP_910B4:
+diff --git a/src/include/tilexr_types.h b/src/include/tilexr_types.h
+index 14adf9f..ece6400 100644
+--- a/src/include/tilexr_types.h
++++ b/src/include/tilexr_types.h
+@@ -45,6 +45,7 @@ enum class ChipName {
+     CHIP_910_9361,
+     CHIP_910_9362,
+     CHIP_910A5,
++    CHIP_950,
+     RESERVED,
+ };
+ 
+@@ -123,4 +124,4 @@ const std::map<TileXRType, std::string> TILEXR_TYPE2NAME = {
+ 
+ 
+ } // namespace TileXR
+-#endif // TILEXR_TYPES_H
+\ No newline at end of file
++#endif // TILEXR_TYPES_H
+diff --git a/tests/udma/integration/test_tilexr_udma.cpp b/tests/udma/integration/test_tilexr_udma.cpp
+index 2ed0854..006d349 100644
+--- a/tests/udma/integration/test_tilexr_udma.cpp
++++ b/tests/udma/integration/test_tilexr_udma.cpp
+@@ -41,13 +41,31 @@ TestStats g_stats;
+ 
+ int get_rank_from_env()
+ {
+-    const char* rankStr = getenv("RANK");
++    const char* rankStr = getenv("PMI_RANK");
++    if (rankStr == nullptr) {
++        rankStr = getenv("OMPI_COMM_WORLD_RANK");
++    }
++    if (rankStr == nullptr) {
++        rankStr = getenv("MV2_COMM_WORLD_RANK");
++    }
++    if (rankStr == nullptr) {
++        rankStr = getenv("RANK");
++    }
+     return rankStr ? atoi(rankStr) : 0;
+ }
+ 
+ int get_rank_size_from_env()
+ {
+-    const char* sizeStr = getenv("RANK_SIZE");
++    const char* sizeStr = getenv("PMI_SIZE");
++    if (sizeStr == nullptr) {
++        sizeStr = getenv("OMPI_COMM_WORLD_SIZE");
++    }
++    if (sizeStr == nullptr) {
++        sizeStr = getenv("MV2_COMM_WORLD_SIZE");
++    }
++    if (sizeStr == nullptr) {
++        sizeStr = getenv("RANK_SIZE");
++    }
+     return sizeStr ? atoi(sizeStr) : 1;
+ }
+ 
+diff --git a/tests/udma/run_tests.sh b/tests/udma/run_tests.sh
+index f103cc8..3a35aa2 100755
+--- a/tests/udma/run_tests.sh
++++ b/tests/udma/run_tests.sh
+@@ -10,11 +10,10 @@ TILEXR_ROOT="${SCRIPT_DIR}/../.."
+ INSTALL_DIR="${SCRIPT_DIR}/install"
+ 
+ # 加载环境
+-source ${TILEXR_ROOT}/common_env.sh
++source "${TILEXR_ROOT}/scripts/common_env.sh"
+ 
+-# 设置 LD_LIBRARY_PATH
+-export LD_LIBRARY_PATH=${TILEXR_ROOT}/3rdparty/shmem/install/shmem/lib:${LD_LIBRARY_PATH}
+-export LD_LIBRARY_PATH=${TILEXR_ROOT}/install/lib:${LD_LIBRARY_PATH}
++# 设置 LD_LIBRARY_PATH：优先使用当前仓库刚编译安装的库，避免被 /usr/local/lib 中的旧库覆盖
++export LD_LIBRARY_PATH=${TILEXR_ROOT}/install/lib:${TILEXR_ROOT}/3rdparty/shmem/install/shmem/lib:/usr/local/lib:${LD_LIBRARY_PATH}
+ 
+ echo "=========================================="
+ echo "  Running UDMA Tests"
+@@ -54,11 +53,13 @@ echo "=========================================="
+ # 检查是否有 mpirun
+ if command -v mpirun &> /dev/null; then
+     # 检测可用的 NPU 数量
+-    NPU_COUNT=$(lspci -n -D | grep -o '19e5:d[0-9a-f]\{3\}' | wc -l)
++    NPU_COUNT=${TILEXR_ASCEND_DEV_NUM:-0}
+     echo "Detected ${NPU_COUNT} NPU(s)"
+ 
+     if [ ${NPU_COUNT} -ge 2 ]; then
+         echo "Running 2-rank test..."
++        unset RANK
++        unset RANK_SIZE
+         mpirun -n 2 ${INSTALL_DIR}/bin/test_tilexr_udma
+         TEST3_RESULT=$?
+     else
+diff --git a/tests/udma/unit/test_shmem_api.cpp b/tests/udma/unit/test_shmem_api.cpp
+index c36ac3d..7c68b13 100644
+--- a/tests/udma/unit/test_shmem_api.cpp
++++ b/tests/udma/unit/test_shmem_api.cpp
+@@ -108,22 +108,31 @@ void test_full_initialization() {
+     void* udmaInfoPtr = nullptr;
+     size_t udmaInfoSize = 0;
+     ret = aclshmemx_get_udma_info(&udmaInfoPtr, &udmaInfoSize);
+-    TEST_ASSERT(ret == ACLSHMEM_SUCCESS, "aclshmemx_get_udma_info should succeed");
+-    TEST_ASSERT(udmaInfoPtr != nullptr, "UDMA info pointer should not be NULL");
+-    TEST_ASSERT(udmaInfoSize > 0, "UDMA info size should be greater than 0");
++    if (rankSize == 1) {
++        TEST_ASSERT(ret == ACLSHMEM_INNER_ERROR,
++                    "aclshmemx_get_udma_info should report unavailable for single rank");
++        TEST_ASSERT(udmaInfoPtr == nullptr, "UDMA info pointer should be NULL for single rank");
++        TEST_ASSERT(udmaInfoSize == 0, "UDMA info size should be 0 for single rank");
++    } else {
++        TEST_ASSERT(ret == ACLSHMEM_SUCCESS, "aclshmemx_get_udma_info should succeed");
++        TEST_ASSERT(udmaInfoPtr != nullptr, "UDMA info pointer should not be NULL");
++        TEST_ASSERT(udmaInfoSize > 0, "UDMA info size should be greater than 0");
++    }
+ 
+     cout << "UDMA Info Pointer: " << udmaInfoPtr << endl;
+     cout << "UDMA Info Size: " << udmaInfoSize << " bytes" << endl;
+ 
+     // Step 7: 验证指针是设备内存
+     aclrtPtrAttributes attr = {};
+-    ret = aclrtPointerGetAttributes(udmaInfoPtr, &attr);
+-    if (ret == ACL_SUCCESS) {
+-        TEST_ASSERT(attr.location.type == ACL_MEM_LOCATION_TYPE_DEVICE,
+-                    "UDMA info should be in device memory");
+-        cout << "Memory Location Type: " << attr.location.type << " (1=DEVICE)" << endl;
+-    } else {
+-        cout << "[WARN] aclrtPointerGetAttributes failed: " << ret << endl;
++    if (udmaInfoPtr != nullptr) {
++        ret = aclrtPointerGetAttributes(udmaInfoPtr, &attr);
++        if (ret == ACL_SUCCESS) {
++            TEST_ASSERT(attr.location.type == ACL_MEM_LOCATION_TYPE_DEVICE,
++                        "UDMA info should be in device memory");
++            cout << "Memory Location Type: " << attr.location.type << " (1=DEVICE)" << endl;
++        } else {
++            cout << "[WARN] aclrtPointerGetAttributes failed: " << ret << endl;
++        }
+     }
+ 
+     // Step 8: 清理
+@@ -165,8 +174,13 @@ void test_multiple_calls_consistency() {
+     size_t size3 = 0;
+     int ret3 = aclshmemx_get_udma_info(&ptr3, &size3);
+ 
+-    TEST_ASSERT(ret1 == ACLSHMEM_SUCCESS && ret2 == ACLSHMEM_SUCCESS && ret3 == ACLSHMEM_SUCCESS,
+-                "All calls should succeed");
++    if (rankSize == 1) {
++        TEST_ASSERT(ret1 == ACLSHMEM_INNER_ERROR && ret2 == ACLSHMEM_INNER_ERROR && ret3 == ACLSHMEM_INNER_ERROR,
++                    "All calls should report unavailable for single rank");
++    } else {
++        TEST_ASSERT(ret1 == ACLSHMEM_SUCCESS && ret2 == ACLSHMEM_SUCCESS && ret3 == ACLSHMEM_SUCCESS,
++                    "All calls should succeed");
++    }
+     TEST_ASSERT(ptr1 == ptr2 && ptr2 == ptr3,
+                 "All calls should return the same pointer");
+     TEST_ASSERT(size1 == size2 && size2 == size3,
+

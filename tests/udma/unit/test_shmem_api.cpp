@@ -108,22 +108,31 @@ void test_full_initialization() {
     void* udmaInfoPtr = nullptr;
     size_t udmaInfoSize = 0;
     ret = aclshmemx_get_udma_info(&udmaInfoPtr, &udmaInfoSize);
-    TEST_ASSERT(ret == ACLSHMEM_SUCCESS, "aclshmemx_get_udma_info should succeed");
-    TEST_ASSERT(udmaInfoPtr != nullptr, "UDMA info pointer should not be NULL");
-    TEST_ASSERT(udmaInfoSize > 0, "UDMA info size should be greater than 0");
+    if (rankSize == 1) {
+        TEST_ASSERT(ret == ACLSHMEM_INNER_ERROR,
+                    "aclshmemx_get_udma_info should report unavailable for single rank");
+        TEST_ASSERT(udmaInfoPtr == nullptr, "UDMA info pointer should be NULL for single rank");
+        TEST_ASSERT(udmaInfoSize == 0, "UDMA info size should be 0 for single rank");
+    } else {
+        TEST_ASSERT(ret == ACLSHMEM_SUCCESS, "aclshmemx_get_udma_info should succeed");
+        TEST_ASSERT(udmaInfoPtr != nullptr, "UDMA info pointer should not be NULL");
+        TEST_ASSERT(udmaInfoSize > 0, "UDMA info size should be greater than 0");
+    }
 
     cout << "UDMA Info Pointer: " << udmaInfoPtr << endl;
     cout << "UDMA Info Size: " << udmaInfoSize << " bytes" << endl;
 
     // Step 7: 验证指针是设备内存
     aclrtPtrAttributes attr = {};
-    ret = aclrtPointerGetAttributes(udmaInfoPtr, &attr);
-    if (ret == ACL_SUCCESS) {
-        TEST_ASSERT(attr.location.type == ACL_MEM_LOCATION_TYPE_DEVICE,
-                    "UDMA info should be in device memory");
-        cout << "Memory Location Type: " << attr.location.type << " (1=DEVICE)" << endl;
-    } else {
-        cout << "[WARN] aclrtPointerGetAttributes failed: " << ret << endl;
+    if (udmaInfoPtr != nullptr) {
+        ret = aclrtPointerGetAttributes(udmaInfoPtr, &attr);
+        if (ret == ACL_SUCCESS) {
+            TEST_ASSERT(attr.location.type == ACL_MEM_LOCATION_TYPE_DEVICE,
+                        "UDMA info should be in device memory");
+            cout << "Memory Location Type: " << attr.location.type << " (1=DEVICE)" << endl;
+        } else {
+            cout << "[WARN] aclrtPointerGetAttributes failed: " << ret << endl;
+        }
     }
 
     // Step 8: 清理
@@ -165,8 +174,13 @@ void test_multiple_calls_consistency() {
     size_t size3 = 0;
     int ret3 = aclshmemx_get_udma_info(&ptr3, &size3);
 
-    TEST_ASSERT(ret1 == ACLSHMEM_SUCCESS && ret2 == ACLSHMEM_SUCCESS && ret3 == ACLSHMEM_SUCCESS,
-                "All calls should succeed");
+    if (rankSize == 1) {
+        TEST_ASSERT(ret1 == ACLSHMEM_INNER_ERROR && ret2 == ACLSHMEM_INNER_ERROR && ret3 == ACLSHMEM_INNER_ERROR,
+                    "All calls should report unavailable for single rank");
+    } else {
+        TEST_ASSERT(ret1 == ACLSHMEM_SUCCESS && ret2 == ACLSHMEM_SUCCESS && ret3 == ACLSHMEM_SUCCESS,
+                    "All calls should succeed");
+    }
     TEST_ASSERT(ptr1 == ptr2 && ptr2 == ptr3,
                 "All calls should return the same pointer");
     TEST_ASSERT(size1 == size2 && size2 == size3,

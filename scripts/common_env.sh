@@ -48,7 +48,7 @@ export TILEXR_PROF_HOME=${TILEXR_RUN_HOME}/prof
 export TILEXR_PLOG_FILE_PATH=${TILEXR_TEMP_HOME}/logfile
 
 # 机器的卡数
-export TILEXR_ASCEND_DEV_NUM=$((`lspci -n -D | grep -o '19e5:d[0-9a-f]\{3\}' | wc -l`))
+export TILEXR_ASCEND_DEV_NUM=`ascend_dev_num`
 
 date_str=`date '+%y%m%d%H%M'`
 export ASCEND_PROCESS_LOG_PATH=${TILEXR_PLOG_HOME}/$date_str
@@ -68,7 +68,7 @@ export PATH=${TILEXR_UTIL_HOME}/cmake/bin:${PATH}
 export PATH=${TILEXR_UTIL_HOME}/ccache:${TILEXR_UTIL_HOME}/ripgrep:${TILEXR_UTIL_HOME}/sshpass/bin:${PATH}
 export PATH=${TILEXR_UTIL_HOME}/time/bin:${TILEXR_UTIL_HOME}/patch/bin:${TILEXR_UTIL_HOME}/pigz:${PATH}
 
-export LD_LIBRARY_PATH=${MPI_HOME}/lib:${TILEXR_SHMEM_HOME}/install/shmem/lib:${ASCEND_HOME_PATH}/${TILEXR_OS_ARCH}-linux/lib64:${ASCEND_HOME_PATH}/${TILEXR_OS_ARCH}-linux/devlib:${LD_LIBRARY_PATH}
+export LD_LIBRARY_PATH=${MPI_HOME}/lib:${TILEXR_SHMEM_HOME}/install/shmem/lib:${ASCEND_DRIVER_PATH:-/usr/local/Ascend/driver}/lib64/driver:${ASCEND_DRIVER_PATH:-/usr/local/Ascend/driver}/lib64/common:${ASCEND_DRIVER_PATH:-/usr/local/Ascend/driver}/lib64:${ASCEND_HOME_PATH}/${TILEXR_OS_ARCH}-linux/lib64:${ASCEND_HOME_PATH}/${TILEXR_OS_ARCH}-linux/devlib:${LD_LIBRARY_PATH}
 
 env_print() {
     line
