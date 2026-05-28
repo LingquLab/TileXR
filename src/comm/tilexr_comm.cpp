@@ -9,6 +9,7 @@
  */
 #include "tilexr_comm.h"
 #include "tilexr_internal.h"
+#include "udma/tilexr_udma_transport.h"
 
 #include <chrono>
 #include <vector>
@@ -29,9 +30,6 @@
 #include "runtime/dev.h"
 #include "runtime/rt_ffts.h"
 
-#include <shmem/include/shmem.h>
-#include <shmem/include/host_device/shmem_common_types.h>
-
 enum TopologyType : int {
     TOPOLOGY_HCCS = 0,
     TOPOLOGY_PIX,
@@ -49,8 +47,6 @@ using namespace Mki;
 namespace TileXR {
 constexpr int HCCL_IPC_PID_ARRAY_SIZE = 1; // 固定每次只传一个PID数据
 constexpr int TILEXR_INIT_TIMEOUT = 600;
-constexpr size_t TILEXR_SHMEM_MIN_MEM = 2 * 1024 * 1024;  // 2 MB, keeps shmem heap 2 MB page aligned
-
 static map<string, GM_ADDR [TILEXR_MAX_RANK_SIZE]> g_localPeerMemMap;
 static map<string, int[TILEXR_MAX_RANK_SIZE]> g_devList;
 static std::mutex g_mtx;
@@ -132,73 +128,31 @@ int TileXRComm::InitUDMA()
     {
         lock_guard<mutex> lock(g_udmaMtx);
         if (g_udmaUnavailable) {
-            MKI_LOG(INFO) << "InitUDMA skipped after previous shmem UDMA init failure";
+            MKI_LOG(INFO) << "InitUDMA skipped after previous UDMA init failure";
             return TILEXR_SUCCESS;
         }
     }
 
-    // Step 1: rank 0 生成 shmem UID
-    aclshmemx_uniqueid_t shmemUid;
-    if (rank_ == 0) {
-        int ret = aclshmemx_get_uniqueid(&shmemUid);
-        if (ret != ACLSHMEM_SUCCESS) {
-            MKI_LOG(WARN) << "aclshmemx_get_uniqueid failed: " << ret << ", UDMA disabled";
-            return TILEXR_SUCCESS;  // 优雅降级
-        }
+    udmaTransport_.reset(new (nothrow) TileXRUDMATransport());
+    if (udmaTransport_ == nullptr) {
+        MKI_LOG(WARN) << "TileXRUDMATransport allocation failed, UDMA disabled";
+        return TILEXR_SUCCESS;
     }
-
-    // Step 2: AllGather UID，所有 rank 获得相同 UID
-    int ret = socketExchange_->AllGather(
-        reinterpret_cast<char*>(&shmemUid),
-        sizeof(aclshmemx_uniqueid_t),
-        reinterpret_cast<char*>(&shmemUid)
-    );
-    if (ret != TILEXR_SUCCESS) {
-        MKI_LOG(WARN) << "AllGather shmem UID failed: " << ret << ", UDMA disabled";
-        return TILEXR_SUCCESS;  // 优雅降级
-    }
-
-    // Step 3: 设置 shmem 初始化属性，指定 UDMA 引擎
-    aclshmemx_init_attr_t shmemAttr;
-    ret = aclshmemx_set_attr_uniqueid_args(
-        rank_,
-        rankSize_,
-        TILEXR_SHMEM_MIN_MEM,
-        &shmemUid,
-        &shmemAttr
-    );
-    if (ret != ACLSHMEM_SUCCESS) {
-        MKI_LOG(WARN) << "aclshmemx_set_attr_uniqueid_args failed: " << ret << ", UDMA disabled";
-        return TILEXR_SUCCESS;  // 优雅降级
-    }
-
-    // 设置 UDMA 引擎
-    shmemAttr.option_attr.data_op_engine_type = ACLSHMEM_DATA_OP_UDMA;
-
-    // Step 4: 初始化 shmem，失败时优雅降级
-    ret = aclshmemx_init_attr(ACLSHMEMX_INIT_WITH_UNIQUEID, &shmemAttr);
-    if (ret != ACLSHMEM_SUCCESS) {
-        MKI_LOG(WARN) << "aclshmemx_init_attr failed: " << ret << ", UDMA disabled";
+    TileXRUDMATransportOptions options {};
+    options.rank = rank_;
+    options.rankSize = rankSize_;
+    options.devId = devId_;
+    options.exchange = socketExchange_;
+    int ret = udmaTransport_->Init(options);
+    if (ret != TILEXR_SUCCESS || !udmaTransport_->IsAvailable()) {
+        MKI_LOG(WARN) << "TileXR UDMA init failed: " << ret << ", UDMA disabled";
         lock_guard<mutex> lock(g_udmaMtx);
         g_udmaUnavailable = true;
-        return TILEXR_SUCCESS;  // 优雅降级
+        udmaTransport_.reset();
+        return TILEXR_SUCCESS;
     }
 
-    // Step 5: 从 shmem 获取 UDMA 信息（设备侧指针）
-    void* udmaInfoPtr = nullptr;
-    size_t udmaInfoSize = 0;
-    ret = aclshmemx_get_udma_info(&udmaInfoPtr, &udmaInfoSize);
-    if (ret != ACLSHMEM_SUCCESS || udmaInfoPtr == nullptr) {
-        MKI_LOG(WARN) << "aclshmemx_get_udma_info failed: " << ret << ", UDMA disabled";
-        aclshmem_finalize();
-        return TILEXR_SUCCESS;  // 优雅降级
-    }
-
-    // Step 6: 直接使用 shmem 返回的设备侧指针
-    // 注意：udmaInfoPtr 已经是设备内存地址，无需再次拷贝
-    udmaInfoDev_ = reinterpret_cast<uint8_t*>(udmaInfoPtr);
-
-    // Step 7: 设置 commArgs_ 字段
+    udmaInfoDev_ = udmaTransport_->GetUDMAInfoDev();
     commArgs_.udmaInfoPtr = udmaInfoDev_;
     commArgs_.extraFlag |= ExtraFlag::UDMA;
 
@@ -293,9 +247,13 @@ int TileXRComm::RegisterUDMAMemory(GM_ADDR localPtr, size_t bytes, TileXRUDMAMem
     localRegion.base = localPtr;
     localRegion.bytes = bytes;
 
-    int ret = aclshmemx_register_udma_memory(localPtr, bytes);
-    if (ret != ACLSHMEM_SUCCESS) {
-        MKI_LOG(ERROR) << "aclshmemx_register_udma_memory failed: " << ret;
+    if (udmaTransport_ == nullptr || !udmaTransport_->IsAvailable()) {
+        MKI_LOG(ERROR) << "TileXR UDMA transport is unavailable";
+        return TILEXR_ERROR_NOT_FOUND;
+    }
+    int ret = udmaTransport_->RegisterMemory(localPtr, bytes);
+    if (ret != TILEXR_SUCCESS) {
+        MKI_LOG(ERROR) << "TileXR UDMA memory registration failed: " << ret;
         return TILEXR_ERROR_INTERNAL;
     }
 
@@ -309,7 +267,7 @@ int TileXRComm::RegisterUDMAMemory(GM_ADDR localPtr, size_t bytes, TileXRUDMAMem
     }
     if (ret != TILEXR_SUCCESS) {
         MKI_LOG(ERROR) << "TileXRUDMARegister allgather failed: " << ret;
-        aclshmemx_unregister_udma_memory(localPtr);
+        udmaTransport_->UnregisterMemory(localPtr);
         return ret;
     }
 
@@ -319,7 +277,7 @@ int TileXRComm::RegisterUDMAMemory(GM_ADDR localPtr, size_t bytes, TileXRUDMAMem
     for (int i = 0; i < rankSize_; ++i) {
         if (allRegions[i].base == nullptr || allRegions[i].bytes == 0) {
             MKI_LOG(ERROR) << "TileXRUDMARegister received invalid region from rank " << i;
-            aclshmemx_unregister_udma_memory(localPtr);
+            udmaTransport_->UnregisterMemory(localPtr);
             return TILEXR_ERROR_PARA_CHECK_FAIL;
         }
         nextRegistry.regions[i] = allRegions[i];
@@ -329,19 +287,19 @@ int TileXRComm::RegisterUDMAMemory(GM_ADDR localPtr, size_t bytes, TileXRUDMAMem
     ret = aclrtMalloc(reinterpret_cast<void **>(&nextRegistryDev), sizeof(nextRegistry), ACL_MEM_MALLOC_HUGE_FIRST);
     if (ret != ACL_SUCCESS) {
         MKI_LOG(ERROR) << "aclrtMalloc UDMA registry failed: " << ret;
-        aclshmemx_unregister_udma_memory(localPtr);
+        udmaTransport_->UnregisterMemory(localPtr);
         return TILEXR_ERROR_INTERNAL;
     }
     ret = aclrtMemcpy(nextRegistryDev, sizeof(nextRegistry), &nextRegistry, sizeof(nextRegistry), ACL_MEMCPY_HOST_TO_DEVICE);
     if (ret != ACL_SUCCESS) {
         MKI_LOG(ERROR) << "aclrtMemcpy UDMA registry failed: " << ret;
         aclrtFree(nextRegistryDev);
-        aclshmemx_unregister_udma_memory(localPtr);
+        udmaTransport_->UnregisterMemory(localPtr);
         return TILEXR_ERROR_INTERNAL;
     }
 
     if (udmaRegisteredPtr_ != nullptr) {
-        aclshmemx_unregister_udma_memory(udmaRegisteredPtr_);
+        udmaTransport_->UnregisterMemory(udmaRegisteredPtr_);
         udmaRegisteredPtr_ = nullptr;
     }
     FreeUDMARegistry();
@@ -352,7 +310,7 @@ int TileXRComm::RegisterUDMAMemory(GM_ADDR localPtr, size_t bytes, TileXRUDMAMem
     *handle = 0;
     ret = UpdateCommArgsDev();
     if (ret != TILEXR_SUCCESS) {
-        aclshmemx_unregister_udma_memory(localPtr);
+        udmaTransport_->UnregisterMemory(localPtr);
         udmaRegisteredPtr_ = nullptr;
         FreeUDMARegistry();
     }
@@ -364,10 +322,10 @@ int TileXRComm::UnregisterUDMAMemory(TileXRUDMAMemHandle handle)
     if (handle != 0) {
         return TILEXR_ERROR_NOT_FOUND;
     }
-    if (udmaRegisteredPtr_ != nullptr) {
-        int ret = aclshmemx_unregister_udma_memory(udmaRegisteredPtr_);
-        if (ret != ACLSHMEM_SUCCESS) {
-            MKI_LOG(WARN) << "aclshmemx_unregister_udma_memory failed: " << ret;
+    if (udmaRegisteredPtr_ != nullptr && udmaTransport_ != nullptr) {
+        int ret = udmaTransport_->UnregisterMemory(udmaRegisteredPtr_);
+        if (ret != TILEXR_SUCCESS) {
+            MKI_LOG(WARN) << "TileXR UDMA memory unregistration failed: " << ret;
         }
         udmaRegisteredPtr_ = nullptr;
     }
@@ -890,16 +848,12 @@ TileXRComm::~TileXRComm()
     FreePeerMem(peerMem_[rank_]);
     FreePeerMem(commArgsPtr_);
 
-    // 清理 UDMA 资源（如果已初始化）
-    if (udmaInfoDev_ != nullptr) {
-        if (udmaRegisteredPtr_ != nullptr) {
-            aclshmemx_unregister_udma_memory(udmaRegisteredPtr_);
-            udmaRegisteredPtr_ = nullptr;
-        }
-        // udmaInfoDev_ 指向 shmem 管理的设备内存，由 shmem finalize 释放
-        aclshmem_finalize();
-        udmaInfoDev_ = nullptr;
+    if (udmaTransport_ != nullptr) {
+        udmaTransport_->Shutdown();
+        udmaTransport_.reset();
     }
+    udmaRegisteredPtr_ = nullptr;
+    udmaInfoDev_ = nullptr;
 }
 
 TileXRComm::TileXRComm(int rank, int rankSize) : rank_(rank), rankSize_(rankSize)

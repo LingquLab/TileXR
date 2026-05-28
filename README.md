@@ -89,7 +89,7 @@ TileXR/
 ├── op-simulator/       # Operator simulation without hardware
 ├── tests/              # Unit and integration test suites
 ├── scripts/            # Build and utility scripts (see scripts/README.md)
-├── 3rdparty/           # Git submodules (hcomm, ops-transformer, spdlog, mki, shmem)
+├── 3rdparty/           # Git submodules (hcomm, ops-transformer, spdlog, mki)
 └── docs/               # Documentation (UDMA, CANN migration, etc.)
 ```
 
@@ -102,7 +102,6 @@ TileXR/
 | [ops-transformer](https://gitcode.com/cann/ops-transformer) | 9.0.0-beta.1 | Operator compilation framework |
 | [spdlog](https://github.com/gabime/spdlog) | submodule | Fast C++ logging library |
 | [mki](https://gitcode.com/cann/mki) | submodule | Matrix kernel interface |
-| [shmem](3rdparty/shmem) | submodule | Transitional low-level communication dependency |
 
 ## Documentation
 
@@ -138,6 +137,7 @@ bash scripts/driver_fix.sh
 TileXR integrates UDMA (UnifiedBus DMA) for high-performance inter-chip communication on Huawei Ascend systems. UDMA is based on Huawei's UnifiedBus interconnect and is exposed through TileXR as an optional device-side transport for registered device memory.
 
 - **Automatic fallback**: Gracefully degrades to IPC/MTE if UDMA unavailable
+- **TileXR-owned initialization**: Host-side UDMA bootstrap, queue setup, and memory registration are managed inside TileXR
 - **Registered memory API**: Host code registers ordinary device memory with `TileXRUDMARegister`
 - **Device-side API**: `include/tilexr_udma.h` provides `UDMAPutNbi`, `UDMAGetNbi`, and `UDMAPutSignalNbi`
 - **Build target**: Current UDMA demo kernel targets `Ascend950`

@@ -13,6 +13,7 @@ Current recommended validation focuses on TileXR-owned APIs:
 - all-gather style UDMA put;
 - UDMA put with signal;
 - registry layout and remote-address calculation.
+- TileXR `src/comm` sources do not include or link shmem.
 
 There is no standalone shmem API test in this tree. TileXR UDMA validation should go through TileXR APIs and the registered-memory demo.
 
@@ -24,7 +25,9 @@ tests/udma/
 ├── build.sh
 ├── run_tests.sh
 ├── unit/
-│   └── test_tilexr_udma_registry.cpp
+│   ├── test_tilexr_no_shmem_dependency.cpp
+│   ├── test_tilexr_udma_registry.cpp
+│   └── test_tilexr_udma_transport_layout.cpp
 ├── integration/
 │   └── test_tilexr_udma.cpp            # TileXR communicator smoke test
 └── demo/
@@ -74,6 +77,8 @@ Expected useful artifacts:
 
 ```bash
 test -x install/bin/test_tilexr_udma_registry
+test -x install/bin/test_tilexr_no_shmem_dependency
+test -x install/bin/test_tilexr_udma_transport_layout
 test -x install/bin/test_tilexr_udma
 test -x install/bin/tilexr_udma_demo
 test -f install/lib/libtilexr_udma_demo_kernel.so
@@ -83,18 +88,22 @@ If `bisheng` is unavailable, the host-only tests may still build while the AICor
 
 ## Recommended Validation
 
-### 1. Registry Unit Test
+### 1. Host-Only Unit Tests
 
-This is host-only and checks TileXR's registered-region metadata helpers.
+These are host-only checks for registered-region metadata, UDMA info layout, and removal of shmem dependencies from TileXR comm sources.
 
 ```bash
 cd /path/to/TileXR/tests/udma
+./install/bin/test_tilexr_no_shmem_dependency
+./install/bin/test_tilexr_udma_transport_layout
 ./install/bin/test_tilexr_udma_registry
 ```
 
 Expected:
 
 ```text
+TileXR comm sources have no shmem dependency
+TileXR UDMA transport layout checks passed
 TileXR UDMA registry checks passed
 ```
 
@@ -160,6 +169,7 @@ grep -R "DATA MISMATCH\\|expected non-local signals\\|TileXR UDMA demo failed\\|
 ## Notes
 
 - Demo host code must not include `shmem.h` or call shmem host APIs.
+- TileXR comm initialization must not include or link shmem.
 - Device kernels should use TileXR wrappers from `tilexr_udma.h`.
 - UDMA buffers in the demo are ordinary `aclrtMalloc` allocations registered with `TileXRUDMARegister`.
 - Current runtime validation is hardware-dependent. A CANN-only environment without real A5 devices can verify compilation, but not UDMA transfer.
