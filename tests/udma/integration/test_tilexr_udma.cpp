@@ -2,7 +2,7 @@
  * Copyright (c) 2024 Huawei Technologies Co., Ltd.
  * Integration test for TileXR UDMA integration
  *
- * 测试目标：验证 TileXR 正确集成 shmem UDMA 功能
+ * 测试目标：验证 TileXR UDMA communicator metadata and registered-memory setup hooks
  */
 
 #include <cstdlib>

@@ -10,6 +10,7 @@
 #ifndef TILEXR_API_H
 #define TILEXR_API_H
 
+#include <cstddef>
 #include <string>
 #include "comm_args.h"
 #ifdef __cplusplus
@@ -17,6 +18,7 @@ extern "C" {
 #endif // __cplusplus
 
 typedef void *TileXRCommPtr;
+typedef uint32_t TileXRUDMAMemHandle;
 #define TILEXRUNIQUE_ID_BYTES 128
 typedef struct { char internal[TILEXRUNIQUE_ID_BYTES]; } TileXRUniqueId;
 
@@ -33,6 +35,12 @@ int TileXRCommInitRankWithDomain(int commDomain, int rankSize, int rank, TileXRC
 int TileXRGetCommArgsDev(TileXRCommPtr comm, GM_ADDR &commArgsPtr);
 
 int TileXRGetCommArgsHost(TileXRCommPtr comm, TileXR::CommArgs *&commArgsPtr);
+
+int TileXRUDMARegister(TileXRCommPtr comm, GM_ADDR localPtr, size_t bytes, TileXRUDMAMemHandle *handle);
+
+int TileXRUDMAUnregister(TileXRCommPtr comm, TileXRUDMAMemHandle handle);
+
+int TileXRGetUDMARegistryDev(TileXRCommPtr comm, GM_ADDR &registryPtr);
 
 void TileXRPrintDFX2Log(TileXRCommPtr comm);
 

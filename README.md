@@ -5,7 +5,7 @@
 ## Features
 
 - **Tile-level Communication**: Asynchronous collective operations at AICore tile granularity
-- **UDMA Support**: High-performance cross-node communication via URMA direct memory access
+- **UDMA Support**: High-performance inter-chip communication over Huawei UnifiedBus DMA
 - **Fused Operators**: MC2 operators combining communication with computation (AllGather+Add, AllGather+MatMul)
 - **IPC Shared Memory**: Efficient intra-node communication with 100MB buffer per rank
 - **Operator Simulator**: Test and validate operators without physical hardware
@@ -15,7 +15,7 @@
 - **OS**: Ubuntu 20.04 LTS
 - **NPU Driver**: ≥ 25.5.0 (check with `npu-smi info`)
 - **CANN**: 9.1.0 (default), 9.0.0-beta.1, or 8.5.0
-- **Supported Chips**: Ascend 910B, 910A5, 310P3
+- **Supported Chips**: Ascend 910B, 910A5, 310P3; UDMA demo support currently targets Ascend950
 - **User**: Root access required for NPU device operations
 
 ### System Dependencies
@@ -87,7 +87,7 @@ TileXR/
 │   ├── mc2/            # Fused collective operators (AllGather+Add, AllGather+MatMul)
 │   └── include/        # Public C/C++ headers
 ├── op-simulator/       # Operator simulation without hardware
-├── tests/              # Test suites (UDMA, integration tests)
+├── tests/              # Unit and integration test suites
 ├── scripts/            # Build and utility scripts (see scripts/README.md)
 ├── 3rdparty/           # Git submodules (hcomm, ops-transformer, spdlog, mki, shmem)
 └── docs/               # Documentation (UDMA, CANN migration, etc.)
@@ -102,12 +102,11 @@ TileXR/
 | [ops-transformer](https://gitcode.com/cann/ops-transformer) | 9.0.0-beta.1 | Operator compilation framework |
 | [spdlog](https://github.com/gabime/spdlog) | submodule | Fast C++ logging library |
 | [mki](https://gitcode.com/cann/mki) | submodule | Matrix kernel interface |
-| [shmem](3rdparty/shmem) | submodule | UDMA capability for cross-node communication |
+| [shmem](3rdparty/shmem) | submodule | Transitional low-level communication dependency |
 
 ## Documentation
 
 - **[scripts/README.md](scripts/README.md)**: Complete script reference and workflows
-- **[docs/SHMEM_INTEGRATION.md](docs/SHMEM_INTEGRATION.md)**: UDMA integration guide
 - **[docs/CANN_VERSION_MIGRATION.md](docs/CANN_VERSION_MIGRATION.md)**: CANN version compatibility
 - **[CLAUDE.md](CLAUDE.md)**: Project instructions for AI assistants
 - **[BUILD_VERIFICATION.md](BUILD_VERIFICATION.md)**: Build verification checklist
@@ -136,14 +135,12 @@ bash scripts/driver_fix.sh
 
 ## UDMA Support
 
-TileXR integrates UDMA (User-space Direct Memory Access) for high-performance inter-chip communication:
+TileXR integrates UDMA (UnifiedBus DMA) for high-performance inter-chip communication on Huawei Ascend systems. UDMA is based on Huawei's UnifiedBus interconnect and is exposed through TileXR as an optional device-side transport for registered device memory.
 
 - **Automatic fallback**: Gracefully degrades to IPC/MTE if UDMA unavailable
-- **Device-side API**: `include/tilexr_udma.h` provides `UDMAPutNbi`, `UDMAGetNbi`, atomic operations
-- **shmem integration**: Uses modified shmem library with custom `aclshmemx_get_udma_info()` API
-- **Build requirement**: shmem must be built with `SOC_TYPE=Ascend950`
-
-See [docs/SHMEM_INTEGRATION.md](docs/SHMEM_INTEGRATION.md) for details.
+- **Registered memory API**: Host code registers ordinary device memory with `TileXRUDMARegister`
+- **Device-side API**: `include/tilexr_udma.h` provides `UDMAPutNbi`, `UDMAGetNbi`, and `UDMAPutSignalNbi`
+- **Build target**: Current UDMA demo kernel targets `Ascend950`
 
 ## Operator Simulator
 

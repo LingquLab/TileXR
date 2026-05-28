@@ -49,7 +49,7 @@ using namespace Mki;
 namespace TileXR {
 constexpr int HCCL_IPC_PID_ARRAY_SIZE = 1; // 固定每次只传一个PID数据
 constexpr int TILEXR_INIT_TIMEOUT = 600;
-constexpr size_t TILEXR_SHMEM_MIN_MEM = 1 * 1024 * 1024;  // 1 MB，仅供 shmem 内部 sync
+constexpr size_t TILEXR_SHMEM_MIN_MEM = 2 * 1024 * 1024;  // 2 MB, keeps shmem heap 2 MB page aligned
 
 static map<string, GM_ADDR [TILEXR_MAX_RANK_SIZE]> g_localPeerMemMap;
 static map<string, int[TILEXR_MAX_RANK_SIZE]> g_devList;
@@ -243,6 +243,141 @@ int TileXRComm::SyncCommArgs()
         return TILEXR_ERROR_INTERNAL;
     }
     return TILEXR_SUCCESS;
+}
+
+int TileXRComm::UpdateCommArgsDev()
+{
+    if (commArgsPtr_ == nullptr) {
+        return TILEXR_SUCCESS;
+    }
+    int ret = aclrtMemcpy(commArgsPtr_, sizeof(commArgs_), &commArgs_, sizeof(commArgs_), ACL_MEMCPY_HOST_TO_DEVICE);
+    if (ret != ACL_SUCCESS) {
+        MKI_LOG(ERROR) << "aclrtMemcpy update comm args err " << ret;
+        return TILEXR_ERROR_INTERNAL;
+    }
+    return TILEXR_SUCCESS;
+}
+
+void TileXRComm::FreeUDMARegistry()
+{
+    if (udmaRegistryDev_ != nullptr) {
+        aclError ret = aclrtFree(udmaRegistryDev_);
+        if (ret != ACL_SUCCESS) {
+            MKI_LOG(WARN) << "Free UDMA registry failed: " << ret;
+        }
+        udmaRegistryDev_ = nullptr;
+    }
+    commArgs_.udmaRegistryPtr = nullptr;
+    udmaRegistry_ = TileXRUDMARegistry {};
+}
+
+int TileXRComm::RegisterUDMAMemory(GM_ADDR localPtr, size_t bytes, TileXRUDMAMemHandle *handle)
+{
+    if (!inited_) {
+        MKI_LOG(ERROR) << "TileXRUDMARegister requires initialized communicator";
+        return TILEXR_ERROR_NOT_INITIALIZED;
+    }
+    if (localPtr == nullptr || bytes == 0 || handle == nullptr) {
+        return TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    if (!((commArgs_.extraFlag & ExtraFlag::UDMA) != 0 && commArgs_.udmaInfoPtr != nullptr)) {
+        MKI_LOG(WARN) << "TileXRUDMARegister called while UDMA is unavailable";
+        return TILEXR_ERROR_NOT_FOUND;
+    }
+    if (!uid_.empty()) {
+        MKI_LOG(WARN) << "TileXRUDMARegister is not supported in InitThread mode";
+        return TILEXR_ERROR_INTERNAL;
+    }
+
+    TileXRUDMARegionDesc localRegion {};
+    localRegion.base = localPtr;
+    localRegion.bytes = bytes;
+
+    int ret = aclshmemx_register_udma_memory(localPtr, bytes);
+    if (ret != ACLSHMEM_SUCCESS) {
+        MKI_LOG(ERROR) << "aclshmemx_register_udma_memory failed: " << ret;
+        return TILEXR_ERROR_INTERNAL;
+    }
+
+    std::vector<TileXRUDMARegionDesc> allRegions(rankSize_);
+    if (TileXRSockExchange::CheckValid(commId_)) {
+        TileXRSockExchange exchange(rank_, rankSize_, commId_);
+        ret = exchange.AllGather(&localRegion, 1, allRegions.data());
+    } else {
+        TileXRSockExchange domainExchange(rank_, rankSize_, commDomain_);
+        ret = domainExchange.AllGather(&localRegion, 1, allRegions.data());
+    }
+    if (ret != TILEXR_SUCCESS) {
+        MKI_LOG(ERROR) << "TileXRUDMARegister allgather failed: " << ret;
+        aclshmemx_unregister_udma_memory(localPtr);
+        return ret;
+    }
+
+    TileXRUDMARegistry nextRegistry {};
+    nextRegistry.rankSize = static_cast<uint32_t>(rankSize_);
+    nextRegistry.regionCount = 1;
+    for (int i = 0; i < rankSize_; ++i) {
+        if (allRegions[i].base == nullptr || allRegions[i].bytes == 0) {
+            MKI_LOG(ERROR) << "TileXRUDMARegister received invalid region from rank " << i;
+            aclshmemx_unregister_udma_memory(localPtr);
+            return TILEXR_ERROR_PARA_CHECK_FAIL;
+        }
+        nextRegistry.regions[i] = allRegions[i];
+    }
+
+    GM_ADDR nextRegistryDev = nullptr;
+    ret = aclrtMalloc(reinterpret_cast<void **>(&nextRegistryDev), sizeof(nextRegistry), ACL_MEM_MALLOC_HUGE_FIRST);
+    if (ret != ACL_SUCCESS) {
+        MKI_LOG(ERROR) << "aclrtMalloc UDMA registry failed: " << ret;
+        aclshmemx_unregister_udma_memory(localPtr);
+        return TILEXR_ERROR_INTERNAL;
+    }
+    ret = aclrtMemcpy(nextRegistryDev, sizeof(nextRegistry), &nextRegistry, sizeof(nextRegistry), ACL_MEMCPY_HOST_TO_DEVICE);
+    if (ret != ACL_SUCCESS) {
+        MKI_LOG(ERROR) << "aclrtMemcpy UDMA registry failed: " << ret;
+        aclrtFree(nextRegistryDev);
+        aclshmemx_unregister_udma_memory(localPtr);
+        return TILEXR_ERROR_INTERNAL;
+    }
+
+    if (udmaRegisteredPtr_ != nullptr) {
+        aclshmemx_unregister_udma_memory(udmaRegisteredPtr_);
+        udmaRegisteredPtr_ = nullptr;
+    }
+    FreeUDMARegistry();
+    udmaRegistry_ = nextRegistry;
+    udmaRegistryDev_ = nextRegistryDev;
+    udmaRegisteredPtr_ = localPtr;
+    commArgs_.udmaRegistryPtr = udmaRegistryDev_;
+    *handle = 0;
+    ret = UpdateCommArgsDev();
+    if (ret != TILEXR_SUCCESS) {
+        aclshmemx_unregister_udma_memory(localPtr);
+        udmaRegisteredPtr_ = nullptr;
+        FreeUDMARegistry();
+    }
+    return ret;
+}
+
+int TileXRComm::UnregisterUDMAMemory(TileXRUDMAMemHandle handle)
+{
+    if (handle != 0) {
+        return TILEXR_ERROR_NOT_FOUND;
+    }
+    if (udmaRegisteredPtr_ != nullptr) {
+        int ret = aclshmemx_unregister_udma_memory(udmaRegisteredPtr_);
+        if (ret != ACLSHMEM_SUCCESS) {
+            MKI_LOG(WARN) << "aclshmemx_unregister_udma_memory failed: " << ret;
+        }
+        udmaRegisteredPtr_ = nullptr;
+    }
+    FreeUDMARegistry();
+    return UpdateCommArgsDev();
+}
+
+GM_ADDR TileXRComm::GetUDMARegistryPtr() const
+{
+    return udmaRegistryDev_;
 }
 
 int TileXRComm::InitCommon()
@@ -751,11 +886,16 @@ TileXRComm::~TileXRComm()
         socketExchange_ = nullptr;
     }
     FreePeerMem(commArgs_.dumpAddr);
+    FreeUDMARegistry();
     FreePeerMem(peerMem_[rank_]);
     FreePeerMem(commArgsPtr_);
 
     // 清理 UDMA 资源（如果已初始化）
     if (udmaInfoDev_ != nullptr) {
+        if (udmaRegisteredPtr_ != nullptr) {
+            aclshmemx_unregister_udma_memory(udmaRegisteredPtr_);
+            udmaRegisteredPtr_ = nullptr;
+        }
         // udmaInfoDev_ 指向 shmem 管理的设备内存，由 shmem finalize 释放
         aclshmem_finalize();
         udmaInfoDev_ = nullptr;

@@ -13,7 +13,7 @@ INSTALL_DIR="${SCRIPT_DIR}/install"
 source "${TILEXR_ROOT}/scripts/common_env.sh"
 
 # 设置 LD_LIBRARY_PATH：优先使用当前仓库刚编译安装的库，避免被 /usr/local/lib 中的旧库覆盖
-export LD_LIBRARY_PATH="${TILEXR_ROOT}/install/lib:${TILEXR_ROOT}/3rdparty/shmem/install/shmem/lib:/usr/local/lib:${LD_LIBRARY_PATH}"
+export LD_LIBRARY_PATH="${INSTALL_DIR}/lib:${TILEXR_ROOT}/install/lib:/usr/local/lib:${LD_LIBRARY_PATH}"
 
 echo "=========================================="
 echo "  Running UDMA Tests"
@@ -22,16 +22,16 @@ echo "LD_LIBRARY_PATH: ${LD_LIBRARY_PATH}"
 echo ""
 
 # 检查测试二进制是否存在
-if [ ! -f "${INSTALL_DIR}/bin/test_shmem_api" ]; then
+if [ ! -f "${INSTALL_DIR}/bin/test_tilexr_udma_registry" ] || [ ! -f "${INSTALL_DIR}/bin/test_tilexr_udma" ]; then
     echo "ERROR: Test binaries not found. Please run build.sh first."
     exit 1
 fi
 
-# 测试 1: shmem API 单元测试（单进程）
+# 测试 1: TileXR UDMA registry 单元测试（host-only）
 echo "=========================================="
-echo "Test 1: shmem API Unit Tests (Single Process)"
+echo "Test 1: TileXR UDMA Registry Unit Test"
 echo "=========================================="
-"${INSTALL_DIR}/bin/test_shmem_api"
+"${INSTALL_DIR}/bin/test_tilexr_udma_registry"
 TEST1_RESULT=$?
 echo ""
 
@@ -76,7 +76,7 @@ echo ""
 echo "=========================================="
 echo "  Test Results Summary"
 echo "=========================================="
-echo "Test 1 (shmem API):        $([ $TEST1_RESULT -eq 0 ] && echo 'PASS' || echo 'FAIL')"
+echo "Test 1 (UDMA Registry):    $([ $TEST1_RESULT -eq 0 ] && echo 'PASS' || echo 'FAIL')"
 echo "Test 2 (TileXR Single):    $([ $TEST2_RESULT -eq 0 ] && echo 'PASS' || echo 'FAIL')"
 echo "Test 3 (TileXR Multi):     $([ $TEST3_RESULT -eq 0 ] && echo 'PASS' || echo 'SKIP/FAIL')"
 echo "=========================================="
