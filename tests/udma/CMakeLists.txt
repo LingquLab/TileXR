@@ -14,7 +14,17 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(ASCEND_HOME_PATH $ENV{ASCEND_HOME_PATH})
 set(ARCH $ENV{ARCH})
 if(NOT ARCH)
-    set(ARCH "x86_64")
+    set(ARCH $ENV{TILEXR_OS_ARCH})
+endif()
+if(NOT ARCH)
+    execute_process(
+        COMMAND uname -m
+        OUTPUT_VARIABLE ARCH
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
+    if(ARCH STREQUAL "arm64")
+        set(ARCH "aarch64")
+    endif()
 endif()
 
 set(ASCEND_DRIVER_PATH $ENV{ASCEND_DRIVER_PATH})

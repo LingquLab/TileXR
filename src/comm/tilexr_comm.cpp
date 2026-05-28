@@ -54,6 +54,8 @@ constexpr size_t TILEXR_SHMEM_MIN_MEM = 1 * 1024 * 1024;  // 1 MB，仅供 shmem
 static map<string, GM_ADDR [TILEXR_MAX_RANK_SIZE]> g_localPeerMemMap;
 static map<string, int[TILEXR_MAX_RANK_SIZE]> g_devList;
 static std::mutex g_mtx;
+static std::mutex g_udmaMtx;
+static bool g_udmaUnavailable = false;
 
 
 // 如果是互联的链路，返回false； 对910B2C那些不互联的链路，返回true
@@ -122,6 +124,19 @@ int TileXRComm::InitDumpAddr()
 
 int TileXRComm::InitUDMA()
 {
+    if (rankSize_ <= 1) {
+        MKI_LOG(INFO) << "InitUDMA skipped for single-rank communicator";
+        return TILEXR_SUCCESS;
+    }
+
+    {
+        lock_guard<mutex> lock(g_udmaMtx);
+        if (g_udmaUnavailable) {
+            MKI_LOG(INFO) << "InitUDMA skipped after previous shmem UDMA init failure";
+            return TILEXR_SUCCESS;
+        }
+    }
+
     // Step 1: rank 0 生成 shmem UID
     aclshmemx_uniqueid_t shmemUid;
     if (rank_ == 0) {
@@ -164,6 +179,8 @@ int TileXRComm::InitUDMA()
     ret = aclshmemx_init_attr(ACLSHMEMX_INIT_WITH_UNIQUEID, &shmemAttr);
     if (ret != ACLSHMEM_SUCCESS) {
         MKI_LOG(WARN) << "aclshmemx_init_attr failed: " << ret << ", UDMA disabled";
+        lock_guard<mutex> lock(g_udmaMtx);
+        g_udmaUnavailable = true;
         return TILEXR_SUCCESS;  // 优雅降级
     }
 

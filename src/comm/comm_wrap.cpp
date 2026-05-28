@@ -226,14 +226,6 @@ int TileXRCommDestroy(TileXRCommPtr comm)
     }
     auto *c = static_cast<TileXRComm *>(comm);
 
-    // 新增：清理 UDMA 资源
-    CommArgs* commArgs = c->GetCommArgs();
-    if (commArgs != nullptr && commArgs->udmaInfoPtr != nullptr) {
-        aclshmem_finalize();
-        aclrtFree(commArgs->udmaInfoPtr);
-        commArgs->udmaInfoPtr = nullptr;
-    }
-
     delete c;
     return TILEXR_SUCCESS;
 }

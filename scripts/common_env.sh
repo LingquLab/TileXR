@@ -8,33 +8,15 @@ fi
 script_path=`realpath $(dirname "${BASH_SOURCE[0]}")`
 source ${script_path}/common_util.sh
 
-export TILEXR_OS_ARCH=`uname -m`
-export TILEXR_CANN_VER="9.1.0"
-
-# OBS 目录名查找表（版本号 → OBS 目录，T 编号无规律，新版本发布时在此追加）
-_cann_obs_dir() {
-    case "$1" in
-        9.1.0)        echo "9.1.T1"  ;;
-        9.0.0-beta.1) echo "9.0.T2"  ;;
-        8.5.0)        echo "8.5.T63" ;;
-        *) echo "" ;;
+_tilexr_os_arch() {
+    case "`uname -m`" in
+        arm64) echo "aarch64" ;;
+        *) uname -m ;;
     esac
 }
-_TILEXR_SUPPORTED_CANN_VERS=("8.5.0" "9.0.0-beta.1" "9.1.0")
-_cann_ver_supported() {
-    local ver=$1
-    for v in "${_TILEXR_SUPPORTED_CANN_VERS[@]}"; do
-        [ "$v" = "$ver" ] && return 0
-    done
-    return 1
-}
-if ! _cann_ver_supported "${TILEXR_CANN_VER}"; then
-    local _fmt; _fmt=$(printf "[%s] " "${_TILEXR_SUPPORTED_CANN_VERS[@]}")
-    echo "ERROR: unsupported CANN version '${TILEXR_CANN_VER}'. Supported: ${_fmt%" "}" >&2
-    return 1 2>/dev/null || exit 1
-fi
 
-export TILEXR_CANN_OBS_DIR=`_cann_obs_dir ${TILEXR_CANN_VER}`
+export TILEXR_OS_ARCH=`_tilexr_os_arch`
+export TILEXR_CANN_VER="9.1.0"
 
 export TILEXR_SOC_NAME=`soc_name`
 export TILEXR_OPS_NAME=`ops_name`
@@ -66,7 +48,7 @@ export TILEXR_PROF_HOME=${TILEXR_RUN_HOME}/prof
 export TILEXR_PLOG_FILE_PATH=${TILEXR_TEMP_HOME}/logfile
 
 # 机器的卡数
-export TILEXR_ASCEND_DEV_NUM=$((`lspci -n -D | grep -o '19e5:d[0-9a-f]\{3\}' | wc -l`))
+export TILEXR_ASCEND_DEV_NUM=`ascend_dev_num`
 
 date_str=`date '+%y%m%d%H%M'`
 export ASCEND_PROCESS_LOG_PATH=${TILEXR_PLOG_HOME}/$date_str
@@ -86,7 +68,7 @@ export PATH=${TILEXR_UTIL_HOME}/cmake/bin:${PATH}
 export PATH=${TILEXR_UTIL_HOME}/ccache:${TILEXR_UTIL_HOME}/ripgrep:${TILEXR_UTIL_HOME}/sshpass/bin:${PATH}
 export PATH=${TILEXR_UTIL_HOME}/time/bin:${TILEXR_UTIL_HOME}/patch/bin:${TILEXR_UTIL_HOME}/pigz:${PATH}
 
-export LD_LIBRARY_PATH=${MPI_HOME}/lib:${TILEXR_SHMEM_HOME}/install/shmem/lib:${ASCEND_HOME_PATH}/${TILEXR_OS_ARCH}-linux/lib64:${ASCEND_HOME_PATH}/${TILEXR_OS_ARCH}-linux/devlib:${LD_LIBRARY_PATH}
+export LD_LIBRARY_PATH=${MPI_HOME}/lib:${TILEXR_SHMEM_HOME}/install/shmem/lib:${ASCEND_DRIVER_PATH:-/usr/local/Ascend/driver}/lib64/driver:${ASCEND_DRIVER_PATH:-/usr/local/Ascend/driver}/lib64/common:${ASCEND_DRIVER_PATH:-/usr/local/Ascend/driver}/lib64:${ASCEND_HOME_PATH}/${TILEXR_OS_ARCH}-linux/lib64:${ASCEND_HOME_PATH}/${TILEXR_OS_ARCH}-linux/devlib:${LD_LIBRARY_PATH}
 
 env_print() {
     line

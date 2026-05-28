@@ -41,13 +41,31 @@ TestStats g_stats;
 
 int get_rank_from_env()
 {
-    const char* rankStr = getenv("RANK");
+    const char* rankStr = getenv("PMI_RANK");
+    if (rankStr == nullptr) {
+        rankStr = getenv("OMPI_COMM_WORLD_RANK");
+    }
+    if (rankStr == nullptr) {
+        rankStr = getenv("MV2_COMM_WORLD_RANK");
+    }
+    if (rankStr == nullptr) {
+        rankStr = getenv("RANK");
+    }
     return rankStr ? atoi(rankStr) : 0;
 }
 
 int get_rank_size_from_env()
 {
-    const char* sizeStr = getenv("RANK_SIZE");
+    const char* sizeStr = getenv("PMI_SIZE");
+    if (sizeStr == nullptr) {
+        sizeStr = getenv("OMPI_COMM_WORLD_SIZE");
+    }
+    if (sizeStr == nullptr) {
+        sizeStr = getenv("MV2_COMM_WORLD_SIZE");
+    }
+    if (sizeStr == nullptr) {
+        sizeStr = getenv("RANK_SIZE");
+    }
     return sizeStr ? atoi(sizeStr) : 1;
 }
 

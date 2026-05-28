@@ -39,11 +39,55 @@ line()    { echo "##########################################################"; }
 
 davinci_detect() { echo `lspci -n -D | grep -o '19e5:d[0-9a-f]\{3\}' | head -n1 | cut -d: -f2`; }
 
+npu_smi_chip_detect() {
+    if ! command -v npu-smi >/dev/null 2>&1; then
+        return
+    fi
+
+    npu-smi info 2>/dev/null | awk -F'|' '
+        /^[|][[:space:]]*[0-9]+[[:space:]]+[|]/ {
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", $3)
+            if ($3 ~ /^Ascend/) {
+                print $3
+                exit
+            }
+        }'
+}
+
+ascend_dev_num() {
+    local count=0
+    if command -v npu-smi >/dev/null 2>&1; then
+        count=$(npu-smi info 2>/dev/null | awk -F'|' '
+            /^[|][[:space:]]*[0-9]+[[:space:]]+[|]/ {
+                gsub(/^[[:space:]]+|[[:space:]]+$/, "", $3)
+                if ($3 ~ /^Ascend/) {
+                    count++
+                }
+            }
+            END { print count + 0 }')
+    fi
+
+    if [ "${count}" -eq 0 ]; then
+        count=$(lspci -n -D 2>/dev/null | grep -o '19e5:d[0-9a-f]\{3\}' | wc -l)
+    fi
+
+    echo "${count}"
+}
+
 soc_name() {
     declare -A SOC_MAP=(
         ["d802"]="ascend910b"
         ["d803"]="ascend910_93"
     )
+    local npu_name
+    npu_name=`npu_smi_chip_detect`
+    case "${npu_name}" in
+        Ascend950*) echo "ascend950"; return ;;
+        Ascend910B*) echo "ascend910b"; return ;;
+        Ascend910A*) echo "ascend910_93"; return ;;
+        Ascend310P*) echo "ascend310p3"; return ;;
+    esac
+
     davinci_type=`davinci_detect`
     if [ "${davinci_type}" = "" ]; then
         echo "ascend910b"
@@ -54,8 +98,10 @@ soc_name() {
 
 ops_name() {
     declare -A OPS_MAP=(
+        ["ascend950"]="A3"
         ["ascend910b"]="910b"
         ["ascend910_93"]="A3"
+        ["ascend310p3"]="310p"
     )
     name=`soc_name`
     echo "${OPS_MAP[$name]}"
