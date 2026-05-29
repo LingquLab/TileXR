@@ -1,0 +1,61 @@
+#
+# Copyright (c) 2024-2026 TileXR Project
+# Root CTest smoke for consuming collectives from an install prefix.
+#
+
+set(TILEXR_ROOT_SOURCE_DIR "@CMAKE_SOURCE_DIR@")
+set(TILEXR_ROOT_BINARY_DIR "@CMAKE_BINARY_DIR@")
+set(TILEXR_COLLECTIVES_TEST_SOURCE_DIR "@CMAKE_SOURCE_DIR@/tests/collectives")
+set(TILEXR_SMOKE_INSTALL_PREFIX "@CMAKE_BINARY_DIR@/tilexr_collectives_ctest_install")
+set(TILEXR_SMOKE_BUILD_DIR "@CMAKE_BINARY_DIR@/collectives_install_smoke_build")
+set(TILEXR_SMOKE_INSTALL_LIBDIR "@CMAKE_INSTALL_LIBDIR@")
+set(CMAKE_CTEST_COMMAND "@CMAKE_CTEST_COMMAND@")
+
+file(REMOVE_RECURSE "${TILEXR_SMOKE_INSTALL_PREFIX}" "${TILEXR_SMOKE_BUILD_DIR}")
+
+message(STATUS "Building root project for TileXR collectives smoke")
+execute_process(
+    COMMAND "${CMAKE_COMMAND}" --build "${TILEXR_ROOT_BINARY_DIR}"
+    RESULT_VARIABLE tilexr_smoke_result
+)
+if(NOT tilexr_smoke_result EQUAL 0)
+    message(FATAL_ERROR "Failed to build root TileXR project for collectives install-prefix smoke")
+endif()
+
+message(STATUS "Installing TileXR collectives smoke prefix with cmake --install")
+execute_process(
+    COMMAND "${CMAKE_COMMAND}" --install "${TILEXR_ROOT_BINARY_DIR}" --prefix "${TILEXR_SMOKE_INSTALL_PREFIX}"
+    RESULT_VARIABLE tilexr_smoke_result
+)
+if(NOT tilexr_smoke_result EQUAL 0)
+    message(FATAL_ERROR "cmake --install failed for collectives install-prefix smoke")
+endif()
+
+message(STATUS "Configuring standalone collectives tests from install prefix")
+execute_process(
+    COMMAND "${CMAKE_COMMAND}" -S "${TILEXR_COLLECTIVES_TEST_SOURCE_DIR}" -B "${TILEXR_SMOKE_BUILD_DIR}"
+        "-DTILEXR_INSTALL_PREFIX=${TILEXR_SMOKE_INSTALL_PREFIX}"
+        "-DTILEXR_INSTALL_LIBDIR=${TILEXR_SMOKE_INSTALL_LIBDIR}"
+    RESULT_VARIABLE tilexr_smoke_result
+)
+if(NOT tilexr_smoke_result EQUAL 0)
+    message(FATAL_ERROR "Failed to configure standalone collectives tests from install prefix")
+endif()
+
+message(STATUS "Building standalone collectives tests from install prefix")
+execute_process(
+    COMMAND "${CMAKE_COMMAND}" --build "${TILEXR_SMOKE_BUILD_DIR}"
+    RESULT_VARIABLE tilexr_smoke_result
+)
+if(NOT tilexr_smoke_result EQUAL 0)
+    message(FATAL_ERROR "Failed to build standalone collectives tests from install prefix")
+endif()
+
+message(STATUS "Running standalone collectives install-prefix tests")
+execute_process(
+    COMMAND "${CMAKE_CTEST_COMMAND}" --test-dir "${TILEXR_SMOKE_BUILD_DIR}" --output-on-failure
+    RESULT_VARIABLE tilexr_smoke_result
+)
+if(NOT tilexr_smoke_result EQUAL 0)
+    message(FATAL_ERROR "Standalone collectives install-prefix tests failed")
+endif()

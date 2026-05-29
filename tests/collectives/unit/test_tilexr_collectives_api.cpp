@@ -131,10 +131,16 @@ void TestRootBuildRegistersCollectivesTests()
     const auto text = ReadFile(path);
     CheckContains(path, text, "option(TILEXR_BUILD_TESTS \"Build TileXR tests\" OFF)");
     CheckContains(path, text, "include(CTest)");
+    CheckContains(path, text, "include(GNUInstallDirs)");
     CheckContains(path, text, "if(TILEXR_BUILD_COLLECTIVES)");
     CheckContains(path, text, "add_subdirectory(src/collectives)");
     CheckContains(path, text, "if(BUILD_TESTING OR TILEXR_BUILD_TESTS)");
     CheckContains(path, text, "add_subdirectory(tests/collectives)");
+    CheckContains(path, text, "tilexr_collectives_install_smoke.cmake");
+    CheckContains(path, text, "tests/collectives/cmake/install_prefix_smoke.cmake.in");
+    CheckContains(path, text, "add_test(NAME tilexr_collectives_install_smoke");
+    CheckContains(path, text, "${CMAKE_COMMAND} -P");
+    CheckContains(path, text, "tilexr_collectives_install_smoke");
 }
 
 void TestCollectivesTestBuildSupportsInTreeAndInstallPrefixModes()
@@ -159,6 +165,9 @@ void TestCollectivesTestBuildSupportsInTreeAndInstallPrefixModes()
     CheckContains(path, text, "set(TILEXR_COLLECTIVES_LIB \"\" CACHE FILEPATH");
     CheckContains(path, text, "set(TILEXR_LIB \"\" CACHE FILEPATH");
     CheckContains(path, text, "${TILEXR_INSTALL_LIB_SEARCH_DIR}");
+    CheckContains(path, text, "foreach(_tilexr_installed_include_dir");
+    CheckContains(path, text, "if(EXISTS \"${_tilexr_installed_include_dir}\")");
+    CheckContains(path, text, "list(APPEND TILEXR_INSTALLED_INCLUDE_DIRS \"${_tilexr_installed_include_dir}\")");
     CheckContains(path, text, "add_library(tilexr-comm-installed SHARED IMPORTED)");
     CheckContains(path, text, "add_library(tilexr-collectives-installed SHARED IMPORTED)");
     CheckContains(path, text, "IMPORTED_LOCATION \"${TILEXR_LIB}\"");
@@ -189,6 +198,23 @@ void TestCollectivesTestBuildSupportsInTreeAndInstallPrefixModes()
     CheckDoesNotContain(path, text, "/tmp/tilexr-build-split-collectives");
 }
 
+void TestCollectivesInstallSmokeUsesStandaloneInstallPrefixMode()
+{
+    const std::string path = "tests/collectives/cmake/install_prefix_smoke.cmake.in";
+    const auto text = ReadFile(path);
+    CheckContains(path, text, "tilexr_collectives_ctest_install");
+    CheckContains(path, text, "collectives_install_smoke_build");
+    CheckContains(path, text, "cmake --install");
+    CheckContains(path, text, "COMMAND \"${CMAKE_COMMAND}\" --install \"${TILEXR_ROOT_BINARY_DIR}\" --prefix \"${TILEXR_SMOKE_INSTALL_PREFIX}\"");
+    CheckContains(path, text, "COMMAND \"${CMAKE_COMMAND}\" -S \"${TILEXR_COLLECTIVES_TEST_SOURCE_DIR}\" -B \"${TILEXR_SMOKE_BUILD_DIR}\"");
+    CheckContains(path, text, "-DTILEXR_INSTALL_PREFIX=${TILEXR_SMOKE_INSTALL_PREFIX}");
+    CheckContains(path, text, "COMMAND \"${CMAKE_COMMAND}\" --build \"${TILEXR_SMOKE_BUILD_DIR}\"");
+    CheckContains(path, text, "COMMAND \"${CMAKE_CTEST_COMMAND}\" --test-dir \"${TILEXR_SMOKE_BUILD_DIR}\" --output-on-failure");
+    CheckDoesNotContain(path, text, "tilexr-collectives-installed");
+    CheckDoesNotContain(path, text, "${TILEXR_ROOT_SOURCE_DIR}/src/collectives");
+    CheckDoesNotContain(path, text, "${TILEXR_ROOT_BINARY_DIR}/src/collectives");
+}
+
 } // namespace
 
 int main()
@@ -200,6 +226,7 @@ int main()
     TestCollectivesBuildDefinesSeparateSharedLibrary();
     TestRootBuildRegistersCollectivesTests();
     TestCollectivesTestBuildSupportsInTreeAndInstallPrefixModes();
+    TestCollectivesInstallSmokeUsesStandaloneInstallPrefixMode();
     if (g_failures != 0) {
         std::cerr << g_failures << " collectives API split checks failed" << std::endl;
         return 1;
