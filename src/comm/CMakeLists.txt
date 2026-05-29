@@ -67,4 +67,9 @@ install(FILES
         ${CMAKE_SOURCE_DIR}/src/include/tilexr_udma_types.h
         DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 install(CODE "string(CONCAT _tilexr_optional_header \"tilexr_\" \"collectives.h\")
-file(REMOVE \"\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_INCLUDEDIR}/\${_tilexr_optional_header}\")")
+if(IS_ABSOLUTE \"${CMAKE_INSTALL_INCLUDEDIR}\")
+    set(_tilexr_optional_header_path \"\$ENV{DESTDIR}${CMAKE_INSTALL_INCLUDEDIR}/\${_tilexr_optional_header}\")
+else()
+    set(_tilexr_optional_header_path \"\$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_INCLUDEDIR}/\${_tilexr_optional_header}\")
+endif()
+file(REMOVE \"\${_tilexr_optional_header_path}\")")
