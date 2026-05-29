@@ -8,7 +8,14 @@
 #include <acl/acl_rt.h>
 #include <algorithm>
 #include <climits>
+#include <cctype>
+#include <cstdlib>
 #include <cstring>
+#include <fstream>
+#include <iterator>
+#include <regex>
+#include <string>
+#include <unordered_map>
 
 #include "mki/utils/log/log.h"
 #include "tools/socket/tilexr_sock_exchange.h"
@@ -38,6 +45,245 @@ HccpEid SwapEidForDevice(const HccpEid& hccpEid)
     std::memcpy(swapped.raw, &eidH, sizeof(uint64_t));
     std::memcpy(swapped.raw + sizeof(uint64_t), &eidL, sizeof(uint64_t));
     return swapped;
+}
+
+struct TileXRRootInfo {
+    std::string topoPath;
+    uint32_t deviceIdOffset = 0;
+    uint32_t eidCount = 0;
+    std::unordered_map<uint32_t, uint32_t> deviceToLocalId;
+    std::unordered_map<uint32_t, std::unordered_map<std::string, uint32_t>> portToEidByLocalId;
+    std::unordered_map<uint32_t, std::map<uint32_t, HccpEid>> eidByLocalId;
+};
+
+struct TileXRTopoEdge {
+    uint32_t localA = 0;
+    uint32_t localB = 0;
+    std::vector<std::string> localAPorts;
+    std::vector<std::string> localBPorts;
+};
+
+std::string ReadTextFile(const std::string& path)
+{
+    std::ifstream input(path);
+    if (!input.is_open()) {
+        return {};
+    }
+    return std::string(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
+}
+
+bool ParseUint(const std::string& value, uint32_t& out)
+{
+    if (value.empty()) {
+        return false;
+    }
+    char* end = nullptr;
+    unsigned long parsed = std::strtoul(value.c_str(), &end, 10);
+    if (end == value.c_str() || *end != '\0' || parsed > UINT32_MAX) {
+        return false;
+    }
+    out = static_cast<uint32_t>(parsed);
+    return true;
+}
+
+std::string JsonStringField(const std::string& object, const std::string& field)
+{
+    const std::regex pattern("\"" + field + "\"\\s*:\\s*\"([^\"]*)\"");
+    std::smatch match;
+    return std::regex_search(object, match, pattern) ? match[1].str() : std::string();
+}
+
+bool JsonUintField(const std::string& object, const std::string& field, uint32_t& out)
+{
+    const std::regex quoted("\"" + field + "\"\\s*:\\s*\"([0-9]+)\"");
+    const std::regex plain("\"" + field + "\"\\s*:\\s*([0-9]+)");
+    std::smatch match;
+    if (std::regex_search(object, match, quoted) || std::regex_search(object, match, plain)) {
+        return ParseUint(match[1].str(), out);
+    }
+    return false;
+}
+
+bool ParseEidHex(const std::string& text, HccpEid& eid)
+{
+    if (text.size() != sizeof(eid.raw) * 2) {
+        return false;
+    }
+    for (size_t i = 0; i < sizeof(eid.raw); ++i) {
+        const char hi = text[i * 2];
+        const char lo = text[i * 2 + 1];
+        if (!std::isxdigit(static_cast<unsigned char>(hi)) || !std::isxdigit(static_cast<unsigned char>(lo))) {
+            return false;
+        }
+        eid.raw[i] = static_cast<uint8_t>(std::strtoul(text.substr(i * 2, 2).c_str(), nullptr, 16));
+    }
+    return true;
+}
+
+std::vector<std::string> JsonStringArrayField(const std::string& object, const std::string& field)
+{
+    const std::regex arrayPattern("\"" + field + "\"\\s*:\\s*\\[([^\\]]*)\\]");
+    std::smatch arrayMatch;
+    if (!std::regex_search(object, arrayMatch, arrayPattern)) {
+        return {};
+    }
+    const std::string body = arrayMatch[1].str();
+    std::vector<std::string> values;
+    const std::regex valuePattern("\"([^\"]*)\"");
+    for (auto it = std::sregex_iterator(body.begin(), body.end(), valuePattern);
+         it != std::sregex_iterator(); ++it) {
+        values.push_back((*it)[1].str());
+    }
+    return values;
+}
+
+std::vector<std::string> ExtractObjectsWithKey(const std::string& text, const std::string& key)
+{
+    std::vector<std::string> objects;
+    const std::string needle = "\"" + key + "\"";
+    size_t pos = 0;
+    while ((pos = text.find(needle, pos)) != std::string::npos) {
+        const size_t begin = text.rfind('{', pos);
+        if (begin == std::string::npos) {
+            ++pos;
+            continue;
+        }
+        int depth = 0;
+        bool inString = false;
+        bool escaped = false;
+        for (size_t i = begin; i < text.size(); ++i) {
+            const char ch = text[i];
+            if (inString) {
+                escaped = (!escaped && ch == '\\');
+                if (ch == '"' && !escaped) {
+                    inString = false;
+                } else if (ch != '\\') {
+                    escaped = false;
+                }
+                continue;
+            }
+            if (ch == '"') {
+                inString = true;
+            } else if (ch == '{') {
+                ++depth;
+            } else if (ch == '}') {
+                --depth;
+                if (depth == 0) {
+                    objects.emplace_back(text.substr(begin, i - begin + 1));
+                    pos = i + 1;
+                    break;
+                }
+            }
+        }
+        if (depth != 0) {
+            break;
+        }
+    }
+    return objects;
+}
+
+bool ParseRootInfo(TileXRRootInfo& root)
+{
+    const std::string content = ReadTextFile("/etc/hccl_rootinfo.json");
+    if (content.empty()) {
+        return false;
+    }
+    root.topoPath = JsonStringField(content, "topo_file_path");
+    if (root.topoPath.empty()) {
+        return false;
+    }
+
+    for (const std::string& rankObj : ExtractObjectsWithKey(content, "device_id")) {
+        uint32_t deviceId = 0;
+        uint32_t localId = 0;
+        if (!JsonUintField(rankObj, "device_id", deviceId) || !JsonUintField(rankObj, "local_id", localId)) {
+            continue;
+        }
+        if (root.deviceToLocalId.empty()) {
+            root.deviceIdOffset = deviceId;
+        }
+        root.deviceToLocalId[deviceId] = localId;
+
+        uint32_t eidIndex = 0;
+        for (const std::string& addrObj : ExtractObjectsWithKey(rankObj, "addr")) {
+            HccpEid eid {};
+            const std::string addr = JsonStringField(addrObj, "addr");
+            if (!addr.empty() && ParseEidHex(addr, eid)) {
+                root.eidByLocalId[localId][eidIndex] = eid;
+            }
+            for (const std::string& port : JsonStringArrayField(addrObj, "ports")) {
+                root.portToEidByLocalId[localId][port] = eidIndex;
+            }
+            ++eidIndex;
+        }
+        if (root.eidCount == 0 && eidIndex != 0) {
+            root.eidCount = eidIndex;
+        }
+    }
+    return !root.deviceToLocalId.empty() && root.eidCount != 0;
+}
+
+std::vector<TileXRTopoEdge> ParseTopoInfo(const std::string& path)
+{
+    const std::string content = ReadTextFile(path);
+    std::vector<TileXRTopoEdge> edges;
+    if (content.empty()) {
+        return edges;
+    }
+    for (const std::string& edgeObj : ExtractObjectsWithKey(content, "local_a")) {
+        TileXRTopoEdge edge {};
+        if (!JsonUintField(edgeObj, "local_a", edge.localA) || !JsonUintField(edgeObj, "local_b", edge.localB)) {
+            continue;
+        }
+        edge.localAPorts = JsonStringArrayField(edgeObj, "local_a_ports");
+        edge.localBPorts = JsonStringArrayField(edgeObj, "local_b_ports");
+        if (!edge.localAPorts.empty() && !edge.localBPorts.empty()) {
+            edges.push_back(edge);
+        }
+    }
+    return edges;
+}
+
+bool ResolveLocalIdWithOffset(const TileXRRootInfo& root, uint32_t deviceId, uint32_t& localId)
+{
+    auto it = root.deviceToLocalId.find(deviceId + root.deviceIdOffset);
+    if (it != root.deviceToLocalId.end()) {
+        localId = it->second;
+        return true;
+    }
+    it = root.deviceToLocalId.find(deviceId);
+    if (it != root.deviceToLocalId.end()) {
+        localId = it->second;
+        return true;
+    }
+    return false;
+}
+
+bool ResolveLocalEidRoute(
+    const TileXRRootInfo& root, const std::vector<TileXRTopoEdge>& edges, uint32_t localId, uint32_t peerLocalId,
+    uint32_t& eidIndex)
+{
+    std::string localPort;
+    for (const auto& edge : edges) {
+        if (edge.localA == localId && edge.localB == peerLocalId) {
+            localPort = edge.localAPorts[0];
+            break;
+        }
+        if (edge.localB == localId && edge.localA == peerLocalId) {
+            localPort = edge.localBPorts[0];
+            break;
+        }
+    }
+    const auto localIt = root.portToEidByLocalId.find(localId);
+    if (localPort.empty() || localIt == root.portToEidByLocalId.end()) {
+        return false;
+    }
+    const auto portIt = localIt->second.find(localPort);
+    if (portIt == localIt->second.end()) {
+        return false;
+    }
+    eidIndex = portIt->second;
+    return root.eidByLocalId.count(localId) != 0 && root.eidByLocalId.at(localId).count(eidIndex) != 0;
 }
 
 } // namespace
@@ -125,6 +371,10 @@ int TileXRUDMATransport::Init(const TileXRUDMATransportOptions& options)
 int TileXRUDMATransport::OpenDevice()
 {
     logicDevId_ = static_cast<uint32_t>(options_.devId);
+    TileXRRootInfo rootInfo {};
+    if (ParseRootInfo(rootInfo)) {
+        deviceIdOffset_ = rootInfo.deviceIdOffset;
+    }
 
     ProcOpenArgs args {};
     args.procType = TSD_SUB_PROC_HCCP;
@@ -175,16 +425,56 @@ int TileXRUDMATransport::BuildRoutes()
     }
     eidCount_ = eidNum;
 
-    uint32_t localEid = devEids[0].eidIndex;
-    HccpEid localEidRaw = devEids[0].eid;
-    std::vector<uint32_t> allLocalEids(options_.rankSize);
-    ret = options_.exchange->AllGather(&localEid, 1, allLocalEids.data());
+    uint32_t localId = static_cast<uint32_t>(options_.devId);
+    bool topoReady = false;
+    TileXRRootInfo rootInfo {};
+    std::vector<TileXRTopoEdge> topoEdges;
+    if (ParseRootInfo(rootInfo)) {
+        if (rootInfo.eidCount > eidCount_) {
+            eidCount_ = rootInfo.eidCount;
+        }
+        topoEdges = ParseTopoInfo(rootInfo.topoPath);
+        topoReady = ResolveLocalIdWithOffset(rootInfo, static_cast<uint32_t>(options_.devId), localId) &&
+            !topoEdges.empty();
+    }
+    if (topoReady) {
+        const auto localEids = rootInfo.eidByLocalId.find(localId);
+        if (localEids != rootInfo.eidByLocalId.end()) {
+            localEidByEid_ = localEids->second;
+        } else {
+            topoReady = false;
+        }
+    }
+    if (!topoReady) {
+        for (const auto& eid : devEids) {
+            localEidByEid_[eid.eidIndex] = eid.eid;
+        }
+    }
+
+    std::vector<uint32_t> allLocalIds(options_.rankSize);
+    ret = options_.exchange->AllGather(&localId, 1, allLocalIds.data());
     if (ret != TILEXR_SUCCESS) {
         return ret;
     }
 
-    std::vector<HccpEid> allEidRaw(options_.rankSize);
-    ret = options_.exchange->AllGather(&localEidRaw, 1, allEidRaw.data());
+    std::vector<int32_t> localRouteByPeer(options_.rankSize, -1);
+    for (int peer = 0; peer < options_.rankSize; ++peer) {
+        if (peer == options_.rank) {
+            continue;
+        }
+        uint32_t localEid = devEids[0].eidIndex;
+        if (topoReady && !ResolveLocalEidRoute(rootInfo, topoEdges, localId, allLocalIds[peer], localEid)) {
+            topoReady = false;
+            MKI_LOG(WARN) << "TileXR UDMA topology route resolution failed, falling back to EID "
+                          << devEids[0].eidIndex;
+            localEid = devEids[0].eidIndex;
+        }
+        peerLocalEid_[peer] = localEid;
+        localRouteByPeer[peer] = static_cast<int32_t>(localEid);
+    }
+
+    std::vector<int32_t> allRouteByPeer(options_.rankSize * options_.rankSize, -1);
+    ret = options_.exchange->AllGather(localRouteByPeer.data(), localRouteByPeer.size(), allRouteByPeer.data());
     if (ret != TILEXR_SUCCESS) {
         return ret;
     }
@@ -193,10 +483,12 @@ int TileXRUDMATransport::BuildRoutes()
         if (peer == options_.rank) {
             continue;
         }
-        peerLocalEid_[peer] = localEid;
-        peerRemoteEid_[peer] = allLocalEids[peer];
+        int32_t remoteEid = allRouteByPeer[peer * options_.rankSize + options_.rank];
+        if (remoteEid < 0 || static_cast<uint32_t>(remoteEid) >= eidCount_) {
+            remoteEid = static_cast<int32_t>(devEids[0].eidIndex);
+        }
+        peerRemoteEid_[peer] = static_cast<uint32_t>(remoteEid);
     }
-    localEidByEid_[localEid] = localEidRaw;
     return TILEXR_SUCCESS;
 }
 
@@ -224,8 +516,13 @@ int TileXRUDMATransport::CreateContexts()
 
         bool found = false;
         CtxInitAttr attr {};
+        auto targetEidIt = localEidByEid_.find(eidIndex);
         for (unsigned int i = 0; i < eidNum; ++i) {
-            if (infoList[i].eidIndex != eidIndex) {
+            bool matched = infoList[i].eidIndex == eidIndex;
+            if (targetEidIt != localEidByEid_.end()) {
+                matched = std::memcmp(infoList[i].eid.raw, targetEidIt->second.raw, sizeof(infoList[i].eid.raw)) == 0;
+            }
+            if (!matched) {
                 continue;
             }
             attr.phyId = logicDevId_ + deviceIdOffset_;

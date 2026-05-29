@@ -16,11 +16,21 @@ int g_failures = 0;
         } \
     } while (0)
 
-std::string ReadFile(const char* path)
+std::string RepoPath(const std::string& path)
 {
-    std::ifstream input(path);
+#ifdef TILEXR_SOURCE_ROOT
+    return std::string(TILEXR_SOURCE_ROOT) + "/" + path;
+#else
+    return path;
+#endif
+}
+
+std::string ReadFile(const std::string& path)
+{
+    const std::string fullPath = RepoPath(path);
+    std::ifstream input(fullPath.c_str());
     if (!input.is_open()) {
-        std::cerr << "failed to open " << path << std::endl;
+        std::cerr << "failed to open " << fullPath << std::endl;
         ++g_failures;
         return {};
     }
@@ -53,7 +63,7 @@ void TestCommSourcesDoNotUseShmem()
         "ACLSHMEM",
     };
     for (const auto& path : paths) {
-        const auto text = ReadFile(path.c_str());
+        const auto text = ReadFile(path);
         for (const auto& needle : forbidden) {
             CheckNoNeedle(path, text, needle);
         }

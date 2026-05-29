@@ -21,6 +21,28 @@ echo "=========================================="
 echo "LD_LIBRARY_PATH: ${LD_LIBRARY_PATH}"
 echo ""
 
+detect_ok_npus() {
+    command -v npu-smi >/dev/null 2>&1 || return 0
+    local ids=()
+    for id in $(seq 0 15); do
+        local health
+        health=$(npu-smi info -t health -i "${id}" 2>/dev/null | awk -F: '/Health Status/ {gsub(/^[ \t]+|[ \t]+$/, "", $2); print $2; exit}')
+        if [ "${health}" = "OK" ]; then
+            ids+=("${id}")
+        fi
+    done
+    local IFS=,
+    echo "${ids[*]}"
+}
+
+if [ -z "${TILEXR_TEST_DEVICES:-}" ]; then
+    TILEXR_TEST_DEVICES=$(detect_ok_npus)
+    export TILEXR_TEST_DEVICES
+fi
+if [ -n "${TILEXR_TEST_DEVICES:-}" ]; then
+    echo "TILEXR_TEST_DEVICES: ${TILEXR_TEST_DEVICES}"
+fi
+
 # 检查测试二进制是否存在
 if [ ! -f "${INSTALL_DIR}/bin/test_tilexr_no_shmem_dependency" ] ||
    [ ! -f "${INSTALL_DIR}/bin/test_tilexr_udma_transport_layout" ] ||
@@ -75,14 +97,19 @@ if command -v mpirun &> /dev/null; then
     NPU_COUNT=${TILEXR_ASCEND_DEV_NUM:-0}
     echo "Detected ${NPU_COUNT} NPU(s)"
 
-    if [ "${NPU_COUNT}" -ge 2 ]; then
+    DEVICE_COUNT=0
+    if [ -n "${TILEXR_TEST_DEVICES:-}" ]; then
+        DEVICE_COUNT=$(echo "${TILEXR_TEST_DEVICES}" | awk -F, '{print NF}')
+    fi
+
+    if [ "${NPU_COUNT}" -ge 2 ] && [ "${DEVICE_COUNT}" -ge 2 ]; then
         echo "Running 2-rank test..."
         unset RANK
         unset RANK_SIZE
         mpirun -n 2 "${INSTALL_DIR}/bin/test_tilexr_udma"
         TEST5_RESULT=$?
     else
-        echo "SKIP: Need at least 2 NPUs for multi-rank test"
+        echo "SKIP: Need at least 2 usable NPUs for multi-rank test"
         TEST5_RESULT=0
     fi
 else

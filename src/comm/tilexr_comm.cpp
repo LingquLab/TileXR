@@ -257,14 +257,13 @@ int TileXRComm::RegisterUDMAMemory(GM_ADDR localPtr, size_t bytes, TileXRUDMAMem
         return TILEXR_ERROR_INTERNAL;
     }
 
-    std::vector<TileXRUDMARegionDesc> allRegions(rankSize_);
-    if (TileXRSockExchange::CheckValid(commId_)) {
-        TileXRSockExchange exchange(rank_, rankSize_, commId_);
-        ret = exchange.AllGather(&localRegion, 1, allRegions.data());
-    } else {
-        TileXRSockExchange domainExchange(rank_, rankSize_, commDomain_);
-        ret = domainExchange.AllGather(&localRegion, 1, allRegions.data());
+    if (socketExchange_ == nullptr) {
+        MKI_LOG(ERROR) << "TileXRUDMARegister requires live socket exchange";
+        udmaTransport_->UnregisterMemory(localPtr);
+        return TILEXR_ERROR_INTERNAL;
     }
+    std::vector<TileXRUDMARegionDesc> allRegions(rankSize_);
+    ret = socketExchange_->AllGather(&localRegion, 1, allRegions.data());
     if (ret != TILEXR_SUCCESS) {
         MKI_LOG(ERROR) << "TileXRUDMARegister allgather failed: " << ret;
         udmaTransport_->UnregisterMemory(localPtr);
@@ -444,8 +443,6 @@ int TileXRComm::Init()
     MKI_LOG(INFO) << "TileXRCommInit " << rank_ << "/" << rankSize_ << " success. extraFlag:" << commArgs_.extraFlag <<
         " commArgs_.localRank : " << commArgs_.localRank << " commArgs_.localRankSize : " << commArgs_.localRankSize;
     inited_ = true;
-    delete socketExchange_; // socketExchange_ 不会为空
-    socketExchange_ = nullptr;
     return TILEXR_SUCCESS;
 }
 

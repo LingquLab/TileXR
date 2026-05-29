@@ -80,6 +80,9 @@ add_executable(test_tilexr_no_shmem_dependency
 target_include_directories(test_tilexr_no_shmem_dependency PRIVATE
     ${TILEXR_ROOT}/src/include
 )
+target_compile_definitions(test_tilexr_no_shmem_dependency PRIVATE
+    TILEXR_SOURCE_ROOT="${TILEXR_ROOT}"
+)
 
 add_executable(test_tilexr_udma_transport_layout
     unit/test_tilexr_udma_transport_layout.cpp

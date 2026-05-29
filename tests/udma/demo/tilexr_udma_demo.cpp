@@ -48,6 +48,29 @@ int GetEnvInt(const char* name, int defaultValue)
     return value == nullptr ? defaultValue : std::atoi(value);
 }
 
+int GetDeviceIdFromEnv(int rank, int npuCount, int firstNpu)
+{
+    const char* devices = std::getenv("TILEXR_DEMO_DEVICES");
+    if (devices != nullptr && devices[0] != '\0') {
+        std::string list(devices);
+        size_t start = 0;
+        int index = 0;
+        while (start <= list.size()) {
+            const size_t comma = list.find(',', start);
+            const size_t end = comma == std::string::npos ? list.size() : comma;
+            if (index == rank && end > start) {
+                return std::atoi(list.substr(start, end - start).c_str());
+            }
+            if (comma == std::string::npos) {
+                break;
+            }
+            start = comma + 1;
+            ++index;
+        }
+    }
+    return rank % npuCount + firstNpu;
+}
+
 int GetRankFromEnv()
 {
     const char* names[] = {"PMI_RANK", "OMPI_COMM_WORLD_RANK", "MV2_COMM_WORLD_RANK", "RANK"};
@@ -367,7 +390,7 @@ int main(int argc, char** argv)
     int32_t elementsPerRank = argc > argIndex ? std::atoi(argv[argIndex++]) : kDefaultElementsPerRank;
     int npuCount = argc > argIndex ? std::atoi(argv[argIndex++]) : GetEnvInt("TILEXR_DEMO_NPUS", 8);
     int firstNpu = argc > argIndex ? std::atoi(argv[argIndex++]) : GetEnvInt("TILEXR_DEMO_FIRST_NPU", 0);
-    int deviceId = rank % npuCount + firstNpu;
+    int deviceId = GetDeviceIdFromEnv(rank, npuCount, firstNpu);
 
     std::cout << "========================================" << std::endl;
     std::cout << "  TileXR UDMA Communication Demo" << std::endl;

@@ -23,7 +23,8 @@ namespace TileXR {
  * symmetric-memory APIs.
  */
 
-#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510)
+#if (defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510)) || \
+    (defined(CATLASS_ARCH) && (CATLASS_ARCH == 3510)) || defined(TILEXR_UDMA_FORCE_ENABLE)
 constexpr bool TILEXR_UDMA_ARCH_SUPPORTED = true;
 #else
 constexpr bool TILEXR_UDMA_ARCH_SUPPORTED = false;
