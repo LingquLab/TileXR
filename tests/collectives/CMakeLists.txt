@@ -45,6 +45,10 @@ add_executable(test_tilexr_collectives_header_compile
     unit/test_tilexr_collectives_header_compile.cpp
 )
 
+add_executable(test_tilexr_collectives_stub_behavior
+    unit/test_tilexr_collectives_stub_behavior.cpp
+)
+
 if(NOT EXISTS "${TILEXR_INSTALL_PREFIX}/include/tilexr_collectives.h")
     message(FATAL_ERROR
         "Installed tilexr_collectives.h not found at ${TILEXR_INSTALL_PREFIX}/include/tilexr_collectives.h. "
@@ -53,6 +57,15 @@ if(NOT EXISTS "${TILEXR_INSTALL_PREFIX}/include/tilexr_collectives.h")
 endif()
 
 target_include_directories(test_tilexr_collectives_header_compile PRIVATE
+    ${TILEXR_INSTALL_PREFIX}/include
+    ${TILEXR_ROOT}/3rdparty
+    ${ASCEND_DRIVER_PATH}/kernel/inc
+    ${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc/
+    ${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc/runtime/
+    ${ASCEND_HOME_PATH}/${ARCH}-linux/include/
+)
+
+target_include_directories(test_tilexr_collectives_stub_behavior PRIVATE
     ${TILEXR_INSTALL_PREFIX}/include
     ${TILEXR_ROOT}/3rdparty
     ${ASCEND_DRIVER_PATH}/kernel/inc
@@ -91,8 +104,14 @@ target_link_libraries(test_tilexr_collectives_header_compile
     ${TILEXR_COMM_LIB}
 )
 
+target_link_libraries(test_tilexr_collectives_stub_behavior
+    ${TILEXR_COLLECTIVES_LIB}
+    ${TILEXR_COMM_LIB}
+)
+
 install(TARGETS
     test_tilexr_collectives_api
     test_tilexr_collectives_header_compile
+    test_tilexr_collectives_stub_behavior
     RUNTIME DESTINATION ${CMAKE_INSTALL_PREFIX}/bin
 )
