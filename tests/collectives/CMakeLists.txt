@@ -12,9 +12,14 @@ include(GNUInstallDirs)
 
 set(TILEXR_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../..")
 set(TILEXR_INSTALL_PREFIX "${TILEXR_ROOT}/install" CACHE PATH "TileXR install prefix for installed collectives headers")
-set(TILEXR_INSTALL_LIBDIR "${CMAKE_INSTALL_LIBDIR}" CACHE PATH "TileXR install library directory relative to TILEXR_INSTALL_PREFIX")
+set(TILEXR_INSTALL_LIBDIR "${CMAKE_INSTALL_LIBDIR}" CACHE STRING "TileXR install library directory relative to TILEXR_INSTALL_PREFIX")
 set(TILEXR_COLLECTIVES_LIB "" CACHE FILEPATH "Path to libtilexr-collectives.so")
 set(TILEXR_LIB "" CACHE FILEPATH "Path to libtile-comm.so")
+if(IS_ABSOLUTE "${TILEXR_INSTALL_LIBDIR}")
+    set(TILEXR_INSTALL_LIB_SEARCH_DIR "${TILEXR_INSTALL_LIBDIR}")
+else()
+    set(TILEXR_INSTALL_LIB_SEARCH_DIR "${TILEXR_INSTALL_PREFIX}/${TILEXR_INSTALL_LIBDIR}")
+endif()
 set(ASCEND_HOME_PATH $ENV{ASCEND_HOME_PATH})
 set(ARCH $ENV{ARCH})
 if(NOT ARCH)
@@ -78,7 +83,7 @@ target_include_directories(test_tilexr_collectives_stub_behavior PRIVATE
 if(NOT TILEXR_COLLECTIVES_LIB)
     find_library(TILEXR_COLLECTIVES_LIB_FOUND tilexr-collectives
         HINTS
-        "${TILEXR_INSTALL_PREFIX}/${TILEXR_INSTALL_LIBDIR}"
+        "${TILEXR_INSTALL_LIB_SEARCH_DIR}"
         NO_DEFAULT_PATH
     )
     if(TILEXR_COLLECTIVES_LIB_FOUND)
@@ -88,7 +93,7 @@ endif()
 
 if(NOT TILEXR_COLLECTIVES_LIB)
     message(FATAL_ERROR
-        "libtilexr-collectives.so not found under ${TILEXR_INSTALL_PREFIX}/${TILEXR_INSTALL_LIBDIR}. "
+        "libtilexr-collectives.so not found under ${TILEXR_INSTALL_LIB_SEARCH_DIR}. "
         "Build/install TileXR with -DTILEXR_BUILD_COLLECTIVES=ON and set TILEXR_INSTALL_PREFIX, "
         "or pass -DTILEXR_COLLECTIVES_LIB=/path/to/libtilexr-collectives.so."
     )
@@ -97,7 +102,7 @@ endif()
 if(NOT TILEXR_LIB)
     find_library(TILEXR_LIB_FOUND tile-comm
         HINTS
-        "${TILEXR_INSTALL_PREFIX}/${TILEXR_INSTALL_LIBDIR}"
+        "${TILEXR_INSTALL_LIB_SEARCH_DIR}"
         NO_DEFAULT_PATH
     )
     if(TILEXR_LIB_FOUND)
@@ -107,7 +112,7 @@ endif()
 
 if(NOT TILEXR_LIB)
     message(FATAL_ERROR
-        "libtile-comm.so not found under ${TILEXR_INSTALL_PREFIX}/${TILEXR_INSTALL_LIBDIR}. "
+        "libtile-comm.so not found under ${TILEXR_INSTALL_LIB_SEARCH_DIR}. "
         "Build/install TileXR and set TILEXR_INSTALL_PREFIX, "
         "or pass -DTILEXR_LIB=/path/to/libtile-comm.so."
     )

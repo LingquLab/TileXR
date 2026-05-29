@@ -128,12 +128,15 @@ void TestCollectivesTestBuildUsesExplicitLibraryHint()
     const auto text = ReadFile(path);
     CheckContains(path, text, "include(GNUInstallDirs)");
     CheckContains(path, text, "set(TILEXR_INSTALL_PREFIX \"${TILEXR_ROOT}/install\" CACHE PATH");
-    CheckContains(path, text, "set(TILEXR_INSTALL_LIBDIR \"${CMAKE_INSTALL_LIBDIR}\" CACHE PATH");
+    CheckContains(path, text, "set(TILEXR_INSTALL_LIBDIR \"${CMAKE_INSTALL_LIBDIR}\" CACHE STRING");
+    CheckContains(path, text, "if(IS_ABSOLUTE \"${TILEXR_INSTALL_LIBDIR}\")");
+    CheckContains(path, text, "set(TILEXR_INSTALL_LIB_SEARCH_DIR \"${TILEXR_INSTALL_LIBDIR}\")");
+    CheckContains(path, text, "set(TILEXR_INSTALL_LIB_SEARCH_DIR \"${TILEXR_INSTALL_PREFIX}/${TILEXR_INSTALL_LIBDIR}\")");
     CheckContains(path, text, "${TILEXR_INSTALL_PREFIX}/include");
     CheckContains(path, text, "${TILEXR_INSTALL_PREFIX}/include/tilexr_collectives.h");
     CheckContains(path, text, "set(TILEXR_COLLECTIVES_LIB \"\" CACHE FILEPATH");
     CheckContains(path, text, "set(TILEXR_LIB \"\" CACHE FILEPATH");
-    CheckContains(path, text, "${TILEXR_INSTALL_PREFIX}/${TILEXR_INSTALL_LIBDIR}");
+    CheckContains(path, text, "${TILEXR_INSTALL_LIB_SEARCH_DIR}");
     CheckContains(path, text, "RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}");
     CheckContains(path, text, "add_executable(test_tilexr_collectives_stub_behavior");
     CheckContains(path, text, "unit/test_tilexr_collectives_stub_behavior.cpp");
@@ -143,6 +146,7 @@ void TestCollectivesTestBuildUsesExplicitLibraryHint()
     CheckDoesNotContain(path, text, "${TILEXR_ROOT}/build");
     CheckDoesNotContain(path, text, "${CMAKE_INSTALL_PREFIX}/bin");
     CheckDoesNotContain(path, text, "${TILEXR_INSTALL_PREFIX}/lib");
+    CheckDoesNotContain(path, text, "CACHE PATH \"TileXR install library directory");
     CheckDoesNotContain(path, text, "/tmp/tilexr-install-split-collectives");
     CheckDoesNotContain(path, text, "/tmp/tilexr-build-split-collectives");
 }
