@@ -21,9 +21,18 @@ int PrepareHostLaunchContext(TileXRCommPtr comm, HostLaunchContext &context)
     if (ret != TileXR::TILEXR_SUCCESS) {
         return ret;
     }
+    if (context.hostArgs == nullptr) {
+        context = HostLaunchContext {};
+        return TileXR::TILEXR_ERROR_NOT_INITIALIZED;
+    }
     ret = TileXRGetCommArgsDev(comm, context.devArgs);
     if (ret != TileXR::TILEXR_SUCCESS) {
+        context = HostLaunchContext {};
         return ret;
+    }
+    if (context.devArgs == nullptr) {
+        context = HostLaunchContext {};
+        return TileXR::TILEXR_ERROR_NOT_INITIALIZED;
     }
     return TileXRCommNextMagic(comm, &context.magic);
 }

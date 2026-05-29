@@ -81,6 +81,14 @@ add_executable(test_tilexr_comm_next_magic
     unit/test_tilexr_comm_next_magic.cpp
 )
 
+add_executable(test_prepare_host_launch_context
+    unit/test_prepare_host_launch_context.cpp
+)
+
+target_include_directories(test_prepare_host_launch_context PRIVATE
+    ${TILEXR_ROOT}/src/collectives/host
+)
+
 if(TILEXR_COLLECTIVES_IN_TREE)
     set(TILEXR_COLLECTIVES_TEST_TARGET tilexr-collectives)
     set(TILEXR_COMM_TEST_TARGET tile-comm)
@@ -173,15 +181,21 @@ target_link_libraries(test_tilexr_comm_next_magic
     ${TILEXR_COMM_TEST_TARGET}
 )
 
+target_link_libraries(test_prepare_host_launch_context
+    ${TILEXR_COLLECTIVES_TEST_TARGET}
+)
+
 add_test(NAME test_tilexr_collectives_api COMMAND test_tilexr_collectives_api)
 add_test(NAME test_tilexr_collectives_header_compile COMMAND test_tilexr_collectives_header_compile)
 add_test(NAME test_tilexr_collectives_stub_behavior COMMAND test_tilexr_collectives_stub_behavior)
 add_test(NAME test_tilexr_comm_next_magic COMMAND test_tilexr_comm_next_magic)
+add_test(NAME test_prepare_host_launch_context COMMAND test_prepare_host_launch_context)
 
 install(TARGETS
     test_tilexr_collectives_api
     test_tilexr_collectives_header_compile
     test_tilexr_collectives_stub_behavior
     test_tilexr_comm_next_magic
+    test_prepare_host_launch_context
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
