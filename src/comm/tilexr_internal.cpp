@@ -10,9 +10,9 @@
 #include "tilexr_internal.h"
 #include <map>
 #include <mutex>
+#include <cstdlib>
 #include <vector>
 #include "tilexr_log.h"
-#include <mki/utils/env/env.h>
 #include <runtime/kernel.h>
 #include "ccl_kernel_args.h"
 
@@ -291,7 +291,7 @@ int LoadMTE(TileXRType cclType, AscendCCLKernelArgs &args, uint32_t blockDim, Ti
         return TILEXR_ERROR_MKIRT;
     }
 
-    static const char *ENV = Mki::GetEnv("LCCL_PARALLEL");
+    static const char *ENV = std::getenv("LCCL_PARALLEL");
     if (ENV && (string(ENV) == "1" || string(ENV) == "true") && dataSize >= IPC_BUFF_MAX_SIZE) {
         TILEXR_LOG(ERROR) << ("LoadMTE args are invalid, because LCCL_PARALLEL is open, and dataSize is too big.");
         return TILEXR_ERROR_MKIRT;

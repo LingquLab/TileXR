@@ -2,6 +2,7 @@
 #include <iostream>
 #include <sstream>
 #include <string>
+#include <sys/stat.h>
 #include <vector>
 
 namespace {
@@ -41,6 +42,16 @@ void CheckNoNeedle(const std::string& path, const std::string& text, const std::
     }
 }
 
+void CheckPathMissing(const std::string& path)
+{
+    struct stat info {};
+    const std::string fullPath = RepoPath(path);
+    if (stat(fullPath.c_str(), &info) == 0) {
+        std::cerr << "unexpected MKI path still exists: " << path << std::endl;
+        ++g_failures;
+    }
+}
+
 void TestCommSourcesDoNotUseMkiLog()
 {
     const std::vector<std::string> paths = {
@@ -63,6 +74,7 @@ void TestCommSourcesDoNotUseMkiLog()
             CheckNoNeedle(path, text, needle);
         }
     }
+    CheckPathMissing("3rdparty/mki");
 }
 
 } // namespace

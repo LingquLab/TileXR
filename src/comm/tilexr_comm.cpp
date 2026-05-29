@@ -13,6 +13,7 @@
 
 #include <acl/acl_rt.h>
 #include <chrono>
+#include <cstdlib>
 #include <vector>
 #include <mutex>
 #include <map>
@@ -22,7 +23,6 @@
 #include <iomanip>
 
 #include "tilexr_log.h"
-#include "mki/utils/env/env.h"
 #include "tools/socket/tilexr_sock_exchange.h"
 
 #include "runtime/kernel.h"
@@ -343,7 +343,7 @@ int TileXRComm::InitCommon()
         TILEXR_LOG(ERROR) << "EnablePeerAccess failed!";
         return TILEXR_ERROR_INTERNAL;
     }
-    const char *lcclDeterministic = Mki::GetEnv("LCCL_DETERMINISTIC");
+    const char *lcclDeterministic = std::getenv("LCCL_DETERMINISTIC");
     if (lcclDeterministic && (string(lcclDeterministic) == "1" || string(lcclDeterministic) == "true")) {
         commArgs_.extraFlag |= ExtraFlag::DETERMINISTIC;
     }

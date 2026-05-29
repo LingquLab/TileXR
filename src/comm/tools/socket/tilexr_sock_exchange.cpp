@@ -13,6 +13,7 @@
 #include <sys/types.h>
 #include <fcntl.h>
 #include <cerrno>
+#include <cstdlib>
 #include <cstring>
 #include <set>
 #include <string>
@@ -28,7 +29,6 @@
 
 #include <acl/acl.h>
 #include <securec.h>
-#include <mki/utils/env/env.h>
 
 using namespace std;
 namespace TileXR {
@@ -139,7 +139,7 @@ int TileXRSockExchange::GetNodeNum()
 
 void TileXRSockExchange::GetIpAndPort()
 {
-    const char* env = Mki::GetEnv("TILEXR_COMM_ID");
+    const char* env = std::getenv("TILEXR_COMM_ID");
 
     if (env == nullptr or ParseIpAndPort(env, ip_, port_) != TILEXR_SUCCESS) {
         ip_ = TILEXR_LOCAL_SOCK_IP;
@@ -519,7 +519,7 @@ int BootstrapGetUniqueId(TileXRBootstrapHandle *handle, int commDomain)
     }
     int ret = 0; // EOK
 
-    const char* env = Mki::GetEnv("TILEXR_COMM_ID");
+    const char* env = std::getenv("TILEXR_COMM_ID");
     if (env) {
         TILEXR_LOG(INFO) << "TILEXR_COMM_ID set by environment to " << env;
         if (GetAddrFromString(&handle->addr, env) != TILEXR_SUCCESS) {
