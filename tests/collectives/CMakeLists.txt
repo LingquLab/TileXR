@@ -113,11 +113,17 @@ else()
 
     set(TILEXR_INSTALLED_INCLUDE_DIRS
         ${TILEXR_INSTALL_PREFIX}/include
+    )
+    foreach(_tilexr_installed_include_dir
         ${ASCEND_DRIVER_PATH}/kernel/inc
         ${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc/
         ${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc/runtime/
         ${ASCEND_HOME_PATH}/${ARCH}-linux/include/
     )
+        if(EXISTS "${_tilexr_installed_include_dir}")
+            list(APPEND TILEXR_INSTALLED_INCLUDE_DIRS "${_tilexr_installed_include_dir}")
+        endif()
+    endforeach()
 
     add_library(tilexr-comm-installed SHARED IMPORTED)
     set_target_properties(tilexr-comm-installed PROPERTIES
