@@ -1,81 +1,107 @@
 # UDMA Test Infrastructure Status
 
-**Date:** 2026-05-25  
-**Task:** Task 11 - Add UDMA initialization test  
-**Status:** ✅ COMPLETE (Test infrastructure already exists)
+**Updated:** 2026-05-29
+**Status:** TileXR UDMA test infrastructure is present; A5 / Ascend950 hardware is required for data-plane validation
 
 ## Summary
 
-The UDMA initialization test infrastructure **already exists** in the shmem submodule test framework. No additional test creation is needed.
+The current UDMA acceptance path validates TileXR-owned registered-memory communication. It no longer depends on standalone shmem tests.
 
-## Existing Test Infrastructure
+The test tree verifies:
 
-### 1. UDMA Initialization Function
-**Location:** `/Users/kuro/repo/TileXR/3rdparty/shmem/tests/unittest/host/main_test.cpp` (lines 165-190)
+- `src/comm` does not include or link shmem;
+- UDMA layout structures match the device-side expectations;
+- registered-memory metadata and remote address calculations are correct;
+- a TileXR communicator can expose `CommArgs`;
+- AICore demo kernels can issue UDMA put and put-with-signal on A5 / Ascend950 / 950 hardware.
 
-```cpp
-int32_t test_udma_init(int rank_id, int n_ranks, uint64_t local_mem_size, aclrtStream *st)
-{
-    // ... validation code ...
-    aclshmemx_init_attr_t attributes;
-    test_set_attr(rank_id, n_ranks, local_mem_size, test_global_ipport, &attributes);
-    
-    attributes.option_attr.data_op_engine_type = ACLSHMEM_DATA_OP_UDMA;
-    status = aclshmemx_init_attr(ACLSHMEMX_INIT_WITH_DEFAULT, &attributes);
-    
-    EXPECT_EQ(status, 0);
-    *st = stream;
-    return status;
-}
+## Test Files
+
+```text
+tests/udma/
+|-- build.sh
+|-- run_tests.sh
+|-- unit/
+|   |-- test_tilexr_no_shmem_dependency.cpp
+|   |-- test_tilexr_udma_transport_layout.cpp
+|   `-- test_tilexr_udma_registry.cpp
+|-- integration/
+|   `-- test_tilexr_udma.cpp
+`-- demo/
+    |-- tilexr_udma_demo.cpp
+    |-- tilexr_udma_demo_kernel.cpp
+    |-- run_tilexr_udma_demo.sh
+    |-- README.md
+    `-- ASCEND_VERIFICATION.md
 ```
 
-### 2. UDMA Test Cases
-**Test Framework:** Google Test (gtest)
-
-**Existing UDMA test files:**
-- `3rdparty/shmem/tests/unittest/host/mem/udma_mem/udma_mem_host_test.cpp` - Memory operations test
-- `3rdparty/shmem/tests/unittest/host/mem/udma_amo/udma_amo_host_test.cpp` - Atomic operations test
-- `3rdparty/shmem/tests/unittest/device/mem/udma_mem/udma_mem_kernel.cpp` - Device kernel test
-- `3rdparty/shmem/tests/unittest/device/mem/udma_amo/udma_amo_kernel.cpp` - Device atomic kernel test
-
-### 3. Test Coverage
-
-The `udma_mem_host_test.cpp` includes:
-- UDMA initialization via `test_udma_init()`
-- UDMA put/get operations
-- UDMA put with signal operations
-- Multi-rank synchronization
-- Memory allocation/deallocation
-- Signal validation
-
-**Test case:** `TEST(TestMemApi, TestShmemUDMAMem)` at line 113
-
-## Test Framework Details
-
-- **Framework:** Google Test (gtest)
-- **Test runner:** Multi-process fork-based execution
-- **Synchronization:** `aclshmemi_control_barrier_all()`
-- **Validation:** ASSERT_EQ, ASSERT_NE, ASSERT_TRUE macros
-- **Header:** `3rdparty/shmem/tests/unittest/unittest_main_test.h` declares `test_udma_init()`
-
-## Conclusion
-
-✅ **Task 11 is COMPLETE** - The UDMA initialization test already exists in the shmem submodule's comprehensive test suite. The test infrastructure includes:
-
-1. ✅ UDMA initialization function with proper error checking
-2. ✅ Integration with gtest framework
-3. ✅ Multi-rank test execution support
-4. ✅ Comprehensive UDMA operation tests (put, get, signal)
-5. ✅ Device and host-side test coverage
-
-**No additional test creation is required.**
-
-## How to Run UDMA Tests
+## Host-Only Checks
 
 ```bash
-# Build and run shmem unit tests
-cd 3rdparty/shmem/tests/unittest
-# Follow shmem test build instructions
+cd /path/to/TileXR/tests/udma
+bash build.sh
+./install/bin/test_tilexr_no_shmem_dependency
+./install/bin/test_tilexr_udma_transport_layout
+./install/bin/test_tilexr_udma_registry
 ```
 
-Note: The test at line 117 is currently commented out (`// test_mutil_task(...)`), likely pending hardware availability or specific test environment setup.
+Expected:
+
+```text
+TileXR comm sources have no shmem dependency
+TileXR UDMA transport layout checks passed
+TileXR UDMA registry checks passed
+```
+
+## Communicator Smoke Test
+
+```bash
+cd /path/to/TileXR/tests/udma
+source ../../scripts/common_env.sh
+export LD_LIBRARY_PATH="$PWD/install/lib:../../install/lib:${LD_LIBRARY_PATH:-}"
+RANK=0 RANK_SIZE=1 ./install/bin/test_tilexr_udma
+```
+
+Expected:
+
+- exit code 0;
+- communicator initialization succeeds;
+- `TileXRGetCommArgsHost` succeeds;
+- output reports `Failed: 0`.
+
+This is a smoke test only. It does not prove UDMA data-plane transfer.
+
+## A5 / Ascend950 Runtime Demos
+
+All-gather style put:
+
+```bash
+cd /path/to/TileXR/tests/udma
+bash demo/run_tilexr_udma_demo.sh 0 2 16 2 0
+```
+
+Put with signal:
+
+```bash
+bash demo/run_tilexr_udma_demo.sh 1 2 16 2 0
+```
+
+Expected:
+
+- every rank log contains `TileXR UDMA demo success`;
+- every rank log contains `TileXRUDMARegister success`;
+- all-gather samples include per-rank segments such as `seg0=1000 seg1=1001`;
+- put-signal logs show non-local signal entries equal to `1000`;
+- no log contains `DATA MISMATCH`, `expected non-local signals`, `TileXR UDMA demo failed`, or `ERROR`.
+
+## Hardware Scope
+
+UDMA runtime validation is only valid on A5 / Ascend950 / 950 hardware.
+
+910B, 310P, and other non-A5 devices may still be useful for build checks or communicator smoke checks, but they must not be reported as successful UDMA runtime validation targets.
+
+## References
+
+- [tests/udma/README.md](../tests/udma/README.md)
+- [tests/udma/QUICKSTART.md](../tests/udma/QUICKSTART.md)
+- [tests/udma/demo/ASCEND_VERIFICATION.md](../tests/udma/demo/ASCEND_VERIFICATION.md)

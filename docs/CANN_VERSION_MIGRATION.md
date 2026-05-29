@@ -7,6 +7,8 @@ This document records lessons learned and best practices when migrating TileXR a
 **Date**: 2026-05-25  
 **Impact**: Build system, include paths, library locations
 
+> Current note: the active TileXR UDMA implementation does not link shmem. The shmem section below is retained as historical context from an earlier UDMA design and for anyone comparing against `3rdparty/shmem`; it is not a required step for building current `tile-comm`.
+
 ### Breaking Changes
 
 #### 1. Include Path Structure
@@ -87,7 +89,9 @@ target_link_directories(tile-comm
 **Symptoms**:
 - `/usr/bin/ld: cannot find -lascend_hal: No such file or directory`
 
-#### 3. shmem Library Changes
+#### 3. Historical shmem Library Changes
+
+These notes applied to an earlier shmem-backed UDMA proposal.
 
 **CANN 9.0.0 shmem**:
 - Library name: `libaclshmem.so`
@@ -99,7 +103,7 @@ target_link_directories(tile-comm
 - Install path: `install/shmem/lib/` (restructured)
 - Public API: `aclshmem_instance_ctx` **without** `udma_info` field (removed)
 
-**Fix**:
+**Historical fix**:
 ```cmake
 # Old (9.0.0)
 find_library(SHMEM_HOST_LIB aclshmem
@@ -112,7 +116,7 @@ find_library(SHMEM_HOST_LIB shmem
     REQUIRED)
 ```
 
-**Code fix** (requires custom shmem API):
+**Historical code fix** (requires custom shmem API):
 ```cpp
 // Old (9.0.0) - Direct access
 aclshmem_instance_ctx* ctx = aclshmemx_instance_ctx_get();
@@ -131,8 +135,9 @@ When upgrading CANN versions:
 - [ ] Check `${ASCEND_HOME_PATH}` directory structure
 - [ ] Update all `include_directories()` to use new paths
 - [ ] Update all `target_link_directories()` to include new library locations
-- [ ] Verify library names haven't changed (e.g., `libaclshmem.so` → `libshmem.so`)
-- [ ] Check for API changes in dependencies (especially shmem)
+- [ ] Verify library names used by active targets have not changed
+- [ ] Check for API changes in dependencies used by active targets
+- [ ] Verify current `install/lib/libtile-comm.so` does not unexpectedly link shmem
 - [ ] Test build on clean environment
 - [ ] Update CLAUDE.md with version-specific notes
 - [ ] Document breaking changes in this file
@@ -162,22 +167,21 @@ ldd /path/to/libtile-comm.so
 grep -r "target_link_directories" CMakeLists.txt
 ```
 
-#### Verifying shmem API
+#### Verifying shmem is not an active TileXR dependency
 
 ```bash
-# Check shmem library symbols
-nm -D /path/to/libshmem.so | grep udma
-
-# Check shmem headers
-grep -r "udma_info" ${SHMEM_ROOT}/include/
+ldd /path/to/libtile-comm.so | grep -i shmem || true
+rg -n '#include "shmem\.h"|aclshmem|ACLSHMEM' src/comm src/include/tilexr_udma.h
 ```
+
+Expected for the current implementation: no matches.
 
 ### Common Pitfalls
 
 1. **Assuming backward compatibility**: CANN minor versions can have breaking changes
 2. **Hardcoded paths**: Always use `${ASCEND_HOME_PATH}` and `${ARCH}` variables
 3. **Incomplete path updates**: Must update both include AND link directories
-4. **Ignoring submodule changes**: shmem API changes require code modifications, not just build fixes
+4. **Confusing historical shmem notes with current build requirements**: current TileXR UDMA uses `src/comm/udma`, not a shmem link dependency
 5. **Missing environment variables**: Always source `common_env.sh` before building
 
 ### Version Detection
@@ -204,7 +208,7 @@ endif()
 Monitor these areas for potential changes:
 
 - AscendC SIMT API evolution
-- shmem API stability (currently requires custom patches)
+- HCCP/RA runtime symbol stability for TileXR-owned UDMA transport
 - Runtime library reorganization
 - New hardware support (Ascend 960, etc.)
 
@@ -223,9 +227,10 @@ Monitor these areas for potential changes:
 ## Related Documents
 
 - [TileXR CLAUDE.md](../CLAUDE.md) - Build instructions and architecture
-- [shmem Integration Guide](./SHMEM_INTEGRATION.md) - Custom shmem API documentation
-- [UDMA Integration Report](/tmp/udma_integration_summary.md) - Detailed integration notes
+- [shmem Integration Status](./SHMEM_INTEGRATION.md) - Current shmem status and historical notes
+- [UDMA Integration Summary](../UDMA_INTEGRATION_SUMMARY.md) - Current TileXR UDMA architecture notes
 
 ## Changelog
 
-- **2026-05-25**: Initial document, CANN 9.0.0 → 9.1.0 migration notes
+- **2026-05-29**: Marked shmem-backed UDMA notes as historical; current TileXR-owned UDMA does not link shmem
+- **2026-05-25**: Initial document, CANN 9.0.0 -> 9.1.0 migration notes

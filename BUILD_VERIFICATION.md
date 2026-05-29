@@ -1,110 +1,148 @@
-# TileXR UDMA Integration - Build Verification Report
+# TileXR Build Verification
 
-**Date:** 2026-05-25  
-**Task:** Task 9 - Build verification of host-side UDMA integration  
-**Status:** Integration complete, awaiting shmem library build
+**Updated:** 2026-05-29
 
-## Summary
+This checklist reflects the current TileXR codebase. The core runtime builds `libtile-comm.so` without a compile-time or link-time shmem dependency.
 
-The host-side UDMA integration has been successfully integrated into the TileXR codebase. All code changes and CMake configurations are in place. The build currently fails at the CMake configuration stage due to the missing shmem library, which is **expected and acceptable** at this stage.
+## Environment
 
-## Build Attempt Results
-
-### 1. SHMEM Library Build Attempt
-
-**Location:** `/Users/kuro/repo/TileXR/3rdparty/shmem`
-
-**Result:** Failed (expected on macOS)
-
-**Reason:** 
-- Requires `bisheng` compiler (Huawei's compiler for Ascend NPU)
-- Requires CANN toolkit and Ascend hardware environment
-- Only buildable on Linux with proper Ascend development environment
-
-**Error:** `bisheng: command not found`
-
-This is expected since:
-- Development is on macOS
-- shmem is designed for Ascend NPU hardware on Linux (Ubuntu 20.04)
-- Requires CANN 9.0.0-beta.1 and Ascend driver ≥ 25.5.0
-
-### 2. TileXR CMake Configuration
-
-**Command:** `cmake -DCMAKE_INSTALL_PREFIX=../install ..`
-
-**Result:** Failed at library detection stage (expected)
-
-**Error:**
-```
-CMake Error at src/comm/CMakeLists.txt:25 (find_library):
-  Could not find SHMEM_HOST_LIB using the following names: aclshmem
+```bash
+cd /path/to/TileXR
+source scripts/common_env.sh
+npu-smi info
 ```
 
-**Analysis:**
-- CMake correctly searches for `aclshmem` library
-- Search paths are properly configured: `${SHMEM_ROOT}/lib` and `${SHMEM_ROOT}/build/lib`
-- Library is marked as `REQUIRED`, causing configuration to fail when not found
-- This confirms the integration is working as designed
+Expected:
 
-## Integration Verification
+- CANN 9.1.0 environment is visible through `ASCEND_HOME_PATH`.
+- `scripts/common_env.sh` detects architecture and SOC information.
+- NPU driver version is 25.5.0 or later.
 
-### ✅ Code Integration Complete
+## Build Core Runtime
 
-1. **UDMA Manager Implementation** (`src/comm/udma_manager.cpp`)
-   - Host-side UDMA initialization and management
-   - Peer memory registration and handle exchange
-   - Integration with shmem library APIs
+```bash
+cmake -S . -B /tmp/tilexr-build -DCMAKE_INSTALL_PREFIX="$PWD/install"
+cmake --build /tmp/tilexr-build --target tile-comm -j"$(nproc)"
+cmake --install /tmp/tilexr-build
+```
 
-2. **Header Files** (`include/tilexr_udma.h`)
-   - Public API for UDMA operations
-   - Type definitions and error codes
+Expected:
 
-3. **CMake Integration** (`src/comm/CMakeLists.txt`)
-   - Properly finds and links shmem library
-   - Includes shmem headers from `${SHMEM_ROOT}/include`
-   - Links against `aclshmem` library
+```bash
+test -f install/lib/libtile-comm.so
+```
 
-### 📋 Next Steps Required
+Check dynamic dependencies:
 
-To complete the build on a proper Ascend development environment:
+```bash
+ldd install/lib/libtile-comm.so | grep -E "ascendcl|runtime|ascend_hal|profapi"
+ldd install/lib/libtile-comm.so | grep -i shmem || true
+```
 
-1. **Build shmem library:**
-   ```bash
-   cd 3rdparty/shmem
-   bash scripts/build.sh
-   source install/set_env.sh
-   ```
+Expected:
 
-2. **Build TileXR:**
-   ```bash
-   source common_env.sh
-   rm -rf build && mkdir build && cd build
-   cmake -DCMAKE_INSTALL_PREFIX=../install ..
-   make -j$(nproc)
-   make install
-   ```
+- CANN runtime libraries are resolved.
+- The shmem grep prints nothing for the current TileXR UDMA implementation.
 
-3. **Verify installation:**
-   - Check for `install/lib/libtile-comm.so`
-   - Verify UDMA symbols are present in the library
+## Build UDMA Tests
 
-## Environment Requirements
+```bash
+cd tests/udma
+bash build.sh
+```
 
-For successful build, the following environment is required:
+Expected host-side artifacts:
 
-- **OS:** Ubuntu 20.04 LTS
-- **Hardware:** Ascend 910B/910A5/310P3
-- **CANN:** 9.0.0-beta.1
-- **Driver:** NPU driver ≥ 25.5.0
-- **Compiler:** bisheng (Huawei's LLVM-based compiler)
-- **User:** root (for device access)
+```bash
+test -x install/bin/test_tilexr_no_shmem_dependency
+test -x install/bin/test_tilexr_udma_transport_layout
+test -x install/bin/test_tilexr_udma_registry
+test -x install/bin/test_tilexr_udma
+```
 
-## Conclusion
+If `bisheng` is available, the AICore demo artifacts should also exist:
 
-The UDMA integration is **code-complete and properly configured**. The build failure is expected and occurs only because:
-1. Development environment is macOS (not Linux)
-2. shmem library has not been built yet (requires Ascend hardware environment)
+```bash
+test -x install/bin/tilexr_udma_demo
+test -f install/lib/libtilexr_udma_demo_kernel.so
+```
 
-Once the code is deployed to a proper Ascend development environment with CANN toolkit installed, the build should succeed after building the shmem library first.
+If `bisheng` is unavailable, `build.sh` may skip only the demo target while still building host-only tests.
 
-**Status:** ✅ INTEGRATION VERIFIED - Ready for Ascend environment build
+## Run Host Checks
+
+```bash
+cd /path/to/TileXR/tests/udma
+./install/bin/test_tilexr_no_shmem_dependency
+./install/bin/test_tilexr_udma_transport_layout
+./install/bin/test_tilexr_udma_registry
+
+source ../../scripts/common_env.sh
+export LD_LIBRARY_PATH="$PWD/install/lib:../../install/lib:${LD_LIBRARY_PATH:-}"
+RANK=0 RANK_SIZE=1 ./install/bin/test_tilexr_udma
+```
+
+Expected:
+
+- `TileXR comm sources have no shmem dependency`
+- `TileXR UDMA transport layout checks passed`
+- `TileXR UDMA registry checks passed`
+- `test_tilexr_udma` exits with `Failed: 0`
+
+## Run UDMA Data-Plane Demos
+
+Run only on A5 / Ascend950 / 950 hardware:
+
+```bash
+cd /path/to/TileXR/tests/udma
+bash demo/run_tilexr_udma_demo.sh 0 2 16 2 0
+bash demo/run_tilexr_udma_demo.sh 1 2 16 2 0
+```
+
+Expected:
+
+- every rank exits 0;
+- every rank log includes `TileXR UDMA demo success`;
+- every rank log includes `TileXRUDMARegister success`;
+- no rank log includes `DATA MISMATCH`, signal mismatch text, or `ERROR`.
+
+Quick log check:
+
+```bash
+latest=$(ls -td logs/tilexr_udma_demo_* | head -n1)
+grep -R "TileXR UDMA demo success" "$latest"
+grep -R "TileXRUDMARegister success" "$latest"
+grep -R "DATA MISMATCH\\|expected non-local signals\\|TileXR UDMA demo failed\\|ERROR" "$latest" || true
+```
+
+The final grep should print nothing for a clean run.
+
+## Common Failures
+
+| Symptom | Likely Cause | Action |
+| --- | --- | --- |
+| Missing CANN headers | `common_env.sh` not sourced or CANN path mismatch | Source the environment and confirm CANN 9.1.0 layout |
+| Cannot find `ascend_hal` | `devlib` path missing | Use the current top-level CMake configuration |
+| Demo target skipped | `bisheng` unavailable | Install/compiler configure `bisheng`, or run host-only tests |
+| UDMA disabled in demo | Unsupported hardware or HCCP/RA runtime unavailable | Use A5 / Ascend950 / 950 and check CANN driver/runtime libraries |
+| shmem appears in `ldd libtile-comm.so` | Unexpected dependency regression | Inspect `src/comm/CMakeLists.txt` and source includes |
+
+## Report Template
+
+```text
+Machine:
+NPU model:
+NPU count:
+CANN version:
+Driver version:
+TileXR commit:
+
+Core build:
+ldd shmem check:
+UDMA host tests:
+UDMA all-gather demo:
+UDMA put-signal demo:
+Log directory:
+
+Errors or warnings:
+```
