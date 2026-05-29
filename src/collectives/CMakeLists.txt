@@ -13,6 +13,9 @@ target_include_directories(tilexr-collectives
         PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/../include
         ${ASCEND_DRIVER_PATH}/kernel/inc
+        ${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc/
+        ${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc/runtime/
+        ${ASCEND_HOME_PATH}/${ARCH}-linux/include/
         PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
 )

@@ -61,6 +61,7 @@ void TestCollectivesHeaderDeclaresPublicApis()
 {
     const std::string path = "src/include/tilexr_collectives.h";
     const auto text = ReadFile(path);
+    CheckContains(path, text, "#ifdef __cplusplus");
     CheckContains(path, text, "extern \"C\"");
     CheckContains(path, text, "int TileXRAllGather(void *sendBuf, void *recvBuf, int64_t sendCount,");
     CheckContains(path, text, "int TileXRAllToAll(void *sendBuf, void *recvBuf, int64_t sendCount,");

@@ -10,14 +10,15 @@
 #ifndef TILEXR_COLLECTIVES_H
 #define TILEXR_COLLECTIVES_H
 
+#ifdef __cplusplus
+
 #include <cstdint>
 #include "acl/acl_base.h"
 #include "tilexr_api.h"
 #include "tilexr_types.h"
 
-#ifdef __cplusplus
+// The collectives public API is currently C++ header-compatible because it reuses TileXR namespace datatypes.
 extern "C" {
-#endif // __cplusplus
 
 int TileXRAllGather(void *sendBuf, void *recvBuf, int64_t sendCount,
                     TileXR::TileXRDataType dataType, TileXRCommPtr comm,
@@ -26,8 +27,8 @@ int TileXRAllToAll(void *sendBuf, void *recvBuf, int64_t sendCount,
                    TileXR::TileXRDataType dataType, TileXRCommPtr comm,
                    aclrtStream stream);
 
-#ifdef __cplusplus
 }
+
 #endif // __cplusplus
 
 #endif // TILEXR_COLLECTIVES_H

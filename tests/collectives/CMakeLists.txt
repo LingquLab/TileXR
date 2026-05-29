@@ -10,6 +10,26 @@ set(CMAKE_CXX_STANDARD 14)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 set(TILEXR_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../..")
+set(ASCEND_HOME_PATH $ENV{ASCEND_HOME_PATH})
+set(ARCH $ENV{ARCH})
+if(NOT ARCH)
+    set(ARCH $ENV{TILEXR_OS_ARCH})
+endif()
+if(NOT ARCH)
+    execute_process(
+        COMMAND uname -m
+        OUTPUT_VARIABLE ARCH
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
+    if(ARCH STREQUAL "arm64")
+        set(ARCH "aarch64")
+    endif()
+endif()
+
+set(ASCEND_DRIVER_PATH $ENV{ASCEND_DRIVER_PATH})
+if(NOT ASCEND_DRIVER_PATH)
+    set(ASCEND_DRIVER_PATH "/usr/local/Ascend/driver")
+endif()
 
 add_executable(test_tilexr_collectives_api
     unit/test_tilexr_collectives_api.cpp
@@ -19,7 +39,35 @@ target_compile_definitions(test_tilexr_collectives_api PRIVATE
     TILEXR_SOURCE_ROOT="${TILEXR_ROOT}"
 )
 
+add_executable(test_tilexr_collectives_header_compile
+    unit/test_tilexr_collectives_header_compile.cpp
+)
+
+target_include_directories(test_tilexr_collectives_header_compile PRIVATE
+    ${TILEXR_ROOT}/src/include
+    ${TILEXR_ROOT}/3rdparty
+    ${ASCEND_DRIVER_PATH}/kernel/inc
+    ${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc/
+    ${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc/runtime/
+    ${ASCEND_HOME_PATH}/${ARCH}-linux/include/
+)
+
+find_library(TILEXR_COLLECTIVES_LIB tilexr-collectives
+    HINTS
+    "${TILEXR_ROOT}/install/lib"
+    "${TILEXR_ROOT}/build/src/collectives"
+    "/tmp/tilexr-install-split-collectives/lib"
+    "/tmp/tilexr-build-split-collectives/src/collectives"
+)
+
+if(TILEXR_COLLECTIVES_LIB)
+    target_link_libraries(test_tilexr_collectives_header_compile
+        ${TILEXR_COLLECTIVES_LIB}
+    )
+endif()
+
 install(TARGETS
     test_tilexr_collectives_api
+    test_tilexr_collectives_header_compile
     RUNTIME DESTINATION ${CMAKE_INSTALL_PREFIX}/bin
 )
