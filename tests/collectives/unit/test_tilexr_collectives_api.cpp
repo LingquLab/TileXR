@@ -125,12 +125,30 @@ void TestCollectivesBuildDefinesSeparateSharedLibrary()
     CheckDoesNotContain(path, text, "${CMAKE_INSTALL_PREFIX}/include");
 }
 
-void TestCollectivesTestBuildUsesExplicitLibraryHint()
+void TestRootBuildRegistersCollectivesTests()
+{
+    const std::string path = "CMakeLists.txt";
+    const auto text = ReadFile(path);
+    CheckContains(path, text, "option(TILEXR_BUILD_TESTS \"Build TileXR tests\" OFF)");
+    CheckContains(path, text, "include(CTest)");
+    CheckContains(path, text, "if(TILEXR_BUILD_COLLECTIVES)");
+    CheckContains(path, text, "add_subdirectory(src/collectives)");
+    CheckContains(path, text, "if(BUILD_TESTING OR TILEXR_BUILD_TESTS)");
+    CheckContains(path, text, "add_subdirectory(tests/collectives)");
+}
+
+void TestCollectivesTestBuildSupportsInTreeAndInstallPrefixModes()
 {
     const std::string path = "tests/collectives/CMakeLists.txt";
     const auto text = ReadFile(path);
     CheckContains(path, text, "include(GNUInstallDirs)");
     CheckContains(path, text, "enable_testing()");
+    CheckContains(path, text, "set(TILEXR_COLLECTIVES_IN_TREE OFF)");
+    CheckContains(path, text, "if(TARGET tilexr-collectives)");
+    CheckContains(path, text, "set(TILEXR_COLLECTIVES_IN_TREE ON)");
+    CheckContains(path, text, "if(TILEXR_COLLECTIVES_IN_TREE)");
+    CheckContains(path, text, "set(TILEXR_COLLECTIVES_TEST_TARGET tilexr-collectives)");
+    CheckContains(path, text, "else()");
     CheckContains(path, text, "set(TILEXR_INSTALL_PREFIX \"${TILEXR_ROOT}/install\" CACHE PATH");
     CheckContains(path, text, "set(TILEXR_INSTALL_LIBDIR \"${CMAKE_INSTALL_LIBDIR}\" CACHE STRING");
     CheckContains(path, text, "if(IS_ABSOLUTE \"${TILEXR_INSTALL_LIBDIR}\")");
@@ -146,8 +164,10 @@ void TestCollectivesTestBuildUsesExplicitLibraryHint()
     CheckContains(path, text, "IMPORTED_LOCATION \"${TILEXR_LIB}\"");
     CheckContains(path, text, "IMPORTED_LOCATION \"${TILEXR_COLLECTIVES_LIB}\"");
     CheckContains(path, text, "INTERFACE_LINK_LIBRARIES tilexr-comm-installed");
-    CheckContains(path, text, "target_link_libraries(test_tilexr_collectives_header_compile\n    tilexr-collectives-installed\n)");
-    CheckContains(path, text, "target_link_libraries(test_tilexr_collectives_stub_behavior\n    tilexr-collectives-installed\n)");
+    CheckContains(path, text, "set(TILEXR_COLLECTIVES_TEST_TARGET tilexr-collectives-installed)");
+    CheckContains(path, text, "endif()");
+    CheckContains(path, text, "target_link_libraries(test_tilexr_collectives_header_compile\n    ${TILEXR_COLLECTIVES_TEST_TARGET}\n)");
+    CheckContains(path, text, "target_link_libraries(test_tilexr_collectives_stub_behavior\n    ${TILEXR_COLLECTIVES_TEST_TARGET}\n)");
     CheckContains(path, text, "RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}");
     CheckContains(path, text, "add_executable(test_tilexr_collectives_stub_behavior");
     CheckContains(path, text, "unit/test_tilexr_collectives_stub_behavior.cpp");
@@ -158,6 +178,7 @@ void TestCollectivesTestBuildUsesExplicitLibraryHint()
     CheckDoesNotContain(path, text, "${TILEXR_ROOT}/src/include");
     CheckDoesNotContain(path, text, "${TILEXR_ROOT}/3rdparty");
     CheckDoesNotContain(path, text, "${TILEXR_ROOT}/build");
+    CheckDoesNotContain(path, text, "${CMAKE_SOURCE_DIR}/src/include");
     CheckDoesNotContain(path, text, "${CMAKE_INSTALL_PREFIX}/bin");
     CheckDoesNotContain(path, text, "${TILEXR_INSTALL_PREFIX}/lib");
     CheckDoesNotContain(path, text, "target_include_directories(test_tilexr_collectives_header_compile");
@@ -177,7 +198,8 @@ int main()
     TestCommBuildDoesNotReferenceCollectives();
     TestCommBuildInstallsPublicHeadersAndKeepsLinksPrivate();
     TestCollectivesBuildDefinesSeparateSharedLibrary();
-    TestCollectivesTestBuildUsesExplicitLibraryHint();
+    TestRootBuildRegistersCollectivesTests();
+    TestCollectivesTestBuildSupportsInTreeAndInstallPrefixModes();
     if (g_failures != 0) {
         std::cerr << g_failures << " collectives API split checks failed" << std::endl;
         return 1;

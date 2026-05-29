@@ -42,6 +42,11 @@ if(NOT ASCEND_DRIVER_PATH)
     set(ASCEND_DRIVER_PATH "/usr/local/Ascend/driver")
 endif()
 
+set(TILEXR_COLLECTIVES_IN_TREE OFF)
+if(TARGET tilexr-collectives)
+    set(TILEXR_COLLECTIVES_IN_TREE ON)
+endif()
+
 add_executable(test_tilexr_collectives_api
     unit/test_tilexr_collectives_api.cpp
 )
@@ -58,78 +63,84 @@ add_executable(test_tilexr_collectives_stub_behavior
     unit/test_tilexr_collectives_stub_behavior.cpp
 )
 
-if(NOT EXISTS "${TILEXR_INSTALL_PREFIX}/include/tilexr_collectives.h")
-    message(FATAL_ERROR
-        "Installed tilexr_collectives.h not found at ${TILEXR_INSTALL_PREFIX}/include/tilexr_collectives.h. "
-        "Run cmake --install after building TileXR with -DTILEXR_BUILD_COLLECTIVES=ON or set TILEXR_INSTALL_PREFIX."
-    )
-endif()
-
-if(NOT TILEXR_COLLECTIVES_LIB)
-    find_library(TILEXR_COLLECTIVES_LIB_FOUND tilexr-collectives
-        HINTS
-        "${TILEXR_INSTALL_LIB_SEARCH_DIR}"
-        NO_DEFAULT_PATH
-    )
-    if(TILEXR_COLLECTIVES_LIB_FOUND)
-        set(TILEXR_COLLECTIVES_LIB "${TILEXR_COLLECTIVES_LIB_FOUND}")
+if(TILEXR_COLLECTIVES_IN_TREE)
+    set(TILEXR_COLLECTIVES_TEST_TARGET tilexr-collectives)
+else()
+    if(NOT EXISTS "${TILEXR_INSTALL_PREFIX}/include/tilexr_collectives.h")
+        message(FATAL_ERROR
+            "Installed tilexr_collectives.h not found at ${TILEXR_INSTALL_PREFIX}/include/tilexr_collectives.h. "
+            "Run cmake --install after building TileXR with -DTILEXR_BUILD_COLLECTIVES=ON or set TILEXR_INSTALL_PREFIX."
+        )
     endif()
-endif()
 
-if(NOT TILEXR_COLLECTIVES_LIB)
-    message(FATAL_ERROR
-        "libtilexr-collectives.so not found under ${TILEXR_INSTALL_LIB_SEARCH_DIR}. "
-        "Build/install TileXR with -DTILEXR_BUILD_COLLECTIVES=ON and set TILEXR_INSTALL_PREFIX, "
-        "or pass -DTILEXR_COLLECTIVES_LIB=/path/to/libtilexr-collectives.so."
-    )
-endif()
-
-if(NOT TILEXR_LIB)
-    find_library(TILEXR_LIB_FOUND tile-comm
-        HINTS
-        "${TILEXR_INSTALL_LIB_SEARCH_DIR}"
-        NO_DEFAULT_PATH
-    )
-    if(TILEXR_LIB_FOUND)
-        set(TILEXR_LIB "${TILEXR_LIB_FOUND}")
+    if(NOT TILEXR_COLLECTIVES_LIB)
+        find_library(TILEXR_COLLECTIVES_LIB_FOUND tilexr-collectives
+            HINTS
+            "${TILEXR_INSTALL_LIB_SEARCH_DIR}"
+            NO_DEFAULT_PATH
+        )
+        if(TILEXR_COLLECTIVES_LIB_FOUND)
+            set(TILEXR_COLLECTIVES_LIB "${TILEXR_COLLECTIVES_LIB_FOUND}")
+        endif()
     endif()
-endif()
 
-if(NOT TILEXR_LIB)
-    message(FATAL_ERROR
-        "libtile-comm.so not found under ${TILEXR_INSTALL_LIB_SEARCH_DIR}. "
-        "Build/install TileXR and set TILEXR_INSTALL_PREFIX, "
-        "or pass -DTILEXR_LIB=/path/to/libtile-comm.so."
+    if(NOT TILEXR_COLLECTIVES_LIB)
+        message(FATAL_ERROR
+            "libtilexr-collectives.so not found under ${TILEXR_INSTALL_LIB_SEARCH_DIR}. "
+            "Build/install TileXR with -DTILEXR_BUILD_COLLECTIVES=ON and set TILEXR_INSTALL_PREFIX, "
+            "or pass -DTILEXR_COLLECTIVES_LIB=/path/to/libtilexr-collectives.so."
+        )
+    endif()
+
+    if(NOT TILEXR_LIB)
+        find_library(TILEXR_LIB_FOUND tile-comm
+            HINTS
+            "${TILEXR_INSTALL_LIB_SEARCH_DIR}"
+            NO_DEFAULT_PATH
+        )
+        if(TILEXR_LIB_FOUND)
+            set(TILEXR_LIB "${TILEXR_LIB_FOUND}")
+        endif()
+    endif()
+
+    if(NOT TILEXR_LIB)
+        message(FATAL_ERROR
+            "libtile-comm.so not found under ${TILEXR_INSTALL_LIB_SEARCH_DIR}. "
+            "Build/install TileXR and set TILEXR_INSTALL_PREFIX, "
+            "or pass -DTILEXR_LIB=/path/to/libtile-comm.so."
+        )
+    endif()
+
+    set(TILEXR_INSTALLED_INCLUDE_DIRS
+        ${TILEXR_INSTALL_PREFIX}/include
+        ${ASCEND_DRIVER_PATH}/kernel/inc
+        ${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc/
+        ${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc/runtime/
+        ${ASCEND_HOME_PATH}/${ARCH}-linux/include/
     )
+
+    add_library(tilexr-comm-installed SHARED IMPORTED)
+    set_target_properties(tilexr-comm-installed PROPERTIES
+        IMPORTED_LOCATION "${TILEXR_LIB}"
+        INTERFACE_INCLUDE_DIRECTORIES "${TILEXR_INSTALLED_INCLUDE_DIRS}"
+    )
+
+    add_library(tilexr-collectives-installed SHARED IMPORTED)
+    set_target_properties(tilexr-collectives-installed PROPERTIES
+        IMPORTED_LOCATION "${TILEXR_COLLECTIVES_LIB}"
+        INTERFACE_INCLUDE_DIRECTORIES "${TILEXR_INSTALLED_INCLUDE_DIRS}"
+        INTERFACE_LINK_LIBRARIES tilexr-comm-installed
+    )
+
+    set(TILEXR_COLLECTIVES_TEST_TARGET tilexr-collectives-installed)
 endif()
-
-set(TILEXR_INSTALLED_INCLUDE_DIRS
-    ${TILEXR_INSTALL_PREFIX}/include
-    ${ASCEND_DRIVER_PATH}/kernel/inc
-    ${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc/
-    ${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc/runtime/
-    ${ASCEND_HOME_PATH}/${ARCH}-linux/include/
-)
-
-add_library(tilexr-comm-installed SHARED IMPORTED)
-set_target_properties(tilexr-comm-installed PROPERTIES
-    IMPORTED_LOCATION "${TILEXR_LIB}"
-    INTERFACE_INCLUDE_DIRECTORIES "${TILEXR_INSTALLED_INCLUDE_DIRS}"
-)
-
-add_library(tilexr-collectives-installed SHARED IMPORTED)
-set_target_properties(tilexr-collectives-installed PROPERTIES
-    IMPORTED_LOCATION "${TILEXR_COLLECTIVES_LIB}"
-    INTERFACE_INCLUDE_DIRECTORIES "${TILEXR_INSTALLED_INCLUDE_DIRS}"
-    INTERFACE_LINK_LIBRARIES tilexr-comm-installed
-)
 
 target_link_libraries(test_tilexr_collectives_header_compile
-    tilexr-collectives-installed
+    ${TILEXR_COLLECTIVES_TEST_TARGET}
 )
 
 target_link_libraries(test_tilexr_collectives_stub_behavior
-    tilexr-collectives-installed
+    ${TILEXR_COLLECTIVES_TEST_TARGET}
 )
 
 add_test(NAME test_tilexr_collectives_api COMMAND test_tilexr_collectives_api)
