@@ -11,6 +11,7 @@
 #include "tilexr_internal.h"
 #include "udma/tilexr_udma_transport.h"
 
+#include <acl/acl_rt.h>
 #include <chrono>
 #include <vector>
 #include <mutex>
@@ -20,8 +21,7 @@
 #include <sstream>
 #include <iomanip>
 
-#include <hccl/hccl.h>
-#include "mki/utils/log/log.h"
+#include "tilexr_log.h"
 #include "mki/utils/env/env.h"
 #include "tools/socket/tilexr_sock_exchange.h"
 
@@ -42,7 +42,6 @@ enum TopologyType : int {
 
 using namespace std;
 using namespace chrono;
-using namespace Mki;
 
 namespace TileXR {
 constexpr int HCCL_IPC_PID_ARRAY_SIZE = 1; // 固定每次只传一个PID数据
@@ -77,14 +76,14 @@ int TileXRComm::InitDumpAddr()
     int ret = 0;
     ret = aclrtMalloc(reinterpret_cast<void **>(&dumpAddr), dumpWorkspaceSize, ACL_MEM_MALLOC_HUGE_FIRST);
     if (ret != ACL_SUCCESS) {
-        MKI_LOG(ERROR) << "aclrtMalloc err " << __LINE__ << " " << ret;
+        TILEXR_LOG(ERROR) << "aclrtMalloc err " << __LINE__ << " " << ret;
         return TILEXR_ERROR_INTERNAL;
     }
     aclrtMemset(dumpAddr, dumpWorkspaceSize, 0, dumpWorkspaceSize);
  
     GM_ADDR memory = static_cast<GM_ADDR>(std::malloc(dumpWorkspaceSize));
     if (!memory) {
-        MKI_LOG(ERROR) << "std::malloc err " << __LINE__;
+        TILEXR_LOG(ERROR) << "std::malloc err " << __LINE__;
         return TILEXR_ERROR_INTERNAL;
     }
     // Zero out allocated memory
@@ -109,7 +108,7 @@ int TileXRComm::InitDumpAddr()
  
     ret = aclrtMemcpy(dumpAddr, dumpWorkspaceSize, memory, dumpWorkspaceSize, ACL_MEMCPY_HOST_TO_DEVICE);
     if (ret != ACL_SUCCESS) {
-        MKI_LOG(ERROR) << "aclrtMemcpy err " << __LINE__ << " " << ret;
+        TILEXR_LOG(ERROR) << "aclrtMemcpy err " << __LINE__ << " " << ret;
         return TILEXR_ERROR_INTERNAL;
     }
     std::free(memory);
@@ -121,21 +120,21 @@ int TileXRComm::InitDumpAddr()
 int TileXRComm::InitUDMA()
 {
     if (rankSize_ <= 1) {
-        MKI_LOG(INFO) << "InitUDMA skipped for single-rank communicator";
+        TILEXR_LOG(INFO) << "InitUDMA skipped for single-rank communicator";
         return TILEXR_SUCCESS;
     }
 
     {
         lock_guard<mutex> lock(g_udmaMtx);
         if (g_udmaUnavailable) {
-            MKI_LOG(INFO) << "InitUDMA skipped after previous UDMA init failure";
+            TILEXR_LOG(INFO) << "InitUDMA skipped after previous UDMA init failure";
             return TILEXR_SUCCESS;
         }
     }
 
     udmaTransport_.reset(new (nothrow) TileXRUDMATransport());
     if (udmaTransport_ == nullptr) {
-        MKI_LOG(WARN) << "TileXRUDMATransport allocation failed, UDMA disabled";
+        TILEXR_LOG(WARN) << "TileXRUDMATransport allocation failed, UDMA disabled";
         return TILEXR_SUCCESS;
     }
     TileXRUDMATransportOptions options {};
@@ -145,7 +144,7 @@ int TileXRComm::InitUDMA()
     options.exchange = socketExchange_;
     int ret = udmaTransport_->Init(options);
     if (ret != TILEXR_SUCCESS || !udmaTransport_->IsAvailable()) {
-        MKI_LOG(WARN) << "TileXR UDMA init failed: " << ret << ", UDMA disabled";
+        TILEXR_LOG(WARN) << "TileXR UDMA init failed: " << ret << ", UDMA disabled";
         lock_guard<mutex> lock(g_udmaMtx);
         g_udmaUnavailable = true;
         udmaTransport_.reset();
@@ -156,7 +155,7 @@ int TileXRComm::InitUDMA()
     commArgs_.udmaInfoPtr = udmaInfoDev_;
     commArgs_.extraFlag |= ExtraFlag::UDMA;
 
-    MKI_LOG(INFO) << "InitUDMA success, rank " << rank_ << "/" << rankSize_;
+    TILEXR_LOG(INFO) << "InitUDMA success, rank " << rank_ << "/" << rankSize_;
     return TILEXR_SUCCESS;
 }
 
@@ -179,7 +178,7 @@ int TileXRComm::SyncCommArgs()
         uint32_t fftsLen = 0;
         int error = rtGetC2cCtrlAddr(&fftsVal, &fftsLen);
         if (error != RT_ERROR_NONE) {
-            MKI_LOG(ERROR) << "rtGetC2cCtrlAddr err:" << error;
+            TILEXR_LOG(ERROR) << "rtGetC2cCtrlAddr err:" << error;
             return TILEXR_ERROR_MKIRT;
         }
         commArgs_.fftsVal = fftsVal;
@@ -188,12 +187,12 @@ int TileXRComm::SyncCommArgs()
     int ret = 0;
     ret = aclrtMalloc(reinterpret_cast<void **>(&commArgsPtr_), sizeof(commArgs_), ACL_MEM_MALLOC_HUGE_FIRST);
     if (ret != ACL_SUCCESS) {
-        MKI_LOG(ERROR) << "aclrtMalloc err " << __LINE__ << " " << ret;
+        TILEXR_LOG(ERROR) << "aclrtMalloc err " << __LINE__ << " " << ret;
         return TILEXR_ERROR_INTERNAL;
     }
     ret = aclrtMemcpy(commArgsPtr_, sizeof(commArgs_), &commArgs_, sizeof(commArgs_), ACL_MEMCPY_HOST_TO_DEVICE);
     if (ret != ACL_SUCCESS) {
-        MKI_LOG(ERROR) << "aclrtMemcpy err " << __LINE__ << " " << ret;
+        TILEXR_LOG(ERROR) << "aclrtMemcpy err " << __LINE__ << " " << ret;
         return TILEXR_ERROR_INTERNAL;
     }
     return TILEXR_SUCCESS;
@@ -206,7 +205,7 @@ int TileXRComm::UpdateCommArgsDev()
     }
     int ret = aclrtMemcpy(commArgsPtr_, sizeof(commArgs_), &commArgs_, sizeof(commArgs_), ACL_MEMCPY_HOST_TO_DEVICE);
     if (ret != ACL_SUCCESS) {
-        MKI_LOG(ERROR) << "aclrtMemcpy update comm args err " << ret;
+        TILEXR_LOG(ERROR) << "aclrtMemcpy update comm args err " << ret;
         return TILEXR_ERROR_INTERNAL;
     }
     return TILEXR_SUCCESS;
@@ -217,7 +216,7 @@ void TileXRComm::FreeUDMARegistry()
     if (udmaRegistryDev_ != nullptr) {
         aclError ret = aclrtFree(udmaRegistryDev_);
         if (ret != ACL_SUCCESS) {
-            MKI_LOG(WARN) << "Free UDMA registry failed: " << ret;
+            TILEXR_LOG(WARN) << "Free UDMA registry failed: " << ret;
         }
         udmaRegistryDev_ = nullptr;
     }
@@ -228,18 +227,18 @@ void TileXRComm::FreeUDMARegistry()
 int TileXRComm::RegisterUDMAMemory(GM_ADDR localPtr, size_t bytes, TileXRUDMAMemHandle *handle)
 {
     if (!inited_) {
-        MKI_LOG(ERROR) << "TileXRUDMARegister requires initialized communicator";
+        TILEXR_LOG(ERROR) << "TileXRUDMARegister requires initialized communicator";
         return TILEXR_ERROR_NOT_INITIALIZED;
     }
     if (localPtr == nullptr || bytes == 0 || handle == nullptr) {
         return TILEXR_ERROR_PARA_CHECK_FAIL;
     }
     if (!((commArgs_.extraFlag & ExtraFlag::UDMA) != 0 && commArgs_.udmaInfoPtr != nullptr)) {
-        MKI_LOG(WARN) << "TileXRUDMARegister called while UDMA is unavailable";
+        TILEXR_LOG(WARN) << "TileXRUDMARegister called while UDMA is unavailable";
         return TILEXR_ERROR_NOT_FOUND;
     }
     if (!uid_.empty()) {
-        MKI_LOG(WARN) << "TileXRUDMARegister is not supported in InitThread mode";
+        TILEXR_LOG(WARN) << "TileXRUDMARegister is not supported in InitThread mode";
         return TILEXR_ERROR_INTERNAL;
     }
 
@@ -248,24 +247,24 @@ int TileXRComm::RegisterUDMAMemory(GM_ADDR localPtr, size_t bytes, TileXRUDMAMem
     localRegion.bytes = bytes;
 
     if (udmaTransport_ == nullptr || !udmaTransport_->IsAvailable()) {
-        MKI_LOG(ERROR) << "TileXR UDMA transport is unavailable";
+        TILEXR_LOG(ERROR) << "TileXR UDMA transport is unavailable";
         return TILEXR_ERROR_NOT_FOUND;
     }
     int ret = udmaTransport_->RegisterMemory(localPtr, bytes);
     if (ret != TILEXR_SUCCESS) {
-        MKI_LOG(ERROR) << "TileXR UDMA memory registration failed: " << ret;
+        TILEXR_LOG(ERROR) << "TileXR UDMA memory registration failed: " << ret;
         return TILEXR_ERROR_INTERNAL;
     }
 
     if (socketExchange_ == nullptr) {
-        MKI_LOG(ERROR) << "TileXRUDMARegister requires live socket exchange";
+        TILEXR_LOG(ERROR) << "TileXRUDMARegister requires live socket exchange";
         udmaTransport_->UnregisterMemory(localPtr);
         return TILEXR_ERROR_INTERNAL;
     }
     std::vector<TileXRUDMARegionDesc> allRegions(rankSize_);
     ret = socketExchange_->AllGather(&localRegion, 1, allRegions.data());
     if (ret != TILEXR_SUCCESS) {
-        MKI_LOG(ERROR) << "TileXRUDMARegister allgather failed: " << ret;
+        TILEXR_LOG(ERROR) << "TileXRUDMARegister allgather failed: " << ret;
         udmaTransport_->UnregisterMemory(localPtr);
         return ret;
     }
@@ -275,7 +274,7 @@ int TileXRComm::RegisterUDMAMemory(GM_ADDR localPtr, size_t bytes, TileXRUDMAMem
     nextRegistry.regionCount = 1;
     for (int i = 0; i < rankSize_; ++i) {
         if (allRegions[i].base == nullptr || allRegions[i].bytes == 0) {
-            MKI_LOG(ERROR) << "TileXRUDMARegister received invalid region from rank " << i;
+            TILEXR_LOG(ERROR) << "TileXRUDMARegister received invalid region from rank " << i;
             udmaTransport_->UnregisterMemory(localPtr);
             return TILEXR_ERROR_PARA_CHECK_FAIL;
         }
@@ -285,13 +284,13 @@ int TileXRComm::RegisterUDMAMemory(GM_ADDR localPtr, size_t bytes, TileXRUDMAMem
     GM_ADDR nextRegistryDev = nullptr;
     ret = aclrtMalloc(reinterpret_cast<void **>(&nextRegistryDev), sizeof(nextRegistry), ACL_MEM_MALLOC_HUGE_FIRST);
     if (ret != ACL_SUCCESS) {
-        MKI_LOG(ERROR) << "aclrtMalloc UDMA registry failed: " << ret;
+        TILEXR_LOG(ERROR) << "aclrtMalloc UDMA registry failed: " << ret;
         udmaTransport_->UnregisterMemory(localPtr);
         return TILEXR_ERROR_INTERNAL;
     }
     ret = aclrtMemcpy(nextRegistryDev, sizeof(nextRegistry), &nextRegistry, sizeof(nextRegistry), ACL_MEMCPY_HOST_TO_DEVICE);
     if (ret != ACL_SUCCESS) {
-        MKI_LOG(ERROR) << "aclrtMemcpy UDMA registry failed: " << ret;
+        TILEXR_LOG(ERROR) << "aclrtMemcpy UDMA registry failed: " << ret;
         aclrtFree(nextRegistryDev);
         udmaTransport_->UnregisterMemory(localPtr);
         return TILEXR_ERROR_INTERNAL;
@@ -324,7 +323,7 @@ int TileXRComm::UnregisterUDMAMemory(TileXRUDMAMemHandle handle)
     if (udmaRegisteredPtr_ != nullptr && udmaTransport_ != nullptr) {
         int ret = udmaTransport_->UnregisterMemory(udmaRegisteredPtr_);
         if (ret != TILEXR_SUCCESS) {
-            MKI_LOG(WARN) << "TileXR UDMA memory unregistration failed: " << ret;
+            TILEXR_LOG(WARN) << "TileXR UDMA memory unregistration failed: " << ret;
         }
         udmaRegisteredPtr_ = nullptr;
     }
@@ -341,7 +340,7 @@ int TileXRComm::InitCommon()
 {
     // enable peer device
     if (EnablePeerAccess() != TILEXR_SUCCESS) {
-        MKI_LOG(ERROR) << "EnablePeerAccess failed!";
+        TILEXR_LOG(ERROR) << "EnablePeerAccess failed!";
         return TILEXR_ERROR_INTERNAL;
     }
     const char *lcclDeterministic = Mki::GetEnv("LCCL_DETERMINISTIC");
@@ -376,7 +375,7 @@ void TileXRComm::CloseIpcMem()
         }
         int ret = rtIpcCloseMemory(static_cast<void *>(peerMem_[i]));
         if (ret != RT_ERROR_NONE) {
-            MKI_LOG(WARN) << "Close ipc[" << i << "] memory failed! ret: " << ret;
+            TILEXR_LOG(WARN) << "Close ipc[" << i << "] memory failed! ret: " << ret;
         }
         peerMem_[i] = nullptr;
     }
@@ -387,7 +386,7 @@ void TileXRComm::FreePeerMem(GM_ADDR &mem) const
     if (mem != nullptr) {
         aclError aclRet = aclrtFree(mem);
         if (aclRet != ACL_SUCCESS) {
-            MKI_LOG(ERROR) << "Free share memory failed! ret: " << aclRet;
+            TILEXR_LOG(ERROR) << "Free share memory failed! ret: " << aclRet;
         }
     }
     mem = nullptr;
@@ -399,7 +398,7 @@ int TileXRComm::Init()
         return TILEXR_SUCCESS;
     }
     if (rank_ < 0 || rank_ >= rankSize_ || rankSize_ <= 0 || rankSize_ > TILEXR_MAX_RANK_SIZE) {
-        MKI_LOG(ERROR) << "The rank is invalid! rank:" << rank_ << " rankSize:" << rankSize_;
+        TILEXR_LOG(ERROR) << "The rank is invalid! rank:" << rank_ << " rankSize:" << rankSize_;
         return TILEXR_ERROR_PARA_CHECK_FAIL;
     }
     if (TileXRSockExchange::CheckValid(commId_)) {
@@ -408,28 +407,28 @@ int TileXRComm::Init()
         socketExchange_ = new (nothrow) TileXRSockExchange(rank_, rankSize_, commDomain_);
     }
     if (socketExchange_ == nullptr) {
-        MKI_LOG(ERROR) << "TileXRSockExchange create failed. rank : " << rank_ << " rankSize:" << rankSize_;
+        TILEXR_LOG(ERROR) << "TileXRSockExchange create failed. rank : " << rank_ << " rankSize:" << rankSize_;
         return TILEXR_ERROR_INTERNAL;
     }
     int ret = GetDev();
     if (ret != TILEXR_SUCCESS) {
-        MKI_LOG(ERROR) << "init context failed! ret: " << ret;
+        TILEXR_LOG(ERROR) << "init context failed! ret: " << ret;
         return ret;
     }
 
-    MKI_LOG(INFO) << "rank " << rank_ << "/" << rankSize_ << " running devId:" << devId_;
+    TILEXR_LOG(INFO) << "rank " << rank_ << "/" << rankSize_ << " running devId:" << devId_;
 
     if (InitCommon() != TILEXR_SUCCESS) {
-        MKI_LOG(ERROR) << "init common failed!";
+        TILEXR_LOG(ERROR) << "init common failed!";
         return TILEXR_ERROR_INTERNAL;
     }
 
-    MKI_LOG(DEBUG) << "Prepare to InitCommMem localRankSize_ -> " << localRankSize_ << ", localRank_ -> " << localRank_;
+    TILEXR_LOG(DEBUG) << "Prepare to InitCommMem localRankSize_ -> " << localRankSize_ << ", localRank_ -> " << localRank_;
     if (InitCommMem() != TILEXR_SUCCESS) {
-        MKI_LOG(ERROR) << "InitCommMem failed!";
+        TILEXR_LOG(ERROR) << "InitCommMem failed!";
         return TILEXR_ERROR_INTERNAL;
     }
-    MKI_LOG(DEBUG) << "InitCommMem " << rank_ << "/" << rankSize_ << ", localRank_ : " << localRank_ <<
+    TILEXR_LOG(DEBUG) << "InitCommMem " << rank_ << "/" << rankSize_ << ", localRank_ : " << localRank_ <<
             ", localRankSize_ : " << localRankSize_ << " success";
 
     // 新增：初始化 UDMA
@@ -440,7 +439,7 @@ int TileXRComm::Init()
 
     // set comm args in device.
     SyncCommArgs();
-    MKI_LOG(INFO) << "TileXRCommInit " << rank_ << "/" << rankSize_ << " success. extraFlag:" << commArgs_.extraFlag <<
+    TILEXR_LOG(INFO) << "TileXRCommInit " << rank_ << "/" << rankSize_ << " success. extraFlag:" << commArgs_.extraFlag <<
         " commArgs_.localRank : " << commArgs_.localRank << " commArgs_.localRankSize : " << commArgs_.localRankSize;
     inited_ = true;
     return TILEXR_SUCCESS;
@@ -452,17 +451,17 @@ int TileXRComm::InitThread(const std::string &uid)
         return TILEXR_SUCCESS;
     }
     if (rank_ < 0 || rank_ >= rankSize_ || rankSize_ <= 0 || rankSize_ > TILEXR_MAX_RANK_SIZE) {
-        MKI_LOG(ERROR) << "The rank is invalid! rank:" << rank_ << "rankSize:" << rankSize_;
+        TILEXR_LOG(ERROR) << "The rank is invalid! rank:" << rank_ << "rankSize:" << rankSize_;
         return TILEXR_ERROR_PARA_CHECK_FAIL;
     }
     if (GetDevThread(uid) != TILEXR_SUCCESS) {
-        MKI_LOG(ERROR) << "get devs failed.";
+        TILEXR_LOG(ERROR) << "get devs failed.";
         return TILEXR_ERROR_INTERNAL;
     }
-    MKI_LOG(INFO) << "rank " << rank_ << "/" << rankSize_ << " running devId:" << devId_ << "uid: " << uid;
+    TILEXR_LOG(INFO) << "rank " << rank_ << "/" << rankSize_ << " running devId:" << devId_ << "uid: " << uid;
 
     if (InitCommon() != TILEXR_SUCCESS) {
-        MKI_LOG(ERROR) << "init common failed!";
+        TILEXR_LOG(ERROR) << "init common failed!";
         return TILEXR_ERROR_INTERNAL;
     }
     {
@@ -483,7 +482,7 @@ int TileXRComm::InitThread(const std::string &uid)
             this_thread::sleep_for(1ms);
             auto elapsed = duration_cast<seconds>(high_resolution_clock::now() - start);
             if (elapsed.count() > TILEXR_INIT_TIMEOUT) {
-                MKI_LOG(ERROR) << "Lccl Init timeout!";
+                TILEXR_LOG(ERROR) << "Lccl Init timeout!";
                 FreePeerMem(g_localPeerMemMap[uid][rank_]);
                 return TILEXR_ERROR_TIMEOUT;
             }
@@ -495,10 +494,10 @@ int TileXRComm::InitThread(const std::string &uid)
 
     // 注意：InitThread 为单进程多线程模式，不支持 UDMA（需要 socketExchange_ 进行跨进程协调）
     // UDMA 主要用于跨进程/跨节点通信，线程模式使用进程内共享内存即可
-    MKI_LOG(DEBUG) << "Thread mode: UDMA initialization skipped (single-process multi-thread scenario)";
+    TILEXR_LOG(DEBUG) << "Thread mode: UDMA initialization skipped (single-process multi-thread scenario)";
 
     SyncCommArgs();
-    MKI_LOG(INFO) << "Lccl init multi thread " << rank_ << "/" << rankSize_ << " success, uid:" << uid;
+    TILEXR_LOG(INFO) << "Lccl init multi thread " << rank_ << "/" << rankSize_ << " success, uid:" << uid;
     inited_ = true;
     return TILEXR_SUCCESS;
 }
@@ -522,9 +521,9 @@ int TileXRComm::EnablePeerAccess()
 
         int64_t value = 0;
         if (rtGetPairDevicesInfo(devId_, dev, 0, &value) != RT_ERROR_NONE) {
-            MKI_LOG(WARN) << devId_ << " & " << dev << " pair devices info failed to get";
+            TILEXR_LOG(WARN) << devId_ << " & " << dev << " pair devices info failed to get";
         } else {
-            MKI_LOG(DEBUG) << devId_ << " <-----> " << dev << ", halGetPairDevicesInfo: *value = " << value;
+            TILEXR_LOG(DEBUG) << devId_ << " <-----> " << dev << ", halGetPairDevicesInfo: *value = " << value;
         }
 
         // 如果310P未来通信域要支持两卡四芯的话，这里需要做更改。并且现在默认服务器上机器只有一个链路种类。
@@ -536,7 +535,7 @@ int TileXRComm::EnablePeerAccess()
             physicalInfo_.physicalLink = PhysicalLink::PCIE;
             commArgs_.extraFlag |= ExtraFlag::TOPO_PCIE;
             if (rankSize_ > PING_PONG_SIZE) {
-                MKI_LOG(ERROR) << "do not support pcie > 2 rank! rankSize_ = " << rankSize_;
+                TILEXR_LOG(ERROR) << "do not support pcie > 2 rank! rankSize_ = " << rankSize_;
                 return TILEXR_ERROR_INTERNAL;
             }
         }
@@ -545,18 +544,18 @@ int TileXRComm::EnablePeerAccess()
 
         // value里的0实际上对应驱动枚举类的 TOPOLOGY_HCCS
         if (physicalInfo_.chipName == ChipName::CHIP_310P3 && value == 0) {
-            MKI_LOG(WARN) << "warn aclrtDeviceEnablePeerAccess is skipped! peerDeviceId = " << dev;
+            TILEXR_LOG(WARN) << "warn aclrtDeviceEnablePeerAccess is skipped! peerDeviceId = " << dev;
             continue;
         }
 
         aclError ret = aclrtDeviceEnablePeerAccess(dev, 0);
         if (ret != ACL_SUCCESS) {
-            MKI_LOG(ERROR) << "err aclrtDeviceEnablePeerAccess failed peerDeviceId = " << dev << " ,rank = " << rank_
+            TILEXR_LOG(ERROR) << "err aclrtDeviceEnablePeerAccess failed peerDeviceId = " << dev << " ,rank = " << rank_
                            << ", value = " << value << ", flags = " << 0 << "," << __LINE__ << ": " << ret;
             return TILEXR_ERROR_INTERNAL;
         }
     }
-    MKI_LOG(DEBUG) << "EnablePeerAccess succeed" << rank_;
+    TILEXR_LOG(DEBUG) << "EnablePeerAccess succeed" << rank_;
     return TILEXR_SUCCESS;
 }
 
@@ -565,24 +564,24 @@ int TileXRComm::GetDev()
     // 这里这个nodeNum可以理解为Y轴长度，手动控制的话将这个拦截修改即可。
     int nodeNum = socketExchange_->GetNodeNum();
     if (nodeNum <= 0 || nodeNum > rankSize_) {
-        MKI_LOG(ERROR) << "error! node num : " << nodeNum << " rank size: " << rankSize_;
+        TILEXR_LOG(ERROR) << "error! node num : " << nodeNum << " rank size: " << rankSize_;
         return TILEXR_ERROR_INTERNAL;
     }
     localRankSize_ = rankSize_ < 0 ? 0 : rankSize_ / nodeNum;
     localRank_ = rank_ % localRankSize_;
-    MKI_LOG(DEBUG) << "GetDev : localRankSize_ : " << localRankSize_ << " localRank_: " << localRank_
+    TILEXR_LOG(DEBUG) << "GetDev : localRankSize_ : " << localRankSize_ << " localRank_: " << localRank_
                     << "  rank :" << rank_ << "   rankSize :" << rankSize_;
     devList_.resize(rankSize_);
     // get current id and broadcast
     aclError aclRet = aclrtGetDevice(&devId_);
     if (aclRet != ACL_SUCCESS) {
-        MKI_LOG(ERROR) << "aclrtGetDevice error! ret: " << aclRet;
+        TILEXR_LOG(ERROR) << "aclrtGetDevice error! ret: " << aclRet;
         return TILEXR_ERROR_INTERNAL;
     }
     // get other rank dev id, put into devList_
     int ret = socketExchange_->AllGather(&devId_, 1, devList_.data());
     if (ret != TILEXR_SUCCESS) {
-        MKI_LOG(ERROR) << "TileXRSockExchange AllGather error! ret: " << ret;
+        TILEXR_LOG(ERROR) << "TileXRSockExchange AllGather error! ret: " << ret;
         return TILEXR_ERROR_INTERNAL;
     }
     std::string devIdStr = "";
@@ -590,8 +589,8 @@ int TileXRComm::GetDev()
         devIdStr += (i == 0 ? "" : ", ");
         devIdStr += to_string(devList_[i]);
     }
-    MKI_LOG(DEBUG) << "rank " << rank_ << " devId: " << devId_ << ", otherDevList : " << devIdStr;
-    MKI_LOG(INFO) << "AllGather: Get other rank dev id success";
+    TILEXR_LOG(DEBUG) << "rank " << rank_ << " devId: " << devId_ << ", otherDevList : " << devIdStr;
+    TILEXR_LOG(INFO) << "AllGather: Get other rank dev id success";
     return TILEXR_SUCCESS;
 }
 
@@ -601,7 +600,7 @@ int TileXRComm::GetDevThread(const std::string &uid)
     // get current id and broadcast
     aclError aclRet = aclrtGetDevice(&devId_);
     if (aclRet != ACL_SUCCESS) {
-        MKI_LOG(ERROR) << "aclrtGetDevice error! ret: " << aclRet;
+        TILEXR_LOG(ERROR) << "aclrtGetDevice error! ret: " << aclRet;
         return TILEXR_ERROR_INTERNAL;
     }
     {
@@ -619,7 +618,7 @@ int TileXRComm::GetDevThread(const std::string &uid)
             this_thread::sleep_for(1ms);
             auto elapsed = duration_cast<seconds>(high_resolution_clock::now() - start);
             if (elapsed.count() > TILEXR_INIT_TIMEOUT) {
-                MKI_LOG(ERROR) << "Lccl Init timeout!";
+                TILEXR_LOG(ERROR) << "Lccl Init timeout!";
                 return TILEXR_ERROR_TIMEOUT;
             }
         }
@@ -634,61 +633,61 @@ int TileXRComm::InitMem()
     constexpr int32_t bufferSizeUint = 1024 * 1024;
     int tilexrBuffSize = bufferSize_ * bufferSizeUint + TILEXR_FLAG_BUFF_BYTES;
 
-    MKI_LOG(DEBUG) << "tilexr buffer size " << tilexrBuffSize;
+    TILEXR_LOG(DEBUG) << "tilexr buffer size " << tilexrBuffSize;
     aclError ret = aclrtMalloc(
         reinterpret_cast<void **>(&peerMem_[rank_]), tilexrBuffSize,
         (GetChipName() == ChipName::CHIP_310P3) ? ACL_MEM_MALLOC_HUGE_FIRST_P2P : ACL_MEM_MALLOC_HUGE_FIRST);
     if (ret != ACL_SUCCESS) {
-        MKI_LOG(ERROR) << "allocate device mem error " << __FILE__ << ":" << __LINE__ << " " << ret;
+        TILEXR_LOG(ERROR) << "allocate device mem error " << __FILE__ << ":" << __LINE__ << " " << ret;
         return TILEXR_ERROR_INTERNAL;
     }
-    MKI_LOG(DEBUG) << "peerMem[rank" << rank_ << "], allocate finished.";
+    TILEXR_LOG(DEBUG) << "peerMem[rank" << rank_ << "], allocate finished.";
     aclrtMemset(peerMem_[rank_], tilexrBuffSize, 0, tilexrBuffSize);
     return TILEXR_SUCCESS;
 }
 
 int TileXRComm::GetPid(uint32_t *pids)
 {
-    if (rtDeviceGetBareTgid(&pids[rank_]) != RT_ERROR_NONE) {  // 获取docker外的进程id，bare指docker�?        MKI_LOG(ERROR) << "DeviceGetBareTgid err " << __LINE__;
+    if (rtDeviceGetBareTgid(&pids[rank_]) != RT_ERROR_NONE) {  // 获取docker外的进程id，bare指docker�?        TILEXR_LOG(ERROR) << "DeviceGetBareTgid err " << __LINE__;
         return TILEXR_ERROR_INTERNAL;
     }
     int ret = socketExchange_->AllGather(&pids[rank_], 1, pids);
     if (ret != TILEXR_SUCCESS) {
-        MKI_LOG(ERROR) << "TileXRSockExchange AllGather error! ret: " << ret;
+        TILEXR_LOG(ERROR) << "TileXRSockExchange AllGather error! ret: " << ret;
         return ret;
     }
     for (int i = 0; i < rankSize_; ++i) {
-        MKI_LOG(DEBUG) << "rank : " << rank_ << ", otherRank : " << i << " pid[" << i << "]: " << pids[i];
+        TILEXR_LOG(DEBUG) << "rank : " << rank_ << ", otherRank : " << i << " pid[" << i << "]: " << pids[i];
     }
-    MKI_LOG(DEBUG) << "AllGather: Get other rank pid";
+    TILEXR_LOG(DEBUG) << "AllGather: Get other rank pid";
     return TILEXR_SUCCESS;
 }
 
 int TileXRComm::GetSidId(int64_t sdids[TILEXR_MAX_RANK_SIZE], int rankSize)
 {
     if (rank_ >= rankSize) {
-        MKI_LOG(ERROR) << "TileXRComm::GetSidId err rank_ >= rankSize " << rank_ << ">=" << rankSize;
+        TILEXR_LOG(ERROR) << "TileXRComm::GetSidId err rank_ >= rankSize " << rank_ << ">=" << rankSize;
         return TILEXR_ERROR_INTERNAL;
     }
     if ((physicalInfo_.chipName >= ChipName::CHIP_910_9391) && (physicalInfo_.chipName < ChipName::RESERVED)) {
         const int rtModuleTypeSystem = 0;
         const int infoTypeSdid = 26;
         if (rtGetDeviceInfo(devList_[rank_], rtModuleTypeSystem, infoTypeSdid, &sdids[rank_]) != RT_ERROR_NONE) {
-            MKI_LOG(ERROR) << "DeviceGetDeviceInfo err " << __LINE__;
+            TILEXR_LOG(ERROR) << "DeviceGetDeviceInfo err " << __LINE__;
             return TILEXR_ERROR_INTERNAL;
         }
-        MKI_LOG(DEBUG) << "rank " << rank_ << " dev id: " << devList_[rank_]
+        TILEXR_LOG(DEBUG) << "rank " << rank_ << " dev id: " << devList_[rank_]
                        << " rtGetDeviceInfo sdid: " << sdids[rank_];
 
         int ret = socketExchange_->AllGather(&sdids[rank_], 1, sdids);
         if (ret != TILEXR_SUCCESS) {
-            MKI_LOG(ERROR) << "TileXRSockExchange AllGather error! ret: " << ret;
+            TILEXR_LOG(ERROR) << "TileXRSockExchange AllGather error! ret: " << ret;
             return ret;
         }
         for (int i = 0; i < rankSize_; ++i) {
-            MKI_LOG(DEBUG) << "rank " << i << " sdid: " << sdids[i];
+            TILEXR_LOG(DEBUG) << "rank " << i << " sdid: " << sdids[i];
         }
-        MKI_LOG(DEBUG) << "AllGather: Get other rank sdid";
+        TILEXR_LOG(DEBUG) << "AllGather: Get other rank sdid";
     }
     return TILEXR_SUCCESS;
 }
@@ -697,13 +696,13 @@ int TileXRComm::GetName(string &name, char names[TILEXR_MAX_RANK_SIZE][IPC_NAME_
 {
     int ret = socketExchange_->AllGather<char>(name.c_str(), IPC_NAME_SIZE, names[0]);
     if (ret != TILEXR_SUCCESS) {
-        MKI_LOG(ERROR) << "TileXRSockExchange AllGather error! ret: " << ret;
+        TILEXR_LOG(ERROR) << "TileXRSockExchange AllGather error! ret: " << ret;
         return TILEXR_ERROR_INTERNAL;
     }
     for (int i = 0; i < rankSize_; ++i) {
-        MKI_LOG(DEBUG) << "rank " << i << " mem name: " << names[i];
+        TILEXR_LOG(DEBUG) << "rank " << i << " mem name: " << names[i];
     }
-    MKI_LOG(DEBUG) << "AllGather: Get other rank mem name";
+    TILEXR_LOG(DEBUG) << "AllGather: Get other rank mem name";
     return TILEXR_SUCCESS;
 }
 
@@ -711,7 +710,7 @@ int TileXRComm::InitCommMem()
 {
     int ret = InitMem();
     if (ret != TILEXR_SUCCESS) {
-        MKI_LOG(ERROR) << "InitMem error! ret: " << ret;
+        TILEXR_LOG(ERROR) << "InitMem error! ret: " << ret;
         return ret;
     }
 
@@ -719,7 +718,7 @@ int TileXRComm::InitCommMem()
     uint32_t pids[TILEXR_MAX_RANK_SIZE] = {0};
     ret = GetPid(pids);
     if (ret != TILEXR_SUCCESS) {
-        MKI_LOG(ERROR) << "GetPid error! ret: " << ret;
+        TILEXR_LOG(ERROR) << "GetPid error! ret: " << ret;
         return ret;
     }
 
@@ -727,33 +726,33 @@ int TileXRComm::InitCommMem()
     int64_t sdids[TILEXR_MAX_RANK_SIZE] = {0};
     ret = GetSidId(sdids, rankSize_);
     if (ret != TILEXR_SUCCESS) {
-        MKI_LOG(ERROR) << "GetSidId error! ret: " << ret;
+        TILEXR_LOG(ERROR) << "GetSidId error! ret: " << ret;
         return ret;
     }
 
     // 获取所有进程的mem name
     string name;
     if (SetMemoryName(name) != TILEXR_SUCCESS) {
-        MKI_LOG(ERROR) << "SetMemoryName err ";
+        TILEXR_LOG(ERROR) << "SetMemoryName err ";
         return TILEXR_ERROR_INTERNAL;
     }
 
     if (SetIpcPidSdid(name, pids, sdids) != TILEXR_SUCCESS) {
-        MKI_LOG(ERROR) << "SetIpcPidSdid failed!";
+        TILEXR_LOG(ERROR) << "SetIpcPidSdid failed!";
         return TILEXR_ERROR_INTERNAL;
     }
 
-    MKI_LOG(DEBUG) << "rank " << rank_ << " mem name: " << name << " name len: " << name.size();
+    TILEXR_LOG(DEBUG) << "rank " << rank_ << " mem name: " << name << " name len: " << name.size();
     char names[TILEXR_MAX_RANK_SIZE][IPC_NAME_SIZE];
     name.resize(IPC_NAME_SIZE);
     ret = GetName(name, names);
     if (ret != TILEXR_SUCCESS) {
-        MKI_LOG(ERROR) << "GetName error! ret: " << ret;
+        TILEXR_LOG(ERROR) << "GetName error! ret: " << ret;
         return ret;
     }
 
     if (OpenIpcMem(names) != TILEXR_SUCCESS) {
-        MKI_LOG(ERROR) << "rank: " << rank_ << " OpenIpcMem failed!";
+        TILEXR_LOG(ERROR) << "rank: " << rank_ << " OpenIpcMem failed!";
         return TILEXR_ERROR_INTERNAL;
     }
     return TILEXR_SUCCESS;
@@ -774,7 +773,7 @@ int TileXRComm::OpenIpcMem(const char names[TILEXR_MAX_RANK_SIZE][IPC_NAME_SIZE]
         int ret = rtIpcOpenMemory(reinterpret_cast<void **>(&peerMem_[i]), names[i]);
         if (ret != RT_ERROR_NONE) {
             CloseIpcMem();
-            MKI_LOG(ERROR) << "rank : " << rank_ << " localRank : " << localRank_ << " peerMem: " << i <<
+            TILEXR_LOG(ERROR) << "rank : " << rank_ << " localRank : " << localRank_ << " peerMem: " << i <<
                 " IpcOpenMemory err " << ret;
             return TILEXR_ERROR_INTERNAL;
         }
@@ -808,7 +807,7 @@ int TileXRComm::SetIpcPidSdid(string &name, const uint32_t *pids, const int64_t 
             int32_t pidInt32 = pids[i];
             int rtRet = rtSetIpcMemPid(name.c_str(), &pidInt32, HCCL_IPC_PID_ARRAY_SIZE);
             if (rtRet != RT_ERROR_NONE) {
-                MKI_LOG(ERROR) << "err " << rtRet;
+                TILEXR_LOG(ERROR) << "err " << rtRet;
                 return TILEXR_ERROR_INTERNAL;
             }
         } else {
@@ -816,7 +815,7 @@ int TileXRComm::SetIpcPidSdid(string &name, const uint32_t *pids, const int64_t 
             int32_t pidInt32 = pids[i];
             int rtRet = rtSetIpcMemorySuperPodPid(name.c_str(), sdids[i], &pidInt32, HCCL_IPC_PID_ARRAY_SIZE);
             if (rtRet != RT_ERROR_NONE) {
-                MKI_LOG(ERROR) << "err " << rtRet;
+                TILEXR_LOG(ERROR) << "err " << rtRet;
                 return TILEXR_ERROR_INTERNAL;
             }
         }
@@ -906,7 +905,7 @@ std::string TileXRComm::PrintDFX()
     int ret = aclrtMemcpy(&commArgs_, sizeof(commArgs_), commArgsPtr_, sizeof(commArgs_),
                           ACL_MEMCPY_DEVICE_TO_HOST);
     if (ret != ACL_SUCCESS) {
-        MKI_LOG(ERROR) << "aclrtMemcpy err " << __LINE__ << " " << ret;
+        TILEXR_LOG(ERROR) << "aclrtMemcpy err " << __LINE__ << " " << ret;
         return "acl mem copy error";
     }
     stringstream ss;

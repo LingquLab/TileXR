@@ -10,7 +10,6 @@
 #ifndef TILEXR_TYPES_H
 #define TILEXR_TYPES_H
 
-#include "hccl/hccl_types.h"
 #include <map>
 #include <string>
 
@@ -53,6 +52,27 @@ enum class PhysicalLink {
     HCCS = 0,
     PCIE = 1,
     RESERVED,
+};
+
+enum TileXRDataType {
+    TILEXR_DATA_TYPE_INT8 = 0,
+    TILEXR_DATA_TYPE_INT16 = 1,
+    TILEXR_DATA_TYPE_INT32 = 2,
+    TILEXR_DATA_TYPE_FP16 = 3,
+    TILEXR_DATA_TYPE_FP32 = 4,
+    TILEXR_DATA_TYPE_INT64 = 5,
+    TILEXR_DATA_TYPE_UINT64 = 6,
+    TILEXR_DATA_TYPE_UINT8 = 7,
+    TILEXR_DATA_TYPE_UINT16 = 8,
+    TILEXR_DATA_TYPE_UINT32 = 9,
+    TILEXR_DATA_TYPE_FP64 = 10,
+    TILEXR_DATA_TYPE_BFP16 = 11,
+    TILEXR_DATA_TYPE_INT128 = 12,
+    TILEXR_DATA_TYPE_HIF8 = 14,
+    TILEXR_DATA_TYPE_FP8E4M3 = 15,
+    TILEXR_DATA_TYPE_FP8E5M2 = 16,
+    TILEXR_DATA_TYPE_FP8E8M0 = 17,
+    TILEXR_DATA_TYPE_RESERVED = 255
 };
 
 // 包含 物理链路、芯片名称 信息。

@@ -19,7 +19,7 @@
 #include <net/if.h>
 #include <arpa/inet.h>
 
-#include "mki/utils/log/log.h"
+#include "tilexr_log.h"
 
 #include "tilexr_types.h"
 #include "tilexr_api.h"
@@ -102,10 +102,10 @@ private:
             auto ret = send(fd, sendBuf, sendSize, flag);
             if (ret < 0) {
                 if (CheckErrno(errno)) {
-                    MKI_LOG(ERROR) << "send failed: " << strerror(errno);
+                    TILEXR_LOG(ERROR) << "send failed: " << strerror(errno);
                     continue;
                 }
-                MKI_LOG(DEBUG) << "Send failed: " << strerror(errno);
+                TILEXR_LOG(DEBUG) << "Send failed: " << strerror(errno);
             }
             return ret;
         } while (true);
@@ -117,10 +117,10 @@ private:
             auto ret = recv(fd, recvBuf, recvSize, flag);
             if (ret < 0) {
                 if (CheckErrno(errno)) {
-                    MKI_LOG(ERROR) << "recv failed: " << strerror(errno);
+                    TILEXR_LOG(ERROR) << "recv failed: " << strerror(errno);
                     continue;
                 }
-                MKI_LOG(DEBUG) << "recv failed: " << strerror(errno);
+                TILEXR_LOG(DEBUG) << "recv failed: " << strerror(errno);
             }
             return ret;
         } while (true);
@@ -129,12 +129,12 @@ private:
     template <typename T> int ClientSendRecv(const T *sendBuf, size_t sendSize, T *recvBuf)
     {
         if (Send(fd_, sendBuf, sendSize * sizeof(T), 0) <= 0) {
-            MKI_LOG(ERROR) << "Client side " << rank_ << " send buffer failed";
+            TILEXR_LOG(ERROR) << "Client side " << rank_ << " send buffer failed";
             return TILEXR_ERROR_INTERNAL;
         }
 
         if (Recv(fd_, recvBuf, sendSize * rankSize_ * sizeof(T), MSG_WAITALL) <= 0) {
-            MKI_LOG(ERROR) << "Client side " << rank_ << " recv buffer failed ";
+            TILEXR_LOG(ERROR) << "Client side " << rank_ << " recv buffer failed ";
             return TILEXR_ERROR_INTERNAL;
         }
 
@@ -149,14 +149,14 @@ private:
 
         for (int i = 1; i < rankSize_; ++i) {
             if (Recv(clientFds_[i], recvBuf + i * sendSize, sendSize * sizeof(T), MSG_WAITALL) <= 0) {
-                MKI_LOG(ERROR) << "Server side recv rank " << i << " buffer failed";
+                TILEXR_LOG(ERROR) << "Server side recv rank " << i << " buffer failed";
                 return TILEXR_ERROR_INTERNAL;
             }
         }
 
         for (int i = 1; i < rankSize_; ++i) {
             if (Send(clientFds_[i], recvBuf, sendSize * rankSize_ * sizeof(T), 0) <= 0) {
-                MKI_LOG(ERROR) << "Server side send rank " << i << " buffer failed";
+                TILEXR_LOG(ERROR) << "Server side send rank " << i << " buffer failed";
                 return TILEXR_ERROR_INTERNAL;
             }
         }

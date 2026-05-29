@@ -31,9 +31,9 @@ namespace TileXR {
 // Common functions
 int RegistKernel(const bool enableProfiling = false);
 
-int64_t Count2Size(int64_t count, const HcclDataType &dataType);
+int64_t Count2Size(int64_t count, const TileXRDataType &dataType);
 
-int LoadMTE(TileXRType cclType, AscendCCLKernelArgs &args, uint32_t blockDim, HcclDataType dataType, aclrtStream stream);
+int LoadMTE(TileXRType cclType, AscendCCLKernelArgs &args, uint32_t blockDim, TileXRDataType dataType, aclrtStream stream);
 
 ChipName GetChipName();
 
