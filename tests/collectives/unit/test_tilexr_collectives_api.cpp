@@ -126,18 +126,23 @@ void TestCollectivesTestBuildUsesExplicitLibraryHint()
 {
     const std::string path = "tests/collectives/CMakeLists.txt";
     const auto text = ReadFile(path);
+    CheckContains(path, text, "include(GNUInstallDirs)");
     CheckContains(path, text, "set(TILEXR_INSTALL_PREFIX \"${TILEXR_ROOT}/install\" CACHE PATH");
+    CheckContains(path, text, "set(TILEXR_INSTALL_LIBDIR \"${CMAKE_INSTALL_LIBDIR}\" CACHE PATH");
     CheckContains(path, text, "${TILEXR_INSTALL_PREFIX}/include");
     CheckContains(path, text, "${TILEXR_INSTALL_PREFIX}/include/tilexr_collectives.h");
     CheckContains(path, text, "set(TILEXR_COLLECTIVES_LIB \"\" CACHE FILEPATH");
     CheckContains(path, text, "set(TILEXR_LIB \"\" CACHE FILEPATH");
-    CheckContains(path, text, "${TILEXR_INSTALL_PREFIX}/lib");
+    CheckContains(path, text, "${TILEXR_INSTALL_PREFIX}/${TILEXR_INSTALL_LIBDIR}");
+    CheckContains(path, text, "RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}");
     CheckContains(path, text, "add_executable(test_tilexr_collectives_stub_behavior");
     CheckContains(path, text, "unit/test_tilexr_collectives_stub_behavior.cpp");
     CheckContains(path, text, "message(FATAL_ERROR");
     CheckDoesNotContain(path, text, "${TILEXR_ROOT}/src/include");
     CheckDoesNotContain(path, text, "${TILEXR_ROOT}/3rdparty");
     CheckDoesNotContain(path, text, "${TILEXR_ROOT}/build");
+    CheckDoesNotContain(path, text, "${CMAKE_INSTALL_PREFIX}/bin");
+    CheckDoesNotContain(path, text, "${TILEXR_INSTALL_PREFIX}/lib");
     CheckDoesNotContain(path, text, "/tmp/tilexr-install-split-collectives");
     CheckDoesNotContain(path, text, "/tmp/tilexr-build-split-collectives");
 }

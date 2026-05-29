@@ -8,9 +8,11 @@ project(TileXR_Collectives_Tests)
 
 set(CMAKE_CXX_STANDARD 14)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+include(GNUInstallDirs)
 
 set(TILEXR_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../..")
 set(TILEXR_INSTALL_PREFIX "${TILEXR_ROOT}/install" CACHE PATH "TileXR install prefix for installed collectives headers")
+set(TILEXR_INSTALL_LIBDIR "${CMAKE_INSTALL_LIBDIR}" CACHE PATH "TileXR install library directory relative to TILEXR_INSTALL_PREFIX")
 set(TILEXR_COLLECTIVES_LIB "" CACHE FILEPATH "Path to libtilexr-collectives.so")
 set(TILEXR_LIB "" CACHE FILEPATH "Path to libtile-comm.so")
 set(ASCEND_HOME_PATH $ENV{ASCEND_HOME_PATH})
@@ -76,7 +78,7 @@ target_include_directories(test_tilexr_collectives_stub_behavior PRIVATE
 if(NOT TILEXR_COLLECTIVES_LIB)
     find_library(TILEXR_COLLECTIVES_LIB_FOUND tilexr-collectives
         HINTS
-        "${TILEXR_INSTALL_PREFIX}/lib"
+        "${TILEXR_INSTALL_PREFIX}/${TILEXR_INSTALL_LIBDIR}"
         NO_DEFAULT_PATH
     )
     if(TILEXR_COLLECTIVES_LIB_FOUND)
@@ -86,7 +88,7 @@ endif()
 
 if(NOT TILEXR_COLLECTIVES_LIB)
     message(FATAL_ERROR
-        "libtilexr-collectives.so not found under ${TILEXR_INSTALL_PREFIX}/lib. "
+        "libtilexr-collectives.so not found under ${TILEXR_INSTALL_PREFIX}/${TILEXR_INSTALL_LIBDIR}. "
         "Build/install TileXR with -DTILEXR_BUILD_COLLECTIVES=ON and set TILEXR_INSTALL_PREFIX, "
         "or pass -DTILEXR_COLLECTIVES_LIB=/path/to/libtilexr-collectives.so."
     )
@@ -95,7 +97,7 @@ endif()
 if(NOT TILEXR_LIB)
     find_library(TILEXR_LIB_FOUND tile-comm
         HINTS
-        "${TILEXR_INSTALL_PREFIX}/lib"
+        "${TILEXR_INSTALL_PREFIX}/${TILEXR_INSTALL_LIBDIR}"
         NO_DEFAULT_PATH
     )
     if(TILEXR_LIB_FOUND)
@@ -105,7 +107,7 @@ endif()
 
 if(NOT TILEXR_LIB)
     message(FATAL_ERROR
-        "libtile-comm.so not found under ${TILEXR_INSTALL_PREFIX}/lib. "
+        "libtile-comm.so not found under ${TILEXR_INSTALL_PREFIX}/${TILEXR_INSTALL_LIBDIR}. "
         "Build/install TileXR and set TILEXR_INSTALL_PREFIX, "
         "or pass -DTILEXR_LIB=/path/to/libtile-comm.so."
     )
@@ -125,5 +127,5 @@ install(TARGETS
     test_tilexr_collectives_api
     test_tilexr_collectives_header_compile
     test_tilexr_collectives_stub_behavior
-    RUNTIME DESTINATION ${CMAKE_INSTALL_PREFIX}/bin
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
