@@ -228,7 +228,7 @@ Monitor these areas for potential changes:
 
 - [TileXR CLAUDE.md](../CLAUDE.md) - Build instructions and architecture
 - [shmem Integration Status](./SHMEM_INTEGRATION.md) - Current shmem status and historical notes
-- [UDMA Integration Summary](../UDMA_INTEGRATION_SUMMARY.md) - Current TileXR UDMA architecture notes
+- [UDMA Integration Summary](./UDMA_INTEGRATION_SUMMARY.md) - Current TileXR UDMA architecture notes
 
 ## Changelog
 

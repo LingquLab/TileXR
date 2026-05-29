@@ -44,7 +44,7 @@ int ParseIpAndPort(const char* input, string &ip, uint16_t &port)
     string inputStr(input);
     size_t colonPos = inputStr.find(':');
     if (colonPos == string::npos) {
-        MKI_LOG(ERROR) << "Input string does not contain a colon separating IP and port.";
+        TILEXR_LOG(ERROR) << "Input string does not contain a colon separating IP and port.";
         return TILEXR_ERROR_INTERNAL;
     }
 
@@ -54,7 +54,7 @@ int ParseIpAndPort(const char* input, string &ip, uint16_t &port)
     std::istringstream portStream(portStr);
     portStream >> port;
     if (portStream.fail() || portStream.bad()) {
-        MKI_LOG(ERROR) << "Invalid port number.";
+        TILEXR_LOG(ERROR) << "Invalid port number.";
         return TILEXR_ERROR_INTERNAL;
     }
     return TILEXR_SUCCESS;
@@ -79,7 +79,7 @@ TileXRSockExchange::TileXRSockExchange(int rank, int rankSize, TileXRUniqueId ti
     inet_ntop(AF_INET, &(tilexrCommId_.handle.addr.sin.sin_addr), ip, INET_ADDRSTRLEN);
     ip_ = ip;
     port_ = ntohs(tilexrCommId_.handle.addr.sin.sin_port);
-    MKI_LOG(INFO) << "TileXRSockExchange using UniqueId mode "
+    TILEXR_LOG(INFO) << "TileXRSockExchange using UniqueId mode "
         << ip_ << ":" << port_ << " ";
 }
 
@@ -103,7 +103,7 @@ int TileXRSockExchange::GetNodeNum()
     }
     isInit_ = true;
     string uuid = GetUUID();
-    MKI_LOG(DEBUG) << "rank:" << rank_ << " UUID " << uuid;
+    TILEXR_LOG(DEBUG) << "rank:" << rank_ << " UUID " << uuid;
 
     set<string> uuidSet {};
     uuidSet.insert(uuid);
@@ -111,26 +111,26 @@ int TileXRSockExchange::GetNodeNum()
     if (IsServer()) {
         for (int i = 1; i < rankSize_; ++i) {
             if (Recv(clientFds_[i], &uuid[0], uuid.size(), 0) <= 0) {
-                MKI_LOG(ERROR) << "Server side recv rank " << i << " buffer failed";
+                TILEXR_LOG(ERROR) << "Server side recv rank " << i << " buffer failed";
                 return TILEXR_ERROR_INTERNAL;
             }
             uuidSet.insert(uuid);
         }
         nodeNum = static_cast<int>(uuidSet.size());
-        MKI_LOG(DEBUG) << "nodeNum:" << nodeNum;
+        TILEXR_LOG(DEBUG) << "nodeNum:" << nodeNum;
         for (int i = 1; i < rankSize_; ++i) {
             if (Send(clientFds_[i], &nodeNum, sizeof(int), 0) <= 0) {
-                MKI_LOG(ERROR) << "Server side send rank " << i << " buffer failed";
+                TILEXR_LOG(ERROR) << "Server side send rank " << i << " buffer failed";
                 return TILEXR_ERROR_INTERNAL;
             }
         }
     } else {
         if (Send(fd_, uuid.data(), uuid.size(), 0) <= 0) {
-            MKI_LOG(ERROR) << "Client side " << rank_ << " send buffer failed";
+            TILEXR_LOG(ERROR) << "Client side " << rank_ << " send buffer failed";
             return TILEXR_ERROR_INTERNAL;
         }
         if (Recv(fd_, &nodeNum, sizeof(int), 0) <= 0) {
-            MKI_LOG(ERROR) << "Client side " << rank_ << " recv buffer failed ";
+            TILEXR_LOG(ERROR) << "Client side " << rank_ << " recv buffer failed ";
             return TILEXR_ERROR_INTERNAL;
         }
     }
@@ -150,7 +150,7 @@ void TileXRSockExchange::GetIpAndPort()
     // only connect localhost for safety
     tilexrCommId_.handle.addr.sin.sin_addr.s_addr = inet_addr(TILEXR_LOCAL_SOCK_IP.c_str()); // ip_.c_str()
     tilexrCommId_.handle.addr.sin.sin_port = htons(port_);
-    MKI_LOG(DEBUG) << "curRank: " << rank_ << " commDomain: " << commDomain_ << " ip: " << ip_ << " port: " << port_;
+    TILEXR_LOG(DEBUG) << "curRank: " << rank_ << " commDomain: " << commDomain_ << " ip: " << ip_ << " port: " << port_;
 }
 
 bool IsLocalIp(const std::string& ip)
@@ -161,7 +161,7 @@ bool IsLocalIp(const std::string& ip)
 
     // 获取网络接口列表
     if (getifaddrs(&ifaddr) == -1) {
-        MKI_LOG(WARN) << "Failed to getifaddrs in IsLocalIp.";
+        TILEXR_LOG(WARN) << "Failed to getifaddrs in IsLocalIp.";
         return false;
     }
 
@@ -180,7 +180,7 @@ bool IsLocalIp(const std::string& ip)
             int s = getnameinfo(ifa->ifa_addr, sizeof(struct sockaddr_in),
                                 host, NI_MAXHOST, nullptr, 0, NI_NUMERICHOST);
             if (s != 0) {
-                MKI_LOG(WARN) << "getnameinfo() failed: " << gai_strerror(s);
+                TILEXR_LOG(WARN) << "getnameinfo() failed: " << gai_strerror(s);
                 continue;
             }
             // 比较输入的IP和当前接口的IP
@@ -197,7 +197,7 @@ bool IsLocalIp(const std::string& ip)
 int TileXRSockExchange::StartSecureTunnel()
 {
     if (IsLocalIp(ip_)) {
-        MKI_LOG(DEBUG) << "no need to start tunnel.";
+        TILEXR_LOG(DEBUG) << "no need to start tunnel.";
         return TILEXR_SUCCESS;
     }
     // 生成一个唯一的锁文件路径，通常基于服务器IP或主机名
@@ -207,29 +207,29 @@ int TileXRSockExchange::StartSecureTunnel()
     lockFileDescriptor_ = open(lockFilePath.c_str(), O_CREAT | O_RDWR,
                                S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH);
     if (lockFileDescriptor_ < 0) {
-        MKI_LOG(ERROR) << "StartSecureTunnel Failed: Unable to open lock file";
+        TILEXR_LOG(ERROR) << "StartSecureTunnel Failed: Unable to open lock file";
         return TILEXR_ERROR_INTERNAL;
     }
 
     // 尝试获取独占锁
     if (flock(lockFileDescriptor_, LOCK_EX | LOCK_NB) < 0) {
         // 如果获取锁失败，说明已经有其他进程在运行
-        MKI_LOG(INFO) << "StartSecureTunnel: Another instance is already running on this server";
+        TILEXR_LOG(INFO) << "StartSecureTunnel: Another instance is already running on this server";
         close(lockFileDescriptor_);
         lockFileDescriptor_ = -1;
         return TILEXR_SUCCESS;
     }
     string port = to_string(port_) + ":localhost:" + to_string(port_);
     string cmd = "/usr/bin/ssh -N -L " + port + " " + ip_;
-    MKI_LOG(INFO) << rank_ <<" StartSecureTunnel : " << cmd;
+    TILEXR_LOG(INFO) << rank_ <<" StartSecureTunnel : " << cmd;
 
     pipe_ = popen(cmd.c_str(), "r");  // "r" 模式打开管道
     if (!pipe_) {
-        MKI_LOG(ERROR) << "StartSecureTunnel Failed: popen error";
+        TILEXR_LOG(ERROR) << "StartSecureTunnel Failed: popen error";
         return TILEXR_ERROR_INTERNAL;
     }
 
-    MKI_LOG(DEBUG) << "StartSecureTunnel success!";
+    TILEXR_LOG(DEBUG) << "StartSecureTunnel success!";
     return TILEXR_SUCCESS;
 }
 
@@ -245,12 +245,12 @@ int TileXRSockExchange::Prepare()
 
     clientFds_.resize(rankSize_, -1);
     if (Listen() != TILEXR_SUCCESS) {
-        MKI_LOG(ERROR) << "Listen Failed!";
+        TILEXR_LOG(ERROR) << "Listen Failed!";
         return TILEXR_ERROR_INTERNAL;
     }
 
     if (Accept() != TILEXR_SUCCESS) {
-        MKI_LOG(ERROR) << "Accept Failed!";
+        TILEXR_LOG(ERROR) << "Accept Failed!";
         return TILEXR_ERROR_INTERNAL;
     }
 
@@ -261,19 +261,19 @@ int TileXRSockExchange::Listen()
 {
     fd_ = socket(AF_INET, SOCK_STREAM, 0);
     if (fd_ < 0) {
-        MKI_LOG(ERROR) << "Server side create socket failed";
+        TILEXR_LOG(ERROR) << "Server side create socket failed";
         return TILEXR_ERROR_INTERNAL;
     }
 
     int reuse = 1;
     if (setsockopt(fd_, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(int)) < 0) {
-        MKI_LOG(ERROR) << "Server side set reuseaddr failed";
+        TILEXR_LOG(ERROR) << "Server side set reuseaddr failed";
         return TILEXR_ERROR_INTERNAL;
     }
 
     struct sockaddr *addrPtr = &tilexrCommId_.handle.addr.sa;
     if (bind(fd_, addrPtr, sizeof(struct sockaddr)) < 0) {
-        MKI_LOG(ERROR) << "Server side bind " << ntohs(tilexrCommId_.handle.addr.sin.sin_port) << " failed";
+        TILEXR_LOG(ERROR) << "Server side bind " << ntohs(tilexrCommId_.handle.addr.sin.sin_port) << " failed";
         return TILEXR_ERROR_INTERNAL;
     }
 
@@ -282,10 +282,10 @@ int TileXRSockExchange::Listen()
      * /proc/sys/net/core/somaxconn if it is less than 65535.
      */
     if (listen(fd_, TILEXR_MAX_BACK_LOG) < 0) {
-        MKI_LOG(ERROR) << "Server side listen " << ntohs(tilexrCommId_.handle.addr.sin.sin_port) << " failed";
+        TILEXR_LOG(ERROR) << "Server side listen " << ntohs(tilexrCommId_.handle.addr.sin.sin_port) << " failed";
         return TILEXR_ERROR_INTERNAL;
     }
-    MKI_LOG(INFO) << "The server is listening! ip: "<< inet_ntoa(tilexrCommId_.handle.addr.sin.sin_addr)
+    TILEXR_LOG(INFO) << "The server is listening! ip: "<< inet_ntoa(tilexrCommId_.handle.addr.sin.sin_addr)
         << " port: " << ntohs(tilexrCommId_.handle.addr.sin.sin_port);
 
     return TILEXR_SUCCESS;
@@ -301,10 +301,10 @@ int TileXRSockExchange::AcceptConnection(int fd, sockaddr_in& clientAddr, sockle
         clientFd = accept(fd, &clientAddrPtr.sa, sinSize);
         if (clientFd < 0) {
             if (!CheckErrno(errno)) {
-                MKI_LOG(ERROR) << "Server side accept failed" << strerror(errno);
+                TILEXR_LOG(ERROR) << "Server side accept failed" << strerror(errno);
                 return -1;
             }
-            MKI_LOG(DEBUG) << "accept failed: " << strerror(errno);
+            TILEXR_LOG(DEBUG) << "accept failed: " << strerror(errno);
             continue;
         }
         break;
@@ -321,22 +321,22 @@ int TileXRSockExchange::Accept()
     for (int i = 1; i < rankSize_; ++i) {
         int fd = AcceptConnection(fd_, clientAddr, &sinSize);
         if (fd < 0) {
-            MKI_LOG(ERROR) << "AcceptConnection failed";
+            TILEXR_LOG(ERROR) << "AcceptConnection failed";
             return TILEXR_ERROR_INTERNAL;
         }
 
         int rank = 0;
         if (Recv(fd, &rank, sizeof(rank), 0) <= 0) {
-            MKI_LOG(ERROR) << "Server side recv rank id failed";
+            TILEXR_LOG(ERROR) << "Server side recv rank id failed";
             return TILEXR_ERROR_INTERNAL;
         }
 
         if (rank >= rankSize_ || rank <= 0 || clientFds_[rank] >= 0) {
-            MKI_LOG(ERROR) << "Server side recv invalid rank id " << rank;
+            TILEXR_LOG(ERROR) << "Server side recv invalid rank id " << rank;
             return TILEXR_ERROR_INTERNAL;
         }
 
-        MKI_LOG(DEBUG) << "Server side recv rank id " << rank;
+        TILEXR_LOG(DEBUG) << "Server side recv rank id " << rank;
         clientFds_[rank] = fd;
     }
 
@@ -350,7 +350,7 @@ void TileXRSockExchange::Close(int &fd) const
     }
 
     if (close(fd) < 0) {
-        MKI_LOG(WARN) << "failed to close fd:" << fd;
+        TILEXR_LOG(WARN) << "failed to close fd:" << fd;
         return;
     }
 
@@ -359,11 +359,11 @@ void TileXRSockExchange::Close(int &fd) const
 
 int TileXRSockExchange::Connect()
 {
-    MKI_LOG(DEBUG) << "Client side " << rank_ << " begin to connect";
+    TILEXR_LOG(DEBUG) << "Client side " << rank_ << " begin to connect";
 
     fd_ = socket(AF_INET, SOCK_STREAM, 0);
     if (fd_ < 0) {
-        MKI_LOG(ERROR) << "Client side " << rank_ << " create socket failed";
+        TILEXR_LOG(ERROR) << "Client side " << rank_ << " create socket failed";
         return TILEXR_ERROR_INTERNAL;
     }
 
@@ -375,16 +375,16 @@ int TileXRSockExchange::Connect()
     while (retryCount < maxRetryCount) {
         if (connect(fd_, addrPtr, sizeof(struct sockaddr)) < 0) {
             if (errno == ECONNREFUSED) {
-                MKI_LOG(DEBUG) << "Client side " << rank_ << " try connect " << (retryCount + 1) << " times refused";
+                TILEXR_LOG(DEBUG) << "Client side " << rank_ << " try connect " << (retryCount + 1) << " times refused";
                 retryCount++;
                 sleep(sleepTimeS);
                 continue;
             }
             if (errno != EINTR) {
-                MKI_LOG(ERROR) << "Client side " << rank_ << " connect failed: " << strerror(errno);
+                TILEXR_LOG(ERROR) << "Client side " << rank_ << " connect failed: " << strerror(errno);
                 break;
             }
-            MKI_LOG(DEBUG) << "Client side " << rank_ << " try connect failed: " << strerror(errno);
+            TILEXR_LOG(DEBUG) << "Client side " << rank_ << " try connect failed: " << strerror(errno);
             continue;
         }
         success = true;
@@ -392,12 +392,12 @@ int TileXRSockExchange::Connect()
     }
 
     if (!success) {
-        MKI_LOG(ERROR) << "Client side " << rank_ << " connect failed";
+        TILEXR_LOG(ERROR) << "Client side " << rank_ << " connect failed";
         return TILEXR_ERROR_INTERNAL;
     }
 
     if (Send(fd_, &rank_, sizeof(rank_), 0) <= 0) {
-        MKI_LOG(ERROR) << "Client side " << rank_ << " send rank failed";
+        TILEXR_LOG(ERROR) << "Client side " << rank_ << " send rank failed";
         return TILEXR_ERROR_INTERNAL;
     }
 
@@ -441,7 +441,7 @@ int GetAddrFromString(TileXRSocketAddress* ua, const char* ipPortPair)
     uint16_t port;
     int ret = ParseIpAndPort(ipPortPair, ip, port);
     if (ret != TILEXR_SUCCESS) {
-        MKI_LOG(ERROR) << "tilexr ParseIpAndPort failed!";
+        TILEXR_LOG(ERROR) << "tilexr ParseIpAndPort failed!";
         return TILEXR_ERROR_INTERNAL;
     }
     ua->sin.sin_family = AF_INET;
@@ -470,7 +470,7 @@ int BootstrapGetServerIp(TileXRSocketAddress& handle)
 
     // 获取网络接口列表
     if (getifaddrs(&ifaddr) == -1) {
-        MKI_LOG(ERROR) << "Failed to getifaddrs in BootstrapGetServerIp.";
+        TILEXR_LOG(ERROR) << "Failed to getifaddrs in BootstrapGetServerIp.";
         return TILEXR_ERROR_INTERNAL;
     }
 
@@ -484,17 +484,17 @@ int BootstrapGetServerIp(TileXRSocketAddress& handle)
             s = getnameinfo(ifa->ifa_addr, sizeof(struct sockaddr_in),
                             host, NI_MAXHOST, nullptr, 0, NI_NUMERICHOST);
             if (s != 0) {
-                MKI_LOG(WARN) << "getnameinfo() failed: " << gai_strerror(s);
+                TILEXR_LOG(WARN) << "getnameinfo() failed: " << gai_strerror(s);
                 continue;
             }
-            MKI_LOG(DEBUG) << "Interface: " << ifa->ifa_name << " Address: " << host;
+            TILEXR_LOG(DEBUG) << "Interface: " << ifa->ifa_name << " Address: " << host;
             if (IsValidInterface(string(ifa->ifa_name))) {
                 break;
             }
         }
     }
     if (ifa) {
-        MKI_LOG(INFO) << "Interface: " << ifa->ifa_name << " Address: " << host;
+        TILEXR_LOG(INFO) << "Interface: " << ifa->ifa_name << " Address: " << host;
     }
     freeifaddrs(ifaddr);
 
@@ -521,22 +521,22 @@ int BootstrapGetUniqueId(TileXRBootstrapHandle *handle, int commDomain)
 
     const char* env = Mki::GetEnv("TILEXR_COMM_ID");
     if (env) {
-        MKI_LOG(INFO) << "TILEXR_COMM_ID set by environment to " << env;
+        TILEXR_LOG(INFO) << "TILEXR_COMM_ID set by environment to " << env;
         if (GetAddrFromString(&handle->addr, env) != TILEXR_SUCCESS) {
-            MKI_LOG(WARN) << ("Invalid TILEXR_COMM_ID, please use format: <ipv4>:<port>");
+            TILEXR_LOG(WARN) << ("Invalid TILEXR_COMM_ID, please use format: <ipv4>:<port>");
             return TILEXR_INVALID_VALUE;
         }
     } else {
         int bootRet = BootstrapGetServerIp(handle->addr);
         if (bootRet != TILEXR_SUCCESS) {
-            MKI_LOG(ERROR) << "tilexr BootstrapGetIpPort failed!";
+            TILEXR_LOG(ERROR) << "tilexr BootstrapGetIpPort failed!";
             return TILEXR_ERROR_INTERNAL;
         }
     }
     int dev;
     int aclRet = aclrtGetDevice(&dev);
     if (aclRet != ACL_SUCCESS) {
-        MKI_LOG(ERROR) << "ERROR: GetDevice.";
+        TILEXR_LOG(ERROR) << "ERROR: GetDevice.";
         return TILEXR_ERROR_INTERNAL;
     }
     handle->addr.sin.sin_port = htons(TILEXR_DEFAULT_SOCK_PORT + dev + commDomain);

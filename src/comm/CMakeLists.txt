@@ -12,6 +12,7 @@ set(TILEXR_SOURCE_FILE tilexr_comm.cpp
         comm_wrap.cpp
         tilexr_internal.cpp
         tilexr_internal.h
+        tilexr_log.h
         tools/socket/tilexr_sock_exchange.h
         tools/socket/tilexr_sock_exchange.cpp
         udma/tilexr_hccp_defs.h
@@ -31,6 +32,7 @@ target_include_directories(tile-comm
         PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
         ${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty
+        ${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/spdlog/include
 )
 target_link_directories(tile-comm
         PUBLIC

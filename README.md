@@ -16,11 +16,11 @@ The current codebase implements the base communication runtime, flag-based synch
 
 ## Features
 
-- **Core communication runtime**: `libtile-comm.so` initializes ranks, shared buffers, peer memory mappings, socket exchange, device `CommArgs`, and DFX state.
+- **Core communication runtime**: `libtile-comm.so` initializes ranks, shared buffers, peer memory mappings, socket exchange, device `CommArgs`, and DFX state. It does not depend on hcomm, HCCL, shmem, or ops-transformer.
 - **Tile-level synchronization**: device-side flag regions and magic values support reusable fine-grained synchronization rounds.
 - **MC2 fused operators**: AllGather+Add and AllGather+MatMul examples under `src/mc2/`.
 - **Registered-memory UDMA path**: host code registers ordinary `aclrtMalloc` device memory with `TileXRUDMARegister`; device kernels use `tilexr_udma.h` wrappers for put/get/signal.
-- **No shmem dependency in current TileXR UDMA path**: `src/comm` builds the UDMA transport from TileXR-owned HCCP/RA runtime integration and does not include or link shmem.
+- **Self-contained TileXR communication library**: `src/comm` uses TileXR-owned types and HCCP/RA runtime integration; it does not include or link hcomm, HCCL, or shmem.
 - **Operator simulator**: `op-simulator/` supports functional/performance simulation for selected AICore kernels without physical hardware.
 
 ## System Requirements
@@ -64,19 +64,21 @@ source scripts/common_env.sh
 
 `scripts/common_env.sh` sets `TILEXR_HOME`, `TILEXR_CANN_HOME`, `TILEXR_TEMP_HOME`, architecture, SOC name, and CANN paths.
 
-For first-time setup:
+For first-time setup of local utilities and optional operator dependencies:
 
 ```bash
 bash scripts/prepare.sh
 ```
 
-Or step by step:
+For the full optional MC2/operator stack, also build hcomm and ops-transformer:
 
 ```bash
 bash scripts/cann_download_install.sh
 bash scripts/hcomm_build_install.sh
 bash scripts/ops_build_run.sh
 ```
+
+Only building `libtile-comm.so` does not require `hcomm_build_install.sh` or `ops_build_run.sh`.
 
 ### 3. Build Core Runtime
 
@@ -117,7 +119,7 @@ TileXR/
 |-- tests/                    # Integration and UDMA tests
 |   `-- udma/
 |-- scripts/                  # Build, setup, test, and utility scripts
-|-- 3rdparty/                 # hcomm, ops-transformer, spdlog, mki, shmem
+|-- 3rdparty/                 # spdlog, mki, plus optional hcomm, ops-transformer, shmem
 `-- docs/                     # Design, migration, and validation notes
 ```
 
@@ -125,7 +127,7 @@ TileXR/
 
 ### Core Runtime
 
-`src/comm/` builds `libtile-comm.so` and exposes the public API in `src/include/tilexr_api.h`.
+`src/comm/` builds `libtile-comm.so` and exposes the public API in `src/include/tilexr_api.h`. This library is intentionally independent of hcomm, HCCL, shmem, and ops-transformer. It uses CANN runtime/ACL/driver APIs plus TileXR-owned communication metadata and datatypes.
 
 Important host-side entry points:
 
@@ -148,7 +150,7 @@ The runtime allocates shared IPC buffers, exchanges peer mappings, uploads `Comm
 The current UDMA path is TileXR-owned:
 
 - `TileXRComm::InitUDMA()` tries to initialize UDMA for multi-rank communicators.
-- `src/comm/udma/tilexr_hccp_loader.*` dynamically loads CANN/HCCP runtime libraries such as `libhccl.so`, `libhccl_v2.so`, `libra.so`, and `libtsdclient.so`.
+- `src/comm/udma/tilexr_hccp_loader.*` dynamically loads CANN HCCP/RA runtime libraries such as `libra.so` and `libtsdclient.so`.
 - `src/comm/udma/tilexr_udma_transport.*` creates contexts, queues, route metadata, and a device-side `TileXR::UDMAInfo` image.
 - `TileXRUDMARegister` registers ordinary device memory and exchanges remote region metadata.
 - `CommArgs::udmaInfoPtr` and `CommArgs::udmaRegistryPtr` make queue and registered-memory metadata visible to kernels.
@@ -168,12 +170,17 @@ If UDMA is unavailable, communicator initialization continues without setting `E
 
 | Component | Version / Source | Purpose |
 | --- | --- | --- |
-| CANN | 9.1.0 | Ascend toolkit, runtime, compiler, and libraries |
-| hcomm | submodule | HCCL communication dependencies |
-| ops-transformer | submodule | Operator build and packaging framework |
+| CANN | 9.1.0 | Required for `libtile-comm.so`: Ascend ACL/runtime/driver headers and libraries |
 | spdlog | submodule | Header-only logging dependency |
 | mki | submodule | Matrix kernel interface and utilities |
-| shmem | submodule, reference/optional | Historical UDMA experiments and examples; not linked by current `src/comm` |
+
+Optional components:
+
+| Component | Version / Source | Used by | Notes |
+| --- | --- | --- | --- |
+| hcomm / HCCL | submodule / CANN communication stack | MC2 fused-operator examples and HCCL tests | Not included or linked by `src/comm` / `libtile-comm.so` |
+| ops-transformer | submodule | `src/mc2` operator build, packaging, and run scripts | Not needed when only compiling `libtile-comm.so` |
+| shmem | submodule, reference/optional | Historical UDMA experiments and comparison examples | Not included or linked by current `src/comm` |
 
 ## UDMA Validation
 
@@ -223,8 +230,8 @@ bash scripts/driver_fix.sh
 ## Documentation
 
 - [scripts/README.md](scripts/README.md): script reference and workflows
-- [BUILD_VERIFICATION.md](BUILD_VERIFICATION.md): current build and verification checklist
-- [UDMA_INTEGRATION_SUMMARY.md](UDMA_INTEGRATION_SUMMARY.md): current UDMA architecture summary
+- [docs/BUILD_VERIFICATION.md](docs/BUILD_VERIFICATION.md): current build and verification checklist
+- [docs/UDMA_INTEGRATION_SUMMARY.md](docs/UDMA_INTEGRATION_SUMMARY.md): current UDMA architecture summary
 - [docs/SHMEM_INTEGRATION.md](docs/SHMEM_INTEGRATION.md): shmem status and historical notes
 - [docs/CANN_VERSION_MIGRATION.md](docs/CANN_VERSION_MIGRATION.md): CANN 9.1.0 migration notes
 - [CLAUDE.md](CLAUDE.md): repository guidance for AI coding agents
@@ -243,7 +250,7 @@ Build failures:
 - Run `git submodule update --init --recursive`.
 - Run `source scripts/common_env.sh` before CMake or scripts.
 - Check `ASCEND_HOME_PATH`, `TILEXR_CANN_VER`, and CANN 9.1.0 include/library layout.
-- Confirm `install/lib/libtile-comm.so` links to CANN libraries and does not require shmem for the current UDMA path.
+- Confirm `install/lib/libtile-comm.so` links only to the expected CANN runtime/driver libraries and does not require hcomm, HCCL, shmem, or ops-transformer.
 
 Log analysis:
 

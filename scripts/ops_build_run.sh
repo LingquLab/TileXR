@@ -5,7 +5,7 @@ source ${script_path}/common_env.sh
 
 env_print
 
-cp ${TILEXR_HOME}/.ops_gitignore ${TILEXR_OPS_HOME}/.gitignore
+cp ${TILEXR_HOME}/.gitignore ${TILEXR_OPS_HOME}/.gitignore
 
 cd ${TILEXR_HOME}
 cmake . && make && make install

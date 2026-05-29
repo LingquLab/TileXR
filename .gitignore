@@ -11,6 +11,7 @@
 .idea
 cmake-build-debug
 cmake-build-release
+cmake-build-*
 
 # Visual Studio
 .vs
@@ -24,6 +25,8 @@ cmake-build-release
 # build & output tempalte dirs
 build/
 build_out/
+build_device/
+build_hccd/
 output/
 
 # binary files
@@ -56,6 +59,9 @@ run/
 env/cann/
 env/temp/
 env/
+third_party/
+utils/
+sign_tmp/
 **/build_device/
 **/build/
 

@@ -11,7 +11,7 @@
 #include <map>
 #include <mutex>
 #include <vector>
-#include <mki/utils/log/log.h>
+#include "tilexr_log.h"
 #include <mki/utils/env/env.h>
 #include <runtime/kernel.h>
 #include "ccl_kernel_args.h"
@@ -25,7 +25,6 @@ constexpr int AI_CORE_NUM_20 = 20;
 constexpr int AI_CORE_NUM_2 = 2;
 
 using namespace std;
-using namespace Mki;
 
 extern const int TILEXR_CCE_BIN_STR[] = {0};
 // asm(R"(.section .rodata, "a", @progbits
@@ -38,14 +37,14 @@ constexpr int COC_RT_DEV_BINARY_MAGIC_ELF = 0x43554245;
 constexpr int TILEXR_1OP_BIN_SIZE = 3000000;
 
 namespace TileXR {
-const std::map<HcclDataType, std::string> DATATYPE2NAME = {
-    { HCCL_DATA_TYPE_INT32, "int" },
-    { HCCL_DATA_TYPE_INT16, "int16_t" },
-    { HCCL_DATA_TYPE_INT8, "int8_t" },
-    { HCCL_DATA_TYPE_INT64, "int64_t" },
-    { HCCL_DATA_TYPE_FP32, "float" },
-    { HCCL_DATA_TYPE_FP16, "float16_t" },
-    { HCCL_DATA_TYPE_BFP16, "bfloat16_t" }
+const std::map<TileXRDataType, std::string> DATATYPE2NAME = {
+    { TILEXR_DATA_TYPE_INT32, "int" },
+    { TILEXR_DATA_TYPE_INT16, "int16_t" },
+    { TILEXR_DATA_TYPE_INT8, "int8_t" },
+    { TILEXR_DATA_TYPE_INT64, "int64_t" },
+    { TILEXR_DATA_TYPE_FP32, "float" },
+    { TILEXR_DATA_TYPE_FP16, "float16_t" },
+    { TILEXR_DATA_TYPE_BFP16, "bfloat16_t" }
 };
 
 const std::unordered_map<std::string, ChipName> CHIP_MAP = {
@@ -80,18 +79,18 @@ int RegisterBinaryKernel(const string &funcName, int8_t *funSig, const T *binStr
     binary.version = 0;
     rtError_t rtRet = rtDevBinaryRegister(&binary, &binHandle);
     if (rtRet != RT_ERROR_NONE) {
-        MKI_LOG(WARN) << "rtDevBinaryRegister failed! " << to_string(rtRet) << ", funcName = " << funcName;
+        TILEXR_LOG(WARN) << "rtDevBinaryRegister failed! " << to_string(rtRet) << ", funcName = " << funcName;
         return TILEXR_ERROR_INTERNAL;
     }
     rtRet = rtFunctionRegister(binHandle, funSig, funcName.c_str(), funcName.c_str(), 0);
     if (rtRet != RT_ERROR_NONE) {
-        MKI_LOG(WARN) << "rtFunctionRegister failed! " << to_string(rtRet) << ", funcName = " << funcName;
+        TILEXR_LOG(WARN) << "rtFunctionRegister failed! " << to_string(rtRet) << ", funcName = " << funcName;
         return TILEXR_ERROR_INTERNAL;
     }
     return TILEXR_SUCCESS;
 }
 
-int8_t *GetFunSig(TileXRType type, HcclDataType dataType, uint64_t devType = 0)
+int8_t *GetFunSig(TileXRType type, TileXRDataType dataType, uint64_t devType = 0)
 {
     constexpr int sigOffset = 16;
     return reinterpret_cast<int8_t *>((static_cast<uint64_t>(type) << sigOffset << sigOffset) +
@@ -101,7 +100,7 @@ int8_t *GetFunSig(TileXRType type, HcclDataType dataType, uint64_t devType = 0)
 const int* FindNextOpStart(const int opStartMaigc, const int* cclBinEndPtr, const int* cclBinPtr)
 {
     if (cclBinPtr == nullptr) {
-        MKI_LOG(ERROR) << "FindNextOpStart failed! cclBinPtr is nullptr";
+        TILEXR_LOG(ERROR) << "FindNextOpStart failed! cclBinPtr is nullptr";
         return nullptr;
     }
     while (*cclBinPtr != opStartMaigc and cclBinPtr < cclBinEndPtr) {
@@ -118,9 +117,9 @@ int RegistCCLOp3Kernel(const int* cclBinPtr)
     const int* cclBinStr = TILEXR_CCE_BIN_STR;
     auto cclBinEndPtr = cclBinStr + TILEXR_1OP_BIN_SIZE / sizeof(int);
     const int opStartMaigc = 0x44444444;
-    vector<HcclDataType> registerTypes = { HCCL_DATA_TYPE_INT32, HCCL_DATA_TYPE_INT16, HCCL_DATA_TYPE_INT8,
-                                           HCCL_DATA_TYPE_FP32, HCCL_DATA_TYPE_FP16, HCCL_DATA_TYPE_BFP16,
-                                           HCCL_DATA_TYPE_INT64 };
+    vector<TileXRDataType> registerTypes = { TILEXR_DATA_TYPE_INT32, TILEXR_DATA_TYPE_INT16, TILEXR_DATA_TYPE_INT8,
+                                           TILEXR_DATA_TYPE_FP32, TILEXR_DATA_TYPE_FP16, TILEXR_DATA_TYPE_BFP16,
+                                           TILEXR_DATA_TYPE_INT64 };
 
     // 这里得按.cpp的文件名字排序，比如 allgather.cpp.o, allreduce.cpp.o, reduce_scatter.cpp.o
     std::vector<TileXRType> registerCCLTypesOp3 = {
@@ -145,9 +144,9 @@ int RegistCCLOp3Kernel(const int* cclBinPtr)
 
 int RegistCCLOp2Kernel(const int* cclBinPtr, const int* nextPtr)
 {
-    vector<HcclDataType> registerTypes = { HCCL_DATA_TYPE_INT32, HCCL_DATA_TYPE_INT16, HCCL_DATA_TYPE_INT8,
-                                           HCCL_DATA_TYPE_FP32, HCCL_DATA_TYPE_FP16, HCCL_DATA_TYPE_BFP16,
-                                           HCCL_DATA_TYPE_INT64 };
+    vector<TileXRDataType> registerTypes = { TILEXR_DATA_TYPE_INT32, TILEXR_DATA_TYPE_INT16, TILEXR_DATA_TYPE_INT8,
+                                           TILEXR_DATA_TYPE_FP32, TILEXR_DATA_TYPE_FP16, TILEXR_DATA_TYPE_BFP16,
+                                           TILEXR_DATA_TYPE_INT64 };
     std::vector<TileXRType> registerCCLTypesOp2 = { // 完成算子实现后在这里添加算子注册
         TileXRType::ALL_GATHER, TileXRType::REDUCE_SCATTER, TileXRType::ALL2ALL_V_C,
         TileXRType::SEND, TileXRType::RECV, TileXRType::LOCAL_REDUCE, TileXRType::GATHER, TileXRType::ALL2ALL,
@@ -163,20 +162,20 @@ int RegistCCLOp2Kernel(const int* cclBinPtr, const int* nextPtr)
         return res;
     }
     res = RegisterBinaryKernel(TILEXR_TYPE2NAME.at(TileXRType::BROADCAST),
-        GetFunSig(TileXRType::BROADCAST, HCCL_DATA_TYPE_RESERVED), cclBinPtr, LCCL_RT_DEV_BINARY_MAGIC_ELF_AIVEC);
+        GetFunSig(TileXRType::BROADCAST, TILEXR_DATA_TYPE_RESERVED), cclBinPtr, LCCL_RT_DEV_BINARY_MAGIC_ELF_AIVEC);
     if (res != TILEXR_SUCCESS) {
         return res;
     }
     res = RegisterBinaryKernel(TILEXR_TYPE2NAME.at(TileXRType::BANDWIDTH),
-        GetFunSig(TileXRType::BANDWIDTH, HCCL_DATA_TYPE_RESERVED), cclBinPtr, LCCL_RT_DEV_BINARY_MAGIC_ELF_AIVEC);
+        GetFunSig(TileXRType::BANDWIDTH, TILEXR_DATA_TYPE_RESERVED), cclBinPtr, LCCL_RT_DEV_BINARY_MAGIC_ELF_AIVEC);
     return res;
 }
 
 int RegistCCLKernel(const bool enableProfiling)
 {
-    vector<HcclDataType> registerTypes = { HCCL_DATA_TYPE_INT32, HCCL_DATA_TYPE_INT16, HCCL_DATA_TYPE_INT8,
-                                           HCCL_DATA_TYPE_FP32, HCCL_DATA_TYPE_FP16, HCCL_DATA_TYPE_BFP16,
-                                           HCCL_DATA_TYPE_INT64 };
+    vector<TileXRDataType> registerTypes = { TILEXR_DATA_TYPE_INT32, TILEXR_DATA_TYPE_INT16, TILEXR_DATA_TYPE_INT8,
+                                           TILEXR_DATA_TYPE_FP32, TILEXR_DATA_TYPE_FP16, TILEXR_DATA_TYPE_BFP16,
+                                           TILEXR_DATA_TYPE_INT64 };
     const int* cclBinStr = TILEXR_CCE_BIN_STR;
     auto cclBinEndPtr = cclBinStr + TILEXR_1OP_BIN_SIZE / sizeof(int);
     const int* cclBinPtr = cclBinStr + 1;
@@ -224,7 +223,7 @@ int RegistCCLKernel(const bool enableProfiling)
 
 void RegistCoCKernel()
 {
-    vector<HcclDataType> registerTypes = { HCCL_DATA_TYPE_FP16, HCCL_DATA_TYPE_BFP16 };
+    vector<TileXRDataType> registerTypes = { TILEXR_DATA_TYPE_FP16, TILEXR_DATA_TYPE_BFP16 };
     vector<vector<TileXRType>> registerCOCTypes = {
         { TileXRType::PURE_MATMUL },
         { TileXRType::MATMUL_ALL_REDUCE },
@@ -261,40 +260,40 @@ int RegistKernel(const bool enableProfiling)
     return TILEXR_SUCCESS;
 }
 
-int64_t Count2Size(int64_t count, const HcclDataType &dataType)
+int64_t Count2Size(int64_t count, const TileXRDataType &dataType)
 {
     int64_t dataSize = TILEXR_INVALID_VALUE;
-    if (dataType == HCCL_DATA_TYPE_INT8 || dataType == HCCL_DATA_TYPE_UINT8) {
+    if (dataType == TILEXR_DATA_TYPE_INT8 || dataType == TILEXR_DATA_TYPE_UINT8) {
         dataSize = count;
-    } else if (dataType == HCCL_DATA_TYPE_INT16 || dataType == HCCL_DATA_TYPE_FP16 ||
-               dataType == HCCL_DATA_TYPE_BFP16 || dataType == HCCL_DATA_TYPE_UINT16) {
+    } else if (dataType == TILEXR_DATA_TYPE_INT16 || dataType == TILEXR_DATA_TYPE_FP16 ||
+               dataType == TILEXR_DATA_TYPE_BFP16 || dataType == TILEXR_DATA_TYPE_UINT16) {
         dataSize = count * sizeof(int16_t);
-    } else if (dataType == HCCL_DATA_TYPE_FP32 || dataType == HCCL_DATA_TYPE_INT32 ||
-               dataType == HCCL_DATA_TYPE_UINT32) {
+    } else if (dataType == TILEXR_DATA_TYPE_FP32 || dataType == TILEXR_DATA_TYPE_INT32 ||
+               dataType == TILEXR_DATA_TYPE_UINT32) {
         dataSize = count * sizeof(int32_t);
-    } else if (dataType == HCCL_DATA_TYPE_INT64 || dataType == HCCL_DATA_TYPE_UINT64) {
+    } else if (dataType == TILEXR_DATA_TYPE_INT64 || dataType == TILEXR_DATA_TYPE_UINT64) {
         dataSize = count * sizeof(int64_t);
     } else {
-        MKI_LOG(ERROR) << "unknown datatype";
+        TILEXR_LOG(ERROR) << "unknown datatype";
     }
     return dataSize;
 }
 
-int LoadMTE(TileXRType cclType, AscendCCLKernelArgs &args, uint32_t blockDim, HcclDataType dataType, aclrtStream stream)
+int LoadMTE(TileXRType cclType, AscendCCLKernelArgs &args, uint32_t blockDim, TileXRDataType dataType, aclrtStream stream)
 {
     int error = 0;
-    MKI_LOG(DEBUG) << "LoadMTE " << TILEXR_TYPE2NAME.at(cclType) << " count:" << args.count << " dataType:" << dataType
+    TILEXR_LOG(DEBUG) << "LoadMTE " << TILEXR_TYPE2NAME.at(cclType) << " count:" << args.count << " dataType:" << dataType
                    << " op:" << args.op << " blockDim:" << blockDim << " rootRank:" << args.root
                    << ", magic: " << args.magic;
     int64_t dataSize = Count2Size(args.count, dataType);
     if (dataSize == TILEXR_INVALID_VALUE || blockDim == 0) {
-        MKI_LOG(ERROR) << ("LoadMTE args are invalid");
+        TILEXR_LOG(ERROR) << ("LoadMTE args are invalid");
         return TILEXR_ERROR_MKIRT;
     }
 
     static const char *ENV = Mki::GetEnv("LCCL_PARALLEL");
     if (ENV && (string(ENV) == "1" || string(ENV) == "true") && dataSize >= IPC_BUFF_MAX_SIZE) {
-        MKI_LOG(ERROR) << ("LoadMTE args are invalid, because LCCL_PARALLEL is open, and dataSize is too big.");
+        TILEXR_LOG(ERROR) << ("LoadMTE args are invalid, because LCCL_PARALLEL is open, and dataSize is too big.");
         return TILEXR_ERROR_MKIRT;
     }
 
@@ -307,14 +306,14 @@ int LoadMTE(TileXRType cclType, AscendCCLKernelArgs &args, uint32_t blockDim, Hc
     // 如果想要发射910A5算子，那么需要把GetFunSig第三个参数添加进去（加1）
     if (cclType == TileXRType::BANDWIDTH) {
         args.count = dataSize;
-        error = rtKernelLaunchWithFlagV2(GetFunSig(cclType, HCCL_DATA_TYPE_RESERVED),
+        error = rtKernelLaunchWithFlagV2(GetFunSig(cclType, TILEXR_DATA_TYPE_RESERVED),
                                          blockDim, &argsInfo, nullptr, stream, 0, &cfgInfo);
     } else {
         error = rtKernelLaunchWithFlagV2(GetFunSig(cclType, dataType),
                                          blockDim, &argsInfo, nullptr, stream, 0, &cfgInfo);
     }
     if (error != RT_ERROR_NONE) {
-        MKI_LOG(ERROR) << "AsdRtFunctionLaunch -:" << TILEXR_TYPE2NAME.at(cclType) << to_string(error);
+        TILEXR_LOG(ERROR) << "AsdRtFunctionLaunch -:" << TILEXR_TYPE2NAME.at(cclType) << to_string(error);
         return TILEXR_ERROR_MKIRT;
     }
     return error;
@@ -340,17 +339,17 @@ ChipName GetChipName()
     char ver[socVerLength];
     auto ret = rtGetSocVersion(ver, socVerLength);
     if (ret != RT_ERROR_NONE) {
-        MKI_LOG(ERROR) << "rtGetSocVersion failed, not sure whether the function is normal, please use it with caution";
+        TILEXR_LOG(ERROR) << "rtGetSocVersion failed, not sure whether the function is normal, please use it with caution";
         return ChipName::RESERVED;
     }
     string chipName(ver);
-    MKI_LOG(DEBUG) << "rtGetSocVersion -- The result after converting ver to string is:" << chipName;
+    TILEXR_LOG(DEBUG) << "rtGetSocVersion -- The result after converting ver to string is:" << chipName;
 
     auto it = CHIP_MAP.find(chipName);
     if (it != CHIP_MAP.end()) {
         curChipName = it->second;
     } else {
-        MKI_LOG(WARN) << "There is no commitment to the supported chip types yet," <<
+        TILEXR_LOG(WARN) << "There is no commitment to the supported chip types yet," <<
                       " and it is not certain whether the functions will work properly.";
     }
     return curChipName;
@@ -378,7 +377,7 @@ uint32_t GetCoreNum(ChipName chipName)
         case ChipName::CHIP_310P3:
             return AI_CORE_NUM_2;
         default:
-            MKI_LOG(ERROR) << "Unknown chip name";
+            TILEXR_LOG(ERROR) << "Unknown chip name";
             return 0;
     }
 }

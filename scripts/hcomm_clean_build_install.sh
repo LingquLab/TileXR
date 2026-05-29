@@ -3,7 +3,7 @@
 script_path=`realpath $(dirname "${BASH_SOURCE[0]}")`
 source ${script_path}/common_env.sh
 
-cp ${TILEXR_HOME}/.hcomm_gitignore ${TILEXR_HCOMM_HOME}/.gitignore
+cp ${TILEXR_HOME}/.gitignore ${TILEXR_HCOMM_HOME}/.gitignore
 
 cd ${TILEXR_HCOMM_HOME}
 _hcomm_build

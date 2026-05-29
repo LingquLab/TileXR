@@ -17,7 +17,7 @@
 #include <string>
 #include <unordered_map>
 
-#include "mki/utils/log/log.h"
+#include "tilexr_log.h"
 #include "tools/socket/tilexr_sock_exchange.h"
 
 namespace TileXR {
@@ -387,7 +387,7 @@ int TileXRUDMATransport::OpenDevice()
     args.subPid = &subPid_;
     auto tsdRet = loader_.TsdProcessOpen(logicDevId_, &args);
     if (tsdRet != 0) {
-        MKI_LOG(WARN) << "TileXR UDMA TsdProcessOpen failed: " << tsdRet;
+        TILEXR_LOG(WARN) << "TileXR UDMA TsdProcessOpen failed: " << tsdRet;
         return TILEXR_ERROR_INTERNAL;
     }
     tsdOpened_ = true;
@@ -399,7 +399,7 @@ int TileXRUDMATransport::OpenDevice()
     initConfig.enableHdcAsync = 1;
     int ret = loader_.RaInit(&initConfig);
     if (ret != 0) {
-        MKI_LOG(WARN) << "TileXR UDMA RaInit failed: " << ret;
+        TILEXR_LOG(WARN) << "TileXR UDMA RaInit failed: " << ret;
         return TILEXR_ERROR_INTERNAL;
     }
     raInitialized_ = true;
@@ -414,13 +414,13 @@ int TileXRUDMATransport::BuildRoutes()
     unsigned int eidNum = 0;
     int ret = loader_.RaGetDevEidInfoNum(info, &eidNum);
     if (ret != 0 || eidNum == 0) {
-        MKI_LOG(WARN) << "TileXR UDMA RaGetDevEidInfoNum failed: " << ret << ", eidNum=" << eidNum;
+        TILEXR_LOG(WARN) << "TileXR UDMA RaGetDevEidInfoNum failed: " << ret << ", eidNum=" << eidNum;
         return TILEXR_ERROR_INTERNAL;
     }
     std::vector<DevEidInfo> devEids(eidNum);
     ret = loader_.RaGetDevEidInfoList(info, devEids.data(), &eidNum);
     if (ret != 0 || eidNum == 0) {
-        MKI_LOG(WARN) << "TileXR UDMA RaGetDevEidInfoList failed: " << ret;
+        TILEXR_LOG(WARN) << "TileXR UDMA RaGetDevEidInfoList failed: " << ret;
         return TILEXR_ERROR_INTERNAL;
     }
     eidCount_ = eidNum;
@@ -465,7 +465,7 @@ int TileXRUDMATransport::BuildRoutes()
         uint32_t localEid = devEids[0].eidIndex;
         if (topoReady && !ResolveLocalEidRoute(rootInfo, topoEdges, localId, allLocalIds[peer], localEid)) {
             topoReady = false;
-            MKI_LOG(WARN) << "TileXR UDMA topology route resolution failed, falling back to EID "
+            TILEXR_LOG(WARN) << "TileXR UDMA topology route resolution failed, falling back to EID "
                           << devEids[0].eidIndex;
             localEid = devEids[0].eidIndex;
         }
@@ -541,7 +541,7 @@ int TileXRUDMATransport::CreateContexts()
         void* ctxHandle = nullptr;
         ret = loader_.RaCtxInit(&cfg, &attr, &ctxHandle);
         if (ret != 0 || ctxHandle == nullptr) {
-            MKI_LOG(WARN) << "TileXR UDMA RaCtxInit failed: " << ret;
+            TILEXR_LOG(WARN) << "TileXR UDMA RaCtxInit failed: " << ret;
             return TILEXR_ERROR_INTERNAL;
         }
         void* tokenHandle = nullptr;
