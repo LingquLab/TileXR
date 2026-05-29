@@ -69,6 +69,14 @@ target_compile_definitions(test_tilexr_collectives_api PRIVATE
     TILEXR_SOURCE_ROOT="${TILEXR_ROOT}"
 )
 
+add_executable(test_tilexr_collectives_kernel_ownership
+    unit/test_tilexr_collectives_kernel_ownership.cpp
+)
+
+target_compile_definitions(test_tilexr_collectives_kernel_ownership PRIVATE
+    TILEXR_SOURCE_ROOT="${TILEXR_ROOT}"
+)
+
 add_executable(test_tilexr_collectives_header_compile
     unit/test_tilexr_collectives_header_compile.cpp
 )
@@ -206,6 +214,7 @@ target_link_libraries(test_prepare_host_launch_context
 )
 
 add_test(NAME test_tilexr_collectives_api COMMAND test_tilexr_collectives_api)
+add_test(NAME test_tilexr_collectives_kernel_ownership COMMAND test_tilexr_collectives_kernel_ownership)
 add_test(NAME test_tilexr_collectives_header_compile COMMAND test_tilexr_collectives_header_compile)
 add_test(NAME test_tilexr_collectives_stub_behavior COMMAND test_tilexr_collectives_stub_behavior)
 add_test(NAME test_tilexr_collectives_uninitialized_comm COMMAND test_tilexr_collectives_uninitialized_comm)
@@ -215,6 +224,7 @@ add_test(NAME test_prepare_host_launch_context COMMAND test_prepare_host_launch_
 
 install(TARGETS
     test_tilexr_collectives_api
+    test_tilexr_collectives_kernel_ownership
     test_tilexr_collectives_header_compile
     test_tilexr_collectives_stub_behavior
     test_tilexr_collectives_uninitialized_comm
