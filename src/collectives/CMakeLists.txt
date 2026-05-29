@@ -5,14 +5,33 @@
 
 include(GNUInstallDirs)
 
+add_subdirectory(kernels)
+
+set(TILEXR_COLLECTIVES_KERNEL_EMBED_CPP
+        ${CMAKE_CURRENT_BINARY_DIR}/tilexr_collectives_kernel_embed.cpp
+)
+
+add_custom_command(
+        OUTPUT ${TILEXR_COLLECTIVES_KERNEL_EMBED_CPP}
+        COMMAND ${CMAKE_COMMAND}
+                -DTILEXR_COLLECTIVES_OP=${TILEXR_COLLECTIVES_OP}
+                -DTILEXR_COLLECTIVES_KERNEL_EMBED_CPP=${TILEXR_COLLECTIVES_KERNEL_EMBED_CPP}
+                -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_collectives_kernel.cmake
+        DEPENDS tilexr_collectives_op ${TILEXR_COLLECTIVES_OP}
+                ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_collectives_kernel.cmake
+        VERBATIM
+)
+
 set(TILEXR_COLLECTIVES_SOURCE_FILE
         host/collective_launcher.cpp
         host/collective_utils.cpp
         host/collective_kernel.cpp
         host/tilexr_collectives.cpp
+        ${TILEXR_COLLECTIVES_KERNEL_EMBED_CPP}
 )
 
 add_library(tilexr-collectives SHARED ${TILEXR_COLLECTIVES_SOURCE_FILE})
+add_dependencies(tilexr-collectives tilexr_collectives_op)
 
 target_include_directories(tilexr-collectives
         PUBLIC

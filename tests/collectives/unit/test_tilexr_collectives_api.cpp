@@ -203,6 +203,9 @@ void TestCollectivesBuildDefinesSeparateSharedLibrary()
     CheckContains(path, text, "host/collective_launcher.cpp");
     CheckContains(path, text, "host/collective_utils.cpp");
     CheckContains(path, text, "host/collective_kernel.cpp");
+    CheckContains(path, text, "add_subdirectory(kernels)");
+    CheckContains(path, text, "tilexr_collectives_kernel_embed.cpp");
+    CheckContains(path, text, "tilexr_collectives_op");
     CheckContains(path, text, "add_library(tilexr-collectives SHARED");
     CheckContains(path, text, "${ASCEND_DRIVER_PATH}/kernel/inc\n        PRIVATE");
     CheckContains(path, text, "target_link_libraries(tilexr-collectives\n        PUBLIC\n        tile-comm\n        PRIVATE");

@@ -21,12 +21,13 @@ namespace Host {
 
 struct AscendCCLKernelArgs {
     const void *input = nullptr;
-    void *output = nullptr;
-    GM_ADDR commArgsPtr = nullptr;
+    const void *output = nullptr;
+    const void *commArgsPtr = nullptr;
     int64_t count = 0;
     int64_t magic = 0;
     int op = 0;
     int root = 0;
+    int cycleCount = 0;
     const void *scale = nullptr;
     int64_t scaleCount = 0;
     const void *offset = nullptr;

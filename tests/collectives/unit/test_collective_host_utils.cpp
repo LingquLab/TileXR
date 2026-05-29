@@ -122,10 +122,10 @@ void TestAllToAllBlockNum()
                 32);
 }
 
-void TestKernelShimWaitsForRegistration()
+void TestKernelShimRejectsInvalidParametersBeforeMagic()
 {
     TileXRCommPtr comm = nullptr;
-    CheckInt64("TileXRCommInit for unregistered kernel launch",
+    CheckInt64("TileXRCommInit for invalid kernel launch",
                TileXRCommInit(0, 1, &comm),
                TileXR::TILEXR_SUCCESS);
     if (comm == nullptr) {
@@ -143,21 +143,21 @@ void TestKernelShimWaitsForRegistration()
     uint8_t sendStorage[16] = {};
     uint8_t recvStorage[16] = {};
 
-    CheckInt64("LaunchCollectiveKernel without registered kernels",
+    CheckInt64("LaunchCollectiveKernel rejects invalid blockDim",
                TileXRCollectives::Host::LaunchCollectiveKernel(comm, TileXR::TileXRType::ALL_GATHER, context,
-                   sendStorage, recvStorage, 4, TileXR::TILEXR_DATA_TYPE_INT32, 2, nullptr),
-               TileXR::TILEXR_ERROR_NOT_INITIALIZED);
-    CheckInt64("LaunchCollectiveKernel preserved magic without registered kernels",
+                   sendStorage, recvStorage, 4, TileXR::TILEXR_DATA_TYPE_INT32, 0, nullptr),
+               TileXR::TILEXR_ERROR_PARA_CHECK_FAIL);
+    CheckInt64("LaunchCollectiveKernel preserved context magic after validation failure",
                context.magic,
                0);
 
     int64_t magic = -1;
-    CheckInt64("TileXRCommNextMagic after unregistered kernel launch",
+    CheckInt64("TileXRCommNextMagic after invalid kernel launch",
                TileXRCommNextMagic(comm, &magic),
                TileXR::TILEXR_SUCCESS);
-    CheckInt64("first magic after unregistered kernel launch", magic, 1);
+    CheckInt64("first magic after invalid kernel launch", magic, 1);
 
-    CheckInt64("TileXRCommDestroy after unregistered kernel launch",
+    CheckInt64("TileXRCommDestroy after invalid kernel launch",
                TileXRCommDestroy(comm),
                TileXR::TILEXR_SUCCESS);
 }
@@ -170,6 +170,6 @@ int main()
     TestCountToBytes();
     TestAllGatherBlockNum();
     TestAllToAllBlockNum();
-    TestKernelShimWaitsForRegistration();
+    TestKernelShimRejectsInvalidParametersBeforeMagic();
     return g_failures == 0 ? 0 : 1;
 }
