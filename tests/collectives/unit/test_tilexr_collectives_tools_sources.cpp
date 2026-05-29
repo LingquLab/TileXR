@@ -2,8 +2,11 @@
 
 #include <fstream>
 #include <iostream>
+#include <set>
 #include <sstream>
 #include <string>
+
+#include "../common/int32_pattern.h"
 
 namespace {
 
@@ -85,7 +88,8 @@ void TestCorrectnessRunnerSource()
     CheckContains(path, text, "aclrtSynchronizeStream");
     CheckContains(path, text, "ExpectedAllGatherValue");
     CheckContains(path, text, "ExpectedAllToAllValue");
-    CheckContains(path, text, "MixExpectedInt32");
+    CheckContains(path, text, "CanUseCollisionFreeInt32Pattern");
+    CheckContains(path, text, "../common/int32_pattern.h");
     CheckDoesNotContain(path, text, "srcRank * 1000000 + index");
     CheckDoesNotContain(path, text, "dstRank * 1000 + index");
 }
@@ -135,11 +139,61 @@ void TestPerfToolSource()
     CheckContains(path, text, "AdvanceBytes");
     CheckContains(path, text, "aclrtMemcpy H2D devRecv sentinel");
     CheckContains(path, text, "actualSendBytesPerRank");
-    CheckContains(path, text, "MixExpectedInt32");
+    CheckContains(path, text, "CanUseCollisionFreeInt32Pattern");
+    CheckContains(path, text, "../common/int32_pattern.h");
     CheckDoesNotContain(path, text, "sendElements * static_cast<int64_t>(options.dtype.bytes)");
     CheckDoesNotContain(path, text, "static_cast<int64_t>(static_cast<double>(bytes) * options.stepFactor)");
     CheckDoesNotContain(path, text, "srcRank * 1000000 + index");
     CheckDoesNotContain(path, text, "dstRank * 1000 + index");
+}
+
+void TestInt32PatternHasNoKnownCollisions()
+{
+    using TileXRCollectivesTest::CanUseCollisionFreeInt32Pattern;
+    using TileXRCollectivesTest::ExpectedAllGatherValue;
+    using TileXRCollectivesTest::ExpectedAllToAllValue;
+
+    const int rankSize = 8;
+    const int64_t reviewedCollisionA = 9646;
+    const int64_t reviewedCollisionB = 76425;
+    if (ExpectedAllGatherValue(rankSize, 0, reviewedCollisionA) ==
+        ExpectedAllGatherValue(rankSize, 0, reviewedCollisionB)) {
+        std::cerr << "reviewed allgather collision was reintroduced" << std::endl;
+        ++g_failures;
+    }
+
+    if (!CanUseCollisionFreeInt32Pattern(128, 262144)) {
+        std::cerr << "pattern should cover 1MiB INT32 validation at rank_size=128" << std::endl;
+        ++g_failures;
+    }
+
+    std::set<int32_t> seen;
+    const int64_t sampleCount = 4096;
+    for (int src = 0; src < rankSize; ++src) {
+        for (int64_t i = 0; i < sampleCount; ++i) {
+            const int32_t value = ExpectedAllGatherValue(rankSize, src, i);
+            if (!seen.insert(value).second) {
+                std::cerr << "allgather int32 pattern collision src=" << src << " index=" << i << std::endl;
+                ++g_failures;
+                return;
+            }
+        }
+    }
+
+    seen.clear();
+    for (int src = 0; src < rankSize; ++src) {
+        for (int dst = 0; dst < rankSize; ++dst) {
+            for (int64_t i = 0; i < sampleCount; ++i) {
+                const int32_t value = ExpectedAllToAllValue(rankSize, src, dst, i);
+                if (!seen.insert(value).second) {
+                    std::cerr << "alltoall int32 pattern collision src=" << src
+                              << " dst=" << dst << " index=" << i << std::endl;
+                    ++g_failures;
+                    return;
+                }
+            }
+        }
+    }
 }
 
 void TestLauncherScripts()
@@ -157,8 +211,9 @@ void TestLauncherScripts()
     CheckContains(correctnessPath, correctness, "kill_remaining_children");
     CheckContains(correctnessPath, correctness, "tail_logs");
     CheckContains(correctnessPath, correctness, "Timed out after");
-    CheckContains(correctnessPath, correctness, "wait -n -p completed_pid");
-    CheckContains(correctnessPath, correctness, "remaining_pids");
+    CheckContains(correctnessPath, correctness, "wait -n");
+    CheckContains(correctnessPath, correctness, "completed_count");
+    CheckDoesNotContain(correctnessPath, correctness, "wait -n -p completed_pid");
     CheckContains(correctnessPath, correctness, "npu-smi info -l");
     CheckContains(correctnessPath, correctness, "tail -n");
     CheckContains(correctnessPath, correctness, "test_tilexr_collectives_correctness");
@@ -176,8 +231,9 @@ void TestLauncherScripts()
     CheckContains(perfPath, perf, "kill_remaining_children");
     CheckContains(perfPath, perf, "tail_logs");
     CheckContains(perfPath, perf, "Timed out after");
-    CheckContains(perfPath, perf, "wait -n -p completed_pid");
-    CheckContains(perfPath, perf, "remaining_pids");
+    CheckContains(perfPath, perf, "wait -n");
+    CheckContains(perfPath, perf, "completed_count");
+    CheckDoesNotContain(perfPath, perf, "wait -n -p completed_pid");
 }
 
 void TestCMakeWiring()
@@ -238,6 +294,7 @@ int main()
     TestLauncherScripts();
     TestCMakeWiring();
     TestReadmeDocumentsManualRuns();
+    TestInt32PatternHasNoKnownCollisions();
     if (g_failures != 0) {
         std::cerr << g_failures << " collectives tools source checks failed" << std::endl;
         return 1;

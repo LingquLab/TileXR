@@ -24,6 +24,7 @@
 
 #include "acl/acl.h"
 #include "tilexr_collectives.h"
+#include "../common/int32_pattern.h"
 
 namespace {
 
@@ -78,35 +79,9 @@ struct Row {
     int errors = 0;
 };
 
-int32_t MixExpectedInt32(uint64_t salt, int srcRank, int dstRank, int64_t index)
-{
-    uint64_t value = salt;
-    value ^= (static_cast<uint64_t>(static_cast<uint32_t>(srcRank)) + 0x9e3779b97f4a7c15ULL +
-        (value << 6) + (value >> 2));
-    value ^= (static_cast<uint64_t>(static_cast<uint32_t>(dstRank)) + 0xbf58476d1ce4e5b9ULL +
-        (value << 6) + (value >> 2));
-    value ^= (static_cast<uint64_t>(index) + 0x94d049bb133111ebULL + (value << 6) + (value >> 2));
-    value ^= value >> 30;
-    value *= 0xbf58476d1ce4e5b9ULL;
-    value ^= value >> 27;
-    value *= 0x94d049bb133111ebULL;
-    value ^= value >> 31;
-    int32_t result = static_cast<int32_t>(static_cast<uint32_t>(value));
-    if (result == -1) {
-        result = static_cast<int32_t>(static_cast<uint32_t>(value >> 32) ^ 0x5a5a5a5aU);
-    }
-    return result;
-}
-
-int32_t ExpectedAllGatherValue(int srcRank, int64_t index)
-{
-    return MixExpectedInt32(0x47415448ULL, srcRank, 0, index);
-}
-
-int32_t ExpectedAllToAllValue(int srcRank, int dstRank, int64_t index)
-{
-    return MixExpectedInt32(0x544f414cULL, srcRank, dstRank, index);
-}
+using TileXRCollectivesTest::CanUseCollisionFreeInt32Pattern;
+using TileXRCollectivesTest::ExpectedAllGatherValue;
+using TileXRCollectivesTest::ExpectedAllToAllValue;
 
 uint8_t PatternByte(int rank, int peer, int64_t byteIndex)
 {
@@ -258,6 +233,11 @@ bool ValidateMaxMessageSize(const Options &options)
     int64_t count = options.maxBytes / static_cast<int64_t>(options.dtype.bytes);
     if (count <= 0) {
         count = 1;
+    }
+    if (options.check && options.dtype.name == "int32" &&
+        !CanUseCollisionFreeInt32Pattern(options.rankSize, count)) {
+        std::cerr << "ERROR: message size is too large for collision-free INT32 validation" << std::endl;
+        return false;
     }
     int64_t sendElements = 0;
     int64_t recvElements = 0;
@@ -487,13 +467,13 @@ bool FillPattern(const Options &options, int64_t count, std::vector<uint8_t> &se
     if (options.dtype.name == "int32") {
         if (options.op == CollectiveOp::ALLGATHER) {
             for (int64_t i = 0; i < count; ++i) {
-                StoreInt32(send, i, ExpectedAllGatherValue(options.rank, i));
+                StoreInt32(send, i, ExpectedAllGatherValue(options.rankSize, options.rank, i));
             }
         } else {
             for (int dst = 0; dst < options.rankSize; ++dst) {
                 for (int64_t i = 0; i < count; ++i) {
                     StoreInt32(send, static_cast<int64_t>(dst) * count + i,
-                        ExpectedAllToAllValue(options.rank, dst, i));
+                        ExpectedAllToAllValue(options.rankSize, options.rank, dst, i));
                 }
             }
         }
@@ -525,7 +505,7 @@ int ValidateInt32(const Options &options, int64_t count, const std::vector<uint8
         for (int src = 0; src < options.rankSize; ++src) {
             for (int64_t i = 0; i < count; ++i) {
                 const int64_t index = static_cast<int64_t>(src) * count + i;
-                const int32_t expected = ExpectedAllGatherValue(src, i);
+                const int32_t expected = ExpectedAllGatherValue(options.rankSize, src, i);
                 const int32_t actual = LoadInt32(recv, index);
                 if (actual != expected) {
                     if (errors < 8) {
@@ -541,7 +521,7 @@ int ValidateInt32(const Options &options, int64_t count, const std::vector<uint8
         for (int src = 0; src < options.rankSize; ++src) {
             for (int64_t i = 0; i < count; ++i) {
                 const int64_t index = static_cast<int64_t>(src) * count + i;
-                const int32_t expected = ExpectedAllToAllValue(src, options.rank, i);
+                const int32_t expected = ExpectedAllToAllValue(options.rankSize, src, options.rank, i);
                 const int32_t actual = LoadInt32(recv, index);
                 if (actual != expected) {
                     if (errors < 8) {

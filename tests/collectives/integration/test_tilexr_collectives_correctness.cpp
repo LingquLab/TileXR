@@ -18,6 +18,7 @@
 
 #include "acl/acl.h"
 #include "tilexr_collectives.h"
+#include "../common/int32_pattern.h"
 
 namespace {
 
@@ -35,35 +36,9 @@ struct Options {
     CollectiveOp op = CollectiveOp::BOTH;
 };
 
-int32_t MixExpectedInt32(uint64_t salt, int srcRank, int dstRank, int64_t index)
-{
-    uint64_t value = salt;
-    value ^= (static_cast<uint64_t>(static_cast<uint32_t>(srcRank)) + 0x9e3779b97f4a7c15ULL +
-        (value << 6) + (value >> 2));
-    value ^= (static_cast<uint64_t>(static_cast<uint32_t>(dstRank)) + 0xbf58476d1ce4e5b9ULL +
-        (value << 6) + (value >> 2));
-    value ^= (static_cast<uint64_t>(index) + 0x94d049bb133111ebULL + (value << 6) + (value >> 2));
-    value ^= value >> 30;
-    value *= 0xbf58476d1ce4e5b9ULL;
-    value ^= value >> 27;
-    value *= 0x94d049bb133111ebULL;
-    value ^= value >> 31;
-    int32_t result = static_cast<int32_t>(static_cast<uint32_t>(value));
-    if (result == -1) {
-        result = static_cast<int32_t>(static_cast<uint32_t>(value >> 32) ^ 0x5a5a5a5aU);
-    }
-    return result;
-}
-
-int32_t ExpectedAllGatherValue(int srcRank, int64_t index)
-{
-    return MixExpectedInt32(0x47415448ULL, srcRank, 0, index);
-}
-
-int32_t ExpectedAllToAllValue(int srcRank, int dstRank, int64_t index)
-{
-    return MixExpectedInt32(0x544f414cULL, srcRank, dstRank, index);
-}
+using TileXRCollectivesTest::CanUseCollisionFreeInt32Pattern;
+using TileXRCollectivesTest::ExpectedAllGatherValue;
+using TileXRCollectivesTest::ExpectedAllToAllValue;
 
 int GetEnvInt(const char *name, int fallback)
 {
@@ -171,6 +146,10 @@ bool ParseOptions(int argc, char **argv, Options &options)
         std::cerr << "ERROR: count is too large" << std::endl;
         return false;
     }
+    if (!CanUseCollisionFreeInt32Pattern(options.rankSize, options.count)) {
+        std::cerr << "ERROR: count is too large for collision-free INT32 validation" << std::endl;
+        return false;
+    }
     return true;
 }
 
@@ -229,7 +208,7 @@ bool RunAllGather(const Options &options, TileXRCommPtr comm, aclrtStream stream
     std::vector<int32_t> hostSend(static_cast<size_t>(sendCount));
     std::vector<int32_t> hostRecv(static_cast<size_t>(recvCount), -1);
     for (int64_t i = 0; i < sendCount; ++i) {
-        hostSend[static_cast<size_t>(i)] = ExpectedAllGatherValue(options.rank, i);
+        hostSend[static_cast<size_t>(i)] = ExpectedAllGatherValue(options.rankSize, options.rank, i);
     }
 
     int32_t *devSend = nullptr;
@@ -248,7 +227,7 @@ bool RunAllGather(const Options &options, TileXRCommPtr comm, aclrtStream stream
     for (int src = 0; ok && src < options.rankSize; ++src) {
         for (int64_t i = 0; i < sendCount; ++i) {
             const int64_t index = static_cast<int64_t>(src) * sendCount + i;
-            const int32_t expected = ExpectedAllGatherValue(src, i);
+            const int32_t expected = ExpectedAllGatherValue(options.rankSize, src, i);
             const int32_t actual = hostRecv[static_cast<size_t>(index)];
             if (actual != expected) {
                 std::cerr << "[rank " << options.rank << "] AllGather mismatch src=" << src
@@ -273,7 +252,7 @@ bool RunAllToAll(const Options &options, TileXRCommPtr comm, aclrtStream stream)
     for (int dst = 0; dst < options.rankSize; ++dst) {
         for (int64_t i = 0; i < countPerPeer; ++i) {
             const int64_t index = static_cast<int64_t>(dst) * countPerPeer + i;
-            hostSend[static_cast<size_t>(index)] = ExpectedAllToAllValue(options.rank, dst, i);
+            hostSend[static_cast<size_t>(index)] = ExpectedAllToAllValue(options.rankSize, options.rank, dst, i);
         }
     }
 
@@ -292,7 +271,7 @@ bool RunAllToAll(const Options &options, TileXRCommPtr comm, aclrtStream stream)
     for (int src = 0; ok && src < options.rankSize; ++src) {
         for (int64_t i = 0; i < countPerPeer; ++i) {
             const int64_t index = static_cast<int64_t>(src) * countPerPeer + i;
-            const int32_t expected = ExpectedAllToAllValue(src, options.rank, i);
+            const int32_t expected = ExpectedAllToAllValue(options.rankSize, src, options.rank, i);
             const int32_t actual = hostRecv[static_cast<size_t>(index)];
             if (actual != expected) {
                 std::cerr << "[rank " << options.rank << "] AllToAll mismatch src=" << src

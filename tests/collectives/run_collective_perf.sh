@@ -96,26 +96,16 @@ watchdog_pid="$!"
 
 trap 'echo "ERROR: interrupted; killing remaining ranks" >&2; kill "${watchdog_pid}" 2>/dev/null || true; kill_remaining_children; tail_logs; rm -f "${timeout_flag}"; exit 130' INT TERM
 
-remaining_pids=("${pids[@]}")
+completed_count=0
 status=0
-while (( ${#remaining_pids[@]} > 0 )); do
-  completed_pid=""
-  if wait -n -p completed_pid "${remaining_pids[@]}"; then
-    next_remaining=()
-    for pid in "${remaining_pids[@]}"; do
-      [[ "${pid}" == "${completed_pid}" ]] || next_remaining+=("${pid}")
-    done
-    remaining_pids=("${next_remaining[@]}")
+while (( completed_count < rank_size )); do
+  if wait -n; then
+    completed_count=$((completed_count + 1))
     continue
   else
     rc="$?"
   fi
 
-  next_remaining=()
-  for pid in "${remaining_pids[@]}"; do
-    [[ "${pid}" == "${completed_pid}" ]] || next_remaining+=("${pid}")
-  done
-  remaining_pids=("${next_remaining[@]}")
   if [[ -f "${timeout_flag}" ]]; then
     status=124
   else
