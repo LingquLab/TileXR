@@ -39,9 +39,3 @@ target_link_libraries(tilexr-collectives
 )
 
 install(TARGETS tilexr-collectives LIBRARY DESTINATION ${CMAKE_INSTALL_PREFIX}/lib)
-install(FILES
-        ${CMAKE_SOURCE_DIR}/src/include/tilexr_collectives.h
-        ${CMAKE_SOURCE_DIR}/src/include/tilexr_api.h
-        ${CMAKE_SOURCE_DIR}/src/include/tilexr_types.h
-        ${CMAKE_SOURCE_DIR}/src/include/comm_args.h
-        DESTINATION ${CMAKE_INSTALL_PREFIX}/include)

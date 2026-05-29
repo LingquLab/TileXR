@@ -83,6 +83,18 @@ void TestCommBuildDoesNotReferenceCollectives()
     CheckDoesNotContain(path, text, "tilexr_collectives");
 }
 
+void TestCommBuildInstallsPublicHeadersAndKeepsLinksPrivate()
+{
+    const std::string path = "src/comm/CMakeLists.txt";
+    const auto text = ReadFile(path);
+    CheckContains(path, text, "target_link_directories(tile-comm\n        PRIVATE");
+    CheckContains(path, text, "target_link_libraries(tile-comm\n        PRIVATE");
+    CheckDoesNotContain(path, text, "target_link_libraries(tile-comm ascendcl");
+    CheckContains(path, text, "install(DIRECTORY ${CMAKE_SOURCE_DIR}/src/include/");
+    CheckContains(path, text, "DESTINATION include");
+    CheckContains(path, text, "FILES_MATCHING PATTERN \"*.h\"");
+}
+
 void TestCollectivesBuildDefinesSeparateSharedLibrary()
 {
     const std::string path = "src/collectives/CMakeLists.txt";
@@ -91,11 +103,9 @@ void TestCollectivesBuildDefinesSeparateSharedLibrary()
     CheckContains(path, text, "target_link_libraries(tilexr-collectives\n        PRIVATE");
     CheckContains(path, text, "target_link_directories(tilexr-collectives\n        PRIVATE");
     CheckDoesNotContain(path, text, "target_link_libraries(tilexr-collectives tile-comm");
-    CheckContains(path, text, "${CMAKE_SOURCE_DIR}/src/include/tilexr_collectives.h");
-    CheckContains(path, text, "${CMAKE_SOURCE_DIR}/src/include/tilexr_api.h");
-    CheckContains(path, text, "${CMAKE_SOURCE_DIR}/src/include/tilexr_types.h");
-    CheckContains(path, text, "${CMAKE_SOURCE_DIR}/src/include/comm_args.h");
-    CheckContains(path, text, "DESTINATION ${CMAKE_INSTALL_PREFIX}/include");
+    CheckDoesNotContain(path, text, "install(FILES");
+    CheckDoesNotContain(path, text, "tilexr_api.h");
+    CheckDoesNotContain(path, text, "comm_args.h");
 }
 
 void TestCollectivesTestBuildUsesExplicitLibraryHint()
@@ -119,6 +129,7 @@ int main()
     TestCollectivesHeaderDeclaresPublicApis();
     TestCoreApiHeaderDoesNotDeclareCollectives();
     TestCommBuildDoesNotReferenceCollectives();
+    TestCommBuildInstallsPublicHeadersAndKeepsLinksPrivate();
     TestCollectivesBuildDefinesSeparateSharedLibrary();
     TestCollectivesTestBuildUsesExplicitLibraryHint();
     if (g_failures != 0) {
