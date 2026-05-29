@@ -8,6 +8,8 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 #
 
+include(GNUInstallDirs)
+
 set(TILEXR_SOURCE_FILE tilexr_comm.cpp
         comm_wrap.cpp
         tilexr_internal.cpp
@@ -54,7 +56,15 @@ target_link_libraries(tile-comm
         dl
 )
 
-install(TARGETS tile-comm LIBRARY DESTINATION ${CMAKE_INSTALL_PREFIX}/lib)
-install(DIRECTORY ${CMAKE_SOURCE_DIR}/src/include/
-        DESTINATION include
-        FILES_MATCHING PATTERN "*.h")
+install(TARGETS tile-comm LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR})
+install(FILES
+        ${CMAKE_SOURCE_DIR}/src/include/tilexr_api.h
+        ${CMAKE_SOURCE_DIR}/src/include/tilexr_types.h
+        ${CMAKE_SOURCE_DIR}/src/include/comm_args.h
+        ${CMAKE_SOURCE_DIR}/src/include/tilexr_sync.h
+        ${CMAKE_SOURCE_DIR}/src/include/tilexr_udma.h
+        ${CMAKE_SOURCE_DIR}/src/include/tilexr_udma_reg.h
+        ${CMAKE_SOURCE_DIR}/src/include/tilexr_udma_types.h
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+install(CODE "string(CONCAT _tilexr_optional_header \"tilexr_\" \"collectives.h\")
+file(REMOVE \"\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_INCLUDEDIR}/\${_tilexr_optional_header}\")")

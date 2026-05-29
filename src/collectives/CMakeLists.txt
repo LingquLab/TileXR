@@ -3,6 +3,8 @@
 # CMakeLists.txt for optional TileXR collectives library
 #
 
+include(GNUInstallDirs)
+
 set(TILEXR_COLLECTIVES_SOURCE_FILE
         host/tilexr_collectives.cpp
 )
@@ -38,4 +40,6 @@ target_link_libraries(tilexr-collectives
         dl
 )
 
-install(TARGETS tilexr-collectives LIBRARY DESTINATION ${CMAKE_INSTALL_PREFIX}/lib)
+install(TARGETS tilexr-collectives LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR})
+install(FILES ${CMAKE_SOURCE_DIR}/src/include/tilexr_collectives.h
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})

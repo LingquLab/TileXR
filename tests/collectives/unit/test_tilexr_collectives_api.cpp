@@ -87,25 +87,39 @@ void TestCommBuildInstallsPublicHeadersAndKeepsLinksPrivate()
 {
     const std::string path = "src/comm/CMakeLists.txt";
     const auto text = ReadFile(path);
+    CheckContains(path, text, "include(GNUInstallDirs)");
     CheckContains(path, text, "target_link_directories(tile-comm\n        PRIVATE");
     CheckContains(path, text, "target_link_libraries(tile-comm\n        PRIVATE");
     CheckDoesNotContain(path, text, "target_link_libraries(tile-comm ascendcl");
-    CheckContains(path, text, "install(DIRECTORY ${CMAKE_SOURCE_DIR}/src/include/");
-    CheckContains(path, text, "DESTINATION include");
-    CheckContains(path, text, "FILES_MATCHING PATTERN \"*.h\"");
+    CheckContains(path, text, "LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}");
+    CheckContains(path, text, "DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}");
+    CheckContains(path, text, "${CMAKE_SOURCE_DIR}/src/include/tilexr_api.h");
+    CheckContains(path, text, "${CMAKE_SOURCE_DIR}/src/include/tilexr_types.h");
+    CheckContains(path, text, "${CMAKE_SOURCE_DIR}/src/include/comm_args.h");
+    CheckContains(path, text, "${CMAKE_SOURCE_DIR}/src/include/tilexr_sync.h");
+    CheckContains(path, text, "${CMAKE_SOURCE_DIR}/src/include/tilexr_udma.h");
+    CheckContains(path, text, "${CMAKE_SOURCE_DIR}/src/include/tilexr_udma_reg.h");
+    CheckContains(path, text, "${CMAKE_SOURCE_DIR}/src/include/tilexr_udma_types.h");
+    CheckDoesNotContain(path, text, "${CMAKE_SOURCE_DIR}/src/include/tilexr_collectives.h");
+    CheckDoesNotContain(path, text, "FILES_MATCHING PATTERN \"*.h\"");
 }
 
 void TestCollectivesBuildDefinesSeparateSharedLibrary()
 {
     const std::string path = "src/collectives/CMakeLists.txt";
     const auto text = ReadFile(path);
+    CheckContains(path, text, "include(GNUInstallDirs)");
     CheckContains(path, text, "add_library(tilexr-collectives SHARED");
     CheckContains(path, text, "target_link_libraries(tilexr-collectives\n        PRIVATE");
     CheckContains(path, text, "target_link_directories(tilexr-collectives\n        PRIVATE");
     CheckDoesNotContain(path, text, "target_link_libraries(tilexr-collectives tile-comm");
-    CheckDoesNotContain(path, text, "install(FILES");
+    CheckContains(path, text, "LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}");
+    CheckContains(path, text, "${CMAKE_SOURCE_DIR}/src/include/tilexr_collectives.h");
+    CheckContains(path, text, "DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}");
     CheckDoesNotContain(path, text, "tilexr_api.h");
     CheckDoesNotContain(path, text, "comm_args.h");
+    CheckDoesNotContain(path, text, "${CMAKE_INSTALL_PREFIX}/lib");
+    CheckDoesNotContain(path, text, "${CMAKE_INSTALL_PREFIX}/include");
 }
 
 void TestCollectivesTestBuildUsesExplicitLibraryHint()
@@ -122,6 +136,7 @@ void TestCollectivesTestBuildUsesExplicitLibraryHint()
     CheckContains(path, text, "unit/test_tilexr_collectives_stub_behavior.cpp");
     CheckContains(path, text, "message(FATAL_ERROR");
     CheckDoesNotContain(path, text, "${TILEXR_ROOT}/src/include");
+    CheckDoesNotContain(path, text, "${TILEXR_ROOT}/3rdparty");
     CheckDoesNotContain(path, text, "${TILEXR_ROOT}/build");
     CheckDoesNotContain(path, text, "/tmp/tilexr-install-split-collectives");
     CheckDoesNotContain(path, text, "/tmp/tilexr-build-split-collectives");

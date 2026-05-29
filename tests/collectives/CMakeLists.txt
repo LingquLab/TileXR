@@ -59,7 +59,6 @@ endif()
 
 target_include_directories(test_tilexr_collectives_header_compile PRIVATE
     ${TILEXR_INSTALL_PREFIX}/include
-    ${TILEXR_ROOT}/3rdparty
     ${ASCEND_DRIVER_PATH}/kernel/inc
     ${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc/
     ${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc/runtime/
@@ -68,7 +67,6 @@ target_include_directories(test_tilexr_collectives_header_compile PRIVATE
 
 target_include_directories(test_tilexr_collectives_stub_behavior PRIVATE
     ${TILEXR_INSTALL_PREFIX}/include
-    ${TILEXR_ROOT}/3rdparty
     ${ASCEND_DRIVER_PATH}/kernel/inc
     ${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc/
     ${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc/runtime/
