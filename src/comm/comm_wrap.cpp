@@ -16,7 +16,6 @@
 #include "tilexr_comm.h"
 #include "mki/utils/log/log.h"
 #include "tools/socket/tilexr_sock_exchange.h"
-#include <shmem/include/shmem.h>
 
 using namespace std;
 using namespace TileXR;

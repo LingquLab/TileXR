@@ -69,6 +69,32 @@ int get_rank_size_from_env()
     return sizeStr ? atoi(sizeStr) : 1;
 }
 
+int get_device_id_from_env(int rank)
+{
+    const char* devices = getenv("TILEXR_TEST_DEVICES");
+    if (devices != nullptr && devices[0] != '\0') {
+        std::string list(devices);
+        size_t start = 0;
+        int index = 0;
+        while (start <= list.size()) {
+            const size_t comma = list.find(',', start);
+            const size_t end = comma == std::string::npos ? list.size() : comma;
+            if (index == rank && end > start) {
+                return atoi(list.substr(start, end - start).c_str());
+            }
+            if (comma == std::string::npos) {
+                break;
+            }
+            start = comma + 1;
+            ++index;
+        }
+    }
+
+    const char* firstNpu = getenv("TILEXR_TEST_FIRST_NPU");
+    const int firstDevice = firstNpu == nullptr ? 0 : atoi(firstNpu);
+    return firstDevice + rank;
+}
+
 TileXRCommPtr init_comm(int rank, int rankSize)
 {
     TileXRCommPtr comm = nullptr;
@@ -205,7 +231,7 @@ int main(int argc, char** argv)
         return 1;
     }
 
-    int deviceId = rank % 8;
+    int deviceId = get_device_id_from_env(rank);
     ret = aclrtSetDevice(deviceId);
     if (ret != ACL_SUCCESS) {
         cerr << "ERROR: aclrtSetDevice(" << deviceId << ") failed: " << ret << endl;

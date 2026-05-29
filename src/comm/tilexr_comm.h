@@ -10,6 +10,7 @@
 #ifndef TILEXR_COMM_H
 #define TILEXR_COMM_H
 
+#include <memory>
 #include <vector>
 #include <string>
 #include "../include/tilexr_udma_reg.h"
@@ -21,6 +22,7 @@ namespace TileXR {
 constexpr int IPC_NAME_SIZE = 65;
 
 class TileXRSockExchange;
+class TileXRUDMATransport;
 class TileXRComm {
 public:
     TileXRComm(int rank, int rankSize);
@@ -62,7 +64,7 @@ private:
     int GetName(std::string &name, char names[TILEXR_MAX_RANK_SIZE][IPC_NAME_SIZE]) const;
     int SyncCommArgs();
     int InitDumpAddr();
-    int InitUDMA();  // 新增：初始化 shmem UDMA
+    int InitUDMA();
     int UpdateCommArgsDev();
     void FreeUDMARegistry();
 
@@ -89,10 +91,11 @@ private:
     TileXRUniqueId commId_ = {};
     TileXRSockExchange *socketExchange_ = nullptr;
     bool isEnableMsprofOp_ = false;
-    GM_ADDR udmaInfoDev_ = nullptr;  // 新增：设备侧 UDMA QP 上下文指针
+    GM_ADDR udmaInfoDev_ = nullptr;
     GM_ADDR udmaRegistryDev_ = nullptr;
     GM_ADDR udmaRegisteredPtr_ = nullptr;
     TileXRUDMARegistry udmaRegistry_ = {};
+    std::unique_ptr<TileXRUDMATransport> udmaTransport_;
 };
 } // TileXR
 

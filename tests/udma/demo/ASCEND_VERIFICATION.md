@@ -10,6 +10,7 @@ must be verified elsewhere.
 Verify that the TileXR UDMA demo:
 
 - builds against TileXR's public demo API without including `shmem.h` in the host demo source;
+- initializes UDMA through TileXR's own comm transport, without linking shmem;
 - registers ordinary `aclrtMalloc` device memory through `TileXRUDMARegister`;
 - runs device-side UDMA put and put-signal kernels successfully;
 - does not report data mismatches or signal mismatches in rank logs.
@@ -64,11 +65,11 @@ Optional source-level check:
 
 ```bash
 cd /path/to/TileXR
-rg -n '#include "shmem\.h"|aclshmem_barrier_all|ShmemBarrier' \
-  tests/udma/demo/*.cpp src/include/tilexr_udma.h
+rg -n '#include "shmem\.h"|aclshmem|ACLSHMEM|ShmemBarrier' \
+  src/comm src/include/tilexr_udma.h tests/udma/demo/*.cpp
 ```
 
-Expected: no matches. The demo host source should not call shmem APIs.
+Expected: no matches in `src/comm` or the demo host source.
 
 ## Runtime Setup
 

@@ -12,12 +12,15 @@ Validate the TileXR registered-memory UDMA path:
 - `tilexr_udma.h` device wrappers issue UDMA put / put-signal operations;
 - demo result data and signal values are correct;
 - host demo code does not include `shmem.h`.
+- TileXR comm initialization and UDMA registration are provided by TileXR code, not shmem.
 - no standalone shmem API test is part of the current acceptance flow.
 
 ## Files To Know
 
 ```text
 tests/udma/unit/test_tilexr_udma_registry.cpp
+tests/udma/unit/test_tilexr_no_shmem_dependency.cpp
+tests/udma/unit/test_tilexr_udma_transport_layout.cpp
 tests/udma/integration/test_tilexr_udma.cpp
 tests/udma/demo/tilexr_udma_demo.cpp
 tests/udma/demo/tilexr_udma_demo_kernel.cpp
@@ -62,6 +65,8 @@ Check:
 
 ```bash
 test -x install/bin/test_tilexr_udma_registry
+test -x install/bin/test_tilexr_no_shmem_dependency
+test -x install/bin/test_tilexr_udma_transport_layout
 test -x install/bin/test_tilexr_udma
 test -x install/bin/tilexr_udma_demo
 test -f install/lib/libtilexr_udma_demo_kernel.so
@@ -71,6 +76,8 @@ test -f install/lib/libtilexr_udma_demo_kernel.so
 
 ```bash
 cd /path/to/TileXR/tests/udma
+./install/bin/test_tilexr_no_shmem_dependency
+./install/bin/test_tilexr_udma_transport_layout
 ./install/bin/test_tilexr_udma_registry
 
 source ../../scripts/common_env.sh
@@ -81,6 +88,8 @@ RANK=0 RANK_SIZE=1 ./install/bin/test_tilexr_udma
 Expected:
 
 - registry test prints `TileXR UDMA registry checks passed`;
+- no-shmem dependency test prints `TileXR comm sources have no shmem dependency`;
+- layout test prints `TileXR UDMA transport layout checks passed`;
 - communicator smoke test exits 0 and prints `Failed: 0`.
 
 ### Step 4: Run UDMA Demo

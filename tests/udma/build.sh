@@ -50,6 +50,8 @@ echo "=========================================="
 echo "Test binaries installed to: ${INSTALL_DIR}/bin"
 echo ""
 echo "Available tests:"
+echo "  - test_tilexr_no_shmem_dependency : source-level no-shmem dependency checks"
+echo "  - test_tilexr_udma_transport_layout : UDMA info layout unit tests"
 echo "  - test_tilexr_udma_registry : registered-memory metadata unit tests"
 echo "  - test_tilexr_udma     : TileXR integration tests"
 if [ -f "${INSTALL_DIR}/bin/tilexr_udma_demo" ]; then
