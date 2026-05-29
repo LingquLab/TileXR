@@ -9,6 +9,20 @@
  */
 #include "tilexr_collectives.h"
 
+namespace {
+
+void TouchInfraCommArgs(TileXRCommPtr comm)
+{
+    if (comm == nullptr) {
+        return;
+    }
+
+    TileXR::CommArgs *args = nullptr;
+    (void)TileXRGetCommArgsHost(comm, args);
+}
+
+} // namespace
+
 int TileXRAllGather(void *sendBuf, void *recvBuf, int64_t sendCount,
                     TileXR::TileXRDataType dataType, TileXRCommPtr comm,
                     aclrtStream stream)
@@ -17,8 +31,8 @@ int TileXRAllGather(void *sendBuf, void *recvBuf, int64_t sendCount,
     (void)recvBuf;
     (void)sendCount;
     (void)dataType;
-    (void)comm;
     (void)stream;
+    TouchInfraCommArgs(comm);
     return TileXR::TILEXR_ERROR_INTERNAL;
 }
 
@@ -30,7 +44,7 @@ int TileXRAllToAll(void *sendBuf, void *recvBuf, int64_t sendCount,
     (void)recvBuf;
     (void)sendCount;
     (void)dataType;
-    (void)comm;
     (void)stream;
+    TouchInfraCommArgs(comm);
     return TileXR::TILEXR_ERROR_INTERNAL;
 }

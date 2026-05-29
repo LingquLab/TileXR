@@ -83,6 +83,28 @@ void TestCommBuildDoesNotReferenceCollectives()
     CheckDoesNotContain(path, text, "tilexr_collectives");
 }
 
+void TestCommInternalDoesNotContainCollectiveRegistration()
+{
+    const std::string paths[] = {
+        "src/comm/tilexr_internal.h",
+        "src/comm/tilexr_internal.cpp",
+    };
+    const std::string forbidden[] = {
+        "TILEXR_CCE_BIN_STR",
+        "RegistCCL",
+        "RegistCoCKernel",
+        "RegistKernel",
+        "LoadMTE",
+    };
+
+    for (const auto& path : paths) {
+        const auto text = ReadFile(path);
+        for (const auto& needle : forbidden) {
+            CheckDoesNotContain(path, text, needle);
+        }
+    }
+}
+
 void TestCommBuildInstallsPublicHeadersAndKeepsLinksPrivate()
 {
     const std::string path = "src/comm/CMakeLists.txt";
@@ -218,7 +240,13 @@ void TestCollectivesInstallSmokeUsesStandaloneInstallPrefixMode()
     CheckContains(path, text, "-DTILEXR_INSTALL_PREFIX=${TILEXR_SMOKE_INSTALL_PREFIX}");
     CheckContains(path, text, "-DTILEXR_INSTALL_INCLUDEDIR=${TILEXR_SMOKE_INSTALL_INCLUDEDIR}");
     CheckContains(path, text, "COMMAND \"${CMAKE_COMMAND}\" --build \"${TILEXR_SMOKE_BUILD_DIR}\"");
-    CheckContains(path, text, "COMMAND \"${CMAKE_CTEST_COMMAND}\" --test-dir \"${TILEXR_SMOKE_BUILD_DIR}\" --output-on-failure");
+    CheckContains(path, text, "COMMAND \"${CMAKE_COMMAND}\" -E env");
+    CheckContains(path, text, "\"${CMAKE_CTEST_COMMAND}\" --test-dir \"${TILEXR_SMOKE_BUILD_DIR}\" --output-on-failure");
+    CheckContains(path, text, "LD_LIBRARY_PATH=${TILEXR_SMOKE_LD_LIBRARY_PATH}");
+    CheckContains(path, text, "find_program(TILEXR_READELF readelf)");
+    CheckContains(path, text, "readelf -d");
+    CheckContains(path, text, "libtile-comm.so");
+    CheckContains(path, text, "TILEXR_SMOKE_COLLECTIVES_LIB");
     CheckContains(path, text, "-DASCEND_HOME_PATH=${TILEXR_SMOKE_ASCEND_HOME_PATH}");
     CheckContains(path, text, "-DARCH=${TILEXR_SMOKE_ARCH}");
     CheckContains(path, text, "-DASCEND_DRIVER_PATH=${TILEXR_SMOKE_ASCEND_DRIVER_PATH}");
@@ -234,6 +262,7 @@ int main()
     TestCollectivesHeaderDeclaresPublicApis();
     TestCoreApiHeaderDoesNotDeclareCollectives();
     TestCommBuildDoesNotReferenceCollectives();
+    TestCommInternalDoesNotContainCollectiveRegistration();
     TestCommBuildInstallsPublicHeadersAndKeepsLinksPrivate();
     TestCollectivesBuildDefinesSeparateSharedLibrary();
     TestRootBuildRegistersCollectivesTests();

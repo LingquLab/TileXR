@@ -15,6 +15,16 @@ set(TILEXR_SMOKE_ARCH "@ARCH@")
 set(TILEXR_SMOKE_ASCEND_DRIVER_PATH "@ASCEND_DRIVER_PATH@")
 set(CMAKE_CTEST_COMMAND "@CMAKE_CTEST_COMMAND@")
 
+if(IS_ABSOLUTE "${TILEXR_SMOKE_INSTALL_LIBDIR}")
+    set(TILEXR_SMOKE_INSTALL_LIB_SEARCH_DIR "${TILEXR_SMOKE_INSTALL_LIBDIR}")
+else()
+    set(TILEXR_SMOKE_INSTALL_LIB_SEARCH_DIR "${TILEXR_SMOKE_INSTALL_PREFIX}/${TILEXR_SMOKE_INSTALL_LIBDIR}")
+endif()
+set(TILEXR_SMOKE_LD_LIBRARY_PATH "${TILEXR_SMOKE_INSTALL_LIB_SEARCH_DIR}")
+if(DEFINED ENV{LD_LIBRARY_PATH} AND NOT "$ENV{LD_LIBRARY_PATH}" STREQUAL "")
+    set(TILEXR_SMOKE_LD_LIBRARY_PATH "${TILEXR_SMOKE_LD_LIBRARY_PATH}:$ENV{LD_LIBRARY_PATH}")
+endif()
+
 file(REMOVE_RECURSE "${TILEXR_SMOKE_INSTALL_PREFIX}" "${TILEXR_SMOKE_BUILD_DIR}")
 
 message(STATUS "Building root project for TileXR collectives smoke")
@@ -33,6 +43,41 @@ execute_process(
 )
 if(NOT tilexr_smoke_result EQUAL 0)
     message(FATAL_ERROR "cmake --install failed for collectives install-prefix smoke")
+endif()
+
+find_program(TILEXR_READELF readelf)
+if(TILEXR_READELF)
+    find_library(TILEXR_SMOKE_COLLECTIVES_LIB tilexr-collectives
+        HINTS
+        "${TILEXR_SMOKE_INSTALL_LIB_SEARCH_DIR}"
+        NO_DEFAULT_PATH
+    )
+    if(NOT TILEXR_SMOKE_COLLECTIVES_LIB)
+        message(FATAL_ERROR
+            "Installed libtilexr-collectives.so not found under ${TILEXR_SMOKE_INSTALL_LIB_SEARCH_DIR}"
+        )
+    endif()
+
+    message(STATUS "Checking libtilexr-collectives.so DT_NEEDED dependency with readelf -d")
+    execute_process(
+        COMMAND "${TILEXR_READELF}" -d "${TILEXR_SMOKE_COLLECTIVES_LIB}"
+        RESULT_VARIABLE tilexr_smoke_result
+        OUTPUT_VARIABLE tilexr_smoke_readelf_output
+        ERROR_VARIABLE tilexr_smoke_readelf_error
+    )
+    if(NOT tilexr_smoke_result EQUAL 0)
+        message(FATAL_ERROR
+            "readelf -d failed for ${TILEXR_SMOKE_COLLECTIVES_LIB}: ${tilexr_smoke_readelf_error}"
+        )
+    endif()
+    if(NOT tilexr_smoke_readelf_output MATCHES "Shared library: \\[libtile-comm\\.so\\]")
+        message(FATAL_ERROR
+            "Installed libtilexr-collectives.so is missing DT_NEEDED for libtile-comm.so:\n"
+            "${tilexr_smoke_readelf_output}"
+        )
+    endif()
+else()
+    message(STATUS "readelf not found; skipping libtilexr-collectives.so DT_NEEDED smoke check")
 endif()
 
 message(STATUS "Configuring standalone collectives tests from install prefix")
@@ -61,7 +106,9 @@ endif()
 
 message(STATUS "Running standalone collectives install-prefix tests")
 execute_process(
-    COMMAND "${CMAKE_CTEST_COMMAND}" --test-dir "${TILEXR_SMOKE_BUILD_DIR}" --output-on-failure
+    COMMAND "${CMAKE_COMMAND}" -E env
+        "LD_LIBRARY_PATH=${TILEXR_SMOKE_LD_LIBRARY_PATH}"
+        "${CMAKE_CTEST_COMMAND}" --test-dir "${TILEXR_SMOKE_BUILD_DIR}" --output-on-failure
     RESULT_VARIABLE tilexr_smoke_result
 )
 if(NOT tilexr_smoke_result EQUAL 0)
