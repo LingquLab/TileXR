@@ -77,8 +77,24 @@ target_compile_definitions(test_tilexr_collectives_kernel_ownership PRIVATE
     TILEXR_SOURCE_ROOT="${TILEXR_ROOT}"
 )
 
+add_executable(test_tilexr_collectives_tools_sources
+    unit/test_tilexr_collectives_tools_sources.cpp
+)
+
+target_compile_definitions(test_tilexr_collectives_tools_sources PRIVATE
+    TILEXR_SOURCE_ROOT="${TILEXR_ROOT}"
+)
+
 add_executable(test_tilexr_collectives_header_compile
     unit/test_tilexr_collectives_header_compile.cpp
+)
+
+add_executable(test_tilexr_collectives_correctness
+    integration/test_tilexr_collectives_correctness.cpp
+)
+
+add_executable(tilexr_collective_perf
+    tilexr-tests/tilexr_collective_perf.cpp
 )
 
 add_executable(test_tilexr_collectives_stub_behavior
@@ -189,8 +205,32 @@ else()
     set(TILEXR_COMM_TEST_TARGET tilexr-comm-installed)
 endif()
 
+set(TILEXR_COLLECTIVES_TEST_LINK_DIRS
+    ${ASCEND_HOME_PATH}/${ARCH}-linux/lib64
+    ${ASCEND_HOME_PATH}/${ARCH}-linux/devlib
+    ${ASCEND_DRIVER_PATH}/lib64/driver
+)
+
 target_link_libraries(test_tilexr_collectives_header_compile
     ${TILEXR_COLLECTIVES_TEST_TARGET}
+)
+
+target_link_directories(test_tilexr_collectives_correctness PRIVATE
+    ${TILEXR_COLLECTIVES_TEST_LINK_DIRS}
+)
+
+target_link_libraries(test_tilexr_collectives_correctness
+    ${TILEXR_COLLECTIVES_TEST_TARGET}
+    ascendcl
+)
+
+target_link_directories(tilexr_collective_perf PRIVATE
+    ${TILEXR_COLLECTIVES_TEST_LINK_DIRS}
+)
+
+target_link_libraries(tilexr_collective_perf
+    ${TILEXR_COLLECTIVES_TEST_TARGET}
+    ascendcl
 )
 
 target_link_libraries(test_tilexr_collectives_stub_behavior
@@ -215,6 +255,7 @@ target_link_libraries(test_prepare_host_launch_context
 
 add_test(NAME test_tilexr_collectives_api COMMAND test_tilexr_collectives_api)
 add_test(NAME test_tilexr_collectives_kernel_ownership COMMAND test_tilexr_collectives_kernel_ownership)
+add_test(NAME test_tilexr_collectives_tools_sources COMMAND test_tilexr_collectives_tools_sources)
 add_test(NAME test_tilexr_collectives_header_compile COMMAND test_tilexr_collectives_header_compile)
 add_test(NAME test_tilexr_collectives_stub_behavior COMMAND test_tilexr_collectives_stub_behavior)
 add_test(NAME test_tilexr_collectives_uninitialized_comm COMMAND test_tilexr_collectives_uninitialized_comm)
@@ -225,11 +266,20 @@ add_test(NAME test_prepare_host_launch_context COMMAND test_prepare_host_launch_
 install(TARGETS
     test_tilexr_collectives_api
     test_tilexr_collectives_kernel_ownership
+    test_tilexr_collectives_tools_sources
     test_tilexr_collectives_header_compile
+    test_tilexr_collectives_correctness
+    tilexr_collective_perf
     test_tilexr_collectives_stub_behavior
     test_tilexr_collectives_uninitialized_comm
     test_collective_host_utils
     test_tilexr_comm_next_magic
     test_prepare_host_launch_context
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+)
+
+install(PROGRAMS
+    run_collectives_correctness.sh
+    run_collective_perf.sh
+    DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
