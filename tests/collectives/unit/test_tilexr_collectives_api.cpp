@@ -38,6 +38,16 @@ std::string ReadFile(const std::string& path)
     return buffer.str();
 }
 
+void CheckFileDoesNotExist(const std::string& path)
+{
+    const std::string fullPath = RepoPath(path);
+    std::ifstream input(fullPath.c_str());
+    if (input.is_open()) {
+        std::cerr << "expected " << fullPath << " not to exist" << std::endl;
+        ++g_failures;
+    }
+}
+
 void CheckContains(const std::string& path, const std::string& text, const std::string& needle)
 {
     const auto pos = text.find(needle);
@@ -82,6 +92,10 @@ void TestCollectivesHostUsesOnlyPublicCommExtensionApi()
         "src/collectives/host/tilexr_collectives.cpp",
         "src/collectives/host/collective_launcher.h",
         "src/collectives/host/collective_launcher.cpp",
+        "src/collectives/host/collective_utils.h",
+        "src/collectives/host/collective_utils.cpp",
+        "src/collectives/host/collective_kernel.h",
+        "src/collectives/host/collective_kernel.cpp",
     };
 
     bool sawCommArgsHost = false;
@@ -100,6 +114,23 @@ void TestCollectivesHostUsesOnlyPublicCommExtensionApi()
     CHECK_TRUE(sawNextMagic);
 }
 
+void TestCollectivesHostOwnsCollectiveLaunchHelpers()
+{
+    const std::string utilsHeaderPath = "src/collectives/host/collective_utils.h";
+    const auto utilsHeader = ReadFile(utilsHeaderPath);
+    CheckContains(utilsHeaderPath, utilsHeader, "bool IsSupportedDataType(TileXR::TileXRDataType dataType);");
+    CheckContains(utilsHeaderPath, utilsHeader, "int64_t CountToBytes(int64_t count, TileXR::TileXRDataType dataType);");
+    CheckContains(utilsHeaderPath, utilsHeader, "uint32_t GetAllGatherBlockNum(const TileXR::CommArgs &commArgs, int64_t dataSize);");
+    CheckContains(utilsHeaderPath, utilsHeader, "uint32_t GetAllToAllBlockNum(const TileXR::CommArgs &commArgs, int64_t dataSize);");
+
+    const std::string kernelHeaderPath = "src/collectives/host/collective_kernel.h";
+    const auto kernelHeader = ReadFile(kernelHeaderPath);
+    CheckContains(kernelHeaderPath, kernelHeader, "namespace TileXRCollectives");
+    CheckContains(kernelHeaderPath, kernelHeader, "namespace Host");
+    CheckContains(kernelHeaderPath, kernelHeader, "struct AscendCCLKernelArgs");
+    CheckContains(kernelHeaderPath, kernelHeader, "int LaunchCollectiveKernel(TileXR::TileXRType type,");
+}
+
 void TestCommBuildDoesNotReferenceCollectives()
 {
     const std::string path = "src/comm/CMakeLists.txt";
@@ -113,6 +144,7 @@ void TestCommInternalDoesNotContainCollectiveRegistration()
     const std::string paths[] = {
         "src/comm/tilexr_internal.h",
         "src/comm/tilexr_internal.cpp",
+        "src/comm/tilexr_comm.cpp",
     };
     const std::string forbidden[] = {
         "TILEXR_CCE_BIN_STR",
@@ -120,6 +152,9 @@ void TestCommInternalDoesNotContainCollectiveRegistration()
         "RegistCoCKernel",
         "RegistKernel",
         "LoadMTE",
+        "LaunchCollective",
+        "AscendCCLKernelArgs",
+        "rtKernelLaunch",
     };
 
     for (const auto& path : paths) {
@@ -128,6 +163,8 @@ void TestCommInternalDoesNotContainCollectiveRegistration()
             CheckDoesNotContain(path, text, needle);
         }
     }
+
+    CheckFileDoesNotExist("src/comm/ccl_kernel_args.h");
 }
 
 void TestCommBuildInstallsPublicHeadersAndKeepsLinksPrivate()
@@ -158,6 +195,8 @@ void TestCollectivesBuildDefinesSeparateSharedLibrary()
     const auto text = ReadFile(path);
     CheckContains(path, text, "include(GNUInstallDirs)");
     CheckContains(path, text, "host/collective_launcher.cpp");
+    CheckContains(path, text, "host/collective_utils.cpp");
+    CheckContains(path, text, "host/collective_kernel.cpp");
     CheckContains(path, text, "add_library(tilexr-collectives SHARED");
     CheckContains(path, text, "${ASCEND_DRIVER_PATH}/kernel/inc\n        PRIVATE");
     CheckContains(path, text, "target_link_libraries(tilexr-collectives\n        PUBLIC\n        tile-comm\n        PRIVATE");
@@ -288,6 +327,7 @@ int main()
     TestCollectivesHeaderDeclaresPublicApis();
     TestCoreApiHeaderDoesNotDeclareCollectives();
     TestCollectivesHostUsesOnlyPublicCommExtensionApi();
+    TestCollectivesHostOwnsCollectiveLaunchHelpers();
     TestCommBuildDoesNotReferenceCollectives();
     TestCommInternalDoesNotContainCollectiveRegistration();
     TestCommBuildInstallsPublicHeadersAndKeepsLinksPrivate();
