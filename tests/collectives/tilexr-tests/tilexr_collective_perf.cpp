@@ -9,6 +9,8 @@
  */
 
 #include <algorithm>
+#include <cerrno>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -24,6 +26,8 @@
 #include "tilexr_collectives.h"
 
 namespace {
+
+constexpr int64_t kMaxHostBufferBytes = 1LL << 30;
 
 enum class CollectiveOp {
     ALLGATHER,
@@ -74,14 +78,34 @@ struct Row {
     int errors = 0;
 };
 
+int32_t MixExpectedInt32(uint64_t salt, int srcRank, int dstRank, int64_t index)
+{
+    uint64_t value = salt;
+    value ^= (static_cast<uint64_t>(static_cast<uint32_t>(srcRank)) + 0x9e3779b97f4a7c15ULL +
+        (value << 6) + (value >> 2));
+    value ^= (static_cast<uint64_t>(static_cast<uint32_t>(dstRank)) + 0xbf58476d1ce4e5b9ULL +
+        (value << 6) + (value >> 2));
+    value ^= (static_cast<uint64_t>(index) + 0x94d049bb133111ebULL + (value << 6) + (value >> 2));
+    value ^= value >> 30;
+    value *= 0xbf58476d1ce4e5b9ULL;
+    value ^= value >> 27;
+    value *= 0x94d049bb133111ebULL;
+    value ^= value >> 31;
+    int32_t result = static_cast<int32_t>(static_cast<uint32_t>(value));
+    if (result == -1) {
+        result = static_cast<int32_t>(static_cast<uint32_t>(value >> 32) ^ 0x5a5a5a5aU);
+    }
+    return result;
+}
+
 int32_t ExpectedAllGatherValue(int srcRank, int64_t index)
 {
-    return static_cast<int32_t>(srcRank * 1000000 + index);
+    return MixExpectedInt32(0x47415448ULL, srcRank, 0, index);
 }
 
 int32_t ExpectedAllToAllValue(int srcRank, int dstRank, int64_t index)
 {
-    return static_cast<int32_t>(srcRank * 1000000 + dstRank * 1000 + index);
+    return MixExpectedInt32(0x544f414cULL, srcRank, dstRank, index);
 }
 
 uint8_t PatternByte(int rank, int peer, int64_t byteIndex)
@@ -149,6 +173,131 @@ bool ParseDataType(const std::string &value, DataTypeInfo &info)
     return true;
 }
 
+bool ParseInt64(const std::string &text, int64_t &out)
+{
+    char *end = nullptr;
+    errno = 0;
+    const long long value = std::strtoll(text.c_str(), &end, 10);
+    if (errno == ERANGE || end == text.c_str() || *end != '\0') {
+        return false;
+    }
+    out = static_cast<int64_t>(value);
+    return true;
+}
+
+bool ParseInt(const std::string &text, int &out)
+{
+    int64_t value = 0;
+    if (!ParseInt64(text, value) || value < std::numeric_limits<int>::min() ||
+        value > std::numeric_limits<int>::max()) {
+        return false;
+    }
+    out = static_cast<int>(value);
+    return true;
+}
+
+bool ParseDouble(const std::string &text, double &out)
+{
+    char *end = nullptr;
+    errno = 0;
+    const double value = std::strtod(text.c_str(), &end);
+    if (errno == ERANGE || end == text.c_str() || *end != '\0' || !std::isfinite(value)) {
+        return false;
+    }
+    out = value;
+    return true;
+}
+
+bool CheckedMulInt64(int64_t lhs, int64_t rhs, int64_t &out)
+{
+    if (lhs < 0 || rhs < 0) {
+        return false;
+    }
+    if (lhs != 0 && rhs > std::numeric_limits<int64_t>::max() / lhs) {
+        return false;
+    }
+    out = lhs * rhs;
+    return true;
+}
+
+bool CheckedBytesForElements(int64_t elements, size_t elementBytes, int64_t &bytes)
+{
+    if (elementBytes > static_cast<size_t>(std::numeric_limits<int64_t>::max())) {
+        return false;
+    }
+    return CheckedMulInt64(elements, static_cast<int64_t>(elementBytes), bytes) &&
+        static_cast<uint64_t>(bytes) <= static_cast<uint64_t>(std::numeric_limits<size_t>::max());
+}
+
+bool FitsHostBufferLimit(int64_t bytes)
+{
+    return bytes > 0 && bytes <= kMaxHostBufferBytes;
+}
+
+bool ComputeMessageSizes(const Options &options, int64_t count, int64_t &sendElements, int64_t &recvElements,
+                         int64_t &sendBytes, int64_t &recvBytes)
+{
+    if (count <= 0) {
+        return false;
+    }
+    const int64_t rankSize = static_cast<int64_t>(options.rankSize);
+    if (!CheckedMulInt64(count, rankSize, recvElements)) {
+        return false;
+    }
+    sendElements = count;
+    if (options.op == CollectiveOp::ALLTOALL && !CheckedMulInt64(count, rankSize, sendElements)) {
+        return false;
+    }
+    return CheckedBytesForElements(sendElements, options.dtype.bytes, sendBytes) &&
+        CheckedBytesForElements(recvElements, options.dtype.bytes, recvBytes) &&
+        FitsHostBufferLimit(sendBytes) && FitsHostBufferLimit(recvBytes);
+}
+
+bool ValidateMaxMessageSize(const Options &options)
+{
+    int64_t count = options.maxBytes / static_cast<int64_t>(options.dtype.bytes);
+    if (count <= 0) {
+        count = 1;
+    }
+    int64_t sendElements = 0;
+    int64_t recvElements = 0;
+    int64_t sendBytes = 0;
+    int64_t recvBytes = 0;
+    if (!ComputeMessageSizes(options, count, sendElements, recvElements, sendBytes, recvBytes)) {
+        std::cerr << "ERROR: message size too large" << std::endl;
+        return false;
+    }
+    (void)sendElements;
+    (void)recvElements;
+    (void)sendBytes;
+    (void)recvBytes;
+    return true;
+}
+
+bool AdvanceBytes(int64_t current, double factor, int64_t maxBytes, int64_t &next)
+{
+    const double scaled = static_cast<double>(current) * factor;
+    if (!std::isfinite(scaled) || scaled > static_cast<double>(std::numeric_limits<int64_t>::max())) {
+        return false;
+    }
+    const int64_t candidate = static_cast<int64_t>(scaled);
+    if (candidate <= current) {
+        if (current == std::numeric_limits<int64_t>::max()) {
+            return false;
+        }
+        next = current + 1;
+    } else {
+        next = candidate;
+    }
+    if (next < current) {
+        return false;
+    }
+    if (next > maxBytes) {
+        next = maxBytes;
+    }
+    return true;
+}
+
 bool ParseOptions(int argc, char **argv, Options &options)
 {
     for (int i = 1; i < argc; ++i) {
@@ -180,31 +329,46 @@ bool ParseOptions(int argc, char **argv, Options &options)
             if (value == nullptr) {
                 return false;
             }
-            options.minBytes = std::atoll(value);
+            if (!ParseInt64(value, options.minBytes)) {
+                std::cerr << "ERROR: invalid --min-bytes" << std::endl;
+                return false;
+            }
         } else if (arg == "--max-bytes") {
             const char *value = requireValue(arg);
             if (value == nullptr) {
                 return false;
             }
-            options.maxBytes = std::atoll(value);
+            if (!ParseInt64(value, options.maxBytes)) {
+                std::cerr << "ERROR: invalid --max-bytes" << std::endl;
+                return false;
+            }
         } else if (arg == "--step-factor") {
             const char *value = requireValue(arg);
             if (value == nullptr) {
                 return false;
             }
-            options.stepFactor = std::atof(value);
+            if (!ParseDouble(value, options.stepFactor)) {
+                std::cerr << "ERROR: invalid --step-factor" << std::endl;
+                return false;
+            }
         } else if (arg == "--iters") {
             const char *value = requireValue(arg);
             if (value == nullptr) {
                 return false;
             }
-            options.iters = std::atoi(value);
+            if (!ParseInt(value, options.iters)) {
+                std::cerr << "ERROR: invalid --iters" << std::endl;
+                return false;
+            }
         } else if (arg == "--warmup-iters") {
             const char *value = requireValue(arg);
             if (value == nullptr) {
                 return false;
             }
-            options.warmupIters = std::atoi(value);
+            if (!ParseInt(value, options.warmupIters)) {
+                std::cerr << "ERROR: invalid --warmup-iters" << std::endl;
+                return false;
+            }
         } else if (arg == "--datatype") {
             const char *value = requireValue(arg);
             if (value == nullptr || !ParseDataType(value, options.dtype)) {
@@ -216,19 +380,28 @@ bool ParseOptions(int argc, char **argv, Options &options)
             if (value == nullptr) {
                 return false;
             }
-            options.rankSize = std::atoi(value);
+            if (!ParseInt(value, options.rankSize)) {
+                std::cerr << "ERROR: invalid --rank-size" << std::endl;
+                return false;
+            }
         } else if (arg == "--rank") {
             const char *value = requireValue(arg);
             if (value == nullptr) {
                 return false;
             }
-            options.rank = std::atoi(value);
+            if (!ParseInt(value, options.rank)) {
+                std::cerr << "ERROR: invalid --rank" << std::endl;
+                return false;
+            }
         } else if (arg == "--first-npu") {
             const char *value = requireValue(arg);
             if (value == nullptr) {
                 return false;
             }
-            options.firstNpu = std::atoi(value);
+            if (!ParseInt(value, options.firstNpu)) {
+                std::cerr << "ERROR: invalid --first-npu" << std::endl;
+                return false;
+            }
         } else if (arg == "--check") {
             const char *value = requireValue(arg);
             if (value == nullptr || !ParseBool(value, options.check)) {
@@ -246,13 +419,19 @@ bool ParseOptions(int argc, char **argv, Options &options)
             if (value == nullptr) {
                 return false;
             }
-            options.minAlgBw = std::atof(value);
+            if (!ParseDouble(value, options.minAlgBw)) {
+                std::cerr << "ERROR: invalid --min-algbw" << std::endl;
+                return false;
+            }
         } else if (arg == "--max-latency-us") {
             const char *value = requireValue(arg);
             if (value == nullptr) {
                 return false;
             }
-            options.maxLatencyUs = std::atof(value);
+            if (!ParseDouble(value, options.maxLatencyUs)) {
+                std::cerr << "ERROR: invalid --max-latency-us" << std::endl;
+                return false;
+            }
         } else if (arg == "--help" || arg == "-h") {
             PrintUsage(argv[0]);
             std::exit(0);
@@ -266,6 +445,9 @@ bool ParseOptions(int argc, char **argv, Options &options)
         options.iters <= 0 || options.warmupIters < 0 || options.rankSize <= 0 ||
         options.rank < 0 || options.rank >= options.rankSize || options.firstNpu < 0) {
         std::cerr << "ERROR: invalid option value" << std::endl;
+        return false;
+    }
+    if (!ValidateMaxMessageSize(options)) {
         return false;
     }
     return true;
@@ -582,23 +764,21 @@ int main(int argc, char **argv)
     }
 
     int totalErrors = 0;
-    for (int64_t bytes = options.minBytes; bytes <= options.maxBytes;) {
+    for (int64_t bytes = options.minBytes;;) {
         int64_t count = bytes / static_cast<int64_t>(options.dtype.bytes);
         if (count <= 0) {
             count = 1;
         }
-        const int64_t sendElements = options.op == CollectiveOp::ALLTOALL ?
-            count * options.rankSize : count;
-        const int64_t recvElements = count * options.rankSize;
-        const int64_t sendBytes = sendElements * static_cast<int64_t>(options.dtype.bytes);
-        const int64_t recvBytes = recvElements * static_cast<int64_t>(options.dtype.bytes);
-        if (sendBytes <= 0 || recvBytes <= 0 ||
-            sendBytes > static_cast<int64_t>(std::numeric_limits<size_t>::max()) ||
-            recvBytes > static_cast<int64_t>(std::numeric_limits<size_t>::max())) {
+        int64_t sendElements = 0;
+        int64_t recvElements = 0;
+        int64_t sendBytes = 0;
+        int64_t recvBytes = 0;
+        if (!ComputeMessageSizes(options, count, sendElements, recvElements, sendBytes, recvBytes)) {
             std::cerr << "ERROR: message size too large" << std::endl;
             Cleanup(comm, stream, deviceId, deviceSet);
             return 1;
         }
+        const int64_t actualSendBytesPerRank = sendBytes;
 
         std::vector<uint8_t> hostSend(static_cast<size_t>(sendBytes));
         std::vector<uint8_t> hostRecv(static_cast<size_t>(recvBytes));
@@ -624,7 +804,11 @@ int main(int argc, char **argv)
 
         int errors = 0;
         if (ok && options.check) {
-            ok = CallCollective(options, devSend, devRecv, count, comm, stream) &&
+            std::fill(hostRecv.begin(), hostRecv.end(), 0xff);
+            ok = CheckAcl(options.rank, "aclrtMemcpy H2D devRecv sentinel",
+                    aclrtMemcpy(devRecv, static_cast<size_t>(recvBytes), hostRecv.data(),
+                        static_cast<size_t>(recvBytes), ACL_MEMCPY_HOST_TO_DEVICE)) &&
+                CallCollective(options, devSend, devRecv, count, comm, stream) &&
                 CheckAcl(options.rank, "aclrtSynchronizeStream check", aclrtSynchronizeStream(stream)) &&
                 CheckAcl(options.rank, "aclrtMemcpy D2H recv",
                     aclrtMemcpy(hostRecv.data(), static_cast<size_t>(recvBytes), devRecv,
@@ -660,8 +844,8 @@ int main(int argc, char **argv)
         }
         totalErrors += errors;
 
-        Row row{opName, options.dtype.name, options.rankSize, bytes, count, options.iters, algBw, busBw,
-            measurement.avgUs, measurement.minUs, measurement.maxUs, errors};
+        Row row{opName, options.dtype.name, options.rankSize, actualSendBytesPerRank, count, options.iters,
+            algBw, busBw, measurement.avgUs, measurement.minUs, measurement.maxUs, errors};
         if (options.rank == 0) {
             PrintRow(row);
             if (!AppendCsv(options.csvPath, row)) {
@@ -670,12 +854,16 @@ int main(int argc, char **argv)
             }
         }
 
-        const int64_t nextBytes = static_cast<int64_t>(static_cast<double>(bytes) * options.stepFactor);
-        if (nextBytes <= bytes) {
-            ++bytes;
-        } else {
-            bytes = nextBytes;
+        int64_t nextBytes = 0;
+        if (!AdvanceBytes(bytes, options.stepFactor, options.maxBytes, nextBytes)) {
+            std::cerr << "ERROR: message size step overflow" << std::endl;
+            Cleanup(comm, stream, deviceId, deviceSet);
+            return 1;
         }
+        if (nextBytes <= bytes) {
+            break;
+        }
+        bytes = nextBytes;
     }
 
     Cleanup(comm, stream, deviceId, deviceSet);

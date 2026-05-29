@@ -5,6 +5,7 @@ usage() {
   echo "Usage: $0 rank_size first_npu bin_dir [extra tilexr_collective_perf args...]" >&2
   echo "Example: $0 2 0 ./install/bin --op allgather --min-bytes 4 --max-bytes 4096 --datatype int32 --check 1" >&2
   echo "Set TILEXR_SKIP_IF_INSUFFICIENT_NPUS=1 to skip cleanly when npu-smi reports fewer devices." >&2
+  echo "Set TILEXR_COLLECTIVES_RUN_TIMEOUT_SEC=N to override the per-launch timeout (default: 600)." >&2
 }
 
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
@@ -17,9 +18,14 @@ first_npu="${2:-0}"
 bin_dir="${3:-./install/bin}"
 shift $(( $# >= 3 ? 3 : $# ))
 binary="${bin_dir}/tilexr_collective_perf"
+timeout_sec="${TILEXR_COLLECTIVES_RUN_TIMEOUT_SEC:-600}"
 
 if [[ ! -x "${binary}" ]]; then
   echo "ERROR: ${binary} is not executable" >&2
+  exit 1
+fi
+if [[ ! "${timeout_sec}" =~ ^[0-9]+$ || "${timeout_sec}" -le 0 ]]; then
+  echo "ERROR: TILEXR_COLLECTIVES_RUN_TIMEOUT_SEC must be a positive integer" >&2
   exit 1
 fi
 
@@ -46,21 +52,7 @@ if [[ -n "${available_npus}" && "${available_npus}" =~ ^[0-9]+$ && "${available_
 fi
 
 pids=()
-for ((rank = 0; rank < rank_size; rank++)); do
-  log="collective_perf_rank${rank}.log"
-  "${binary}" --rank-size "${rank_size}" --rank "${rank}" --first-npu "${first_npu}" "$@" \
-    > "${log}" 2>&1 &
-  pids+=("$!")
-done
-
-status=0
-for pid in "${pids[@]}"; do
-  if ! wait "${pid}"; then
-    status=1
-  fi
-done
-
-if [[ "${status}" -ne 0 ]]; then
+tail_logs() {
   for ((rank = 0; rank < rank_size; rank++)); do
     log="collective_perf_rank${rank}.log"
     if [[ -f "${log}" ]]; then
@@ -68,6 +60,79 @@ if [[ "${status}" -ne 0 ]]; then
       tail -n 80 "${log}" >&2
     fi
   done
-fi
+}
 
-exit "${status}"
+kill_remaining_children() {
+  local pid
+  for pid in "${pids[@]}"; do
+    kill "${pid}" 2>/dev/null || true
+  done
+  sleep 1
+  for pid in "${pids[@]}"; do
+    kill -KILL "${pid}" 2>/dev/null || true
+  done
+  for pid in "${pids[@]}"; do
+    wait "${pid}" 2>/dev/null || true
+  done
+}
+
+for ((rank = 0; rank < rank_size; rank++)); do
+  log="collective_perf_rank${rank}.log"
+  "${binary}" --rank-size "${rank_size}" --rank "${rank}" --first-npu "${first_npu}" "$@" \
+    > "${log}" 2>&1 &
+  pids+=("$!")
+done
+
+timeout_flag="${TMPDIR:-/tmp}/tilexr_collective_perf_timeout.$$"
+rm -f "${timeout_flag}"
+(
+  sleep "${timeout_sec}"
+  printf 1 > "${timeout_flag}"
+  echo "ERROR: Timed out after ${timeout_sec}s; killing remaining ranks" >&2
+  kill "${pids[@]}" 2>/dev/null || true
+  exit 124
+) &
+watchdog_pid="$!"
+
+trap 'echo "ERROR: interrupted; killing remaining ranks" >&2; kill "${watchdog_pid}" 2>/dev/null || true; kill_remaining_children; tail_logs; rm -f "${timeout_flag}"; exit 130' INT TERM
+
+remaining_pids=("${pids[@]}")
+status=0
+while (( ${#remaining_pids[@]} > 0 )); do
+  completed_pid=""
+  if wait -n -p completed_pid "${remaining_pids[@]}"; then
+    next_remaining=()
+    for pid in "${remaining_pids[@]}"; do
+      [[ "${pid}" == "${completed_pid}" ]] || next_remaining+=("${pid}")
+    done
+    remaining_pids=("${next_remaining[@]}")
+    continue
+  else
+    rc="$?"
+  fi
+
+  next_remaining=()
+  for pid in "${remaining_pids[@]}"; do
+    [[ "${pid}" == "${completed_pid}" ]] || next_remaining+=("${pid}")
+  done
+  remaining_pids=("${next_remaining[@]}")
+  if [[ -f "${timeout_flag}" ]]; then
+    status=124
+  else
+    echo "ERROR: rank process exited with status ${rc}; killing remaining ranks" >&2
+    status=1
+  fi
+  kill "${watchdog_pid}" 2>/dev/null || true
+  kill_remaining_children
+  tail_logs
+  rm -f "${timeout_flag}"
+  trap - INT TERM
+  exit "${status}"
+done
+
+kill "${watchdog_pid}" 2>/dev/null || true
+wait "${watchdog_pid}" 2>/dev/null || true
+rm -f "${timeout_flag}"
+trap - INT TERM
+
+exit 0

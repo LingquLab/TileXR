@@ -32,7 +32,9 @@ and `--op allgather|alltoall|both`. It initializes ACL, selects `first_npu + ran
 calls `TileXRCommInitRankLocal`, runs INT32 `TileXRAllGather` and equal `TileXRAllToAll`, synchronizes,
 copies results back, and validates deterministic rank-specific patterns.
 
-The script writes `collectives_correctness_rank*.log` and tails logs on failure.
+The script writes `collectives_correctness_rank*.log` and tails logs on failure. Multi-rank launches use
+`TILEXR_COLLECTIVES_RUN_TIMEOUT_SEC` as a whole-launch timeout, defaulting to 600 seconds. If any rank fails
+or the timeout expires, the script kills remaining ranks and tails each rank log.
 
 ## Perf Run
 
@@ -56,10 +58,11 @@ Output fields:
 op dtype ranks bytes count iters algbw(GB/s) busbw(GB/s) avg(us) min(us) max(us) errors
 ```
 
-For the whole sample loop, transferred work is `bytes * iters` for each row in the report.
-`algbw(GB/s)` is `output_bytes_per_rank / avg_us / 1000`, where `output_bytes_per_rank` is the bytes
-received by one rank for the measured message size. `busbw(GB/s)` is `algbw * (rank_size - 1) / rank_size`
-for both allgather and equal alltoall. CSV output uses the same fields.
+The `bytes` column is the actual send bytes per rank for that operation and size row:
+allgather: count * dtype_size; alltoall: count * rank_size * dtype_size. `algbw(GB/s)` is
+`output_bytes_per_rank / avg_us / 1000`, where `output_bytes_per_rank` is the bytes received by one rank for
+the measured message size. `busbw(GB/s)` is `algbw * (rank_size - 1) / rank_size` for both allgather and
+equal alltoall. CSV output uses the same fields.
 
 `--check=1` validates outputs. INT32 is checked element-by-element with operation-specific expected values;
 other dtypes use deterministic byte-pattern checks. `--check=0` measures only.
@@ -72,6 +75,9 @@ they exit nonzero. Set `TILEXR_SKIP_IF_INSUFFICIENT_NPUS=1` to skip cleanly inst
 ```bash
 TILEXR_SKIP_IF_INSUFFICIENT_NPUS=1 ./run_collectives_correctness.sh 8 16 0 ../../build/tests/collectives
 ```
+
+Set `TILEXR_COLLECTIVES_RUN_TIMEOUT_SEC=N` to override the default 600-second launch timeout for either
+manual script.
 
 Common failure reasons include missing CANN environment, too few visible NPUs, devices already in use,
 driver/runtime version mismatch, unsupported topology for the selected collective kernel, or `LD_LIBRARY_PATH`

@@ -85,6 +85,9 @@ void TestCorrectnessRunnerSource()
     CheckContains(path, text, "aclrtSynchronizeStream");
     CheckContains(path, text, "ExpectedAllGatherValue");
     CheckContains(path, text, "ExpectedAllToAllValue");
+    CheckContains(path, text, "MixExpectedInt32");
+    CheckDoesNotContain(path, text, "srcRank * 1000000 + index");
+    CheckDoesNotContain(path, text, "dstRank * 1000 + index");
 }
 
 void TestPerfToolSource()
@@ -125,6 +128,18 @@ void TestPerfToolSource()
     CheckContains(path, text, "ComputeAlgBandwidthGbps");
     CheckContains(path, text, "ComputeBusBandwidthGbps");
     CheckContains(path, text, "ValidateInt32");
+    CheckContains(path, text, "CheckedMulInt64");
+    CheckContains(path, text, "CheckedBytesForElements");
+    CheckContains(path, text, "kMaxHostBufferBytes");
+    CheckContains(path, text, "FitsHostBufferLimit");
+    CheckContains(path, text, "AdvanceBytes");
+    CheckContains(path, text, "aclrtMemcpy H2D devRecv sentinel");
+    CheckContains(path, text, "actualSendBytesPerRank");
+    CheckContains(path, text, "MixExpectedInt32");
+    CheckDoesNotContain(path, text, "sendElements * static_cast<int64_t>(options.dtype.bytes)");
+    CheckDoesNotContain(path, text, "static_cast<int64_t>(static_cast<double>(bytes) * options.stepFactor)");
+    CheckDoesNotContain(path, text, "srcRank * 1000000 + index");
+    CheckDoesNotContain(path, text, "dstRank * 1000 + index");
 }
 
 void TestLauncherScripts()
@@ -138,6 +153,12 @@ void TestLauncherScripts()
     CheckContains(correctnessPath, correctness, "bin_dir");
     CheckContains(correctnessPath, correctness, "collectives_correctness_rank${rank}.log");
     CheckContains(correctnessPath, correctness, "TILEXR_SKIP_IF_INSUFFICIENT_NPUS");
+    CheckContains(correctnessPath, correctness, "TILEXR_COLLECTIVES_RUN_TIMEOUT_SEC");
+    CheckContains(correctnessPath, correctness, "kill_remaining_children");
+    CheckContains(correctnessPath, correctness, "tail_logs");
+    CheckContains(correctnessPath, correctness, "Timed out after");
+    CheckContains(correctnessPath, correctness, "wait -n -p completed_pid");
+    CheckContains(correctnessPath, correctness, "remaining_pids");
     CheckContains(correctnessPath, correctness, "npu-smi info -l");
     CheckContains(correctnessPath, correctness, "tail -n");
     CheckContains(correctnessPath, correctness, "test_tilexr_collectives_correctness");
@@ -151,6 +172,12 @@ void TestLauncherScripts()
     CheckContains(perfPath, perf, "--first-npu");
     CheckContains(perfPath, perf, "collective_perf_rank${rank}.log");
     CheckContains(perfPath, perf, "TILEXR_SKIP_IF_INSUFFICIENT_NPUS");
+    CheckContains(perfPath, perf, "TILEXR_COLLECTIVES_RUN_TIMEOUT_SEC");
+    CheckContains(perfPath, perf, "kill_remaining_children");
+    CheckContains(perfPath, perf, "tail_logs");
+    CheckContains(perfPath, perf, "Timed out after");
+    CheckContains(perfPath, perf, "wait -n -p completed_pid");
+    CheckContains(perfPath, perf, "remaining_pids");
 }
 
 void TestCMakeWiring()
@@ -192,8 +219,11 @@ void TestReadmeDocumentsManualRuns()
     CheckContains(path, text, "--csv");
     CheckContains(path, text, "algbw(GB/s)");
     CheckContains(path, text, "busbw(GB/s)");
-    CheckContains(path, text, "bytes * iters");
+    CheckContains(path, text, "actual send bytes per rank");
+    CheckContains(path, text, "allgather: count * dtype_size");
+    CheckContains(path, text, "alltoall: count * rank_size * dtype_size");
     CheckContains(path, text, "rank_size - 1");
+    CheckContains(path, text, "TILEXR_COLLECTIVES_RUN_TIMEOUT_SEC");
     CheckContains(path, text, "TILEXR_SKIP_IF_INSUFFICIENT_NPUS");
     CheckContains(path, text, "CTest");
     CheckContains(path, text, "manual");

@@ -35,14 +35,34 @@ struct Options {
     CollectiveOp op = CollectiveOp::BOTH;
 };
 
+int32_t MixExpectedInt32(uint64_t salt, int srcRank, int dstRank, int64_t index)
+{
+    uint64_t value = salt;
+    value ^= (static_cast<uint64_t>(static_cast<uint32_t>(srcRank)) + 0x9e3779b97f4a7c15ULL +
+        (value << 6) + (value >> 2));
+    value ^= (static_cast<uint64_t>(static_cast<uint32_t>(dstRank)) + 0xbf58476d1ce4e5b9ULL +
+        (value << 6) + (value >> 2));
+    value ^= (static_cast<uint64_t>(index) + 0x94d049bb133111ebULL + (value << 6) + (value >> 2));
+    value ^= value >> 30;
+    value *= 0xbf58476d1ce4e5b9ULL;
+    value ^= value >> 27;
+    value *= 0x94d049bb133111ebULL;
+    value ^= value >> 31;
+    int32_t result = static_cast<int32_t>(static_cast<uint32_t>(value));
+    if (result == -1) {
+        result = static_cast<int32_t>(static_cast<uint32_t>(value >> 32) ^ 0x5a5a5a5aU);
+    }
+    return result;
+}
+
 int32_t ExpectedAllGatherValue(int srcRank, int64_t index)
 {
-    return static_cast<int32_t>(srcRank * 1000000 + index);
+    return MixExpectedInt32(0x47415448ULL, srcRank, 0, index);
 }
 
 int32_t ExpectedAllToAllValue(int srcRank, int dstRank, int64_t index)
 {
-    return static_cast<int32_t>(srcRank * 1000000 + dstRank * 1000 + index);
+    return MixExpectedInt32(0x544f414cULL, srcRank, dstRank, index);
 }
 
 int GetEnvInt(const char *name, int fallback)
