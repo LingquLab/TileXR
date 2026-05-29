@@ -10,6 +10,7 @@ set(CMAKE_CXX_STANDARD 14)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 set(TILEXR_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../..")
+set(TILEXR_INSTALL_PREFIX "${TILEXR_ROOT}/install" CACHE PATH "TileXR install prefix for installed collectives headers")
 set(TILEXR_COLLECTIVES_LIB "" CACHE FILEPATH "Path to libtilexr-collectives.so")
 set(ASCEND_HOME_PATH $ENV{ASCEND_HOME_PATH})
 set(ARCH $ENV{ARCH})
@@ -44,8 +45,15 @@ add_executable(test_tilexr_collectives_header_compile
     unit/test_tilexr_collectives_header_compile.cpp
 )
 
+if(NOT EXISTS "${TILEXR_INSTALL_PREFIX}/include/tilexr_collectives.h")
+    message(FATAL_ERROR
+        "Installed tilexr_collectives.h not found at ${TILEXR_INSTALL_PREFIX}/include/tilexr_collectives.h. "
+        "Run cmake --install after building TileXR with -DTILEXR_BUILD_COLLECTIVES=ON or set TILEXR_INSTALL_PREFIX."
+    )
+endif()
+
 target_include_directories(test_tilexr_collectives_header_compile PRIVATE
-    ${TILEXR_ROOT}/src/include
+    ${TILEXR_INSTALL_PREFIX}/include
     ${TILEXR_ROOT}/3rdparty
     ${ASCEND_DRIVER_PATH}/kernel/inc
     ${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc/

@@ -91,15 +91,23 @@ void TestCollectivesBuildDefinesSeparateSharedLibrary()
     CheckContains(path, text, "target_link_libraries(tilexr-collectives\n        PRIVATE");
     CheckContains(path, text, "target_link_directories(tilexr-collectives\n        PRIVATE");
     CheckDoesNotContain(path, text, "target_link_libraries(tilexr-collectives tile-comm");
-    CheckContains(path, text, "install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/../include/tilexr_collectives.h");
+    CheckContains(path, text, "${CMAKE_SOURCE_DIR}/src/include/tilexr_collectives.h");
+    CheckContains(path, text, "${CMAKE_SOURCE_DIR}/src/include/tilexr_api.h");
+    CheckContains(path, text, "${CMAKE_SOURCE_DIR}/src/include/tilexr_types.h");
+    CheckContains(path, text, "${CMAKE_SOURCE_DIR}/src/include/comm_args.h");
+    CheckContains(path, text, "DESTINATION ${CMAKE_INSTALL_PREFIX}/include");
 }
 
 void TestCollectivesTestBuildUsesExplicitLibraryHint()
 {
     const std::string path = "tests/collectives/CMakeLists.txt";
     const auto text = ReadFile(path);
+    CheckContains(path, text, "set(TILEXR_INSTALL_PREFIX \"${TILEXR_ROOT}/install\" CACHE PATH");
+    CheckContains(path, text, "${TILEXR_INSTALL_PREFIX}/include");
+    CheckContains(path, text, "${TILEXR_INSTALL_PREFIX}/include/tilexr_collectives.h");
     CheckContains(path, text, "set(TILEXR_COLLECTIVES_LIB \"\" CACHE FILEPATH");
     CheckContains(path, text, "message(FATAL_ERROR");
+    CheckDoesNotContain(path, text, "${TILEXR_ROOT}/src/include");
     CheckDoesNotContain(path, text, "/tmp/tilexr-install-split-collectives");
     CheckDoesNotContain(path, text, "/tmp/tilexr-build-split-collectives");
 }
