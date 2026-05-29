@@ -10,6 +10,7 @@ set(CMAKE_CXX_STANDARD 14)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 set(TILEXR_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../..")
+set(TILEXR_COLLECTIVES_LIB "" CACHE FILEPATH "Path to libtilexr-collectives.so")
 set(ASCEND_HOME_PATH $ENV{ASCEND_HOME_PATH})
 set(ARCH $ENV{ARCH})
 if(NOT ARCH)
@@ -52,19 +53,35 @@ target_include_directories(test_tilexr_collectives_header_compile PRIVATE
     ${ASCEND_HOME_PATH}/${ARCH}-linux/include/
 )
 
-find_library(TILEXR_COLLECTIVES_LIB tilexr-collectives
-    HINTS
-    "${TILEXR_ROOT}/install/lib"
-    "${TILEXR_ROOT}/build/src/collectives"
-    "/tmp/tilexr-install-split-collectives/lib"
-    "/tmp/tilexr-build-split-collectives/src/collectives"
-)
+if(NOT TILEXR_COLLECTIVES_LIB)
+    find_library(TILEXR_COLLECTIVES_LIB_FOUND tilexr-collectives
+        HINTS
+        "${TILEXR_ROOT}/install/lib"
+        "${TILEXR_ROOT}/build/src/collectives"
+    )
+    if(TILEXR_COLLECTIVES_LIB_FOUND)
+        set(TILEXR_COLLECTIVES_LIB "${TILEXR_COLLECTIVES_LIB_FOUND}")
+    endif()
+endif()
 
-if(TILEXR_COLLECTIVES_LIB)
-    target_link_libraries(test_tilexr_collectives_header_compile
-        ${TILEXR_COLLECTIVES_LIB}
+if(NOT TILEXR_COLLECTIVES_LIB)
+    message(FATAL_ERROR
+        "libtilexr-collectives.so not found. Build/install TileXR with -DTILEXR_BUILD_COLLECTIVES=ON "
+        "or pass -DTILEXR_COLLECTIVES_LIB=/path/to/libtilexr-collectives.so."
     )
 endif()
+
+find_library(TILEXR_COMM_LIB tile-comm
+    HINTS
+    "${TILEXR_ROOT}/install/lib"
+    "${TILEXR_ROOT}/build/src/comm"
+    REQUIRED
+)
+
+target_link_libraries(test_tilexr_collectives_header_compile
+    ${TILEXR_COLLECTIVES_LIB}
+    ${TILEXR_COMM_LIB}
+)
 
 install(TARGETS
     test_tilexr_collectives_api

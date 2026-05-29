@@ -88,6 +88,20 @@ void TestCollectivesBuildDefinesSeparateSharedLibrary()
     const std::string path = "src/collectives/CMakeLists.txt";
     const auto text = ReadFile(path);
     CheckContains(path, text, "add_library(tilexr-collectives SHARED");
+    CheckContains(path, text, "target_link_libraries(tilexr-collectives\n        PRIVATE");
+    CheckContains(path, text, "target_link_directories(tilexr-collectives\n        PRIVATE");
+    CheckDoesNotContain(path, text, "target_link_libraries(tilexr-collectives tile-comm");
+    CheckContains(path, text, "install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/../include/tilexr_collectives.h");
+}
+
+void TestCollectivesTestBuildUsesExplicitLibraryHint()
+{
+    const std::string path = "tests/collectives/CMakeLists.txt";
+    const auto text = ReadFile(path);
+    CheckContains(path, text, "set(TILEXR_COLLECTIVES_LIB \"\" CACHE FILEPATH");
+    CheckContains(path, text, "message(FATAL_ERROR");
+    CheckDoesNotContain(path, text, "/tmp/tilexr-install-split-collectives");
+    CheckDoesNotContain(path, text, "/tmp/tilexr-build-split-collectives");
 }
 
 } // namespace
@@ -98,6 +112,7 @@ int main()
     TestCoreApiHeaderDoesNotDeclareCollectives();
     TestCommBuildDoesNotReferenceCollectives();
     TestCollectivesBuildDefinesSeparateSharedLibrary();
+    TestCollectivesTestBuildUsesExplicitLibraryHint();
     if (g_failures != 0) {
         std::cerr << g_failures << " collectives API split checks failed" << std::endl;
         return 1;
