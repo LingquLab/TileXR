@@ -1,261 +1,141 @@
 # TileXR UDMA Integration Summary
 
-**Date:** 2026-05-25  
-**Branch:** master  
-**Status:** ✅ Integration Complete (Pending Ascend Hardware Verification)
+**Updated:** 2026-05-29
+**Status:** Implemented in TileXR comm runtime; A5 / Ascend950 runtime validation required
 
 ## Overview
 
-Successfully integrated UDMA (Unified Direct Memory Access) capability into TileXR, enabling high-performance zero-copy communication between Ascend NPU devices. The integration maintains full backward compatibility while adding optional UDMA transport for operators that can benefit from it.
+TileXR now contains a TileXR-owned registered-memory UDMA path. The current implementation does not depend on shmem host APIs or link shmem into `libtile-comm.so`.
 
-## Integration Scope
+The implementation is aligned with the TileXR design direction: use device-visible metadata and AICore-side wrappers so kernels can issue fine-grained, data-driven communication rather than waiting for coarse host-controlled collective phases.
 
-### 1. Submodule Addition
-- **Added:** `shmem` submodule at `3rdparty/shmem/`
-- **Purpose:** Provides UDMA transport layer via `libshmem.so`
-- **Commit:** `e7ca5ce` - "build: add shmem submodule for UDMA support"
+## Current Architecture
 
-### 2. Core Data Structure Changes
+### Host Runtime
 
-#### CommArgs Extension (`include/comm_args.h`)
-- Added `void* udmaInfoPtr` field for device-side UDMA metadata
-- Added `bool useUDMA` flag for runtime capability detection
-- **Commit:** `55434dc` - "feat: add UDMA flag and udmaInfoPtr to CommArgs"
+- `TileXRComm::InitUDMA()` attempts UDMA initialization for multi-rank communicators.
+- `TileXRUDMATransport` dynamically loads HCCP/RA runtime symbols from CANN libraries:
+  - `libhccl.so`
+  - `libhccl_v2.so`
+  - `libra.so`
+  - `libtsdclient.so`
+- The transport opens the device-side TSD process, resolves EID routes, creates contexts, channels, CQs, and QPs, then uploads a `TileXR::UDMAInfo` image to device memory.
+- Failure to initialize UDMA disables the UDMA capability bit but does not break normal communicator initialization.
 
-#### TileXRComm Class Extension (`comm/tilexr_comm.h`)
-- Added `InitUDMA()` method for UDMA initialization
-- Added `udmaInfoDev_` member for device memory pointer
-- **Commit:** `d25b7c4` - "feat: add InitUDMA method and udmaInfoDev_ member to TileXRComm"
+### Registered Memory
 
-### 3. UDMA Initialization Logic
+- Host code registers ordinary `aclrtMalloc` device memory through `TileXRUDMARegister`.
+- Registration exchanges remote region descriptors across ranks through the existing TileXR socket exchange.
+- `CommArgs::udmaRegistryPtr` points to a device-side registry with per-rank base pointers and sizes.
+- The current registry supports one registered region per rank.
 
-#### Process Mode (`comm/tilexr_comm.cpp`)
-- Implemented `InitUDMA()` with graceful degradation
-- Socket-based rank-to-rank UDMA handle exchange
-- Automatic fallback to IPC if UDMA unavailable
-- **Commit:** `eb5dfd1` - "feat: implement InitUDMA for process mode"
+### Device API
 
-#### Thread Mode (`comm/tilexr_comm.cpp`)
-- Extended `InitThread()` with UDMA support
-- Shared UDMA info across threads within same process
-- **Commit:** `cad048b` - "feat: add UDMA support for InitThread (thread mode)"
+`src/include/tilexr_udma.h` exposes device-side wrappers:
 
-#### Integration into Init Flow (`comm/tilexr_comm.cpp`)
-- Integrated `InitUDMA()` into main `Init()` method
-- Populates `commArgs_.useUDMA` and `commArgs_.udmaInfoPtr`
-- **Commit:** `f988fff` - "feat: integrate InitUDMA into Init() flow"
+- `UDMAPutNbi`
+- `UDMAGetNbi`
+- `UDMAPutSignalNbi`
+- `UDMAQuiet`
 
-### 4. Resource Cleanup
+Wrappers check `CommArgs::extraFlag`, `udmaInfoPtr`, and `udmaRegistryPtr` before issuing UDMA work. Invalid or unavailable UDMA state turns the wrapper into a no-op.
 
-#### Destroy Logic (`comm/tilexr_comm.cpp`)
-- Added UDMA cleanup in `TileXRCommDestroy()`
-- Proper device memory deallocation
-- **Commit:** `014d7db` - "feat: add UDMA cleanup in TileXRCommDestroy"
+## Key Files
 
-### 5. Device-Side API
-
-#### Kernel Wrapper (`include/tilexr_udma.h`)
-- Provides `TileXRUDMARead()` and `TileXRUDMAWrite()` for AICore kernels
-- Type-safe templated interface
-- Automatic UDMA vs IPC fallback based on `commArgs.useUDMA`
-- **Commit:** `994ef2d` - "feat: add tilexr_udma.h device-side wrapper"
-
-### 6. Build System Integration
-
-#### CMake Changes (`CMakeLists.txt`)
-- Added shmem library detection and linking
-- Conditional compilation based on shmem availability
-- **Commits:**
-  - `de5b87f` - "build: integrate shmem library into tile-comm"
-  - `ead2807` - "build: verify host-side UDMA integration (shmem build pending)"
-
-### 7. Documentation
-
-#### Design Specification (`docs/UDMA_CAPABILITY.md`)
-- Complete design rationale and architecture
-- API specifications and usage examples
-- **Commit:** `a4b98b3` - "docs: add TileXR UDMA capability design spec"
-
-#### Project Instructions (`CLAUDE.md`)
-- Updated with UDMA capability overview
-- Build and usage instructions
-- **Commit:** `002ed7c` - "docs: document UDMA capability in CLAUDE.md"
-
-## Changed Files Summary
-
-### Core Implementation (7 files)
-1. `/Users/kuro/repo/TileXR/include/comm_args.h` - Extended with UDMA fields
-2. `/Users/kuro/repo/TileXR/comm/tilexr_comm.h` - Added InitUDMA method
-3. `/Users/kuro/repo/TileXR/comm/tilexr_comm.cpp` - Implemented UDMA initialization and cleanup
-4. `/Users/kuro/repo/TileXR/include/tilexr_udma.h` - **NEW** Device-side UDMA API
-5. `/Users/kuro/repo/TileXR/CMakeLists.txt` - Build system integration
-6. `/Users/kuro/repo/TileXR/.gitmodules` - Added shmem submodule
-7. `/Users/kuro/repo/TileXR/3rdparty/shmem/` - **NEW** Submodule directory
-
-### Documentation (2 files)
-8. `/Users/kuro/repo/TileXR/docs/UDMA_CAPABILITY.md` - **NEW** Design specification
-9. `/Users/kuro/repo/TileXR/CLAUDE.md` - Updated project instructions
-
-## Build Status
-
-### ⚠️ Current Environment: macOS
-- **Cannot build:** TileXR requires CANN toolkit and Ascend NPU drivers
-- **Cannot verify:** Runtime behavior requires physical Ascend hardware
-- **Code verified:** Syntax, structure, and integration points reviewed
-
-### ✅ What Was Verified (macOS)
-1. Git history integrity - all 12 commits present
-2. File structure and organization
-3. Code syntax and C++ semantics
-4. API consistency and backward compatibility
-5. Documentation completeness
-6. Build system structure (CMake logic)
-
-### ⏳ Requires Ascend Environment
-1. **Compilation verification:**
-   ```bash
-   source common_env.sh
-   mkdir -p build && cd build
-   cmake -DCMAKE_INSTALL_PREFIX=../install ..
-   make -j$(nproc)
-   ```
-
-2. **Shmem submodule build:**
-   ```bash
-   cd 3rdparty/shmem
-   # Follow shmem build instructions
-   # Verify libshmem.so is produced
-   ```
-
-3. **Runtime testing:**
-   ```bash
-   # Test with UDMA available
-   bash test_allreduce.sh
-   
-   # Test with UDMA unavailable (should gracefully degrade)
-   # Verify logs show: "UDMA not available, using IPC fallback"
-   ```
-
-4. **Operator integration:**
-   - Modify an operator kernel to use `TileXRUDMARead()`
-   - Verify performance improvement vs IPC
-   - Verify correctness of data transfer
-
-## Key Design Decisions
-
-### 1. Graceful Degradation
-- UDMA initialization failures do not abort program
-- Automatic fallback to existing IPC mechanism
-- Operators work identically regardless of transport
-
-### 2. Backward Compatibility
-- No changes to existing public API (`tilexr_api.h`)
-- Existing operators continue to work without modification
-- New UDMA API is purely additive
-
-### 3. Opt-In Usage
-- Operators must explicitly use `tilexr_udma.h` to benefit
-- Default behavior unchanged
-- Clear migration path for performance-critical operators
-
-### 4. Type Safety
-- Templated device-side API prevents type mismatches
-- Compile-time size checking
-- Runtime capability detection
-
-## Next Steps for Ascend Environment
-
-### Phase 1: Build Verification (Est. 30 min)
-1. Clone repository on Ascend machine
-2. Initialize submodules: `git submodule update --init --recursive`
-3. Build shmem library
-4. Build TileXR with shmem integration
-5. Verify `libtile-comm.so` links against `libshmem.so`
-
-### Phase 2: Runtime Verification (Est. 1 hour)
-1. Run existing test suite to verify no regressions
-2. Check logs for UDMA initialization status
-3. Test with UDMA available (normal case)
-4. Test with UDMA unavailable (simulate failure, verify fallback)
-5. Verify multi-rank communication still works
-
-### Phase 3: Performance Validation (Est. 2-4 hours)
-1. Select a bandwidth-sensitive operator (e.g., `all_gather_matmul`)
-2. Create UDMA-enabled variant using `tilexr_udma.h`
-3. Benchmark: IPC vs UDMA transport
-4. Measure latency and throughput improvements
-5. Document performance gains
-
-### Phase 4: Production Readiness (Est. 1 day)
-1. Migrate critical operators to UDMA
-2. Add UDMA-specific unit tests
-3. Update operator documentation with UDMA usage
-4. Create performance tuning guide
-5. Prepare release notes
-
-## Commit History
-
-```
-002ed7c docs: document UDMA capability in CLAUDE.md
-cad048b feat: add UDMA support for InitThread (thread mode)
-ead2807 build: verify host-side UDMA integration (shmem build pending)
-de5b87f build: integrate shmem library into tile-comm
-994ef2d feat: add tilexr_udma.h device-side wrapper
-014d7db feat: add UDMA cleanup in TileXRCommDestroy
-f988fff feat: integrate InitUDMA into Init() flow
-eb5dfd1 feat: implement InitUDMA for process mode
-d25b7c4 feat: add InitUDMA method and udmaInfoDev_ member to TileXRComm
-55434dc feat: add UDMA flag and udmaInfoPtr to CommArgs
-e7ca5ce build: add shmem submodule for UDMA support
-a4b98b3 docs: add TileXR UDMA capability design spec
+```text
+src/include/tilexr_api.h
+src/include/comm_args.h
+src/include/tilexr_udma.h
+src/include/tilexr_udma_reg.h
+src/include/tilexr_udma_types.h
+src/comm/tilexr_comm.cpp
+src/comm/comm_wrap.cpp
+src/comm/udma/tilexr_hccp_loader.*
+src/comm/udma/tilexr_udma_transport.*
+src/comm/udma/tilexr_udma_layout.*
+tests/udma/
 ```
 
-## Risk Assessment
+## Public API Additions
 
-### Low Risk ✅
-- Backward compatibility maintained
-- Graceful degradation implemented
-- No changes to existing operator behavior
-- Additive-only API changes
+```cpp
+typedef uint32_t TileXRUDMAMemHandle;
 
-### Medium Risk ⚠️
-- Shmem library dependency (new external component)
-- UDMA handle exchange via sockets (network dependency)
-- Device memory allocation for UDMA metadata
+int TileXRUDMARegister(TileXRCommPtr comm, GM_ADDR localPtr, size_t bytes,
+                       TileXRUDMAMemHandle *handle);
+int TileXRUDMAUnregister(TileXRCommPtr comm, TileXRUDMAMemHandle handle);
+int TileXRGetUDMARegistryDev(TileXRCommPtr comm, GM_ADDR &registryPtr);
+```
 
-### Mitigation Strategies
-1. **Dependency isolation:** Shmem is optional, build succeeds without it
-2. **Network resilience:** Socket exchange has timeouts and error handling
-3. **Memory management:** Proper cleanup in destroy path, error handling in allocation
+`CommArgs` contains:
 
-## Success Criteria
+```cpp
+GM_ADDR udmaInfoPtr;
+GM_ADDR udmaRegistryPtr;
+```
 
-### ✅ Completed
-- [x] Design specification written
-- [x] Core data structures extended
-- [x] UDMA initialization implemented
-- [x] Device-side API provided
-- [x] Build system integrated
-- [x] Documentation complete
-- [x] Git history clean and atomic
-- [x] Backward compatibility preserved
+The capability bit is `ExtraFlag::UDMA`.
 
-### ⏳ Pending (Requires Ascend Hardware)
-- [ ] Compilation successful
-- [ ] Runtime initialization successful
-- [ ] Graceful degradation verified
-- [ ] Multi-rank communication tested
-- [ ] Performance improvement measured
-- [ ] Operator integration validated
+## What Changed From The Earlier shmem Design
 
-## Conclusion
+Early UDMA design notes used a patched shmem library to expose UDMA queue information. The current code no longer follows that path:
 
-The UDMA integration is **architecturally complete** and ready for Ascend hardware verification. All code changes follow TileXR conventions, maintain backward compatibility, and provide a clear path for operators to adopt high-performance UDMA transport.
+- `src/comm` does not include `shmem.h`.
+- `tile-comm` does not link `libshmem.so` or `libaclshmem.so`.
+- UDMA metadata is built by TileXR from HCCP/RA contexts and uploaded as `TileXR::UDMAInfo`.
+- UDMA tests include a no-shmem dependency check to keep this boundary explicit.
 
-The implementation prioritizes **safety** (graceful degradation), **compatibility** (no breaking changes), and **usability** (simple device-side API). Once verified on Ascend hardware, operators can incrementally migrate to UDMA for performance-critical communication paths.
+The `3rdparty/shmem` submodule remains in the repository for reference, experiments, and upstream comparison, but it is not part of the current TileXR UDMA acceptance flow.
 
----
+## Validation Scope
 
-**Integration completed by:** Claude Code  
-**Review status:** Pending Ascend hardware verification  
-**Recommended reviewer:** TileXR maintainer with Ascend access
+Host-only checks:
+
+```bash
+cd tests/udma
+bash build.sh
+./install/bin/test_tilexr_no_shmem_dependency
+./install/bin/test_tilexr_udma_transport_layout
+./install/bin/test_tilexr_udma_registry
+```
+
+Communicator smoke test:
+
+```bash
+source ../../scripts/common_env.sh
+export LD_LIBRARY_PATH="$PWD/install/lib:../../install/lib:${LD_LIBRARY_PATH:-}"
+RANK=0 RANK_SIZE=1 ./install/bin/test_tilexr_udma
+```
+
+A5 / Ascend950 data-plane demos:
+
+```bash
+bash demo/run_tilexr_udma_demo.sh 0 2 16 2 0
+bash demo/run_tilexr_udma_demo.sh 1 2 16 2 0
+```
+
+Successful demo logs should include `TileXR UDMA demo success` and `TileXRUDMARegister success`, and should not include `DATA MISMATCH`, signal mismatch messages, or `ERROR`.
+
+## Constraints
+
+- Runtime data-plane validation requires A5 / Ascend950 / 950 hardware.
+- Non-A5 devices can be used only for compilation or smoke checks, not for UDMA success claims.
+- The demo kernel build requires `bisheng`; if unavailable, host-only UDMA tests can still build.
+- `TileXRUDMARegister` is not supported in `InitThread` mode in the current implementation.
+- The current registered-memory API supports one active registered region.
+
+## Design Alignment
+
+Implemented now:
+
+- AICore-visible transport metadata.
+- Registered-memory put/get/signal wrappers.
+- Graceful capability detection.
+- TileXR-owned runtime setup and DFX-friendly test logs.
+
+Still design/roadmap:
+
+- Full dynamic semantic selection among MTE, UDMA/RDMA, notify, and data-as-flag per tile.
+- Best-effort CMO scheduling.
+- CCU/MS offload of control loops.
+- Broader tile-level profiling and replay tooling.

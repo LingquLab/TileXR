@@ -1,22 +1,38 @@
 # TileXR
 
-**TileXR** (eXtreme Rendezvous for Asynchronous Tile Communication) is a distributed communication toolkit for Huawei Ascend NPU chips, built on the CANN stack. It provides tile-level asynchronous collective communication primitives optimized for distributed training.
+**TileXR** (eXtreme Rendezvous for Asynchronous Tile Communication) is a data-centric asynchronous communication runtime for Huawei Ascend NPUs. It moves communication control from coarse BSP-style kernel phases toward tile-level, AICore-driven rendezvous: data readiness, transport choice, and synchronization become explicit runtime state instead of a fixed all-ranks barrier.
+
+The project currently contains a core communication library, MC2 fused collective operators, a registered-memory UDMA prototype for A5 / Ascend950 hardware, and simulator/test infrastructure for Ascend C kernels.
+
+## Design Direction
+
+TileXR is designed around three ideas from the current architecture deck:
+
+- **Tile as the unit of progress**: split large BSP communication phases into smaller data tiles that can be produced, transferred, synchronized, and consumed independently.
+- **AICore-driven asynchronous rendezvous**: let device code observe data readiness and runtime state, then advance communication without repeatedly returning to host scheduling.
+- **Dynamic communication semantics**: choose among IPC/MTE, direct-drive UDMA/RDMA-style paths, notify/data-as-flag synchronization, and future offload paths according to data size, link state, peer readiness, and resource pressure.
+
+The current codebase implements the base communication runtime, flag-based synchronization, MC2 examples, and an A5 UDMA registered-memory path. Broader dynamic scheduling, CMO best-effort scheduling, and CCU offload are design targets and should be treated as roadmap unless a specific implementation file says otherwise.
 
 ## Features
 
-- **Tile-level Communication**: Asynchronous collective operations at AICore tile granularity
-- **UDMA Support**: High-performance inter-chip communication over Huawei UnifiedBus DMA
-- **Fused Operators**: MC2 operators combining communication with computation (AllGather+Add, AllGather+MatMul)
-- **IPC Shared Memory**: Efficient intra-node communication with 100MB buffer per rank
-- **Operator Simulator**: Test and validate operators without physical hardware
+- **Core communication runtime**: `libtile-comm.so` initializes ranks, shared buffers, peer memory mappings, socket exchange, device `CommArgs`, and DFX state.
+- **Tile-level synchronization**: device-side flag regions and magic values support reusable fine-grained synchronization rounds.
+- **MC2 fused operators**: AllGather+Add and AllGather+MatMul examples under `src/mc2/`.
+- **Registered-memory UDMA path**: host code registers ordinary `aclrtMalloc` device memory with `TileXRUDMARegister`; device kernels use `tilexr_udma.h` wrappers for put/get/signal.
+- **No shmem dependency in current TileXR UDMA path**: `src/comm` builds the UDMA transport from TileXR-owned HCCP/RA runtime integration and does not include or link shmem.
+- **Operator simulator**: `op-simulator/` supports functional/performance simulation for selected AICore kernels without physical hardware.
 
 ## System Requirements
 
 - **OS**: Ubuntu 20.04 LTS
-- **NPU Driver**: ≥ 25.5.0 (check with `npu-smi info`)
-- **CANN**: 9.1.0 (default), 9.0.0-beta.1, or 8.5.0
-- **Supported Chips**: Ascend 910B, 910A5, 310P3; UDMA demo support currently targets Ascend950
-- **User**: Root access required for NPU device operations
+- **User**: root access is typically required for NPU device operations
+- **NPU driver**: 25.5.0 or later, check with `npu-smi info`
+- **CANN**: current build scripts and CMake are aligned to CANN 9.1.0
+- **Core supported chips**: Ascend 910B, 910A5, 310P3
+- **UDMA runtime validation target**: A5 / Ascend950 / 950 only
+
+UDMA builds or smoke tests on 910B, 310P, or other non-A5 devices are not valid UDMA data-plane validation.
 
 ### System Dependencies
 
@@ -34,138 +50,203 @@ git clone --recursive https://gitcode.com/LingquLab/TileXR.git
 cd TileXR
 ```
 
-### 2. First-Time Setup
+If the repository was cloned without submodules:
 
 ```bash
-# Complete automated setup (CANN + dependencies)
-bash scripts/prepare.sh
+git submodule update --init --recursive
 ```
 
-Or step-by-step:
-
-```bash
-# Install CANN toolkit
-bash scripts/cann_download_install.sh
-
-# Build hcomm
-bash scripts/hcomm_build_install.sh
-
-# Build and run ops-transformer
-bash scripts/ops_build_run.sh
-```
-
-### 3. Build TileXR
+### 2. Prepare Environment
 
 ```bash
 source scripts/common_env.sh
-mkdir -p build && cd build
-cmake -DCMAKE_INSTALL_PREFIX=../install ..
-make -j$(nproc) && make install
 ```
 
-Output: `install/lib/libtile-comm.so`
+`scripts/common_env.sh` sets `TILEXR_HOME`, `TILEXR_CANN_HOME`, `TILEXR_TEMP_HOME`, architecture, SOC name, and CANN paths.
 
-### 4. Run Tests
+For first-time setup:
 
 ```bash
-# Build test suite
+bash scripts/prepare.sh
+```
+
+Or step by step:
+
+```bash
+bash scripts/cann_download_install.sh
+bash scripts/hcomm_build_install.sh
+bash scripts/ops_build_run.sh
+```
+
+### 3. Build Core Runtime
+
+```bash
+source scripts/common_env.sh
+cmake -S . -B build -DCMAKE_INSTALL_PREFIX="$PWD/install"
+cmake --build build -j"$(nproc)"
+cmake --install build
+```
+
+Expected output:
+
+```text
+install/lib/libtile-comm.so
+```
+
+### 4. Run Basic Tests
+
+```bash
 bash scripts/test_build.sh
-
-# Run AllReduce test
 bash scripts/test_allreduce.sh
-
-# Check logs
 bash scripts/plog_grep.sh ERROR
 ```
 
 ## Repository Structure
 
-```
+```text
 TileXR/
-├── src/
-│   ├── comm/           # Core communication library → libtile-comm.so
-│   ├── mc2/            # Fused collective operators (AllGather+Add, AllGather+MatMul)
-│   └── include/        # Public C/C++ headers
-├── op-simulator/       # Operator simulation without hardware
-├── tests/              # Unit and integration test suites
-├── scripts/            # Build and utility scripts (see scripts/README.md)
-├── 3rdparty/           # Git submodules (hcomm, ops-transformer, spdlog, mki)
-└── docs/               # Documentation (UDMA, CANN migration, etc.)
+|-- src/
+|   |-- comm/                 # Core communication runtime
+|   |   `-- udma/             # TileXR-owned HCCP/RA UDMA transport
+|   |-- include/              # Public C/C++ and device headers
+|   `-- mc2/                  # Fused collective operators
+|       |-- all_gather_add/
+|       |-- all_gather_matmul/
+|       `-- common/
+|-- op-simulator/             # Ascend C kernel simulation
+|-- tests/                    # Integration and UDMA tests
+|   `-- udma/
+|-- scripts/                  # Build, setup, test, and utility scripts
+|-- 3rdparty/                 # hcomm, ops-transformer, spdlog, mki, shmem
+`-- docs/                     # Design, migration, and validation notes
 ```
+
+## Architecture
+
+### Core Runtime
+
+`src/comm/` builds `libtile-comm.so` and exposes the public API in `src/include/tilexr_api.h`.
+
+Important host-side entry points:
+
+- `TileXRGetUniqueId`
+- `TileXRCommInitRankLocal`
+- `TileXRCommInitRank`
+- `TileXRCommInitRankWithDomain`
+- `TileXRGetCommArgsDev`
+- `TileXRGetCommArgsHost`
+- `TileXRCommDestroy`
+
+The runtime allocates shared IPC buffers, exchanges peer mappings, uploads `CommArgs` to device memory, and records topology/capability flags in `CommArgs::extraFlag`.
+
+### Device Synchronization
+
+`src/include/tilexr_sync.h` provides device-side flag synchronization. Flags use magic values so multiple rounds can reuse the same flag memory without a full reset.
+
+### UDMA Registered Memory
+
+The current UDMA path is TileXR-owned:
+
+- `TileXRComm::InitUDMA()` tries to initialize UDMA for multi-rank communicators.
+- `src/comm/udma/tilexr_hccp_loader.*` dynamically loads CANN/HCCP runtime libraries such as `libhccl.so`, `libhccl_v2.so`, `libra.so`, and `libtsdclient.so`.
+- `src/comm/udma/tilexr_udma_transport.*` creates contexts, queues, route metadata, and a device-side `TileXR::UDMAInfo` image.
+- `TileXRUDMARegister` registers ordinary device memory and exchanges remote region metadata.
+- `CommArgs::udmaInfoPtr` and `CommArgs::udmaRegistryPtr` make queue and registered-memory metadata visible to kernels.
+- `src/include/tilexr_udma.h` provides `UDMAPutNbi`, `UDMAGetNbi`, `UDMAPutSignalNbi`, and `UDMAQuiet`.
+
+If UDMA is unavailable, communicator initialization continues without setting `ExtraFlag::UDMA`. UDMA-specific registration or demo paths then report that UDMA is unavailable.
+
+### MC2 Operators
+
+`src/mc2/` contains fused communication+compute examples following the ops-transformer host/tiling/kernel split:
+
+- `all_gather_add`: example AllGather plus element-wise Add, fixed shape and rank-size constraints.
+- `all_gather_matmul`: AllGather plus MatMul with aclnn API, graph integration, and tests.
+- `common`: shared MC2 tiling, topology, HCCL, and matrix multiplication utilities.
 
 ## Dependencies
 
-| Component | Version | Purpose |
-|-----------|---------|---------|
-| [CANN](https://www.hiascend.com/software/cann) | 9.1.0 | Ascend Computing Architecture Neural Network toolkit |
-| [hcomm](https://gitcode.com/cann/hcomm) | 9.0.0-beta.1 | HCCL communication library |
-| [ops-transformer](https://gitcode.com/cann/ops-transformer) | 9.0.0-beta.1 | Operator compilation framework |
-| [spdlog](https://github.com/gabime/spdlog) | submodule | Fast C++ logging library |
-| [mki](https://gitcode.com/cann/mki) | submodule | Matrix kernel interface |
+| Component | Version / Source | Purpose |
+| --- | --- | --- |
+| CANN | 9.1.0 | Ascend toolkit, runtime, compiler, and libraries |
+| hcomm | submodule | HCCL communication dependencies |
+| ops-transformer | submodule | Operator build and packaging framework |
+| spdlog | submodule | Header-only logging dependency |
+| mki | submodule | Matrix kernel interface and utilities |
+| shmem | submodule, reference/optional | Historical UDMA experiments and examples; not linked by current `src/comm` |
 
-## Documentation
+## UDMA Validation
 
-- **[scripts/README.md](scripts/README.md)**: Complete script reference and workflows
-- **[docs/CANN_VERSION_MIGRATION.md](docs/CANN_VERSION_MIGRATION.md)**: CANN version compatibility
-- **[CLAUDE.md](CLAUDE.md)**: Project instructions for AI assistants
-- **[BUILD_VERIFICATION.md](BUILD_VERIFICATION.md)**: Build verification checklist
-
-## Common Commands
+Use the dedicated UDMA guides when validating A5 / Ascend950 / 950 hardware:
 
 ```bash
-# Source environment (required before any operation)
-source scripts/common_env.sh
-
-# Rebuild operators after changes
-bash scripts/ops_only_run.sh
-
-# Check device status
-bash scripts/device_connect.sh
-
-# Monitor NPU devices
-bash scripts/watch.sh
-
-# Search logs
-bash scripts/plog_grep.sh "search_term"
-
-# Fix driver issues
-bash scripts/driver_fix.sh
+cd tests/udma
+bash build.sh
+./install/bin/test_tilexr_no_shmem_dependency
+./install/bin/test_tilexr_udma_transport_layout
+./install/bin/test_tilexr_udma_registry
 ```
 
-## UDMA Support
+Run data-plane demos only on A5 / Ascend950 / 950:
 
-TileXR integrates UDMA (UnifiedBus DMA) for high-performance inter-chip communication on Huawei Ascend systems. UDMA is based on Huawei's UnifiedBus interconnect and is exposed through TileXR as an optional device-side transport for registered device memory.
+```bash
+bash demo/run_tilexr_udma_demo.sh 0 2 16 2 0
+bash demo/run_tilexr_udma_demo.sh 1 2 16 2 0
+```
 
-- **Automatic fallback**: Gracefully degrades to IPC/MTE if UDMA unavailable
-- **TileXR-owned initialization**: Host-side UDMA bootstrap, queue setup, and memory registration are managed inside TileXR
-- **Registered memory API**: Host code registers ordinary device memory with `TileXRUDMARegister`
-- **Device-side API**: `include/tilexr_udma.h` provides `UDMAPutNbi`, `UDMAGetNbi`, and `UDMAPutSignalNbi`
-- **Build target**: Current UDMA demo kernel targets `Ascend950`
+See:
+
+- [tests/udma/README.md](tests/udma/README.md)
+- [tests/udma/QUICKSTART.md](tests/udma/QUICKSTART.md)
+- [tests/udma/demo/ASCEND_VERIFICATION.md](tests/udma/demo/ASCEND_VERIFICATION.md)
 
 ## Operator Simulator
-
-Test AICore kernels without physical hardware:
 
 ```bash
 cd op-simulator
 bash compile_and_run.sh
 ```
 
-Use `base_test.cpp` and `test_template.cpp` as templates for new operator tests.
+Use `op-simulator/src/base_test.cpp` and `op-simulator/test_template.cpp` as templates for new operator simulations.
 
-## Troubleshooting
+## Common Commands
 
-**Driver issues**:
 ```bash
+source scripts/common_env.sh
+bash scripts/ops_only_run.sh
+bash scripts/device_connect.sh
+bash scripts/watch.sh
+bash scripts/plog_grep.sh "search_term"
 bash scripts/driver_fix.sh
 ```
 
-**Build failures**:
-- Ensure `git submodule update --init --recursive` has been run
-- Check CANN version: `source scripts/common_env.sh && echo $TILEXR_CANN_VER`
-- Verify driver: `npu-smi info`
+## Documentation
 
-**Log analysis**:
+- [scripts/README.md](scripts/README.md): script reference and workflows
+- [BUILD_VERIFICATION.md](BUILD_VERIFICATION.md): current build and verification checklist
+- [UDMA_INTEGRATION_SUMMARY.md](UDMA_INTEGRATION_SUMMARY.md): current UDMA architecture summary
+- [docs/SHMEM_INTEGRATION.md](docs/SHMEM_INTEGRATION.md): shmem status and historical notes
+- [docs/CANN_VERSION_MIGRATION.md](docs/CANN_VERSION_MIGRATION.md): CANN 9.1.0 migration notes
+- [CLAUDE.md](CLAUDE.md): repository guidance for AI coding agents
+
+## Troubleshooting
+
+Driver or device issues:
+
+```bash
+bash scripts/driver_fix.sh
+npu-smi info
+```
+
+Build failures:
+
+- Run `git submodule update --init --recursive`.
+- Run `source scripts/common_env.sh` before CMake or scripts.
+- Check `ASCEND_HOME_PATH`, `TILEXR_CANN_VER`, and CANN 9.1.0 include/library layout.
+- Confirm `install/lib/libtile-comm.so` links to CANN libraries and does not require shmem for the current UDMA path.
+
+Log analysis:
+
 ```bash
 bash scripts/plog_grep.sh ERROR
 bash scripts/plog_grep.sh WARNING
@@ -175,6 +256,6 @@ bash scripts/plog_grep.sh WARNING
 
 Copyright (c) 2025 Huawei Technologies Co., Ltd.
 
-This program is free software, you can redistribute it and/or modify it under the terms and conditions of CANN Open Software License Agreement Version 2.0.
+This program is free software. You may redistribute it and/or modify it under the terms and conditions of CANN Open Software License Agreement Version 2.0.
 
-See [LICENSE](LICENSE) for details.
+See the repository license notice for details.
