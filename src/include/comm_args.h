@@ -12,12 +12,21 @@
 #define TILEXR_COMM_ARGS_H
 #include <cstdint>
 
+#if defined(__CCE__) && defined(__CCE_IS_AICORE__)
+#define TILEXR_ASCENDC_AICORE_COMPILE 1
+#else
+#define TILEXR_ASCENDC_AICORE_COMPILE 0
+#endif
+
+#if TILEXR_ASCENDC_AICORE_COMPILE
+#include "kernel_operator.h"
+#endif
+
 #ifndef GM_ADDR
 using GM_ADDR = uint8_t*;
 #endif
 
-#if (defined(__DAV_C220_VEC__) || defined(__DAV_C310__) || defined(__DAV_C310_VEC__) || defined(__DAV_C220_CUBE__)) && \
-    !defined(FORCE_INLINE_AICORE)
+#if TILEXR_ASCENDC_AICORE_COMPILE && !defined(FORCE_INLINE_AICORE)
 #define FORCE_INLINE_AICORE __attribute__((always_inline)) inline __aicore__
 #endif
 
