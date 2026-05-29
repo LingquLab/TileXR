@@ -9,6 +9,7 @@ project(TileXR_Collectives_Tests)
 set(CMAKE_CXX_STANDARD 14)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 include(GNUInstallDirs)
+enable_testing()
 
 set(TILEXR_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../..")
 set(TILEXR_INSTALL_PREFIX "${TILEXR_ROOT}/install" CACHE PATH "TileXR install prefix for installed collectives headers")
@@ -127,6 +128,10 @@ target_link_libraries(test_tilexr_collectives_stub_behavior
     ${TILEXR_COLLECTIVES_LIB}
     ${TILEXR_LIB}
 )
+
+add_test(NAME test_tilexr_collectives_api COMMAND test_tilexr_collectives_api)
+add_test(NAME test_tilexr_collectives_header_compile COMMAND test_tilexr_collectives_header_compile)
+add_test(NAME test_tilexr_collectives_stub_behavior COMMAND test_tilexr_collectives_stub_behavior)
 
 install(TARGETS
     test_tilexr_collectives_api
