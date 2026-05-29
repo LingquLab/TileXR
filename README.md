@@ -116,10 +116,11 @@ TileXR/
 |       |-- all_gather_matmul/
 |       `-- common/
 |-- op-simulator/             # Ascend C kernel simulation
-|-- tests/                    # Integration and UDMA tests
+|-- tests/                    # Host, communication, integration, and UDMA tests
+|   |-- comm/
 |   `-- udma/
 |-- scripts/                  # Build, setup, test, and utility scripts
-|-- 3rdparty/                 # spdlog, mki, plus optional hcomm, ops-transformer, shmem
+|-- 3rdparty/                 # spdlog plus optional hcomm, ops-transformer, shmem
 `-- docs/                     # Design, migration, and validation notes
 ```
 
@@ -171,8 +172,7 @@ If UDMA is unavailable, communicator initialization continues without setting `E
 | Component | Version / Source | Purpose |
 | --- | --- | --- |
 | CANN | 9.1.0 | Required for `libtile-comm.so`: Ascend ACL/runtime/driver headers and libraries |
-| spdlog | submodule | Header-only logging dependency |
-| mki | submodule | Matrix kernel interface and utilities |
+| spdlog | submodule | Header-only optional backend for TileXR logging; `src/comm/tilexr_log.h` falls back to direct stdout/stderr logging when unavailable |
 
 Optional components:
 
