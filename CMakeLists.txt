@@ -12,6 +12,7 @@ cmake_minimum_required(VERSION 3.16)
 
 project(tilexr LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 14)
+option(TILEXR_BUILD_COLLECTIVES "Build optional TileXR collectives library" OFF)
 
 add_link_options(-Wl,-z,relro,-z,now)
 add_link_options(-s)
@@ -46,3 +47,6 @@ include_directories(
         ${CMAKE_SOURCE_DIR}/3rdparty/
 )
 add_subdirectory(src/comm)
+if(TILEXR_BUILD_COLLECTIVES)
+    add_subdirectory(src/collectives)
+endif()
