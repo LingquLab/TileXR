@@ -361,8 +361,6 @@ int TileXRComm::InitCommon()
         commArgs_.extraFlag |= ExtraFlag::IS_GREATER_THAN_40_AIV;
     }
 
-    // RegistKernel(isEnableMsprofOp_);
-
     localRank_ = rank_ % localRankSize_;
     return TILEXR_SUCCESS;
 }

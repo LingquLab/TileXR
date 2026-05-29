@@ -77,6 +77,18 @@ add_executable(test_tilexr_collectives_stub_behavior
     unit/test_tilexr_collectives_stub_behavior.cpp
 )
 
+add_executable(test_tilexr_collectives_uninitialized_comm
+    unit/test_tilexr_collectives_uninitialized_comm.cpp
+)
+
+add_executable(test_collective_host_utils
+    unit/test_collective_host_utils.cpp
+)
+
+target_include_directories(test_collective_host_utils PRIVATE
+    ${TILEXR_ROOT}/src/collectives/host
+)
+
 add_executable(test_tilexr_comm_next_magic
     unit/test_tilexr_comm_next_magic.cpp
 )
@@ -177,6 +189,14 @@ target_link_libraries(test_tilexr_collectives_stub_behavior
     ${TILEXR_COLLECTIVES_TEST_TARGET}
 )
 
+target_link_libraries(test_tilexr_collectives_uninitialized_comm
+    ${TILEXR_COLLECTIVES_TEST_TARGET}
+)
+
+target_link_libraries(test_collective_host_utils
+    ${TILEXR_COLLECTIVES_TEST_TARGET}
+)
+
 target_link_libraries(test_tilexr_comm_next_magic
     ${TILEXR_COMM_TEST_TARGET}
 )
@@ -188,6 +208,8 @@ target_link_libraries(test_prepare_host_launch_context
 add_test(NAME test_tilexr_collectives_api COMMAND test_tilexr_collectives_api)
 add_test(NAME test_tilexr_collectives_header_compile COMMAND test_tilexr_collectives_header_compile)
 add_test(NAME test_tilexr_collectives_stub_behavior COMMAND test_tilexr_collectives_stub_behavior)
+add_test(NAME test_tilexr_collectives_uninitialized_comm COMMAND test_tilexr_collectives_uninitialized_comm)
+add_test(NAME test_collective_host_utils COMMAND test_collective_host_utils)
 add_test(NAME test_tilexr_comm_next_magic COMMAND test_tilexr_comm_next_magic)
 add_test(NAME test_prepare_host_launch_context COMMAND test_prepare_host_launch_context)
 
@@ -195,6 +217,8 @@ install(TARGETS
     test_tilexr_collectives_api
     test_tilexr_collectives_header_compile
     test_tilexr_collectives_stub_behavior
+    test_tilexr_collectives_uninitialized_comm
+    test_collective_host_utils
     test_tilexr_comm_next_magic
     test_prepare_host_launch_context
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}

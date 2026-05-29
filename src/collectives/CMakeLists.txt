@@ -7,6 +7,8 @@ include(GNUInstallDirs)
 
 set(TILEXR_COLLECTIVES_SOURCE_FILE
         host/collective_launcher.cpp
+        host/collective_utils.cpp
+        host/collective_kernel.cpp
         host/tilexr_collectives.cpp
 )
 
