@@ -17,10 +17,10 @@ target_include_directories(tilexr-collectives
         ${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc/
         ${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc/runtime/
         ${ASCEND_HOME_PATH}/${ARCH}-linux/include/
+        ${ASCEND_DRIVER_PATH}/kernel/inc
         PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
         ${CMAKE_CURRENT_SOURCE_DIR}/host
-        ${ASCEND_DRIVER_PATH}/kernel/inc
 )
 
 target_link_directories(tilexr-collectives
@@ -31,8 +31,9 @@ target_link_directories(tilexr-collectives
 )
 
 target_link_libraries(tilexr-collectives
-        PRIVATE
+        PUBLIC
         tile-comm
+        PRIVATE
         ascendcl
         runtime
         profapi
@@ -41,5 +42,5 @@ target_link_libraries(tilexr-collectives
 )
 
 install(TARGETS tilexr-collectives LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR})
-install(FILES ${CMAKE_SOURCE_DIR}/src/include/tilexr_collectives.h
+install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/../include/tilexr_collectives.h
         DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})

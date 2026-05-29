@@ -65,22 +65,6 @@ if(NOT EXISTS "${TILEXR_INSTALL_PREFIX}/include/tilexr_collectives.h")
     )
 endif()
 
-target_include_directories(test_tilexr_collectives_header_compile PRIVATE
-    ${TILEXR_INSTALL_PREFIX}/include
-    ${ASCEND_DRIVER_PATH}/kernel/inc
-    ${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc/
-    ${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc/runtime/
-    ${ASCEND_HOME_PATH}/${ARCH}-linux/include/
-)
-
-target_include_directories(test_tilexr_collectives_stub_behavior PRIVATE
-    ${TILEXR_INSTALL_PREFIX}/include
-    ${ASCEND_DRIVER_PATH}/kernel/inc
-    ${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc/
-    ${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc/runtime/
-    ${ASCEND_HOME_PATH}/${ARCH}-linux/include/
-)
-
 if(NOT TILEXR_COLLECTIVES_LIB)
     find_library(TILEXR_COLLECTIVES_LIB_FOUND tilexr-collectives
         HINTS
@@ -119,14 +103,33 @@ if(NOT TILEXR_LIB)
     )
 endif()
 
+set(TILEXR_INSTALLED_INCLUDE_DIRS
+    ${TILEXR_INSTALL_PREFIX}/include
+    ${ASCEND_DRIVER_PATH}/kernel/inc
+    ${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc/
+    ${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc/runtime/
+    ${ASCEND_HOME_PATH}/${ARCH}-linux/include/
+)
+
+add_library(tilexr-comm-installed SHARED IMPORTED)
+set_target_properties(tilexr-comm-installed PROPERTIES
+    IMPORTED_LOCATION "${TILEXR_LIB}"
+    INTERFACE_INCLUDE_DIRECTORIES "${TILEXR_INSTALLED_INCLUDE_DIRS}"
+)
+
+add_library(tilexr-collectives-installed SHARED IMPORTED)
+set_target_properties(tilexr-collectives-installed PROPERTIES
+    IMPORTED_LOCATION "${TILEXR_COLLECTIVES_LIB}"
+    INTERFACE_INCLUDE_DIRECTORIES "${TILEXR_INSTALLED_INCLUDE_DIRS}"
+    INTERFACE_LINK_LIBRARIES tilexr-comm-installed
+)
+
 target_link_libraries(test_tilexr_collectives_header_compile
-    ${TILEXR_COLLECTIVES_LIB}
-    ${TILEXR_LIB}
+    tilexr-collectives-installed
 )
 
 target_link_libraries(test_tilexr_collectives_stub_behavior
-    ${TILEXR_COLLECTIVES_LIB}
-    ${TILEXR_LIB}
+    tilexr-collectives-installed
 )
 
 add_test(NAME test_tilexr_collectives_api COMMAND test_tilexr_collectives_api)

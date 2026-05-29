@@ -58,13 +58,13 @@ target_link_libraries(tile-comm
 
 install(TARGETS tile-comm LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR})
 install(FILES
-        ${CMAKE_SOURCE_DIR}/src/include/tilexr_api.h
-        ${CMAKE_SOURCE_DIR}/src/include/tilexr_types.h
-        ${CMAKE_SOURCE_DIR}/src/include/comm_args.h
-        ${CMAKE_SOURCE_DIR}/src/include/tilexr_sync.h
-        ${CMAKE_SOURCE_DIR}/src/include/tilexr_udma.h
-        ${CMAKE_SOURCE_DIR}/src/include/tilexr_udma_reg.h
-        ${CMAKE_SOURCE_DIR}/src/include/tilexr_udma_types.h
+        ${CMAKE_CURRENT_SOURCE_DIR}/../include/tilexr_api.h
+        ${CMAKE_CURRENT_SOURCE_DIR}/../include/tilexr_types.h
+        ${CMAKE_CURRENT_SOURCE_DIR}/../include/comm_args.h
+        ${CMAKE_CURRENT_SOURCE_DIR}/../include/tilexr_sync.h
+        ${CMAKE_CURRENT_SOURCE_DIR}/../include/tilexr_udma.h
+        ${CMAKE_CURRENT_SOURCE_DIR}/../include/tilexr_udma_reg.h
+        ${CMAKE_CURRENT_SOURCE_DIR}/../include/tilexr_udma_types.h
         DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 install(CODE "string(CONCAT _tilexr_optional_header \"tilexr_\" \"collectives.h\")
 if(IS_ABSOLUTE \"${CMAKE_INSTALL_INCLUDEDIR}\")
