@@ -114,15 +114,15 @@ uint32_t GetAllToAllBlockNum(const TileXR::CommArgs &commArgs, int64_t dataSize)
         return 0;
     }
     const uint32_t extraFlag = commArgs.extraFlag;
-    if ((extraFlag & TileXR::ExtraFlag::TOPO_910_93) != 0) {
-        if (rankSize <= SMALL_RANK_SIZE && dataSize > TileXR::SMALL_DATA_SIZE &&
-            dataSize % static_cast<int64_t>(SMALL_RANK_SIZE * SMALL_RANK_SIZE * rankSize) == 0) {
-            return ALLTOALL_TWO_STEP_BLOCK_NUM * TWO_BLOCK_NUM;
-        }
-        return rankSize <= ALLTOALL_TWO_STEP_BLOCK_NUM ?
-            rankSize * TWO_BLOCK_NUM : ALLTOALL_TWO_STEP_BLOCK_NUM * TWO_BLOCK_NUM;
+    if ((extraFlag & TileXR::ExtraFlag::TOPO_910_93) == 0) {
+        return 0;
     }
-    return rankSize * TWO_BLOCK_NUM;
+    if (rankSize <= SMALL_RANK_SIZE && dataSize > TileXR::SMALL_DATA_SIZE &&
+        dataSize % static_cast<int64_t>(SMALL_RANK_SIZE * SMALL_RANK_SIZE * rankSize) == 0) {
+        return ALLTOALL_TWO_STEP_BLOCK_NUM * TWO_BLOCK_NUM;
+    }
+    return rankSize <= ALLTOALL_TWO_STEP_BLOCK_NUM ?
+        rankSize * TWO_BLOCK_NUM : ALLTOALL_TWO_STEP_BLOCK_NUM * TWO_BLOCK_NUM;
 }
 
 } // namespace Host

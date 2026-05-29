@@ -108,9 +108,9 @@ void TestAllToAllBlockNum()
 {
     using TileXRCollectives::Host::GetAllToAllBlockNum;
 
-    CheckUint32("default alltoall uses two blocks per rank",
+    CheckUint32("default alltoall unsupported because CCE path is 910_93-only",
                 GetAllToAllBlockNum(Args(4, 0), 1024),
-                8);
+                0);
     CheckUint32("910_93 small alltoall uses two blocks per rank",
                 GetAllToAllBlockNum(Args(8, TileXR::ExtraFlag::TOPO_910_93), 1024),
                 16);
