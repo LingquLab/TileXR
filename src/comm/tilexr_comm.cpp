@@ -896,6 +896,11 @@ CommArgs* TileXRComm::GetCommArgs()
     return &commArgs_;
 }
 
+int64_t TileXRComm::NextMagic()
+{
+    return magic_.fetch_add(1);
+}
+
 std::string TileXRComm::PrintDFX()
 {
     if (commArgsPtr_ == nullptr) {

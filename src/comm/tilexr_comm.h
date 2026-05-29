@@ -10,6 +10,7 @@
 #ifndef TILEXR_COMM_H
 #define TILEXR_COMM_H
 
+#include <atomic>
 #include <memory>
 #include <vector>
 #include <string>
@@ -39,6 +40,7 @@ public:
     const PhysicalInfo &GetPhysicalInfo() const;
     GM_ADDR GetCommArgsPtr();
     CommArgs* GetCommArgs();
+    int64_t NextMagic();
     int RegisterUDMAMemory(GM_ADDR localPtr, size_t bytes, TileXRUDMAMemHandle *handle);
     int UnregisterUDMAMemory(TileXRUDMAMemHandle handle);
     GM_ADDR GetUDMARegistryPtr() const;
@@ -75,7 +77,7 @@ private:
     int localRank_ = -1;
     uint32_t localRankSize_ = 0;
     int devId_ = 0;
-    int64_t magic_ = 1;
+    std::atomic<int64_t> magic_ {1};
     bool inited_ = false;
     bool ipcMemInited_ = false;
     std::string uid_ = {};

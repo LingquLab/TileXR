@@ -71,8 +71,33 @@ void TestCoreApiHeaderDoesNotDeclareCollectives()
 {
     const std::string path = "src/include/tilexr_api.h";
     const auto text = ReadFile(path);
+    CheckContains(path, text, "int TileXRCommNextMagic(TileXRCommPtr comm, int64_t *magic);");
     CheckDoesNotContain(path, text, "TileXRAllGather");
     CheckDoesNotContain(path, text, "TileXRAllToAll");
+}
+
+void TestCollectivesHostUsesOnlyPublicCommExtensionApi()
+{
+    const std::string paths[] = {
+        "src/collectives/host/tilexr_collectives.cpp",
+        "src/collectives/host/collective_launcher.h",
+        "src/collectives/host/collective_launcher.cpp",
+    };
+
+    bool sawCommArgsHost = false;
+    bool sawCommArgsDev = false;
+    bool sawNextMagic = false;
+    for (const auto& path : paths) {
+        const auto text = ReadFile(path);
+        CheckDoesNotContain(path, text, "tilexr_comm.h");
+        sawCommArgsHost = sawCommArgsHost || text.find("TileXRGetCommArgsHost") != std::string::npos;
+        sawCommArgsDev = sawCommArgsDev || text.find("TileXRGetCommArgsDev") != std::string::npos;
+        sawNextMagic = sawNextMagic || text.find("TileXRCommNextMagic") != std::string::npos;
+    }
+
+    CHECK_TRUE(sawCommArgsHost);
+    CHECK_TRUE(sawCommArgsDev);
+    CHECK_TRUE(sawNextMagic);
 }
 
 void TestCommBuildDoesNotReferenceCollectives()
@@ -132,6 +157,7 @@ void TestCollectivesBuildDefinesSeparateSharedLibrary()
     const std::string path = "src/collectives/CMakeLists.txt";
     const auto text = ReadFile(path);
     CheckContains(path, text, "include(GNUInstallDirs)");
+    CheckContains(path, text, "host/collective_launcher.cpp");
     CheckContains(path, text, "add_library(tilexr-collectives SHARED");
     CheckContains(path, text, "${ASCEND_DRIVER_PATH}/kernel/inc\n        PRIVATE");
     CheckContains(path, text, "target_link_libraries(tilexr-collectives\n        PUBLIC\n        tile-comm\n        PRIVATE");
@@ -261,6 +287,7 @@ int main()
 {
     TestCollectivesHeaderDeclaresPublicApis();
     TestCoreApiHeaderDoesNotDeclareCollectives();
+    TestCollectivesHostUsesOnlyPublicCommExtensionApi();
     TestCommBuildDoesNotReferenceCollectives();
     TestCommInternalDoesNotContainCollectiveRegistration();
     TestCommBuildInstallsPublicHeadersAndKeepsLinksPrivate();

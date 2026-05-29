@@ -77,8 +77,13 @@ add_executable(test_tilexr_collectives_stub_behavior
     unit/test_tilexr_collectives_stub_behavior.cpp
 )
 
+add_executable(test_tilexr_comm_next_magic
+    unit/test_tilexr_comm_next_magic.cpp
+)
+
 if(TILEXR_COLLECTIVES_IN_TREE)
     set(TILEXR_COLLECTIVES_TEST_TARGET tilexr-collectives)
+    set(TILEXR_COMM_TEST_TARGET tile-comm)
 else()
     if(NOT EXISTS "${TILEXR_INSTALL_INCLUDE_SEARCH_DIR}/tilexr_collectives.h")
         message(FATAL_ERROR
@@ -153,6 +158,7 @@ else()
     )
 
     set(TILEXR_COLLECTIVES_TEST_TARGET tilexr-collectives-installed)
+    set(TILEXR_COMM_TEST_TARGET tilexr-comm-installed)
 endif()
 
 target_link_libraries(test_tilexr_collectives_header_compile
@@ -163,13 +169,19 @@ target_link_libraries(test_tilexr_collectives_stub_behavior
     ${TILEXR_COLLECTIVES_TEST_TARGET}
 )
 
+target_link_libraries(test_tilexr_comm_next_magic
+    ${TILEXR_COMM_TEST_TARGET}
+)
+
 add_test(NAME test_tilexr_collectives_api COMMAND test_tilexr_collectives_api)
 add_test(NAME test_tilexr_collectives_header_compile COMMAND test_tilexr_collectives_header_compile)
 add_test(NAME test_tilexr_collectives_stub_behavior COMMAND test_tilexr_collectives_stub_behavior)
+add_test(NAME test_tilexr_comm_next_magic COMMAND test_tilexr_comm_next_magic)
 
 install(TARGETS
     test_tilexr_collectives_api
     test_tilexr_collectives_header_compile
     test_tilexr_collectives_stub_behavior
+    test_tilexr_comm_next_magic
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 )

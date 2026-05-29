@@ -7,18 +7,19 @@
  * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
  * See LICENSE in the root of the software repository for the full text of the License.
  */
+#include "collective_launcher.h"
 #include "tilexr_collectives.h"
 
 namespace {
 
-void TouchInfraCommArgs(TileXRCommPtr comm)
+void TouchHostLaunchContext(TileXRCommPtr comm)
 {
     if (comm == nullptr) {
         return;
     }
 
-    TileXR::CommArgs *args = nullptr;
-    (void)TileXRGetCommArgsHost(comm, args);
+    TileXRCollectives::Host::HostLaunchContext context;
+    (void)TileXRCollectives::Host::PrepareHostLaunchContext(comm, context);
 }
 
 } // namespace
@@ -32,7 +33,7 @@ int TileXRAllGather(void *sendBuf, void *recvBuf, int64_t sendCount,
     (void)sendCount;
     (void)dataType;
     (void)stream;
-    TouchInfraCommArgs(comm);
+    TouchHostLaunchContext(comm);
     return TileXR::TILEXR_ERROR_INTERNAL;
 }
 
@@ -45,6 +46,6 @@ int TileXRAllToAll(void *sendBuf, void *recvBuf, int64_t sendCount,
     (void)sendCount;
     (void)dataType;
     (void)stream;
-    TouchInfraCommArgs(comm);
+    TouchHostLaunchContext(comm);
     return TileXR::TILEXR_ERROR_INTERNAL;
 }
