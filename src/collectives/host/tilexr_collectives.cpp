@@ -63,7 +63,7 @@ int TileXRAllGather(void *sendBuf, void *recvBuf, int64_t sendCount,
     }
 
     const uint32_t blockDim = TileXRCollectives::Host::GetAllGatherBlockNum(*context.hostArgs, bytes);
-    return TileXRCollectives::Host::LaunchCollectiveKernel(TileXR::TileXRType::ALL_GATHER, context,
+    return TileXRCollectives::Host::LaunchCollectiveKernel(comm, TileXR::TileXRType::ALL_GATHER, context,
         sendBuf, recvBuf, sendCount, dataType, blockDim, stream);
 }
 
@@ -100,6 +100,6 @@ int TileXRAllToAll(void *sendBuf, void *recvBuf, int64_t sendCount,
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
     const uint32_t blockDim = TileXRCollectives::Host::GetAllToAllBlockNum(*context.hostArgs, kernelBytes);
-    return TileXRCollectives::Host::LaunchCollectiveKernel(TileXR::TileXRType::ALL2ALL, context,
+    return TileXRCollectives::Host::LaunchCollectiveKernel(comm, TileXR::TileXRType::ALL2ALL, context,
         sendBuf, recvBuf, kernelCount, dataType, blockDim, stream);
 }

@@ -25,15 +25,25 @@ bool AreCollectiveKernelsRegistered()
 
 } // namespace
 
-int LaunchCollectiveKernel(TileXR::TileXRType type, const HostLaunchContext &context,
+int LaunchCollectiveKernel(TileXRCommPtr comm, TileXR::TileXRType type, const HostLaunchContext &context,
                            void *sendBuf, void *recvBuf, int64_t kernelCount,
                            TileXR::TileXRDataType dataType, uint32_t blockDim,
                            aclrtStream stream)
 {
     if ((type != TileXR::TileXRType::ALL_GATHER && type != TileXR::TileXRType::ALL2ALL) ||
-        context.hostArgs == nullptr || context.devArgs == nullptr || sendBuf == nullptr || recvBuf == nullptr ||
+        comm == nullptr || context.hostArgs == nullptr || context.devArgs == nullptr || sendBuf == nullptr || recvBuf == nullptr ||
         kernelCount <= 0 || blockDim == 0 || !IsSupportedDataType(dataType)) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+
+    if (!AreCollectiveKernelsRegistered()) {
+        return TileXR::TILEXR_ERROR_NOT_INITIALIZED;
+    }
+
+    int64_t magic = 0;
+    const int magicRet = TileXRCommNextMagic(comm, &magic);
+    if (magicRet != TileXR::TILEXR_SUCCESS) {
+        return magicRet;
     }
 
     AscendCCLKernelArgs args {};
@@ -41,12 +51,8 @@ int LaunchCollectiveKernel(TileXR::TileXRType type, const HostLaunchContext &con
     args.output = recvBuf;
     args.commArgsPtr = context.devArgs;
     args.count = kernelCount;
-    args.magic = context.magic;
+    args.magic = magic;
     args.op = static_cast<int>(type);
-
-    if (!AreCollectiveKernelsRegistered()) {
-        return TileXR::TILEXR_ERROR_NOT_INITIALIZED;
-    }
 
     rtArgsEx_t argsInfo {};
     argsInfo.args = &args;

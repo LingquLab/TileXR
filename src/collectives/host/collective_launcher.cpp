@@ -34,7 +34,7 @@ int PrepareHostLaunchContext(TileXRCommPtr comm, HostLaunchContext &context)
         context = HostLaunchContext {};
         return TileXR::TILEXR_ERROR_NOT_INITIALIZED;
     }
-    return TileXRCommNextMagic(comm, &context.magic);
+    return TileXR::TILEXR_SUCCESS;
 }
 
 } // namespace Host

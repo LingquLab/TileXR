@@ -124,19 +124,42 @@ void TestAllToAllBlockNum()
 
 void TestKernelShimWaitsForRegistration()
 {
+    TileXRCommPtr comm = nullptr;
+    CheckInt64("TileXRCommInit for unregistered kernel launch",
+               TileXRCommInit(0, 1, &comm),
+               TileXR::TILEXR_SUCCESS);
+    if (comm == nullptr) {
+        std::cerr << "TileXRCommInit returned success but left comm null" << std::endl;
+        ++g_failures;
+        return;
+    }
+
     TileXR::CommArgs args {};
     args.rankSize = 2;
     TileXRCollectives::Host::HostLaunchContext context;
     context.hostArgs = &args;
     context.devArgs = reinterpret_cast<GM_ADDR>(0x1000);
-    context.magic = 7;
+    context.magic = 0;
     uint8_t sendStorage[16] = {};
     uint8_t recvStorage[16] = {};
 
     CheckInt64("LaunchCollectiveKernel without registered kernels",
-               TileXRCollectives::Host::LaunchCollectiveKernel(TileXR::TileXRType::ALL_GATHER, context,
+               TileXRCollectives::Host::LaunchCollectiveKernel(comm, TileXR::TileXRType::ALL_GATHER, context,
                    sendStorage, recvStorage, 4, TileXR::TILEXR_DATA_TYPE_INT32, 2, nullptr),
                TileXR::TILEXR_ERROR_NOT_INITIALIZED);
+    CheckInt64("LaunchCollectiveKernel preserved magic without registered kernels",
+               context.magic,
+               0);
+
+    int64_t magic = -1;
+    CheckInt64("TileXRCommNextMagic after unregistered kernel launch",
+               TileXRCommNextMagic(comm, &magic),
+               TileXR::TILEXR_SUCCESS);
+    CheckInt64("first magic after unregistered kernel launch", magic, 1);
+
+    CheckInt64("TileXRCommDestroy after unregistered kernel launch",
+               TileXRCommDestroy(comm),
+               TileXR::TILEXR_SUCCESS);
 }
 
 } // namespace

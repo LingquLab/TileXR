@@ -32,7 +32,7 @@ struct AscendCCLKernelArgs {
     const void *offset = nullptr;
 };
 
-int LaunchCollectiveKernel(TileXR::TileXRType type, const HostLaunchContext &context,
+int LaunchCollectiveKernel(TileXRCommPtr comm, TileXR::TileXRType type, const HostLaunchContext &context,
                            void *sendBuf, void *recvBuf, int64_t kernelCount,
                            TileXR::TileXRDataType dataType, uint32_t blockDim,
                            aclrtStream stream);

@@ -112,6 +112,12 @@ void TestCollectivesHostUsesOnlyPublicCommExtensionApi()
     CHECK_TRUE(sawCommArgsHost);
     CHECK_TRUE(sawCommArgsDev);
     CHECK_TRUE(sawNextMagic);
+
+    const std::string launcherPath = "src/collectives/host/collective_launcher.cpp";
+    CheckDoesNotContain(launcherPath, ReadFile(launcherPath), "TileXRCommNextMagic");
+
+    const std::string kernelPath = "src/collectives/host/collective_kernel.cpp";
+    CheckContains(kernelPath, ReadFile(kernelPath), "TileXRCommNextMagic");
 }
 
 void TestCollectivesHostOwnsCollectiveLaunchHelpers()
@@ -128,7 +134,7 @@ void TestCollectivesHostOwnsCollectiveLaunchHelpers()
     CheckContains(kernelHeaderPath, kernelHeader, "namespace TileXRCollectives");
     CheckContains(kernelHeaderPath, kernelHeader, "namespace Host");
     CheckContains(kernelHeaderPath, kernelHeader, "struct AscendCCLKernelArgs");
-    CheckContains(kernelHeaderPath, kernelHeader, "int LaunchCollectiveKernel(TileXR::TileXRType type,");
+    CheckContains(kernelHeaderPath, kernelHeader, "int LaunchCollectiveKernel(TileXRCommPtr comm, TileXR::TileXRType type,");
 }
 
 void TestCommBuildDoesNotReferenceCollectives()
