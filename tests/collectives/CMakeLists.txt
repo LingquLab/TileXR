@@ -14,6 +14,7 @@ enable_testing()
 set(TILEXR_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../..")
 set(TILEXR_INSTALL_PREFIX "${TILEXR_ROOT}/install" CACHE PATH "TileXR install prefix for installed collectives headers")
 set(TILEXR_INSTALL_LIBDIR "${CMAKE_INSTALL_LIBDIR}" CACHE STRING "TileXR install library directory relative to TILEXR_INSTALL_PREFIX")
+set(TILEXR_INSTALL_INCLUDEDIR "${CMAKE_INSTALL_INCLUDEDIR}" CACHE STRING "TileXR install include directory relative to TILEXR_INSTALL_PREFIX")
 set(TILEXR_COLLECTIVES_LIB "" CACHE FILEPATH "Path to libtilexr-collectives.so")
 set(TILEXR_LIB "" CACHE FILEPATH "Path to libtile-comm.so")
 if(IS_ABSOLUTE "${TILEXR_INSTALL_LIBDIR}")
@@ -21,26 +22,39 @@ if(IS_ABSOLUTE "${TILEXR_INSTALL_LIBDIR}")
 else()
     set(TILEXR_INSTALL_LIB_SEARCH_DIR "${TILEXR_INSTALL_PREFIX}/${TILEXR_INSTALL_LIBDIR}")
 endif()
-set(ASCEND_HOME_PATH $ENV{ASCEND_HOME_PATH})
-set(ARCH $ENV{ARCH})
-if(NOT ARCH)
-    set(ARCH $ENV{TILEXR_OS_ARCH})
-endif()
-if(NOT ARCH)
-    execute_process(
-        COMMAND uname -m
-        OUTPUT_VARIABLE ARCH
-        OUTPUT_STRIP_TRAILING_WHITESPACE
-    )
-    if(ARCH STREQUAL "arm64")
-        set(ARCH "aarch64")
-    endif()
+if(IS_ABSOLUTE "${TILEXR_INSTALL_INCLUDEDIR}")
+    set(TILEXR_INSTALL_INCLUDE_SEARCH_DIR "${TILEXR_INSTALL_INCLUDEDIR}")
+else()
+    set(TILEXR_INSTALL_INCLUDE_SEARCH_DIR "${TILEXR_INSTALL_PREFIX}/${TILEXR_INSTALL_INCLUDEDIR}")
 endif()
 
-set(ASCEND_DRIVER_PATH $ENV{ASCEND_DRIVER_PATH})
-if(NOT ASCEND_DRIVER_PATH)
-    set(ASCEND_DRIVER_PATH "/usr/local/Ascend/driver")
+set(_tilexr_default_ascend_home_path "$ENV{ASCEND_HOME_PATH}")
+if(NOT _tilexr_default_ascend_home_path)
+    set(_tilexr_default_ascend_home_path "/usr/local/Ascend/ascend-toolkit/latest")
 endif()
+set(ASCEND_HOME_PATH "${_tilexr_default_ascend_home_path}" CACHE PATH "Ascend toolkit path")
+
+set(_tilexr_default_arch "$ENV{ARCH}")
+if(NOT _tilexr_default_arch)
+    set(_tilexr_default_arch "$ENV{TILEXR_OS_ARCH}")
+endif()
+if(NOT _tilexr_default_arch)
+    execute_process(
+        COMMAND uname -m
+        OUTPUT_VARIABLE _tilexr_default_arch
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
+    if(_tilexr_default_arch STREQUAL "arm64")
+        set(_tilexr_default_arch "aarch64")
+    endif()
+endif()
+set(ARCH "${_tilexr_default_arch}" CACHE STRING "Target OS architecture")
+
+set(_tilexr_default_ascend_driver_path "$ENV{ASCEND_DRIVER_PATH}")
+if(NOT _tilexr_default_ascend_driver_path)
+    set(_tilexr_default_ascend_driver_path "/usr/local/Ascend/driver")
+endif()
+set(ASCEND_DRIVER_PATH "${_tilexr_default_ascend_driver_path}" CACHE PATH "Ascend driver path")
 
 set(TILEXR_COLLECTIVES_IN_TREE OFF)
 if(TARGET tilexr-collectives)
@@ -66,9 +80,9 @@ add_executable(test_tilexr_collectives_stub_behavior
 if(TILEXR_COLLECTIVES_IN_TREE)
     set(TILEXR_COLLECTIVES_TEST_TARGET tilexr-collectives)
 else()
-    if(NOT EXISTS "${TILEXR_INSTALL_PREFIX}/include/tilexr_collectives.h")
+    if(NOT EXISTS "${TILEXR_INSTALL_INCLUDE_SEARCH_DIR}/tilexr_collectives.h")
         message(FATAL_ERROR
-            "Installed tilexr_collectives.h not found at ${TILEXR_INSTALL_PREFIX}/include/tilexr_collectives.h. "
+            "Installed tilexr_collectives.h not found at ${TILEXR_INSTALL_INCLUDE_SEARCH_DIR}/tilexr_collectives.h. "
             "Run cmake --install after building TileXR with -DTILEXR_BUILD_COLLECTIVES=ON or set TILEXR_INSTALL_PREFIX."
         )
     endif()
@@ -112,7 +126,7 @@ else()
     endif()
 
     set(TILEXR_INSTALLED_INCLUDE_DIRS
-        ${TILEXR_INSTALL_PREFIX}/include
+        ${TILEXR_INSTALL_INCLUDE_SEARCH_DIR}
     )
     foreach(_tilexr_installed_include_dir
         ${ASCEND_DRIVER_PATH}/kernel/inc

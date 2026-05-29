@@ -157,11 +157,18 @@ void TestCollectivesTestBuildSupportsInTreeAndInstallPrefixModes()
     CheckContains(path, text, "else()");
     CheckContains(path, text, "set(TILEXR_INSTALL_PREFIX \"${TILEXR_ROOT}/install\" CACHE PATH");
     CheckContains(path, text, "set(TILEXR_INSTALL_LIBDIR \"${CMAKE_INSTALL_LIBDIR}\" CACHE STRING");
+    CheckContains(path, text, "set(TILEXR_INSTALL_INCLUDEDIR \"${CMAKE_INSTALL_INCLUDEDIR}\" CACHE STRING");
     CheckContains(path, text, "if(IS_ABSOLUTE \"${TILEXR_INSTALL_LIBDIR}\")");
     CheckContains(path, text, "set(TILEXR_INSTALL_LIB_SEARCH_DIR \"${TILEXR_INSTALL_LIBDIR}\")");
     CheckContains(path, text, "set(TILEXR_INSTALL_LIB_SEARCH_DIR \"${TILEXR_INSTALL_PREFIX}/${TILEXR_INSTALL_LIBDIR}\")");
-    CheckContains(path, text, "${TILEXR_INSTALL_PREFIX}/include");
-    CheckContains(path, text, "${TILEXR_INSTALL_PREFIX}/include/tilexr_collectives.h");
+    CheckContains(path, text, "if(IS_ABSOLUTE \"${TILEXR_INSTALL_INCLUDEDIR}\")");
+    CheckContains(path, text, "set(TILEXR_INSTALL_INCLUDE_SEARCH_DIR \"${TILEXR_INSTALL_INCLUDEDIR}\")");
+    CheckContains(path, text, "set(TILEXR_INSTALL_INCLUDE_SEARCH_DIR \"${TILEXR_INSTALL_PREFIX}/${TILEXR_INSTALL_INCLUDEDIR}\")");
+    CheckContains(path, text, "${TILEXR_INSTALL_INCLUDE_SEARCH_DIR}");
+    CheckContains(path, text, "${TILEXR_INSTALL_INCLUDE_SEARCH_DIR}/tilexr_collectives.h");
+    CheckContains(path, text, "set(ASCEND_HOME_PATH \"${_tilexr_default_ascend_home_path}\" CACHE PATH");
+    CheckContains(path, text, "set(ARCH \"${_tilexr_default_arch}\" CACHE STRING");
+    CheckContains(path, text, "set(ASCEND_DRIVER_PATH \"${_tilexr_default_ascend_driver_path}\" CACHE PATH");
     CheckContains(path, text, "set(TILEXR_COLLECTIVES_LIB \"\" CACHE FILEPATH");
     CheckContains(path, text, "set(TILEXR_LIB \"\" CACHE FILEPATH");
     CheckContains(path, text, "${TILEXR_INSTALL_LIB_SEARCH_DIR}");
@@ -194,6 +201,7 @@ void TestCollectivesTestBuildSupportsInTreeAndInstallPrefixModes()
     CheckDoesNotContain(path, text, "target_include_directories(test_tilexr_collectives_stub_behavior");
     CheckDoesNotContain(path, text, "${TILEXR_COLLECTIVES_LIB}\n    ${TILEXR_LIB}");
     CheckDoesNotContain(path, text, "CACHE PATH \"TileXR install library directory");
+    CheckDoesNotContain(path, text, "${TILEXR_INSTALL_PREFIX}/include");
     CheckDoesNotContain(path, text, "/tmp/tilexr-install-split-collectives");
     CheckDoesNotContain(path, text, "/tmp/tilexr-build-split-collectives");
 }
@@ -208,8 +216,12 @@ void TestCollectivesInstallSmokeUsesStandaloneInstallPrefixMode()
     CheckContains(path, text, "COMMAND \"${CMAKE_COMMAND}\" --install \"${TILEXR_ROOT_BINARY_DIR}\" --prefix \"${TILEXR_SMOKE_INSTALL_PREFIX}\"");
     CheckContains(path, text, "COMMAND \"${CMAKE_COMMAND}\" -S \"${TILEXR_COLLECTIVES_TEST_SOURCE_DIR}\" -B \"${TILEXR_SMOKE_BUILD_DIR}\"");
     CheckContains(path, text, "-DTILEXR_INSTALL_PREFIX=${TILEXR_SMOKE_INSTALL_PREFIX}");
+    CheckContains(path, text, "-DTILEXR_INSTALL_INCLUDEDIR=${TILEXR_SMOKE_INSTALL_INCLUDEDIR}");
     CheckContains(path, text, "COMMAND \"${CMAKE_COMMAND}\" --build \"${TILEXR_SMOKE_BUILD_DIR}\"");
     CheckContains(path, text, "COMMAND \"${CMAKE_CTEST_COMMAND}\" --test-dir \"${TILEXR_SMOKE_BUILD_DIR}\" --output-on-failure");
+    CheckContains(path, text, "-DASCEND_HOME_PATH=${TILEXR_SMOKE_ASCEND_HOME_PATH}");
+    CheckContains(path, text, "-DARCH=${TILEXR_SMOKE_ARCH}");
+    CheckContains(path, text, "-DASCEND_DRIVER_PATH=${TILEXR_SMOKE_ASCEND_DRIVER_PATH}");
     CheckDoesNotContain(path, text, "tilexr-collectives-installed");
     CheckDoesNotContain(path, text, "${TILEXR_ROOT_SOURCE_DIR}/src/collectives");
     CheckDoesNotContain(path, text, "${TILEXR_ROOT_BINARY_DIR}/src/collectives");
