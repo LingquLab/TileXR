@@ -12,6 +12,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(TILEXR_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../..")
 set(TILEXR_INSTALL_PREFIX "${TILEXR_ROOT}/install" CACHE PATH "TileXR install prefix for installed collectives headers")
 set(TILEXR_COLLECTIVES_LIB "" CACHE FILEPATH "Path to libtilexr-collectives.so")
+set(TILEXR_LIB "" CACHE FILEPATH "Path to libtile-comm.so")
 set(ASCEND_HOME_PATH $ENV{ASCEND_HOME_PATH})
 set(ARCH $ENV{ARCH})
 if(NOT ARCH)
@@ -77,8 +78,8 @@ target_include_directories(test_tilexr_collectives_stub_behavior PRIVATE
 if(NOT TILEXR_COLLECTIVES_LIB)
     find_library(TILEXR_COLLECTIVES_LIB_FOUND tilexr-collectives
         HINTS
-        "${TILEXR_ROOT}/install/lib"
-        "${TILEXR_ROOT}/build/src/collectives"
+        "${TILEXR_INSTALL_PREFIX}/lib"
+        NO_DEFAULT_PATH
     )
     if(TILEXR_COLLECTIVES_LIB_FOUND)
         set(TILEXR_COLLECTIVES_LIB "${TILEXR_COLLECTIVES_LIB_FOUND}")
@@ -87,26 +88,39 @@ endif()
 
 if(NOT TILEXR_COLLECTIVES_LIB)
     message(FATAL_ERROR
-        "libtilexr-collectives.so not found. Build/install TileXR with -DTILEXR_BUILD_COLLECTIVES=ON "
+        "libtilexr-collectives.so not found under ${TILEXR_INSTALL_PREFIX}/lib. "
+        "Build/install TileXR with -DTILEXR_BUILD_COLLECTIVES=ON and set TILEXR_INSTALL_PREFIX, "
         "or pass -DTILEXR_COLLECTIVES_LIB=/path/to/libtilexr-collectives.so."
     )
 endif()
 
-find_library(TILEXR_COMM_LIB tile-comm
-    HINTS
-    "${TILEXR_ROOT}/install/lib"
-    "${TILEXR_ROOT}/build/src/comm"
-    REQUIRED
-)
+if(NOT TILEXR_LIB)
+    find_library(TILEXR_LIB_FOUND tile-comm
+        HINTS
+        "${TILEXR_INSTALL_PREFIX}/lib"
+        NO_DEFAULT_PATH
+    )
+    if(TILEXR_LIB_FOUND)
+        set(TILEXR_LIB "${TILEXR_LIB_FOUND}")
+    endif()
+endif()
+
+if(NOT TILEXR_LIB)
+    message(FATAL_ERROR
+        "libtile-comm.so not found under ${TILEXR_INSTALL_PREFIX}/lib. "
+        "Build/install TileXR and set TILEXR_INSTALL_PREFIX, "
+        "or pass -DTILEXR_LIB=/path/to/libtile-comm.so."
+    )
+endif()
 
 target_link_libraries(test_tilexr_collectives_header_compile
     ${TILEXR_COLLECTIVES_LIB}
-    ${TILEXR_COMM_LIB}
+    ${TILEXR_LIB}
 )
 
 target_link_libraries(test_tilexr_collectives_stub_behavior
     ${TILEXR_COLLECTIVES_LIB}
-    ${TILEXR_COMM_LIB}
+    ${TILEXR_LIB}
 )
 
 install(TARGETS
