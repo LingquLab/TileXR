@@ -65,6 +65,7 @@ install(FILES
         ${CMAKE_CURRENT_SOURCE_DIR}/../include/tilexr_udma.h
         ${CMAKE_CURRENT_SOURCE_DIR}/../include/tilexr_udma_reg.h
         ${CMAKE_CURRENT_SOURCE_DIR}/../include/tilexr_udma_types.h
+        ${CMAKE_CURRENT_SOURCE_DIR}/../include/tilexr_sdma_types.h
         DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 install(CODE "string(CONCAT _tilexr_optional_header \"tilexr_\" \"collectives.h\")
 if(IS_ABSOLUTE \"${CMAKE_INSTALL_INCLUDEDIR}\")
