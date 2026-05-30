@@ -64,13 +64,21 @@ add_executable(test_tilexr_ep_layout
     ${TILEXR_ROOT}/src/ep/host/ep_layout.cpp
 )
 
+add_executable(test_tilexr_ep_api_sources
+    unit/test_tilexr_ep_api_sources.cpp
+)
+
 target_include_directories(test_tilexr_ep_layout PRIVATE
     ${TILEXR_EP_TEST_INCLUDE_DIRS}
 )
 
+target_compile_definitions(test_tilexr_ep_api_sources PRIVATE TILEXR_SOURCE_ROOT="${TILEXR_ROOT}")
+
 add_test(NAME test_tilexr_ep_layout COMMAND test_tilexr_ep_layout)
+add_test(NAME test_tilexr_ep_api_sources COMMAND test_tilexr_ep_api_sources)
 
 install(TARGETS
     test_tilexr_ep_layout
+    test_tilexr_ep_api_sources
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
