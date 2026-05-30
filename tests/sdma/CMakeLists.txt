@@ -35,7 +35,7 @@ endif()
 message(STATUS "TILEXR_TEST_HAVE_PTO_SDMA: ${TILEXR_TEST_HAVE_PTO_SDMA}")
 
 find_library(TILEXR_LIB tile-comm
-    HINTS "${TILEXR_ROOT}/install/lib" "${TILEXR_ROOT}/build/src/comm"
+    HINTS "${TILEXR_ROOT}/install/lib64" "${TILEXR_ROOT}/install/lib" "${TILEXR_ROOT}/build/src/comm"
     REQUIRED)
 
 link_directories(

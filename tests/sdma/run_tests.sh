@@ -31,6 +31,11 @@ if [ "${ARCH}" = "arm64" ]; then
     export ARCH="aarch64"
 fi
 export ASCEND_DRIVER_PATH="${ASCEND_DRIVER_PATH:-/usr/local/Ascend/driver}"
+TILEXR_INSTALL_LIB_DIR="${TILEXR_ROOT}/install/lib"
+if [ -f "${TILEXR_ROOT}/install/lib64/libtile-comm.so" ]; then
+    TILEXR_INSTALL_LIB_DIR="${TILEXR_ROOT}/install/lib64"
+fi
+TILEXR_COMM_LIB="${TILEXR_INSTALL_LIB_DIR}/libtile-comm.so"
 SANITIZED_LD_LIBRARY_PATH=""
 IFS=':' read -r -a LD_LIBRARY_PATH_PARTS <<< "${LD_LIBRARY_PATH:-}"
 for path in "${LD_LIBRARY_PATH_PARTS[@]}"; do
@@ -43,14 +48,14 @@ for path in "${LD_LIBRARY_PATH_PARTS[@]}"; do
         SANITIZED_LD_LIBRARY_PATH="${SANITIZED_LD_LIBRARY_PATH}:${path}"
     fi
 done
-export LD_LIBRARY_PATH="${INSTALL_DIR}/lib:${TILEXR_ROOT}/install/lib:${ASCEND_DRIVER_PATH}/lib64/driver:${ASCEND_HOME_PATH}/${ARCH}-linux/lib64"
+export LD_LIBRARY_PATH="${INSTALL_DIR}/lib:${TILEXR_INSTALL_LIB_DIR}:${ASCEND_DRIVER_PATH}/lib64/driver:${ASCEND_HOME_PATH}/${ARCH}-linux/lib64"
 if [ -n "${SANITIZED_LD_LIBRARY_PATH}" ]; then
     export LD_LIBRARY_PATH="${LD_LIBRARY_PATH}:${SANITIZED_LD_LIBRARY_PATH}"
 fi
 
-bash "${SCRIPT_DIR}/check_runtime_deps.sh" "${TILEXR_ROOT}/install/lib/libtile-comm.so"
+bash "${SCRIPT_DIR}/check_runtime_deps.sh" "${TILEXR_COMM_LIB}"
 
-TILE_COMM_DEPS=$(ldd "${TILEXR_ROOT}/install/lib/libtile-comm.so" || true)
+TILE_COMM_DEPS=$(ldd "${TILEXR_COMM_LIB}" || true)
 HAL_AVAILABLE=1
 if echo "${TILE_COMM_DEPS}" | grep -E 'libascend_hal.so => not found' >/dev/null; then
     HAL_AVAILABLE=0
