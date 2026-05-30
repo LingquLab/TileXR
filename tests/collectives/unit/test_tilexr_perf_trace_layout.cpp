@@ -31,6 +31,7 @@ int main()
 {
     CheckEq("trace magic", TileXR::TILEXR_PERF_TRACE_MAGIC, 0x54585054u);
     CheckEq("trace version", TileXR::TILEXR_PERF_TRACE_VERSION, 1u);
+    CheckEq("max stage name", TileXR::TILEXR_PERF_MAX_STAGE_NAME, 32u);
     CheckEq("stage count", TileXR::TILEXR_PERF_STAGE_COUNT, 7u);
     CheckEq("a5 divisor", TileXR::PerfTraceCycleDivisor(TileXR::PerfChipClass::A5), 1000u);
     CheckEq("generic divisor", TileXR::PerfTraceCycleDivisor(TileXR::PerfChipClass::GENERIC), 50u);
@@ -41,12 +42,14 @@ int main()
                                 3 * TileXR::TILEXR_PERF_STAGE_COUNT + 2));
 
     TileXR::TileXRPerfTraceHeader header {};
-    header.magic = TileXR::TILEXR_PERF_TRACE_MAGIC;
-    header.version = TileXR::TILEXR_PERF_TRACE_VERSION;
-    header.headerSize = sizeof(TileXR::TileXRPerfTraceHeader);
-    header.stageDescSize = sizeof(TileXR::TileXRPerfStageDesc);
-    header.coreStageStatsSize = sizeof(TileXR::TileXRPerfCoreStageStats);
-    CheckTrue("header size is recorded", header.headerSize >= sizeof(uint32_t) * 8);
+    CheckEq("default header magic", header.magic, TileXR::TILEXR_PERF_TRACE_MAGIC);
+    CheckEq("default header version", header.version, TileXR::TILEXR_PERF_TRACE_VERSION);
+    CheckEq("default header size", header.headerSize,
+            static_cast<uint32_t>(sizeof(TileXR::TileXRPerfTraceHeader)));
+    CheckEq("default stage desc size", header.stageDescSize,
+            static_cast<uint32_t>(sizeof(TileXR::TileXRPerfStageDesc)));
+    CheckEq("default core stage stats size", header.coreStageStatsSize,
+            static_cast<uint32_t>(sizeof(TileXR::TileXRPerfCoreStageStats)));
     CheckTrue("stats carry raw cycles", offsetof(TileXR::TileXRPerfCoreStageStats, sumCycles) > 0);
     CheckTrue("stats carry timeline bounds", offsetof(TileXR::TileXRPerfCoreStageStats, lastEndCycle) >
         offsetof(TileXR::TileXRPerfCoreStageStats, firstStartCycle));
