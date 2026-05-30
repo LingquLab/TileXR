@@ -45,6 +45,7 @@ add_executable(test_tilexr_sdma_metadata
     unit/test_tilexr_sdma_metadata.cpp
 )
 target_include_directories(test_tilexr_sdma_metadata PRIVATE
+    ${TILEXR_ROOT}/install/include
     ${TILEXR_ROOT}/src/include
 )
 

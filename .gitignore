@@ -24,10 +24,12 @@ cmake-build-*
 
 # build & output tempalte dirs
 build/
+build-sdma-tests/
 build_out/
 build_device/
 build_hccd/
 output/
+install/
 
 # binary files
 *.so
@@ -65,6 +67,7 @@ utils/
 sign_tmp/
 **/build_device/
 **/build/
+tests/*/install/
 
 CMakeCache.txt
 CMakeFiles/
