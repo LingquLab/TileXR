@@ -95,7 +95,6 @@ add_executable(test_tilexr_sdma_header_compile
 )
 target_include_directories(test_tilexr_sdma_header_compile PRIVATE
     ${TILEXR_ROOT}/install/include
-    ${TILEXR_ROOT}/src/include
     ${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc/
     ${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc/runtime/
     ${ASCEND_HOME_PATH}/${ARCH}-linux/include/
