@@ -137,9 +137,10 @@ void TestBlueDeployScriptInitializesEpSubmodulesOnly()
     }
 
     CheckContains("tests/ep/demo/deploy_and_run_blue.sh", deployScript,
-        "submodule update --init 3rdparty/hcomm 3rdparty/ops-transformer 3rdparty/spdlog");
+        "submodule update --init 3rdparty/hcomm 3rdparty/ops-transformer");
     CheckNotContains("tests/ep/demo/deploy_and_run_blue.sh", deployScript, "submodule update --init --recursive");
     CheckNotContains("tests/ep/demo/deploy_and_run_blue.sh", deployScript, "3rdparty/shmem");
+    CheckNotContains("tests/ep/demo/deploy_and_run_blue.sh", deployScript, "3rdparty/spdlog");
 }
 
 void TestNoForbiddenDependencies()
