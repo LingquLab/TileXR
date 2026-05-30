@@ -75,6 +75,9 @@ void TestKernelUsesTileXRPeerMemory()
     CheckContains(path, contents, "kEpStepDispatchReady");
     CheckContains(path, contents, "LoadInt32FromGm");
     CheckContains(path, contents, "LoadAssistTupleFromGm");
+    CheckContains(path, contents, "StoreWindowHeader");
+    CheckContains(path, contents, "StoreSlotHeader");
+    CheckContains(path, contents, "StoreAssistTuple");
     CheckContains(path, contents, "localWindow + PayloadOffset(dstRank, slotBytes)");
     CheckContains(path, contents, "localWindow + SlotOffset(dstRank, slotBytes)");
     CheckContains(path, contents, "sourceWindow = shareAddrs[srcRank] + TileXR::IPC_DATA_OFFSET");
@@ -83,6 +86,8 @@ void TestKernelUsesTileXRPeerMemory()
     CheckNotContains(path, contents, "assistBase[item]");
     CheckNotContains(path, contents, "args->peerMems[peer]");
     CheckNotContains(path, contents, "shareAddrs[dstRank] + TileXR::IPC_DATA_OFFSET");
+    CheckNotContains(path, contents, "slot->count");
+    CheckNotContains(path, contents, "assist[index]");
 }
 
 void TestNoForbiddenDependencies()

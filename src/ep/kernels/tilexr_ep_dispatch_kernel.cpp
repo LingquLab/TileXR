@@ -8,7 +8,7 @@ namespace {
 constexpr uint32_t kEpUbBytes = 64*1024;
 constexpr uint32_t kEpSyncUbBytes = 4*1024;
 constexpr uint32_t kEpCopyTileBytes = kEpUbBytes - kEpSyncUbBytes;
-constexpr uint32_t kEpScalarUbBytes = 32;
+constexpr uint32_t kEpScalarUbBytes = 64;
 constexpr uint32_t kEpScalarUbOffset = kEpSyncUbBytes - kEpScalarUbBytes;
 
 __aicore__ inline int64_t AlignUp(int64_t value, int64_t alignment)
@@ -105,44 +105,99 @@ __aicore__ inline TileXREp::EpAssistTuple LoadAssistTupleFromGm(
     return tuple;
 }
 
+__aicore__ inline void StoreInt64WordsToGm(
+    GM_ADDR dstGM, AscendC::LocalTensor<int64_t> &local, AscendC::TBuf<AscendC::QuePosition::VECCALC> &tBuf,
+    uint32_t bytes)
+{
+    (void)tBuf;
+    AscendC::GlobalTensor<int64_t> dst;
+    dst.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t *>(dstGM), bytes / sizeof(int64_t));
+
+    AscendC::DataCopyExtParams copyParams {1, bytes, 0, 0, 0};
+    AscendC::SetFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID0);
+    AscendC::WaitFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID0);
+    AscendC::DataCopyPad(dst, local, copyParams);
+    AscendC::SetFlag<AscendC::HardEvent::MTE3_S>(EVENT_ID0);
+    AscendC::WaitFlag<AscendC::HardEvent::MTE3_S>(EVENT_ID0);
+}
+
+__aicore__ inline int64_t PackInt32Pair(uint32_t low, int32_t high)
+{
+    const uint64_t packed = static_cast<uint64_t>(low) | (static_cast<uint64_t>(static_cast<uint32_t>(high)) << 32);
+    return static_cast<int64_t>(packed);
+}
+
+__aicore__ inline void StoreWindowHeader(GM_ADDR headerGM, int32_t rankSize, int64_t maxRoutesPerSrc,
+    int64_t rowBytes, int64_t slotBytes, int64_t totalBytes, AscendC::TBuf<AscendC::QuePosition::VECCALC> &tBuf)
+{
+    AscendC::LocalTensor<int64_t> local =
+        tBuf.GetWithOffset<int64_t>(kEpScalarUbBytes / sizeof(int64_t), kEpScalarUbOffset);
+    local.SetValue(0, PackInt32Pair(TileXREp::kEpWindowMagic, rankSize));
+    local.SetValue(1, maxRoutesPerSrc);
+    local.SetValue(2, rowBytes);
+    local.SetValue(3, slotBytes);
+    local.SetValue(4, totalBytes);
+    local.SetValue(5, 0);
+    local.SetValue(6, 0);
+    local.SetValue(7, 0);
+    StoreInt64WordsToGm(headerGM, local, tBuf, TileXREp::kEpWindowHeaderBytes);
+}
+
+__aicore__ inline void StoreSlotHeader(GM_ADDR slotGM, int32_t count, int32_t srcRank, int64_t payloadBytes,
+    int64_t assistBytes, AscendC::TBuf<AscendC::QuePosition::VECCALC> &tBuf)
+{
+    AscendC::LocalTensor<int64_t> local =
+        tBuf.GetWithOffset<int64_t>(kEpScalarUbBytes / sizeof(int64_t), kEpScalarUbOffset);
+    local.SetValue(0, PackInt32Pair(static_cast<uint32_t>(count), srcRank));
+    local.SetValue(1, payloadBytes);
+    local.SetValue(2, assistBytes);
+    local.SetValue(3, 0);
+    local.SetValue(4, 0);
+    local.SetValue(5, 0);
+    local.SetValue(6, 0);
+    local.SetValue(7, 0);
+    StoreInt64WordsToGm(slotGM, local, tBuf, TileXREp::kEpSrcSlotHeaderBytes);
+}
+
+__aicore__ inline void StoreAssistTuple(GM_ADDR assistGM, int64_t index, int32_t srcRank, int32_t tokenId,
+    int32_t topKId, int32_t expertId, AscendC::TBuf<AscendC::QuePosition::VECCALC> &tBuf)
+{
+    AscendC::LocalTensor<int32_t> local =
+        tBuf.GetWithOffset<int32_t>(kEpScalarUbBytes / sizeof(int32_t), kEpScalarUbOffset);
+    local.SetValue(0, srcRank);
+    local.SetValue(1, tokenId);
+    local.SetValue(2, topKId);
+    local.SetValue(3, expertId);
+
+    AscendC::GlobalTensor<int32_t> dst;
+    dst.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(assistGM) + index * TileXREp::kEpAssistTupleInts,
+        TileXREp::kEpAssistTupleInts);
+    AscendC::DataCopyExtParams copyParams {
+        1, static_cast<uint32_t>(sizeof(TileXREp::EpAssistTuple)), 0, 0, 0};
+    AscendC::SetFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID0);
+    AscendC::WaitFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID0);
+    AscendC::DataCopyPad(dst, local, copyParams);
+    AscendC::SetFlag<AscendC::HardEvent::MTE3_S>(EVENT_ID0);
+    AscendC::WaitFlag<AscendC::HardEvent::MTE3_S>(EVENT_ID0);
+}
+
 __aicore__ inline void ClearLocalWindow(
     GM_ADDR localWindow, int32_t rankSize, int64_t maxRoutesPerSrc, int64_t rowBytes, int64_t slotBytes,
-    int64_t totalBytes)
+    int64_t totalBytes, AscendC::TBuf<AscendC::QuePosition::VECCALC> &tBuf)
 {
-    auto header = reinterpret_cast<__gm__ TileXREp::EpWindowHeader *>(localWindow);
-    header->magic = TileXREp::kEpWindowMagic;
-    header->rankSize = rankSize;
-    header->maxRoutesPerSrc = maxRoutesPerSrc;
-    header->rowBytes = rowBytes;
-    header->slotBytes = slotBytes;
-    header->totalBytes = totalBytes;
-    header->reserved0 = 0;
-    header->reserved1 = 0;
-    header->reserved2 = 0;
+    StoreWindowHeader(localWindow, rankSize, maxRoutesPerSrc, rowBytes, slotBytes, totalBytes, tBuf);
 
     for (int32_t srcRank = 0; srcRank < rankSize; ++srcRank) {
-        auto slot = reinterpret_cast<__gm__ TileXREp::EpSrcSlotHeader *>(localWindow + SlotOffset(srcRank, slotBytes));
-        slot->count = 0;
-        slot->srcRank = srcRank;
-        slot->payloadBytes = 0;
-        slot->assistBytes = 0;
-        slot->reserved0 = 0;
-        slot->reserved1 = 0;
-        slot->reserved2 = 0;
-        slot->reserved3 = 0;
-        slot->reserved4 = 0;
+        StoreSlotHeader(localWindow + SlotOffset(srcRank, slotBytes), 0, srcRank, 0, 0, tBuf);
     }
     AscendC::PipeBarrier<PIPE_ALL>();
 }
 
 __aicore__ inline void WriteAssist(
-    GM_ADDR assistGM, int64_t index, int32_t srcRank, int32_t tokenId, int32_t topKId, int32_t expertId)
+    GM_ADDR assistGM, int64_t index, int32_t srcRank, int32_t tokenId, int32_t topKId, int32_t expertId,
+    AscendC::TBuf<AscendC::QuePosition::VECCALC> &tBuf)
 {
-    auto assist = reinterpret_cast<__gm__ TileXREp::EpAssistTuple *>(assistGM);
-    assist[index].srcRank = srcRank;
-    assist[index].tokenId = tokenId;
-    assist[index].topKId = topKId;
-    assist[index].expertId = expertId;
+    StoreAssistTuple(assistGM, index, srcRank, tokenId, topKId, expertId, tBuf);
 }
 
 __aicore__ inline bool IsValidShape(int64_t bs, int64_t h, int64_t topK, int64_t moeExpertNum, int64_t dtypeBytes,
@@ -211,7 +266,7 @@ extern "C" __global__ __aicore__ void tilexr_ep_dispatch_kernel(GM_ADDR commArgs
         sync.Init(rank, rankSize, shareAddrs, tBuf);
 
         GM_ADDR localWindow = shareAddrs[rank] + TileXR::IPC_DATA_OFFSET;
-        ClearLocalWindow(localWindow, rankSize, maxRoutesPerSrc, rowBytes, slotBytes, totalBytes);
+        ClearLocalWindow(localWindow, rankSize, maxRoutesPerSrc, rowBytes, slotBytes, totalBytes, tBuf);
         sync.SetInnerFlag(static_cast<int32_t>(magic), TileXREp::kEpStepWindowCleared);
         for (int32_t peer = 0; peer < rankSize; ++peer) {
             sync.WaitRankInnerFlag(static_cast<int32_t>(magic), TileXREp::kEpStepWindowCleared, peer);
@@ -240,23 +295,15 @@ extern "C" __global__ __aicore__ void tilexr_ep_dispatch_kernel(GM_ADDR commArgs
                 CopyBytesGmToGm(localWindow + PayloadOffset(dstRank, slotBytes) + dstIndex * rowBytes,
                     xGM + token * rowBytes, tBuf, rowBytes);
                 WriteAssist(localWindow + AssistOffset(dstRank, slotBytes, payloadBytesPerSlot), dstIndex, rank,
-                    static_cast<int32_t>(token), static_cast<int32_t>(topKId), expertId);
+                    static_cast<int32_t>(token), static_cast<int32_t>(topKId), expertId, tBuf);
                 ++dstCounts[dstRank];
             }
         }
 
         for (int32_t dstRank = 0; dstRank < rankSize; ++dstRank) {
-            auto slot =
-                reinterpret_cast<__gm__ TileXREp::EpSrcSlotHeader *>(localWindow + SlotOffset(dstRank, slotBytes));
-            slot->count = static_cast<int32_t>(dstCounts[dstRank]);
-            slot->srcRank = rank;
-            slot->payloadBytes = dstCounts[dstRank] * rowBytes;
-            slot->assistBytes = dstCounts[dstRank] * static_cast<int64_t>(sizeof(TileXREp::EpAssistTuple));
-            slot->reserved0 = 0;
-            slot->reserved1 = 0;
-            slot->reserved2 = 0;
-            slot->reserved3 = 0;
-            slot->reserved4 = 0;
+            StoreSlotHeader(localWindow + SlotOffset(dstRank, slotBytes), static_cast<int32_t>(dstCounts[dstRank]),
+                rank, dstCounts[dstRank] * rowBytes,
+                dstCounts[dstRank] * static_cast<int64_t>(sizeof(TileXREp::EpAssistTuple)), tBuf);
         }
         AscendC::PipeBarrier<PIPE_ALL>();
 
@@ -276,9 +323,7 @@ extern "C" __global__ __aicore__ void tilexr_ep_dispatch_kernel(GM_ADDR commArgs
         auto localAssistBase = reinterpret_cast<__gm__ TileXREp::EpAssistTuple *>(assistInfoForCombineOutGM);
         for (int32_t srcRank = 0; srcRank < rankSize; ++srcRank) {
             GM_ADDR sourceWindow = shareAddrs[srcRank] + TileXR::IPC_DATA_OFFSET;
-            auto slot =
-                reinterpret_cast<__gm__ TileXREp::EpSrcSlotHeader *>(sourceWindow + SlotOffset(rank, slotBytes));
-            const int64_t count = slot->count;
+            const int64_t count = LoadInt32FromGm(sourceWindow + SlotOffset(rank, slotBytes), tBuf);
             epRecvCountsOut[srcRank] = static_cast<int32_t>(count);
             if (count <= 0 || count > maxRoutesPerSrc) {
                 continue;
