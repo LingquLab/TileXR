@@ -14,8 +14,8 @@ struct EpWindowConfig {
     int64_t topK = 0;
     int64_t moeExpertNum = 0;
     int64_t localExpertNum = 0;
-    int64_t maxRoutesPerSrc = 0;
     int64_t dtypeBytes = 0;
+    int64_t maxRoutesPerSrc = 0;
     int64_t rowBytes = 0;
     int64_t payloadBytesPerSlot = 0;
     int64_t assistBytesPerSlot = 0;
