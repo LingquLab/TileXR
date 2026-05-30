@@ -67,7 +67,7 @@ utils/
 sign_tmp/
 **/build_device/
 **/build/
-tests/*/install/
+tests/sdma/install/
 
 CMakeCache.txt
 CMakeFiles/

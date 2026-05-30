@@ -27,14 +27,6 @@ find_library(TILEXR_LIB tile-comm
     HINTS "${TILEXR_ROOT}/install/lib" "${TILEXR_ROOT}/build/src/comm"
     REQUIRED)
 
-include_directories(
-    ${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc/
-    ${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc/runtime/
-    ${ASCEND_HOME_PATH}/${ARCH}-linux/include/
-    ${ASCEND_DRIVER_PATH}/kernel/inc
-    ${TILEXR_ROOT}/src/include
-)
-
 link_directories(
     ${ASCEND_DRIVER_PATH}/lib64/driver
     ${ASCEND_HOME_PATH}/${ARCH}-linux/lib64
@@ -47,6 +39,10 @@ add_executable(test_tilexr_sdma_metadata
 target_include_directories(test_tilexr_sdma_metadata PRIVATE
     ${TILEXR_ROOT}/install/include
     ${TILEXR_ROOT}/src/include
+    ${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc/
+    ${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc/runtime/
+    ${ASCEND_HOME_PATH}/${ARCH}-linux/include/
+    ${ASCEND_DRIVER_PATH}/kernel/inc
 )
 
 set(INSTALL_TARGETS
