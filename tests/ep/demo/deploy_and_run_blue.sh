@@ -24,7 +24,24 @@ echo "  commit: ${commit}"
 git clone --no-hardlinks --no-checkout "${TILEXR_ROOT}" "${STAGING_REPO}"
 git -C "${STAGING_REPO}" checkout --detach "${commit}"
 
-ssh "${REMOTE}" "mkdir -p $(printf '%q' "${REMOTE_BASE}") $(printf '%q' "${REMOTE_REPO}")"
+remote_prepare=$(cat <<EOF
+set -euo pipefail
+remote_base=$(printf '%q' "${REMOTE_BASE}")
+remote_repo=$(printf '%q' "${REMOTE_REPO}")
+case "\${remote_repo}" in
+  "\${remote_base}"/TileXR)
+    rm -rf -- "\${remote_repo}"
+    mkdir -p -- "\${remote_repo}"
+    ;;
+  *)
+    echo "Refusing to clean unexpected remote repo: \${remote_repo}" >&2
+    exit 2
+    ;;
+esac
+EOF
+)
+
+ssh "${REMOTE}" "bash -lc $(printf '%q' "${remote_prepare}")"
 
 rsync -a --delete \
   --exclude='.worktrees' \

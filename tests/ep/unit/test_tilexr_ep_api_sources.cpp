@@ -104,6 +104,19 @@ void TestBishengVersionDateParsing()
     CheckNotContains("src/ep/CMakeLists.txt", epCmake, "{4}");
 }
 
+void TestBlueDeployScriptCleansRemoteCheckout()
+{
+    std::string deployScript;
+    if (!ReadFile("tests/ep/demo/deploy_and_run_blue.sh", &deployScript)) {
+        return;
+    }
+
+    CheckContains("tests/ep/demo/deploy_and_run_blue.sh", deployScript, "case \"\\${remote_repo}\" in");
+    CheckContains("tests/ep/demo/deploy_and_run_blue.sh", deployScript, "Refusing to clean unexpected remote repo");
+    CheckContains("tests/ep/demo/deploy_and_run_blue.sh", deployScript, "rm -rf -- \"\\${remote_repo}\"");
+    CheckContains("tests/ep/demo/deploy_and_run_blue.sh", deployScript, "mkdir -p -- \"\\${remote_repo}\"");
+}
+
 void TestNoForbiddenDependencies()
 {
     const std::vector<std::string> paths = {
@@ -139,6 +152,7 @@ int main()
     TestPublicHeader();
     TestBuildPlacement();
     TestBishengVersionDateParsing();
+    TestBlueDeployScriptCleansRemoteCheckout();
     TestNoForbiddenDependencies();
     return g_failures == 0 ? 0 : 1;
 }
