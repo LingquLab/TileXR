@@ -113,6 +113,7 @@ void TestCollectivesOwnsCceBuild()
     CheckContains(kernelsCmakePath, kernelsCmake, "tilexr_lccl_op.cpp");
     CheckContains(kernelsCmakePath, kernelsCmake, "tilexr_collectives_op.o");
     CheckContains(kernelsCmakePath, kernelsCmake, "tilexr_collectives_op");
+    CheckContains(kernelsCmakePath, kernelsCmake, "TILEXR_COLLECTIVES_ENABLE_PROFILING");
     CheckDoesNotContain(kernelsCmakePath, kernelsCmake, "src/comm");
 }
 
@@ -125,6 +126,13 @@ void TestCollectivesKernelSourcesAreScoped()
     CheckDoesNotContain(kernelTuPath, kernelTu, "LCCL_ALL_REDUCE_FUNC_AUTO_DEF");
     CheckDoesNotContain(kernelTuPath, kernelTu, "LCCL_REDUCE_SCATTER_FUNC_AUTO_DEF");
     CheckDoesNotContain(kernelTuPath, kernelTu, "LCCL_BROADCAST_FUNC_AUTO_DEF");
+
+    const std::string perfTraceKernelPath = "src/collectives/kernels/perf_trace_kernel.h";
+    const auto perfTraceKernel = ReadFile(perfTraceKernelPath);
+    CheckContains(perfTraceKernelPath, perfTraceKernel, "TILEXR_COLLECTIVES_ENABLE_PROFILING");
+    CheckContains(perfTraceKernelPath, perfTraceKernel, "TileXRPerfStageBegin");
+    CheckContains(perfTraceKernelPath, perfTraceKernel, "TileXRPerfStageEnd");
+    CheckContains(perfTraceKernelPath, perfTraceKernel, "TileXRPerfAccumulateDuration");
 
     const std::vector<std::string> kernelFiles = CollectFiles("src/collectives/kernels");
     CheckTrue(!kernelFiles.empty(), "expected collectives kernel files to be present");

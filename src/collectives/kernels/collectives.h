@@ -15,6 +15,7 @@
 
 #include "datacopy_gm2gm.h"
 #include "datacopy_gm2gm_delay.h"
+#include "perf_trace_kernel.h"
 #include "sync_collectives.h"
 using namespace AscendC;
 using namespace TileXR;
