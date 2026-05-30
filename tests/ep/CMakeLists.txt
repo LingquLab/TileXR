@@ -18,30 +18,33 @@ set(TILEXR_INSTALL_PREFIX "${TILEXR_ROOT}/install" CACHE PATH "TileXR install pr
 set(TILEXR_INSTALL_LIBDIR "${CMAKE_INSTALL_LIBDIR}" CACHE STRING "TileXR install library directory")
 set(TILEXR_INSTALL_INCLUDEDIR "${CMAKE_INSTALL_INCLUDEDIR}" CACHE STRING "TileXR install include directory")
 
-set(ASCEND_HOME_PATH $ENV{ASCEND_HOME_PATH})
-if(NOT ASCEND_HOME_PATH)
-    set(ASCEND_HOME_PATH "/usr/local/Ascend/ascend-toolkit/latest")
+set(_tilexr_default_ascend_home_path "$ENV{ASCEND_HOME_PATH}")
+if(NOT _tilexr_default_ascend_home_path)
+    set(_tilexr_default_ascend_home_path "/usr/local/Ascend/ascend-toolkit/latest")
 endif()
+set(ASCEND_HOME_PATH "${_tilexr_default_ascend_home_path}" CACHE PATH "Ascend toolkit path")
 
-set(ARCH $ENV{ARCH})
-if(NOT ARCH)
-    set(ARCH $ENV{TILEXR_OS_ARCH})
+set(_tilexr_default_arch "$ENV{ARCH}")
+if(NOT _tilexr_default_arch)
+    set(_tilexr_default_arch "$ENV{TILEXR_OS_ARCH}")
 endif()
-if(NOT ARCH)
+if(NOT _tilexr_default_arch)
     execute_process(
         COMMAND uname -m
-        OUTPUT_VARIABLE ARCH
+        OUTPUT_VARIABLE _tilexr_default_arch
         OUTPUT_STRIP_TRAILING_WHITESPACE
     )
-    if(ARCH STREQUAL "arm64")
-        set(ARCH "aarch64")
+    if(_tilexr_default_arch STREQUAL "arm64")
+        set(_tilexr_default_arch "aarch64")
     endif()
 endif()
+set(ARCH "${_tilexr_default_arch}" CACHE STRING "Target OS architecture")
 
-set(ASCEND_DRIVER_PATH $ENV{ASCEND_DRIVER_PATH})
-if(NOT ASCEND_DRIVER_PATH)
-    set(ASCEND_DRIVER_PATH "/usr/local/Ascend/driver")
+set(_tilexr_default_ascend_driver_path "$ENV{ASCEND_DRIVER_PATH}")
+if(NOT _tilexr_default_ascend_driver_path)
+    set(_tilexr_default_ascend_driver_path "/usr/local/Ascend/driver")
 endif()
+set(ASCEND_DRIVER_PATH "${_tilexr_default_ascend_driver_path}" CACHE PATH "Ascend driver path")
 
 set(TILEXR_EP_TEST_INCLUDE_DIRS
     ${TILEXR_ROOT}/src/include
@@ -111,3 +114,45 @@ install(TARGETS
     test_tilexr_ep_host_validation
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
+
+if(BUILD_TILEXR_EP_DEMO)
+    if(IS_ABSOLUTE "${TILEXR_INSTALL_LIBDIR}")
+        set(TILEXR_INSTALL_LIB_SEARCH_DIR "${TILEXR_INSTALL_LIBDIR}")
+    else()
+        set(TILEXR_INSTALL_LIB_SEARCH_DIR "${TILEXR_INSTALL_PREFIX}/${TILEXR_INSTALL_LIBDIR}")
+    endif()
+    if(IS_ABSOLUTE "${TILEXR_INSTALL_INCLUDEDIR}")
+        set(TILEXR_INSTALL_INCLUDE_SEARCH_DIR "${TILEXR_INSTALL_INCLUDEDIR}")
+    else()
+        set(TILEXR_INSTALL_INCLUDE_SEARCH_DIR "${TILEXR_INSTALL_PREFIX}/${TILEXR_INSTALL_INCLUDEDIR}")
+    endif()
+
+    find_library(TILEXR_EP_LIB tilexr-ep HINTS "${TILEXR_INSTALL_LIB_SEARCH_DIR}" REQUIRED)
+    find_library(TILEXR_COMM_LIB tile-comm HINTS "${TILEXR_INSTALL_LIB_SEARCH_DIR}" REQUIRED)
+
+    add_executable(tilexr_ep_dispatch_demo demo/tilexr_ep_dispatch_demo.cpp)
+
+    target_include_directories(tilexr_ep_dispatch_demo PRIVATE
+        "${TILEXR_INSTALL_INCLUDE_SEARCH_DIR}"
+        "${ASCEND_HOME_PATH}/${ARCH}-linux/include"
+        "${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc"
+        "${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc/runtime"
+    )
+
+    target_link_directories(tilexr_ep_dispatch_demo PRIVATE
+        "${TILEXR_INSTALL_LIB_SEARCH_DIR}"
+        "${ASCEND_HOME_PATH}/${ARCH}-linux/lib64"
+        "${ASCEND_HOME_PATH}/${ARCH}-linux/devlib"
+        "${ASCEND_DRIVER_PATH}/lib64/driver"
+    )
+
+    target_link_libraries(tilexr_ep_dispatch_demo PRIVATE
+        ${TILEXR_EP_LIB}
+        ${TILEXR_COMM_LIB}
+        ascendcl
+        runtime
+        ascend_hal
+    )
+
+    install(TARGETS tilexr_ep_dispatch_demo RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+endif()
