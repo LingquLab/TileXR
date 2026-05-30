@@ -66,6 +66,8 @@ void TestKernelUsesTileXRPeerMemory()
     CheckContains(path, contents, "launch_tilexr_ep_dispatch_kernel");
     CheckContains(path, contents, "CommArgs");
     CheckContains(path, contents, "peerMems");
+    CheckContains(path, contents, "GlobalTensor<GM_ADDR> peerMems");
+    CheckContains(path, contents, "peerMems.GetValue(peer)");
     CheckContains(path, contents, "IPC_DATA_OFFSET");
     CheckContains(path, contents, "SyncCollectives");
     CheckContains(path, contents, "DataCopyPad");
@@ -75,6 +77,7 @@ void TestKernelUsesTileXRPeerMemory()
     CheckContains(path, contents, "LoadAssistTupleFromGm");
     CheckNotContains(path, contents, "expertIds[");
     CheckNotContains(path, contents, "assistBase[item]");
+    CheckNotContains(path, contents, "args->peerMems[peer]");
 }
 
 void TestNoForbiddenDependencies()

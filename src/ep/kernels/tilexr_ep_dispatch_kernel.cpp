@@ -195,8 +195,10 @@ extern "C" __global__ __aicore__ void tilexr_ep_dispatch_kernel(GM_ADDR commArgs
         }
 
         GM_ADDR shareAddrs[TileXR::TILEXR_MAX_RANK_SIZE];
+        AscendC::GlobalTensor<GM_ADDR> peerMems;
+        peerMems.SetGlobalBuffer(&(args->peerMems[0]), TileXR::TILEXR_MAX_RANK_SIZE);
         for (int32_t peer = 0; peer < rankSize; ++peer) {
-            shareAddrs[peer] = args->peerMems[peer];
+            shareAddrs[peer] = peerMems.GetValue(peer);
             if (shareAddrs[peer] == nullptr) {
                 return;
             }
