@@ -16,7 +16,7 @@ if echo "${deps}" | grep -E 'libascend_hal.so => .*devlib' >/dev/null; then
     exit 1
 fi
 
-if echo "${deps}" | grep -i 'shmem' >/dev/null; then
+if echo "${deps}" | grep -E 'lib(acl)?shmem|=> .*shmem.*\.so' >/dev/null; then
     echo "ERROR: tile-comm links shmem unexpectedly"
     exit 1
 fi

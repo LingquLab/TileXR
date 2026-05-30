@@ -9,6 +9,16 @@
 #include "comm_args.h"
 #include "tilexr_sdma_types.h"
 
+#if defined(__has_include)
+#if __has_include("tilexr_sdma_config.h")
+#include "tilexr_sdma_config.h"
+#endif
+#endif
+
+#ifndef TILEXR_HAVE_PTO_SDMA
+#define TILEXR_HAVE_PTO_SDMA 0
+#endif
+
 #if TILEXR_ASCENDC_AICORE_COMPILE && defined(TILEXR_HAVE_PTO_SDMA) && TILEXR_HAVE_PTO_SDMA
 #ifndef PTO_COMM_NOT_SUPPORTED
 #define PTO_COMM_NOT_SUPPORTED 1

@@ -43,6 +43,7 @@ bool TileXRSDMATransport::EnvEnabled()
 
 int TileXRSDMATransport::Init(const TileXRSDMATransportOptions& options)
 {
+    Shutdown();
     options_ = options;
     available_ = false;
     workspaceDev_ = nullptr;
