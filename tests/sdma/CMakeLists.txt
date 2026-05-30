@@ -24,6 +24,15 @@ if(NOT ASCEND_DRIVER_PATH)
 endif()
 
 set(TILEXR_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../..")
+set(TILEXR_INSTALLED_SDMA_CONFIG "${TILEXR_ROOT}/install/include/tilexr_sdma_config.h")
+set(TILEXR_TEST_HAVE_PTO_SDMA OFF)
+if(EXISTS "${TILEXR_INSTALLED_SDMA_CONFIG}")
+    file(READ "${TILEXR_INSTALLED_SDMA_CONFIG}" TILEXR_INSTALLED_SDMA_CONFIG_TEXT)
+    if(TILEXR_INSTALLED_SDMA_CONFIG_TEXT MATCHES "#define[ \t]+TILEXR_HAVE_PTO_SDMA[ \t]+1")
+        set(TILEXR_TEST_HAVE_PTO_SDMA ON)
+    endif()
+endif()
+message(STATUS "TILEXR_TEST_HAVE_PTO_SDMA: ${TILEXR_TEST_HAVE_PTO_SDMA}")
 
 find_library(TILEXR_LIB tile-comm
     HINTS "${TILEXR_ROOT}/install/lib" "${TILEXR_ROOT}/build/src/comm"
@@ -129,7 +138,9 @@ set(INSTALL_TARGETS
     test_tilexr_sdma_disabled_comm
 )
 
-if(BUILD_TILEXR_SDMA_DEMO)
+if(BUILD_TILEXR_SDMA_DEMO AND NOT TILEXR_TEST_HAVE_PTO_SDMA)
+    message(WARNING "installed tilexr_sdma_config.h disables PTO SDMA; skip tilexr_sdma_demo")
+elseif(BUILD_TILEXR_SDMA_DEMO)
     find_program(BISHENG_EXECUTABLE bisheng)
     if(NOT BISHENG_EXECUTABLE)
         message(WARNING "bisheng not found; skip tilexr_sdma_demo")

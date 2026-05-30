@@ -24,6 +24,8 @@ unset(TILEXR_HAVE_PTO_SDMA_WORKSPACE_API CACHE)
 unset(TILEXR_HAVE_PTO_SDMA_WORKSPACE_API)
 unset(TILEXR_PTO_NNOPBASE_LIB CACHE)
 unset(TILEXR_PTO_NNOPBASE_LIB)
+unset(TILEXR_PTO_NNOPBASE_DEVLIB CACHE)
+unset(TILEXR_PTO_NNOPBASE_DEVLIB)
 
 cmake_push_check_state(RESET)
 set(CMAKE_REQUIRED_INCLUDES
@@ -64,13 +66,13 @@ foreach(_tilexr_pto_sdma_include_dir IN LISTS TILEXR_PTO_SDMA_INCLUDE_DIRS)
     endif()
 endforeach()
 
-foreach(_tilexr_pto_nnopbase_candidate
-        "${ASCEND_HOME_PATH}/${ARCH}-linux/lib64/libnnopbase.so"
-        "${ASCEND_HOME_PATH}/${ARCH}-linux/devlib/libnnopbase.so")
-    if(EXISTS "${_tilexr_pto_nnopbase_candidate}" AND NOT TILEXR_PTO_NNOPBASE_LIB)
-        set(TILEXR_PTO_NNOPBASE_LIB "${_tilexr_pto_nnopbase_candidate}")
-    endif()
-endforeach()
+set(_tilexr_pto_nnopbase_runtime "${ASCEND_HOME_PATH}/${ARCH}-linux/lib64/libnnopbase.so")
+set(_tilexr_pto_nnopbase_devlib "${ASCEND_HOME_PATH}/${ARCH}-linux/devlib/libnnopbase.so")
+if(EXISTS "${_tilexr_pto_nnopbase_runtime}")
+    set(TILEXR_PTO_NNOPBASE_LIB "${_tilexr_pto_nnopbase_runtime}")
+elseif(EXISTS "${_tilexr_pto_nnopbase_devlib}")
+    set(TILEXR_PTO_NNOPBASE_DEVLIB "${_tilexr_pto_nnopbase_devlib}")
+endif()
 
 if(TILEXR_HAVE_PTO_SDMA_WORKSPACE AND
         TILEXR_HAVE_PTO_SDMA_WORKSPACE_API AND
@@ -81,6 +83,11 @@ else()
     set(TILEXR_HAVE_PTO_SDMA OFF)
 endif()
 message(STATUS "TILEXR_HAVE_PTO_SDMA: ${TILEXR_HAVE_PTO_SDMA}")
+if(TILEXR_PTO_NNOPBASE_DEVLIB AND NOT TILEXR_PTO_NNOPBASE_LIB)
+    message(WARNING
+            "PTO SDMA headers were found but libnnopbase.so is only present in CANN devlib; "
+            "disable TILEXR_HAVE_PTO_SDMA to avoid a runtime dependency on devlib HAL.")
+endif()
 
 if(TILEXR_HAVE_PTO_SDMA)
     set(TILEXR_HAVE_PTO_SDMA_VALUE 1)

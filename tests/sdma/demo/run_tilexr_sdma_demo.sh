@@ -58,6 +58,19 @@ if [ ! -x "${bin}" ]; then
     exit 1
 fi
 
+deps=$(ldd "${bin}" || true)
+if echo "${deps}" | grep -E 'libascend_hal.so => not found' >/dev/null; then
+    echo "ERROR: libascend_hal.so not found; SDMA demo requires driver HAL from ${ASCEND_DRIVER_PATH}/lib64/driver"
+    echo "${deps}"
+    exit 1
+fi
+
+if echo "${deps}" | grep -E 'libascend_hal.so => .*devlib' >/dev/null; then
+    echo "ERROR: libascend_hal.so resolved from CANN devlib; SDMA demo must use driver HAL"
+    echo "${deps}"
+    exit 1
+fi
+
 echo "=========================================="
 echo "  TileXR SDMA Demo"
 echo "=========================================="
