@@ -5,54 +5,38 @@ if(NOT BISHENG_EXECUTABLE)
     message(FATAL_ERROR "bisheng not found; source scripts/common_env.sh before configuring with -DTILEXR_BUILD_EP=ON")
 endif()
 
-set(TILEXR_EP_SOC_TYPE "Ascend950" CACHE STRING "TileXR EP kernel SOC type")
+set(TILEXR_EP_DEFAULT_SOC_TYPE "$ENV{TILEXR_SOC_NAME}")
+if(NOT TILEXR_EP_DEFAULT_SOC_TYPE)
+    set(TILEXR_EP_DEFAULT_SOC_TYPE "Ascend910B")
+endif()
+set(TILEXR_EP_SOC_TYPE "${TILEXR_EP_DEFAULT_SOC_TYPE}" CACHE STRING "TileXR EP kernel SOC type")
+string(TOLOWER "${TILEXR_EP_SOC_TYPE}" TILEXR_EP_SOC_TYPE_LOWER)
 
-if(TILEXR_EP_SOC_TYPE STREQUAL "Ascend950")
+if(TILEXR_EP_SOC_TYPE_LOWER MATCHES "ascend950|ascend910_9|ascend910-9|a5")
     set(TILEXR_EP_NPU_ARCH "dav-3510")
     set(TILEXR_EP_AICORE_ARCH "--cce-aicore-arch=dav-c310-vec")
     set(TILEXR_EP_CATLASS_ARCH "3510")
+elseif(TILEXR_EP_SOC_TYPE_LOWER MATCHES "ascend910b|910b")
+    set(TILEXR_EP_NPU_ARCH "dav-2201")
+    set(TILEXR_EP_AICORE_ARCH "--cce-aicore-arch=dav-c220-vec")
+    set(TILEXR_EP_CATLASS_ARCH "2201")
 else()
     set(TILEXR_EP_NPU_ARCH "dav-2201")
     set(TILEXR_EP_AICORE_ARCH "--cce-aicore-arch=dav-c220-vec")
     set(TILEXR_EP_CATLASS_ARCH "2201")
 endif()
 
-execute_process(
-    COMMAND ${BISHENG_EXECUTABLE} -v
-    OUTPUT_VARIABLE BISHENG_VERSION_OUTPUT
-    ERROR_VARIABLE BISHENG_VERSION_OUTPUT
-    RESULT_VARIABLE BISHENG_VERSION_RESULT
+set(TILEXR_EP_KERNEL_COMPILE_OPTIONS
+    -xcce
+    -Xhost-start -ftrapv -Xhost-end
+    -mllvm -cce-aicore-stack-size=0x8000
+    -mllvm -cce-aicore-function-stack-size=0x8000
+    -mllvm -cce-aicore-record-overflow=true
+    -mllvm -cce-aicore-addr-transform
+    -mllvm -cce-aicore-dcci-insert-for-scalar=false
+    ${TILEXR_EP_AICORE_ARCH}
 )
-set(TILEXR_EP_BISHENG_DATE "0")
-if(BISHENG_VERSION_RESULT EQUAL 0)
-    if(BISHENG_VERSION_OUTPUT MATCHES "([0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9])")
-        set(TILEXR_EP_BISHENG_DATE "${CMAKE_MATCH_1}")
-    elseif(BISHENG_VERSION_OUTPUT MATCHES "([0-9][0-9][0-9][0-9])-([0-9][0-9])-([0-9][0-9])")
-        set(TILEXR_EP_BISHENG_DATE "${CMAKE_MATCH_1}${CMAKE_MATCH_2}${CMAKE_MATCH_3}")
-    endif()
-endif()
-
-if(TILEXR_EP_BISHENG_DATE GREATER_EQUAL 20250428)
-    set(TILEXR_EP_KERNEL_COMPILE_OPTIONS
-        -xasc
-        -Xhost-start -ftrapv -Xhost-end
-        --npu-arch=${TILEXR_EP_NPU_ARCH}
-        --cce-auto-infer-kernel-type=false
-    )
-    set(TILEXR_EP_KERNEL_LINK_OPTIONS --cce-fatobj-link)
-else()
-    set(TILEXR_EP_KERNEL_COMPILE_OPTIONS
-        -xcce
-        -Xhost-start -ftrapv -Xhost-end
-        -mllvm -cce-aicore-stack-size=0x8000
-        -mllvm -cce-aicore-function-stack-size=0x8000
-        -mllvm -cce-aicore-record-overflow=true
-        -mllvm -cce-aicore-addr-transform
-        -mllvm -cce-aicore-dcci-insert-for-scalar=false
-        ${TILEXR_EP_AICORE_ARCH}
-    )
-    set(TILEXR_EP_KERNEL_LINK_OPTIONS --cce-fatobj-link ${TILEXR_EP_AICORE_ARCH})
-endif()
+set(TILEXR_EP_KERNEL_LINK_OPTIONS --cce-fatobj-link ${TILEXR_EP_AICORE_ARCH})
 
 set(TILEXR_EP_KERNEL_SO "${CMAKE_CURRENT_BINARY_DIR}/libtilexr_ep_dispatch_kernel.so")
 set(TILEXR_EP_KERNEL_INCLUDES

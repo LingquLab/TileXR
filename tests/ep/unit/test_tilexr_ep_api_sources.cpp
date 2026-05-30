@@ -87,21 +87,33 @@ void TestBuildPlacement()
     }
 }
 
-void TestBishengVersionDateParsing()
+void TestEpSocDefaultFollowsEnvironment()
 {
     std::string epCmake;
     if (!ReadFile("src/ep/CMakeLists.txt", &epCmake)) {
         return;
     }
 
-    CheckContains("src/ep/CMakeLists.txt", epCmake,
-        "([0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9])");
-    CheckContains("src/ep/CMakeLists.txt", epCmake,
-        "([0-9][0-9][0-9][0-9])-([0-9][0-9])-([0-9][0-9])");
-    CheckContains("src/ep/CMakeLists.txt", epCmake, "${CMAKE_MATCH_1}${CMAKE_MATCH_2}${CMAKE_MATCH_3}");
-    CheckContains("src/ep/CMakeLists.txt", epCmake, "TILEXR_EP_BISHENG_DATE GREATER_EQUAL 20250428");
-    CheckNotContains("src/ep/CMakeLists.txt", epCmake, "{8}");
-    CheckNotContains("src/ep/CMakeLists.txt", epCmake, "{4}");
+    CheckContains("src/ep/CMakeLists.txt", epCmake, "$ENV{TILEXR_SOC_NAME}");
+    CheckContains("src/ep/CMakeLists.txt", epCmake, "string(TOLOWER");
+    CheckContains("src/ep/CMakeLists.txt", epCmake, "ascend910b");
+    CheckContains("src/ep/CMakeLists.txt", epCmake, "dav-c220-vec");
+    CheckContains("src/ep/CMakeLists.txt", epCmake, "Ascend910B");
+}
+
+void TestEpKernelUsesCceArchFlags()
+{
+    std::string epCmake;
+    if (!ReadFile("src/ep/CMakeLists.txt", &epCmake)) {
+        return;
+    }
+
+    CheckContains("src/ep/CMakeLists.txt", epCmake, "-xcce");
+    CheckContains("src/ep/CMakeLists.txt", epCmake, "${TILEXR_EP_AICORE_ARCH}");
+    CheckContains("src/ep/CMakeLists.txt", epCmake, "--cce-fatobj-link");
+    CheckNotContains("src/ep/CMakeLists.txt", epCmake, "-xasc");
+    CheckNotContains("src/ep/CMakeLists.txt", epCmake, "--npu-arch=");
+    CheckNotContains("src/ep/CMakeLists.txt", epCmake, "--cce-auto-infer-kernel-type=false");
 }
 
 void TestBlueDeployScriptCleansRemoteCheckout()
@@ -151,7 +163,8 @@ int main()
 {
     TestPublicHeader();
     TestBuildPlacement();
-    TestBishengVersionDateParsing();
+    TestEpSocDefaultFollowsEnvironment();
+    TestEpKernelUsesCceArchFlags();
     TestBlueDeployScriptCleansRemoteCheckout();
     TestNoForbiddenDependencies();
     return g_failures == 0 ? 0 : 1;
