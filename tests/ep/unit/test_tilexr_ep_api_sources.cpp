@@ -144,6 +144,19 @@ void TestBlueDeployScriptInitializesEpSubmodulesOnly()
     CheckNotContains("tests/ep/demo/deploy_and_run_blue.sh", deployScript, "3rdparty/spdlog");
 }
 
+void TestDemoRunnerUsesLibAndLib64Paths()
+{
+    std::string runner;
+    if (!ReadFile("tests/ep/demo/run_tilexr_ep_dispatch_demo.sh", &runner)) {
+        return;
+    }
+
+    CheckContains("tests/ep/demo/run_tilexr_ep_dispatch_demo.sh", runner, "${TILEXR_ROOT}/install/lib64");
+    CheckContains("tests/ep/demo/run_tilexr_ep_dispatch_demo.sh", runner, "${TILEXR_ROOT}/install/lib");
+    CheckContains("tests/ep/demo/run_tilexr_ep_dispatch_demo.sh", runner, "${INSTALL_DIR}/lib64");
+    CheckContains("tests/ep/demo/run_tilexr_ep_dispatch_demo.sh", runner, "${INSTALL_DIR}/lib");
+}
+
 void TestNoForbiddenDependencies()
 {
     const std::vector<std::string> paths = {
@@ -182,6 +195,7 @@ int main()
     TestEpKernelUsesCceArchFlags();
     TestBlueDeployScriptCleansRemoteCheckout();
     TestBlueDeployScriptInitializesEpSubmodulesOnly();
+    TestDemoRunnerUsesLibAndLib64Paths();
     TestNoForbiddenDependencies();
     return g_failures == 0 ? 0 : 1;
 }

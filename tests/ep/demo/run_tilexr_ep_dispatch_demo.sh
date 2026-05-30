@@ -17,7 +17,7 @@ source "${TILEXR_ROOT}/scripts/common_env.sh"
 export TILEXR_COMM_ID="${TILEXR_COMM_ID:-127.0.0.1:10077}"
 export TILEXR_DEMO_NPUS="${npu_count}"
 export TILEXR_DEMO_FIRST_NPU="${first_npu}"
-export LD_LIBRARY_PATH="${TILEXR_ROOT}/install/lib:${INSTALL_DIR}/lib:${LD_LIBRARY_PATH:-}"
+export LD_LIBRARY_PATH="${TILEXR_ROOT}/install/lib64:${TILEXR_ROOT}/install/lib:${INSTALL_DIR}/lib64:${INSTALL_DIR}/lib:${LD_LIBRARY_PATH:-}"
 
 bin="${INSTALL_DIR}/bin/tilexr_ep_dispatch_demo"
 if [[ ! -x "${bin}" ]]; then
