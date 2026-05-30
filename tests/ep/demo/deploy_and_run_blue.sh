@@ -11,12 +11,18 @@ REMOTE_LOG=${REMOTE_BASE}/deploy_$(date +%Y%m%d_%H%M%S).log
 
 branch=$(git -C "${TILEXR_ROOT}" rev-parse --abbrev-ref HEAD)
 commit=$(git -C "${TILEXR_ROOT}" rev-parse HEAD)
+STAGING_DIR=$(mktemp -d "${TMPDIR:-/tmp}/tilexr_ep_deploy.XXXXXX")
+trap 'rm -rf "${STAGING_DIR}"' EXIT
+STAGING_REPO="${STAGING_DIR}/TileXR"
 
 echo "Deploying TileXR EP dispatch verification"
 echo "  remote: ${REMOTE}"
 echo "  remote repo: ${REMOTE_REPO}"
 echo "  branch: ${branch}"
 echo "  commit: ${commit}"
+
+git clone --no-hardlinks --no-checkout "${TILEXR_ROOT}" "${STAGING_REPO}"
+git -C "${STAGING_REPO}" checkout --detach "${commit}"
 
 ssh "${REMOTE}" "mkdir -p $(printf '%q' "${REMOTE_BASE}") $(printf '%q' "${REMOTE_REPO}")"
 
@@ -28,7 +34,7 @@ rsync -a --delete \
   --exclude='tests/ep/build' \
   --exclude='tests/ep/install' \
   --exclude='tests/ep/logs' \
-  "${TILEXR_ROOT}/" "${REMOTE}:${REMOTE_REPO}/"
+  "${STAGING_REPO}/" "${REMOTE}:${REMOTE_REPO}/"
 
 remote_script=$(cat <<EOF
 set -euo pipefail
@@ -37,6 +43,8 @@ cd $(printf '%q' "${REMOTE_REPO}")
   echo "Remote branch source: ${branch}"
   echo "Remote commit source: ${commit}"
   git submodule update --init --recursive
+  : "\${ASCEND_HOME_PATH:=}"
+  : "\${LD_LIBRARY_PATH:=}"
   source scripts/common_env.sh
   bash tests/ep/build.sh full
   bash tests/ep/demo/run_tilexr_ep_dispatch_demo.sh 2
