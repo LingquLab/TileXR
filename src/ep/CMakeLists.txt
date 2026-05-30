@@ -134,7 +134,7 @@ target_link_directories(tilexr-ep
 
 target_link_libraries(tilexr-ep
     PRIVATE
-        tilexr_ep_dispatch_kernel
+        -l:libtilexr_ep_dispatch_kernel.so
         tile-comm
         ascendcl
         runtime
