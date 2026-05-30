@@ -120,8 +120,10 @@ Local validation in this branch:
 - CANN 9.1.0 build passed with `TILEXR_HAVE_PTO_SDMA: ON`.
 - CANN 9.1.0 SDMA unit tests passed.
 - Local demo binary and kernel built.
-- Local demo runtime is blocked at `aclInit ret=500000` because this environment
-  has no usable driver HAL/device runtime.
+- Local demo runtime is blocked because this environment has no usable driver
+  HAL/device runtime. With devlib HAL stripped, the runner reports
+  `libascend_hal.so not found`; if devlib HAL is allowed, the symptom can become
+  `aclInit ret=500000`.
 
 Pending validation:
 

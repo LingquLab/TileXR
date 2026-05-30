@@ -39,7 +39,7 @@ cmake -S "${TILEXR_ROOT}" -B "${ROOT_BUILD}" \
     -DTILEXR_BUILD_TESTS=OFF
 cmake --build "${ROOT_BUILD}" --target install -j"$(nproc)"
 
-for header in comm_args.h tilexr_sdma_types.h; do
+for header in comm_args.h tilexr_sdma_types.h tilexr_sdma_config.h; do
     if [ ! -f "${ROOT_INSTALL}/include/${header}" ]; then
         echo "ERROR: expected installed header missing: ${ROOT_INSTALL}/include/${header}" >&2
         exit 1
