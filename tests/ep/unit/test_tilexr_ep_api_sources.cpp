@@ -87,6 +87,23 @@ void TestBuildPlacement()
     }
 }
 
+void TestBishengVersionDateParsing()
+{
+    std::string epCmake;
+    if (!ReadFile("src/ep/CMakeLists.txt", &epCmake)) {
+        return;
+    }
+
+    CheckContains("src/ep/CMakeLists.txt", epCmake,
+        "([0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9])");
+    CheckContains("src/ep/CMakeLists.txt", epCmake,
+        "([0-9][0-9][0-9][0-9])-([0-9][0-9])-([0-9][0-9])");
+    CheckContains("src/ep/CMakeLists.txt", epCmake, "${CMAKE_MATCH_1}${CMAKE_MATCH_2}${CMAKE_MATCH_3}");
+    CheckContains("src/ep/CMakeLists.txt", epCmake, "TILEXR_EP_BISHENG_DATE GREATER_EQUAL 20250428");
+    CheckNotContains("src/ep/CMakeLists.txt", epCmake, "{8}");
+    CheckNotContains("src/ep/CMakeLists.txt", epCmake, "{4}");
+}
+
 void TestNoForbiddenDependencies()
 {
     const std::vector<std::string> paths = {
@@ -121,6 +138,7 @@ int main()
 {
     TestPublicHeader();
     TestBuildPlacement();
+    TestBishengVersionDateParsing();
     TestNoForbiddenDependencies();
     return g_failures == 0 ? 0 : 1;
 }
