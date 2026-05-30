@@ -237,19 +237,17 @@ extern "C" __global__ __aicore__ void tilexr_ep_dispatch_kernel(GM_ADDR commArgs
                 }
 
                 const int64_t dstIndex = dstCounts[dstRank];
-                GM_ADDR dstWindow = shareAddrs[dstRank] + TileXR::IPC_DATA_OFFSET;
-                CopyBytesGmToGm(dstWindow + PayloadOffset(rank, slotBytes) + dstIndex * rowBytes,
+                CopyBytesGmToGm(localWindow + PayloadOffset(dstRank, slotBytes) + dstIndex * rowBytes,
                     xGM + token * rowBytes, tBuf, rowBytes);
-                WriteAssist(dstWindow + AssistOffset(rank, slotBytes, payloadBytesPerSlot), dstIndex, rank,
+                WriteAssist(localWindow + AssistOffset(dstRank, slotBytes, payloadBytesPerSlot), dstIndex, rank,
                     static_cast<int32_t>(token), static_cast<int32_t>(topKId), expertId);
                 ++dstCounts[dstRank];
             }
         }
 
         for (int32_t dstRank = 0; dstRank < rankSize; ++dstRank) {
-            GM_ADDR dstWindow = shareAddrs[dstRank] + TileXR::IPC_DATA_OFFSET;
             auto slot =
-                reinterpret_cast<__gm__ TileXREp::EpSrcSlotHeader *>(dstWindow + SlotOffset(rank, slotBytes));
+                reinterpret_cast<__gm__ TileXREp::EpSrcSlotHeader *>(localWindow + SlotOffset(dstRank, slotBytes));
             slot->count = static_cast<int32_t>(dstCounts[dstRank]);
             slot->srcRank = rank;
             slot->payloadBytes = dstCounts[dstRank] * rowBytes;
@@ -277,16 +275,17 @@ extern "C" __global__ __aicore__ void tilexr_ep_dispatch_kernel(GM_ADDR commArgs
         int64_t outRecord = 0;
         auto localAssistBase = reinterpret_cast<__gm__ TileXREp::EpAssistTuple *>(assistInfoForCombineOutGM);
         for (int32_t srcRank = 0; srcRank < rankSize; ++srcRank) {
+            GM_ADDR sourceWindow = shareAddrs[srcRank] + TileXR::IPC_DATA_OFFSET;
             auto slot =
-                reinterpret_cast<__gm__ TileXREp::EpSrcSlotHeader *>(localWindow + SlotOffset(srcRank, slotBytes));
+                reinterpret_cast<__gm__ TileXREp::EpSrcSlotHeader *>(sourceWindow + SlotOffset(rank, slotBytes));
             const int64_t count = slot->count;
             epRecvCountsOut[srcRank] = static_cast<int32_t>(count);
             if (count <= 0 || count > maxRoutesPerSrc) {
                 continue;
             }
 
-            GM_ADDR payloadBase = localWindow + PayloadOffset(srcRank, slotBytes);
-            GM_ADDR assistBase = localWindow + AssistOffset(srcRank, slotBytes, payloadBytesPerSlot);
+            GM_ADDR payloadBase = sourceWindow + PayloadOffset(rank, slotBytes);
+            GM_ADDR assistBase = sourceWindow + AssistOffset(rank, slotBytes, payloadBytesPerSlot);
             for (int64_t item = 0; item < count; ++item) {
                 CopyBytesGmToGm(expandXOutGM + outRecord * rowBytes, payloadBase + item * rowBytes, tBuf, rowBytes);
                 const TileXREp::EpAssistTuple tuple = LoadAssistTupleFromGm(
