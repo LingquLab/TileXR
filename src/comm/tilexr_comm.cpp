@@ -9,6 +9,7 @@
  */
 #include "tilexr_comm.h"
 #include "tilexr_internal.h"
+#include "sdma/tilexr_sdma_transport.h"
 #include "udma/tilexr_udma_transport.h"
 
 #include <acl/acl_rt.h>
@@ -51,6 +52,8 @@ static map<string, int[TILEXR_MAX_RANK_SIZE]> g_devList;
 static std::mutex g_mtx;
 static std::mutex g_udmaMtx;
 static bool g_udmaUnavailable = false;
+static std::mutex g_sdmaMtx;
+static bool g_sdmaUnavailable = false;
 
 
 // 如果是互联的链路，返回false； 对910B2C那些不互联的链路，返回true
@@ -157,6 +160,82 @@ int TileXRComm::InitUDMA()
 
     TILEXR_LOG(INFO) << "InitUDMA success, rank " << rank_ << "/" << rankSize_;
     return TILEXR_SUCCESS;
+}
+
+int TileXRComm::InitSDMA()
+{
+    {
+        lock_guard<mutex> lock(g_sdmaMtx);
+        if (g_sdmaUnavailable) {
+            TILEXR_LOG(INFO) << "InitSDMA skipped after previous SDMA init failure";
+            sdmaInitStatus_ = SDMAInitStatus::PTO_UNAVAILABLE;
+            return TILEXR_SUCCESS;
+        }
+    }
+
+    sdmaTransport_.reset(new (nothrow) TileXRSDMATransport());
+    if (sdmaTransport_ == nullptr) {
+        TILEXR_LOG(WARN) << "TileXRSDMATransport allocation failed, SDMA disabled";
+        sdmaInitStatus_ = SDMAInitStatus::INIT_FAILED;
+        return TILEXR_SUCCESS;
+    }
+
+    TileXRSDMATransportOptions options {};
+    options.devId = devId_;
+    int ret = sdmaTransport_->Init(options);
+    sdmaInitStatus_ = sdmaTransport_->GetLastStatus();
+    if (ret != TILEXR_SUCCESS || !sdmaTransport_->IsAvailable()) {
+        if (sdmaInitStatus_ != SDMAInitStatus::DISABLED_BY_ENV) {
+            TILEXR_LOG(WARN) << "TileXR SDMA init unavailable, status " << static_cast<int>(sdmaInitStatus_);
+            lock_guard<mutex> lock(g_sdmaMtx);
+            g_sdmaUnavailable = true;
+        }
+        sdmaTransport_.reset();
+        sdmaWorkspaceDev_ = nullptr;
+        commArgs_.sdmaWorkspacePtr = nullptr;
+        return TILEXR_SUCCESS;
+    }
+
+    sdmaWorkspaceDev_ = sdmaTransport_->GetWorkspaceDev();
+    if (sdmaWorkspaceDev_ == nullptr) {
+        TILEXR_LOG(WARN) << "TileXR SDMA workspace is null, SDMA disabled";
+        sdmaInitStatus_ = SDMAInitStatus::NULL_WORKSPACE;
+        sdmaTransport_.reset();
+        return TILEXR_SUCCESS;
+    }
+
+    commArgs_.sdmaWorkspacePtr = sdmaWorkspaceDev_;
+    commArgs_.extraFlag |= ExtraFlag::SDMA;
+    sdmaInitStatus_ = SDMAInitStatus::INITIALIZED;
+    TILEXR_LOG(INFO) << "InitSDMA success, workspace " << static_cast<void*>(sdmaWorkspaceDev_);
+    return TILEXR_SUCCESS;
+}
+
+void TileXRComm::ResetSDMAState()
+{
+    commArgs_.extraFlag &= ~ExtraFlag::SDMA;
+    commArgs_.sdmaWorkspacePtr = nullptr;
+    sdmaWorkspaceDev_ = nullptr;
+    sdmaInitStatus_ = SDMAInitStatus::DISABLED_BY_ENV;
+    if (sdmaTransport_ != nullptr) {
+        sdmaTransport_->Shutdown();
+        sdmaTransport_.reset();
+    }
+}
+
+bool TileXRComm::IsSDMAAvailable() const
+{
+    return (commArgs_.extraFlag & ExtraFlag::SDMA) != 0 && commArgs_.sdmaWorkspacePtr != nullptr;
+}
+
+GM_ADDR TileXRComm::GetSDMAWorkspacePtr() const
+{
+    return sdmaWorkspaceDev_;
+}
+
+SDMAInitStatus TileXRComm::GetSDMAInitStatus() const
+{
+    return sdmaInitStatus_;
 }
 
 int TileXRComm::SyncCommArgs()
@@ -434,6 +513,10 @@ int TileXRComm::Init()
     if (ret != TILEXR_SUCCESS) {
         return ret;
     }
+    ret = InitSDMA();
+    if (ret != TILEXR_SUCCESS) {
+        return ret;
+    }
 
     // set comm args in device.
     SyncCommArgs();
@@ -494,6 +577,10 @@ int TileXRComm::InitThread(const std::string &uid)
     // UDMA 主要用于跨进程/跨节点通信，线程模式使用进程内共享内存即可
     TILEXR_LOG(DEBUG) << "Thread mode: UDMA initialization skipped (single-process multi-thread scenario)";
 
+    int ret = InitSDMA();
+    if (ret != TILEXR_SUCCESS) {
+        return ret;
+    }
     SyncCommArgs();
     TILEXR_LOG(INFO) << "Lccl init multi thread " << rank_ << "/" << rankSize_ << " success, uid:" << uid;
     inited_ = true;
@@ -848,6 +935,7 @@ TileXRComm::~TileXRComm()
     }
     udmaRegisteredPtr_ = nullptr;
     udmaInfoDev_ = nullptr;
+    ResetSDMAState();
 }
 
 TileXRComm::TileXRComm(int rank, int rankSize) : rank_(rank), rankSize_(rankSize)
@@ -950,6 +1038,12 @@ std::string TileXRComm::PrintDFX()
         ss << "0x"<< std::hex << commArgs_.dfx[i] << ", ";
     }
     ss << "\n    ]";
+
+    ss << "\n  sdma: {"
+       << " enabled: " << (((commArgs_.extraFlag & ExtraFlag::SDMA) != 0) ? "true" : "false")
+       << ", status: " << static_cast<int>(sdmaInitStatus_)
+       << ", workspace: " << static_cast<void*>(commArgs_.sdmaWorkspacePtr)
+       << " }";
 
     ss << "\n}";
     return ss.str();
