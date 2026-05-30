@@ -44,11 +44,12 @@ done
 
 ret=0
 for pid in "${pids[@]}"; do
-    if ! wait "${pid}"; then
-        status=$?
-        if [[ "${ret}" -eq 0 ]]; then
-            ret="${status}"
-        fi
+    set +e
+    wait "${pid}"
+    status=$?
+    set -e
+    if [[ "${status}" -ne 0 && "${ret}" -eq 0 ]]; then
+        ret="${status}"
     fi
 done
 
