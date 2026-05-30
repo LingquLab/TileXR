@@ -9,6 +9,96 @@
 #
 
 include(GNUInstallDirs)
+include(CMakePushCheckState)
+include(CheckIncludeFileCXX)
+include(CheckCXXSourceCompiles)
+
+set(TILEXR_PTO_SDMA_INCLUDE_DIRS
+        ${ASCEND_HOME_PATH}/${ARCH}-linux/include
+        ${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc
+        ${ASCEND_DRIVER_PATH}/kernel/inc)
+
+unset(TILEXR_HAVE_PTO_SDMA_WORKSPACE CACHE)
+unset(TILEXR_HAVE_PTO_SDMA_WORKSPACE)
+unset(TILEXR_HAVE_PTO_SDMA_WORKSPACE_API CACHE)
+unset(TILEXR_HAVE_PTO_SDMA_WORKSPACE_API)
+unset(TILEXR_PTO_NNOPBASE_LIB CACHE)
+unset(TILEXR_PTO_NNOPBASE_LIB)
+unset(TILEXR_PTO_NNOPBASE_DEVLIB CACHE)
+unset(TILEXR_PTO_NNOPBASE_DEVLIB)
+
+cmake_push_check_state(RESET)
+set(CMAKE_REQUIRED_INCLUDES
+        ${TILEXR_PTO_SDMA_INCLUDE_DIRS})
+check_include_file_cxx("pto/npu/comm/async/sdma/sdma_workspace_manager.hpp" TILEXR_HAVE_PTO_SDMA_WORKSPACE)
+
+if(DEFINED CMAKE_TRY_COMPILE_TARGET_TYPE)
+    set(_tilexr_had_try_compile_target_type ON)
+    set(_tilexr_saved_try_compile_target_type "${CMAKE_TRY_COMPILE_TARGET_TYPE}")
+else()
+    set(_tilexr_had_try_compile_target_type OFF)
+endif()
+set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
+check_cxx_source_compiles("
+#include <type_traits>
+#include \"pto/npu/comm/async/sdma/sdma_workspace_manager.hpp\"
+int main()
+{
+    pto::comm::sdma::SdmaWorkspaceManager manager;
+    static_assert(std::is_same<decltype(manager.Init()), bool>::value, \"Init must return bool\");
+    static_assert(std::is_same<decltype(manager.Finalize()), void>::value, \"Finalize must return void\");
+    void *workspace = manager.GetWorkspaceAddr();
+    (void)workspace;
+    return 0;
+}
+" TILEXR_HAVE_PTO_SDMA_WORKSPACE_API)
+if(_tilexr_had_try_compile_target_type)
+    set(CMAKE_TRY_COMPILE_TARGET_TYPE "${_tilexr_saved_try_compile_target_type}")
+else()
+    unset(CMAKE_TRY_COMPILE_TARGET_TYPE)
+endif()
+cmake_pop_check_state()
+
+set(TILEXR_HAVE_PTO_SDMA_INTRIN OFF)
+foreach(_tilexr_pto_sdma_include_dir IN LISTS TILEXR_PTO_SDMA_INCLUDE_DIRS)
+    if(EXISTS "${_tilexr_pto_sdma_include_dir}/pto/npu/comm/async/sdma/sdma_async_intrin.hpp")
+        set(TILEXR_HAVE_PTO_SDMA_INTRIN ON)
+    endif()
+endforeach()
+
+set(_tilexr_pto_nnopbase_runtime "${ASCEND_HOME_PATH}/${ARCH}-linux/lib64/libnnopbase.so")
+set(_tilexr_pto_nnopbase_devlib "${ASCEND_HOME_PATH}/${ARCH}-linux/devlib/libnnopbase.so")
+if(EXISTS "${_tilexr_pto_nnopbase_runtime}")
+    set(TILEXR_PTO_NNOPBASE_LIB "${_tilexr_pto_nnopbase_runtime}")
+elseif(EXISTS "${_tilexr_pto_nnopbase_devlib}")
+    set(TILEXR_PTO_NNOPBASE_DEVLIB "${_tilexr_pto_nnopbase_devlib}")
+endif()
+
+if(TILEXR_HAVE_PTO_SDMA_WORKSPACE AND
+        TILEXR_HAVE_PTO_SDMA_WORKSPACE_API AND
+        TILEXR_HAVE_PTO_SDMA_INTRIN AND
+        TILEXR_PTO_NNOPBASE_LIB)
+    set(TILEXR_HAVE_PTO_SDMA ON)
+else()
+    set(TILEXR_HAVE_PTO_SDMA OFF)
+endif()
+message(STATUS "TILEXR_HAVE_PTO_SDMA: ${TILEXR_HAVE_PTO_SDMA}")
+if(TILEXR_PTO_NNOPBASE_DEVLIB AND NOT TILEXR_PTO_NNOPBASE_LIB)
+    message(WARNING
+            "PTO SDMA headers were found but libnnopbase.so is only present in CANN devlib; "
+            "disable TILEXR_HAVE_PTO_SDMA to avoid a runtime dependency on devlib HAL.")
+endif()
+
+if(TILEXR_HAVE_PTO_SDMA)
+    set(TILEXR_HAVE_PTO_SDMA_VALUE 1)
+else()
+    set(TILEXR_HAVE_PTO_SDMA_VALUE 0)
+endif()
+
+configure_file(
+        ${CMAKE_CURRENT_SOURCE_DIR}/../include/tilexr_sdma_config.h.in
+        ${CMAKE_CURRENT_BINARY_DIR}/include/tilexr_sdma_config.h
+        @ONLY)
 
 set(TILEXR_SOURCE_FILE tilexr_comm.cpp
         comm_wrap.cpp
@@ -24,12 +114,21 @@ set(TILEXR_SOURCE_FILE tilexr_comm.cpp
         udma/tilexr_udma_layout.cpp
         udma/tilexr_udma_transport.h
         udma/tilexr_udma_transport.cpp
+        sdma/tilexr_sdma_transport.h
+        sdma/tilexr_sdma_transport.cpp
 )
 
 add_library(tile-comm SHARED ${TILEXR_SOURCE_FILE})
 
+if(TILEXR_HAVE_PTO_SDMA)
+    target_compile_definitions(tile-comm PRIVATE TILEXR_HAVE_PTO_SDMA=1)
+else()
+    target_compile_definitions(tile-comm PRIVATE TILEXR_HAVE_PTO_SDMA=0)
+endif()
+
 target_include_directories(tile-comm
         PUBLIC
+        ${CMAKE_CURRENT_BINARY_DIR}/include
         ${CMAKE_CURRENT_SOURCE_DIR}/../include
         ${ASCEND_DRIVER_PATH}/kernel/inc
         ${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc/
@@ -56,8 +155,16 @@ target_link_libraries(tile-comm
         dl
 )
 
+if(TILEXR_HAVE_PTO_SDMA)
+    target_link_libraries(tile-comm
+            PRIVATE
+            ${TILEXR_PTO_NNOPBASE_LIB}
+    )
+endif()
+
 install(TARGETS tile-comm LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR})
 install(FILES
+        ${CMAKE_CURRENT_BINARY_DIR}/include/tilexr_sdma_config.h
         ${CMAKE_CURRENT_SOURCE_DIR}/../include/tilexr_api.h
         ${CMAKE_CURRENT_SOURCE_DIR}/../include/tilexr_types.h
         ${CMAKE_CURRENT_SOURCE_DIR}/../include/comm_args.h
@@ -65,6 +172,9 @@ install(FILES
         ${CMAKE_CURRENT_SOURCE_DIR}/../include/tilexr_udma.h
         ${CMAKE_CURRENT_SOURCE_DIR}/../include/tilexr_udma_reg.h
         ${CMAKE_CURRENT_SOURCE_DIR}/../include/tilexr_udma_types.h
+        ${CMAKE_CURRENT_SOURCE_DIR}/../include/tilexr_sdma_types.h
+        ${CMAKE_CURRENT_SOURCE_DIR}/../include/tilexr_sdma.h
+        ${CMAKE_CURRENT_SOURCE_DIR}/../include/tilexr_sdma_compat.h
         DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 install(CODE "string(CONCAT _tilexr_optional_header \"tilexr_\" \"collectives.h\")
 if(IS_ABSOLUTE \"${CMAKE_INSTALL_INCLUDEDIR}\")

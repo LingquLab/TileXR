@@ -14,6 +14,7 @@
 #include <memory>
 #include <vector>
 #include <string>
+#include "../include/tilexr_sdma_types.h"
 #include "../include/tilexr_udma_reg.h"
 #include "../include/tilexr_types.h"
 #include "../include/tilexr_api.h"
@@ -24,6 +25,7 @@ constexpr int IPC_NAME_SIZE = 65;
 
 class TileXRSockExchange;
 class TileXRUDMATransport;
+class TileXRSDMATransport;
 class TileXRComm {
 public:
     TileXRComm(int rank, int rankSize);
@@ -44,6 +46,9 @@ public:
     int RegisterUDMAMemory(GM_ADDR localPtr, size_t bytes, TileXRUDMAMemHandle *handle);
     int UnregisterUDMAMemory(TileXRUDMAMemHandle handle);
     GM_ADDR GetUDMARegistryPtr() const;
+    bool IsSDMAAvailable() const;
+    GM_ADDR GetSDMAWorkspacePtr() const;
+    SDMAInitStatus GetSDMAInitStatus() const;
     std::string PrintDFX();
     friend class Lccl;
     friend class Lcoc;
@@ -67,8 +72,10 @@ private:
     int SyncCommArgs();
     int InitDumpAddr();
     int InitUDMA();
+    int InitSDMA();
     int UpdateCommArgsDev();
     void FreeUDMARegistry();
+    void ResetSDMAState();
 
 private:
     int rank_ = 0;  // global rank id
@@ -98,6 +105,9 @@ private:
     GM_ADDR udmaRegisteredPtr_ = nullptr;
     TileXRUDMARegistry udmaRegistry_ = {};
     std::unique_ptr<TileXRUDMATransport> udmaTransport_;
+    GM_ADDR sdmaWorkspaceDev_ = nullptr;
+    SDMAInitStatus sdmaInitStatus_ = SDMAInitStatus::DISABLED_BY_ENV;
+    std::unique_ptr<TileXRSDMATransport> sdmaTransport_;
 };
 } // TileXR
 

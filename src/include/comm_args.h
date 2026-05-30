@@ -12,6 +12,8 @@
 #define TILEXR_COMM_ARGS_H
 #include <cstdint>
 
+#include "tilexr_sdma_types.h"
+
 #if defined(__CCE__) && defined(__CCE_IS_AICORE__)
 #define TILEXR_ASCENDC_AICORE_COMPILE 1
 #else
@@ -90,6 +92,7 @@ struct ExtraFlag {
     static constexpr uint32_t QUANT_CURRENT = 1 << 8;
     static constexpr uint32_t TOPO_PCIE = 1 << 9;
     static constexpr uint32_t UDMA = 1 << 10;
+    static constexpr uint32_t SDMA = 1 << 11;
     static constexpr uint32_t ATOMIC_ENABLE = 1 << 15;  // 表示在910A5算子中启用atomic实现
     static constexpr uint32_t IS_GREATER_THAN_40_AIV = 1 << 16;
 };
@@ -112,6 +115,7 @@ struct CommArgs {
     uint64_t fftsVal = 0;
     GM_ADDR udmaInfoPtr = nullptr;  // device-side TileXR::UDMAInfo*; nullptr 表示 UDMA 不可用
     GM_ADDR udmaRegistryPtr = nullptr;  // device-side TileXRUDMARegistry* for user-registered UDMA memory
+    GM_ADDR sdmaWorkspacePtr = nullptr;  // device-side SDMA workspace; nullptr 表示 SDMA 不可用
 };
 
 struct LcclDumpBlockInfo {
