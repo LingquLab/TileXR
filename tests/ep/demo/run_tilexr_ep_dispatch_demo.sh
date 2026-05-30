@@ -10,6 +10,8 @@ rank_size="${1:-2}"
 npu_count="${2:-${rank_size}}"
 first_npu="${3:-0}"
 
+: "${ASCEND_HOME_PATH:=}"
+: "${LD_LIBRARY_PATH:=}"
 source "${TILEXR_ROOT}/scripts/common_env.sh"
 
 export TILEXR_COMM_ID="${TILEXR_COMM_ID:-127.0.0.1:10077}"
@@ -43,7 +45,10 @@ done
 ret=0
 for pid in "${pids[@]}"; do
     if ! wait "${pid}"; then
-        ret=1
+        status=$?
+        if [[ "${ret}" -eq 0 ]]; then
+            ret="${status}"
+        fi
     fi
 done
 
