@@ -53,6 +53,14 @@ void CheckContains(const std::string &path, const std::string &needle)
     }
 }
 
+void CheckTextContains(const std::string &label, const std::string &text, const std::string &needle)
+{
+    if (text.find(needle) == std::string::npos) {
+        std::cerr << "expected " << label << " to contain: " << needle << std::endl;
+        ++g_failures;
+    }
+}
+
 void CheckFileMissingOrDoesNotContain(const std::string &path, const std::string &needle)
 {
     std::ifstream input(path.c_str());
@@ -141,11 +149,27 @@ void TestPerfReportSummariesAndFiles()
     CheckContains(options.outputDir + "/trace.json", "\"first_start_cycle\"");
     CheckContains(options.outputDir + "/trace.json", "\"last_end_cycle\"");
     CheckContains(options.outputDir + "/trace.json", "\"sum_us\"");
+    const std::string traceJson = ReadFile(options.outputDir + "/trace.json");
+    CheckTextContains("trace.json", traceJson,
+                      "\"stage\": \"flag_poll_wait\", \"stage_id\": 4, \"count\": 1, \"raw_cycles\": 1000");
+    CheckTextContains("trace.json", traceJson,
+                      "\"min_cycles\": 1000, \"max_cycles\": 1000, \"first_start_cycle\": 100004");
+    CheckTextContains("trace.json", traceJson,
+                      "\"last_end_cycle\": 101004, \"aux0\": 4096, \"aux1\": 8192, \"sum_us\": 20");
+    CheckTextContains("trace.json", traceJson,
+                      "\"stage\": \"peer_ipc_to_output\", \"stage_id\": 5, \"count\": 2, \"raw_cycles\": 4000");
+    CheckTextContains("trace.json", traceJson,
+                      "\"min_cycles\": 2000, \"max_cycles\": 2500, \"first_start_cycle\": 101105");
+    CheckTextContains("trace.json", traceJson,
+                      "\"last_end_cycle\": 105105, \"aux0\": 4097, \"aux1\": 8193, \"sum_us\": 80");
     CheckContains(options.outputDir + "/summary.csv", "stage,rank,core");
     CheckContains(options.outputDir + "/analysis.md", "bottleneck");
     CheckContains(options.outputDir + "/report.html", "Bottleneck First");
     CheckContains(options.outputDir + "/report.html", "Timeline");
     CheckContains(options.outputDir + "/report.html", "first_start_cycle");
+    const std::string htmlReport = ReadFile(options.outputDir + "/report.html");
+    CheckTextContains("report.html", htmlReport,
+                      "peer_ipc_to_output</td><td>101105</td><td>105105</td><td>4000</td><td>4000</td><td>80");
     CheckContains(options.outputDir + "/ai_prompt.md", "TileXR collective profiling");
 
     options.outputDir = "/tmp/tilexr_perf_report_test_nested/a/b";
@@ -163,6 +187,18 @@ void TestPerfReportSummariesAndFiles()
             TileXRCollectives::Host::WritePerfTraceReports(header, stats, options),
             TileXR::TILEXR_SUCCESS);
     CheckFileMissingOrDoesNotContain(options.outputDir + "/ai_prompt.md", "stale prompt");
+
+    TileXR::TileXRPerfTraceHeader invalidHeader = header;
+    invalidHeader.stageCount = TileXR::TILEXR_PERF_STAGE_COUNT + 1;
+    CheckEq("WritePerfTraceReports rejects invalid stage count",
+            TileXRCollectives::Host::WritePerfTraceReports(invalidHeader, stats, options),
+            TileXR::TILEXR_ERROR_PARA_CHECK_FAIL);
+
+    invalidHeader = header;
+    invalidHeader.cycleToUsDivisor = 0;
+    CheckEq("WritePerfTraceReports rejects invalid cycle divisor",
+            TileXRCollectives::Host::WritePerfTraceReports(invalidHeader, stats, options),
+            TileXR::TILEXR_ERROR_PARA_CHECK_FAIL);
 }
 
 } // namespace

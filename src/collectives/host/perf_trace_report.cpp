@@ -175,6 +175,15 @@ double StatSumUs(const TileXR::TileXRPerfTraceHeader &header, const TileXR::Tile
     return TileXR::PerfTraceCyclesToUs(stat.sumCycles, header.cycleToUsDivisor);
 }
 
+bool IsValidTraceHeader(const TileXR::TileXRPerfTraceHeader &header)
+{
+    return header.magic == TileXR::TILEXR_PERF_TRACE_MAGIC &&
+        header.version == TileXR::TILEXR_PERF_TRACE_VERSION &&
+        header.stageCount > 0 &&
+        header.stageCount <= TileXR::TILEXR_PERF_STAGE_COUNT &&
+        header.cycleToUsDivisor != 0;
+}
+
 std::string BuildTraceJson(const TileXR::TileXRPerfTraceHeader &header,
                            const std::vector<TileXR::TileXRPerfCoreStageStats> &stats)
 {
@@ -369,14 +378,19 @@ std::vector<PerfStageSummary> SummarizePerfTrace(
     const TileXR::TileXRPerfTraceHeader &header,
     const std::vector<TileXR::TileXRPerfCoreStageStats> &stats)
 {
-    std::vector<PerfStageSummary> summaries(header.stageCount);
-    for (uint32_t stageId = 0; stageId < header.stageCount; ++stageId) {
+    const uint32_t stageCount = std::min(header.stageCount, TileXR::TILEXR_PERF_STAGE_COUNT);
+    if (stageCount == 0) {
+        return {};
+    }
+
+    std::vector<PerfStageSummary> summaries(stageCount);
+    for (uint32_t stageId = 0; stageId < stageCount; ++stageId) {
         summaries[stageId].stageId = stageId;
         summaries[stageId].stageName = PerfStageName(stageId);
     }
 
     for (const auto &stat : stats) {
-        if (stat.count == 0 || stat.stageId >= header.stageCount) {
+        if (stat.count == 0 || stat.stageId >= stageCount) {
             continue;
         }
 
@@ -446,6 +460,10 @@ int WritePerfTraceReports(
     const std::vector<TileXR::TileXRPerfCoreStageStats> &stats,
     const PerfReportOptions &options)
 {
+    if (!IsValidTraceHeader(header)) {
+        return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+
     if (!EnsureOutputDir(options.outputDir)) {
         return TileXR::TILEXR_ERROR_INTERNAL;
     }
