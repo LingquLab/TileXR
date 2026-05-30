@@ -9,20 +9,71 @@
 #
 
 include(GNUInstallDirs)
+include(CMakePushCheckState)
 include(CheckIncludeFileCXX)
+include(CheckCXXSourceCompiles)
 
-set(CMAKE_REQUIRED_INCLUDES
+set(TILEXR_PTO_SDMA_INCLUDE_DIRS
         ${ASCEND_HOME_PATH}/${ARCH}-linux/include
         ${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc
         ${ASCEND_DRIVER_PATH}/kernel/inc)
+
+cmake_push_check_state(RESET)
+set(CMAKE_REQUIRED_INCLUDES
+        ${TILEXR_PTO_SDMA_INCLUDE_DIRS})
 check_include_file_cxx("pto/npu/comm/async/sdma/sdma_workspace_manager.hpp" TILEXR_HAVE_PTO_SDMA_WORKSPACE)
-check_include_file_cxx("pto/npu/comm/async/sdma/sdma_async_intrin.hpp" TILEXR_HAVE_PTO_SDMA_INTRIN)
-if(TILEXR_HAVE_PTO_SDMA_WORKSPACE AND TILEXR_HAVE_PTO_SDMA_INTRIN)
+
+if(DEFINED CMAKE_TRY_COMPILE_TARGET_TYPE)
+    set(_tilexr_had_try_compile_target_type ON)
+    set(_tilexr_saved_try_compile_target_type "${CMAKE_TRY_COMPILE_TARGET_TYPE}")
+else()
+    set(_tilexr_had_try_compile_target_type OFF)
+endif()
+set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
+check_cxx_source_compiles("
+#include <type_traits>
+#include \"pto/npu/comm/async/sdma/sdma_workspace_manager.hpp\"
+int main()
+{
+    pto::comm::sdma::SdmaWorkspaceManager manager;
+    static_assert(std::is_same<decltype(manager.Init()), bool>::value, \"Init must return bool\");
+    static_assert(std::is_same<decltype(manager.Finalize()), void>::value, \"Finalize must return void\");
+    void *workspace = manager.GetWorkspaceAddr();
+    (void)workspace;
+    return 0;
+}
+" TILEXR_HAVE_PTO_SDMA_WORKSPACE_API)
+if(_tilexr_had_try_compile_target_type)
+    set(CMAKE_TRY_COMPILE_TARGET_TYPE "${_tilexr_saved_try_compile_target_type}")
+else()
+    unset(CMAKE_TRY_COMPILE_TARGET_TYPE)
+endif()
+cmake_pop_check_state()
+
+set(TILEXR_HAVE_PTO_SDMA_INTRIN OFF)
+foreach(_tilexr_pto_sdma_include_dir IN LISTS TILEXR_PTO_SDMA_INCLUDE_DIRS)
+    if(EXISTS "${_tilexr_pto_sdma_include_dir}/pto/npu/comm/async/sdma/sdma_async_intrin.hpp")
+        set(TILEXR_HAVE_PTO_SDMA_INTRIN ON)
+    endif()
+endforeach()
+
+if(TILEXR_HAVE_PTO_SDMA_WORKSPACE AND TILEXR_HAVE_PTO_SDMA_WORKSPACE_API AND TILEXR_HAVE_PTO_SDMA_INTRIN)
     set(TILEXR_HAVE_PTO_SDMA ON)
 else()
     set(TILEXR_HAVE_PTO_SDMA OFF)
 endif()
 message(STATUS "TILEXR_HAVE_PTO_SDMA: ${TILEXR_HAVE_PTO_SDMA}")
+
+if(TILEXR_HAVE_PTO_SDMA)
+    set(TILEXR_HAVE_PTO_SDMA_VALUE 1)
+else()
+    set(TILEXR_HAVE_PTO_SDMA_VALUE 0)
+endif()
+
+configure_file(
+        ${CMAKE_CURRENT_SOURCE_DIR}/../include/tilexr_sdma_config.h.in
+        ${CMAKE_CURRENT_BINARY_DIR}/include/tilexr_sdma_config.h
+        @ONLY)
 
 set(TILEXR_SOURCE_FILE tilexr_comm.cpp
         comm_wrap.cpp
@@ -52,6 +103,7 @@ endif()
 
 target_include_directories(tile-comm
         PUBLIC
+        ${CMAKE_CURRENT_BINARY_DIR}/include
         ${CMAKE_CURRENT_SOURCE_DIR}/../include
         ${ASCEND_DRIVER_PATH}/kernel/inc
         ${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc/
@@ -75,11 +127,13 @@ target_link_libraries(tile-comm
         runtime
         profapi
         ascend_hal
+        nnopbase
         dl
 )
 
 install(TARGETS tile-comm LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR})
 install(FILES
+        ${CMAKE_CURRENT_BINARY_DIR}/include/tilexr_sdma_config.h
         ${CMAKE_CURRENT_SOURCE_DIR}/../include/tilexr_api.h
         ${CMAKE_CURRENT_SOURCE_DIR}/../include/tilexr_types.h
         ${CMAKE_CURRENT_SOURCE_DIR}/../include/comm_args.h
