@@ -46,8 +46,16 @@ for header in comm_args.h tilexr_sdma_types.h; do
     fi
 done
 
+if command -v bisheng >/dev/null 2>&1; then
+    DEMO_OPTION="-DBUILD_TILEXR_SDMA_DEMO=ON"
+else
+    echo "WARN: bisheng not found; TileXR SDMA demo target will be skipped."
+    DEMO_OPTION="-DBUILD_TILEXR_SDMA_DEMO=OFF"
+fi
+
 cmake -S "${SCRIPT_DIR}" -B "${TEST_BUILD}" \
-    -DCMAKE_INSTALL_PREFIX="${TEST_INSTALL}"
+    -DCMAKE_INSTALL_PREFIX="${TEST_INSTALL}" \
+    ${DEMO_OPTION}
 cmake --build "${TEST_BUILD}" --target install -j"$(nproc)"
 
 echo "SDMA tests installed to ${TEST_INSTALL}/bin"
