@@ -22,6 +22,7 @@ void TestAvailableRejectsInvalidArgs()
 {
     bool available = true;
     CHECK_EQ(TileXRSDMAAvailable(nullptr, &available), TileXR::TILEXR_ERROR_PARA_CHECK_FAIL);
+    CHECK_EQ(available, true);
     CHECK_EQ(TileXRSDMAAvailable(reinterpret_cast<TileXRCommPtr>(0x1), nullptr),
              TileXR::TILEXR_ERROR_PARA_CHECK_FAIL);
 }
@@ -30,6 +31,7 @@ void TestWorkspaceRejectsInvalidArgs()
 {
     GM_ADDR workspace = reinterpret_cast<GM_ADDR>(0x1234);
     CHECK_EQ(TileXRGetSDMAWorkspaceDev(nullptr, &workspace), TileXR::TILEXR_ERROR_PARA_CHECK_FAIL);
+    CHECK_EQ(workspace, reinterpret_cast<GM_ADDR>(0x1234));
     CHECK_EQ(TileXRGetSDMAWorkspaceDev(reinterpret_cast<TileXRCommPtr>(0x1), nullptr),
              TileXR::TILEXR_ERROR_PARA_CHECK_FAIL);
 }
