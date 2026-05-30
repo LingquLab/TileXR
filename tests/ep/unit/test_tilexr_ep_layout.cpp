@@ -63,6 +63,11 @@ void TestWindowConfig()
     const int ret = TileXREp::TileXREpBuildWindowConfig(
         2, 4, 8, 2, 8, TileXR::TILEXR_DATA_TYPE_FP16, &config);
     CheckInt("valid config ret", ret, TileXR::TILEXR_SUCCESS);
+    CheckInt64("rank size", config.rankSize, 2);
+    CheckInt64("bs", config.bs, 4);
+    CheckInt64("hidden size", config.h, 8);
+    CheckInt64("topk", config.topK, 2);
+    CheckInt64("moe experts", config.moeExpertNum, 8);
     CheckInt64("local experts", config.localExpertNum, 4);
     CheckInt64("dtype bytes", config.dtypeBytes, 2);
     CheckInt64("max routes", config.maxRoutesPerSrc, 8);

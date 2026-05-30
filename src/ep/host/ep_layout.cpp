@@ -68,26 +68,28 @@ bool TileXREpIsSupportedDataType(TileXR::TileXRDataType dtype)
     return TileXREpDataTypeSize(dtype) > 0;
 }
 
-int TileXREpBuildWindowConfig(int64_t rankSize, int64_t maxTokensPerSrc, int64_t hiddenSize, int64_t topK,
-    int64_t expertNum, TileXR::TileXRDataType dtype, EpWindowConfig *config)
+int TileXREpBuildWindowConfig(int64_t rankSize, int64_t bs, int64_t h, int64_t topK,
+    int64_t moeExpertNum, TileXR::TileXRDataType dtype, EpWindowConfig *out)
 {
-    if (config == nullptr || !IsPositive(rankSize) || !IsPositive(maxTokensPerSrc) || !IsPositive(hiddenSize) ||
-        !IsPositive(topK) || !IsPositive(expertNum) || expertNum % rankSize != 0 || !TileXREpIsSupportedDataType(dtype)) {
+    if (out == nullptr || !IsPositive(rankSize) || !IsPositive(bs) || !IsPositive(h) || !IsPositive(topK) ||
+        !IsPositive(moeExpertNum) || moeExpertNum % rankSize != 0 || !TileXREpIsSupportedDataType(dtype)) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
 
     EpWindowConfig next {};
     next.rankSize = rankSize;
-    next.localExpertNum = expertNum / rankSize;
+    next.bs = bs;
+    next.h = h;
     next.topK = topK;
-    next.hiddenSize = hiddenSize;
+    next.moeExpertNum = moeExpertNum;
+    next.localExpertNum = moeExpertNum / rankSize;
     next.dtypeBytes = TileXREpDataTypeSize(dtype);
 
-    if (!MulInt64(maxTokensPerSrc, topK, &next.maxRoutesPerSrc)) {
+    if (!MulInt64(bs, topK, &next.maxRoutesPerSrc)) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
 
-    if (!MulInt64(hiddenSize, next.dtypeBytes, &next.rowBytes)) {
+    if (!MulInt64(h, next.dtypeBytes, &next.rowBytes)) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
 
@@ -128,11 +130,11 @@ int TileXREpBuildWindowConfig(int64_t rankSize, int64_t maxTokensPerSrc, int64_t
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
 
-    *config = next;
+    *out = next;
     return TileXR::TILEXR_SUCCESS;
 }
 
-int TileXREpDstRank(int expertId, int localExpertNum)
+int TileXREpDstRank(int32_t expertId, int64_t localExpertNum)
 {
     if (expertId < 0 || localExpertNum <= 0) {
         return static_cast<int>(TileXR::TILEXR_INVALID_VALUE);
@@ -140,7 +142,7 @@ int TileXREpDstRank(int expertId, int localExpertNum)
     return expertId / localExpertNum;
 }
 
-int TileXREpLocalExpert(int expertId, int localExpertNum)
+int TileXREpLocalExpert(int32_t expertId, int64_t localExpertNum)
 {
     if (expertId < 0 || localExpertNum <= 0) {
         return static_cast<int>(TileXR::TILEXR_INVALID_VALUE);
