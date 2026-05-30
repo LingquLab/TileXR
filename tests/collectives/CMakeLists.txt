@@ -219,6 +219,10 @@ target_link_libraries(test_tilexr_collectives_header_compile
     ${TILEXR_COLLECTIVES_TEST_TARGET}
 )
 
+target_link_libraries(test_tilexr_perf_trace_layout
+    ${TILEXR_COMM_TEST_TARGET}
+)
+
 target_link_directories(test_tilexr_collectives_correctness PRIVATE
     ${TILEXR_COLLECTIVES_TEST_LINK_DIRS}
 )

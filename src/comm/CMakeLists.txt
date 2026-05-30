@@ -62,6 +62,7 @@ install(FILES
         ${CMAKE_CURRENT_SOURCE_DIR}/../include/tilexr_types.h
         ${CMAKE_CURRENT_SOURCE_DIR}/../include/comm_args.h
         ${CMAKE_CURRENT_SOURCE_DIR}/../include/tilexr_sync.h
+        ${CMAKE_CURRENT_SOURCE_DIR}/../include/tilexr_perf_trace.h
         ${CMAKE_CURRENT_SOURCE_DIR}/../include/tilexr_udma.h
         ${CMAKE_CURRENT_SOURCE_DIR}/../include/tilexr_udma_reg.h
         ${CMAKE_CURRENT_SOURCE_DIR}/../include/tilexr_udma_types.h

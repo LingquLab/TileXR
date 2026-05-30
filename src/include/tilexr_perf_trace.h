@@ -4,6 +4,12 @@
 #include <cstddef>
 #include <cstdint>
 
+#if defined(__CCE__) && defined(__CCE_IS_AICORE__)
+#define TILEXR_PERF_TRACE_INLINE __attribute__((always_inline)) inline __aicore__
+#else
+#define TILEXR_PERF_TRACE_INLINE inline
+#endif
+
 namespace TileXR {
 
 constexpr uint32_t TILEXR_PERF_TRACE_MAGIC = 0x54585054u; // TXPT
@@ -44,6 +50,7 @@ struct TileXRPerfTraceHeader {
     uint32_t magic = TILEXR_PERF_TRACE_MAGIC;
     uint32_t version = TILEXR_PERF_TRACE_VERSION;
     uint32_t headerSize = sizeof(TileXRPerfTraceHeader);
+    // Stage descriptions are static schema metadata; this records their ABI size.
     uint32_t stageDescSize = sizeof(uint32_t) * 4 + TILEXR_PERF_MAX_STAGE_NAME;
     uint32_t coreStageStatsSize = sizeof(uint32_t) * 4 + sizeof(uint64_t) * 8;
     uint32_t flags = 0;
@@ -84,14 +91,14 @@ struct TileXRPerfCoreStageStats {
     uint64_t aux1 = 0;
 };
 
-inline size_t PerfTraceStatsOffset(uint32_t rank, uint32_t core, uint32_t stage,
-                                   uint32_t maxCoreCount, uint32_t stageCount)
+TILEXR_PERF_TRACE_INLINE size_t PerfTraceStatsOffset(uint32_t rank, uint32_t core, uint32_t stage,
+                                                     uint32_t maxCoreCount, uint32_t stageCount)
 {
     return (static_cast<size_t>(rank) * maxCoreCount * stageCount) +
         (static_cast<size_t>(core) * stageCount) + stage;
 }
 
-inline uint32_t PerfTraceCycleDivisor(PerfChipClass chipClass)
+TILEXR_PERF_TRACE_INLINE uint32_t PerfTraceCycleDivisor(PerfChipClass chipClass)
 {
     return chipClass == PerfChipClass::A5 ? 1000u : 50u;
 }
@@ -102,5 +109,7 @@ inline double PerfTraceCyclesToUs(uint64_t cycles, uint32_t divisor)
 }
 
 } // namespace TileXR
+
+#undef TILEXR_PERF_TRACE_INLINE
 
 #endif // TILEXR_PERF_TRACE_H
