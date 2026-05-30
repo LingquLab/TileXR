@@ -48,6 +48,7 @@ MANIFEST.in
 .claude/settings.local.json
 
 # custom
+.worktrees/
 op-simulator/build
 op-simulator/kernel_file
 op-simulator/op
