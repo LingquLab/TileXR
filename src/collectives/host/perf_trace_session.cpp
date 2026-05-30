@@ -47,7 +47,7 @@ int PreparePerfTraceLaunch(PerfTraceSession *session, const TileXR::CommArgs &co
 
     session->hostStats.clear();
     if (commArgs.rank < 0 || commArgs.rankSize <= 0 || commArgs.rank >= commArgs.rankSize ||
-        blockDim == 0 || count < 0) {
+        commArgs.rankSize > TileXR::TILEXR_MAX_RANK_SIZE || blockDim == 0 || count < 0) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
 
@@ -67,7 +67,7 @@ int PreparePerfTraceLaunch(PerfTraceSession *session, const TileXR::CommArgs &co
     session->header.cycleToUsDivisor =
         (commArgs.extraFlag & TileXR::ExtraFlag::TOPO_910A5) != 0 ? 1000u : 50u;
 
-    if (commArgs.rankSize > TileXR::TILEXR_MAX_RANK_SIZE || session->header.stageCount == 0) {
+    if (session->header.stageCount == 0) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
 

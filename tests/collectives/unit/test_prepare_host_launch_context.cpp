@@ -125,6 +125,18 @@ void CheckPerfTraceLaunchMetadata()
     CheckPointer("zero rankSize deviceTrace", deviceTrace, nullptr);
     CheckMagic("zero rankSize stats size", static_cast<int64_t>(session.hostStats.size()), 0);
 
+    session.header.rankSize = 7;
+    commArgs.rankSize = TileXR::TILEXR_MAX_RANK_SIZE + 1;
+    deviceTrace = reinterpret_cast<const void *>(0x1);
+    CheckStatus("PreparePerfTraceLaunch oversized rankSize",
+                TileXRCollectives::Host::PreparePerfTraceLaunch(
+                    &session, commArgs, TileXR::TileXRType::ALL_GATHER,
+                    TileXR::TILEXR_DATA_TYPE_FP16, 4, 4096, nullptr, &deviceTrace),
+                TileXR::TILEXR_ERROR_PARA_CHECK_FAIL);
+    CheckPointer("oversized rankSize deviceTrace", deviceTrace, nullptr);
+    CheckMagic("oversized rankSize stats size", static_cast<int64_t>(session.hostStats.size()), 0);
+    CheckMagic("oversized rankSize preserves header", session.header.rankSize, 7);
+
     session.config.enabled = 0;
     deviceTrace = reinterpret_cast<const void *>(0x1);
     CheckStatus("PreparePerfTraceLaunch disabled",
