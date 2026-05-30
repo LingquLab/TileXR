@@ -27,6 +27,7 @@ set(TILEXR_COLLECTIVES_SOURCE_FILE
         host/collective_utils.cpp
         host/collective_kernel.cpp
         host/perf_trace_report.cpp
+        host/perf_trace_session.cpp
         host/tilexr_collectives.cpp
         ${TILEXR_COLLECTIVES_KERNEL_EMBED_CPP}
 )
@@ -65,5 +66,8 @@ target_link_libraries(tilexr-collectives
 )
 
 install(TARGETS tilexr-collectives LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR})
-install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/../include/tilexr_collectives.h
+install(FILES
+        ${CMAKE_CURRENT_SOURCE_DIR}/../include/tilexr_collectives.h
+        ${CMAKE_CURRENT_SOURCE_DIR}/../include/tilexr_collectives_perf.h
+        ${CMAKE_CURRENT_SOURCE_DIR}/../include/tilexr_perf_trace.h
         DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
