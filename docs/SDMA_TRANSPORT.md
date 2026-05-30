@@ -63,10 +63,9 @@ Device wrappers build a PTO `SdmaSession` from `args->sdmaWorkspacePtr`, post
 
 ## CANN Compatibility
 
-The implementation is intended for the PTO SDMA interfaces in CANN 9.0.0 and
-CANN 9.1.0. Local validation has confirmed CANN 9.1.0; CANN 9.0.0 remains
-pending until a 9.0 install is available. TileXR isolates PTO SDMA header
-differences in `tilexr_sdma_compat.h`.
+The implementation is validated with the PTO SDMA interfaces in CANN 9.0.0 and
+CANN 9.1.0. TileXR isolates PTO SDMA header differences in
+`tilexr_sdma_compat.h`.
 
 Runtime must load `libascend_hal.so` from the driver path, typically:
 
@@ -115,7 +114,7 @@ bash tests/sdma/demo/run_tilexr_sdma_demo.sh "${TILEXR_CANN_91_HOME}" 0 64 4096 
 
 ## Current Validation Status
 
-Local validation in this branch:
+Local validation in this branch on the development host:
 
 - CANN 9.1.0 build passed with `TILEXR_HAVE_PTO_SDMA: ON`.
 - CANN 9.1.0 SDMA unit tests passed.
@@ -125,14 +124,32 @@ Local validation in this branch:
   `libascend_hal.so not found`; if devlib HAL is allowed, the symptom can become
   `aclInit ret=500000`.
 
-Pending validation:
+Hardware validation on `blue`:
 
-- CANN 9.0.0 build and unit tests; no local CANN 9.0 install is present in this
-  workspace.
-- Actual SDMA data-plane copy on hardware. Run this on `blue` or another target
-  Ascend host before claiming demo copy success.
-- Two-version release acceptance, including CANN 9.0.0 and CANN 9.1.0 unit
-  tests plus demo copy success.
+- Verification directory:
+  `/home/d00520898/tilexr_sdma_verify_20260530/TileXR`.
+- Hardware: 8 x Ascend 910B3, driver `25.5.0`, device 0 used for demo.
+- CANN 9.0.0 path: `/home/gsn3/Ascend/cann-9.0.0`.
+- CANN 9.1.0 path:
+  `/home/d00520898/tilexr_sdma_verify_20260530/TileXR/env/cann/cann-9.1.0`.
+- Both CANN versions configured with `TILEXR_HAVE_PTO_SDMA: ON` and linked
+  `libnnopbase.so` from `${ARCH}-linux/lib64` while resolving
+  `libascend_hal.so` from `/usr/local/Ascend/driver/lib64/driver`.
+- `bash tests/sdma/run_tests.sh <cann>` passed for both CANN 9.0.0 and 9.1.0.
+- `bash tests/sdma/demo/run_tilexr_sdma_demo.sh <cann> 0 64 4096 1048576`
+  passed for both versions. Logs show STARS stream creation, STARS query
+  completion, `ExtraFlag::SDMA`, non-null SDMA workspace, and:
+
+```text
+PASS TileXR SDMA copied 64 bytes correctly
+PASS TileXR SDMA copied 4096 bytes correctly
+PASS TileXR SDMA copied 1048576 bytes correctly
+```
+
+Remaining validation:
+
+- Broader parameter/performance matrix below; current demo covers one device,
+  one stream, channel group `0`, and sizes 64 B, 4 KiB, and 1 MiB.
 
 ## Deferred Stress And Performance Scope
 
