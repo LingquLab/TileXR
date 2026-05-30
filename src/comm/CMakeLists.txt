@@ -9,6 +9,20 @@
 #
 
 include(GNUInstallDirs)
+include(CheckIncludeFileCXX)
+
+set(CMAKE_REQUIRED_INCLUDES
+        ${ASCEND_HOME_PATH}/${ARCH}-linux/include
+        ${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc
+        ${ASCEND_DRIVER_PATH}/kernel/inc)
+check_include_file_cxx("pto/npu/comm/async/sdma/sdma_workspace_manager.hpp" TILEXR_HAVE_PTO_SDMA_WORKSPACE)
+check_include_file_cxx("pto/npu/comm/async/sdma/sdma_async_intrin.hpp" TILEXR_HAVE_PTO_SDMA_INTRIN)
+if(TILEXR_HAVE_PTO_SDMA_WORKSPACE AND TILEXR_HAVE_PTO_SDMA_INTRIN)
+    set(TILEXR_HAVE_PTO_SDMA ON)
+else()
+    set(TILEXR_HAVE_PTO_SDMA OFF)
+endif()
+message(STATUS "TILEXR_HAVE_PTO_SDMA: ${TILEXR_HAVE_PTO_SDMA}")
 
 set(TILEXR_SOURCE_FILE tilexr_comm.cpp
         comm_wrap.cpp
@@ -29,6 +43,12 @@ set(TILEXR_SOURCE_FILE tilexr_comm.cpp
 )
 
 add_library(tile-comm SHARED ${TILEXR_SOURCE_FILE})
+
+if(TILEXR_HAVE_PTO_SDMA)
+    target_compile_definitions(tile-comm PRIVATE TILEXR_HAVE_PTO_SDMA=1)
+else()
+    target_compile_definitions(tile-comm PRIVATE TILEXR_HAVE_PTO_SDMA=0)
+endif()
 
 target_include_directories(tile-comm
         PUBLIC
@@ -68,6 +88,7 @@ install(FILES
         ${CMAKE_CURRENT_SOURCE_DIR}/../include/tilexr_udma_reg.h
         ${CMAKE_CURRENT_SOURCE_DIR}/../include/tilexr_udma_types.h
         ${CMAKE_CURRENT_SOURCE_DIR}/../include/tilexr_sdma_types.h
+        ${CMAKE_CURRENT_SOURCE_DIR}/../include/tilexr_sdma_compat.h
         DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 install(CODE "string(CONCAT _tilexr_optional_header \"tilexr_\" \"collectives.h\")
 if(IS_ABSOLUTE \"${CMAKE_INSTALL_INCLUDEDIR}\")

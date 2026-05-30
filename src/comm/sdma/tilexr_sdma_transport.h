@@ -6,6 +6,8 @@
 #ifndef TILEXR_SDMA_TRANSPORT_H
 #define TILEXR_SDMA_TRANSPORT_H
 
+#include <memory>
+
 #include "comm_args.h"
 #include "tilexr_sdma_types.h"
 
@@ -17,7 +19,7 @@ struct TileXRSDMATransportOptions {
 
 class TileXRSDMATransport {
 public:
-    TileXRSDMATransport() = default;
+    TileXRSDMATransport();
     ~TileXRSDMATransport();
     TileXRSDMATransport(const TileXRSDMATransport&) = delete;
     TileXRSDMATransport& operator=(const TileXRSDMATransport&) = delete;
@@ -30,12 +32,15 @@ public:
     SDMAInitStatus GetLastStatus() const;
 
 private:
+    struct Impl;
+
     static bool EnvEnabled();
 
     TileXRSDMATransportOptions options_ {};
     bool available_ = false;
     GM_ADDR workspaceDev_ = nullptr;
     SDMAInitStatus lastStatus_ = SDMAInitStatus::DISABLED_BY_ENV;
+    std::unique_ptr<Impl> impl_;
 };
 
 } // namespace TileXR

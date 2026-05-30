@@ -37,6 +37,8 @@ export LD_LIBRARY_PATH="${INSTALL_DIR}/lib:${TILEXR_ROOT}/install/lib:${ASCEND_D
 "${INSTALL_DIR}/bin/test_tilexr_sdma_api_invalid"
 "${INSTALL_DIR}/bin/test_tilexr_sdma_transport_disabled"
 "${INSTALL_DIR}/bin/test_tilexr_sdma_comm_wiring"
+"${INSTALL_DIR}/bin/test_tilexr_sdma_source_guard"
+bash "${SCRIPT_DIR}/check_runtime_deps.sh" "${TILEXR_ROOT}/install/lib/libtile-comm.so"
 
 if command -v npu-smi >/dev/null 2>&1; then
     "${INSTALL_DIR}/bin/test_tilexr_sdma_disabled_comm"
