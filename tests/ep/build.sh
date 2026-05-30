@@ -31,7 +31,7 @@ esac
 BUILD_DIR="${SCRIPT_DIR}/build"
 INSTALL_DIR="${SCRIPT_DIR}/install"
 
-rm -rf "${BUILD_DIR}"
+rm -rf "${BUILD_DIR}" "${INSTALL_DIR}"
 mkdir -p "${BUILD_DIR}" "${INSTALL_DIR}"
 
 cmake -S "${SCRIPT_DIR}" -B "${BUILD_DIR}" \
