@@ -31,17 +31,46 @@ if [ "${ARCH}" = "arm64" ]; then
     export ARCH="aarch64"
 fi
 export ASCEND_DRIVER_PATH="${ASCEND_DRIVER_PATH:-/usr/local/Ascend/driver}"
-export LD_LIBRARY_PATH="${INSTALL_DIR}/lib:${TILEXR_ROOT}/install/lib:${ASCEND_DRIVER_PATH}/lib64/driver:${ASCEND_HOME_PATH}/${ARCH}-linux/lib64:${LD_LIBRARY_PATH:-}"
+SANITIZED_LD_LIBRARY_PATH=""
+IFS=':' read -r -a LD_LIBRARY_PATH_PARTS <<< "${LD_LIBRARY_PATH:-}"
+for path in "${LD_LIBRARY_PATH_PARTS[@]}"; do
+    if [[ -z "${path}" || "${path}" == *devlib* ]]; then
+        continue
+    fi
+    if [ -z "${SANITIZED_LD_LIBRARY_PATH}" ]; then
+        SANITIZED_LD_LIBRARY_PATH="${path}"
+    else
+        SANITIZED_LD_LIBRARY_PATH="${SANITIZED_LD_LIBRARY_PATH}:${path}"
+    fi
+done
+export LD_LIBRARY_PATH="${INSTALL_DIR}/lib:${TILEXR_ROOT}/install/lib:${ASCEND_DRIVER_PATH}/lib64/driver:${ASCEND_HOME_PATH}/${ARCH}-linux/lib64"
+if [ -n "${SANITIZED_LD_LIBRARY_PATH}" ]; then
+    export LD_LIBRARY_PATH="${LD_LIBRARY_PATH}:${SANITIZED_LD_LIBRARY_PATH}"
+fi
+
+bash "${SCRIPT_DIR}/check_runtime_deps.sh" "${TILEXR_ROOT}/install/lib/libtile-comm.so"
+
+TILE_COMM_DEPS=$(ldd "${TILEXR_ROOT}/install/lib/libtile-comm.so" || true)
+HAL_AVAILABLE=1
+if echo "${TILE_COMM_DEPS}" | grep -E 'libascend_hal.so => not found' >/dev/null; then
+    HAL_AVAILABLE=0
+fi
 
 "${INSTALL_DIR}/bin/test_tilexr_sdma_metadata"
-"${INSTALL_DIR}/bin/test_tilexr_sdma_api_invalid"
 "${INSTALL_DIR}/bin/test_tilexr_sdma_transport_disabled"
 "${INSTALL_DIR}/bin/test_tilexr_sdma_comm_wiring"
 "${INSTALL_DIR}/bin/test_tilexr_sdma_source_guard"
-bash "${SCRIPT_DIR}/check_runtime_deps.sh" "${TILEXR_ROOT}/install/lib/libtile-comm.so"
 
-if command -v npu-smi >/dev/null 2>&1; then
+if [ "${HAL_AVAILABLE}" -eq 1 ]; then
+    "${INSTALL_DIR}/bin/test_tilexr_sdma_api_invalid"
+else
+    echo "Skip test_tilexr_sdma_api_invalid: libascend_hal.so not found"
+fi
+
+if [ "${HAL_AVAILABLE}" -eq 1 ] && command -v npu-smi >/dev/null 2>&1; then
     "${INSTALL_DIR}/bin/test_tilexr_sdma_disabled_comm"
+elif [ "${HAL_AVAILABLE}" -eq 0 ]; then
+    echo "Skip test_tilexr_sdma_disabled_comm: libascend_hal.so not found"
 else
     echo "Skip test_tilexr_sdma_disabled_comm: npu-smi not found"
 fi

@@ -8,20 +8,7 @@ if [ ! -f "${lib}" ]; then
     exit 1
 fi
 
-ld_path=""
-IFS=':' read -r -a ld_parts <<< "${LD_LIBRARY_PATH:-}"
-for part in "${ld_parts[@]}"; do
-    if [[ -z "${part}" || "${part}" == *devlib* ]]; then
-        continue
-    fi
-    if [ -z "${ld_path}" ]; then
-        ld_path="${part}"
-    else
-        ld_path="${ld_path}:${part}"
-    fi
-done
-
-deps=$(LD_LIBRARY_PATH="${ld_path}" ldd "${lib}")
+deps=$(ldd "${lib}")
 echo "${deps}"
 
 if echo "${deps}" | grep -E 'libascend_hal.so => .*devlib' >/dev/null; then

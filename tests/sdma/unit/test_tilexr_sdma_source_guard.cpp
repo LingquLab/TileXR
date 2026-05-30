@@ -61,6 +61,7 @@ void TestCommSourcesDoNotUseShmem()
         "src/comm/sdma/tilexr_sdma_transport.h",
     };
     const std::vector<std::string> forbidden = {
+        "shmem",
         "shmem.h",
         "libshmem",
         "aclshmem",
