@@ -76,6 +76,16 @@ kill_remaining_children() {
   done
 }
 
+has_running_children() {
+  local pid
+  for pid in "${pids[@]}"; do
+    if kill -0 "${pid}" 2>/dev/null; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 for ((rank = 0; rank < rank_size; rank++)); do
   log="collectives_correctness_rank${rank}.log"
   TILEXR_RANK_SIZE="${rank_size}" TILEXR_RANK="${rank}" TILEXR_COUNT="${count}" TILEXR_FIRST_NPU="${first_npu}" \
@@ -84,46 +94,34 @@ for ((rank = 0; rank < rank_size; rank++)); do
   pids+=("$!")
 done
 
-timeout_flag="${TMPDIR:-/tmp}/tilexr_collectives_correctness_timeout.$$"
-rm -f "${timeout_flag}"
-(
-  sleep "${timeout_sec}"
-  printf 1 > "${timeout_flag}"
-  echo "ERROR: Timed out after ${timeout_sec}s; killing remaining ranks" >&2
-  kill "${pids[@]}" 2>/dev/null || true
-  exit 124
-) &
-watchdog_pid="$!"
+trap 'echo "ERROR: interrupted; killing remaining ranks" >&2; kill_remaining_children; tail_logs; exit 130' INT TERM
 
-trap 'echo "ERROR: interrupted; killing remaining ranks" >&2; kill "${watchdog_pid}" 2>/dev/null || true; kill_remaining_children; tail_logs; rm -f "${timeout_flag}"; exit 130' INT TERM
-
-completed_count=0
+deadline=$((SECONDS + timeout_sec))
 status=0
-while (( completed_count < rank_size )); do
+while has_running_children; do
+  if (( SECONDS >= deadline )); then
+    echo "ERROR: Timed out after ${timeout_sec}s; killing remaining ranks" >&2
+    status=124
+    kill_remaining_children
+    tail_logs
+    trap - INT TERM
+    exit "${status}"
+  fi
+
   if wait -n; then
-    completed_count=$((completed_count + 1))
     continue
   else
     rc="$?"
   fi
 
-  if [[ -f "${timeout_flag}" ]]; then
-    status=124
-  else
-    echo "ERROR: rank process exited with status ${rc}; killing remaining ranks" >&2
-    status=1
-  fi
-  kill "${watchdog_pid}" 2>/dev/null || true
+  echo "ERROR: rank process exited with status ${rc}; killing remaining ranks" >&2
+  status=1
   kill_remaining_children
   tail_logs
-  rm -f "${timeout_flag}"
   trap - INT TERM
   exit "${status}"
 done
 
-kill "${watchdog_pid}" 2>/dev/null || true
-wait "${watchdog_pid}" 2>/dev/null || true
-rm -f "${timeout_flag}"
 trap - INT TERM
 
 exit 0

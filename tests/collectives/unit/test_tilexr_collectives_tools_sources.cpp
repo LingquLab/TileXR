@@ -211,9 +211,12 @@ void TestLauncherScripts()
     CheckContains(correctnessPath, correctness, "kill_remaining_children");
     CheckContains(correctnessPath, correctness, "tail_logs");
     CheckContains(correctnessPath, correctness, "Timed out after");
+    CheckContains(correctnessPath, correctness, "deadline=$((SECONDS + timeout_sec))");
+    CheckContains(correctnessPath, correctness, "has_running_children");
     CheckContains(correctnessPath, correctness, "wait -n");
-    CheckContains(correctnessPath, correctness, "completed_count");
     CheckDoesNotContain(correctnessPath, correctness, "wait -n -p completed_pid");
+    CheckDoesNotContain(correctnessPath, correctness, "watchdog_pid");
+    CheckDoesNotContain(correctnessPath, correctness, "timeout_flag");
     CheckContains(correctnessPath, correctness, "npu-smi info -l");
     CheckContains(correctnessPath, correctness, "tail -n");
     CheckContains(correctnessPath, correctness, "test_tilexr_collectives_correctness");
@@ -231,9 +234,12 @@ void TestLauncherScripts()
     CheckContains(perfPath, perf, "kill_remaining_children");
     CheckContains(perfPath, perf, "tail_logs");
     CheckContains(perfPath, perf, "Timed out after");
+    CheckContains(perfPath, perf, "deadline=$((SECONDS + timeout_sec))");
+    CheckContains(perfPath, perf, "has_running_children");
     CheckContains(perfPath, perf, "wait -n");
-    CheckContains(perfPath, perf, "completed_count");
     CheckDoesNotContain(perfPath, perf, "wait -n -p completed_pid");
+    CheckDoesNotContain(perfPath, perf, "watchdog_pid");
+    CheckDoesNotContain(perfPath, perf, "timeout_flag");
 }
 
 void TestCMakeWiring()
