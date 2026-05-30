@@ -171,6 +171,26 @@ int TileXRGetUDMARegistryDev(TileXRCommPtr comm, GM_ADDR &registryPtr)
     return TILEXR_SUCCESS;
 }
 
+int TileXRSDMAAvailable(TileXRCommPtr comm, bool *available)
+{
+    if (comm == nullptr || available == nullptr) {
+        TILEXR_LOG(ERROR) << "TileXRSDMAAvailable invalid input";
+        return TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    *available = false;
+    return TILEXR_SUCCESS;
+}
+
+int TileXRGetSDMAWorkspaceDev(TileXRCommPtr comm, GM_ADDR *workspace)
+{
+    if (comm == nullptr || workspace == nullptr) {
+        TILEXR_LOG(ERROR) << "TileXRGetSDMAWorkspaceDev invalid input";
+        return TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    *workspace = nullptr;
+    return TILEXR_SUCCESS;
+}
+
 void TileXRPrintDFX2Log(TileXRCommPtr comm)
 {
     if (comm == nullptr) {
