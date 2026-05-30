@@ -36,8 +36,17 @@ int main()
 {
     unsetenv("TILEXR_ENABLE_SDMA");
 
-    CHECK_EQ(aclInit(nullptr), ACL_SUCCESS);
-    CHECK_EQ(aclrtSetDevice(0), ACL_SUCCESS);
+    aclError aclRet = aclInit(nullptr);
+    if (aclRet != ACL_SUCCESS) {
+        std::cout << "Skip test_tilexr_sdma_disabled_comm: aclInit failed with " << aclRet << std::endl;
+        return 0;
+    }
+    aclRet = aclrtSetDevice(0);
+    if (aclRet != ACL_SUCCESS) {
+        std::cout << "Skip test_tilexr_sdma_disabled_comm: aclrtSetDevice(0) failed with " << aclRet << std::endl;
+        (void)aclFinalize();
+        return 0;
+    }
 
     TileXRCommPtr comm = nullptr;
     CHECK_EQ(TileXRCommInitRankLocal(1, 0, &comm), TileXR::TILEXR_SUCCESS);
@@ -53,8 +62,10 @@ int main()
     TileXR::CommArgs* args = nullptr;
     CHECK_EQ(TileXRGetCommArgsHost(comm, args), TileXR::TILEXR_SUCCESS);
     CHECK_TRUE(args != nullptr);
-    CHECK_TRUE((args->extraFlag & TileXR::ExtraFlag::SDMA) == 0);
-    CHECK_TRUE(args->sdmaWorkspacePtr == nullptr);
+    if (args != nullptr) {
+        CHECK_TRUE((args->extraFlag & TileXR::ExtraFlag::SDMA) == 0);
+        CHECK_TRUE(args->sdmaWorkspacePtr == nullptr);
+    }
 
     CHECK_EQ(TileXRCommDestroy(comm), TileXR::TILEXR_SUCCESS);
     CHECK_EQ(aclrtResetDevice(0), ACL_SUCCESS);

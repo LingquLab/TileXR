@@ -200,6 +200,9 @@ int TileXRComm::InitSDMA()
     if (sdmaWorkspaceDev_ == nullptr) {
         TILEXR_LOG(WARN) << "TileXR SDMA workspace is null, SDMA disabled";
         sdmaInitStatus_ = SDMAInitStatus::NULL_WORKSPACE;
+        commArgs_.extraFlag &= ~ExtraFlag::SDMA;
+        commArgs_.sdmaWorkspacePtr = nullptr;
+        sdmaWorkspaceDev_ = nullptr;
         sdmaTransport_.reset();
         return TILEXR_SUCCESS;
     }

@@ -98,7 +98,6 @@ target_link_libraries(test_tilexr_sdma_disabled_comm
     ${TILEXR_LIB}
     ascendcl
     runtime
-    ascend_hal
 )
 set(INSTALL_TARGETS
     test_tilexr_sdma_metadata
