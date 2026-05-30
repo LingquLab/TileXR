@@ -126,19 +126,23 @@ The tuple is written into the sender's slot in the receiver window. During `Loca
 
 The TileXR kernel follows the V2 flow with TileXR primitives:
 
+0. `ClearWindow`
+   - Clear this rank's receive-window source-slot headers before peers write into them.
+   - Publish a cleared flag and wait for all ranks to clear their receive windows.
+
 1. `AlltoAllDispatch`
-   - Each AIV handles a slice of `(BS * K)` routes.
+   - The logical operation can be sliced across `(BS * K)` routes, but the MVP launch uses one AIV block so fixed-slot counters are deterministic.
    - For each route, compute `dstRank` and `localExpert`.
    - Copy `x[tokenId]` into the current rank's fixed source slot inside `dstRank`'s receive window.
    - Write the metadata tuple next to the payload.
    - Accumulate per-destination send counts in the source slot header.
 
 2. `SetStatus`
-   - After all route writes for a destination are complete, publish a ready flag for `(dstRank, srcRank, epoch)`.
+   - After all route writes for all destinations are complete, publish the source rank's ready flag for the launch.
    - The flag value includes an epoch/magic value to prevent stale-window reads.
 
 3. `WaitDispatch`
-   - Each rank waits for all source ranks to publish ready flags into its receive window.
+   - Each rank waits for all source ranks to publish their launch ready flags.
    - Waits use `SyncCollectives` and its existing magic/value style.
 
 4. `LocalWindowCopy`
@@ -157,7 +161,7 @@ The MVP uses the existing first 2MB peer-memory flag area through `SyncCollectiv
 
 Each launch uses a monotonically changing magic value. The MVP host launcher obtains this value with `TileXRCommNextMagic(comm, &magic)` and passes `magic` to the kernel as an explicit launch argument.
 
-The protocol has one ready flag per `(destination rank, source rank)` for the MVP. More granular token-level flags are unnecessary while fixed source slots are used and the receiver waits for the full source slot to be complete.
+The protocol has one ready flag per source rank for the MVP. A source rank publishes the flag only after it has finished writing all destination windows for the launch, so each receiver can safely read its source slots after waiting for every source. More granular token-level flags are unnecessary while fixed source slots are used and the receiver waits for the full source slot to be complete.
 
 ## Error Handling
 
@@ -229,6 +233,7 @@ Add a second EP backend after the peer-memory MVP is correct:
 - Replace peer-memory remote writes with `UDMAPutSignalNbi`.
 - Keep the peer-memory backend as fallback when `CommArgs::extraFlag & ExtraFlag::UDMA` is not set.
 - Add A5/Ascend950 validation on hardware that supports TileXR UDMA.
+- Add multi-AIV route slicing after per-destination record offsets are made deterministic without serial slot counters.
 
 ## Open Decisions
 
