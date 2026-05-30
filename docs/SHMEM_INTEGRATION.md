@@ -1,6 +1,6 @@
 # shmem Integration Status
 
-**Updated:** 2026-05-29
+**Updated:** 2026-05-30
 
 This repository still contains `3rdparty/shmem`, but the current TileXR core communication and UDMA path do not use shmem as a runtime dependency.
 
@@ -81,3 +81,11 @@ Use the shmem submodule only when:
 - checking whether an upstream shmem API can replace TileXR-owned transport code in a future design.
 
 The production README and UDMA acceptance guides should continue to describe the TileXR-owned path unless the implementation changes.
+
+## SDMA Note
+
+TileXR SDMA transport is also TileXR-owned and does not revive the old
+shmem-backed design. The SDMA host manager may use CANN's
+`aclnnShmemSdmaStarsQuery*` symbols through PTO `SdmaWorkspaceManager` to obtain
+STARS queue metadata, but TileXR does not include or link shmem and does not use
+shmem data-copy APIs.

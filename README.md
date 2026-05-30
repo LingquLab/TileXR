@@ -2,7 +2,7 @@
 
 **TileXR** (eXtreme Rendezvous for Asynchronous Tile Communication) is a data-centric asynchronous communication runtime for Huawei Ascend NPUs. It moves communication control from coarse BSP-style kernel phases toward tile-level, AICore-driven rendezvous: data readiness, transport choice, and synchronization become explicit runtime state instead of a fixed all-ranks barrier.
 
-The project currently contains a core communication library, an optional TileXR collectives library, MC2 fused collective operators, a registered-memory UDMA prototype for A5 / Ascend950 hardware, and simulator/test infrastructure for Ascend C kernels.
+The project currently contains a core communication library, an optional TileXR collectives library, MC2 fused collective operators, a registered-memory UDMA prototype for A5 / Ascend950 hardware, an opt-in on-card SDMA copy transport, and simulator/test infrastructure for Ascend C kernels.
 
 ## Design Direction
 
@@ -21,6 +21,7 @@ The current codebase implements the base communication runtime, flag-based synch
 - **Tile-level synchronization**: device-side flag regions and magic values support reusable fine-grained synchronization rounds.
 - **MC2 fused operators**: AllGather+Add and AllGather+MatMul examples under `src/mc2/`.
 - **Registered-memory UDMA path**: host code registers ordinary `aclrtMalloc` device memory with `TileXRUDMARegister`; device kernels use `tilexr_udma.h` wrappers for put/get/signal.
+- **On-card SDMA transport**: an opt-in (`TILEXR_ENABLE_SDMA=1`) local GM-to-GM copy path. Host code queries it with `TileXRSDMAAvailable` / `TileXRGetSDMAWorkspaceDev`; device kernels use `tilexr_sdma.h` (`SDMACopyNbi`, `SDMAWait`). Separate from UDMA: SDMA is local to one device, UDMA targets registered remote memory.
 - **Operator simulator**: `op-simulator/` supports functional/performance simulation for selected AICore kernels without physical hardware.
 
 ## System Requirements
@@ -129,7 +130,8 @@ bash scripts/plog_grep.sh ERROR
 TileXR/
 |-- src/
 |   |-- comm/                 # Core communication runtime
-|   |   `-- udma/             # TileXR-owned HCCP/RA UDMA transport
+|   |   |-- udma/             # TileXR-owned HCCP/RA UDMA transport
+|   |   `-- sdma/             # On-card PTO SDMA local copy transport
 |   |-- collectives/          # Optional TileXR collectives library
 |   |-- include/              # Public C/C++ and device headers
 |   `-- mc2/                  # Fused collective operators
@@ -140,7 +142,8 @@ TileXR/
 |-- tests/                    # Host, communication, integration, and UDMA tests
 |   |-- collectives/          # Collectives source/unit checks and manual runners
 |   |-- comm/
-|   `-- udma/
+|   |-- udma/
+|   `-- sdma/                 # SDMA unit tests, integration test, and data-plane demo
 |-- scripts/                  # Build, setup, test, and utility scripts
 |-- 3rdparty/                 # spdlog plus optional hcomm, ops-transformer, shmem
 `-- docs/                     # Design, migration, and validation notes
@@ -192,6 +195,17 @@ The current UDMA path is TileXR-owned:
 
 If UDMA is unavailable, communicator initialization continues without setting `ExtraFlag::UDMA`. UDMA-specific registration or demo paths then report that UDMA is unavailable.
 
+### SDMA Local Transport
+
+SDMA is a first-class local on-card GM-to-GM copy path, separate from UDMA. It is disabled by default and enabled with `TILEXR_ENABLE_SDMA=1`.
+
+- `TileXRComm::InitSDMA()` owns a `TileXRSDMATransport` beside the UDMA transport. When enabled, it creates a PTO `pto::comm::sdma::SdmaWorkspaceManager`, stores its device workspace address in `CommArgs::sdmaWorkspacePtr`, and sets `ExtraFlag::SDMA`.
+- Host queries: `TileXRSDMAAvailable(comm, &available)` and `TileXRGetSDMAWorkspaceDev(comm, &workspace)`. The workspace pointer is owned by `TileXRComm` and must not be freed.
+- Device API: `src/include/tilexr_sdma.h` provides `TileXR::SDMACopyNbi` and `TileXR::SDMAWait`, accepting raw same-device GM pointers. It does not register memory or validate buffer ownership.
+- PTO SDMA header differences across CANN 9.0.0 / 9.1.0 are isolated in `src/include/tilexr_sdma_compat.h`.
+
+Enabled initialization is best-effort: if PTO SDMA headers or runtime resources are unavailable, communicator initialization continues without setting `ExtraFlag::SDMA`, and `SDMACopyNbi` returns event handle `0` while `SDMAWait` reports completion. See [docs/SDMA_TRANSPORT.md](docs/SDMA_TRANSPORT.md) for the full transport guide.
+
 ### MC2 Operators
 
 `src/mc2/` contains fused communication+compute examples following the ops-transformer host/tiling/kernel split:
@@ -239,6 +253,24 @@ See:
 - [tests/udma/README.md](tests/udma/README.md)
 - [tests/udma/QUICKSTART.md](tests/udma/QUICKSTART.md)
 - [tests/udma/demo/ASCEND_VERIFICATION.md](tests/udma/demo/ASCEND_VERIFICATION.md)
+
+## SDMA Validation
+
+Build and run the SDMA unit tests against a selected CANN install, then run the data-plane demo on a device:
+
+```bash
+bash tests/sdma/build.sh /path/to/cann
+bash tests/sdma/run_tests.sh /path/to/cann
+bash tests/sdma/demo/run_tilexr_sdma_demo.sh /path/to/cann 0 64 4096 1048576
+```
+
+Expected demo success line:
+
+```text
+PASS TileXR SDMA copied <bytes> bytes correctly
+```
+
+The unit tests are hardware-free; the demo requires a usable driver HAL/device runtime and resolves `libascend_hal.so` from `/usr/local/Ascend/driver/lib64/driver`. See [docs/SDMA_TRANSPORT.md](docs/SDMA_TRANSPORT.md) for enablement, the host/device API, CANN 9.0.0 / 9.1.0 acceptance steps, and current validation status.
 
 ## Collectives Validation
 
@@ -294,6 +326,7 @@ bash scripts/driver_fix.sh
 - [scripts/README.md](scripts/README.md): script reference and workflows
 - [docs/BUILD_VERIFICATION.md](docs/BUILD_VERIFICATION.md): current build and verification checklist
 - [docs/UDMA_INTEGRATION_SUMMARY.md](docs/UDMA_INTEGRATION_SUMMARY.md): current UDMA architecture summary
+- [docs/SDMA_TRANSPORT.md](docs/SDMA_TRANSPORT.md): on-card SDMA transport guide, enablement, and validation
 - [docs/SHMEM_INTEGRATION.md](docs/SHMEM_INTEGRATION.md): shmem status and historical notes
 - [docs/CANN_VERSION_MIGRATION.md](docs/CANN_VERSION_MIGRATION.md): CANN 9.1.0 migration notes
 - [tests/collectives/README.md](tests/collectives/README.md): optional collectives correctness and performance tools

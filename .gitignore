@@ -24,10 +24,12 @@ cmake-build-*
 
 # build & output tempalte dirs
 build/
+build-sdma-tests/
 build_out/
 build_device/
 build_hccd/
 output/
+install/
 
 # binary files
 *.so
@@ -48,6 +50,7 @@ MANIFEST.in
 .claude/settings.local.json
 
 # custom
+.worktrees/
 op-simulator/build
 op-simulator/kernel_file
 op-simulator/op
@@ -64,6 +67,7 @@ utils/
 sign_tmp/
 **/build_device/
 **/build/
+tests/sdma/install/
 
 CMakeCache.txt
 CMakeFiles/

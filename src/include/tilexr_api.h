@@ -44,6 +44,10 @@ int TileXRUDMAUnregister(TileXRCommPtr comm, TileXRUDMAMemHandle handle);
 
 int TileXRGetUDMARegistryDev(TileXRCommPtr comm, GM_ADDR &registryPtr);
 
+int TileXRSDMAAvailable(TileXRCommPtr comm, bool *available);
+
+int TileXRGetSDMAWorkspaceDev(TileXRCommPtr comm, GM_ADDR *workspace);
+
 void TileXRPrintDFX2Log(TileXRCommPtr comm);
 
 int TileXRCommInit(int rank, int rankSize, TileXRCommPtr *comms);

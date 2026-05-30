@@ -1,6 +1,6 @@
 # TileXR UDMA Integration Summary
 
-**Updated:** 2026-05-29
+**Updated:** 2026-05-30
 **Status:** Implemented in TileXR comm runtime; A5 / Ascend950 runtime validation required
 
 ## Overview
@@ -139,3 +139,10 @@ Still design/roadmap:
 - Best-effort CMO scheduling.
 - CCU/MS offload of control loops.
 - Broader tile-level profiling and replay tooling.
+
+## Relationship To SDMA
+
+UDMA remains the registered-memory remote transport. SDMA is a separate local
+GM-to-GM transport for same-device copies. Both expose device-visible metadata
+through `CommArgs`, but SDMA does not require memory registration and is enabled
+only when `TILEXR_ENABLE_SDMA=1`.
