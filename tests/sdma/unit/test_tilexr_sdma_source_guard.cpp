@@ -77,21 +77,34 @@ void TestCommSourcesDoNotUseShmem()
 
 void TestOnlyCompatIncludesSdmaIntrinsics()
 {
-    const auto compat = ReadFile("src/include/tilexr_sdma_compat.h");
-    CheckNeedle("src/include/tilexr_sdma_compat.h", compat,
-                "pto/npu/comm/async/sdma/sdma_async_intrin.hpp");
-    const auto transport = ReadFile("src/comm/sdma/tilexr_sdma_transport.cpp");
-    CheckNeedle("src/comm/sdma/tilexr_sdma_transport.cpp", transport,
-                "pto/npu/comm/async/sdma/sdma_workspace_manager.hpp");
-    const std::vector<std::string> disallowed = {
+    const std::vector<std::string> paths = {
         "src/include/tilexr_sdma.h",
+        "src/include/tilexr_sdma_compat.h",
+        "src/include/tilexr_sdma_types.h",
         "src/include/comm_args.h",
         "src/comm/tilexr_comm.cpp",
+        "src/comm/tilexr_comm.h",
+        "src/comm/comm_wrap.cpp",
+        "src/comm/sdma/tilexr_sdma_transport.cpp",
+        "src/comm/sdma/tilexr_sdma_transport.h",
     };
-    for (const auto& path : disallowed) {
+    const std::string ptoPrefix = "pto/npu/comm/async/sdma/";
+    const std::string intrinHeader = ptoPrefix + "sdma_async_intrin.hpp";
+    const std::string workspaceHeader = ptoPrefix + "sdma_workspace_manager.hpp";
+    for (const auto& path : paths) {
         const bool required = path != "src/include/tilexr_sdma.h";
         const auto text = ReadFile(path, required);
-        CheckNoNeedle(path, text, "pto/npu/comm/async/sdma/");
+        if (path == "src/include/tilexr_sdma_compat.h") {
+            CheckNeedle(path, text, intrinHeader);
+            CheckNoNeedle(path, text, workspaceHeader);
+            continue;
+        }
+        if (path == "src/comm/sdma/tilexr_sdma_transport.cpp") {
+            CheckNeedle(path, text, workspaceHeader);
+            CheckNoNeedle(path, text, intrinHeader);
+            continue;
+        }
+        CheckNoNeedle(path, text, ptoPrefix);
     }
 }
 
