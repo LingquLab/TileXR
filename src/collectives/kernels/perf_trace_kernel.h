@@ -1,6 +1,7 @@
 #ifndef TILEXR_COLLECTIVES_KERNEL_PERF_TRACE_KERNEL_H
 #define TILEXR_COLLECTIVES_KERNEL_PERF_TRACE_KERNEL_H
 
+#include "comm_args.h"
 #include "kernel_operator.h"
 #include "tilexr_perf_trace.h"
 

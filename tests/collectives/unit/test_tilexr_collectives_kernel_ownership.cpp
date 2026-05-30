@@ -133,6 +133,13 @@ void TestCollectivesKernelSourcesAreScoped()
     CheckContains(perfTraceKernelPath, perfTraceKernel, "TileXRPerfStageBegin");
     CheckContains(perfTraceKernelPath, perfTraceKernel, "TileXRPerfStageEnd");
     CheckContains(perfTraceKernelPath, perfTraceKernel, "TileXRPerfAccumulateDuration");
+    CheckContains(perfTraceKernelPath, perfTraceKernel, "#include \"comm_args.h\"");
+
+    const std::string perfTraceLayoutPath = "src/include/tilexr_perf_trace.h";
+    const auto perfTraceLayout = ReadFile(perfTraceLayoutPath);
+    CheckContains(perfTraceLayoutPath, perfTraceLayout, "PerfTraceCyclesToUs");
+    CheckContains(perfTraceLayoutPath, perfTraceLayout, "__CCE_IS_AICORE__");
+    CheckContains(perfTraceLayoutPath, perfTraceLayout, "!defined(__CCE__) || !defined(__CCE_IS_AICORE__)");
 
     const std::vector<std::string> kernelFiles = CollectFiles("src/collectives/kernels");
     CheckTrue(!kernelFiles.empty(), "expected collectives kernel files to be present");

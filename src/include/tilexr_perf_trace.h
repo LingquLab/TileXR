@@ -103,10 +103,12 @@ TILEXR_PERF_TRACE_INLINE uint32_t PerfTraceCycleDivisor(PerfChipClass chipClass)
     return chipClass == PerfChipClass::A5 ? 1000u : 50u;
 }
 
+#if !defined(__CCE__) || !defined(__CCE_IS_AICORE__)
 inline double PerfTraceCyclesToUs(uint64_t cycles, uint32_t divisor)
 {
     return divisor == 0 ? 0.0 : static_cast<double>(cycles) / static_cast<double>(divisor);
 }
+#endif
 
 } // namespace TileXR
 
