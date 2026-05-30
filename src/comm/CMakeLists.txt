@@ -67,10 +67,17 @@ install(FILES
         ${CMAKE_CURRENT_SOURCE_DIR}/../include/tilexr_udma_reg.h
         ${CMAKE_CURRENT_SOURCE_DIR}/../include/tilexr_udma_types.h
         DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
-install(CODE "string(CONCAT _tilexr_optional_header \"tilexr_\" \"collectives.h\")
-if(IS_ABSOLUTE \"${CMAKE_INSTALL_INCLUDEDIR}\")
-    set(_tilexr_optional_header_path \"\$ENV{DESTDIR}${CMAKE_INSTALL_INCLUDEDIR}/\${_tilexr_optional_header}\")
-else()
-    set(_tilexr_optional_header_path \"\$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_INCLUDEDIR}/\${_tilexr_optional_header}\")
-endif()
-file(REMOVE \"\${_tilexr_optional_header_path}\")")
+install(CODE "string(CONCAT _tilexr_collective_header \"tilexr_\" \"collectives.h\")
+string(CONCAT _tilexr_collective_perf_header \"tilexr_\" \"collectives\" \"_perf.h\")
+set(_tilexr_optional_headers
+    \"\${_tilexr_collective_header}\"
+    \"\${_tilexr_collective_perf_header}\"
+)
+foreach(_tilexr_optional_header IN LISTS _tilexr_optional_headers)
+    if(IS_ABSOLUTE \"${CMAKE_INSTALL_INCLUDEDIR}\")
+        set(_tilexr_optional_header_path \"\$ENV{DESTDIR}${CMAKE_INSTALL_INCLUDEDIR}/\${_tilexr_optional_header}\")
+    else()
+        set(_tilexr_optional_header_path \"\$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_INCLUDEDIR}/\${_tilexr_optional_header}\")
+    endif()
+    file(REMOVE \"\${_tilexr_optional_header_path}\")
+endforeach()")

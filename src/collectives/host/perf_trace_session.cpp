@@ -1,5 +1,7 @@
 #include "perf_trace_session.h"
 
+#include <exception>
+#include <memory>
 #include <string>
 
 #include "perf_trace_report.h"
@@ -33,12 +35,23 @@ extern "C" int TileXRCollectivePerfSessionCreate(const TileXRCollectivePerfConfi
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
 
-    TileXRCollectives::Host::PerfTraceSession *impl = new TileXRCollectives::Host::PerfTraceSession;
-    impl->config = *config;
-    impl->outputDir = config->outputDir;
-    impl->config.outputDir = impl->outputDir.c_str();
-    *session = impl;
-    return TileXR::TILEXR_SUCCESS;
+    try {
+        std::unique_ptr<TileXRCollectives::Host::PerfTraceSession> impl(
+            new TileXRCollectives::Host::PerfTraceSession);
+        impl->config = *config;
+        impl->outputDir = config->outputDir;
+        impl->config.outputDir = impl->outputDir.c_str();
+        if (config->aiCommand != nullptr) {
+            impl->aiCommand = config->aiCommand;
+            impl->config.aiCommand = impl->aiCommand.c_str();
+        }
+        *session = impl.release();
+        return TileXR::TILEXR_SUCCESS;
+    } catch (const std::exception &) {
+        return TileXR::TILEXR_ERROR_INTERNAL;
+    } catch (...) {
+        return TileXR::TILEXR_ERROR_INTERNAL;
+    }
 }
 
 extern "C" int TileXRCollectivePerfSessionDestroy(TileXRCollectivePerfSession session)
@@ -65,10 +78,16 @@ extern "C" int TileXRCollectivePerfWriteReport(TileXRCollectivePerfSession sessi
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
 
-    TileXRCollectives::Host::PerfTraceSession *impl =
-        static_cast<TileXRCollectives::Host::PerfTraceSession *>(session);
-    TileXRCollectives::Host::PerfReportOptions options {};
-    options.outputDir = impl->outputDir;
-    options.emitAiPrompt = impl->config.emitAiPrompt != 0;
-    return TileXRCollectives::Host::WritePerfTraceReports(impl->header, impl->hostStats, options);
+    try {
+        TileXRCollectives::Host::PerfTraceSession *impl =
+            static_cast<TileXRCollectives::Host::PerfTraceSession *>(session);
+        TileXRCollectives::Host::PerfReportOptions options {};
+        options.outputDir = impl->outputDir;
+        options.emitAiPrompt = impl->config.emitAiPrompt != 0;
+        return TileXRCollectives::Host::WritePerfTraceReports(impl->header, impl->hostStats, options);
+    } catch (const std::exception &) {
+        return TileXR::TILEXR_ERROR_INTERNAL;
+    } catch (...) {
+        return TileXR::TILEXR_ERROR_INTERNAL;
+    }
 }

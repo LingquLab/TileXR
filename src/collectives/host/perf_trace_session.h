@@ -14,6 +14,7 @@ namespace Host {
 struct PerfTraceSession {
     TileXRCollectivePerfConfig config {};
     std::string outputDir;
+    std::string aiCommand;
     std::vector<TileXR::TileXRPerfCoreStageStats> hostStats;
     TileXR::TileXRPerfTraceHeader header {};
     void *deviceBuffer = nullptr;

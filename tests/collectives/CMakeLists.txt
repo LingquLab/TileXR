@@ -105,6 +105,10 @@ add_executable(test_collective_perf_session
     unit/test_collective_perf_session.cpp
 )
 
+target_include_directories(test_collective_perf_session PRIVATE
+    ${TILEXR_ROOT}/src/collectives/host
+)
+
 add_executable(test_tilexr_collectives_correctness
     integration/test_tilexr_collectives_correctness.cpp
 )
