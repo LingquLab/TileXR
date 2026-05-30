@@ -89,6 +89,10 @@ add_executable(test_tilexr_collectives_header_compile
     unit/test_tilexr_collectives_header_compile.cpp
 )
 
+add_executable(test_tilexr_perf_trace_layout
+    unit/test_tilexr_perf_trace_layout.cpp
+)
+
 add_executable(test_tilexr_collectives_correctness
     integration/test_tilexr_collectives_correctness.cpp
 )
@@ -257,6 +261,7 @@ add_test(NAME test_tilexr_collectives_api COMMAND test_tilexr_collectives_api)
 add_test(NAME test_tilexr_collectives_kernel_ownership COMMAND test_tilexr_collectives_kernel_ownership)
 add_test(NAME test_tilexr_collectives_tools_sources COMMAND test_tilexr_collectives_tools_sources)
 add_test(NAME test_tilexr_collectives_header_compile COMMAND test_tilexr_collectives_header_compile)
+add_test(NAME test_tilexr_perf_trace_layout COMMAND test_tilexr_perf_trace_layout)
 add_test(NAME test_tilexr_collectives_stub_behavior COMMAND test_tilexr_collectives_stub_behavior)
 add_test(NAME test_tilexr_collectives_uninitialized_comm COMMAND test_tilexr_collectives_uninitialized_comm)
 add_test(NAME test_collective_host_utils COMMAND test_collective_host_utils)
@@ -268,6 +273,7 @@ install(TARGETS
     test_tilexr_collectives_kernel_ownership
     test_tilexr_collectives_tools_sources
     test_tilexr_collectives_header_compile
+    test_tilexr_perf_trace_layout
     test_tilexr_collectives_correctness
     tilexr_collective_perf
     test_tilexr_collectives_stub_behavior
