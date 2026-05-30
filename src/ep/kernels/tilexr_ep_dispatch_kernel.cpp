@@ -8,6 +8,8 @@ namespace {
 constexpr uint32_t kEpUbBytes = 64*1024;
 constexpr uint32_t kEpSyncUbBytes = 4*1024;
 constexpr uint32_t kEpCopyTileBytes = kEpUbBytes - kEpSyncUbBytes;
+constexpr uint32_t kEpScalarUbBytes = 32;
+constexpr uint32_t kEpScalarUbOffset = kEpSyncUbBytes - kEpScalarUbBytes;
 
 __aicore__ inline int64_t AlignUp(int64_t value, int64_t alignment)
 {
@@ -63,6 +65,21 @@ __aicore__ inline void CopyBytesGmToGm(
         AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
     }
     AscendC::PipeBarrier<PIPE_ALL>();
+}
+
+__aicore__ inline int32_t LoadInt32FromGm(GM_ADDR srcGM, AscendC::TBuf<AscendC::QuePosition::VECCALC> &tBuf)
+{
+    AscendC::LocalTensor<int32_t> local =
+        tBuf.GetWithOffset<int32_t>(kEpScalarUbBytes / sizeof(int32_t), kEpScalarUbOffset);
+    AscendC::GlobalTensor<int32_t> src;
+    src.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(srcGM), 1);
+
+    AscendC::DataCopyExtParams copyParams {1, static_cast<uint32_t>(sizeof(int32_t)), 0, 0, 0};
+    AscendC::DataCopyPadExtParams<int32_t> padParams {false, 0, 0, 0};
+    AscendC::DataCopyPad(local, src, copyParams, padParams);
+    AscendC::SetFlag<AscendC::HardEvent::MTE2_S>(EVENT_ID0);
+    AscendC::WaitFlag<AscendC::HardEvent::MTE2_S>(EVENT_ID0);
+    return local.GetValue(0);
 }
 
 __aicore__ inline void ClearLocalWindow(
@@ -181,11 +198,11 @@ extern "C" __global__ __aicore__ void tilexr_ep_dispatch_kernel(GM_ADDR commArgs
         }
 
         const int64_t localExpertNum = moeExpertNum / rankSize;
-        auto expertIds = reinterpret_cast<__gm__ int32_t *>(expertIdsGM);
         for (int64_t token = 0; token < bs; ++token) {
             for (int64_t topKId = 0; topKId < topK; ++topKId) {
                 const int64_t route = token * topK + topKId;
-                const int32_t expertId = expertIds[route];
+                const int32_t expertId = LoadInt32FromGm(expertIdsGM + route * static_cast<int64_t>(sizeof(int32_t)),
+                    tBuf);
                 if (expertId < 0 || static_cast<int64_t>(expertId) >= moeExpertNum) {
                     continue;
                 }

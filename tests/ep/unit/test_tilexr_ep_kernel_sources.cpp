@@ -71,6 +71,8 @@ void TestKernelUsesTileXRPeerMemory()
     CheckContains(path, contents, "DataCopyPad");
     CheckContains(path, contents, "kEpStepWindowCleared");
     CheckContains(path, contents, "kEpStepDispatchReady");
+    CheckContains(path, contents, "LoadInt32FromGm");
+    CheckNotContains(path, contents, "expertIds[");
 }
 
 void TestNoForbiddenDependencies()
