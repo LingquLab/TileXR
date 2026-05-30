@@ -31,7 +31,8 @@ void SetActivePerfTraceSessionForHost(PerfTraceSession *session)
 extern "C" int TileXRCollectivePerfSessionCreate(const TileXRCollectivePerfConfig *config,
                                                  TileXRCollectivePerfSession *session)
 {
-    if (config == nullptr || session == nullptr || config->enabled == 0 || config->outputDir == nullptr) {
+    if (config == nullptr || session == nullptr || config->enabled == 0 || config->outputDir == nullptr ||
+        config->outputDir[0] == '\0' || config->sampleEveryN == 0) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
 

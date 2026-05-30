@@ -65,6 +65,20 @@ void TestCollectivePerfSessionLifecycle()
     CheckEq("create rejects null config", TileXRCollectivePerfSessionCreate(nullptr, &session),
         TileXR::TILEXR_ERROR_PARA_CHECK_FAIL);
 
+    TileXRCollectivePerfConfig invalidConfig {};
+    invalidConfig.enabled = 1;
+    invalidConfig.outputDir = outputDir.c_str();
+    invalidConfig.sampleEveryN = 0;
+    CheckEq("create rejects zero sampleEveryN", TileXRCollectivePerfSessionCreate(&invalidConfig, &session),
+        TileXR::TILEXR_ERROR_PARA_CHECK_FAIL);
+    CheckTrue("session remains null after zero sampleEveryN", session == nullptr);
+
+    invalidConfig.outputDir = "";
+    invalidConfig.sampleEveryN = 1;
+    CheckEq("create rejects empty outputDir", TileXRCollectivePerfSessionCreate(&invalidConfig, &session),
+        TileXR::TILEXR_ERROR_PARA_CHECK_FAIL);
+    CheckTrue("session remains null after empty outputDir", session == nullptr);
+
     std::string aiCommand = "tilexr-analyze --dry-run";
     TileXRCollectivePerfConfig config {};
     config.enabled = 1;
