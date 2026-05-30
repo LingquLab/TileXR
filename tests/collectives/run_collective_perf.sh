@@ -83,29 +83,30 @@ for ((rank = 0; rank < rank_size; rank++)); do
   pids+=("$!")
 done
 
-timeout_flag="${TMPDIR:-/tmp}/tilexr_collective_perf_timeout.$$"
-rm -f "${timeout_flag}"
-(
-  sleep "${timeout_sec}"
-  printf 1 > "${timeout_flag}"
-  kill "${pids[@]}" 2>/dev/null || true
-  exit 124
-) >/dev/null 2>&1 &
+sleep "${timeout_sec}" >/dev/null 2>&1 &
 watchdog_pid="$!"
 
-trap 'echo "ERROR: interrupted; killing remaining ranks" >&2; kill "${watchdog_pid}" 2>/dev/null || true; kill_remaining_children; tail_logs; rm -f "${timeout_flag}"; exit 130' INT TERM
+trap 'echo "ERROR: interrupted; killing remaining ranks" >&2; kill "${watchdog_pid}" 2>/dev/null || true; wait "${watchdog_pid}" 2>/dev/null || true; kill_remaining_children; tail_logs; exit 130' INT TERM
 
 completed_count=0
 status=0
 while (( completed_count < rank_size )); do
   if wait -n; then
+    if ! kill -0 "${watchdog_pid}" 2>/dev/null; then
+      echo "ERROR: Timed out after ${timeout_sec}s; killing remaining ranks" >&2
+      status=124
+      kill_remaining_children
+      tail_logs
+      trap - INT TERM
+      exit "${status}"
+    fi
     completed_count=$((completed_count + 1))
     continue
   else
     rc="$?"
   fi
 
-  if [[ -f "${timeout_flag}" ]]; then
+  if ! kill -0 "${watchdog_pid}" 2>/dev/null; then
     echo "ERROR: Timed out after ${timeout_sec}s; killing remaining ranks" >&2
     status=124
   else
@@ -113,16 +114,15 @@ while (( completed_count < rank_size )); do
     status=1
   fi
   kill "${watchdog_pid}" 2>/dev/null || true
+  wait "${watchdog_pid}" 2>/dev/null || true
   kill_remaining_children
   tail_logs
-  rm -f "${timeout_flag}"
   trap - INT TERM
   exit "${status}"
 done
 
 kill "${watchdog_pid}" 2>/dev/null || true
 wait "${watchdog_pid}" 2>/dev/null || true
-rm -f "${timeout_flag}"
 trap - INT TERM
 
 exit 0

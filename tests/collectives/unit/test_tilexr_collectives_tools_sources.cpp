@@ -212,8 +212,8 @@ void TestLauncherScripts()
     CheckContains(correctnessPath, correctness, "tail_logs");
     CheckContains(correctnessPath, correctness, "Timed out after");
     CheckContains(correctnessPath, correctness, "watchdog_pid");
-    CheckContains(correctnessPath, correctness, "timeout_flag");
-    CheckContains(correctnessPath, correctness, ">/dev/null 2>&1 &");
+    CheckContains(correctnessPath, correctness, "sleep \"${timeout_sec}\" >/dev/null 2>&1 &");
+    CheckContains(correctnessPath, correctness, "wait \"${watchdog_pid}\"");
     CheckContains(correctnessPath, correctness, "wait -n");
     CheckContains(correctnessPath, correctness, "completed_count");
     CheckDoesNotContain(correctnessPath, correctness, "wait -n -p completed_pid");
@@ -235,8 +235,8 @@ void TestLauncherScripts()
     CheckContains(perfPath, perf, "tail_logs");
     CheckContains(perfPath, perf, "Timed out after");
     CheckContains(perfPath, perf, "watchdog_pid");
-    CheckContains(perfPath, perf, "timeout_flag");
-    CheckContains(perfPath, perf, ">/dev/null 2>&1 &");
+    CheckContains(perfPath, perf, "sleep \"${timeout_sec}\" >/dev/null 2>&1 &");
+    CheckContains(perfPath, perf, "wait \"${watchdog_pid}\"");
     CheckContains(perfPath, perf, "wait -n");
     CheckContains(perfPath, perf, "completed_count");
     CheckDoesNotContain(perfPath, perf, "wait -n -p completed_pid");
