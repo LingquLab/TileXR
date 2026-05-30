@@ -26,9 +26,14 @@ if [ -f "${CANN_HOME}/set_env.sh" ]; then
     set -u
 fi
 
+ARCH="${ARCH:-${TILEXR_OS_ARCH:-$(uname -m)}}"
+if [ "${ARCH}" = "arm64" ]; then
+    ARCH="aarch64"
+fi
+
 export TILEXR_ENABLE_SDMA=1
 export ASCEND_RT_VISIBLE_DEVICES="${DEVICE_ID}"
-export LD_LIBRARY_PATH="${INSTALL_DIR}/lib:${TILEXR_ROOT}/install/lib:${CANN_HOME}/lib64:${CANN_HOME}/$(uname -m)-linux/lib64:/usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/driver/lib64/driver:${LD_LIBRARY_PATH:-}"
+export LD_LIBRARY_PATH="/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/driver/lib64:${INSTALL_DIR}/lib:${TILEXR_ROOT}/install/lib:${CANN_HOME}/lib64:${CANN_HOME}/${ARCH}-linux/lib64:${LD_LIBRARY_PATH:-}"
 
 bin="${INSTALL_DIR}/bin/tilexr_sdma_demo"
 if [ ! -x "${bin}" ]; then

@@ -3,9 +3,9 @@
  * Licensed under the Apache License, Version 2.0
  */
 
-// CANN 9.1.0's SDMA header path can recursively include the PTO async
-// prefetch backend before SDMA helper symbols are visible. This demo only
-// needs SDMA put/wait, so keep that unused backend out of this translation unit.
+// Demo-local CANN 9.1.0 workaround: this SDMA-only kernel does not exercise
+// PTO async prefetch, whose unused backend can be pulled in before SDMA helper
+// symbols are visible.
 #ifndef PTO_NPU_TPREFETCH_ASYNC_HPP
 #define PTO_NPU_TPREFETCH_ASYNC_HPP
 #endif

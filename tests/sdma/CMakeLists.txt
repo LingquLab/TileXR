@@ -25,15 +25,9 @@ endif()
 
 set(TILEXR_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../..")
 
-message(STATUS "ASCEND_HOME_PATH: ${ASCEND_HOME_PATH}")
-message(STATUS "ARCH: ${ARCH}")
-message(STATUS "TILEXR_ROOT: ${TILEXR_ROOT}")
-
 find_library(TILEXR_LIB tile-comm
     HINTS "${TILEXR_ROOT}/install/lib" "${TILEXR_ROOT}/build/src/comm"
     REQUIRED)
-
-message(STATUS "Found tile-comm: ${TILEXR_LIB}")
 
 link_directories(
     ${ASCEND_DRIVER_PATH}/lib64/driver
