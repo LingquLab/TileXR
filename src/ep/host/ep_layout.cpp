@@ -71,8 +71,9 @@ bool TileXREpIsSupportedDataType(TileXR::TileXRDataType dtype)
 int TileXREpBuildWindowConfig(int64_t rankSize, int64_t bs, int64_t h, int64_t topK,
     int64_t moeExpertNum, TileXR::TileXRDataType dtype, EpWindowConfig *out)
 {
-    if (out == nullptr || !IsPositive(rankSize) || !IsPositive(bs) || !IsPositive(h) || !IsPositive(topK) ||
-        !IsPositive(moeExpertNum) || moeExpertNum % rankSize != 0 || !TileXREpIsSupportedDataType(dtype)) {
+    if (out == nullptr || !IsPositive(rankSize) || rankSize > TileXR::TILEXR_MAX_RANK_SIZE || !IsPositive(bs) ||
+        !IsPositive(h) || !IsPositive(topK) || !IsPositive(moeExpertNum) || moeExpertNum % rankSize != 0 ||
+        !TileXREpIsSupportedDataType(dtype)) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
 
