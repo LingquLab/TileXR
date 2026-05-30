@@ -1,6 +1,7 @@
 #include <cstdint>
 #include <iostream>
 
+#include "comm_args.h"
 #include "ep_layout.h"
 #include "tilexr_types.h"
 
@@ -89,6 +90,10 @@ void TestRejectsInvalidConfig()
         TileXR::TILEXR_ERROR_PARA_CHECK_FAIL);
     CheckInt("unsupported dtype", TileXREp::TileXREpBuildWindowConfig(
         2, 4, 8, 2, 8, TileXR::TILEXR_DATA_TYPE_FP32, &config),
+        TileXR::TILEXR_ERROR_PARA_CHECK_FAIL);
+    CheckInt("rank size too large", TileXREp::TileXREpBuildWindowConfig(
+        TileXR::TILEXR_MAX_RANK_SIZE + 1, 4, 8, 2, TileXR::TILEXR_MAX_RANK_SIZE + 1,
+        TileXR::TILEXR_DATA_TYPE_FP16, &config),
         TileXR::TILEXR_ERROR_PARA_CHECK_FAIL);
     CheckInt("oversized window", TileXREp::TileXREpBuildWindowConfig(
         2, 1024 * 1024, 64, 8, 8, TileXR::TILEXR_DATA_TYPE_FP16, &config),
