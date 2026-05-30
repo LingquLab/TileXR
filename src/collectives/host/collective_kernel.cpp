@@ -15,6 +15,7 @@
 #include <string>
 
 #include "collective_utils.h"
+#include "perf_trace_session.h"
 #include "runtime/kernel.h"
 
 extern "C" {
@@ -145,6 +146,14 @@ int LaunchCollectiveKernel(TileXRCommPtr comm, TileXR::TileXRType type, const Ho
     args.count = kernelCount;
     args.magic = magic;
     args.op = 0;
+
+    const void *perfTrace = nullptr;
+    const int perfRet = PreparePerfTraceLaunch(GetActivePerfTraceSession(), *context.hostArgs,
+        type, dataType, blockDim, kernelCount, stream, &perfTrace);
+    if (perfRet != TileXR::TILEXR_SUCCESS) {
+        return perfRet;
+    }
+    args.perfTrace = perfTrace;
 
     rtTaskCfgInfo_t cfgInfo {};
     cfgInfo.schemMode = 1;

@@ -1,9 +1,13 @@
 #include "perf_trace_session.h"
 
+#include <cstddef>
+#include <cstdint>
 #include <exception>
+#include <limits>
 #include <memory>
 #include <string>
 
+#include "comm_args.h"
 #include "perf_trace_report.h"
 #include "tilexr_types.h"
 
@@ -23,6 +27,54 @@ PerfTraceSession *GetActivePerfTraceSession()
 void SetActivePerfTraceSessionForHost(PerfTraceSession *session)
 {
     g_activeSession = session;
+}
+
+int PreparePerfTraceLaunch(PerfTraceSession *session, const TileXR::CommArgs &commArgs,
+                           TileXR::TileXRType opType, TileXR::TileXRDataType dataType,
+                           uint32_t blockDim, int64_t count, aclrtStream stream,
+                           const void **deviceTrace)
+{
+    (void)stream;
+    if (deviceTrace == nullptr) {
+        return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    *deviceTrace = nullptr;
+
+    if (session == nullptr || session->config.enabled == 0) {
+        return TileXR::TILEXR_SUCCESS;
+    }
+
+    session->header = TileXR::TileXRPerfTraceHeader {};
+    session->header.rank = static_cast<uint32_t>(commArgs.rank);
+    session->header.rankSize = static_cast<uint32_t>(commArgs.rankSize);
+    session->header.blockDim = blockDim;
+    session->header.maxCoreCount = blockDim;
+    session->header.opType = static_cast<uint32_t>(opType);
+    session->header.dataType = static_cast<uint32_t>(dataType);
+    session->header.messageBytes = static_cast<uint64_t>(count);
+    session->header.cycleToUsDivisor =
+        (commArgs.extraFlag & TileXR::ExtraFlag::TOPO_910A5) != 0 ? 1000u : 50u;
+
+    session->hostStats.clear();
+    if (commArgs.rankSize <= 0 || commArgs.rankSize > TileXR::TILEXR_MAX_RANK_SIZE ||
+        blockDim == 0 || session->header.stageCount == 0) {
+        *deviceTrace = session->deviceBuffer;
+        return TileXR::TILEXR_SUCCESS;
+    }
+
+    const size_t rankSize = static_cast<size_t>(commArgs.rankSize);
+    const size_t coreCount = static_cast<size_t>(blockDim);
+    const size_t stageCount = static_cast<size_t>(session->header.stageCount);
+    const size_t maxCount = std::numeric_limits<size_t>::max();
+    if (rankSize > maxCount / coreCount || rankSize * coreCount > maxCount / stageCount) {
+        *deviceTrace = session->deviceBuffer;
+        return TileXR::TILEXR_SUCCESS;
+    }
+
+    const size_t statsCount = rankSize * coreCount * stageCount;
+    session->hostStats.assign(statsCount, TileXR::TileXRPerfCoreStageStats {});
+    *deviceTrace = session->deviceBuffer;
+    return TileXR::TILEXR_SUCCESS;
 }
 
 } // namespace Host

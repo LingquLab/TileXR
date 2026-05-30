@@ -164,6 +164,9 @@ void TestHostRegistrationLivesInCollectives()
     CheckContains(kernelPath, kernel, "TileXR::TILEXR_DATA_TYPE_FP16");
     CheckContains(kernelPath, kernel, "TileXR::TILEXR_DATA_TYPE_FP32");
     CheckContains(kernelPath, kernel, "TileXR::TILEXR_DATA_TYPE_BFP16");
+    CheckContains(kernelPath, kernel, "perfTrace");
+    CheckContains(kernelPath, kernel, "PreparePerfTraceLaunch");
+    CheckContains(kernelPath, kernel, "GetActivePerfTraceSession");
     CheckDoesNotContain(kernelPath, kernel, "g_collectiveKernelStub");
 }
 

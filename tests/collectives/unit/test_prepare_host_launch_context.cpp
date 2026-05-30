@@ -1,7 +1,9 @@
 #include <cstdint>
 #include <iostream>
 
+#include "collective_kernel.h"
 #include "collective_launcher.h"
+#include "perf_trace_session.h"
 #include "tilexr_types.h"
 
 namespace {
@@ -39,10 +41,75 @@ void CheckResetContext(const TileXRCollectives::Host::HostLaunchContext &context
     CheckMagic("context.magic", context.magic, 0);
 }
 
+void CheckKernelArgsHasPerfTrace()
+{
+    TileXRCollectives::Host::AscendCCLKernelArgs args {};
+    CheckPointer("args.perfTrace", args.perfTrace, nullptr);
+}
+
+void CheckPerfTraceLaunchMetadata()
+{
+    TileXR::CommArgs commArgs {};
+    commArgs.rank = 1;
+    commArgs.rankSize = 2;
+    commArgs.extraFlag = TileXR::ExtraFlag::TOPO_910A5;
+
+    TileXRCollectives::Host::PerfTraceSession session {};
+    session.config.enabled = 1;
+    session.deviceBuffer = reinterpret_cast<void *>(0x1234);
+
+    const void *deviceTrace = reinterpret_cast<const void *>(0x1);
+    CheckStatus("PreparePerfTraceLaunch enabled",
+                TileXRCollectives::Host::PreparePerfTraceLaunch(
+                    &session, commArgs, TileXR::TileXRType::ALL_GATHER,
+                    TileXR::TILEXR_DATA_TYPE_FP16, 4, 4096, nullptr, &deviceTrace),
+                TileXR::TILEXR_SUCCESS);
+    CheckPointer("enabled deviceTrace", deviceTrace, session.deviceBuffer);
+    CheckMagic("trace rank", session.header.rank, 1);
+    CheckMagic("trace rankSize", session.header.rankSize, 2);
+    CheckMagic("trace blockDim", session.header.blockDim, 4);
+    CheckMagic("trace maxCoreCount", session.header.maxCoreCount, 4);
+    CheckMagic("trace opType", session.header.opType,
+               static_cast<int64_t>(TileXR::TileXRType::ALL_GATHER));
+    CheckMagic("trace dataType", session.header.dataType, TileXR::TILEXR_DATA_TYPE_FP16);
+    CheckMagic("trace messageBytes", session.header.messageBytes, 4096);
+    CheckMagic("trace cycleToUsDivisor", session.header.cycleToUsDivisor, 1000);
+    CheckMagic("trace stats size", static_cast<int64_t>(session.hostStats.size()),
+               static_cast<int64_t>(commArgs.rankSize) * 4 * TileXR::TILEXR_PERF_STAGE_COUNT);
+
+    CheckStatus("PreparePerfTraceLaunch null deviceTrace",
+                TileXRCollectives::Host::PreparePerfTraceLaunch(
+                    &session, commArgs, TileXR::TileXRType::ALL_GATHER,
+                    TileXR::TILEXR_DATA_TYPE_FP16, 4, 4096, nullptr, nullptr),
+                TileXR::TILEXR_ERROR_PARA_CHECK_FAIL);
+
+    commArgs.rankSize = 0;
+    deviceTrace = reinterpret_cast<const void *>(0x1);
+    CheckStatus("PreparePerfTraceLaunch zero rankSize",
+                TileXRCollectives::Host::PreparePerfTraceLaunch(
+                    &session, commArgs, TileXR::TileXRType::ALL_GATHER,
+                    TileXR::TILEXR_DATA_TYPE_FP16, 4, 4096, nullptr, &deviceTrace),
+                TileXR::TILEXR_SUCCESS);
+    CheckPointer("zero rankSize deviceTrace", deviceTrace, session.deviceBuffer);
+    CheckMagic("zero rankSize stats size", static_cast<int64_t>(session.hostStats.size()), 0);
+
+    session.config.enabled = 0;
+    deviceTrace = reinterpret_cast<const void *>(0x1);
+    CheckStatus("PreparePerfTraceLaunch disabled",
+                TileXRCollectives::Host::PreparePerfTraceLaunch(
+                    &session, commArgs, TileXR::TileXRType::ALL_GATHER,
+                    TileXR::TILEXR_DATA_TYPE_FP16, 4, 4096, nullptr, &deviceTrace),
+                TileXR::TILEXR_SUCCESS);
+    CheckPointer("disabled deviceTrace", deviceTrace, nullptr);
+}
+
 } // namespace
 
 int main()
 {
+    CheckKernelArgsHasPerfTrace();
+    CheckPerfTraceLaunchMetadata();
+
     TileXRCollectives::Host::HostLaunchContext context;
 
     CheckStatus("PrepareHostLaunchContext(nullptr, context)",
