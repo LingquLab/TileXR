@@ -186,6 +186,11 @@ target_link_directories(
 )
 ```
 
+**Runtime RPATH warning**:
+- `${ASCEND_HOME_PATH}/${ARCH}-linux/devlib` is for link-time fallback only. Do not write it into runtime RPATH/RUNPATH.
+- If `aarch64-linux/devlib` is present in RPATH, the process may load the stub `libascend_hal.so` from devlib instead of the real driver HAL, causing `aclInit` to fail, for example with `500000` and log message `init soc version failed`.
+- Runtime should load `libascend_hal.so` from the driver path, typically `/usr/local/Ascend/driver/lib64/driver`.
+
 ### shmem Integration Notes
 
 The old shmem-backed UDMA proposal has been superseded by TileXR-owned UDMA transport under `src/comm/udma/`.
