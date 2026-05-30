@@ -26,6 +26,7 @@ set(TILEXR_COLLECTIVES_SOURCE_FILE
         host/collective_launcher.cpp
         host/collective_utils.cpp
         host/collective_kernel.cpp
+        host/perf_trace_report.cpp
         host/tilexr_collectives.cpp
         ${TILEXR_COLLECTIVES_KERNEL_EMBED_CPP}
 )
