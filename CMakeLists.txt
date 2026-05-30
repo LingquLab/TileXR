@@ -12,6 +12,13 @@ cmake_minimum_required(VERSION 3.16)
 
 project(tilexr LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 14)
+option(TILEXR_BUILD_COLLECTIVES "Build optional TileXR collectives library" OFF)
+option(TILEXR_BUILD_TESTS "Build TileXR tests" OFF)
+include(CTest)
+if(BUILD_TESTING OR TILEXR_BUILD_TESTS)
+    enable_testing()
+endif()
+include(GNUInstallDirs)
 
 add_link_options(-Wl,-z,relro,-z,now)
 add_link_options(-s)
@@ -46,3 +53,16 @@ include_directories(
         ${CMAKE_SOURCE_DIR}/3rdparty/
 )
 add_subdirectory(src/comm)
+if(TILEXR_BUILD_COLLECTIVES)
+    add_subdirectory(src/collectives)
+    if(BUILD_TESTING OR TILEXR_BUILD_TESTS)
+        add_subdirectory(tests/collectives)
+        configure_file(
+            tests/collectives/cmake/install_prefix_smoke.cmake.in
+            ${CMAKE_BINARY_DIR}/tilexr_collectives_install_smoke.cmake
+            @ONLY
+        )
+        add_test(NAME tilexr_collectives_install_smoke
+            COMMAND ${CMAKE_COMMAND} -P ${CMAKE_BINARY_DIR}/tilexr_collectives_install_smoke.cmake)
+    endif()
+endif()

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024 Huawei Technologies Co., Ltd.
+ * Copyright (c) 2024-2026 TileXR Project
  * This file is a part of the CANN Open Software.
  * Licensed under CANN Open Software License Agreement Version 1.0 (the "License").
  * Please refer to the License for details. You may not use this file except in compliance with the License.
@@ -7,16 +7,25 @@
  * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
  * See LICENSE in the root of the software repository for the full text of the License.
  */
-#ifndef TILEXR_INTERNAL_H
-#define TILEXR_INTERNAL_H
+#ifndef TILEXR_COLLECTIVES_HOST_COLLECTIVE_LAUNCHER_H
+#define TILEXR_COLLECTIVES_HOST_COLLECTIVE_LAUNCHER_H
 
 #include <cstdint>
-#include "../include/tilexr_types.h"
 
-namespace TileXR {
-// Common functions
-ChipName GetChipName();
+#include "tilexr_api.h"
 
-uint32_t GetCoreNum(ChipName chipName);
-} // namespace TileXR
-#endif // TILEXR_INTERNAL_H
+namespace TileXRCollectives {
+namespace Host {
+
+struct HostLaunchContext {
+    TileXR::CommArgs *hostArgs = nullptr;
+    GM_ADDR devArgs = nullptr;
+    int64_t magic = 0;
+};
+
+int PrepareHostLaunchContext(TileXRCommPtr comm, HostLaunchContext &context);
+
+} // namespace Host
+} // namespace TileXRCollectives
+
+#endif // TILEXR_COLLECTIVES_HOST_COLLECTIVE_LAUNCHER_H

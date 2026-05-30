@@ -2,7 +2,7 @@
 
 **TileXR** (eXtreme Rendezvous for Asynchronous Tile Communication) is a data-centric asynchronous communication runtime for Huawei Ascend NPUs. It moves communication control from coarse BSP-style kernel phases toward tile-level, AICore-driven rendezvous: data readiness, transport choice, and synchronization become explicit runtime state instead of a fixed all-ranks barrier.
 
-The project currently contains a core communication library, MC2 fused collective operators, a registered-memory UDMA prototype for A5 / Ascend950 hardware, and simulator/test infrastructure for Ascend C kernels.
+The project currently contains a core communication library, an optional TileXR collectives library, MC2 fused collective operators, a registered-memory UDMA prototype for A5 / Ascend950 hardware, and simulator/test infrastructure for Ascend C kernels.
 
 ## Design Direction
 
@@ -16,11 +16,11 @@ The current codebase implements the base communication runtime, flag-based synch
 
 ## Features
 
-- **Core communication runtime**: `libtile-comm.so` initializes ranks, shared buffers, peer memory mappings, socket exchange, device `CommArgs`, and DFX state. It does not depend on hcomm, HCCL, shmem, or ops-transformer.
+- **Core communication runtime**: `libtile-comm.so` initializes ranks, shared buffers, peer memory mappings, socket exchange, device `CommArgs`, and DFX state. It builds only against CANN runtime/ACL/driver APIs and TileXR-owned types — it does not include or link hcomm, HCCL, shmem, or ops-transformer.
+- **Optional TileXR collectives**: `libtilexr-collectives.so`, built only when `TILEXR_BUILD_COLLECTIVES=ON`, layers standalone `TileXRAllGather` and equal-size `TileXRAllToAll` APIs on top of `libtile-comm.so`.
 - **Tile-level synchronization**: device-side flag regions and magic values support reusable fine-grained synchronization rounds.
 - **MC2 fused operators**: AllGather+Add and AllGather+MatMul examples under `src/mc2/`.
 - **Registered-memory UDMA path**: host code registers ordinary `aclrtMalloc` device memory with `TileXRUDMARegister`; device kernels use `tilexr_udma.h` wrappers for put/get/signal.
-- **Self-contained TileXR communication library**: `src/comm` uses TileXR-owned types and HCCP/RA runtime integration; it does not include or link hcomm, HCCL, or shmem.
 - **Operator simulator**: `op-simulator/` supports functional/performance simulation for selected AICore kernels without physical hardware.
 
 ## System Requirements
@@ -92,7 +92,27 @@ cmake --install build
 Expected output:
 
 ```text
-install/lib/libtile-comm.so
+install/lib*/libtile-comm.so
+```
+
+To build the optional TileXR collectives library and its tests/tools:
+
+```bash
+source scripts/common_env.sh
+cmake -S . -B build-collectives \
+  -DTILEXR_BUILD_COLLECTIVES=ON \
+  -DTILEXR_BUILD_TESTS=ON \
+  -DBUILD_TESTING=OFF \
+  -DCMAKE_INSTALL_PREFIX="$PWD/install"
+cmake --build build-collectives -j"$(nproc)"
+cmake --install build-collectives
+```
+
+Additional expected output:
+
+```text
+install/lib*/libtilexr-collectives.so
+install/include/tilexr_collectives.h
 ```
 
 ### 4. Run Basic Tests
@@ -110,6 +130,7 @@ TileXR/
 |-- src/
 |   |-- comm/                 # Core communication runtime
 |   |   `-- udma/             # TileXR-owned HCCP/RA UDMA transport
+|   |-- collectives/          # Optional TileXR collectives library
 |   |-- include/              # Public C/C++ and device headers
 |   `-- mc2/                  # Fused collective operators
 |       |-- all_gather_add/
@@ -117,6 +138,7 @@ TileXR/
 |       `-- common/
 |-- op-simulator/             # Ascend C kernel simulation
 |-- tests/                    # Host, communication, integration, and UDMA tests
+|   |-- collectives/          # Collectives source/unit checks and manual runners
 |   |-- comm/
 |   `-- udma/
 |-- scripts/                  # Build, setup, test, and utility scripts
@@ -130,21 +152,32 @@ TileXR/
 
 `src/comm/` builds `libtile-comm.so` and exposes the public API in `src/include/tilexr_api.h`. This library is intentionally independent of hcomm, HCCL, shmem, and ops-transformer. It uses CANN runtime/ACL/driver APIs plus TileXR-owned communication metadata and datatypes.
 
-Important host-side entry points:
+Important host-side entry points, grouped by role:
 
-- `TileXRGetUniqueId`
-- `TileXRCommInitRankLocal`
-- `TileXRCommInitRank`
-- `TileXRCommInitRankWithDomain`
-- `TileXRGetCommArgsDev`
-- `TileXRGetCommArgsHost`
-- `TileXRCommDestroy`
+- **Lifecycle**: `TileXRGetUniqueId`, `TileXRCommInitRankLocal`, `TileXRCommInitRank`, `TileXRCommInitRankWithDomain`, `TileXRCommDestroy`.
+- **CommArgs access**: `TileXRGetCommArgsHost` (host view), `TileXRGetCommArgsDev` (device pointer for kernels).
+- **Synchronization rounds**: `TileXRCommNextMagic` hands out a fresh magic value so callers can reuse flag memory across rounds; the optional collectives library uses it to schedule per-launch synchronization.
 
 The runtime allocates shared IPC buffers, exchanges peer mappings, uploads `CommArgs` to device memory, and records topology/capability flags in `CommArgs::extraFlag`.
 
 ### Device Synchronization
 
 `src/include/tilexr_sync.h` provides device-side flag synchronization. Flags use magic values so multiple rounds can reuse the same flag memory without a full reset.
+
+### Optional TileXR Collectives
+
+`src/collectives/` builds `libtilexr-collectives.so` when `TILEXR_BUILD_COLLECTIVES=ON`. The split is intentional:
+
+- `libtile-comm.so` owns communicator setup, peer memory, `CommArgs`, UDMA metadata, and the infra public API in `tilexr_api.h`.
+- `libtilexr-collectives.so` owns collectives host validation, launch, embedded CCE kernel registration, and the public collectives API in `tilexr_collectives.h`.
+- Installing only the default core runtime does not install `tilexr_collectives.h`.
+
+Initial collectives APIs:
+
+- `TileXRAllGather`
+- `TileXRAllToAll` for equal per-peer counts
+
+`TileXRAllGather` supports the validated multi-rank path. Multi-rank `TileXRAllToAll` is currently enabled only when the communicator reports the supported `TOPO_910_93` topology; unsupported topologies return a parameter-check error instead of launching an invalid kernel path. Single-rank loopback is supported for both APIs.
 
 ### UDMA Registered Memory
 
@@ -171,7 +204,7 @@ If UDMA is unavailable, communicator initialization continues without setting `E
 
 | Component | Version / Source | Purpose |
 | --- | --- | --- |
-| CANN | 9.1.0 | Required for `libtile-comm.so`: Ascend ACL/runtime/driver headers and libraries |
+| CANN | 9.1.0 | Required for `libtile-comm.so` and optional `libtilexr-collectives.so`: Ascend ACL/runtime/driver headers and libraries |
 | spdlog | submodule | Header-only optional backend for TileXR logging; `src/comm/tilexr_log.h` falls back to direct stdout/stderr logging when unavailable |
 
 Optional components:
@@ -207,6 +240,35 @@ See:
 - [tests/udma/QUICKSTART.md](tests/udma/QUICKSTART.md)
 - [tests/udma/demo/ASCEND_VERIFICATION.md](tests/udma/demo/ASCEND_VERIFICATION.md)
 
+## Collectives Validation
+
+Configure the collectives build as shown in [Quick Start §3](#3-build-core-runtime), then run the hardware-free source and CLI smoke checks registered with CTest:
+
+```bash
+ctest --test-dir build-collectives --output-on-failure
+```
+
+These checks verify headers, the library split, scripts, docs, and tool wiring without an NPU. Physical multi-NPU runs are manual.
+
+Manual multi-NPU correctness and performance tools live under `tests/collectives/`:
+
+```bash
+cd tests/collectives
+TILEXR_INSTALL="$PWD/../../install"
+TILEXR_LIBDIR="$(find "$TILEXR_INSTALL" -maxdepth 1 -type d -name 'lib*' | head -n 1)"
+
+LD_LIBRARY_PATH="$TILEXR_LIBDIR:${LD_LIBRARY_PATH:-}" \
+  ./run_collectives_correctness.sh 2 16 0 ../../install/bin allgather
+
+LD_LIBRARY_PATH="$TILEXR_LIBDIR:${LD_LIBRARY_PATH:-}" \
+  ./run_collective_perf.sh 2 0 ../../install/bin \
+    --op allgather --min-bytes 4 --max-bytes 4096 \
+    --step-factor 2 --iters 20 --warmup-iters 5 \
+    --datatype int32 --check 1
+```
+
+The perf tool prints nccl-tests-style latency, algorithm bandwidth, bus bandwidth, and error counts, with optional CSV output. See [tests/collectives/README.md](tests/collectives/README.md) for script arguments, skip behavior, timeout handling, and topology limitations.
+
 ## Operator Simulator
 
 ```bash
@@ -234,6 +296,7 @@ bash scripts/driver_fix.sh
 - [docs/UDMA_INTEGRATION_SUMMARY.md](docs/UDMA_INTEGRATION_SUMMARY.md): current UDMA architecture summary
 - [docs/SHMEM_INTEGRATION.md](docs/SHMEM_INTEGRATION.md): shmem status and historical notes
 - [docs/CANN_VERSION_MIGRATION.md](docs/CANN_VERSION_MIGRATION.md): CANN 9.1.0 migration notes
+- [tests/collectives/README.md](tests/collectives/README.md): optional collectives correctness and performance tools
 - [CLAUDE.md](CLAUDE.md): repository guidance for AI coding agents
 
 ## Troubleshooting
@@ -251,6 +314,7 @@ Build failures:
 - Run `source scripts/common_env.sh` before CMake or scripts.
 - Check `ASCEND_HOME_PATH`, `TILEXR_CANN_VER`, and CANN 9.1.0 include/library layout.
 - Confirm `install/lib/libtile-comm.so` links only to the expected CANN runtime/driver libraries and does not require hcomm, HCCL, shmem, or ops-transformer.
+- Do not put `${ASCEND_HOME_PATH}/${ARCH}-linux/devlib` into runtime RPATH/RUNPATH. That path is a link-time fallback and may contain stub libraries such as `libascend_hal.so`; runtime should resolve the real driver HAL from `/usr/local/Ascend/driver/lib64/driver`.
 
 Log analysis:
 

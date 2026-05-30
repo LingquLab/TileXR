@@ -129,6 +129,17 @@ int TileXRGetCommArgsHost(TileXRCommPtr comm, TileXR::CommArgs *&commArgsPtr)
     return TILEXR_SUCCESS;
 }
 
+int TileXRCommNextMagic(TileXRCommPtr comm, int64_t *magic)
+{
+    if (comm == nullptr || magic == nullptr) {
+        TILEXR_LOG(ERROR) << "TileXRCommNextMagic invalid input";
+        return TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    auto* c = static_cast<TileXRComm *>(comm);
+    *magic = c->NextMagic();
+    return TILEXR_SUCCESS;
+}
+
 int TileXRUDMARegister(TileXRCommPtr comm, GM_ADDR localPtr, size_t bytes, TileXRUDMAMemHandle *handle)
 {
     if (comm == nullptr || localPtr == nullptr || handle == nullptr || bytes == 0) {
