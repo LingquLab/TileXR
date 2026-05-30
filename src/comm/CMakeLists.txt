@@ -18,6 +18,13 @@ set(TILEXR_PTO_SDMA_INCLUDE_DIRS
         ${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc
         ${ASCEND_DRIVER_PATH}/kernel/inc)
 
+unset(TILEXR_HAVE_PTO_SDMA_WORKSPACE CACHE)
+unset(TILEXR_HAVE_PTO_SDMA_WORKSPACE)
+unset(TILEXR_HAVE_PTO_SDMA_WORKSPACE_API CACHE)
+unset(TILEXR_HAVE_PTO_SDMA_WORKSPACE_API)
+unset(TILEXR_PTO_NNOPBASE_LIB CACHE)
+unset(TILEXR_PTO_NNOPBASE_LIB)
+
 cmake_push_check_state(RESET)
 set(CMAKE_REQUIRED_INCLUDES
         ${TILEXR_PTO_SDMA_INCLUDE_DIRS})
@@ -57,7 +64,18 @@ foreach(_tilexr_pto_sdma_include_dir IN LISTS TILEXR_PTO_SDMA_INCLUDE_DIRS)
     endif()
 endforeach()
 
-if(TILEXR_HAVE_PTO_SDMA_WORKSPACE AND TILEXR_HAVE_PTO_SDMA_WORKSPACE_API AND TILEXR_HAVE_PTO_SDMA_INTRIN)
+foreach(_tilexr_pto_nnopbase_candidate
+        "${ASCEND_HOME_PATH}/${ARCH}-linux/lib64/libnnopbase.so"
+        "${ASCEND_HOME_PATH}/${ARCH}-linux/devlib/libnnopbase.so")
+    if(EXISTS "${_tilexr_pto_nnopbase_candidate}" AND NOT TILEXR_PTO_NNOPBASE_LIB)
+        set(TILEXR_PTO_NNOPBASE_LIB "${_tilexr_pto_nnopbase_candidate}")
+    endif()
+endforeach()
+
+if(TILEXR_HAVE_PTO_SDMA_WORKSPACE AND
+        TILEXR_HAVE_PTO_SDMA_WORKSPACE_API AND
+        TILEXR_HAVE_PTO_SDMA_INTRIN AND
+        TILEXR_PTO_NNOPBASE_LIB)
     set(TILEXR_HAVE_PTO_SDMA ON)
 else()
     set(TILEXR_HAVE_PTO_SDMA OFF)
@@ -127,9 +145,15 @@ target_link_libraries(tile-comm
         runtime
         profapi
         ascend_hal
-        nnopbase
         dl
 )
+
+if(TILEXR_HAVE_PTO_SDMA)
+    target_link_libraries(tile-comm
+            PRIVATE
+            ${TILEXR_PTO_NNOPBASE_LIB}
+    )
+endif()
 
 install(TARGETS tile-comm LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR})
 install(FILES
