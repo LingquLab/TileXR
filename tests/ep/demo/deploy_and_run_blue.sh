@@ -59,7 +59,7 @@ cd $(printf '%q' "${REMOTE_REPO}")
 {
   echo "Remote branch source: ${branch}"
   echo "Remote commit source: ${commit}"
-  git -c url.https://github.com/.insteadOf=git@github.com: submodule update --init --recursive
+  git -c url.https://github.com/.insteadOf=git@github.com: submodule update --init 3rdparty/hcomm 3rdparty/ops-transformer 3rdparty/spdlog
   : "\${ASCEND_HOME_PATH:=}"
   : "\${LD_LIBRARY_PATH:=}"
   source scripts/common_env.sh

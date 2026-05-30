@@ -129,6 +129,19 @@ void TestBlueDeployScriptCleansRemoteCheckout()
     CheckContains("tests/ep/demo/deploy_and_run_blue.sh", deployScript, "mkdir -p -- \"\\${remote_repo}\"");
 }
 
+void TestBlueDeployScriptInitializesEpSubmodulesOnly()
+{
+    std::string deployScript;
+    if (!ReadFile("tests/ep/demo/deploy_and_run_blue.sh", &deployScript)) {
+        return;
+    }
+
+    CheckContains("tests/ep/demo/deploy_and_run_blue.sh", deployScript,
+        "submodule update --init 3rdparty/hcomm 3rdparty/ops-transformer 3rdparty/spdlog");
+    CheckNotContains("tests/ep/demo/deploy_and_run_blue.sh", deployScript, "submodule update --init --recursive");
+    CheckNotContains("tests/ep/demo/deploy_and_run_blue.sh", deployScript, "3rdparty/shmem");
+}
+
 void TestNoForbiddenDependencies()
 {
     const std::vector<std::string> paths = {
@@ -166,6 +179,7 @@ int main()
     TestEpSocDefaultFollowsEnvironment();
     TestEpKernelUsesCceArchFlags();
     TestBlueDeployScriptCleansRemoteCheckout();
+    TestBlueDeployScriptInitializesEpSubmodulesOnly();
     TestNoForbiddenDependencies();
     return g_failures == 0 ? 0 : 1;
 }
