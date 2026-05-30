@@ -16,12 +16,11 @@ The current codebase implements the base communication runtime, flag-based synch
 
 ## Features
 
-- **Core communication runtime**: `libtile-comm.so` initializes ranks, shared buffers, peer memory mappings, socket exchange, device `CommArgs`, and DFX state. It does not depend on hcomm, HCCL, shmem, or ops-transformer.
-- **Optional TileXR collectives**: `libtilexr-collectives.so` is built only when `TILEXR_BUILD_COLLECTIVES=ON`. It provides standalone `TileXRAllGather` and equal-size `TileXRAllToAll` APIs on top of `libtile-comm.so`.
+- **Core communication runtime**: `libtile-comm.so` initializes ranks, shared buffers, peer memory mappings, socket exchange, device `CommArgs`, and DFX state. It builds only against CANN runtime/ACL/driver APIs and TileXR-owned types — it does not include or link hcomm, HCCL, shmem, or ops-transformer.
+- **Optional TileXR collectives**: `libtilexr-collectives.so`, built only when `TILEXR_BUILD_COLLECTIVES=ON`, layers standalone `TileXRAllGather` and equal-size `TileXRAllToAll` APIs on top of `libtile-comm.so`.
 - **Tile-level synchronization**: device-side flag regions and magic values support reusable fine-grained synchronization rounds.
 - **MC2 fused operators**: AllGather+Add and AllGather+MatMul examples under `src/mc2/`.
 - **Registered-memory UDMA path**: host code registers ordinary `aclrtMalloc` device memory with `TileXRUDMARegister`; device kernels use `tilexr_udma.h` wrappers for put/get/signal.
-- **Self-contained TileXR communication library**: `src/comm` uses TileXR-owned types and HCCP/RA runtime integration; it does not include or link hcomm, HCCL, or shmem.
 - **Operator simulator**: `op-simulator/` supports functional/performance simulation for selected AICore kernels without physical hardware.
 
 ## System Requirements
@@ -153,15 +152,11 @@ TileXR/
 
 `src/comm/` builds `libtile-comm.so` and exposes the public API in `src/include/tilexr_api.h`. This library is intentionally independent of hcomm, HCCL, shmem, and ops-transformer. It uses CANN runtime/ACL/driver APIs plus TileXR-owned communication metadata and datatypes.
 
-Important host-side entry points:
+Important host-side entry points, grouped by role:
 
-- `TileXRGetUniqueId`
-- `TileXRCommInitRankLocal`
-- `TileXRCommInitRank`
-- `TileXRCommInitRankWithDomain`
-- `TileXRGetCommArgsDev`
-- `TileXRGetCommArgsHost`
-- `TileXRCommDestroy`
+- **Lifecycle**: `TileXRGetUniqueId`, `TileXRCommInitRankLocal`, `TileXRCommInitRank`, `TileXRCommInitRankWithDomain`, `TileXRCommDestroy`.
+- **CommArgs access**: `TileXRGetCommArgsHost` (host view), `TileXRGetCommArgsDev` (device pointer for kernels).
+- **Synchronization rounds**: `TileXRCommNextMagic` hands out a fresh magic value so callers can reuse flag memory across rounds; the optional collectives library uses it to schedule per-launch synchronization.
 
 The runtime allocates shared IPC buffers, exchanges peer mappings, uploads `CommArgs` to device memory, and records topology/capability flags in `CommArgs::extraFlag`.
 
@@ -247,17 +242,13 @@ See:
 
 ## Collectives Validation
 
-Hardware-free source and CLI smoke checks are registered with CTest when collectives tests are enabled:
+Configure the collectives build as shown in [Quick Start §3](#3-build-core-runtime), then run the hardware-free source and CLI smoke checks registered with CTest:
 
 ```bash
-source scripts/common_env.sh
-cmake -S . -B build-collectives \
-  -DTILEXR_BUILD_COLLECTIVES=ON \
-  -DTILEXR_BUILD_TESTS=ON \
-  -DBUILD_TESTING=OFF
-cmake --build build-collectives -j"$(nproc)"
 ctest --test-dir build-collectives --output-on-failure
 ```
+
+These checks verify headers, the library split, scripts, docs, and tool wiring without an NPU. Physical multi-NPU runs are manual.
 
 Manual multi-NPU correctness and performance tools live under `tests/collectives/`:
 
