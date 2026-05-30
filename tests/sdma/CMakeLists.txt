@@ -75,10 +75,37 @@ target_include_directories(test_tilexr_sdma_transport_disabled PRIVATE
     ${ASCEND_HOME_PATH}/${ARCH}-linux/include/
     ${ASCEND_DRIVER_PATH}/kernel/inc
 )
+
+add_executable(test_tilexr_sdma_comm_wiring
+    unit/test_tilexr_sdma_comm_wiring.cpp
+)
+target_compile_definitions(test_tilexr_sdma_comm_wiring PRIVATE
+    TILEXR_SOURCE_ROOT="${TILEXR_ROOT}"
+)
+
+add_executable(test_tilexr_sdma_disabled_comm
+    integration/test_tilexr_sdma_disabled_comm.cpp
+)
+target_include_directories(test_tilexr_sdma_disabled_comm PRIVATE
+    ${TILEXR_ROOT}/install/include
+    ${TILEXR_ROOT}/src/include
+    ${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc/
+    ${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc/runtime/
+    ${ASCEND_HOME_PATH}/${ARCH}-linux/include/
+    ${ASCEND_DRIVER_PATH}/kernel/inc
+)
+target_link_libraries(test_tilexr_sdma_disabled_comm
+    ${TILEXR_LIB}
+    ascendcl
+    runtime
+    ascend_hal
+)
 set(INSTALL_TARGETS
     test_tilexr_sdma_metadata
     test_tilexr_sdma_api_invalid
     test_tilexr_sdma_transport_disabled
+    test_tilexr_sdma_comm_wiring
+    test_tilexr_sdma_disabled_comm
 )
 
 install(TARGETS ${INSTALL_TARGETS}

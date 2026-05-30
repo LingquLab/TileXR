@@ -177,7 +177,8 @@ int TileXRSDMAAvailable(TileXRCommPtr comm, bool *available)
         TILEXR_LOG(ERROR) << "TileXRSDMAAvailable invalid input";
         return TILEXR_ERROR_PARA_CHECK_FAIL;
     }
-    *available = false;
+    auto* c = static_cast<TileXRComm *>(comm);
+    *available = c->IsSDMAAvailable();
     return TILEXR_SUCCESS;
 }
 
@@ -187,7 +188,8 @@ int TileXRGetSDMAWorkspaceDev(TileXRCommPtr comm, GM_ADDR *workspace)
         TILEXR_LOG(ERROR) << "TileXRGetSDMAWorkspaceDev invalid input";
         return TILEXR_ERROR_PARA_CHECK_FAIL;
     }
-    *workspace = nullptr;
+    auto* c = static_cast<TileXRComm *>(comm);
+    *workspace = c->GetSDMAWorkspacePtr();
     return TILEXR_SUCCESS;
 }
 
