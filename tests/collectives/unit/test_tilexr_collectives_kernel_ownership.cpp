@@ -170,6 +170,16 @@ void TestHostRegistrationLivesInCollectives()
     CheckDoesNotContain(kernelPath, kernel, "g_collectiveKernelStub");
 }
 
+void TestDeviceKernelArgsMatchHostLaunchAbi()
+{
+    const std::string collectivesPath = "src/collectives/kernels/collectives.h";
+    const auto collectives = ReadFile(collectivesPath);
+    CheckContains(collectivesPath, collectives, "GM_ADDR perfTrace");
+    CheckContains(collectivesPath, collectives, "KERNELS_ARGS_CALL()");
+    CheckContains(collectivesPath, collectives,
+                  "input, output, commArgs, len, magic, op, root, cycleCount, scale, scaleCount, offset, perfTrace");
+}
+
 void TestCommDoesNotOwnCollectiveRuntime()
 {
     const auto commFiles = CollectFiles("src/comm");
@@ -201,6 +211,7 @@ int main()
     TestCollectivesOwnsCceBuild();
     TestCollectivesKernelSourcesAreScoped();
     TestHostRegistrationLivesInCollectives();
+    TestDeviceKernelArgsMatchHostLaunchAbi();
     TestCommDoesNotOwnCollectiveRuntime();
     return g_failures == 0 ? 0 : 1;
 }

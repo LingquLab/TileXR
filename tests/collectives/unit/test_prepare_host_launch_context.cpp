@@ -1,3 +1,4 @@
+#include <cstddef>
 #include <cstdint>
 #include <iostream>
 
@@ -41,10 +42,21 @@ void CheckResetContext(const TileXRCollectives::Host::HostLaunchContext &context
     CheckMagic("context.magic", context.magic, 0);
 }
 
+void CheckTrue(const char *label, bool condition)
+{
+    if (!condition) {
+        std::cerr << label << " failed" << std::endl;
+        ++g_failures;
+    }
+}
+
 void CheckKernelArgsHasPerfTrace()
 {
     TileXRCollectives::Host::AscendCCLKernelArgs args {};
     CheckPointer("args.perfTrace", args.perfTrace, nullptr);
+    CheckTrue("perfTrace follows offset",
+              offsetof(TileXRCollectives::Host::AscendCCLKernelArgs, perfTrace) >
+              offsetof(TileXRCollectives::Host::AscendCCLKernelArgs, offset));
 }
 
 void CheckPerfTraceLaunchMetadata()
@@ -72,7 +84,7 @@ void CheckPerfTraceLaunchMetadata()
     CheckMagic("trace opType", session.header.opType,
                static_cast<int64_t>(TileXR::TileXRType::ALL_GATHER));
     CheckMagic("trace dataType", session.header.dataType, TileXR::TILEXR_DATA_TYPE_FP16);
-    CheckMagic("trace messageBytes", session.header.messageBytes, 4096);
+    CheckMagic("trace messageBytes", session.header.messageBytes, 8192);
     CheckMagic("trace cycleToUsDivisor", session.header.cycleToUsDivisor, 1000);
     CheckMagic("trace stats size", static_cast<int64_t>(session.hostStats.size()),
                static_cast<int64_t>(commArgs.rankSize) * 4 * TileXR::TILEXR_PERF_STAGE_COUNT);
@@ -83,14 +95,34 @@ void CheckPerfTraceLaunchMetadata()
                     TileXR::TILEXR_DATA_TYPE_FP16, 4, 4096, nullptr, nullptr),
                 TileXR::TILEXR_ERROR_PARA_CHECK_FAIL);
 
+    commArgs.rank = -1;
+    deviceTrace = reinterpret_cast<const void *>(0x1);
+    CheckStatus("PreparePerfTraceLaunch invalid rank",
+                TileXRCollectives::Host::PreparePerfTraceLaunch(
+                    &session, commArgs, TileXR::TileXRType::ALL_GATHER,
+                    TileXR::TILEXR_DATA_TYPE_FP16, 4, 4096, nullptr, &deviceTrace),
+                TileXR::TILEXR_ERROR_PARA_CHECK_FAIL);
+    CheckPointer("invalid rank deviceTrace", deviceTrace, nullptr);
+    CheckMagic("invalid rank stats size", static_cast<int64_t>(session.hostStats.size()), 0);
+    commArgs.rank = 1;
+
+    deviceTrace = reinterpret_cast<const void *>(0x1);
+    CheckStatus("PreparePerfTraceLaunch invalid count",
+                TileXRCollectives::Host::PreparePerfTraceLaunch(
+                    &session, commArgs, TileXR::TileXRType::ALL_GATHER,
+                    TileXR::TILEXR_DATA_TYPE_FP16, 4, -1, nullptr, &deviceTrace),
+                TileXR::TILEXR_ERROR_PARA_CHECK_FAIL);
+    CheckPointer("invalid count deviceTrace", deviceTrace, nullptr);
+    CheckMagic("invalid count stats size", static_cast<int64_t>(session.hostStats.size()), 0);
+
     commArgs.rankSize = 0;
     deviceTrace = reinterpret_cast<const void *>(0x1);
     CheckStatus("PreparePerfTraceLaunch zero rankSize",
                 TileXRCollectives::Host::PreparePerfTraceLaunch(
                     &session, commArgs, TileXR::TileXRType::ALL_GATHER,
                     TileXR::TILEXR_DATA_TYPE_FP16, 4, 4096, nullptr, &deviceTrace),
-                TileXR::TILEXR_SUCCESS);
-    CheckPointer("zero rankSize deviceTrace", deviceTrace, session.deviceBuffer);
+                TileXR::TILEXR_ERROR_PARA_CHECK_FAIL);
+    CheckPointer("zero rankSize deviceTrace", deviceTrace, nullptr);
     CheckMagic("zero rankSize stats size", static_cast<int64_t>(session.hostStats.size()), 0);
 
     session.config.enabled = 0;
