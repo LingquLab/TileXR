@@ -36,7 +36,7 @@ set(TILEXR_EP_KERNEL_COMPILE_OPTIONS
     -mllvm -cce-aicore-dcci-insert-for-scalar=false
     ${TILEXR_EP_AICORE_ARCH}
 )
-set(TILEXR_EP_KERNEL_LINK_OPTIONS --cce-fatobj-link ${TILEXR_EP_AICORE_ARCH})
+set(TILEXR_EP_KERNEL_LINK_OPTIONS ${TILEXR_EP_AICORE_ARCH})
 
 set(TILEXR_EP_KERNEL_SO "${CMAKE_CURRENT_BINARY_DIR}/libtilexr_ep_dispatch_kernel.so")
 set(TILEXR_EP_KERNEL_INCLUDES

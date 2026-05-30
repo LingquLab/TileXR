@@ -110,10 +110,11 @@ void TestEpKernelUsesCceArchFlags()
 
     CheckContains("src/ep/CMakeLists.txt", epCmake, "-xcce");
     CheckContains("src/ep/CMakeLists.txt", epCmake, "${TILEXR_EP_AICORE_ARCH}");
-    CheckContains("src/ep/CMakeLists.txt", epCmake, "--cce-fatobj-link");
+    CheckContains("src/ep/CMakeLists.txt", epCmake, "set(TILEXR_EP_KERNEL_LINK_OPTIONS ${TILEXR_EP_AICORE_ARCH})");
     CheckNotContains("src/ep/CMakeLists.txt", epCmake, "-xasc");
     CheckNotContains("src/ep/CMakeLists.txt", epCmake, "--npu-arch=");
     CheckNotContains("src/ep/CMakeLists.txt", epCmake, "--cce-auto-infer-kernel-type=false");
+    CheckNotContains("src/ep/CMakeLists.txt", epCmake, "--cce-fatobj-link");
 }
 
 void TestBlueDeployScriptCleansRemoteCheckout()
