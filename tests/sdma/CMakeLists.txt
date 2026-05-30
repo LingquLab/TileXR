@@ -75,12 +75,6 @@ target_include_directories(test_tilexr_sdma_transport_disabled PRIVATE
     ${ASCEND_HOME_PATH}/${ARCH}-linux/include/
     ${ASCEND_DRIVER_PATH}/kernel/inc
 )
-target_link_libraries(test_tilexr_sdma_transport_disabled
-    ascendcl
-    runtime
-    ascend_hal
-)
-
 set(INSTALL_TARGETS
     test_tilexr_sdma_metadata
     test_tilexr_sdma_api_invalid
