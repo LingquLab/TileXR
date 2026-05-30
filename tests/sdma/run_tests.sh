@@ -35,5 +35,6 @@ export LD_LIBRARY_PATH="${INSTALL_DIR}/lib:${TILEXR_ROOT}/install/lib:${ASCEND_D
 
 "${INSTALL_DIR}/bin/test_tilexr_sdma_metadata"
 "${INSTALL_DIR}/bin/test_tilexr_sdma_api_invalid"
+"${INSTALL_DIR}/bin/test_tilexr_sdma_transport_disabled"
 
 echo "TileXR SDMA unit tests passed"

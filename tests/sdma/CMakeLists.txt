@@ -63,9 +63,28 @@ target_link_libraries(test_tilexr_sdma_api_invalid
     ascend_hal
 )
 
+add_executable(test_tilexr_sdma_transport_disabled
+    unit/test_tilexr_sdma_transport_disabled.cpp
+    ${TILEXR_ROOT}/src/comm/sdma/tilexr_sdma_transport.cpp
+)
+target_include_directories(test_tilexr_sdma_transport_disabled PRIVATE
+    ${TILEXR_ROOT}/src/comm
+    ${TILEXR_ROOT}/src/include
+    ${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc/
+    ${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc/runtime/
+    ${ASCEND_HOME_PATH}/${ARCH}-linux/include/
+    ${ASCEND_DRIVER_PATH}/kernel/inc
+)
+target_link_libraries(test_tilexr_sdma_transport_disabled
+    ascendcl
+    runtime
+    ascend_hal
+)
+
 set(INSTALL_TARGETS
     test_tilexr_sdma_metadata
     test_tilexr_sdma_api_invalid
+    test_tilexr_sdma_transport_disabled
 )
 
 install(TARGETS ${INSTALL_TARGETS}

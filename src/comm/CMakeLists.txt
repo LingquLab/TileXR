@@ -24,6 +24,8 @@ set(TILEXR_SOURCE_FILE tilexr_comm.cpp
         udma/tilexr_udma_layout.cpp
         udma/tilexr_udma_transport.h
         udma/tilexr_udma_transport.cpp
+        sdma/tilexr_sdma_transport.h
+        sdma/tilexr_sdma_transport.cpp
 )
 
 add_library(tile-comm SHARED ${TILEXR_SOURCE_FILE})
