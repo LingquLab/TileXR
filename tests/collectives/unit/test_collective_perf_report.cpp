@@ -53,6 +53,22 @@ void CheckContains(const std::string &path, const std::string &needle)
     }
 }
 
+void CheckFileMissingOrDoesNotContain(const std::string &path, const std::string &needle)
+{
+    std::ifstream input(path.c_str());
+    if (!input.is_open()) {
+        return;
+    }
+
+    std::ostringstream buffer;
+    buffer << input.rdbuf();
+    const std::string text = buffer.str();
+    if (text.find(needle) != std::string::npos) {
+        std::cerr << "expected " << path << " not to retain stale content: " << needle << std::endl;
+        ++g_failures;
+    }
+}
+
 TileXR::TileXRPerfCoreStageStats MakeStat(uint32_t rank, uint32_t core, TileXR::PerfStageId stage,
                                           uint64_t count, uint64_t sumCycles, uint64_t maxCycles)
 {
@@ -62,7 +78,12 @@ TileXR::TileXRPerfCoreStageStats MakeStat(uint32_t rank, uint32_t core, TileXR::
     stat.stageId = static_cast<uint32_t>(stage);
     stat.count = count;
     stat.sumCycles = sumCycles;
+    stat.minCycles = sumCycles / count;
     stat.maxCycles = maxCycles;
+    stat.firstStartCycle = 100000 + rank * 1000 + core * 100 + static_cast<uint32_t>(stage);
+    stat.lastEndCycle = stat.firstStartCycle + sumCycles;
+    stat.aux0 = 0x1000 + rank;
+    stat.aux1 = 0x2000 + core;
     return stat;
 }
 
@@ -117,10 +138,31 @@ void TestPerfReportSummariesAndFiles()
             TileXR::TILEXR_SUCCESS);
 
     CheckContains(options.outputDir + "/trace.json", "\"raw_cycles\"");
+    CheckContains(options.outputDir + "/trace.json", "\"first_start_cycle\"");
+    CheckContains(options.outputDir + "/trace.json", "\"last_end_cycle\"");
+    CheckContains(options.outputDir + "/trace.json", "\"sum_us\"");
     CheckContains(options.outputDir + "/summary.csv", "stage,rank,core");
     CheckContains(options.outputDir + "/analysis.md", "bottleneck");
     CheckContains(options.outputDir + "/report.html", "Bottleneck First");
+    CheckContains(options.outputDir + "/report.html", "Timeline");
+    CheckContains(options.outputDir + "/report.html", "first_start_cycle");
     CheckContains(options.outputDir + "/ai_prompt.md", "TileXR collective profiling");
+
+    options.outputDir = "/tmp/tilexr_perf_report_test_nested/a/b";
+    options.emitAiPrompt = true;
+    CheckEq("WritePerfTraceReports nested output",
+            TileXRCollectives::Host::WritePerfTraceReports(header, stats, options),
+            TileXR::TILEXR_SUCCESS);
+    CheckContains(options.outputDir + "/trace.json", "\"raw_cycles\"");
+
+    std::ofstream stalePrompt((options.outputDir + "/ai_prompt.md").c_str(), std::ios::out | std::ios::trunc);
+    stalePrompt << "stale prompt";
+    stalePrompt.close();
+    options.emitAiPrompt = false;
+    CheckEq("WritePerfTraceReports without ai prompt",
+            TileXRCollectives::Host::WritePerfTraceReports(header, stats, options),
+            TileXR::TILEXR_SUCCESS);
+    CheckFileMissingOrDoesNotContain(options.outputDir + "/ai_prompt.md", "stale prompt");
 }
 
 } // namespace

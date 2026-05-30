@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <cstdio>
 #include <fstream>
 #include <sstream>
 #include <sys/stat.h>
@@ -17,23 +18,50 @@ bool EnsureOutputDir(const std::string &outputDir)
         return false;
     }
 
-    struct stat st {};
-    if (stat(outputDir.c_str(), &st) == 0) {
-        return S_ISDIR(st.st_mode);
+    std::string current;
+    size_t pos = 0;
+    if (outputDir[0] == '/') {
+        current = "/";
+        pos = 1;
     }
 
-    if (errno != ENOENT) {
-        return false;
+    while (pos <= outputDir.size()) {
+        const size_t next = outputDir.find('/', pos);
+        const std::string component = outputDir.substr(
+            pos, next == std::string::npos ? std::string::npos : next - pos);
+        pos = next == std::string::npos ? outputDir.size() + 1 : next + 1;
+        if (component.empty()) {
+            continue;
+        }
+
+        if (!current.empty() && current[current.size() - 1] != '/') {
+            current += "/";
+        }
+        current += component;
+
+        struct stat st {};
+        if (stat(current.c_str(), &st) == 0) {
+            if (!S_ISDIR(st.st_mode)) {
+                return false;
+            }
+            continue;
+        }
+
+        if (errno != ENOENT) {
+            return false;
+        }
+
+        if (mkdir(current.c_str(), 0755) != 0) {
+            if (errno != EEXIST) {
+                return false;
+            }
+            if (stat(current.c_str(), &st) != 0 || !S_ISDIR(st.st_mode)) {
+                return false;
+            }
+        }
     }
 
-    if (mkdir(outputDir.c_str(), 0755) == 0) {
-        return true;
-    }
-    if (errno != EEXIST) {
-        return false;
-    }
-
-    return stat(outputDir.c_str(), &st) == 0 && S_ISDIR(st.st_mode);
+    return true;
 }
 
 bool WriteTextFile(const std::string &path, const std::string &text)
@@ -44,7 +72,20 @@ bool WriteTextFile(const std::string &path, const std::string &text)
     }
 
     output << text;
-    return output.good();
+    output.flush();
+    if (output.fail() || output.bad()) {
+        return false;
+    }
+    output.close();
+    return !output.fail() && !output.bad();
+}
+
+bool RemoveIfExists(const std::string &path)
+{
+    if (std::remove(path.c_str()) == 0) {
+        return true;
+    }
+    return errno == ENOENT;
 }
 
 std::string JoinPath(const std::string &dir, const std::string &file)
@@ -129,6 +170,11 @@ std::vector<TileXR::TileXRPerfCoreStageStats> NonEmptyStats(
     return result;
 }
 
+double StatSumUs(const TileXR::TileXRPerfTraceHeader &header, const TileXR::TileXRPerfCoreStageStats &stat)
+{
+    return TileXR::PerfTraceCyclesToUs(stat.sumCycles, header.cycleToUsDivisor);
+}
+
 std::string BuildTraceJson(const TileXR::TileXRPerfTraceHeader &header,
                            const std::vector<TileXR::TileXRPerfCoreStageStats> &stats)
 {
@@ -153,7 +199,13 @@ std::string BuildTraceJson(const TileXR::TileXRPerfTraceHeader &header,
             << ", \"stage_id\": " << stat.stageId
             << ", \"count\": " << stat.count
             << ", \"raw_cycles\": " << stat.sumCycles
+            << ", \"min_cycles\": " << stat.minCycles
             << ", \"max_cycles\": " << stat.maxCycles
+            << ", \"first_start_cycle\": " << stat.firstStartCycle
+            << ", \"last_end_cycle\": " << stat.lastEndCycle
+            << ", \"aux0\": " << stat.aux0
+            << ", \"aux1\": " << stat.aux1
+            << ", \"sum_us\": " << StatSumUs(header, stat)
             << "}";
         if (i + 1 != nonEmptyStats.size()) {
             out << ",";
@@ -168,7 +220,7 @@ std::string BuildTraceJson(const TileXR::TileXRPerfTraceHeader &header,
 std::string BuildSummaryCsv(const std::vector<PerfStageSummary> &summaries)
 {
     std::ostringstream out;
-    out << "stage,rank,core,count,sum_cycles,max_cycles,sum_us\n";
+    out << "stage,rank,core,count,sum_cycles,max_cycles,sum_us,rank_meaning,core_meaning\n";
     for (const auto &summary : summaries) {
         out << summary.stageName << ","
             << summary.maxRank << ","
@@ -176,7 +228,8 @@ std::string BuildSummaryCsv(const std::vector<PerfStageSummary> &summaries)
             << summary.count << ","
             << summary.sumCycles << ","
             << summary.maxCycles << ","
-            << summary.sumUs << "\n";
+            << summary.sumUs << ","
+            << "max,max\n";
     }
     return out.str();
 }
@@ -212,8 +265,10 @@ std::string BuildAnalysisMarkdown(const TileXR::TileXRPerfTraceHeader &header,
 
 std::string BuildHtmlReport(const TileXR::TileXRPerfTraceHeader &header,
                             const std::vector<PerfStageSummary> &summaries,
-                            const std::vector<std::string> &findings)
+                            const std::vector<std::string> &findings,
+                            const std::vector<TileXR::TileXRPerfCoreStageStats> &stats)
 {
+    const auto nonEmptyStats = NonEmptyStats(stats);
     std::ostringstream out;
     out << "<!doctype html>\n<html><head><meta charset=\"utf-8\">";
     out << "<title>TileXR Collective Perf Report</title>";
@@ -238,6 +293,25 @@ std::string BuildHtmlReport(const TileXR::TileXRPerfTraceHeader &header,
             << "</td><td>" << summary.sumUs
             << "</td><td>" << summary.maxRank
             << "</td><td>" << summary.maxCore
+            << "</td></tr>\n";
+    }
+    out << "</tbody></table>\n";
+    out << "<h2>Timeline</h2>\n";
+    out << "<table><thead><tr><th>Rank</th><th>Core</th><th>Stage</th>";
+    out << "<th>first_start_cycle</th><th>last_end_cycle</th>";
+    out << "<th>duration_cycles</th><th>raw_cycles</th><th>sum_us</th>";
+    out << "</tr></thead><tbody>\n";
+    for (const auto &stat : nonEmptyStats) {
+        const uint64_t durationCycles = stat.lastEndCycle >= stat.firstStartCycle ?
+            stat.lastEndCycle - stat.firstStartCycle : 0;
+        out << "<tr><td>" << stat.rank
+            << "</td><td>" << stat.core
+            << "</td><td>" << EscapeHtml(PerfStageName(stat.stageId))
+            << "</td><td>" << stat.firstStartCycle
+            << "</td><td>" << stat.lastEndCycle
+            << "</td><td>" << durationCycles
+            << "</td><td>" << stat.sumCycles
+            << "</td><td>" << StatSumUs(header, stat)
             << "</td></tr>\n";
     }
     out << "</tbody></table>\n";
@@ -382,12 +456,15 @@ int WritePerfTraceReports(
     if (!WriteTextFile(JoinPath(options.outputDir, "trace.json"), BuildTraceJson(header, stats)) ||
         !WriteTextFile(JoinPath(options.outputDir, "summary.csv"), BuildSummaryCsv(summaries)) ||
         !WriteTextFile(JoinPath(options.outputDir, "analysis.md"), BuildAnalysisMarkdown(header, summaries, findings)) ||
-        !WriteTextFile(JoinPath(options.outputDir, "report.html"), BuildHtmlReport(header, summaries, findings))) {
+        !WriteTextFile(JoinPath(options.outputDir, "report.html"), BuildHtmlReport(header, summaries, findings, stats))) {
         return TileXR::TILEXR_ERROR_INTERNAL;
     }
 
     if (options.emitAiPrompt &&
         !WriteTextFile(JoinPath(options.outputDir, "ai_prompt.md"), BuildAiPrompt(header, summaries, findings))) {
+        return TileXR::TILEXR_ERROR_INTERNAL;
+    }
+    if (!options.emitAiPrompt && !RemoveIfExists(JoinPath(options.outputDir, "ai_prompt.md"))) {
         return TileXR::TILEXR_ERROR_INTERNAL;
     }
 
