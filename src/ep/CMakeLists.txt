@@ -134,11 +134,16 @@ target_link_directories(tilexr-ep
 
 target_link_libraries(tilexr-ep
     PRIVATE
-        "${TILEXR_EP_KERNEL_SO}"
+        tilexr_ep_dispatch_kernel
         tile-comm
         ascendcl
         runtime
         ascend_hal
+)
+
+set_target_properties(tilexr-ep PROPERTIES
+    BUILD_RPATH "${CMAKE_CURRENT_BINARY_DIR}"
+    INSTALL_RPATH "$ORIGIN"
 )
 
 install(TARGETS tilexr-ep LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR})
