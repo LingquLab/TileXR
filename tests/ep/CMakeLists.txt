@@ -59,6 +59,18 @@ foreach(dir
     endif()
 endforeach()
 
+find_path(TILEXR_EP_ACL_BASE_INCLUDE_DIR acl/acl_base.h
+    PATHS ${TILEXR_EP_TEST_INCLUDE_DIRS}
+    NO_DEFAULT_PATH
+)
+if(NOT TILEXR_EP_ACL_BASE_INCLUDE_DIR)
+    set(TILEXR_EP_ACL_STUB_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated_acl_stub")
+    file(MAKE_DIRECTORY "${TILEXR_EP_ACL_STUB_DIR}/acl")
+    file(WRITE "${TILEXR_EP_ACL_STUB_DIR}/acl/acl_base.h"
+"#ifndef TILEXR_EP_TEST_ACL_BASE_H\n#define TILEXR_EP_TEST_ACL_BASE_H\ntypedef void *aclrtStream;\n#endif\n")
+    list(APPEND TILEXR_EP_TEST_INCLUDE_DIRS "${TILEXR_EP_ACL_STUB_DIR}")
+endif()
+
 add_executable(test_tilexr_ep_layout
     unit/test_tilexr_ep_layout.cpp
     ${TILEXR_ROOT}/src/ep/host/ep_layout.cpp
@@ -68,7 +80,17 @@ add_executable(test_tilexr_ep_api_sources
     unit/test_tilexr_ep_api_sources.cpp
 )
 
+add_executable(test_tilexr_ep_host_validation
+    unit/test_tilexr_ep_host_validation.cpp
+    ${TILEXR_ROOT}/src/ep/host/ep_layout.cpp
+    ${TILEXR_ROOT}/src/ep/host/ep_dispatch_host.cpp
+)
+
 target_include_directories(test_tilexr_ep_layout PRIVATE
+    ${TILEXR_EP_TEST_INCLUDE_DIRS}
+)
+
+target_include_directories(test_tilexr_ep_host_validation PRIVATE
     ${TILEXR_EP_TEST_INCLUDE_DIRS}
 )
 
@@ -76,9 +98,11 @@ target_compile_definitions(test_tilexr_ep_api_sources PRIVATE TILEXR_SOURCE_ROOT
 
 add_test(NAME test_tilexr_ep_layout COMMAND test_tilexr_ep_layout)
 add_test(NAME test_tilexr_ep_api_sources COMMAND test_tilexr_ep_api_sources)
+add_test(NAME test_tilexr_ep_host_validation COMMAND test_tilexr_ep_host_validation)
 
 install(TARGETS
     test_tilexr_ep_layout
     test_tilexr_ep_api_sources
+    test_tilexr_ep_host_validation
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 )

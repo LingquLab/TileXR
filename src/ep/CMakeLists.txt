@@ -2,6 +2,10 @@ include(GNUInstallDirs)
 
 add_library(tilexr-ep SHARED
     host/ep_layout.cpp
+    host/ep_dispatch_host.cpp
+    host/ep_launch_context.cpp
+    host/ep_kernel_launch.cpp
+    host/tilexr_ep_dispatch.cpp
 )
 
 target_include_directories(tilexr-ep
