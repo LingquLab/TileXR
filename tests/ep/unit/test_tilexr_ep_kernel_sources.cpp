@@ -72,7 +72,9 @@ void TestKernelUsesTileXRPeerMemory()
     CheckContains(path, contents, "kEpStepWindowCleared");
     CheckContains(path, contents, "kEpStepDispatchReady");
     CheckContains(path, contents, "LoadInt32FromGm");
+    CheckContains(path, contents, "LoadAssistTupleFromGm");
     CheckNotContains(path, contents, "expertIds[");
+    CheckNotContains(path, contents, "assistBase[item]");
 }
 
 void TestNoForbiddenDependencies()

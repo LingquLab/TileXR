@@ -82,6 +82,29 @@ __aicore__ inline int32_t LoadInt32FromGm(GM_ADDR srcGM, AscendC::TBuf<AscendC::
     return local.GetValue(0);
 }
 
+__aicore__ inline TileXREp::EpAssistTuple LoadAssistTupleFromGm(
+    GM_ADDR srcGM, AscendC::TBuf<AscendC::QuePosition::VECCALC> &tBuf)
+{
+    AscendC::LocalTensor<int32_t> local =
+        tBuf.GetWithOffset<int32_t>(TileXREp::kEpAssistTupleInts, kEpScalarUbOffset);
+    AscendC::GlobalTensor<int32_t> src;
+    src.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(srcGM), TileXREp::kEpAssistTupleInts);
+
+    AscendC::DataCopyExtParams copyParams {
+        1, static_cast<uint32_t>(sizeof(TileXREp::EpAssistTuple)), 0, 0, 0};
+    AscendC::DataCopyPadExtParams<int32_t> padParams {false, 0, 0, 0};
+    AscendC::DataCopyPad(local, src, copyParams, padParams);
+    AscendC::SetFlag<AscendC::HardEvent::MTE2_S>(EVENT_ID0);
+    AscendC::WaitFlag<AscendC::HardEvent::MTE2_S>(EVENT_ID0);
+
+    TileXREp::EpAssistTuple tuple;
+    tuple.srcRank = local.GetValue(0);
+    tuple.tokenId = local.GetValue(1);
+    tuple.topKId = local.GetValue(2);
+    tuple.expertId = local.GetValue(3);
+    return tuple;
+}
+
 __aicore__ inline void ClearLocalWindow(
     GM_ADDR localWindow, int32_t rankSize, int64_t maxRoutesPerSrc, int64_t rowBytes, int64_t slotBytes,
     int64_t totalBytes)
@@ -261,12 +284,11 @@ extern "C" __global__ __aicore__ void tilexr_ep_dispatch_kernel(GM_ADDR commArgs
             }
 
             GM_ADDR payloadBase = localWindow + PayloadOffset(srcRank, slotBytes);
-            auto assistBase =
-                reinterpret_cast<__gm__ TileXREp::EpAssistTuple *>(localWindow + AssistOffset(srcRank, slotBytes,
-                    payloadBytesPerSlot));
+            GM_ADDR assistBase = localWindow + AssistOffset(srcRank, slotBytes, payloadBytesPerSlot);
             for (int64_t item = 0; item < count; ++item) {
                 CopyBytesGmToGm(expandXOutGM + outRecord * rowBytes, payloadBase + item * rowBytes, tBuf, rowBytes);
-                const TileXREp::EpAssistTuple tuple = assistBase[item];
+                const TileXREp::EpAssistTuple tuple = LoadAssistTupleFromGm(
+                    assistBase + item * static_cast<int64_t>(sizeof(TileXREp::EpAssistTuple)), tBuf);
                 localAssistBase[outRecord].srcRank = tuple.srcRank;
                 localAssistBase[outRecord].tokenId = tuple.tokenId;
                 localAssistBase[outRecord].topKId = tuple.topKId;
