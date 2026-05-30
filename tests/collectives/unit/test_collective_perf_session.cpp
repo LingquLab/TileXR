@@ -86,9 +86,12 @@ void TestCollectivePerfSessionLifecycle()
 
     CheckEq("set active session succeeds", TileXRCollectivePerfSetActiveSession(session), TileXR::TILEXR_SUCCESS);
     CheckTrue("active getter returns session", TileXRCollectives::Host::GetActivePerfTraceSession() == impl);
+    CheckEq("clear active session succeeds", TileXRCollectivePerfSetActiveSession(nullptr), TileXR::TILEXR_SUCCESS);
+    CheckTrue("active getter clears session", TileXRCollectives::Host::GetActivePerfTraceSession() == nullptr);
     CheckEq("write report succeeds", TileXRCollectivePerfWriteReport(session), TileXR::TILEXR_SUCCESS);
     CheckContains("report.html", ReadFile(outputDir + "/report.html"), "Bottleneck First");
     CheckContains("trace.json", ReadFile(outputDir + "/trace.json"), "tilexr_perf_trace_report.v1");
+    CheckEq("set active again succeeds", TileXRCollectivePerfSetActiveSession(session), TileXR::TILEXR_SUCCESS);
     CheckEq("destroy succeeds", TileXRCollectivePerfSessionDestroy(session), TileXR::TILEXR_SUCCESS);
     CheckTrue("destroy clears active session", TileXRCollectives::Host::GetActivePerfTraceSession() == nullptr);
 }
