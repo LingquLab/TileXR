@@ -1,6 +1,6 @@
 # shmem Integration Status
 
-**Updated:** 2026-05-29
+**Updated:** 2026-05-30
 
 This repository still contains `3rdparty/shmem`, but the current TileXR core communication and UDMA path do not use shmem as a runtime dependency.
 

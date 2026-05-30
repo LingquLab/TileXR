@@ -63,8 +63,10 @@ Device wrappers build a PTO `SdmaSession` from `args->sdmaWorkspacePtr`, post
 
 ## CANN Compatibility
 
-The implementation targets CANN 9.0.0 and CANN 9.1.0. TileXR isolates PTO SDMA
-header differences in `tilexr_sdma_compat.h`.
+The implementation is intended for the PTO SDMA interfaces in CANN 9.0.0 and
+CANN 9.1.0. Local validation has confirmed CANN 9.1.0; CANN 9.0.0 remains
+pending until a 9.0 install is available. TileXR isolates PTO SDMA header
+differences in `tilexr_sdma_compat.h`.
 
 Runtime must load `libascend_hal.so` from the driver path, typically:
 

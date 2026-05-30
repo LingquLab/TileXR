@@ -30,10 +30,27 @@ ARCH="${ARCH:-${TILEXR_OS_ARCH:-$(uname -m)}}"
 if [ "${ARCH}" = "arm64" ]; then
     ARCH="aarch64"
 fi
+export ASCEND_DRIVER_PATH="${ASCEND_DRIVER_PATH:-/usr/local/Ascend/driver}"
+
+SANITIZED_LD_LIBRARY_PATH=""
+IFS=':' read -r -a LD_LIBRARY_PATH_PARTS <<< "${LD_LIBRARY_PATH:-}"
+for path in "${LD_LIBRARY_PATH_PARTS[@]}"; do
+    if [[ -z "${path}" || "${path}" == *devlib* ]]; then
+        continue
+    fi
+    if [ -z "${SANITIZED_LD_LIBRARY_PATH}" ]; then
+        SANITIZED_LD_LIBRARY_PATH="${path}"
+    else
+        SANITIZED_LD_LIBRARY_PATH="${SANITIZED_LD_LIBRARY_PATH}:${path}"
+    fi
+done
 
 export TILEXR_ENABLE_SDMA=1
 export ASCEND_RT_VISIBLE_DEVICES="${DEVICE_ID}"
-export LD_LIBRARY_PATH="/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/driver/lib64:${INSTALL_DIR}/lib:${TILEXR_ROOT}/install/lib:${CANN_HOME}/lib64:${CANN_HOME}/${ARCH}-linux/lib64:${LD_LIBRARY_PATH:-}"
+export LD_LIBRARY_PATH="${ASCEND_DRIVER_PATH}/lib64/driver:${ASCEND_DRIVER_PATH}/lib64/common:${ASCEND_DRIVER_PATH}/lib64:${INSTALL_DIR}/lib:${TILEXR_ROOT}/install/lib:${CANN_HOME}/lib64:${CANN_HOME}/${ARCH}-linux/lib64"
+if [ -n "${SANITIZED_LD_LIBRARY_PATH}" ]; then
+    export LD_LIBRARY_PATH="${LD_LIBRARY_PATH}:${SANITIZED_LD_LIBRARY_PATH}"
+fi
 
 bin="${INSTALL_DIR}/bin/tilexr_sdma_demo"
 if [ ! -x "${bin}" ]; then

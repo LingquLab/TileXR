@@ -1,6 +1,6 @@
 # TileXR UDMA Integration Summary
 
-**Updated:** 2026-05-29
+**Updated:** 2026-05-30
 **Status:** Implemented in TileXR comm runtime; A5 / Ascend950 runtime validation required
 
 ## Overview
