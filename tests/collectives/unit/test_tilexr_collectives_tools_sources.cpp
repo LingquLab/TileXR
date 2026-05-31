@@ -113,6 +113,10 @@ void TestPerfToolSource()
     CheckContains(path, text, "--csv");
     CheckContains(path, text, "--min-algbw");
     CheckContains(path, text, "--max-latency-us");
+    CheckContains(path, text, "--profile");
+    CheckContains(path, text, "--profile-dir");
+    CheckContains(path, text, "--profile-ai-prompt");
+    CheckContains(path, text, "--profile-sample-every");
     CheckContains(path, text, "aclrtCreateEvent");
     CheckContains(path, text, "aclrtRecordEvent");
     CheckContains(path, text, "aclrtEventElapsedTime");
@@ -141,6 +145,10 @@ void TestPerfToolSource()
     CheckContains(path, text, "actualSendBytesPerRank");
     CheckContains(path, text, "CanUseCollisionFreeInt32Pattern");
     CheckContains(path, text, "../common/int32_pattern.h");
+    CheckContains(path, text, "TileXRCollectivePerfSessionCreate");
+    CheckContains(path, text, "TileXRCollectivePerfSetActiveSession");
+    CheckContains(path, text, "TileXRCollectivePerfWriteReport");
+    CheckContains(path, text, "TileXRCollectivePerfSessionDestroy");
     CheckDoesNotContain(path, text, "sendElements * static_cast<int64_t>(options.dtype.bytes)");
     CheckDoesNotContain(path, text, "static_cast<int64_t>(static_cast<double>(bytes) * options.stepFactor)");
     CheckDoesNotContain(path, text, "srcRank * 1000000 + index");
