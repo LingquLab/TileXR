@@ -2,7 +2,7 @@
 
 **TileXR** (eXtreme Rendezvous for Asynchronous Tile Communication) is a data-centric asynchronous communication runtime for Huawei Ascend NPUs. It moves communication control from coarse BSP-style kernel phases toward tile-level, AICore-driven rendezvous: data readiness, transport choice, and synchronization become explicit runtime state instead of a fixed all-ranks barrier.
 
-The project currently contains a core communication library, an optional TileXR collectives library, MC2 fused collective operators, a registered-memory UDMA prototype for A5 / Ascend950 hardware, an opt-in on-card SDMA copy transport, and simulator/test infrastructure for Ascend C kernels.
+The project currently contains a core communication library, an optional TileXR collectives library, a standalone Expert Parallelism (EP) dispatch MVP, MC2 fused collective operators, a registered-memory UDMA prototype for A5 / Ascend950 hardware, an opt-in on-card SDMA copy transport, and simulator/test infrastructure for Ascend C kernels.
 
 ## Design Direction
 
@@ -18,6 +18,7 @@ The current codebase implements the base communication runtime, flag-based synch
 
 - **Core communication runtime**: `libtile-comm.so` initializes ranks, shared buffers, peer memory mappings, socket exchange, device `CommArgs`, and DFX state. It builds only against CANN runtime/ACL/driver APIs and TileXR-owned types — it does not include or link hcomm, HCCL, shmem, or ops-transformer.
 - **Optional TileXR collectives**: `libtilexr-collectives.so`, built only when `TILEXR_BUILD_COLLECTIVES=ON`, layers standalone `TileXRAllGather` and equal-size `TileXRAllToAll` APIs on top of `libtile-comm.so`.
+- **Standalone EP dispatch MVP**: `libtilexr-ep.so` and `libtilexr_ep_dispatch_kernel.so` provide a first TileXR-native MoE EP dispatch route under `src/ep`, independent from `src/mc2`, shmem, and UDMA.
 - **Tile-level synchronization**: device-side flag regions and magic values support reusable fine-grained synchronization rounds.
 - **MC2 fused operators**: AllGather+Add and AllGather+MatMul examples under `src/mc2/`.
 - **Registered-memory UDMA path**: host code registers ordinary `aclrtMalloc` device memory with `TileXRUDMARegister`; device kernels use `tilexr_udma.h` wrappers for put/get/signal.
@@ -133,6 +134,7 @@ TileXR/
 |   |   |-- udma/             # TileXR-owned HCCP/RA UDMA transport
 |   |   `-- sdma/             # On-card PTO SDMA local copy transport
 |   |-- collectives/          # Optional TileXR collectives library
+|   |-- ep/                   # Standalone TileXR EP dispatch MVP
 |   |-- include/              # Public C/C++ and device headers
 |   `-- mc2/                  # Fused collective operators
 |       |-- all_gather_add/
@@ -142,6 +144,7 @@ TileXR/
 |-- tests/                    # Host, communication, integration, and UDMA tests
 |   |-- collectives/          # Collectives source/unit checks and manual runners
 |   |-- comm/
+|   |-- ep/                   # EP source checks, build helper, and 2-rank demo
 |   |-- udma/
 |   `-- sdma/                 # SDMA unit tests, integration test, and data-plane demo
 |-- scripts/                  # Build, setup, test, and utility scripts
@@ -181,6 +184,18 @@ Initial collectives APIs:
 - `TileXRAllToAll` for equal per-peer counts
 
 `TileXRAllGather` supports the validated multi-rank path. Multi-rank `TileXRAllToAll` is currently enabled only when the communicator reports the supported `TOPO_910_93` topology; unsupported topologies return a parameter-check error instead of launching an invalid kernel path. Single-rank loopback is supported for both APIs.
+
+### Standalone EP Dispatch
+
+`src/ep/` builds the first TileXR-native Expert Parallelism dispatch path:
+
+- `libtilexr-ep.so` exposes `TileXRMoeEpDispatch` through `src/include/tilexr_ep.h`.
+- `libtilexr_ep_dispatch_kernel.so` contains the Ascend C dispatch/combine kernel.
+- Host code validates MoE shape, dtype, communicator state, and IPC window size before launch.
+- The MVP route uses `CommArgs::peerMems[]`, `TileXR::IPC_DATA_OFFSET`, and `SyncCollectives` for peer-memory communication. Each rank writes its own IPC window, peers read from that window after synchronization.
+- Shared EP window metadata is written through MTE/UB copies so peer ranks observe slot headers and assist tuples consistently.
+
+This EP path is intentionally independent from `src/mc2`, ops-transformer runtime helpers, shmem, and UDMA. A future route can add a UDMA backend with TileXR-registered receive windows while keeping the peer-memory path as fallback.
 
 ### UDMA Registered Memory
 
@@ -301,6 +316,37 @@ LD_LIBRARY_PATH="$TILEXR_LIBDIR:${LD_LIBRARY_PATH:-}" \
 
 The perf tool prints nccl-tests-style latency, algorithm bandwidth, bus bandwidth, and error counts, with optional CSV output. See [tests/collectives/README.md](tests/collectives/README.md) for script arguments, skip behavior, timeout handling, and topology limitations.
 
+## EP Dispatch Validation
+
+The standalone EP checks live under `tests/ep/` and can be built without the full MC2 stack:
+
+```bash
+source scripts/common_env.sh
+bash tests/ep/build.sh source-only
+ctest --test-dir tests/ep/build --output-on-failure
+```
+
+On a configured multi-NPU Ascend host with `bisheng`, build the full EP library, demo, and kernel:
+
+```bash
+source scripts/common_env.sh
+bash tests/ep/build.sh full
+```
+
+The deterministic 2-rank demo validates peer-memory EP dispatch and combine outputs:
+
+```bash
+bash tests/ep/demo/run_tilexr_ep_dispatch_demo.sh 2 2 0
+```
+
+For the current PR validation flow, the blue deployment helper creates a clean remote checkout under `/home/d00520898/tilexr_ep_dispatch_verify/TileXR`, builds the EP artifacts, and runs the demo:
+
+```bash
+bash tests/ep/demo/deploy_and_run_blue.sh
+```
+
+Expected demo logs include `rank 0 validation PASS` and `rank 1 validation PASS`. See [tests/ep/README.md](tests/ep/README.md) for details and current route-2 UDMA TODOs.
+
 ## Operator Simulator
 
 ```bash
@@ -330,6 +376,7 @@ bash scripts/driver_fix.sh
 - [docs/SHMEM_INTEGRATION.md](docs/SHMEM_INTEGRATION.md): shmem status and historical notes
 - [docs/CANN_VERSION_MIGRATION.md](docs/CANN_VERSION_MIGRATION.md): CANN 9.1.0 migration notes
 - [tests/collectives/README.md](tests/collectives/README.md): optional collectives correctness and performance tools
+- [tests/ep/README.md](tests/ep/README.md): standalone EP dispatch build, demo, and future UDMA backend notes
 - [CLAUDE.md](CLAUDE.md): repository guidance for AI coding agents
 
 ## Troubleshooting
