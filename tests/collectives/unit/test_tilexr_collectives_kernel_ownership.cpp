@@ -230,6 +230,24 @@ void TestBigDataAllGatherPerfStages()
     CheckContains(path, text, "TileXRPerfTraceEnabled");
 }
 
+void TestTwoNpuBigDataAllGatherPerfStages()
+{
+    const std::string path = "src/collectives/kernels/kernels/lcal_allgather_2npu_big_data_write.cce";
+    const auto text = ReadFile(path);
+    CheckContains(path, text, "GM_ADDR perfTrace");
+    CheckContains(path, text, "PerfStageId::KERNEL_TOTAL");
+    CheckContains(path, text, "PerfStageId::CHUNK_TOTAL");
+    CheckContains(path, text, "PerfStageId::POST_SYNC");
+    CheckContains(path, text, "PerfStageId::LOCAL_INPUT_TO_IPC");
+    CheckContains(path, text, "PerfStageId::FLAG_POLL_WAIT");
+    CheckContains(path, text, "PerfStageId::PEER_IPC_TO_OUTPUT");
+    CheckContains(path, text, "PerfStageId::CHUNK_BARRIER");
+    CheckContains(path, text, "TileXRPerfStageBegin");
+    CheckContains(path, text, "TileXRPerfStageEnd");
+    CheckContains(path, text, "TileXRPerfAccumulateDuration");
+    CheckContains(path, text, "TileXRPerfTraceEnabled");
+}
+
 void TestCommDoesNotOwnCollectiveRuntime()
 {
     const auto commFiles = CollectFiles("src/comm");
@@ -264,6 +282,7 @@ int main()
     TestPerfTraceCycleDivisorIsA5Specific();
     TestDeviceKernelArgsMatchHostLaunchAbi();
     TestBigDataAllGatherPerfStages();
+    TestTwoNpuBigDataAllGatherPerfStages();
     TestCommDoesNotOwnCollectiveRuntime();
     return g_failures == 0 ? 0 : 1;
 }
