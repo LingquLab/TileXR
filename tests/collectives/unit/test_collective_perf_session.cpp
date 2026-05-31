@@ -100,6 +100,7 @@ void TestCollectivePerfSessionLifecycle()
 
     CheckEq("set active session succeeds", TileXRCollectivePerfSetActiveSession(session), TileXR::TILEXR_SUCCESS);
     CheckTrue("active getter returns session", TileXRCollectives::Host::GetActivePerfTraceSession() == impl);
+    CheckEq("write empty report", TileXRCollectivePerfWriteReport(session), TileXR::TILEXR_SUCCESS);
     CheckEq("clear active session succeeds", TileXRCollectivePerfSetActiveSession(nullptr), TileXR::TILEXR_SUCCESS);
     CheckTrue("active getter clears session", TileXRCollectives::Host::GetActivePerfTraceSession() == nullptr);
     CheckEq("write report succeeds", TileXRCollectivePerfWriteReport(session), TileXR::TILEXR_SUCCESS);

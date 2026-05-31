@@ -250,3 +250,7 @@ Hardware/manual tests:
 - The legacy `dumpAddr` path should not be removed in this first release unless it directly conflicts with the new trace control block.
 - Stage names should be stable strings in host-side schema rather than hard-coded only in the report tool.
 - The trace format version should be bumped whenever struct layout changes.
+
+## Implementation Verification
+
+Implementation plan verification requires host-only collectives tests, profile-build compilation, and an optional hardware run of `tilexr_collective_perf --profile 1` on the big-data AllGather path. Hardware verification is reported as skipped when no usable NPU devices are available.

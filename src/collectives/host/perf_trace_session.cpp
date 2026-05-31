@@ -7,6 +7,7 @@
 #include <memory>
 #include <string>
 
+#include "acl/acl_rt.h"
 #include "collective_utils.h"
 #include "comm_args.h"
 #include "perf_trace_report.h"
@@ -35,7 +36,6 @@ int PreparePerfTraceLaunch(PerfTraceSession *session, const TileXR::CommArgs &co
                            uint32_t blockDim, int64_t count, aclrtStream stream,
                            const void **deviceTrace)
 {
-    (void)stream;
     if (deviceTrace == nullptr) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
@@ -93,6 +93,44 @@ int PreparePerfTraceLaunch(PerfTraceSession *session, const TileXR::CommArgs &co
         session->hostStats.clear();
         return TileXR::TILEXR_ERROR_INTERNAL;
     }
+
+    session->header.statsOffset = sizeof(TileXR::TileXRPerfTraceHeader);
+    if (session->hostStats.size() > maxCount / sizeof(TileXR::TileXRPerfCoreStageStats)) {
+        return TileXR::TILEXR_ERROR_INTERNAL;
+    }
+    const size_t statsBytes = session->hostStats.size() * sizeof(TileXR::TileXRPerfCoreStageStats);
+    session->header.statsBytes = static_cast<uint64_t>(statsBytes);
+    if (session->header.statsOffset > std::numeric_limits<uint64_t>::max() - session->header.statsBytes) {
+        return TileXR::TILEXR_ERROR_INTERNAL;
+    }
+    const uint64_t requiredBytes64 = session->header.statsOffset + session->header.statsBytes;
+    if (requiredBytes64 > static_cast<uint64_t>(maxCount)) {
+        return TileXR::TILEXR_ERROR_INTERNAL;
+    }
+    const size_t requiredBytes = static_cast<size_t>(requiredBytes64);
+    if (session->deviceBufferBytes < requiredBytes) {
+        if (session->deviceBuffer != nullptr) {
+            aclrtFree(session->deviceBuffer);
+            session->deviceBuffer = nullptr;
+            session->deviceBufferBytes = 0;
+        }
+        aclError allocRet = aclrtMalloc(&session->deviceBuffer, requiredBytes, ACL_MEM_MALLOC_HUGE_FIRST);
+        if (allocRet != ACL_SUCCESS) {
+            return TileXR::TILEXR_ERROR_INTERNAL;
+        }
+        session->deviceBufferBytes = requiredBytes;
+    }
+    aclError copyRet = aclrtMemcpyAsync(session->deviceBuffer, sizeof(session->header),
+        &session->header, sizeof(session->header), ACL_MEMCPY_HOST_TO_DEVICE, stream);
+    if (copyRet != ACL_SUCCESS) {
+        return TileXR::TILEXR_ERROR_INTERNAL;
+    }
+    void *statsDevice = static_cast<uint8_t *>(session->deviceBuffer) + session->header.statsOffset;
+    aclError memsetRet = aclrtMemsetAsync(statsDevice, static_cast<size_t>(session->header.statsBytes),
+        0, static_cast<size_t>(session->header.statsBytes), stream);
+    if (memsetRet != ACL_SUCCESS) {
+        return TileXR::TILEXR_ERROR_INTERNAL;
+    }
     *deviceTrace = session->deviceBuffer;
     return TileXR::TILEXR_SUCCESS;
 }
@@ -134,6 +172,10 @@ extern "C" int TileXRCollectivePerfSessionDestroy(TileXRCollectivePerfSession se
     if (TileXRCollectives::Host::GetActivePerfTraceSession() == impl) {
         TileXRCollectives::Host::SetActivePerfTraceSessionForHost(nullptr);
     }
+    if (impl != nullptr && impl->deviceBuffer != nullptr) {
+        aclrtFree(impl->deviceBuffer);
+        impl->deviceBuffer = nullptr;
+    }
     delete impl;
     return TileXR::TILEXR_SUCCESS;
 }
@@ -154,6 +196,14 @@ extern "C" int TileXRCollectivePerfWriteReport(TileXRCollectivePerfSession sessi
     try {
         TileXRCollectives::Host::PerfTraceSession *impl =
             static_cast<TileXRCollectives::Host::PerfTraceSession *>(session);
+        if (impl->deviceBuffer != nullptr && impl->header.statsBytes > 0 && !impl->hostStats.empty()) {
+            const void *statsDevice = static_cast<const uint8_t *>(impl->deviceBuffer) + impl->header.statsOffset;
+            aclError copyRet = aclrtMemcpy(impl->hostStats.data(), static_cast<size_t>(impl->header.statsBytes),
+                statsDevice, static_cast<size_t>(impl->header.statsBytes), ACL_MEMCPY_DEVICE_TO_HOST);
+            if (copyRet != ACL_SUCCESS) {
+                return TileXR::TILEXR_ERROR_INTERNAL;
+            }
+        }
         TileXRCollectives::Host::PerfReportOptions options {};
         options.outputDir = impl->outputDir;
         options.emitAiPrompt = impl->config.emitAiPrompt != 0;
