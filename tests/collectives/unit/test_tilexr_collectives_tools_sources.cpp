@@ -145,10 +145,17 @@ void TestPerfToolSource()
     CheckContains(path, text, "actualSendBytesPerRank");
     CheckContains(path, text, "CanUseCollisionFreeInt32Pattern");
     CheckContains(path, text, "../common/int32_pattern.h");
+    CheckContains(path, text, "JoinPath");
+    CheckContains(path, text, "ResolveProfileOutputDir");
+    CheckContains(path, text, "\"run/prof/collectives\"");
+    CheckContains(path, text, "\"rank\" + std::to_string(options.rank)");
     CheckContains(path, text, "TileXRCollectivePerfSessionCreate");
     CheckContains(path, text, "TileXRCollectivePerfSetActiveSession");
     CheckContains(path, text, "TileXRCollectivePerfWriteReport");
     CheckContains(path, text, "TileXRCollectivePerfSessionDestroy");
+    CheckContains(path, text, "aclrtSynchronizeStream before perf report");
+    CheckContains(path, text, "TileXRCollectivePerfSetActiveSession clear failed");
+    CheckContains(path, text, "TileXRCollectivePerfSessionDestroy failed");
     CheckDoesNotContain(path, text, "sendElements * static_cast<int64_t>(options.dtype.bytes)");
     CheckDoesNotContain(path, text, "static_cast<int64_t>(static_cast<double>(bytes) * options.stepFactor)");
     CheckDoesNotContain(path, text, "srcRank * 1000000 + index");

@@ -731,6 +731,20 @@ bool AppendCsv(const std::string &path, const Row &row)
     return true;
 }
 
+std::string JoinPath(const std::string &base, const std::string &leaf)
+{
+    if (base.empty() || base[base.size() - 1] == '/') {
+        return base + leaf;
+    }
+    return base + "/" + leaf;
+}
+
+std::string ResolveProfileOutputDir(const Options &options)
+{
+    const std::string root = options.profileDir.empty() ? "run/prof/collectives" : options.profileDir;
+    return JoinPath(root, "rank" + std::to_string(options.rank));
+}
+
 void Cleanup(TileXRCommPtr comm, aclrtStream stream, int deviceId, bool deviceSet)
 {
     if (comm != nullptr) {
@@ -745,17 +759,28 @@ void Cleanup(TileXRCommPtr comm, aclrtStream stream, int deviceId, bool deviceSe
     aclFinalize();
 }
 
-void FinishPerfSession(TileXRCollectivePerfSession &perfSession, const Options &options, int &totalErrors)
+void FinishPerfSession(TileXRCollectivePerfSession &perfSession, const Options &options, aclrtStream stream,
+                       int &totalErrors)
 {
     if (perfSession == nullptr) {
         return;
     }
-    TileXRCollectivePerfSetActiveSession(nullptr);
+    if (stream != nullptr) {
+        CheckAcl(options.rank, "aclrtSynchronizeStream before perf report", aclrtSynchronizeStream(stream));
+    }
+    if (TileXRCollectivePerfSetActiveSession(nullptr) != TileXR::TILEXR_SUCCESS) {
+        std::cerr << "[rank " << options.rank << "] ERROR: TileXRCollectivePerfSetActiveSession clear failed"
+                  << std::endl;
+        totalErrors += 1;
+    }
     if (TileXRCollectivePerfWriteReport(perfSession) != TileXR::TILEXR_SUCCESS) {
         std::cerr << "[rank " << options.rank << "] ERROR: TileXRCollectivePerfWriteReport failed" << std::endl;
         totalErrors += 1;
     }
-    TileXRCollectivePerfSessionDestroy(perfSession);
+    if (TileXRCollectivePerfSessionDestroy(perfSession) != TileXR::TILEXR_SUCCESS) {
+        std::cerr << "[rank " << options.rank << "] ERROR: TileXRCollectivePerfSessionDestroy failed" << std::endl;
+        totalErrors += 1;
+    }
     perfSession = nullptr;
 }
 
@@ -791,18 +816,17 @@ int main(int argc, char **argv)
     int totalErrors = 0;
     TileXRCollectivePerfSession perfSession = nullptr;
     if (options.profile) {
-        const std::string defaultDir = options.profileDir.empty() ?
-            ("run/prof/collectives/rank" + std::to_string(options.rank)) : options.profileDir;
+        const std::string outputDir = ResolveProfileOutputDir(options);
         TileXRCollectivePerfConfig perfConfig {};
         perfConfig.enabled = 1;
-        perfConfig.outputDir = defaultDir.c_str();
+        perfConfig.outputDir = outputDir.c_str();
         perfConfig.emitAiPrompt = options.profileAiPrompt ? 1 : 0;
         perfConfig.sampleEveryN = static_cast<unsigned int>(options.profileSampleEvery);
         if (!CheckTileXR(options.rank, "TileXRCollectivePerfSessionCreate",
                 TileXRCollectivePerfSessionCreate(&perfConfig, &perfSession)) ||
             !CheckTileXR(options.rank, "TileXRCollectivePerfSetActiveSession",
                 TileXRCollectivePerfSetActiveSession(perfSession))) {
-            FinishPerfSession(perfSession, options, totalErrors);
+            FinishPerfSession(perfSession, options, stream, totalErrors);
             Cleanup(comm, stream, deviceId, deviceSet);
             return 1;
         }
@@ -823,7 +847,7 @@ int main(int argc, char **argv)
         int64_t recvBytes = 0;
         if (!ComputeMessageSizes(options, count, sendElements, recvElements, sendBytes, recvBytes)) {
             std::cerr << "ERROR: message size too large" << std::endl;
-            FinishPerfSession(perfSession, options, totalErrors);
+            FinishPerfSession(perfSession, options, stream, totalErrors);
             Cleanup(comm, stream, deviceId, deviceSet);
             return 1;
         }
@@ -877,7 +901,7 @@ int main(int argc, char **argv)
             aclrtFree(devRecv);
         }
         if (!ok) {
-            FinishPerfSession(perfSession, options, totalErrors);
+            FinishPerfSession(perfSession, options, stream, totalErrors);
             Cleanup(comm, stream, deviceId, deviceSet);
             return 1;
         }
@@ -899,7 +923,7 @@ int main(int argc, char **argv)
         if (options.rank == 0) {
             PrintRow(row);
             if (!AppendCsv(options.csvPath, row)) {
-                FinishPerfSession(perfSession, options, totalErrors);
+                FinishPerfSession(perfSession, options, stream, totalErrors);
                 Cleanup(comm, stream, deviceId, deviceSet);
                 return 1;
             }
@@ -908,7 +932,7 @@ int main(int argc, char **argv)
         int64_t nextBytes = 0;
         if (!AdvanceBytes(bytes, options.stepFactor, options.maxBytes, nextBytes)) {
             std::cerr << "ERROR: message size step overflow" << std::endl;
-            FinishPerfSession(perfSession, options, totalErrors);
+            FinishPerfSession(perfSession, options, stream, totalErrors);
             Cleanup(comm, stream, deviceId, deviceSet);
             return 1;
         }
@@ -918,7 +942,7 @@ int main(int argc, char **argv)
         bytes = nextBytes;
     }
 
-    FinishPerfSession(perfSession, options, totalErrors);
+    FinishPerfSession(perfSession, options, stream, totalErrors);
     Cleanup(comm, stream, deviceId, deviceSet);
     return totalErrors == 0 ? 0 : 1;
 }

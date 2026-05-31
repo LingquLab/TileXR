@@ -87,7 +87,8 @@ Run the perf tool with profiling:
 ```
 
 The report directory contains `trace.json`, `summary.csv`, `analysis.md`, `report.html`, and `ai_prompt.md`
-when prompt export is enabled.
+when prompt export is enabled. `--profile-dir` is a root directory; each rank writes its own report under
+`run/prof/collectives/rank<N>/` in the example above.
 
 ## Skip Behavior
 
