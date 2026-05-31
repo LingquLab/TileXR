@@ -149,11 +149,17 @@ void TestPerfToolSource()
     CheckContains(path, text, "ResolveProfileOutputDir");
     CheckContains(path, text, "\"run/prof/collectives\"");
     CheckContains(path, text, "\"rank\" + std::to_string(options.rank)");
+    CheckContains(path, text, "\"launch\" + std::to_string(profileLaunchIndex)");
     CheckContains(path, text, "TileXRCollectivePerfSessionCreate");
     CheckContains(path, text, "TileXRCollectivePerfSetActiveSession");
     CheckContains(path, text, "TileXRCollectivePerfWriteReport");
     CheckContains(path, text, "TileXRCollectivePerfSessionDestroy");
     CheckContains(path, text, "aclrtSynchronizeStream before perf report");
+    CheckContains(path, text, "ProfileThisLaunch");
+    CheckContains(path, text, "profileLaunchIndex");
+    CheckContains(path, text, "TileXRCollectivePerfSetActiveSession(perfSession)");
+    CheckContains(path, text, "TileXRCollectivePerfSetActiveSession(nullptr)");
+    CheckContains(path, text, "skipWriteReport");
     CheckContains(path, text, "TileXRCollectivePerfSetActiveSession clear failed");
     CheckContains(path, text, "TileXRCollectivePerfSessionDestroy failed");
     CheckDoesNotContain(path, text, "sendElements * static_cast<int64_t>(options.dtype.bytes)");

@@ -155,7 +155,7 @@ int PreparePerfTraceLaunch(PerfTraceSession *session, const TileXR::CommArgs &co
     session->header.dataType = static_cast<uint32_t>(dataType);
     session->header.messageBytes = static_cast<uint64_t>(messageBytes);
     session->header.cycleToUsDivisor =
-        (commArgs.extraFlag & TileXR::ExtraFlag::TOPO_910A5) != 0 ? 1000u : 50u;
+        (commArgs.extraFlag & TileXR::ExtraFlag::PERF_CYCLE_A5) != 0 ? 1000u : 50u;
 
     if (session->header.stageCount == 0) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;

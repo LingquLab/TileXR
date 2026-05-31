@@ -184,7 +184,7 @@ void CheckPerfTraceLaunchMetadata()
     TileXR::CommArgs commArgs {};
     commArgs.rank = 1;
     commArgs.rankSize = 2;
-    commArgs.extraFlag = TileXR::ExtraFlag::TOPO_910A5;
+    commArgs.extraFlag = TileXR::ExtraFlag::PERF_CYCLE_A5;
 
     TileXRCollectives::Host::PerfTraceSession session {};
     session.config.enabled = 1;
@@ -214,6 +214,16 @@ void CheckPerfTraceLaunchMetadata()
                     &session, commArgs, TileXR::TileXRType::ALL_GATHER,
                     TileXR::TILEXR_DATA_TYPE_FP16, 4, 4096, nullptr, nullptr),
                 TileXR::TILEXR_ERROR_PARA_CHECK_FAIL);
+
+    commArgs.extraFlag = TileXR::ExtraFlag::TOPO_910A5;
+    deviceTrace = reinterpret_cast<const void *>(0x1);
+    CheckStatus("PreparePerfTraceLaunch topo a5 flag uses generic cycle",
+                TileXRCollectives::Host::PreparePerfTraceLaunch(
+                    &session, commArgs, TileXR::TileXRType::ALL_GATHER,
+                    TileXR::TILEXR_DATA_TYPE_FP16, 4, 4096, nullptr, &deviceTrace),
+                TileXR::TILEXR_SUCCESS);
+    CheckMagic("topo a5 flag cycleToUsDivisor", session.header.cycleToUsDivisor, 50);
+    commArgs.extraFlag = TileXR::ExtraFlag::PERF_CYCLE_A5;
 
     commArgs.rank = -1;
     deviceTrace = reinterpret_cast<const void *>(0x1);
