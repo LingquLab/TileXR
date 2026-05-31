@@ -63,13 +63,19 @@ __attribute__((always_inline)) inline __aicore__ void TileXRAllGatherBigDataOrig
                 continue;
             }
 
-            const uint64_t pollStart = static_cast<uint64_t>(AscendC::GetSystemCycle());
+            const bool tracePollWait = TileXR::TileXRPerfTraceEnabled(perfTrace);
+            uint64_t pollStart = 0;
+            if (tracePollWait) {
+                pollStart = static_cast<uint64_t>(AscendC::GetSystemCycle());
+            }
             ctrlFlagsGMX = (__gm__ int64_t*)buff[x] + (blockGroup0Idx) * MEM_DMA_UNIT_INT_NUM;
             CpGM2UB(ctrlFlagsUB2[blockGroup0Idx], ctrlFlagsGMX, sizeof(int64_t));
             AscendC::PipeBarrier<PIPE_ALL>();
-            const uint64_t pollEnd = static_cast<uint64_t>(AscendC::GetSystemCycle());
-            TileXR::TileXRPerfAccumulateDuration(
-                perfTrace, perfRank, perfCore, TileXR::PerfStageId::FLAG_POLL_WAIT, pollStart, pollEnd);
+            if (tracePollWait) {
+                const uint64_t pollEnd = static_cast<uint64_t>(AscendC::GetSystemCycle());
+                TileXR::TileXRPerfAccumulateDuration(
+                    perfTrace, perfRank, perfCore, TileXR::PerfStageId::FLAG_POLL_WAIT, pollStart, pollEnd);
+            }
 
             if ((*ctrlFlagsUB2[blockGroup0Idx] >> 10) != (magic >> 10)) {
                 continue;

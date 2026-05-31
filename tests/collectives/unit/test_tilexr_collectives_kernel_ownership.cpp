@@ -133,6 +133,7 @@ void TestCollectivesKernelSourcesAreScoped()
     CheckContains(perfTraceKernelPath, perfTraceKernel, "TileXRPerfStageBegin");
     CheckContains(perfTraceKernelPath, perfTraceKernel, "TileXRPerfStageEnd");
     CheckContains(perfTraceKernelPath, perfTraceKernel, "TileXRPerfAccumulateDuration");
+    CheckContains(perfTraceKernelPath, perfTraceKernel, "TileXRPerfTraceEnabled");
     CheckContains(perfTraceKernelPath, perfTraceKernel, "#include \"comm_args.h\"");
 
     const std::string perfTraceLayoutPath = "src/include/tilexr_perf_trace.h";
@@ -209,6 +210,7 @@ void TestBigDataAllGatherPerfStages()
     CheckContains(path, text, "TileXRPerfStageBegin");
     CheckContains(path, text, "TileXRPerfStageEnd");
     CheckContains(path, text, "TileXRPerfAccumulateDuration");
+    CheckContains(path, text, "TileXRPerfTraceEnabled");
 }
 
 void TestCommDoesNotOwnCollectiveRuntime()

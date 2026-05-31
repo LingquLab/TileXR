@@ -13,6 +13,11 @@ struct TileXRPerfStageToken {
 
 #if defined(TILEXR_COLLECTIVES_ENABLE_PROFILING)
 
+__attribute__((always_inline)) inline __aicore__ bool TileXRPerfTraceEnabled(GM_ADDR trace)
+{
+    return trace != nullptr;
+}
+
 __attribute__((always_inline)) inline __aicore__ __gm__ TileXRPerfCoreStageStats *TileXRPerfStatsSlot(
     GM_ADDR trace, uint32_t rank, uint32_t core, uint32_t stage)
 {
@@ -94,6 +99,12 @@ __attribute__((always_inline)) inline __aicore__ void TileXRPerfStageEnd(
 }
 
 #else
+
+__attribute__((always_inline)) inline __aicore__ bool TileXRPerfTraceEnabled(GM_ADDR trace)
+{
+    (void)trace;
+    return false;
+}
 
 __attribute__((always_inline)) inline __aicore__ __gm__ TileXRPerfCoreStageStats *TileXRPerfStatsSlot(
     GM_ADDR trace, uint32_t rank, uint32_t core, uint32_t stage)
