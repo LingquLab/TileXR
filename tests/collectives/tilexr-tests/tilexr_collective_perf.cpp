@@ -24,6 +24,7 @@
 
 #include "acl/acl.h"
 #include "tilexr_collectives.h"
+#include "tilexr_collectives_perf.h"
 #include "../common/int32_pattern.h"
 
 namespace {
@@ -56,6 +57,10 @@ struct Options {
     std::string csvPath;
     double minAlgBw = -1.0;
     double maxLatencyUs = -1.0;
+    bool profile = false;
+    std::string profileDir;
+    bool profileAiPrompt = false;
+    int profileSampleEvery = 1;
 };
 
 struct Measurement {
@@ -110,7 +115,9 @@ void PrintUsage(const char *program)
         << "  --datatype int8|int16|int32|int64|fp16|fp32|bf16\n"
         << "  --rank-size N --rank R --first-npu D\n"
         << "  --check 0|1 [--csv path]\n"
-        << "  [--min-algbw GB/s] [--max-latency-us us]\n";
+        << "  [--min-algbw GB/s] [--max-latency-us us]\n"
+        << "  [--profile 0|1] [--profile-dir path]\n"
+        << "  [--profile-ai-prompt 0|1] [--profile-sample-every N]\n";
 }
 
 bool ParseBool(const std::string &value, bool &out)
@@ -412,6 +419,30 @@ bool ParseOptions(int argc, char **argv, Options &options)
                 std::cerr << "ERROR: invalid --max-latency-us" << std::endl;
                 return false;
             }
+        } else if (arg == "--profile") {
+            const char *value = requireValue(arg);
+            if (value == nullptr || !ParseBool(value, options.profile)) {
+                std::cerr << "ERROR: --profile must be 0 or 1" << std::endl;
+                return false;
+            }
+        } else if (arg == "--profile-dir") {
+            const char *value = requireValue(arg);
+            if (value == nullptr) {
+                return false;
+            }
+            options.profileDir = value;
+        } else if (arg == "--profile-ai-prompt") {
+            const char *value = requireValue(arg);
+            if (value == nullptr || !ParseBool(value, options.profileAiPrompt)) {
+                std::cerr << "ERROR: --profile-ai-prompt must be 0 or 1" << std::endl;
+                return false;
+            }
+        } else if (arg == "--profile-sample-every") {
+            const char *value = requireValue(arg);
+            if (value == nullptr || !ParseInt(value, options.profileSampleEvery)) {
+                std::cerr << "ERROR: invalid --profile-sample-every" << std::endl;
+                return false;
+            }
         } else if (arg == "--help" || arg == "-h") {
             PrintUsage(argv[0]);
             std::exit(0);
@@ -425,6 +456,10 @@ bool ParseOptions(int argc, char **argv, Options &options)
         options.iters <= 0 || options.warmupIters < 0 || options.rankSize <= 0 ||
         options.rank < 0 || options.rank >= options.rankSize || options.firstNpu < 0) {
         std::cerr << "ERROR: invalid option value" << std::endl;
+        return false;
+    }
+    if (options.profileSampleEvery <= 0) {
+        std::cerr << "ERROR: --profile-sample-every must be positive" << std::endl;
         return false;
     }
     if (!ValidateMaxMessageSize(options)) {
@@ -710,6 +745,20 @@ void Cleanup(TileXRCommPtr comm, aclrtStream stream, int deviceId, bool deviceSe
     aclFinalize();
 }
 
+void FinishPerfSession(TileXRCollectivePerfSession &perfSession, const Options &options, int &totalErrors)
+{
+    if (perfSession == nullptr) {
+        return;
+    }
+    TileXRCollectivePerfSetActiveSession(nullptr);
+    if (TileXRCollectivePerfWriteReport(perfSession) != TileXR::TILEXR_SUCCESS) {
+        std::cerr << "[rank " << options.rank << "] ERROR: TileXRCollectivePerfWriteReport failed" << std::endl;
+        totalErrors += 1;
+    }
+    TileXRCollectivePerfSessionDestroy(perfSession);
+    perfSession = nullptr;
+}
+
 } // namespace
 
 int main(int argc, char **argv)
@@ -739,11 +788,30 @@ int main(int argc, char **argv)
         return 1;
     }
 
+    int totalErrors = 0;
+    TileXRCollectivePerfSession perfSession = nullptr;
+    if (options.profile) {
+        const std::string defaultDir = options.profileDir.empty() ?
+            ("run/prof/collectives/rank" + std::to_string(options.rank)) : options.profileDir;
+        TileXRCollectivePerfConfig perfConfig {};
+        perfConfig.enabled = 1;
+        perfConfig.outputDir = defaultDir.c_str();
+        perfConfig.emitAiPrompt = options.profileAiPrompt ? 1 : 0;
+        perfConfig.sampleEveryN = static_cast<unsigned int>(options.profileSampleEvery);
+        if (!CheckTileXR(options.rank, "TileXRCollectivePerfSessionCreate",
+                TileXRCollectivePerfSessionCreate(&perfConfig, &perfSession)) ||
+            !CheckTileXR(options.rank, "TileXRCollectivePerfSetActiveSession",
+                TileXRCollectivePerfSetActiveSession(perfSession))) {
+            FinishPerfSession(perfSession, options, totalErrors);
+            Cleanup(comm, stream, deviceId, deviceSet);
+            return 1;
+        }
+    }
+
     if (options.rank == 0) {
         PrintHeader();
     }
 
-    int totalErrors = 0;
     for (int64_t bytes = options.minBytes;;) {
         int64_t count = bytes / static_cast<int64_t>(options.dtype.bytes);
         if (count <= 0) {
@@ -755,6 +823,7 @@ int main(int argc, char **argv)
         int64_t recvBytes = 0;
         if (!ComputeMessageSizes(options, count, sendElements, recvElements, sendBytes, recvBytes)) {
             std::cerr << "ERROR: message size too large" << std::endl;
+            FinishPerfSession(perfSession, options, totalErrors);
             Cleanup(comm, stream, deviceId, deviceSet);
             return 1;
         }
@@ -808,6 +877,7 @@ int main(int argc, char **argv)
             aclrtFree(devRecv);
         }
         if (!ok) {
+            FinishPerfSession(perfSession, options, totalErrors);
             Cleanup(comm, stream, deviceId, deviceSet);
             return 1;
         }
@@ -829,6 +899,7 @@ int main(int argc, char **argv)
         if (options.rank == 0) {
             PrintRow(row);
             if (!AppendCsv(options.csvPath, row)) {
+                FinishPerfSession(perfSession, options, totalErrors);
                 Cleanup(comm, stream, deviceId, deviceSet);
                 return 1;
             }
@@ -837,6 +908,7 @@ int main(int argc, char **argv)
         int64_t nextBytes = 0;
         if (!AdvanceBytes(bytes, options.stepFactor, options.maxBytes, nextBytes)) {
             std::cerr << "ERROR: message size step overflow" << std::endl;
+            FinishPerfSession(perfSession, options, totalErrors);
             Cleanup(comm, stream, deviceId, deviceSet);
             return 1;
         }
@@ -846,6 +918,7 @@ int main(int argc, char **argv)
         bytes = nextBytes;
     }
 
+    FinishPerfSession(perfSession, options, totalErrors);
     Cleanup(comm, stream, deviceId, deviceSet);
     return totalErrors == 0 ? 0 : 1;
 }
