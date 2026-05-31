@@ -22,10 +22,23 @@ struct PerfTraceSession {
     TileXR::TileXRPerfTraceHeader header {};
     void *deviceBuffer = nullptr;
     size_t deviceBufferBytes = 0;
+    bool ownsDeviceBuffer = false;
+    bool deviceTraceReady = false;
+    std::vector<void *> retiredDeviceBuffers;
+};
+
+struct PerfTraceRuntimeHooks {
+    aclError (*mallocDevice)(void **ptr, size_t bytes);
+    aclError (*freeDevice)(void *ptr);
+    aclError (*copyHostToDeviceAsync)(void *dst, size_t dstBytes, const void *src, size_t bytes,
+                                      aclrtStream stream);
+    aclError (*memsetDeviceAsync)(void *dst, size_t dstBytes, int value, size_t bytes, aclrtStream stream);
+    aclError (*copyDeviceToHost)(void *dst, size_t dstBytes, const void *src, size_t bytes);
 };
 
 PerfTraceSession *GetActivePerfTraceSession();
 void SetActivePerfTraceSessionForHost(PerfTraceSession *session);
+void SetPerfTraceRuntimeHooksForTest(const PerfTraceRuntimeHooks *hooks);
 int PreparePerfTraceLaunch(PerfTraceSession *session, const TileXR::CommArgs &commArgs,
                            TileXR::TileXRType opType, TileXR::TileXRDataType dataType,
                            uint32_t blockDim, int64_t count, aclrtStream stream,

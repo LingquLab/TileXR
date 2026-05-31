@@ -19,6 +19,68 @@ namespace {
 
 PerfTraceSession *g_activeSession = nullptr;
 
+aclError AclMallocDevice(void **ptr, size_t bytes)
+{
+    return aclrtMalloc(ptr, bytes, ACL_MEM_MALLOC_HUGE_FIRST);
+}
+
+aclError AclFreeDevice(void *ptr)
+{
+    return aclrtFree(ptr);
+}
+
+aclError AclCopyHostToDeviceAsync(void *dst, size_t dstBytes, const void *src, size_t bytes,
+                                  aclrtStream stream)
+{
+    return aclrtMemcpyAsync(dst, dstBytes, src, bytes, ACL_MEMCPY_HOST_TO_DEVICE, stream);
+}
+
+aclError AclMemsetDeviceAsync(void *dst, size_t dstBytes, int value, size_t bytes, aclrtStream stream)
+{
+    return aclrtMemsetAsync(dst, dstBytes, value, bytes, stream);
+}
+
+aclError AclCopyDeviceToHost(void *dst, size_t dstBytes, const void *src, size_t bytes)
+{
+    return aclrtMemcpy(dst, dstBytes, src, bytes, ACL_MEMCPY_DEVICE_TO_HOST);
+}
+
+const PerfTraceRuntimeHooks kDefaultRuntimeHooks {
+    AclMallocDevice,
+    AclFreeDevice,
+    AclCopyHostToDeviceAsync,
+    AclMemsetDeviceAsync,
+    AclCopyDeviceToHost,
+};
+
+const PerfTraceRuntimeHooks *g_runtimeHooks = &kDefaultRuntimeHooks;
+
+bool ComputeStatsBytes(size_t statsCount, size_t *statsBytes)
+{
+    if (statsBytes == nullptr) {
+        return false;
+    }
+    const size_t maxCount = std::numeric_limits<size_t>::max();
+    if (statsCount > maxCount / sizeof(TileXR::TileXRPerfCoreStageStats)) {
+        return false;
+    }
+    *statsBytes = statsCount * sizeof(TileXR::TileXRPerfCoreStageStats);
+    return true;
+}
+
+bool ComputeRequiredBytes(uint64_t statsOffset, uint64_t statsBytes, size_t *requiredBytes)
+{
+    if (requiredBytes == nullptr || statsOffset > std::numeric_limits<uint64_t>::max() - statsBytes) {
+        return false;
+    }
+    const uint64_t requiredBytes64 = statsOffset + statsBytes;
+    if (requiredBytes64 > static_cast<uint64_t>(std::numeric_limits<size_t>::max())) {
+        return false;
+    }
+    *requiredBytes = static_cast<size_t>(requiredBytes64);
+    return true;
+}
+
 } // namespace
 
 PerfTraceSession *GetActivePerfTraceSession()
@@ -29,6 +91,33 @@ PerfTraceSession *GetActivePerfTraceSession()
 void SetActivePerfTraceSessionForHost(PerfTraceSession *session)
 {
     g_activeSession = session;
+}
+
+void SetPerfTraceRuntimeHooksForTest(const PerfTraceRuntimeHooks *hooks)
+{
+    g_runtimeHooks = hooks == nullptr ? &kDefaultRuntimeHooks : hooks;
+}
+
+aclError FreePerfTraceDeviceBufferForHost(void *ptr)
+{
+    return g_runtimeHooks->freeDevice(ptr);
+}
+
+aclError CopyPerfTraceStatsToHost(void *dst, size_t dstBytes, const void *src, size_t bytes)
+{
+    return g_runtimeHooks->copyDeviceToHost(dst, dstBytes, src, bytes);
+}
+
+bool ValidatePerfTraceStatsLayout(const PerfTraceSession *session, size_t *statsBytes)
+{
+    if (session == nullptr || session->deviceBuffer == nullptr ||
+        !ComputeStatsBytes(session->hostStats.size(), statsBytes) ||
+        session->header.statsBytes != static_cast<uint64_t>(*statsBytes)) {
+        return false;
+    }
+    size_t requiredBytes = 0;
+    return ComputeRequiredBytes(session->header.statsOffset, session->header.statsBytes, &requiredBytes) &&
+           requiredBytes <= session->deviceBufferBytes;
 }
 
 int PreparePerfTraceLaunch(PerfTraceSession *session, const TileXR::CommArgs &commArgs,
@@ -45,6 +134,7 @@ int PreparePerfTraceLaunch(PerfTraceSession *session, const TileXR::CommArgs &co
         return TileXR::TILEXR_SUCCESS;
     }
 
+    session->deviceTraceReady = false;
     session->hostStats.clear();
     if (commArgs.rank < 0 || commArgs.rankSize <= 0 || commArgs.rank >= commArgs.rankSize ||
         commArgs.rankSize > TileXR::TILEXR_MAX_RANK_SIZE || blockDim == 0 || count < 0) {
@@ -95,42 +185,48 @@ int PreparePerfTraceLaunch(PerfTraceSession *session, const TileXR::CommArgs &co
     }
 
     session->header.statsOffset = sizeof(TileXR::TileXRPerfTraceHeader);
-    if (session->hostStats.size() > maxCount / sizeof(TileXR::TileXRPerfCoreStageStats)) {
+    size_t statsBytes = 0;
+    if (!ComputeStatsBytes(session->hostStats.size(), &statsBytes)) {
         return TileXR::TILEXR_ERROR_INTERNAL;
     }
-    const size_t statsBytes = session->hostStats.size() * sizeof(TileXR::TileXRPerfCoreStageStats);
     session->header.statsBytes = static_cast<uint64_t>(statsBytes);
-    if (session->header.statsOffset > std::numeric_limits<uint64_t>::max() - session->header.statsBytes) {
+    size_t requiredBytes = 0;
+    if (!ComputeRequiredBytes(session->header.statsOffset, session->header.statsBytes, &requiredBytes)) {
         return TileXR::TILEXR_ERROR_INTERNAL;
     }
-    const uint64_t requiredBytes64 = session->header.statsOffset + session->header.statsBytes;
-    if (requiredBytes64 > static_cast<uint64_t>(maxCount)) {
-        return TileXR::TILEXR_ERROR_INTERNAL;
-    }
-    const size_t requiredBytes = static_cast<size_t>(requiredBytes64);
-    if (session->deviceBufferBytes < requiredBytes) {
-        if (session->deviceBuffer != nullptr) {
-            aclrtFree(session->deviceBuffer);
-            session->deviceBuffer = nullptr;
-            session->deviceBufferBytes = 0;
-        }
-        aclError allocRet = aclrtMalloc(&session->deviceBuffer, requiredBytes, ACL_MEM_MALLOC_HUGE_FIRST);
-        if (allocRet != ACL_SUCCESS) {
+    if (session->deviceBuffer == nullptr || !session->ownsDeviceBuffer || session->deviceBufferBytes < requiredBytes) {
+        void *newBuffer = nullptr;
+        aclError allocRet = g_runtimeHooks->mallocDevice(&newBuffer, requiredBytes);
+        if (allocRet != ACL_SUCCESS || newBuffer == nullptr) {
             return TileXR::TILEXR_ERROR_INTERNAL;
         }
+        if (session->ownsDeviceBuffer && session->deviceBuffer != nullptr) {
+            try {
+                session->retiredDeviceBuffers.push_back(session->deviceBuffer);
+            } catch (const std::exception &) {
+                g_runtimeHooks->freeDevice(newBuffer);
+                return TileXR::TILEXR_ERROR_INTERNAL;
+            } catch (...) {
+                g_runtimeHooks->freeDevice(newBuffer);
+                return TileXR::TILEXR_ERROR_INTERNAL;
+            }
+        }
+        session->deviceBuffer = newBuffer;
         session->deviceBufferBytes = requiredBytes;
+        session->ownsDeviceBuffer = true;
     }
-    aclError copyRet = aclrtMemcpyAsync(session->deviceBuffer, sizeof(session->header),
-        &session->header, sizeof(session->header), ACL_MEMCPY_HOST_TO_DEVICE, stream);
+    aclError copyRet = g_runtimeHooks->copyHostToDeviceAsync(session->deviceBuffer, sizeof(session->header),
+        &session->header, sizeof(session->header), stream);
     if (copyRet != ACL_SUCCESS) {
         return TileXR::TILEXR_ERROR_INTERNAL;
     }
     void *statsDevice = static_cast<uint8_t *>(session->deviceBuffer) + session->header.statsOffset;
-    aclError memsetRet = aclrtMemsetAsync(statsDevice, static_cast<size_t>(session->header.statsBytes),
+    aclError memsetRet = g_runtimeHooks->memsetDeviceAsync(statsDevice, static_cast<size_t>(session->header.statsBytes),
         0, static_cast<size_t>(session->header.statsBytes), stream);
     if (memsetRet != ACL_SUCCESS) {
         return TileXR::TILEXR_ERROR_INTERNAL;
     }
+    session->deviceTraceReady = true;
     *deviceTrace = session->deviceBuffer;
     return TileXR::TILEXR_SUCCESS;
 }
@@ -172,12 +268,23 @@ extern "C" int TileXRCollectivePerfSessionDestroy(TileXRCollectivePerfSession se
     if (TileXRCollectives::Host::GetActivePerfTraceSession() == impl) {
         TileXRCollectives::Host::SetActivePerfTraceSessionForHost(nullptr);
     }
-    if (impl != nullptr && impl->deviceBuffer != nullptr) {
-        aclrtFree(impl->deviceBuffer);
-        impl->deviceBuffer = nullptr;
+    bool freeFailed = false;
+    if (impl != nullptr) {
+        if (impl->ownsDeviceBuffer && impl->deviceBuffer != nullptr) {
+            freeFailed = TileXRCollectives::Host::FreePerfTraceDeviceBufferForHost(impl->deviceBuffer) != ACL_SUCCESS ||
+                         freeFailed;
+            impl->deviceBuffer = nullptr;
+        }
+        for (std::vector<void *>::iterator it = impl->retiredDeviceBuffers.begin();
+             it != impl->retiredDeviceBuffers.end(); ++it) {
+            if (*it != nullptr) {
+                freeFailed = TileXRCollectives::Host::FreePerfTraceDeviceBufferForHost(*it) != ACL_SUCCESS ||
+                             freeFailed;
+            }
+        }
     }
     delete impl;
-    return TileXR::TILEXR_SUCCESS;
+    return freeFailed ? TileXR::TILEXR_ERROR_INTERNAL : TileXR::TILEXR_SUCCESS;
 }
 
 extern "C" int TileXRCollectivePerfSetActiveSession(TileXRCollectivePerfSession session)
@@ -196,10 +303,14 @@ extern "C" int TileXRCollectivePerfWriteReport(TileXRCollectivePerfSession sessi
     try {
         TileXRCollectives::Host::PerfTraceSession *impl =
             static_cast<TileXRCollectives::Host::PerfTraceSession *>(session);
-        if (impl->deviceBuffer != nullptr && impl->header.statsBytes > 0 && !impl->hostStats.empty()) {
+        if (impl->deviceTraceReady) {
+            size_t expectedStatsBytes = 0;
+            if (!TileXRCollectives::Host::ValidatePerfTraceStatsLayout(impl, &expectedStatsBytes)) {
+                return TileXR::TILEXR_ERROR_INTERNAL;
+            }
             const void *statsDevice = static_cast<const uint8_t *>(impl->deviceBuffer) + impl->header.statsOffset;
-            aclError copyRet = aclrtMemcpy(impl->hostStats.data(), static_cast<size_t>(impl->header.statsBytes),
-                statsDevice, static_cast<size_t>(impl->header.statsBytes), ACL_MEMCPY_DEVICE_TO_HOST);
+            aclError copyRet = TileXRCollectives::Host::CopyPerfTraceStatsToHost(
+                impl->hostStats.data(), expectedStatsBytes, statsDevice, expectedStatsBytes);
             if (copyRet != ACL_SUCCESS) {
                 return TileXR::TILEXR_ERROR_INTERNAL;
             }
