@@ -89,6 +89,26 @@ add_executable(test_tilexr_collectives_header_compile
     unit/test_tilexr_collectives_header_compile.cpp
 )
 
+add_executable(test_tilexr_perf_trace_layout
+    unit/test_tilexr_perf_trace_layout.cpp
+)
+
+add_executable(test_collective_perf_report
+    unit/test_collective_perf_report.cpp
+)
+
+target_include_directories(test_collective_perf_report PRIVATE
+    ${TILEXR_ROOT}/src/collectives/host
+)
+
+add_executable(test_collective_perf_session
+    unit/test_collective_perf_session.cpp
+)
+
+target_include_directories(test_collective_perf_session PRIVATE
+    ${TILEXR_ROOT}/src/collectives/host
+)
+
 add_executable(test_tilexr_collectives_correctness
     integration/test_tilexr_collectives_correctness.cpp
 )
@@ -215,6 +235,18 @@ target_link_libraries(test_tilexr_collectives_header_compile
     ${TILEXR_COLLECTIVES_TEST_TARGET}
 )
 
+target_link_libraries(test_tilexr_perf_trace_layout
+    ${TILEXR_COMM_TEST_TARGET}
+)
+
+target_link_libraries(test_collective_perf_report
+    ${TILEXR_COLLECTIVES_TEST_TARGET}
+)
+
+target_link_libraries(test_collective_perf_session
+    ${TILEXR_COLLECTIVES_TEST_TARGET}
+)
+
 target_link_directories(test_tilexr_collectives_correctness PRIVATE
     ${TILEXR_COLLECTIVES_TEST_LINK_DIRS}
 )
@@ -257,6 +289,9 @@ add_test(NAME test_tilexr_collectives_api COMMAND test_tilexr_collectives_api)
 add_test(NAME test_tilexr_collectives_kernel_ownership COMMAND test_tilexr_collectives_kernel_ownership)
 add_test(NAME test_tilexr_collectives_tools_sources COMMAND test_tilexr_collectives_tools_sources)
 add_test(NAME test_tilexr_collectives_header_compile COMMAND test_tilexr_collectives_header_compile)
+add_test(NAME test_tilexr_perf_trace_layout COMMAND test_tilexr_perf_trace_layout)
+add_test(NAME test_collective_perf_report COMMAND test_collective_perf_report)
+add_test(NAME test_collective_perf_session COMMAND test_collective_perf_session)
 add_test(NAME test_tilexr_collectives_stub_behavior COMMAND test_tilexr_collectives_stub_behavior)
 add_test(NAME test_tilexr_collectives_uninitialized_comm COMMAND test_tilexr_collectives_uninitialized_comm)
 add_test(NAME test_collective_host_utils COMMAND test_collective_host_utils)
@@ -268,6 +303,9 @@ install(TARGETS
     test_tilexr_collectives_kernel_ownership
     test_tilexr_collectives_tools_sources
     test_tilexr_collectives_header_compile
+    test_tilexr_perf_trace_layout
+    test_collective_perf_report
+    test_collective_perf_session
     test_tilexr_collectives_correctness
     tilexr_collective_perf
     test_tilexr_collectives_stub_behavior

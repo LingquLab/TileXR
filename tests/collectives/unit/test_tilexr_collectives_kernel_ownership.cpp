@@ -113,6 +113,7 @@ void TestCollectivesOwnsCceBuild()
     CheckContains(kernelsCmakePath, kernelsCmake, "tilexr_lccl_op.cpp");
     CheckContains(kernelsCmakePath, kernelsCmake, "tilexr_collectives_op.o");
     CheckContains(kernelsCmakePath, kernelsCmake, "tilexr_collectives_op");
+    CheckContains(kernelsCmakePath, kernelsCmake, "TILEXR_COLLECTIVES_ENABLE_PROFILING");
     CheckDoesNotContain(kernelsCmakePath, kernelsCmake, "src/comm");
 }
 
@@ -125,6 +126,21 @@ void TestCollectivesKernelSourcesAreScoped()
     CheckDoesNotContain(kernelTuPath, kernelTu, "LCCL_ALL_REDUCE_FUNC_AUTO_DEF");
     CheckDoesNotContain(kernelTuPath, kernelTu, "LCCL_REDUCE_SCATTER_FUNC_AUTO_DEF");
     CheckDoesNotContain(kernelTuPath, kernelTu, "LCCL_BROADCAST_FUNC_AUTO_DEF");
+
+    const std::string perfTraceKernelPath = "src/collectives/kernels/perf_trace_kernel.h";
+    const auto perfTraceKernel = ReadFile(perfTraceKernelPath);
+    CheckContains(perfTraceKernelPath, perfTraceKernel, "TILEXR_COLLECTIVES_ENABLE_PROFILING");
+    CheckContains(perfTraceKernelPath, perfTraceKernel, "TileXRPerfStageBegin");
+    CheckContains(perfTraceKernelPath, perfTraceKernel, "TileXRPerfStageEnd");
+    CheckContains(perfTraceKernelPath, perfTraceKernel, "TileXRPerfAccumulateDuration");
+    CheckContains(perfTraceKernelPath, perfTraceKernel, "TileXRPerfTraceEnabled");
+    CheckContains(perfTraceKernelPath, perfTraceKernel, "#include \"comm_args.h\"");
+
+    const std::string perfTraceLayoutPath = "src/include/tilexr_perf_trace.h";
+    const auto perfTraceLayout = ReadFile(perfTraceLayoutPath);
+    CheckContains(perfTraceLayoutPath, perfTraceLayout, "PerfTraceCyclesToUs");
+    CheckContains(perfTraceLayoutPath, perfTraceLayout, "__CCE_IS_AICORE__");
+    CheckContains(perfTraceLayoutPath, perfTraceLayout, "!defined(__CCE__) || !defined(__CCE_IS_AICORE__)");
 
     const std::vector<std::string> kernelFiles = CollectFiles("src/collectives/kernels");
     CheckTrue(!kernelFiles.empty(), "expected collectives kernel files to be present");
@@ -164,7 +180,72 @@ void TestHostRegistrationLivesInCollectives()
     CheckContains(kernelPath, kernel, "TileXR::TILEXR_DATA_TYPE_FP16");
     CheckContains(kernelPath, kernel, "TileXR::TILEXR_DATA_TYPE_FP32");
     CheckContains(kernelPath, kernel, "TileXR::TILEXR_DATA_TYPE_BFP16");
+    CheckContains(kernelPath, kernel, "perfTrace");
+    CheckContains(kernelPath, kernel, "PreparePerfTraceLaunch");
+    CheckContains(kernelPath, kernel, "GetActivePerfTraceSession");
     CheckDoesNotContain(kernelPath, kernel, "g_collectiveKernelStub");
+}
+
+void TestPerfTraceCycleDivisorIsA5Specific()
+{
+    const std::string commArgsPath = "src/include/comm_args.h";
+    const auto commArgs = ReadFile(commArgsPath);
+    CheckContains(commArgsPath, commArgs, "PERF_CYCLE_A5");
+
+    const std::string commPath = "src/comm/tilexr_comm.cpp";
+    const auto comm = ReadFile(commPath);
+    CheckContains(commPath, comm, "GetChipName() == ChipName::CHIP_910A5");
+    CheckContains(commPath, comm, "ExtraFlag::PERF_CYCLE_A5");
+
+    const std::string sessionPath = "src/collectives/host/perf_trace_session.cpp";
+    const auto session = ReadFile(sessionPath);
+    CheckContains(sessionPath, session, "ExtraFlag::PERF_CYCLE_A5");
+    CheckDoesNotContain(sessionPath, session, "TOPO_910A5) != 0 ? 1000u : 50u");
+}
+
+void TestDeviceKernelArgsMatchHostLaunchAbi()
+{
+    const std::string collectivesPath = "src/collectives/kernels/collectives.h";
+    const auto collectives = ReadFile(collectivesPath);
+    CheckContains(collectivesPath, collectives, "GM_ADDR perfTrace");
+    CheckContains(collectivesPath, collectives, "KERNELS_ARGS_CALL()");
+    CheckContains(collectivesPath, collectives,
+                  "input, output, commArgs, len, magic, op, root, cycleCount, scale, scaleCount, offset, perfTrace");
+}
+
+void TestBigDataAllGatherPerfStages()
+{
+    const std::string path = "src/collectives/kernels/kernels/lcal_allgather_big_data.cce";
+    const auto text = ReadFile(path);
+    CheckContains(path, text, "PerfStageId::KERNEL_TOTAL");
+    CheckContains(path, text, "PerfStageId::CHUNK_TOTAL");
+    CheckContains(path, text, "PerfStageId::POST_SYNC");
+    CheckContains(path, text, "PerfStageId::LOCAL_INPUT_TO_IPC");
+    CheckContains(path, text, "PerfStageId::FLAG_POLL_WAIT");
+    CheckContains(path, text, "PerfStageId::PEER_IPC_TO_OUTPUT");
+    CheckContains(path, text, "PerfStageId::CHUNK_BARRIER");
+    CheckContains(path, text, "TileXRPerfStageBegin");
+    CheckContains(path, text, "TileXRPerfStageEnd");
+    CheckContains(path, text, "TileXRPerfAccumulateDuration");
+    CheckContains(path, text, "TileXRPerfTraceEnabled");
+}
+
+void TestTwoNpuBigDataAllGatherPerfStages()
+{
+    const std::string path = "src/collectives/kernels/kernels/lcal_allgather_2npu_big_data_write.cce";
+    const auto text = ReadFile(path);
+    CheckContains(path, text, "GM_ADDR perfTrace");
+    CheckContains(path, text, "PerfStageId::KERNEL_TOTAL");
+    CheckContains(path, text, "PerfStageId::CHUNK_TOTAL");
+    CheckContains(path, text, "PerfStageId::POST_SYNC");
+    CheckContains(path, text, "PerfStageId::LOCAL_INPUT_TO_IPC");
+    CheckContains(path, text, "PerfStageId::FLAG_POLL_WAIT");
+    CheckContains(path, text, "PerfStageId::PEER_IPC_TO_OUTPUT");
+    CheckContains(path, text, "PerfStageId::CHUNK_BARRIER");
+    CheckContains(path, text, "TileXRPerfStageBegin");
+    CheckContains(path, text, "TileXRPerfStageEnd");
+    CheckContains(path, text, "TileXRPerfAccumulateDuration");
+    CheckContains(path, text, "TileXRPerfTraceEnabled");
 }
 
 void TestCommDoesNotOwnCollectiveRuntime()
@@ -198,6 +279,10 @@ int main()
     TestCollectivesOwnsCceBuild();
     TestCollectivesKernelSourcesAreScoped();
     TestHostRegistrationLivesInCollectives();
+    TestPerfTraceCycleDivisorIsA5Specific();
+    TestDeviceKernelArgsMatchHostLaunchAbi();
+    TestBigDataAllGatherPerfStages();
+    TestTwoNpuBigDataAllGatherPerfStages();
     TestCommDoesNotOwnCollectiveRuntime();
     return g_failures == 0 ? 0 : 1;
 }

@@ -69,6 +69,27 @@ equal alltoall. CSV output uses the same fields.
 `--check=1` validates outputs. INT32 is checked element-by-element with operation-specific expected values;
 other dtypes use deterministic byte-pattern checks. `--check=0` measures only.
 
+### Operator-Internal Profiling
+
+Build collectives with profiling enabled:
+
+```bash
+cmake -S . -B build-profile -DTILEXR_BUILD_COLLECTIVES=ON -DTILEXR_COLLECTIVES_ENABLE_PROFILING=ON
+cmake --build build-profile --target tilexr_collective_perf -j"$(nproc)"
+```
+
+Run the perf tool with profiling:
+
+```bash
+./run_collective_perf.sh 2 0 ../../build-profile/tests/collectives \
+  --op allgather --min-bytes 67108864 --max-bytes 67108864 \
+  --profile 1 --profile-dir run/prof/collectives --profile-ai-prompt 1
+```
+
+Each sampled launch writes `trace.json`, `summary.csv`, `analysis.md`, `report.html`, and `ai_prompt.md`
+when prompt export is enabled. `--profile-dir` is a root directory; each rank writes sampled launches under
+`run/prof/collectives/rank<N>/launch<M>/` in the example above.
+
 ## Skip Behavior
 
 Manual scripts are strict by default. If `npu-smi info -l` or `TILEXR_AVAILABLE_NPUS` reports too few devices,

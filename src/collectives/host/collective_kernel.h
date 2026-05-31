@@ -31,6 +31,7 @@ struct AscendCCLKernelArgs {
     const void *scale = nullptr;
     int64_t scaleCount = 0;
     const void *offset = nullptr;
+    const void *perfTrace = nullptr;
 };
 
 int LaunchCollectiveKernel(TileXRCommPtr comm, TileXR::TileXRType type, const HostLaunchContext &context,
