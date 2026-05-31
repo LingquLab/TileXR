@@ -186,6 +186,23 @@ void TestHostRegistrationLivesInCollectives()
     CheckDoesNotContain(kernelPath, kernel, "g_collectiveKernelStub");
 }
 
+void TestPerfTraceCycleDivisorIsA5Specific()
+{
+    const std::string commArgsPath = "src/include/comm_args.h";
+    const auto commArgs = ReadFile(commArgsPath);
+    CheckContains(commArgsPath, commArgs, "PERF_CYCLE_A5");
+
+    const std::string commPath = "src/comm/tilexr_comm.cpp";
+    const auto comm = ReadFile(commPath);
+    CheckContains(commPath, comm, "GetChipName() == ChipName::CHIP_910A5");
+    CheckContains(commPath, comm, "ExtraFlag::PERF_CYCLE_A5");
+
+    const std::string sessionPath = "src/collectives/host/perf_trace_session.cpp";
+    const auto session = ReadFile(sessionPath);
+    CheckContains(sessionPath, session, "ExtraFlag::PERF_CYCLE_A5");
+    CheckDoesNotContain(sessionPath, session, "TOPO_910A5) != 0 ? 1000u : 50u");
+}
+
 void TestDeviceKernelArgsMatchHostLaunchAbi()
 {
     const std::string collectivesPath = "src/collectives/kernels/collectives.h";
@@ -244,6 +261,7 @@ int main()
     TestCollectivesOwnsCceBuild();
     TestCollectivesKernelSourcesAreScoped();
     TestHostRegistrationLivesInCollectives();
+    TestPerfTraceCycleDivisorIsA5Specific();
     TestDeviceKernelArgsMatchHostLaunchAbi();
     TestBigDataAllGatherPerfStages();
     TestCommDoesNotOwnCollectiveRuntime();
