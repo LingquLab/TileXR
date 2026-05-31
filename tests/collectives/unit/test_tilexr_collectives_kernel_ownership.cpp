@@ -195,6 +195,22 @@ void TestDeviceKernelArgsMatchHostLaunchAbi()
                   "input, output, commArgs, len, magic, op, root, cycleCount, scale, scaleCount, offset, perfTrace");
 }
 
+void TestBigDataAllGatherPerfStages()
+{
+    const std::string path = "src/collectives/kernels/kernels/lcal_allgather_big_data.cce";
+    const auto text = ReadFile(path);
+    CheckContains(path, text, "PerfStageId::KERNEL_TOTAL");
+    CheckContains(path, text, "PerfStageId::CHUNK_TOTAL");
+    CheckContains(path, text, "PerfStageId::POST_SYNC");
+    CheckContains(path, text, "PerfStageId::LOCAL_INPUT_TO_IPC");
+    CheckContains(path, text, "PerfStageId::FLAG_POLL_WAIT");
+    CheckContains(path, text, "PerfStageId::PEER_IPC_TO_OUTPUT");
+    CheckContains(path, text, "PerfStageId::CHUNK_BARRIER");
+    CheckContains(path, text, "TileXRPerfStageBegin");
+    CheckContains(path, text, "TileXRPerfStageEnd");
+    CheckContains(path, text, "TileXRPerfAccumulateDuration");
+}
+
 void TestCommDoesNotOwnCollectiveRuntime()
 {
     const auto commFiles = CollectFiles("src/comm");
@@ -227,6 +243,7 @@ int main()
     TestCollectivesKernelSourcesAreScoped();
     TestHostRegistrationLivesInCollectives();
     TestDeviceKernelArgsMatchHostLaunchAbi();
+    TestBigDataAllGatherPerfStages();
     TestCommDoesNotOwnCollectiveRuntime();
     return g_failures == 0 ? 0 : 1;
 }
