@@ -319,8 +319,8 @@ void TestReadmeDocumentsManualRuns()
     CheckContains(path, text, "trace_index.json");
     CheckContains(path, text, "root-level report.html");
     CheckContains(path, text, "tilexr_collective_profile_report.py");
-    CheckContains(path, text, "zoom");
-    CheckContains(path, text, "chronological timeline");
+    CheckContains(path, text, "zoomable chronological timeline");
+    CheckContains(path, text, "warmup launches are not profiled");
     CheckContains(path, text, "TILEXR_COLLECTIVES_RUN_TIMEOUT_SEC");
     CheckContains(path, text, "TILEXR_SKIP_IF_INSUFFICIENT_NPUS");
     CheckContains(path, text, "CTest");

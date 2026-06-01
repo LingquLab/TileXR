@@ -96,9 +96,9 @@ After all rank processes finish successfully, `run_collective_perf.sh` also writ
 run/prof/collectives/report.html
 run/prof/collectives/trace_index.json
 run/prof/collectives/analysis.md
-run/prof/collectives/ai_prompt.md
 ```
 
+When prompt export is enabled, the aggregate prompt is written as `run/prof/collectives/ai_prompt.md`.
 The root-level report.html keeps the bottleneck-first summary and adds a zoomable chronological timeline across
 sampled measured iterations. Warmup execution is controlled by the existing `--warmup-iters` option and is reported
 as metadata; warmup launches are not profiled by this report path. The per-launch `rank<N>/launch<M>/report.html`
