@@ -60,6 +60,13 @@ def write_trace(root, rank, launch, message_bytes=1024, schema="tilexr_perf_trac
     (launch_dir / "report.html").write_text("<html>single launch</html>\n", encoding="utf-8")
 
 
+def write_custom_trace(root, rank, launch, trace):
+    launch_dir = root / f"rank{rank}" / f"launch{launch}"
+    launch_dir.mkdir(parents=True)
+    (launch_dir / "trace.json").write_text(json.dumps(trace, indent=2), encoding="utf-8")
+    (launch_dir / "report.html").write_text("<html>single launch</html>\n", encoding="utf-8")
+
+
 def run_helper(root, *args):
     command = [sys.executable, str(HELPER), str(root), *args]
     return subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -143,6 +150,68 @@ class CollectiveProfileReportTest(unittest.TestCase):
             self.assertEqual(len(index["groups"]), 2)
             joined = "\n".join(index["diagnostics"])
             self.assertIn("incompatible trace groups detected", joined)
+            self.assertIn("message_bytes=1024", joined)
+            self.assertIn("rank0/launch0/trace.json", joined)
+            self.assertIn("message_bytes=2048", joined)
+            self.assertIn("rank1/launch0/trace.json", joined)
+
+    def test_rank_core_max_uses_stage_max_cycles(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            launch_dir = root / "rank0" / "launch0"
+            launch_dir.mkdir(parents=True)
+            trace = {
+                "schema": "tilexr_perf_trace_report.v1",
+                "op_type": 3,
+                "op_name": "TileXRAllGather",
+                "rank_size": 1,
+                "max_core_count": 2,
+                "block_dim": 2,
+                "stage_count": 7,
+                "cycle_to_us_divisor": 50,
+                "message_bytes": 1024,
+                "stats": [
+                    make_stat(0, 0, "long_total", 1, 1000, 1000, max_cycles=200),
+                    make_stat(0, 1, "short_peak", 2, 2000, 100, max_cycles=900),
+                ],
+            }
+            (launch_dir / "trace.json").write_text(json.dumps(trace), encoding="utf-8")
+
+            result = run_helper(root, "--warmup-iters", "0", "--iters", "1", "--profile-sample-every", "1")
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+            summary = json.loads((root / "trace_index.json").read_text(encoding="utf-8"))["groups"][0]["summary"]
+            self.assertEqual(summary["rank_core_max"]["core"], 1)
+            self.assertEqual(summary["rank_core_max"]["stage"], "short_peak")
+            self.assertEqual(summary["rank_core_max"]["max_us"], 18.0)
+
+    def test_missing_kernel_total_renders_unavailable_slowest_launch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            launch_dir = root / "rank0" / "launch0"
+            launch_dir.mkdir(parents=True)
+            trace = {
+                "schema": "tilexr_perf_trace_report.v1",
+                "op_type": 3,
+                "op_name": "TileXRAllGather",
+                "rank_size": 1,
+                "max_core_count": 1,
+                "block_dim": 1,
+                "stage_count": 7,
+                "cycle_to_us_divisor": 50,
+                "message_bytes": 1024,
+                "stats": [make_stat(0, 0, "flag_poll_wait", 4, 1000, 200, max_cycles=50)],
+            }
+            (launch_dir / "trace.json").write_text(json.dumps(trace), encoding="utf-8")
+
+            result = run_helper(root, "--warmup-iters", "0", "--iters", "1", "--profile-sample-every", "1")
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+            analysis = (root / "analysis.md").read_text(encoding="utf-8")
+            report = (root / "report.html").read_text(encoding="utf-8")
+            self.assertIn("Slowest launch: unavailable", analysis)
+            self.assertNotIn("launchNone", analysis)
+            self.assertNotIn("launchNone", report)
 
     def test_invalid_schema_is_reported_without_crashing(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -155,6 +224,68 @@ class CollectiveProfileReportTest(unittest.TestCase):
             index = json.loads((root / "trace_index.json").read_text(encoding="utf-8"))
             self.assertFalse(index["groups"])
             self.assertIn("invalid schema in rank0/launch0/trace.json", "\n".join(index["diagnostics"]))
+
+    def test_non_object_json_top_level_is_reported_without_crashing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            launch_dir = root / "rank0" / "launch0"
+            launch_dir.mkdir(parents=True)
+            (launch_dir / "trace.json").write_text("[]", encoding="utf-8")
+
+            result = run_helper(root, "--warmup-iters", "0", "--iters", "1", "--profile-sample-every", "1")
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+            index = json.loads((root / "trace_index.json").read_text(encoding="utf-8"))
+            self.assertFalse(index["groups"])
+            self.assertIn("invalid top-level trace type in rank0/launch0/trace.json", "\n".join(index["diagnostics"]))
+
+    def test_malformed_stats_are_reported_while_valid_stats_are_kept(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            trace = {
+                "schema": "tilexr_perf_trace_report.v1",
+                "op_type": 3,
+                "op_name": "TileXRAllGather",
+                "rank_size": 1,
+                "max_core_count": 1,
+                "block_dim": 1,
+                "stage_count": 7,
+                "cycle_to_us_divisor": 50,
+                "message_bytes": 1024,
+                "stats": {},
+            }
+            write_custom_trace(root, 0, 0, trace)
+            trace["stats"] = ["bad", make_stat(0, 0, "kernel_total", 0, 1000, 500, max_cycles=900)]
+            write_custom_trace(root, 0, 1, trace)
+
+            result = run_helper(root, "--warmup-iters", "0", "--iters", "2", "--profile-sample-every", "1")
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+            index = json.loads((root / "trace_index.json").read_text(encoding="utf-8"))
+            bars = index["groups"][0]["bars"]
+            self.assertEqual(len(bars), 1)
+            self.assertEqual(bars[0]["stage"], "kernel_total")
+            joined = "\n".join(index["diagnostics"])
+            self.assertIn("invalid stats in rank0/launch0/trace.json", joined)
+            self.assertIn("invalid stat entry in rank0/launch1/trace.json stats[0]", joined)
+
+    def test_trace_controlled_fields_are_safe_inside_report_script(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_trace(root, 0, 0, rank_size=1)
+            trace_path = root / "rank0" / "launch0" / "trace.json"
+            trace = json.loads(trace_path.read_text(encoding="utf-8"))
+            trace["op_name"] = "TileXRAllGather</script><script>alert(1)</script>"
+            trace_path.write_text(json.dumps(trace), encoding="utf-8")
+
+            result = run_helper(root, "--warmup-iters", "0", "--iters", "1", "--profile-sample-every", "1")
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+            html = (root / "report.html").read_text(encoding="utf-8")
+            script_body = html.split("const traceIndex = ", 1)[1].split(";\nlet scale", 1)[0]
+            self.assertNotIn("</script>", script_body.lower())
+            self.assertNotIn("<script>", script_body.lower())
+            self.assertIn("\\u003c/script\\u003e", script_body)
 
     def test_single_rank_single_launch_fallback(self):
         with tempfile.TemporaryDirectory() as tmp:

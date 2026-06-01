@@ -52,13 +52,36 @@ def load_traces(root):
             diagnostics.append(f"invalid json in {source}: {exc}")
             continue
 
+        if not isinstance(trace, dict):
+            diagnostics.append(f"invalid top-level trace type in {source}: expected object")
+            continue
+
         if trace.get("schema") != TRACE_SCHEMA:
             diagnostics.append(f"invalid schema in {source}")
             continue
 
+        trace = sanitize_trace(trace, source, diagnostics)
         traces.append({"rank": rank, "launch_id": launch_id, "path": path, "trace": trace})
 
     return traces, diagnostics
+
+
+def sanitize_trace(trace, source, diagnostics):
+    trace = dict(trace)
+    stats = trace.get("stats", [])
+    if not isinstance(stats, list):
+        diagnostics.append(f"invalid stats in {source}: expected list")
+        trace["stats"] = []
+        return trace
+
+    valid_stats = []
+    for index, stat in enumerate(stats):
+        if not isinstance(stat, dict):
+            diagnostics.append(f"invalid stat entry in {source} stats[{index}]: expected object")
+            continue
+        valid_stats.append(stat)
+    trace["stats"] = valid_stats
+    return trace
 
 
 def group_key(entry):
@@ -169,18 +192,21 @@ def normalized_bars(entries, root):
 def summarize_group(group):
     stage_totals = defaultdict(float)
     launch_kernel = defaultdict(float)
-    rank_core_max = {"rank": 0, "core": 0, "stage": "", "duration_us": 0.0}
+    rank_core_max = {"rank": 0, "core": 0, "stage": "", "duration_us": 0.0, "max_cycles": 0, "max_us": 0.0}
 
     for bar in group["bars"]:
         stage_totals[bar["stage"]] += bar["sum_us"]
         if bar["stage"] == "kernel_total":
             launch_kernel[bar["launch_id"]] = max(launch_kernel[bar["launch_id"]], bar["duration_us"])
-        if bar["duration_us"] > rank_core_max["duration_us"]:
+        max_us = cycles_to_us(bar["max_cycles"], group["cycle_to_us_divisor"])
+        if max_us > rank_core_max["max_us"]:
             rank_core_max = {
                 "rank": bar["rank"],
                 "core": bar["core"],
                 "stage": bar["stage"],
                 "duration_us": bar["duration_us"],
+                "max_cycles": bar["max_cycles"],
+                "max_us": max_us,
             }
 
     top_stage = max(stage_totals.items(), key=lambda item: item[1]) if stage_totals else ("none", 0.0)
@@ -200,7 +226,17 @@ def build_index(root, args):
         grouped[group_key(entry)].append(entry)
 
     if len(grouped) > 1:
-        diagnostics.append("incompatible trace groups detected")
+        group_details = []
+        for key, entries in sorted(grouped.items(), key=lambda item: (
+            str(item[0][1]),
+            as_int(item[0][2]),
+            as_int(item[0][3]),
+            as_int(item[0][4]),
+            as_int(item[0][5]),
+            as_int(item[0][0]),
+        )):
+            group_details.append(describe_group(key, entries, root))
+        diagnostics.append("incompatible trace groups detected: " + "; ".join(group_details))
 
     sampled_launch_ids = expected_launch_ids(args.iters, args.profile_sample_every)
     groups = []
@@ -257,10 +293,29 @@ def build_index(root, args):
     }
 
 
+def describe_group(key, entries, root):
+    op_type, op_name, rank_size, message_bytes, stage_count, divisor = key
+    sources = ", ".join(
+        relpath(entry["path"], root)
+        for entry in sorted(entries, key=lambda item: (item["launch_id"], item["rank"], relpath(item["path"], root)))
+    )
+    return (
+        f"op_type={op_type} op_name={op_name} rank_size={rank_size} "
+        f"message_bytes={message_bytes} stage_count={stage_count} "
+        f"cycle_to_us_divisor={divisor} sources=[{sources}]"
+    )
+
+
 def format_launches(launch_ids):
     if not launch_ids:
         return "none"
     return ", ".join(f"launch{launch_id}" for launch_id in launch_ids)
+
+
+def format_slowest_launch(slowest):
+    if slowest["launch_id"] is None:
+        return "unavailable"
+    return f"launch{slowest['launch_id']} at {slowest['kernel_us']:.3f} us"
 
 
 def render_analysis(index):
@@ -297,12 +352,12 @@ def render_analysis(index):
         )
         lines.append(f"## Group {group_index}: {group['op_name']} message_bytes={group['message_bytes']}")
         lines.append(f"- Launches: {format_launches(group['launch_ids'])}")
-        lines.append(f"- Slowest launch: launch{slowest['launch_id']} at {slowest['kernel_us']:.3f} us")
+        lines.append(f"- Slowest launch: {format_slowest_launch(slowest)}")
         lines.append(f"- Top stage: {summary['top_stage']['stage']} at {summary['top_stage']['sum_us']:.3f} us")
         lines.append(f"- Stage totals: {stage_summary}")
         lines.append(
             f"- Rank/core max: rank{rank_core['rank']} core{rank_core['core']} "
-            f"{rank_core['stage']} {rank_core['duration_us']:.3f} us"
+            f"{rank_core['stage']} max {rank_core['max_us']:.3f} us"
         )
         lines.append("")
 
@@ -326,7 +381,10 @@ def render_ai_prompt(index):
         summary = group["summary"]
         slowest = summary["slowest_launch"]
         lines.append(f"- {group['op_name']} bytes={group['message_bytes']} launches={group['launch_ids']}")
-        lines.append(f"  slowest_launch=launch{slowest['launch_id']} kernel_us={slowest['kernel_us']:.3f}")
+        if slowest["launch_id"] is None:
+            lines.append("  slowest_launch=unavailable")
+        else:
+            lines.append(f"  slowest_launch=launch{slowest['launch_id']} kernel_us={slowest['kernel_us']:.3f}")
         lines.append(f"  top_stage={summary['top_stage']['stage']} sum_us={summary['top_stage']['sum_us']:.3f}")
 
     if index["diagnostics"]:
@@ -337,19 +395,19 @@ def render_ai_prompt(index):
     return "\n".join(lines) + "\n"
 
 
-def stage_category(stage):
-    stage = stage.lower()
-    if "wait" in stage or "poll" in stage:
-        return "wait"
-    if "copy" in stage or "ipc" in stage:
-        return "copy"
-    if "sync" in stage or "barrier" in stage:
-        return "sync"
-    return "total"
+def json_for_script(value):
+    return (
+        json.dumps(value, separators=(",", ":"), ensure_ascii=False)
+        .replace("&", "\\u0026")
+        .replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+        .replace("\u2028", "\\u2028")
+        .replace("\u2029", "\\u2029")
+    )
 
 
 def render_html(index):
-    data = json.dumps(index, separators=(",", ":"))
+    data = json_for_script(index)
     summary_items = []
     fallback_rows = []
 
@@ -360,10 +418,10 @@ def render_html(index):
         summary_items.append(
             "<li>"
             f"{html.escape(str(group['op_name']))} bytes={group['message_bytes']}: "
-            f"Slowest launch launch{slowest['launch_id']} {slowest['kernel_us']:.3f} us; "
+            f"Slowest launch {html.escape(format_slowest_launch(slowest))}; "
             f"Top stage {html.escape(str(summary['top_stage']['stage']))} {summary['top_stage']['sum_us']:.3f} us; "
             f"Rank/core max rank{rank_core['rank']} core{rank_core['core']} "
-            f"{html.escape(str(rank_core['stage']))} {rank_core['duration_us']:.3f} us"
+            f"{html.escape(str(rank_core['stage']))} max {rank_core['max_us']:.3f} us"
             "</li>"
         )
 
