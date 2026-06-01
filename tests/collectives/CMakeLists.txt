@@ -10,6 +10,7 @@ set(CMAKE_CXX_STANDARD 14)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 include(GNUInstallDirs)
 enable_testing()
+find_package(Python3 COMPONENTS Interpreter)
 
 set(TILEXR_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../..")
 set(TILEXR_INSTALL_PREFIX "${TILEXR_ROOT}/install" CACHE PATH "TileXR install prefix for installed collectives headers")
@@ -297,6 +298,13 @@ add_test(NAME test_tilexr_collectives_uninitialized_comm COMMAND test_tilexr_col
 add_test(NAME test_collective_host_utils COMMAND test_collective_host_utils)
 add_test(NAME test_tilexr_comm_next_magic COMMAND test_tilexr_comm_next_magic)
 add_test(NAME test_prepare_host_launch_context COMMAND test_prepare_host_launch_context)
+if(Python3_Interpreter_FOUND)
+    add_test(
+        NAME test_collective_profile_report
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/unit/test_collective_profile_report.py
+    )
+endif()
 
 install(TARGETS
     test_tilexr_collectives_api
@@ -319,5 +327,6 @@ install(TARGETS
 install(PROGRAMS
     run_collectives_correctness.sh
     run_collective_perf.sh
+    tilexr_collective_profile_report.py
     DESTINATION ${CMAKE_INSTALL_BINDIR}
 )

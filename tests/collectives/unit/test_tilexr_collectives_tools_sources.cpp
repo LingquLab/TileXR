@@ -276,6 +276,9 @@ void TestCMakeWiring()
     CheckContains(path, text, "test_tilexr_collectives_tools_sources");
     CheckContains(path, text, "run_collectives_correctness.sh");
     CheckContains(path, text, "run_collective_perf.sh");
+    CheckContains(path, text, "find_package(Python3 COMPONENTS Interpreter)");
+    CheckContains(path, text, "test_collective_profile_report");
+    CheckContains(path, text, "tilexr_collective_profile_report.py");
     CheckDoesNotContain(path, text, "add_test(NAME test_tilexr_collectives_correctness");
     CheckDoesNotContain(path, text, "add_test(NAME tilexr_collective_perf");
 }
