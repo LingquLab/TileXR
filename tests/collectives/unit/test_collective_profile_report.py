@@ -137,6 +137,38 @@ class CollectiveProfileReportTest(unittest.TestCase):
             self.assertIn("missing trace for rank1 launch2", joined)
             self.assertNotIn("launch1", joined)
 
+    def test_multi_size_global_launch_ids_do_not_report_false_missing_traces(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for launch in (0, 1):
+                write_trace(root, 0, launch, message_bytes=1024)
+                write_trace(root, 1, launch, message_bytes=1024)
+            for launch in (2, 3):
+                write_trace(root, 0, launch, message_bytes=2048)
+                write_trace(root, 1, launch, message_bytes=2048)
+
+            result = run_helper(root, "--warmup-iters", "0", "--iters", "2", "--profile-sample-every", "1")
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+            index = json.loads((root / "trace_index.json").read_text(encoding="utf-8"))
+            launch_groups = [group["launch_ids"] for group in index["groups"]]
+            self.assertEqual(launch_groups, [[0, 1], [2, 3]])
+            self.assertFalse(index["diagnostics"])
+
+    def test_launch_labels_drill_down_and_fit_uses_wrapper_width(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_trace(root, 0, 0, rank_size=1)
+
+            result = run_helper(root, "--warmup-iters", "0", "--iters", "1", "--profile-sample-every", "1")
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+            html = (root / "report.html").read_text(encoding="utf-8")
+            self.assertIn("function launchDrilldown(launchBars)", html)
+            self.assertIn("line.href = launchDrilldown(launchBars)", html)
+            self.assertIn("function timelineWidthAt(nextScale)", html)
+            self.assertIn("wrap.clientWidth", html)
+
     def test_keeps_incompatible_message_bytes_out_of_valid_group(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -102,6 +102,16 @@ def expected_launch_ids(measured_iters, sample_every):
     return [launch_id for launch_id in range(measured_iters) if launch_id % sample_every == 0]
 
 
+def expected_group_launch_ids(observed_launch_ids, measured_iters, sample_every):
+    sampled_offsets = expected_launch_ids(measured_iters, sample_every)
+    if not observed_launch_ids or not sampled_offsets:
+        return observed_launch_ids
+
+    first_launch = min(observed_launch_ids)
+    launch_base = (first_launch // measured_iters) * measured_iters
+    return [launch_base + offset for offset in sampled_offsets]
+
+
 def as_int(value, default=0):
     try:
         return int(value)
@@ -225,20 +235,7 @@ def build_index(root, args):
     for entry in traces:
         grouped[group_key(entry)].append(entry)
 
-    if len(grouped) > 1:
-        group_details = []
-        for key, entries in sorted(grouped.items(), key=lambda item: (
-            str(item[0][1]),
-            as_int(item[0][2]),
-            as_int(item[0][3]),
-            as_int(item[0][4]),
-            as_int(item[0][5]),
-            as_int(item[0][0]),
-        )):
-            group_details.append(describe_group(key, entries, root))
-        diagnostics.append("incompatible trace groups detected: " + "; ".join(group_details))
-
-    sampled_launch_ids = expected_launch_ids(args.iters, args.profile_sample_every)
+    add_incompatible_group_diagnostics(grouped, root, diagnostics)
     groups = []
 
     def sort_key(item):
@@ -258,8 +255,9 @@ def build_index(root, args):
         launch_ids = sorted({entry["launch_id"] for entry in entries})
         effective_rank_size = as_int(rank_size, len(rank_ids))
         expected_ranks = list(range(effective_rank_size))
+        expected_launches = expected_group_launch_ids(launch_ids, args.iters, args.profile_sample_every)
 
-        for launch_id in sampled_launch_ids or launch_ids:
+        for launch_id in expected_launches:
             for rank in expected_ranks:
                 if not any(entry["rank"] == rank and entry["launch_id"] == launch_id for entry in entries):
                     diagnostics.append(f"missing trace for rank{rank} launch{launch_id}")
@@ -291,6 +289,31 @@ def build_index(root, args):
         "groups": groups,
         "diagnostics": diagnostics,
     }
+
+
+def add_incompatible_group_diagnostics(grouped, root, diagnostics):
+    keys_by_launch = defaultdict(set)
+    for key, entries in grouped.items():
+        for entry in entries:
+            keys_by_launch[entry["launch_id"]].add(key)
+
+    for launch_id, keys in sorted(keys_by_launch.items()):
+        if len(keys) <= 1:
+            continue
+        group_details = [
+            describe_group(key, grouped[key], root)
+            for key in sorted(keys, key=lambda item: (
+                str(item[1]),
+                as_int(item[2]),
+                as_int(item[3]),
+                as_int(item[4]),
+                as_int(item[5]),
+                as_int(item[0]),
+            ))
+        ]
+        diagnostics.append(
+            f"incompatible trace groups detected for launch{launch_id}: " + "; ".join(group_details)
+        )
 
 
 def describe_group(key, entries, root):
@@ -459,10 +482,10 @@ body{{font-family:Arial,sans-serif;margin:24px;color:#172033;background:#f8fafc}
 button{{margin-right:8px;padding:6px 10px;border:1px solid #94a3b8;background:#fff;border-radius:4px;cursor:pointer}}
 .panel{{background:#fff;border:1px solid #cbd5e1;border-radius:6px;padding:16px;margin:16px 0}}
 .timeline-wrap{{overflow:auto;border:1px solid #cbd5e1;background:#fff;height:520px;position:relative}}
-.timeline{{position:relative;height:100%;min-width:960px;transform-origin:0 0}}
+.timeline{{position:relative;height:100%;min-width:100%;transform-origin:0 0}}
 .bar{{position:absolute;height:16px;border-radius:3px;color:#0f172a;font-size:11px;overflow:hidden;white-space:nowrap;border:1px solid rgba(15,23,42,.25);text-decoration:none}}
 .stage-total{{background:#cbd5e1}} .stage-wait{{background:#fca5a5}} .stage-copy{{background:#93c5fd}} .stage-sync{{background:#a7f3d0}}
-.launch-line{{position:absolute;top:0;bottom:0;border-left:1px dashed #94a3b8;color:#475569;font-size:12px;padding-left:4px}}
+.launch-line{{position:absolute;top:0;bottom:0;border-left:1px dashed #94a3b8;color:#475569;font-size:12px;padding-left:4px;text-decoration:none}}
 table{{border-collapse:collapse;background:#fff;width:100%}} td,th{{border:1px solid #cbd5e1;padding:6px 8px}} th{{background:#e2e8f0;text-align:left}}
 </style>
 </head>
@@ -475,6 +498,7 @@ table{{border-collapse:collapse;background:#fff;width:100%}} td,th{{border:1px s
 </section>
 <section class="panel">
 <h2>Chronological Timeline</h2>
+<p>Each rank/launch lane is normalized independently; cross-NPU raw cycle offsets are not assumed to be synchronized.</p>
 <div>
 <button onclick="zoomBy(1.25)">Zoom In</button>
 <button onclick="zoomBy(0.8)">Zoom Out</button>
@@ -500,51 +524,96 @@ function category(stage) {{
   if (stage.includes('sync') || stage.includes('barrier')) return 'sync';
   return 'total';
 }}
+function selectedLaunchId() {{
+  const filter = document.getElementById('launchFilter');
+  return filter ? filter.value : 'all';
+}}
+function visibleLaunches() {{
+  const selectedLaunch = selectedLaunchId();
+  const launches = [];
+  for (const group of traceIndex.groups) {{
+    for (const launchId of group.launch_ids) {{
+      if (selectedLaunch !== 'all' && selectedLaunch !== String(launchId)) continue;
+      const launchBars = group.bars.filter(bar => bar.launch_id === launchId);
+      launches.push({{group, launchId, launchBars}});
+    }}
+  }}
+  return launches;
+}}
+function timelineWidthAt(nextScale) {{
+  const wrap = document.getElementById('wrap');
+  const launchGap = 80;
+  let xBase = 0;
+  for (const launch of visibleLaunches()) {{
+    const maxEnd = Math.max(1, ...launch.launchBars.map(bar => bar.end_us));
+    xBase += Math.max(220, maxEnd * nextScale * 4) + launchGap;
+  }}
+  return Math.max(wrap.clientWidth, xBase);
+}}
+function launchDrilldown(launchBars) {{
+  const preferred = launchBars.find(bar => bar.stage === 'kernel_total') || launchBars[0];
+  return preferred ? preferred.drilldown : '#';
+}}
 function renderTimeline() {{
   const root = document.getElementById('timeline');
+  const wrap = document.getElementById('wrap');
   root.innerHTML = '';
   refreshLaunchFilter();
-  const selectedLaunch = document.getElementById('launchFilter').value;
   const laneHeight = 28;
   const launchGap = 80;
   let xBase = 0;
   const lanes = new Map();
   let laneCount = 0;
-  for (const group of traceIndex.groups) {{
-    for (const launchId of group.launch_ids) {{
-      if (selectedLaunch !== 'all' && selectedLaunch !== String(launchId)) continue;
-      const launchBars = group.bars.filter(bar => bar.launch_id === launchId);
-      const maxEnd = Math.max(1, ...launchBars.map(bar => bar.end_us));
-      const width = Math.max(220, maxEnd * scale * 4);
-      const line = document.createElement('div');
-      line.className = 'launch-line';
-      line.style.left = `${{xBase}}px`;
-      line.textContent = `launch${{launchId}}`;
-      root.appendChild(line);
-      for (const bar of launchBars) {{
-        const lane = foldCores ? `rank${{bar.rank}}` : `rank${{bar.rank}}/core${{bar.core}}`;
-        if (!lanes.has(lane)) lanes.set(lane, laneCount++);
-        const cat = category(bar.stage);
-        const item = document.createElement('a');
-        item.href = bar.drilldown;
-        item.className = `bar stage-${{cat}}`;
-        item.dataset.stageCategory = cat;
-        item.style.display = stageVisibility[cat] ? '' : 'none';
-        item.style.left = `${{xBase + bar.start_us * scale * 4}}px`;
-        item.style.top = `${{24 + lanes.get(lane) * laneHeight}}px`;
-        item.style.width = `${{Math.max(2, (bar.end_us - bar.start_us) * scale * 4)}}px`;
-        item.title = `launch${{bar.launch_id}} ${{lane}} ${{bar.stage}} duration=${{bar.duration_us.toFixed(3)}}us sum=${{bar.sum_us.toFixed(3)}}us count=${{bar.count}} source=${{bar.source}}`;
-        item.textContent = `${{lane}} ${{bar.stage}}`;
-        root.appendChild(item);
-      }}
-      xBase += width + launchGap;
+  for (const launch of visibleLaunches()) {{
+    const launchId = launch.launchId;
+    const launchBars = launch.launchBars;
+    const maxEnd = Math.max(1, ...launchBars.map(bar => bar.end_us));
+    const width = Math.max(220, maxEnd * scale * 4);
+    const line = document.createElement('a');
+    line.href = launchDrilldown(launchBars);
+    line.className = 'launch-line';
+    line.style.left = `${{xBase}}px`;
+    line.textContent = `launch${{launchId}}`;
+    root.appendChild(line);
+    for (const bar of launchBars) {{
+      const lane = foldCores ? `rank${{bar.rank}}` : `rank${{bar.rank}}/core${{bar.core}}`;
+      if (!lanes.has(lane)) lanes.set(lane, laneCount++);
+      const cat = category(bar.stage);
+      const item = document.createElement('a');
+      item.href = bar.drilldown;
+      item.className = `bar stage-${{cat}}`;
+      item.dataset.stageCategory = cat;
+      item.style.display = stageVisibility[cat] ? '' : 'none';
+      item.style.left = `${{xBase + bar.start_us * scale * 4}}px`;
+      item.style.top = `${{24 + lanes.get(lane) * laneHeight}}px`;
+      item.style.width = `${{Math.max(2, (bar.end_us - bar.start_us) * scale * 4)}}px`;
+      item.title = `launch${{bar.launch_id}} ${{lane}} ${{bar.stage}} start=${{bar.start_us.toFixed(3)}}us end=${{bar.end_us.toFixed(3)}}us duration=${{bar.duration_us.toFixed(3)}}us sum=${{bar.sum_us.toFixed(3)}}us max_cycles=${{bar.max_cycles}} count=${{bar.count}} source=${{bar.source}}`;
+      item.textContent = `${{lane}} ${{bar.stage}}`;
+      root.appendChild(item);
     }}
+    xBase += width + launchGap;
   }}
-  root.style.width = `${{Math.max(960, xBase)}}px`;
+  root.style.width = `${{Math.max(wrap.clientWidth, xBase)}}px`;
   root.style.height = `${{Math.max(520, 60 + laneCount * laneHeight)}}px`;
 }}
 function zoomBy(factor) {{ scale = Math.max(0.1, Math.min(20, scale * factor)); renderTimeline(); }}
-function fitTimeline() {{ scale = 1; renderTimeline(); document.getElementById('wrap').scrollLeft = 0; }}
+function fitTimeline() {{
+  const wrap = document.getElementById('wrap');
+  const target = Math.max(320, wrap.clientWidth - 16);
+  let low = 0.1;
+  let high = 20;
+  if (timelineWidthAt(low) > target) {{
+    scale = low;
+  }} else {{
+    for (let i = 0; i < 24; i++) {{
+      const mid = (low + high) / 2;
+      if (timelineWidthAt(mid) <= target) low = mid; else high = mid;
+    }}
+    scale = low;
+  }}
+  renderTimeline();
+  wrap.scrollLeft = 0;
+}}
 function toggleLaneMode() {{ foldCores = !foldCores; renderTimeline(); }}
 function refreshLaunchFilter() {{
   const select = document.getElementById('launchFilter');
