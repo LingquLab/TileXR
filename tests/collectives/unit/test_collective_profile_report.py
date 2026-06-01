@@ -155,6 +155,23 @@ class CollectiveProfileReportTest(unittest.TestCase):
             self.assertEqual(launch_groups, [[0, 1], [2, 3]])
             self.assertFalse(index["diagnostics"])
 
+    def test_sampled_multi_size_launch_ids_use_global_sampling_modulo(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for launch in (0, 2):
+                write_trace(root, 0, launch, message_bytes=1024)
+                write_trace(root, 1, launch, message_bytes=1024)
+            write_trace(root, 0, 4, message_bytes=2048)
+            write_trace(root, 1, 4, message_bytes=2048)
+
+            result = run_helper(root, "--warmup-iters", "0", "--iters", "3", "--profile-sample-every", "2")
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+            index = json.loads((root / "trace_index.json").read_text(encoding="utf-8"))
+            launch_groups = [group["launch_ids"] for group in index["groups"]]
+            self.assertEqual(launch_groups, [[0, 2], [4]])
+            self.assertFalse(index["diagnostics"])
+
     def test_launch_labels_drill_down_and_fit_uses_wrapper_width(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -168,6 +185,7 @@ class CollectiveProfileReportTest(unittest.TestCase):
             self.assertIn("line.href = launchDrilldown(launchBars)", html)
             self.assertIn("function timelineWidthAt(nextScale)", html)
             self.assertIn("wrap.clientWidth", html)
+            self.assertIn("return xBase;", html)
 
     def test_keeps_incompatible_message_bytes_out_of_valid_group(self):
         with tempfile.TemporaryDirectory() as tmp:

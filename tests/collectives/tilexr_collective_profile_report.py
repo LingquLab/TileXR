@@ -103,13 +103,16 @@ def expected_launch_ids(measured_iters, sample_every):
 
 
 def expected_group_launch_ids(observed_launch_ids, measured_iters, sample_every):
-    sampled_offsets = expected_launch_ids(measured_iters, sample_every)
-    if not observed_launch_ids or not sampled_offsets:
+    if not observed_launch_ids or measured_iters <= 0 or sample_every <= 0:
         return observed_launch_ids
 
     first_launch = min(observed_launch_ids)
     launch_base = (first_launch // measured_iters) * measured_iters
-    return [launch_base + offset for offset in sampled_offsets]
+    return [
+        launch_id
+        for launch_id in range(launch_base, launch_base + measured_iters)
+        if launch_id % sample_every == 0
+    ]
 
 
 def as_int(value, default=0):
@@ -541,14 +544,13 @@ function visibleLaunches() {{
   return launches;
 }}
 function timelineWidthAt(nextScale) {{
-  const wrap = document.getElementById('wrap');
   const launchGap = 80;
   let xBase = 0;
   for (const launch of visibleLaunches()) {{
     const maxEnd = Math.max(1, ...launch.launchBars.map(bar => bar.end_us));
     xBase += Math.max(220, maxEnd * nextScale * 4) + launchGap;
   }}
-  return Math.max(wrap.clientWidth, xBase);
+  return xBase;
 }}
 function launchDrilldown(launchBars) {{
   const preferred = launchBars.find(bar => bar.stage === 'kernel_total') || launchBars[0];
