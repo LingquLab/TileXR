@@ -27,6 +27,10 @@ profile_sample_every="1"
 warmup_iters="5"
 measured_iters="20"
 
+is_true_bool() {
+  [[ "${1:-}" == "1" || "${1:-}" == "true" || "${1:-}" == "yes" ]]
+}
+
 parse_profile_args() {
   local args=("$@")
   local i
@@ -55,7 +59,7 @@ parse_profile_args() {
 }
 
 write_profile_report_if_enabled() {
-  if [[ "${profile_enabled}" != "1" && "${profile_enabled}" != "true" ]]; then
+  if ! is_true_bool "${profile_enabled}"; then
     return 0
   fi
   local root="${profile_dir:-run/prof/collectives}"
@@ -75,7 +79,7 @@ write_profile_report_if_enabled() {
     return 0
   fi
   local prompt_args=()
-  if [[ "${profile_ai_prompt}" == "1" || "${profile_ai_prompt}" == "true" ]]; then
+  if is_true_bool "${profile_ai_prompt}"; then
     prompt_args+=(--emit-ai-prompt)
   fi
   "${python_cmd}" "${helper}" "${root}" \

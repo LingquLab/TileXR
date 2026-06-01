@@ -266,6 +266,8 @@ void TestLauncherScripts()
     CheckContains(perfPath, perf, "tilexr_collective_profile_report.py");
     CheckContains(perfPath, perf, "--warmup-iters");
     CheckContains(perfPath, perf, "--profile-sample-every");
+    CheckContains(perfPath, perf, "is_true_bool");
+    CheckContains(perfPath, perf, "yes");
 }
 
 void TestCMakeWiring()
