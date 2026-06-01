@@ -261,6 +261,11 @@ void TestLauncherScripts()
     CheckContains(perfPath, perf, "wait -n");
     CheckContains(perfPath, perf, "completed_count");
     CheckDoesNotContain(perfPath, perf, "wait -n -p completed_pid");
+    CheckContains(perfPath, perf, "parse_profile_args");
+    CheckContains(perfPath, perf, "write_profile_report_if_enabled");
+    CheckContains(perfPath, perf, "tilexr_collective_profile_report.py");
+    CheckContains(perfPath, perf, "--warmup-iters");
+    CheckContains(perfPath, perf, "--profile-sample-every");
 }
 
 void TestCMakeWiring()

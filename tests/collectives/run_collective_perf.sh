@@ -19,6 +19,73 @@ bin_dir="${3:-./install/bin}"
 shift $(( $# >= 3 ? 3 : $# ))
 binary="${bin_dir}/tilexr_collective_perf"
 timeout_sec="${TILEXR_COLLECTIVES_RUN_TIMEOUT_SEC:-600}"
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+profile_enabled="0"
+profile_dir=""
+profile_ai_prompt="0"
+profile_sample_every="1"
+warmup_iters="5"
+measured_iters="20"
+
+parse_profile_args() {
+  local args=("$@")
+  local i
+  for ((i = 0; i < ${#args[@]}; i++)); do
+    case "${args[$i]}" in
+      --profile)
+        if (( i + 1 < ${#args[@]} )); then profile_enabled="${args[$((i + 1))]}"; fi
+        ;;
+      --profile-dir)
+        if (( i + 1 < ${#args[@]} )); then profile_dir="${args[$((i + 1))]}"; fi
+        ;;
+      --profile-ai-prompt)
+        if (( i + 1 < ${#args[@]} )); then profile_ai_prompt="${args[$((i + 1))]}"; fi
+        ;;
+      --profile-sample-every)
+        if (( i + 1 < ${#args[@]} )); then profile_sample_every="${args[$((i + 1))]}"; fi
+        ;;
+      --warmup-iters)
+        if (( i + 1 < ${#args[@]} )); then warmup_iters="${args[$((i + 1))]}"; fi
+        ;;
+      --iters)
+        if (( i + 1 < ${#args[@]} )); then measured_iters="${args[$((i + 1))]}"; fi
+        ;;
+    esac
+  done
+}
+
+write_profile_report_if_enabled() {
+  if [[ "${profile_enabled}" != "1" && "${profile_enabled}" != "true" ]]; then
+    return 0
+  fi
+  local root="${profile_dir:-run/prof/collectives}"
+  local helper="${script_dir}/tilexr_collective_profile_report.py"
+  local python_cmd=""
+  if command -v python3 >/dev/null 2>&1; then
+    python_cmd="python3"
+  elif command -v python >/dev/null 2>&1; then
+    python_cmd="python"
+  fi
+  if [[ -z "${python_cmd}" ]]; then
+    echo "WARNING: python3 not found; skipping aggregate profile report" >&2
+    return 0
+  fi
+  if [[ ! -f "${helper}" ]]; then
+    echo "WARNING: ${helper} not found; skipping aggregate profile report" >&2
+    return 0
+  fi
+  local prompt_args=()
+  if [[ "${profile_ai_prompt}" == "1" || "${profile_ai_prompt}" == "true" ]]; then
+    prompt_args+=(--emit-ai-prompt)
+  fi
+  "${python_cmd}" "${helper}" "${root}" \
+    --warmup-iters "${warmup_iters}" \
+    --iters "${measured_iters}" \
+    --profile-sample-every "${profile_sample_every}" \
+    "${prompt_args[@]}"
+}
+
+parse_profile_args "$@"
 
 if [[ ! -x "${binary}" ]]; then
   echo "ERROR: ${binary} is not executable" >&2
@@ -124,5 +191,10 @@ done
 kill "${watchdog_pid}" 2>/dev/null || true
 wait "${watchdog_pid}" 2>/dev/null || true
 trap - INT TERM
+
+if ! write_profile_report_if_enabled; then
+  echo "ERROR: aggregate profile report generation failed" >&2
+  exit 1
+fi
 
 exit 0
