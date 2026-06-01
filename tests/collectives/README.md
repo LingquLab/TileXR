@@ -86,9 +86,30 @@ Run the perf tool with profiling:
   --profile 1 --profile-dir run/prof/collectives --profile-ai-prompt 1
 ```
 
-Each sampled launch writes `trace.json`, `summary.csv`, `analysis.md`, `report.html`, and `ai_prompt.md`
+Each sampled measured launch writes `trace.json`, `summary.csv`, `analysis.md`, `report.html`, and `ai_prompt.md`
 when prompt export is enabled. `--profile-dir` is a root directory; each rank writes sampled launches under
 `run/prof/collectives/rank<N>/launch<M>/` in the example above.
+
+After all rank processes finish successfully, `run_collective_perf.sh` also writes a root-level report:
+
+```text
+run/prof/collectives/report.html
+run/prof/collectives/trace_index.json
+run/prof/collectives/analysis.md
+run/prof/collectives/ai_prompt.md
+```
+
+The root-level report.html keeps the bottleneck-first summary and adds a zoomable chronological timeline across
+sampled measured iterations. Warmup execution is controlled by the existing `--warmup-iters` option and is reported
+as metadata; warmup launches are not profiled by this report path. The per-launch `rank<N>/launch<M>/report.html`
+files remain available for drilldown.
+
+To regenerate the aggregate report from an existing profile directory:
+
+```bash
+python3 tilexr_collective_profile_report.py run/prof/collectives \
+  --warmup-iters 5 --iters 20 --profile-sample-every 1 --emit-ai-prompt
+```
 
 ## Skip Behavior
 
