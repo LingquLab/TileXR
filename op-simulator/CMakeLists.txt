@@ -48,6 +48,9 @@ add_link_options(-s)
 
 include_directories(
         ${CMAKE_CURRENT_LIST_DIR}/include/
+        ${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc/
+        ${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc/runtime/
+        ${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc/runtime/runtime/
         ${ASCEND_HOME_PATH}/${ARCH}-linux/include/
         ${ASCEND_HOME_PATH}/${ARCH}-linux/include/hccl/
         ${ASCEND_HOME_PATH}/${ARCH}-linux/include/experiment
@@ -56,8 +59,11 @@ include_directories(
         ${CMAKE_SOURCE_DIR}/src/3rdparty/spdlog/include
         ${CMAKE_SOURCE_DIR}/src/3rdparty/
 )
-link_directories(${ASCEND_HOME_PATH}/${ARCH}-linux/lib64/)
+link_directories(
+        ${ASCEND_HOME_PATH}/${ARCH}-linux/lib64/
+        ${ASCEND_HOME_PATH}/${ARCH}-linux/devlib/linux/${ARCH}/
+)
 
-list(APPEND CMAKE_MODULE_PATH "${ASCEND_HOME_PATH}/${ARCH}-linux/tikcpp/ascendc_kernel_cmake/ASC_CMake")
+list(APPEND CMAKE_MODULE_PATH "${ASCEND_HOME_PATH}/${ARCH}-linux/tikcpp/ascendc_kernel_cmake/asc_modules")
 
 add_subdirectory(src)
