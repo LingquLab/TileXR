@@ -24,6 +24,9 @@ include_directories(
     ${CCE_INCLUDE_BASE}/tikcpp/tikcfw/
     ${CCE_INCLUDE_BASE}/tikcpp/tikcfw/interface/
     ${CCE_INCLUDE_BASE}/tikcpp/tikcfw/impl/
+    ${CCE_INCLUDE_BASE}/pkg_inc/
+    ${CCE_INCLUDE_BASE}/pkg_inc/runtime/
+    ${CCE_INCLUDE_BASE}/pkg_inc/runtime/runtime/
     .
 )
 
@@ -41,7 +44,7 @@ target_compile_options(kernel_demo PRIVATE
 
 set(OP_OUTPUT_PATH "${CMAKE_INSTALL_PREFIX}/my_kernel.o")
 
-set(CCE_LLD "${ASCEND_HOME_PATH}/compiler/ccec_compiler/bin/ld.lld")
+set(CCE_LLD "${ASCEND_HOME_PATH}/${ARCH}-linux/bin/ld.lld")
 
 # 3. 添加自定义命令来执行链接操作
 add_custom_command(

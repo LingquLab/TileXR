@@ -156,7 +156,7 @@ int main(int argc, char* argv[])
         }
 
         CheckRtError(rtSetDevice(0), "rtSetDevice failed");
-        RunKernel(kernelName, "./op/my_kernel.o");
+        RunKernel(kernelName, "./op/my_kernel.o", blockNum);
 
         rtDeviceReset(0);
         aclFinalize();

@@ -379,12 +379,7 @@ Expected demo logs include `rank 0 validation PASS` and `rank 1 validation PASS`
 
 ## Operator Simulator
 
-```bash
-cd op-simulator
-bash compile_and_run.sh
-```
-
-Use `op-simulator/src/base_test.cpp` and `op-simulator/test_template.cpp` as templates for new operator simulations.
+`op-simulator/` contains the basic Ascend C simulator demo and MoE EP-card trace comparison tools. See [op-simulator/README.md](op-simulator/README.md) for commands and trace summary usage.
 
 ## Common Commands
 
