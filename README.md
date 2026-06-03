@@ -31,10 +31,10 @@ The current codebase implements the base communication runtime, flag-based synch
 - **User**: root access is typically required for NPU device operations
 - **NPU driver**: 25.5.0 or later, check with `npu-smi info`
 - **CANN**: current build scripts and CMake are aligned to CANN 9.1.0
-- **Core supported chips**: Ascend 910B, 910A5, 310P3
+- **Core supported chips**: Ascend 910B, 910A5
 - **UDMA runtime validation target**: A5 / Ascend950 / 950 only
 
-UDMA builds or smoke tests on 910B, 310P, or other non-A5 devices are not valid UDMA data-plane validation.
+UDMA builds or smoke tests on 910B or other non-A5 devices are not valid UDMA data-plane validation.
 
 ### System Dependencies
 
@@ -314,7 +314,37 @@ LD_LIBRARY_PATH="$TILEXR_LIBDIR:${LD_LIBRARY_PATH:-}" \
     --datatype int32 --check 1
 ```
 
-The perf tool prints nccl-tests-style latency, algorithm bandwidth, bus bandwidth, and error counts, with optional CSV output. See [tests/collectives/README.md](tests/collectives/README.md) for script arguments, skip behavior, timeout handling, and topology limitations.
+The perf tool prints latency, algorithm bandwidth, bus bandwidth, and error counts, with optional CSV output.
+
+Operator-internal profiling can be enabled for the collectives perf tool with `TILEXR_COLLECTIVES_ENABLE_PROFILING=ON`:
+
+```bash
+source scripts/common_env.sh
+cmake -S . -B build-profile \
+  -DTILEXR_BUILD_COLLECTIVES=ON \
+  -DTILEXR_COLLECTIVES_ENABLE_PROFILING=ON
+cmake --build build-profile --target tilexr_collective_perf -j"$(nproc)"
+
+cd tests/collectives
+./run_collective_perf.sh 2 0 ../../build-profile/tests/collectives \
+  --op allgather --min-bytes 67108864 --max-bytes 67108864 \
+  --profile 1 --profile-dir run/prof/collectives --profile-ai-prompt 1
+```
+
+Each sampled measured launch writes per-rank/per-launch artifacts under
+`run/prof/collectives/rank<N>/launch<M>/`. After all ranks finish successfully,
+`run_collective_perf.sh` also writes aggregate root-level profiling artifacts:
+
+```text
+run/prof/collectives/report.html
+run/prof/collectives/trace_index.json
+run/prof/collectives/analysis.md
+run/prof/collectives/ai_prompt.md   # only when prompt export is enabled
+```
+
+The aggregate `report.html` keeps the bottleneck-first summary and adds a zoomable chronological timeline across ranks, cores, and sampled measured launches, with links back to each per-launch report. Warmup iterations remain controlled by `--warmup-iters` and are reported as metadata; warmup launches are not profiled by this path. Existing profile directories can be re-analyzed with `tests/collectives/tilexr_collective_profile_report.py`.
+
+See [tests/collectives/README.md](tests/collectives/README.md) for script arguments, skip behavior, timeout handling, topology limitations, and profiling report details.
 
 ## EP Dispatch Validation
 

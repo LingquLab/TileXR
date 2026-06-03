@@ -15,16 +15,17 @@
 
 #include "datacopy_gm2gm.h"
 #include "datacopy_gm2gm_delay.h"
+#include "perf_trace_kernel.h"
 #include "sync_collectives.h"
 using namespace AscendC;
 using namespace TileXR;
 
 #define KERNELS_ARGS_FUN() \
 GM_ADDR input, GM_ADDR output, GM_ADDR commArgs, int64_t len, int64_t magic, int op, int root, int cycleCount, \
-GM_ADDR scale, int64_t scaleCount, GM_ADDR offset
+GM_ADDR scale, int64_t scaleCount, GM_ADDR offset, GM_ADDR perfTrace
 
 #define KERNELS_ARGS_CALL() \
-input, output, commArgs, len, magic, op, root, cycleCount, scale, scaleCount, offset
+input, output, commArgs, len, magic, op, root, cycleCount, scale, scaleCount, offset, perfTrace
 
 #define KERNELS_GATHER_TABLE_ARGS_FUN() \
 GM_ADDR embTable, GM_ADDR lookup, GM_ADDR revData, int64_t lookupLen, int64_t embTableLen, int64_t embTableDim

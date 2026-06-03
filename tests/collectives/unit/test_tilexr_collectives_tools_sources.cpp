@@ -113,6 +113,10 @@ void TestPerfToolSource()
     CheckContains(path, text, "--csv");
     CheckContains(path, text, "--min-algbw");
     CheckContains(path, text, "--max-latency-us");
+    CheckContains(path, text, "--profile");
+    CheckContains(path, text, "--profile-dir");
+    CheckContains(path, text, "--profile-ai-prompt");
+    CheckContains(path, text, "--profile-sample-every");
     CheckContains(path, text, "aclrtCreateEvent");
     CheckContains(path, text, "aclrtRecordEvent");
     CheckContains(path, text, "aclrtEventElapsedTime");
@@ -141,6 +145,23 @@ void TestPerfToolSource()
     CheckContains(path, text, "actualSendBytesPerRank");
     CheckContains(path, text, "CanUseCollisionFreeInt32Pattern");
     CheckContains(path, text, "../common/int32_pattern.h");
+    CheckContains(path, text, "JoinPath");
+    CheckContains(path, text, "ResolveProfileOutputDir");
+    CheckContains(path, text, "\"run/prof/collectives\"");
+    CheckContains(path, text, "\"rank\" + std::to_string(options.rank)");
+    CheckContains(path, text, "\"launch\" + std::to_string(profileLaunchIndex)");
+    CheckContains(path, text, "TileXRCollectivePerfSessionCreate");
+    CheckContains(path, text, "TileXRCollectivePerfSetActiveSession");
+    CheckContains(path, text, "TileXRCollectivePerfWriteReport");
+    CheckContains(path, text, "TileXRCollectivePerfSessionDestroy");
+    CheckContains(path, text, "aclrtSynchronizeStream before perf report");
+    CheckContains(path, text, "ProfileThisLaunch");
+    CheckContains(path, text, "profileLaunchIndex");
+    CheckContains(path, text, "TileXRCollectivePerfSetActiveSession(perfSession)");
+    CheckContains(path, text, "TileXRCollectivePerfSetActiveSession(nullptr)");
+    CheckContains(path, text, "skipWriteReport");
+    CheckContains(path, text, "TileXRCollectivePerfSetActiveSession clear failed");
+    CheckContains(path, text, "TileXRCollectivePerfSessionDestroy failed");
     CheckDoesNotContain(path, text, "sendElements * static_cast<int64_t>(options.dtype.bytes)");
     CheckDoesNotContain(path, text, "static_cast<int64_t>(static_cast<double>(bytes) * options.stepFactor)");
     CheckDoesNotContain(path, text, "srcRank * 1000000 + index");
@@ -240,6 +261,13 @@ void TestLauncherScripts()
     CheckContains(perfPath, perf, "wait -n");
     CheckContains(perfPath, perf, "completed_count");
     CheckDoesNotContain(perfPath, perf, "wait -n -p completed_pid");
+    CheckContains(perfPath, perf, "parse_profile_args");
+    CheckContains(perfPath, perf, "write_profile_report_if_enabled");
+    CheckContains(perfPath, perf, "tilexr_collective_profile_report.py");
+    CheckContains(perfPath, perf, "--warmup-iters");
+    CheckContains(perfPath, perf, "--profile-sample-every");
+    CheckContains(perfPath, perf, "is_true_bool");
+    CheckContains(perfPath, perf, "yes");
 }
 
 void TestCMakeWiring()
@@ -255,6 +283,9 @@ void TestCMakeWiring()
     CheckContains(path, text, "test_tilexr_collectives_tools_sources");
     CheckContains(path, text, "run_collectives_correctness.sh");
     CheckContains(path, text, "run_collective_perf.sh");
+    CheckContains(path, text, "find_package(Python3 COMPONENTS Interpreter)");
+    CheckContains(path, text, "test_collective_profile_report");
+    CheckContains(path, text, "tilexr_collective_profile_report.py");
     CheckDoesNotContain(path, text, "add_test(NAME test_tilexr_collectives_correctness");
     CheckDoesNotContain(path, text, "add_test(NAME tilexr_collective_perf");
 }
@@ -285,6 +316,11 @@ void TestReadmeDocumentsManualRuns()
     CheckContains(path, text, "allgather: count * dtype_size");
     CheckContains(path, text, "alltoall: count * rank_size * dtype_size");
     CheckContains(path, text, "rank_size - 1");
+    CheckContains(path, text, "trace_index.json");
+    CheckContains(path, text, "root-level report.html");
+    CheckContains(path, text, "tilexr_collective_profile_report.py");
+    CheckContains(path, text, "zoomable chronological timeline");
+    CheckContains(path, text, "warmup launches are not profiled");
     CheckContains(path, text, "TILEXR_COLLECTIVES_RUN_TIMEOUT_SEC");
     CheckContains(path, text, "TILEXR_SKIP_IF_INSUFFICIENT_NPUS");
     CheckContains(path, text, "CTest");

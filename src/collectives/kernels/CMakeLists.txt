@@ -7,6 +7,7 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 enable_language(CCE)
 
 set(TILEXR_COLLECTIVES_1OP_BIN_SIZE 5242880 CACHE STRING "Padded size for TileXR collectives CCE binary")
+option(TILEXR_COLLECTIVES_ENABLE_PROFILING "Enable TileXR collectives kernel profiling helpers" OFF)
 
 set(CCE_COMPILE_OPTION
         -O2
@@ -47,6 +48,10 @@ target_compile_options(tilexr_collectives_op_tmp PRIVATE
         ${CCE_COMPILE_OPTION}
         --cce-aicore-arch=${AIV_ARCH}
 )
+
+if(TILEXR_COLLECTIVES_ENABLE_PROFILING)
+    target_compile_definitions(tilexr_collectives_op_tmp PRIVATE TILEXR_COLLECTIVES_ENABLE_PROFILING=1)
+endif()
 
 set(TILEXR_COLLECTIVES_OP "${CMAKE_CURRENT_BINARY_DIR}/tilexr_collectives_op.o")
 add_custom_command(

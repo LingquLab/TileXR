@@ -24,6 +24,7 @@
 
 #include "acl/acl.h"
 #include "tilexr_collectives.h"
+#include "tilexr_collectives_perf.h"
 #include "../common/int32_pattern.h"
 
 namespace {
@@ -56,6 +57,10 @@ struct Options {
     std::string csvPath;
     double minAlgBw = -1.0;
     double maxLatencyUs = -1.0;
+    bool profile = false;
+    std::string profileDir;
+    bool profileAiPrompt = false;
+    int profileSampleEvery = 1;
 };
 
 struct Measurement {
@@ -78,6 +83,14 @@ struct Row {
     double maxUs = 0.0;
     int errors = 0;
 };
+
+std::string JoinPath(const std::string &base, const std::string &leaf);
+std::string ResolveProfileOutputDir(const Options &options, uint64_t profileLaunchIndex);
+bool ProfileThisLaunch(const Options &options, uint64_t profileLaunchIndex);
+bool StartPerfSessionForLaunch(const Options &options, uint64_t profileLaunchIndex,
+                               TileXRCollectivePerfSession &perfSession);
+void FinishPerfSession(TileXRCollectivePerfSession &perfSession, const Options &options, aclrtStream stream,
+                       int &totalErrors, bool skipWriteReport);
 
 using TileXRCollectivesTest::CanUseCollisionFreeInt32Pattern;
 using TileXRCollectivesTest::ExpectedAllGatherValue;
@@ -110,7 +123,9 @@ void PrintUsage(const char *program)
         << "  --datatype int8|int16|int32|int64|fp16|fp32|bf16\n"
         << "  --rank-size N --rank R --first-npu D\n"
         << "  --check 0|1 [--csv path]\n"
-        << "  [--min-algbw GB/s] [--max-latency-us us]\n";
+        << "  [--min-algbw GB/s] [--max-latency-us us]\n"
+        << "  [--profile 0|1] [--profile-dir path]\n"
+        << "  [--profile-ai-prompt 0|1] [--profile-sample-every N]\n";
 }
 
 bool ParseBool(const std::string &value, bool &out)
@@ -412,6 +427,30 @@ bool ParseOptions(int argc, char **argv, Options &options)
                 std::cerr << "ERROR: invalid --max-latency-us" << std::endl;
                 return false;
             }
+        } else if (arg == "--profile") {
+            const char *value = requireValue(arg);
+            if (value == nullptr || !ParseBool(value, options.profile)) {
+                std::cerr << "ERROR: --profile must be 0 or 1" << std::endl;
+                return false;
+            }
+        } else if (arg == "--profile-dir") {
+            const char *value = requireValue(arg);
+            if (value == nullptr) {
+                return false;
+            }
+            options.profileDir = value;
+        } else if (arg == "--profile-ai-prompt") {
+            const char *value = requireValue(arg);
+            if (value == nullptr || !ParseBool(value, options.profileAiPrompt)) {
+                std::cerr << "ERROR: --profile-ai-prompt must be 0 or 1" << std::endl;
+                return false;
+            }
+        } else if (arg == "--profile-sample-every") {
+            const char *value = requireValue(arg);
+            if (value == nullptr || !ParseInt(value, options.profileSampleEvery)) {
+                std::cerr << "ERROR: invalid --profile-sample-every" << std::endl;
+                return false;
+            }
         } else if (arg == "--help" || arg == "-h") {
             PrintUsage(argv[0]);
             std::exit(0);
@@ -425,6 +464,10 @@ bool ParseOptions(int argc, char **argv, Options &options)
         options.iters <= 0 || options.warmupIters < 0 || options.rankSize <= 0 ||
         options.rank < 0 || options.rank >= options.rankSize || options.firstNpu < 0) {
         std::cerr << "ERROR: invalid option value" << std::endl;
+        return false;
+    }
+    if (options.profileSampleEvery <= 0) {
+        std::cerr << "ERROR: --profile-sample-every must be positive" << std::endl;
         return false;
     }
     if (!ValidateMaxMessageSize(options)) {
@@ -593,7 +636,7 @@ double ComputeBusBandwidthGbps(CollectiveOp op, int rankSize, double algBwGbps)
 }
 
 bool MeasureOnce(const Options &options, void *devSend, void *devRecv, int64_t count, TileXRCommPtr comm,
-                 aclrtStream stream, double &us)
+                 aclrtStream stream, uint64_t profileLaunchIndex, int &totalErrors, double &us)
 {
     aclrtEvent start = nullptr;
     aclrtEvent stop = nullptr;
@@ -608,13 +651,22 @@ bool MeasureOnce(const Options &options, void *devSend, void *devRecv, int64_t c
         }
         return false;
     }
-    if (!CallCollective(options, devSend, devRecv, count, comm, stream) ||
-        !CheckAcl(options.rank, "aclrtRecordEvent stop", aclrtRecordEvent(stop, stream)) ||
-        !CheckAcl(options.rank, "aclrtSynchronizeEvent stop", aclrtSynchronizeEvent(stop))) {
+    TileXRCollectivePerfSession perfSession = nullptr;
+    if (ProfileThisLaunch(options, profileLaunchIndex) &&
+        !StartPerfSessionForLaunch(options, profileLaunchIndex, perfSession)) {
         aclrtDestroyEvent(start);
         aclrtDestroyEvent(stop);
         return false;
     }
+    if (!CallCollective(options, devSend, devRecv, count, comm, stream) ||
+        !CheckAcl(options.rank, "aclrtRecordEvent stop", aclrtRecordEvent(stop, stream)) ||
+        !CheckAcl(options.rank, "aclrtSynchronizeEvent stop", aclrtSynchronizeEvent(stop))) {
+        FinishPerfSession(perfSession, options, stream, totalErrors, true);
+        aclrtDestroyEvent(start);
+        aclrtDestroyEvent(stop);
+        return false;
+    }
+    FinishPerfSession(perfSession, options, stream, totalErrors, false);
 
     float elapsedMs = 0.0f;
     const bool ok = CheckAcl(options.rank, "aclrtEventElapsedTime",
@@ -626,7 +678,7 @@ bool MeasureOnce(const Options &options, void *devSend, void *devRecv, int64_t c
 }
 
 bool Measure(const Options &options, void *devSend, void *devRecv, int64_t count, TileXRCommPtr comm,
-             aclrtStream stream, Measurement &measurement)
+             aclrtStream stream, uint64_t &profileLaunchIndex, int &totalErrors, Measurement &measurement)
 {
     for (int i = 0; i < options.warmupIters; ++i) {
         if (!CallCollective(options, devSend, devRecv, count, comm, stream)) {
@@ -641,7 +693,9 @@ bool Measure(const Options &options, void *devSend, void *devRecv, int64_t count
     samples.reserve(static_cast<size_t>(options.iters));
     for (int i = 0; i < options.iters; ++i) {
         double us = 0.0;
-        if (!MeasureOnce(options, devSend, devRecv, count, comm, stream, us)) {
+        const uint64_t currentProfileLaunchIndex = profileLaunchIndex++;
+        if (!MeasureOnce(options, devSend, devRecv, count, comm, stream,
+                currentProfileLaunchIndex, totalErrors, us)) {
             return false;
         }
         samples.push_back(us);
@@ -696,6 +750,49 @@ bool AppendCsv(const std::string &path, const Row &row)
     return true;
 }
 
+std::string JoinPath(const std::string &base, const std::string &leaf)
+{
+    if (base.empty() || base[base.size() - 1] == '/') {
+        return base + leaf;
+    }
+    return base + "/" + leaf;
+}
+
+std::string ResolveProfileOutputDir(const Options &options, uint64_t profileLaunchIndex)
+{
+    const std::string root = options.profileDir.empty() ? "run/prof/collectives" : options.profileDir;
+    return JoinPath(JoinPath(root, "rank" + std::to_string(options.rank)),
+                    "launch" + std::to_string(profileLaunchIndex));
+}
+
+bool ProfileThisLaunch(const Options &options, uint64_t profileLaunchIndex)
+{
+    return options.profile && options.profileSampleEvery > 0 &&
+        (profileLaunchIndex % static_cast<uint64_t>(options.profileSampleEvery)) == 0;
+}
+
+bool StartPerfSessionForLaunch(const Options &options, uint64_t profileLaunchIndex,
+                               TileXRCollectivePerfSession &perfSession)
+{
+    const std::string outputDir = ResolveProfileOutputDir(options, profileLaunchIndex);
+    TileXRCollectivePerfConfig perfConfig {};
+    perfConfig.enabled = 1;
+    perfConfig.outputDir = outputDir.c_str();
+    perfConfig.emitAiPrompt = options.profileAiPrompt ? 1 : 0;
+    perfConfig.sampleEveryN = static_cast<unsigned int>(options.profileSampleEvery);
+    if (!CheckTileXR(options.rank, "TileXRCollectivePerfSessionCreate",
+            TileXRCollectivePerfSessionCreate(&perfConfig, &perfSession))) {
+        return false;
+    }
+    if (!CheckTileXR(options.rank, "TileXRCollectivePerfSetActiveSession",
+            TileXRCollectivePerfSetActiveSession(perfSession))) {
+        TileXRCollectivePerfSessionDestroy(perfSession);
+        perfSession = nullptr;
+        return false;
+    }
+    return true;
+}
+
 void Cleanup(TileXRCommPtr comm, aclrtStream stream, int deviceId, bool deviceSet)
 {
     if (comm != nullptr) {
@@ -708,6 +805,42 @@ void Cleanup(TileXRCommPtr comm, aclrtStream stream, int deviceId, bool deviceSe
         aclrtResetDevice(deviceId);
     }
     aclFinalize();
+}
+
+void FinishPerfSession(TileXRCollectivePerfSession &perfSession, const Options &options, aclrtStream stream,
+                       int &totalErrors, bool skipWriteReport)
+{
+    if (perfSession == nullptr) {
+        return;
+    }
+    bool streamSynced = true;
+    if (stream != nullptr) {
+        streamSynced = CheckAcl(options.rank, "aclrtSynchronizeStream before perf report",
+            aclrtSynchronizeStream(stream));
+        if (!streamSynced) {
+            totalErrors += 1;
+            skipWriteReport = true;
+        }
+    }
+    if (TileXRCollectivePerfSetActiveSession(nullptr) != TileXR::TILEXR_SUCCESS) {
+        std::cerr << "[rank " << options.rank << "] ERROR: TileXRCollectivePerfSetActiveSession clear failed"
+                  << std::endl;
+        totalErrors += 1;
+    }
+    if (!skipWriteReport && TileXRCollectivePerfWriteReport(perfSession) != TileXR::TILEXR_SUCCESS) {
+        std::cerr << "[rank " << options.rank << "] ERROR: TileXRCollectivePerfWriteReport failed" << std::endl;
+        totalErrors += 1;
+    }
+    if (!streamSynced) {
+        // Avoid freeing a trace buffer that may still be referenced by queued device work.
+        perfSession = nullptr;
+        return;
+    }
+    if (TileXRCollectivePerfSessionDestroy(perfSession) != TileXR::TILEXR_SUCCESS) {
+        std::cerr << "[rank " << options.rank << "] ERROR: TileXRCollectivePerfSessionDestroy failed" << std::endl;
+        totalErrors += 1;
+    }
+    perfSession = nullptr;
 }
 
 } // namespace
@@ -739,11 +872,13 @@ int main(int argc, char **argv)
         return 1;
     }
 
+    int totalErrors = 0;
+    uint64_t profileLaunchIndex = 0;
+
     if (options.rank == 0) {
         PrintHeader();
     }
 
-    int totalErrors = 0;
     for (int64_t bytes = options.minBytes;;) {
         int64_t count = bytes / static_cast<int64_t>(options.dtype.bytes);
         if (count <= 0) {
@@ -779,7 +914,8 @@ int main(int argc, char **argv)
 
         Measurement measurement;
         if (ok) {
-            ok = Measure(options, devSend, devRecv, count, comm, stream, measurement);
+            ok = Measure(options, devSend, devRecv, count, comm, stream,
+                profileLaunchIndex, totalErrors, measurement);
         }
 
         int errors = 0;
