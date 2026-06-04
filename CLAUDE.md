@@ -26,7 +26,7 @@ src/
 op-simulator/     # Operator simulation and testing without physical hardware
 tests/            # Test suites (UDMA, integration tests)
 scripts/          # Build and utility scripts (see scripts/README.md)
-3rdparty/         # Git submodules: hcomm, ops-transformer, spdlog, mki
+3rdparty/         # Git submodules: hcomm, ops-transformer, spdlog
 reference/        # Ignored reference-only source trees downloaded on demand
 docs/             # Documentation (UDMA, CANN migration, etc.)
 ```
@@ -53,7 +53,6 @@ TileXR requires the following dependencies:
 - **hcomm**: Git submodule, built via `scripts/hcomm_build_install.sh`
 - **ops-transformer**: Git submodule, built via `scripts/ops_build_run.sh`
 - **spdlog**: Git submodule (header-only logging)
-- **mki**: Git submodule (matrix kernel interface)
 - **shmem** (reference-only): Download on demand with `reference/download_shmem.sh` into ignored `reference/shmem/` for historical UDMA experiments and comparison. Current `src/comm` does not include or link shmem.
 
 ### Quick setup:
