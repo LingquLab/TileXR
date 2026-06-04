@@ -36,7 +36,11 @@ else ()
     set(ASCEND_HOME_PATH /usr/local/Ascend/ascend-toolkit/latest)
 endif ()
 
-set(ASCEND_DRIVER_PATH /usr/local/Ascend/driver)
+set(_tilexr_default_ascend_driver_path "$ENV{ASCEND_DRIVER_PATH}")
+if(NOT _tilexr_default_ascend_driver_path)
+    set(_tilexr_default_ascend_driver_path /usr/local/Ascend/driver)
+endif()
+set(ASCEND_DRIVER_PATH "${_tilexr_default_ascend_driver_path}" CACHE PATH "Ascend driver path")
 
 message("== ASCEND_HOME_PATH: ${ASCEND_HOME_PATH}")
 message("== ASCEND_DRIVER_PATH: ${ASCEND_DRIVER_PATH}")
@@ -44,6 +48,7 @@ message("== ASCEND_DRIVER_PATH: ${ASCEND_DRIVER_PATH}")
 include_directories(
         ${CMAKE_CURRENT_LIST_DIR}/src/include/
         ${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc/
+        ${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc/profiling/
         ${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc/runtime/
         ${ASCEND_HOME_PATH}/${ARCH}-linux/include/
         ${ASCEND_HOME_PATH}/${ARCH}-linux/include/hccl/

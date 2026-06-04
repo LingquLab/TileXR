@@ -85,7 +85,6 @@ private:
     int Prepare();
     int Listen();
     int Accept();
-    int StartSecureTunnel();
     void Close(int &fd) const;
     int Connect();
     int AcceptConnection(int fd, sockaddr_in &clientAddr, socklen_t *sinSize) const;
@@ -163,11 +162,9 @@ private:
 
         return TILEXR_SUCCESS;
     }
-    FILE* pipe_ = nullptr;
     int rank_ = 0;
     int rankSize_ = 0;
     int fd_ = -1;
-    int lockFileDescriptor_ = -1;
     std::vector<int> clientFds_ = {};
     bool isInit_ = false;
     int commDomain_ = -1;

@@ -11,7 +11,6 @@
 
 #include <unistd.h>
 #include <sys/types.h>
-#include <fcntl.h>
 #include <cerrno>
 #include <cstdlib>
 #include <cstring>
@@ -20,7 +19,6 @@
 #include <fstream>
 #include <sstream>
 
-#include <sys/file.h>
 #include <sys/socket.h>
 #include <ifaddrs.h>
 #include <netdb.h>
@@ -147,90 +145,9 @@ void TileXRSockExchange::GetIpAndPort()
     }
     port_ += commDomain_;
     tilexrCommId_.handle.addr.sin.sin_family = AF_INET;
-    // only connect localhost for safety
-    tilexrCommId_.handle.addr.sin.sin_addr.s_addr = inet_addr(TILEXR_LOCAL_SOCK_IP.c_str()); // ip_.c_str()
+    tilexrCommId_.handle.addr.sin.sin_addr.s_addr = inet_addr(ip_.c_str());
     tilexrCommId_.handle.addr.sin.sin_port = htons(port_);
     TILEXR_LOG(DEBUG) << "curRank: " << rank_ << " commDomain: " << commDomain_ << " ip: " << ip_ << " port: " << port_;
-}
-
-bool IsLocalIp(const std::string& ip)
-{
-    struct ifaddrs* ifaddr = nullptr;
-    char host[NI_MAXHOST];
-    bool found = false;
-
-    // 获取网络接口列表
-    if (getifaddrs(&ifaddr) == -1) {
-        TILEXR_LOG(WARN) << "Failed to getifaddrs in IsLocalIp.";
-        return false;
-    }
-
-    // 遍历网络接口列表
-    for (ifaddrs *ifa = ifaddr; ifa != nullptr; ifa = ifa->ifa_next) {
-        if (ifa->ifa_addr == nullptr) {
-            continue;
-        }
-
-        // 只处理IPv4地址
-        if (ifa->ifa_addr->sa_family == AF_INET) {
-            // 初始化 host 缓冲区
-            for (size_t i = 0; i < NI_MAXHOST; ++i) {
-                host[i] = 0;
-            }
-            int s = getnameinfo(ifa->ifa_addr, sizeof(struct sockaddr_in),
-                                host, NI_MAXHOST, nullptr, 0, NI_NUMERICHOST);
-            if (s != 0) {
-                TILEXR_LOG(WARN) << "getnameinfo() failed: " << gai_strerror(s);
-                continue;
-            }
-            // 比较输入的IP和当前接口的IP
-            if (ip == host) {
-                found = true;
-                break;
-            }
-        }
-    }
-    freeifaddrs(ifaddr);
-    return found;
-}
-
-int TileXRSockExchange::StartSecureTunnel()
-{
-    if (IsLocalIp(ip_)) {
-        TILEXR_LOG(DEBUG) << "no need to start tunnel.";
-        return TILEXR_SUCCESS;
-    }
-    // 生成一个唯一的锁文件路径，通常基于服务器IP或主机名
-    std::string lockFilePath = "/tmp/secure_tunnel_lock_" + ip_;
-
-    // 打开锁文件
-    lockFileDescriptor_ = open(lockFilePath.c_str(), O_CREAT | O_RDWR,
-                               S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH);
-    if (lockFileDescriptor_ < 0) {
-        TILEXR_LOG(ERROR) << "StartSecureTunnel Failed: Unable to open lock file";
-        return TILEXR_ERROR_INTERNAL;
-    }
-
-    // 尝试获取独占锁
-    if (flock(lockFileDescriptor_, LOCK_EX | LOCK_NB) < 0) {
-        // 如果获取锁失败，说明已经有其他进程在运行
-        TILEXR_LOG(INFO) << "StartSecureTunnel: Another instance is already running on this server";
-        close(lockFileDescriptor_);
-        lockFileDescriptor_ = -1;
-        return TILEXR_SUCCESS;
-    }
-    string port = to_string(port_) + ":localhost:" + to_string(port_);
-    string cmd = "/usr/bin/ssh -N -L " + port + " " + ip_;
-    TILEXR_LOG(INFO) << rank_ <<" StartSecureTunnel : " << cmd;
-
-    pipe_ = popen(cmd.c_str(), "r");  // "r" 模式打开管道
-    if (!pipe_) {
-        TILEXR_LOG(ERROR) << "StartSecureTunnel Failed: popen error";
-        return TILEXR_ERROR_INTERNAL;
-    }
-
-    TILEXR_LOG(DEBUG) << "StartSecureTunnel success!";
-    return TILEXR_SUCCESS;
 }
 
 int TileXRSockExchange::Prepare()
@@ -239,7 +156,6 @@ int TileXRSockExchange::Prepare()
         GetIpAndPort();
     }
     if (!IsServer()) {
-        StartSecureTunnel();
         return Connect();
     }
 
@@ -416,14 +332,6 @@ void TileXRSockExchange::Cleanup()
         fd_ = -1;
     }
 
-    if (lockFileDescriptor_ >= 0) {
-        Close(lockFileDescriptor_);
-        lockFileDescriptor_ = -1;
-    }
-    if (pipe_) {
-        pclose(pipe_);
-        pipe_ = nullptr;
-    }
     if (clientFds_.empty()) {
         return;
     }

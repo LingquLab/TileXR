@@ -82,11 +82,17 @@ int TileXRComm::InitDumpAddr()
         TILEXR_LOG(ERROR) << "aclrtMalloc err " << __LINE__ << " " << ret;
         return TILEXR_ERROR_INTERNAL;
     }
-    aclrtMemset(dumpAddr, dumpWorkspaceSize, 0, dumpWorkspaceSize);
+    ret = aclrtMemset(dumpAddr, dumpWorkspaceSize, 0, dumpWorkspaceSize);
+    if (ret != ACL_SUCCESS) {
+        TILEXR_LOG(ERROR) << "aclrtMemset err " << __LINE__ << " " << ret;
+        aclrtFree(dumpAddr);
+        return TILEXR_ERROR_INTERNAL;
+    }
  
     GM_ADDR memory = static_cast<GM_ADDR>(std::malloc(dumpWorkspaceSize));
     if (!memory) {
         TILEXR_LOG(ERROR) << "std::malloc err " << __LINE__;
+        aclrtFree(dumpAddr);
         return TILEXR_ERROR_INTERNAL;
     }
     // Zero out allocated memory
@@ -112,6 +118,8 @@ int TileXRComm::InitDumpAddr()
     ret = aclrtMemcpy(dumpAddr, dumpWorkspaceSize, memory, dumpWorkspaceSize, ACL_MEMCPY_HOST_TO_DEVICE);
     if (ret != ACL_SUCCESS) {
         TILEXR_LOG(ERROR) << "aclrtMemcpy err " << __LINE__ << " " << ret;
+        std::free(memory);
+        aclrtFree(dumpAddr);
         return TILEXR_ERROR_INTERNAL;
     }
     std::free(memory);
@@ -275,6 +283,7 @@ int TileXRComm::SyncCommArgs()
     ret = aclrtMemcpy(commArgsPtr_, sizeof(commArgs_), &commArgs_, sizeof(commArgs_), ACL_MEMCPY_HOST_TO_DEVICE);
     if (ret != ACL_SUCCESS) {
         TILEXR_LOG(ERROR) << "aclrtMemcpy err " << __LINE__ << " " << ret;
+        FreePeerMem(commArgsPtr_);
         return TILEXR_ERROR_INTERNAL;
     }
     return TILEXR_SUCCESS;
@@ -525,7 +534,11 @@ int TileXRComm::Init()
     }
 
     // set comm args in device.
-    SyncCommArgs();
+    ret = SyncCommArgs();
+    if (ret != TILEXR_SUCCESS) {
+        TILEXR_LOG(ERROR) << "SyncCommArgs failed! ret: " << ret;
+        return ret;
+    }
     TILEXR_LOG(INFO) << "TileXRCommInit " << rank_ << "/" << rankSize_ << " success. extraFlag:" << commArgs_.extraFlag <<
         " commArgs_.localRank : " << commArgs_.localRank << " commArgs_.localRankSize : " << commArgs_.localRankSize;
     inited_ = true;
@@ -560,7 +573,11 @@ int TileXRComm::InitThread(const std::string &uid)
         }
         uid_ = uid;
     }
-    InitMem();
+    int ret = InitMem();
+    if (ret != TILEXR_SUCCESS) {
+        TILEXR_LOG(ERROR) << "InitMem failed! ret: " << ret;
+        return ret;
+    }
     g_localPeerMemMap[uid][rank_] = peerMem_[rank_];
 
     auto start = high_resolution_clock::now();
@@ -583,11 +600,15 @@ int TileXRComm::InitThread(const std::string &uid)
     // UDMA 主要用于跨进程/跨节点通信，线程模式使用进程内共享内存即可
     TILEXR_LOG(DEBUG) << "Thread mode: UDMA initialization skipped (single-process multi-thread scenario)";
 
-    int ret = InitSDMA();
+    ret = InitSDMA();
     if (ret != TILEXR_SUCCESS) {
         return ret;
     }
-    SyncCommArgs();
+    ret = SyncCommArgs();
+    if (ret != TILEXR_SUCCESS) {
+        TILEXR_LOG(ERROR) << "SyncCommArgs failed! ret: " << ret;
+        return ret;
+    }
     TILEXR_LOG(INFO) << "Lccl init multi thread " << rank_ << "/" << rankSize_ << " success, uid:" << uid;
     inited_ = true;
     return TILEXR_SUCCESS;

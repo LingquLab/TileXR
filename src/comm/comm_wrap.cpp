@@ -11,6 +11,7 @@
 #include <vector>
 #include <thread>
 #include <atomic>
+#include <memory>
 #include <acl/acl_rt.h>
 
 #include "tilexr_comm.h"
@@ -27,17 +28,18 @@ int TileXRCommInitRankLocal(int rankSize, int rank, TileXRCommPtr *comm)
         TILEXR_LOG(ERROR) << "tilexr comm ptr is nullptr!";
         return TILEXR_ERROR_INTERNAL;
     }
-    auto* c = new (std::nothrow) TileXRComm(rank, rankSize);
+    *comm = nullptr;
+    unique_ptr<TileXRComm> c(new (std::nothrow) TileXRComm(rank, rankSize));
     if (c == nullptr) {
         TILEXR_LOG(ERROR) << "TileXRComm create failed. rank : " << rank << ", rankSize : " << rankSize;
         return TILEXR_ERROR_INTERNAL;
     }
-    *comm = c;
     int ret = c->Init();
     if (ret != TILEXR_SUCCESS) {
-        TILEXR_LOG(ERROR) << "tilexr init failed!";
-        return TILEXR_ERROR_INTERNAL;
+        TILEXR_LOG(ERROR) << "tilexr init failed! ret: " << ret;
+        return ret;
     }
+    *comm = c.release();
     return TILEXR_SUCCESS;
 }
 
@@ -62,17 +64,18 @@ int TileXRCommInitRank(TileXRUniqueId commId, int rankSize, int rank, TileXRComm
         TILEXR_LOG(ERROR) << "tilexr comm ptr is nullptr!";
         return TILEXR_ERROR_INTERNAL;
     }
-    auto* c = new (std::nothrow) TileXRComm(rank, rankSize, commId);
+    *comm = nullptr;
+    unique_ptr<TileXRComm> c(new (std::nothrow) TileXRComm(rank, rankSize, commId));
     if (c == nullptr) {
         TILEXR_LOG(ERROR) << "TileXRComm create failed. rank : " << rank << ", rankSize : " << rankSize;
         return TILEXR_ERROR_INTERNAL;
     }
-    *comm = c;
     int ret = c->Init();
     if (ret != TILEXR_SUCCESS) {
-        TILEXR_LOG(ERROR) << "tilexr init failed!";
-        return TILEXR_ERROR_INTERNAL;
+        TILEXR_LOG(ERROR) << "tilexr init failed! ret: " << ret;
+        return ret;
     }
+    *comm = c.release();
     return TILEXR_SUCCESS;
 }
 
@@ -83,6 +86,7 @@ int TileXRCommInitRankWithCustDomainSize(int commDomain, int bufferSize, int ran
         TILEXR_LOG(ERROR) << "tilexr comm ptr is nullptr!";
         return TILEXR_ERROR_INTERNAL;
     }
+    *comm = nullptr;
 
     constexpr int minBufferSize = TILEXR_COMM_BUFFER_SIZE;
     if (bufferSize < minBufferSize) {
@@ -91,13 +95,17 @@ int TileXRCommInitRankWithCustDomainSize(int commDomain, int bufferSize, int ran
         return TILEXR_ERROR_INTERNAL;
     }
 
-    auto* c = new TileXRComm(rank, rankSize, commDomain, bufferSize);
-    *comm = c;
-    int ret = c->Init();
-    if (ret != TILEXR_SUCCESS) {
-        TILEXR_LOG(ERROR) << "tilexr init failed!";
+    unique_ptr<TileXRComm> c(new (std::nothrow) TileXRComm(rank, rankSize, commDomain, bufferSize));
+    if (c == nullptr) {
+        TILEXR_LOG(ERROR) << "TileXRComm create failed. rank : " << rank << ", rankSize : " << rankSize;
         return TILEXR_ERROR_INTERNAL;
     }
+    int ret = c->Init();
+    if (ret != TILEXR_SUCCESS) {
+        TILEXR_LOG(ERROR) << "tilexr init failed! ret: " << ret;
+        return ret;
+    }
+    *comm = c.release();
     return TILEXR_SUCCESS;
 }
 
@@ -209,6 +217,7 @@ int TileXRCommInit(int rank, int rankSize, TileXRCommPtr *comms)
         TILEXR_LOG(ERROR) << "tilexr comms is nullptr!";
         return TILEXR_ERROR_INTERNAL;
     }
+    *comms = nullptr;
     *comms = new (std::nothrow) TileXRComm(rank, rankSize);
     if (*comms == nullptr) {
         TILEXR_LOG(ERROR) << "TileXRComm create failed. rank : " << rank << ", rankSize : " << rankSize;
@@ -227,27 +236,33 @@ int TileXRCommInitAll(uint32_t ndev, int32_t *devices, TileXRCommPtr *comms)
         TILEXR_LOG(ERROR) << "tilexr devices is nullptr!";
         return TILEXR_ERROR_INTERNAL;
     }
+    for (uint32_t i = 0; i < ndev; ++i) {
+        comms[i] = nullptr;
+    }
     static int commDomain = 0;
     commDomain++;
+    vector<unique_ptr<TileXRComm>> commHolders;
+    commHolders.reserve(ndev);
     for (uint32_t i = 0; i < ndev; ++i) {
-        comms[i] = new (std::nothrow) TileXRComm(i, ndev, commDomain, TILEXR_COMM_BUFFER_SIZE);
-        if (comms[i] == nullptr) {
+        unique_ptr<TileXRComm> commHolder(new (std::nothrow) TileXRComm(i, ndev, commDomain, TILEXR_COMM_BUFFER_SIZE));
+        if (commHolder == nullptr) {
             TILEXR_LOG(ERROR) << "TileXRComm create failed. dev : " << i << ", ndev : " << ndev;
             return TILEXR_ERROR_INTERNAL;
         }
+        commHolders.emplace_back(std::move(commHolder));
     }
     static atomic<int> uid;
     uid++;
     vector<unique_ptr<thread>> threads;
-    int error = TILEXR_SUCCESS;
+    atomic<int> error(TILEXR_SUCCESS);
     for (uint32_t r = 0; r < ndev; r++) {
         threads.emplace_back(make_unique<thread>(
             [&](int rank) {
                 aclrtSetDevice(devices[rank]);
-                auto* c = static_cast<TileXRComm *>(comms[rank]);
+                auto* c = commHolders[rank].get();
                 int ret = c->InitThread("uid" + to_string(uid));
                 if (ret != TILEXR_SUCCESS) {
-                    error = ret;
+                    error.store(ret);
                 }
             },
             r));
@@ -256,7 +271,15 @@ int TileXRCommInitAll(uint32_t ndev, int32_t *devices, TileXRCommPtr *comms)
         t->join();
     }
     threads.clear();
-    return error;
+    int ret = error.load();
+    if (ret != TILEXR_SUCCESS) {
+        TILEXR_LOG(ERROR) << "TileXRCommInitAll init failed! ret: " << ret;
+        return ret;
+    }
+    for (uint32_t i = 0; i < ndev; ++i) {
+        comms[i] = commHolders[i].release();
+    }
+    return TILEXR_SUCCESS;
 }
 
 int TileXRCommInitThread(int rank, int rankSize, const char *uid, TileXRCommPtr *comms)
@@ -269,17 +292,23 @@ int TileXRCommInitThread(int rank, int rankSize, const char *uid, TileXRCommPtr 
         TILEXR_LOG(ERROR) << "tilexr comms is nullptr!";
         return TILEXR_ERROR_INTERNAL;
     }
+    *comms = nullptr;
     if (rank >= rankSize) {
         TILEXR_LOG(ERROR) << "tilexr rank : " << rank << " rankSize : " << rankSize;
         return TILEXR_ERROR_INTERNAL;
     }
-    *comms = new (std::nothrow) TileXRComm(rank, rankSize);
-    if (*comms == nullptr) {
+    unique_ptr<TileXRComm> c(new (std::nothrow) TileXRComm(rank, rankSize));
+    if (c == nullptr) {
         TILEXR_LOG(ERROR) << "TileXRComm create failed. rank : " << rank << ", rankSize : " << rankSize;
         return TILEXR_ERROR_INTERNAL;
     }
-    auto* c = static_cast<TileXRComm *>(*comms);
-    return c->InitThread(string(uid));
+    int ret = c->InitThread(string(uid));
+    if (ret != TILEXR_SUCCESS) {
+        TILEXR_LOG(ERROR) << "tilexr init thread failed! ret: " << ret;
+        return ret;
+    }
+    *comms = c.release();
+    return TILEXR_SUCCESS;
 }
 
 int TileXRCommDestroy(TileXRCommPtr comm)
