@@ -207,15 +207,16 @@ Demo test:
 
 ## Remote Hardware Verification
 
-Hardware validation will run on `ssh blue` in:
+Hardware validation runs on an explicitly supplied SSH target and remote scratch directory:
 
 ```text
-/home/d00520898/tilexr_ep_dispatch_verify/
+TILEXR_EP_REMOTE=<ssh-target>
+TILEXR_EP_REMOTE_BASE=<remote-scratch-dir>
 ```
 
 The verification procedure must deploy a complete working tree, not a partial file copy:
 
-1. Create `/home/d00520898/tilexr_ep_dispatch_verify/TileXR`.
+1. Create `${TILEXR_EP_REMOTE_BASE}/TileXR`.
 2. Sync the full repository and this branch into that directory.
 3. Initialize required submodules.
 4. Source `scripts/common_env.sh`.

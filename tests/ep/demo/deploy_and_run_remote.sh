@@ -4,8 +4,8 @@ set -euo pipefail
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 TILEXR_ROOT=$(cd "${SCRIPT_DIR}/../../.." && pwd)
 
-REMOTE=${TILEXR_EP_REMOTE:-blue}
-REMOTE_BASE=${TILEXR_EP_REMOTE_BASE:-/home/d00520898/tilexr_ep_dispatch_verify}
+REMOTE=${TILEXR_EP_REMOTE:?set TILEXR_EP_REMOTE to the SSH target for remote EP verification}
+REMOTE_BASE=${TILEXR_EP_REMOTE_BASE:?set TILEXR_EP_REMOTE_BASE to a scratch directory on the remote host}
 REMOTE_REPO=${REMOTE_BASE}/TileXR
 REMOTE_LOG=${REMOTE_BASE}/deploy_$(date +%Y%m%d_%H%M%S).log
 

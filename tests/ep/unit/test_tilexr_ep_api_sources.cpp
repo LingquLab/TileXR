@@ -117,31 +117,47 @@ void TestEpKernelUsesCceArchFlags()
     CheckNotContains("src/ep/CMakeLists.txt", epCmake, "--cce-fatobj-link");
 }
 
-void TestBlueDeployScriptCleansRemoteCheckout()
+const char *kRemoteDeployScript = "tests/ep/demo/deploy_and_run_remote.sh";
+
+void TestRemoteDeployScriptCleansRemoteCheckout()
 {
     std::string deployScript;
-    if (!ReadFile("tests/ep/demo/deploy_and_run_blue.sh", &deployScript)) {
+    if (!ReadFile(kRemoteDeployScript, &deployScript)) {
         return;
     }
 
-    CheckContains("tests/ep/demo/deploy_and_run_blue.sh", deployScript, "case \"\\${remote_repo}\" in");
-    CheckContains("tests/ep/demo/deploy_and_run_blue.sh", deployScript, "Refusing to clean unexpected remote repo");
-    CheckContains("tests/ep/demo/deploy_and_run_blue.sh", deployScript, "rm -rf -- \"\\${remote_repo}\"");
-    CheckContains("tests/ep/demo/deploy_and_run_blue.sh", deployScript, "mkdir -p -- \"\\${remote_repo}\"");
+    CheckContains(kRemoteDeployScript, deployScript, "case \"\\${remote_repo}\" in");
+    CheckContains(kRemoteDeployScript, deployScript, "Refusing to clean unexpected remote repo");
+    CheckContains(kRemoteDeployScript, deployScript, "rm -rf -- \"\\${remote_repo}\"");
+    CheckContains(kRemoteDeployScript, deployScript, "mkdir -p -- \"\\${remote_repo}\"");
 }
 
-void TestBlueDeployScriptInitializesEpSubmodulesOnly()
+void TestRemoteDeployScriptInitializesEpSubmodulesOnly()
 {
     std::string deployScript;
-    if (!ReadFile("tests/ep/demo/deploy_and_run_blue.sh", &deployScript)) {
+    if (!ReadFile(kRemoteDeployScript, &deployScript)) {
         return;
     }
 
-    CheckContains("tests/ep/demo/deploy_and_run_blue.sh", deployScript,
+    CheckContains(kRemoteDeployScript, deployScript,
         "submodule update --init 3rdparty/hcomm 3rdparty/ops-transformer");
-    CheckNotContains("tests/ep/demo/deploy_and_run_blue.sh", deployScript, "submodule update --init --recursive");
-    CheckNotContains("tests/ep/demo/deploy_and_run_blue.sh", deployScript, "3rdparty/shmem");
-    CheckNotContains("tests/ep/demo/deploy_and_run_blue.sh", deployScript, "3rdparty/spdlog");
+    CheckNotContains(kRemoteDeployScript, deployScript, "submodule update --init --recursive");
+    CheckNotContains(kRemoteDeployScript, deployScript, "3rdparty/shmem");
+    CheckNotContains(kRemoteDeployScript, deployScript, "3rdparty/spdlog");
+}
+
+void TestRemoteDeployScriptDoesNotExposePrivateRemoteDefaults()
+{
+    std::string deployScript;
+    if (!ReadFile(kRemoteDeployScript, &deployScript)) {
+        return;
+    }
+
+    CheckContains(kRemoteDeployScript, deployScript, "TILEXR_EP_REMOTE:?set TILEXR_EP_REMOTE");
+    CheckContains(kRemoteDeployScript, deployScript, "TILEXR_EP_REMOTE_BASE:?set TILEXR_EP_REMOTE_BASE");
+    CheckNotContains(kRemoteDeployScript, deployScript, "TILEXR_EP_REMOTE:-");
+    CheckNotContains(kRemoteDeployScript, deployScript, "TILEXR_EP_REMOTE_BASE:-");
+    CheckNotContains(kRemoteDeployScript, deployScript, "REMOTE_BASE=/");
 }
 
 void TestDemoRunnerUsesLibAndLib64Paths()
@@ -193,8 +209,9 @@ int main()
     TestBuildPlacement();
     TestEpSocDefaultFollowsEnvironment();
     TestEpKernelUsesCceArchFlags();
-    TestBlueDeployScriptCleansRemoteCheckout();
-    TestBlueDeployScriptInitializesEpSubmodulesOnly();
+    TestRemoteDeployScriptCleansRemoteCheckout();
+    TestRemoteDeployScriptInitializesEpSubmodulesOnly();
+    TestRemoteDeployScriptDoesNotExposePrivateRemoteDefaults();
     TestDemoRunnerUsesLibAndLib64Paths();
     TestNoForbiddenDependencies();
     return g_failures == 0 ? 0 : 1;

@@ -369,10 +369,12 @@ The deterministic 2-rank demo validates peer-memory EP dispatch and combine outp
 bash tests/ep/demo/run_tilexr_ep_dispatch_demo.sh 2 2 0
 ```
 
-For the current PR validation flow, the blue deployment helper creates a clean remote checkout under `/home/d00520898/tilexr_ep_dispatch_verify/TileXR`, builds the EP artifacts, and runs the demo:
+For remote PR validation, set the target host and scratch directory explicitly. The deployment helper creates a clean remote checkout under `${TILEXR_EP_REMOTE_BASE}/TileXR`, builds the EP artifacts, and runs the demo:
 
 ```bash
-bash tests/ep/demo/deploy_and_run_blue.sh
+TILEXR_EP_REMOTE=<ssh-target> \
+TILEXR_EP_REMOTE_BASE=<remote-scratch-dir> \
+bash tests/ep/demo/deploy_and_run_remote.sh
 ```
 
 Expected demo logs include `rank 0 validation PASS` and `rank 1 validation PASS`. See [tests/ep/README.md](tests/ep/README.md) for details and current route-2 UDMA TODOs.
