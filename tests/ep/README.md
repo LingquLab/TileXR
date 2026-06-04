@@ -29,13 +29,15 @@ bash demo/run_tilexr_ep_dispatch_demo.sh 2
 
 `full` mode builds and installs `tile-comm`, `tilexr-ep`, and `libtilexr_ep_dispatch_kernel.so` under the repository `install` directory, then builds the EP demo.
 
-## Remote Blue Verification
+## Remote Verification
 
 ```bash
-bash demo/deploy_and_run_blue.sh
+TILEXR_EP_REMOTE=<ssh-target> \
+TILEXR_EP_REMOTE_BASE=<remote-scratch-dir> \
+bash demo/deploy_and_run_remote.sh
 ```
 
-The remote verification script syncs the complete repository into `/home/d00520898/tilexr_ep_dispatch_verify/TileXR` on blue, initializes submodules, sources `scripts/common_env.sh`, builds the full EP artifacts, and runs the two-rank dispatch demo.
+The remote verification script syncs the complete repository into `${TILEXR_EP_REMOTE_BASE}/TileXR` on `${TILEXR_EP_REMOTE}`, initializes submodules, sources `scripts/common_env.sh`, builds the full EP artifacts, and runs the two-rank dispatch demo.
 
 ## Future UDMA Backend
 

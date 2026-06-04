@@ -33,7 +33,7 @@
 - Create `tests/ep/unit/test_tilexr_ep_kernel_sources.cpp`: kernel source checks for peer-memory and `SyncCollectives`.
 - Create `tests/ep/demo/tilexr_ep_dispatch_demo.cpp`: two-rank deterministic FP16-bit-pattern dispatch demo.
 - Create `tests/ep/demo/run_tilexr_ep_dispatch_demo.sh`: local multi-process demo runner.
-- Create `tests/ep/demo/deploy_and_run_blue.sh`: complete remote deployment to `ssh blue:/home/d00520898/tilexr_ep_dispatch_verify/TileXR`.
+- Create `tests/ep/demo/deploy_and_run_remote.sh`: complete remote deployment to an explicitly supplied SSH target and scratch directory.
 - Create `tests/ep/README.md`: build, run, and remote verification notes.
 
 ## Task 1: Window Layout Helpers and Unit Tests
@@ -1867,11 +1867,13 @@ This tree tests the standalone TileXR EP module under `src/ep`. The EP path is i
 
 The full mode builds and installs `tile-comm`, `tilexr-ep`, and `libtilexr_ep_dispatch_kernel.so` under the repository `install` directory, then builds the EP demo.
 
-## Remote Blue Verification
+## Remote Verification
 
-    bash demo/deploy_and_run_blue.sh
+    TILEXR_EP_REMOTE=<ssh-target> \
+    TILEXR_EP_REMOTE_BASE=<remote-scratch-dir> \
+    bash demo/deploy_and_run_remote.sh
 
-The remote script syncs the complete repository into `/home/d00520898/tilexr_ep_dispatch_verify/TileXR` on `blue`, initializes submodules, sources `scripts/common_env.sh`, builds full EP artifacts, and runs the two-rank dispatch demo.
+The remote script syncs the complete repository into `${TILEXR_EP_REMOTE_BASE}/TileXR` on `${TILEXR_EP_REMOTE}`, initializes submodules, sources `scripts/common_env.sh`, builds full EP artifacts, and runs the two-rank dispatch demo.
 ```
 
 - [ ] **Step 3: Commit**
@@ -2342,15 +2344,15 @@ git add tests/ep/CMakeLists.txt tests/ep/demo/tilexr_ep_dispatch_demo.cpp tests/
 git commit -m "test: add ep dispatch demo"
 ```
 
-## Task 7: Remote Blue Complete Deployment
+## Task 7: Remote Complete Deployment
 
 **Files:**
-- Create: `tests/ep/demo/deploy_and_run_blue.sh`
+- Create: `tests/ep/demo/deploy_and_run_remote.sh`
 - Modify: `tests/ep/README.md`
 
 - [ ] **Step 1: Add the remote deployment script**
 
-Create `tests/ep/demo/deploy_and_run_blue.sh` with executable mode:
+Create `tests/ep/demo/deploy_and_run_remote.sh` with executable mode:
 
 ```bash
 #!/bin/bash
@@ -2359,8 +2361,8 @@ set -euo pipefail
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 TILEXR_ROOT=$(cd "${SCRIPT_DIR}/../../.." && pwd)
 
-REMOTE=${TILEXR_EP_REMOTE:-blue}
-REMOTE_BASE=${TILEXR_EP_REMOTE_BASE:-/home/d00520898/tilexr_ep_dispatch_verify}
+REMOTE=${TILEXR_EP_REMOTE:?set TILEXR_EP_REMOTE to the SSH target for remote EP verification}
+REMOTE_BASE=${TILEXR_EP_REMOTE_BASE:?set TILEXR_EP_REMOTE_BASE to a scratch directory on the remote host}
 REMOTE_REPO="${REMOTE_BASE}/TileXR"
 REMOTE_LOG="${REMOTE_BASE}/deploy_$(date +%Y%m%d_%H%M%S).log"
 
@@ -2402,15 +2404,15 @@ echo "Remote verification log: ${REMOTE}:${REMOTE_LOG}"
 Run:
 
 ```bash
-chmod +x tests/ep/demo/deploy_and_run_blue.sh
+chmod +x tests/ep/demo/deploy_and_run_remote.sh
 ```
 
-- [ ] **Step 2: Ensure README names the remote path**
+- [ ] **Step 2: Ensure README describes remote configuration**
 
 Confirm `tests/ep/README.md` contains:
 
 ```markdown
-The remote script syncs the complete repository into `/home/d00520898/tilexr_ep_dispatch_verify/TileXR` on `blue`, initializes submodules, sources `scripts/common_env.sh`, builds full EP artifacts, and runs the two-rank dispatch demo.
+The remote script syncs the complete repository into `${TILEXR_EP_REMOTE_BASE}/TileXR` on `${TILEXR_EP_REMOTE}`, initializes submodules, sources `scripts/common_env.sh`, builds full EP artifacts, and runs the two-rank dispatch demo.
 ```
 
 - [ ] **Step 3: Commit**
@@ -2418,8 +2420,8 @@ The remote script syncs the complete repository into `/home/d00520898/tilexr_ep_
 Run:
 
 ```bash
-git add tests/ep/demo/deploy_and_run_blue.sh tests/ep/README.md
-git commit -m "test: add ep blue deployment script"
+git add tests/ep/demo/deploy_and_run_remote.sh tests/ep/README.md
+git commit -m "test: add ep remote deployment script"
 ```
 
 ## Task 8: Local and Remote Verification
@@ -2464,15 +2466,17 @@ bash tests/ep/demo/run_tilexr_ep_dispatch_demo.sh 2
 
 Expected: both rank logs end with `validation success records=8`, and the script exits `0`.
 
-- [ ] **Step 4: Run complete deployment on blue**
+- [ ] **Step 4: Run complete remote deployment**
 
 Run:
 
 ```bash
-bash tests/ep/demo/deploy_and_run_blue.sh
+TILEXR_EP_REMOTE=<ssh-target> \
+TILEXR_EP_REMOTE_BASE=<remote-scratch-dir> \
+bash tests/ep/demo/deploy_and_run_remote.sh
 ```
 
-Expected: remote script creates `/home/d00520898/tilexr_ep_dispatch_verify/TileXR`, syncs the complete repository, initializes submodules, builds EP in full mode, runs the two-rank demo, and prints the remote log path.
+Expected: remote script creates `${TILEXR_EP_REMOTE_BASE}/TileXR`, syncs the complete repository, initializes submodules, builds EP in full mode, runs the two-rank demo, and prints the remote log path.
 
 - [ ] **Step 5: Capture final status**
 
