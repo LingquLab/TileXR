@@ -148,7 +148,8 @@ TileXR/
 |   |-- udma/
 |   `-- sdma/                 # SDMA unit tests, integration test, and data-plane demo
 |-- scripts/                  # Build, setup, test, and utility scripts
-|-- 3rdparty/                 # spdlog plus optional hcomm, ops-transformer, shmem
+|-- 3rdparty/                 # spdlog plus optional hcomm and ops-transformer submodules
+|-- reference/                # scripts for ignored reference-only source checkouts
 `-- docs/                     # Design, migration, and validation notes
 ```
 
@@ -242,7 +243,7 @@ Optional components:
 | --- | --- | --- | --- |
 | hcomm / HCCL | submodule / CANN communication stack | MC2 fused-operator examples and HCCL tests | Not included or linked by `src/comm` / `libtile-comm.so` |
 | ops-transformer | submodule | `src/mc2` operator build, packaging, and run scripts | Not needed when only compiling `libtile-comm.so` |
-| shmem | submodule, reference/optional | Historical UDMA experiments and comparison examples | Not included or linked by current `src/comm` |
+| shmem | ignored checkout under `reference/shmem/` via `reference/download_shmem.sh` | Historical UDMA experiments and comparison examples | Not included or linked by current `src/comm` |
 
 ## UDMA Validation
 

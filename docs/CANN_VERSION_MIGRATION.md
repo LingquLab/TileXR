@@ -7,7 +7,7 @@ This document records lessons learned and best practices when migrating TileXR a
 **Date**: 2026-05-25  
 **Impact**: Build system, include paths, library locations
 
-> Current note: the active TileXR UDMA implementation does not link shmem. The shmem section below is retained as historical context from an earlier UDMA design and for anyone comparing against `3rdparty/shmem`; it is not a required step for building current `tile-comm`.
+> Current note: the active TileXR UDMA implementation does not link shmem. The shmem section below is retained as historical context from an earlier UDMA design and for anyone comparing against the ignored `reference/shmem/` checkout; it is not a required step for building current `tile-comm`.
 
 ### Breaking Changes
 

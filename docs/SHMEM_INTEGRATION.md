@@ -2,7 +2,7 @@
 
 **Updated:** 2026-05-30
 
-This repository still contains `3rdparty/shmem`, but the current TileXR core communication and UDMA path do not use shmem as a runtime dependency.
+This repository can download shmem into ignored `reference/shmem/` for comparison, but the current TileXR core communication and UDMA path do not use shmem as a runtime dependency.
 
 ## Current Status
 
@@ -12,9 +12,9 @@ This repository still contains `3rdparty/shmem`, but the current TileXR core com
 - UDMA validation goes through TileXR APIs, especially `TileXRUDMARegister` and device wrappers in `tilexr_udma.h`.
 - `tests/udma/unit/test_tilexr_no_shmem_dependency.cpp` is the guardrail that checks this boundary.
 
-## Why The Submodule Still Exists
+## Why The Reference Checkout Exists
 
-`3rdparty/shmem` is kept for reference, experiments, upstream comparison, and examples. It is not required to build the current `tile-comm` target.
+`reference/download_shmem.sh` can create `reference/shmem/` for reference, experiments, upstream comparison, and examples. The checkout is ignored by git and is not required to build the current `tile-comm` target.
 
 Do not add a shmem include or link dependency to `src/comm` unless the project explicitly chooses to revive the old shmem-backed UDMA design.
 
@@ -73,7 +73,7 @@ TileXR comm sources have no shmem dependency
 
 ## When To Look At shmem
 
-Use the shmem submodule only when:
+Use the shmem reference checkout only when:
 
 - comparing TileXR UDMA behavior with shmem examples;
 - experimenting with alternative UDMA initialization strategies;

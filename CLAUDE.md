@@ -26,7 +26,8 @@ src/
 op-simulator/     # Operator simulation and testing without physical hardware
 tests/            # Test suites (UDMA, integration tests)
 scripts/          # Build and utility scripts (see scripts/README.md)
-3rdparty/         # Git submodules: hcomm, ops-transformer, spdlog, mki, shmem
+3rdparty/         # Git submodules: hcomm, ops-transformer, spdlog, mki
+reference/        # Ignored reference-only source trees downloaded on demand
 docs/             # Documentation (UDMA, CANN migration, etc.)
 ```
 
@@ -53,7 +54,7 @@ TileXR requires the following dependencies:
 - **ops-transformer**: Git submodule, built via `scripts/ops_build_run.sh`
 - **spdlog**: Git submodule (header-only logging)
 - **mki**: Git submodule (matrix kernel interface)
-- **shmem** (optional/reference): Git submodule at `3rdparty/shmem`, kept for historical UDMA experiments and comparison. Current `src/comm` does not include or link shmem.
+- **shmem** (reference-only): Download on demand with `reference/download_shmem.sh` into ignored `reference/shmem/` for historical UDMA experiments and comparison. Current `src/comm` does not include or link shmem.
 
 ### Quick setup:
 
@@ -195,7 +196,7 @@ target_link_directories(
 
 The old shmem-backed UDMA proposal has been superseded by TileXR-owned UDMA transport under `src/comm/udma/`.
 
-- `3rdparty/shmem` remains as a reference/experimental submodule.
+- `reference/shmem/` is an ignored reference-only checkout created by `reference/download_shmem.sh` when needed.
 - Current `tile-comm` does not link `libshmem.so` or `libaclshmem.so`.
 - Do not add shmem includes to `src/comm` unless the architecture is intentionally changed.
 - See [docs/SHMEM_INTEGRATION.md](docs/SHMEM_INTEGRATION.md) for historical context and current guardrails.

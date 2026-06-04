@@ -85,7 +85,7 @@ Early UDMA design notes used a patched shmem library to expose UDMA queue inform
 - UDMA metadata is built by TileXR from HCCP/RA contexts and uploaded as `TileXR::UDMAInfo`.
 - UDMA tests include a no-shmem dependency check to keep this boundary explicit.
 
-The `3rdparty/shmem` submodule remains in the repository for reference, experiments, and upstream comparison, but it is not part of the current TileXR UDMA acceptance flow.
+The ignored `reference/shmem/` checkout can be created with `reference/download_shmem.sh` for reference, experiments, and upstream comparison, but it is not part of the current TileXR UDMA acceptance flow.
 
 ## Validation Scope
 

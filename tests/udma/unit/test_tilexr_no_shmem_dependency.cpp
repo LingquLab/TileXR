@@ -70,11 +70,41 @@ void TestCommSourcesDoNotUseShmem()
     }
 }
 
+void TestShmemIsReferenceOnly()
+{
+    const auto gitmodules = ReadFile(".gitmodules");
+    CheckNoNeedle(".gitmodules", gitmodules, "3rdparty/shmem");
+
+    const auto commonEnv = ReadFile("scripts/common_env.sh");
+    CheckNoNeedle("scripts/common_env.sh", commonEnv, "TILEXR_SHMEM_HOME");
+    CheckNoNeedle("scripts/common_env.sh", commonEnv, "install/shmem/lib");
+
+    const auto gitignore = ReadFile(".gitignore");
+    CHECK_TRUE(gitignore.find("reference/*") != std::string::npos);
+    CHECK_TRUE(gitignore.find("!reference/download_shmem.sh") != std::string::npos);
+    CHECK_TRUE(gitignore.find("!reference/download_ascend_transformer_boost.sh") != std::string::npos);
+
+    const auto referenceReadme = ReadFile("reference/README.md");
+    CHECK_TRUE(referenceReadme.find("reference-only") != std::string::npos);
+
+    const auto downloadScript = ReadFile("reference/download_shmem.sh");
+    CHECK_TRUE(downloadScript.find("https://github.com/LingquLab/shmem.git") != std::string::npos);
+    CHECK_TRUE(downloadScript.find("tilexr-udma-integration") != std::string::npos);
+
+    const auto atbScript = ReadFile("reference/download_ascend_transformer_boost.sh");
+    CHECK_TRUE(atbScript.find("https://gitcode.com/cann/ascend-transformer-boost.git") != std::string::npos);
+    CHECK_TRUE(atbScript.find("master") != std::string::npos);
+
+    const auto memoryReadme = ReadFile("tests/memory/README.md");
+    CheckNoNeedle("tests/memory/README.md", memoryReadme, "3rdparty/ascend-transformer-boost");
+}
+
 } // namespace
 
 int main()
 {
     TestCommSourcesDoNotUseShmem();
+    TestShmemIsReferenceOnly();
     if (g_failures != 0) {
         std::cerr << g_failures << " no-shmem dependency checks failed" << std::endl;
         return 1;

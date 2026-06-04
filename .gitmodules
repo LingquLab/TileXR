@@ -4,10 +4,6 @@
 [submodule "3rdparty/hcomm"]
 	path = 3rdparty/hcomm
 	url = https://gitcode.com/LingquLab/hcomm.git
-[submodule "3rdparty/shmem"]
-	path = 3rdparty/shmem
-	url = https://github.com/LingquLab/shmem.git
-	branch = tilexr-udma-integration
 [submodule "3rdparty/spdlog"]
 	path = 3rdparty/spdlog
 	url = git@github.com:gabime/spdlog.git

@@ -68,6 +68,10 @@ sign_tmp/
 **/build_device/
 **/build/
 tests/sdma/install/
+reference/*
+!reference/README.md
+!reference/download_shmem.sh
+!reference/download_ascend_transformer_boost.sh
 
 CMakeCache.txt
 CMakeFiles/
