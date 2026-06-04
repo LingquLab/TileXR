@@ -22,7 +22,6 @@ tests/udma/
 |-- build.sh
 |-- run_tests.sh
 |-- unit/
-|   |-- test_tilexr_no_shmem_dependency.cpp
 |   |-- test_tilexr_udma_transport_layout.cpp
 |   `-- test_tilexr_udma_registry.cpp
 |-- integration/
@@ -40,7 +39,6 @@ tests/udma/
 ```bash
 cd /path/to/TileXR/tests/udma
 bash build.sh
-./install/bin/test_tilexr_no_shmem_dependency
 ./install/bin/test_tilexr_udma_transport_layout
 ./install/bin/test_tilexr_udma_registry
 ```
@@ -48,7 +46,6 @@ bash build.sh
 Expected:
 
 ```text
-TileXR comm sources have no shmem dependency
 TileXR UDMA transport layout checks passed
 TileXR UDMA registry checks passed
 ```

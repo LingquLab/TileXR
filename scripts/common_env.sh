@@ -39,7 +39,6 @@ export MPI_HOME=${TILEXR_UTIL_HOME}/mpich
 
 export TILEXR_HCOMM_HOME=${TILEXR_3RD_HOME}/hcomm
 export TILEXR_OPS_HOME=${TILEXR_3RD_HOME}/ops-transformer
-export TILEXR_SHMEM_HOME=${TILEXR_3RD_HOME}/shmem
 
 # 运行日志相关目录
 export TILEXR_RUN_HOME=${TILEXR_HOME}/run
@@ -68,7 +67,7 @@ export PATH=${TILEXR_UTIL_HOME}/cmake/bin:${PATH}
 export PATH=${TILEXR_UTIL_HOME}/ccache:${TILEXR_UTIL_HOME}/ripgrep:${TILEXR_UTIL_HOME}/sshpass/bin:${PATH}
 export PATH=${TILEXR_UTIL_HOME}/time/bin:${TILEXR_UTIL_HOME}/patch/bin:${TILEXR_UTIL_HOME}/pigz:${PATH}
 
-export LD_LIBRARY_PATH=${MPI_HOME}/lib:${TILEXR_SHMEM_HOME}/install/shmem/lib:${ASCEND_DRIVER_PATH:-/usr/local/Ascend/driver}/lib64/driver:${ASCEND_DRIVER_PATH:-/usr/local/Ascend/driver}/lib64/common:${ASCEND_DRIVER_PATH:-/usr/local/Ascend/driver}/lib64:${ASCEND_HOME_PATH}/${TILEXR_OS_ARCH}-linux/lib64:${ASCEND_HOME_PATH}/${TILEXR_OS_ARCH}-linux/devlib:${LD_LIBRARY_PATH}
+export LD_LIBRARY_PATH=${MPI_HOME}/lib:${ASCEND_DRIVER_PATH:-/usr/local/Ascend/driver}/lib64/driver:${ASCEND_DRIVER_PATH:-/usr/local/Ascend/driver}/lib64/common:${ASCEND_DRIVER_PATH:-/usr/local/Ascend/driver}/lib64:${ASCEND_HOME_PATH}/${TILEXR_OS_ARCH}-linux/lib64:${ASCEND_HOME_PATH}/${TILEXR_OS_ARCH}-linux/devlib:${LD_LIBRARY_PATH}
 
 env_print() {
     line

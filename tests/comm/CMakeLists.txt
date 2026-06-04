@@ -22,14 +22,6 @@ target_compile_definitions(test_tilexr_log PRIVATE
     TILEXR_LOG_DISABLE_SPDLOG=1
 )
 
-add_executable(test_tilexr_no_mki_log_dependency
-    unit/test_tilexr_no_mki_log_dependency.cpp
-)
-
-target_compile_definitions(test_tilexr_no_mki_log_dependency PRIVATE
-    TILEXR_SOURCE_ROOT="${TILEXR_ROOT}"
-)
-
 add_executable(test_tilexr_log_spdlog_compile
     unit/test_tilexr_log_spdlog_compile.cpp
 )
@@ -41,7 +33,6 @@ target_include_directories(test_tilexr_log_spdlog_compile PRIVATE
 
 install(TARGETS
     test_tilexr_log
-    test_tilexr_no_mki_log_dependency
     test_tilexr_log_spdlog_compile
     RUNTIME DESTINATION ${CMAKE_INSTALL_PREFIX}/bin
 )

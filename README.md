@@ -148,7 +148,8 @@ TileXR/
 |   |-- udma/
 |   `-- sdma/                 # SDMA unit tests, integration test, and data-plane demo
 |-- scripts/                  # Build, setup, test, and utility scripts
-|-- 3rdparty/                 # spdlog plus optional hcomm, ops-transformer, shmem
+|-- 3rdparty/                 # spdlog plus optional hcomm and ops-transformer submodules
+|-- reference/                # scripts for ignored reference-only source checkouts
 `-- docs/                     # Design, migration, and validation notes
 ```
 
@@ -242,7 +243,7 @@ Optional components:
 | --- | --- | --- | --- |
 | hcomm / HCCL | submodule / CANN communication stack | MC2 fused-operator examples and HCCL tests | Not included or linked by `src/comm` / `libtile-comm.so` |
 | ops-transformer | submodule | `src/mc2` operator build, packaging, and run scripts | Not needed when only compiling `libtile-comm.so` |
-| shmem | submodule, reference/optional | Historical UDMA experiments and comparison examples | Not included or linked by current `src/comm` |
+| shmem | ignored checkout under `reference/shmem/` via `reference/download_shmem.sh` | Historical UDMA experiments and comparison examples | Not included or linked by current `src/comm` |
 
 ## UDMA Validation
 
@@ -251,7 +252,6 @@ Use the dedicated UDMA guides when validating A5 / Ascend950 / 950 hardware:
 ```bash
 cd tests/udma
 bash build.sh
-./install/bin/test_tilexr_no_shmem_dependency
 ./install/bin/test_tilexr_udma_transport_layout
 ./install/bin/test_tilexr_udma_registry
 ```
@@ -398,7 +398,7 @@ bash scripts/driver_fix.sh
 - [docs/BUILD_VERIFICATION.md](docs/BUILD_VERIFICATION.md): current build and verification checklist
 - [docs/UDMA_INTEGRATION_SUMMARY.md](docs/UDMA_INTEGRATION_SUMMARY.md): current UDMA architecture summary
 - [docs/SDMA_TRANSPORT.md](docs/SDMA_TRANSPORT.md): on-card SDMA transport guide, enablement, and validation
-- [docs/SHMEM_INTEGRATION.md](docs/SHMEM_INTEGRATION.md): shmem status and historical notes
+- [reference/README.md](reference/README.md): ignored reference-only source checkouts
 - [docs/CANN_VERSION_MIGRATION.md](docs/CANN_VERSION_MIGRATION.md): CANN 9.1.0 migration notes
 - [tests/collectives/README.md](tests/collectives/README.md): optional collectives correctness and performance tools
 - [tests/ep/README.md](tests/ep/README.md): standalone EP dispatch build, demo, and future UDMA backend notes

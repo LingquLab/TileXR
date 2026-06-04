@@ -1,6 +1,6 @@
 # TileXR Peer-Memory DataCopy Demo
 
-This directory contains a small memory-semantics example modeled after `ascend-transformer-boost/src/kernels/lcal/src/kernels/lcal_allgather.cce`.
+This directory contains a small memory-semantics example modeled after the reference-only `ascend-transformer-boost/src/kernels/lcal/src/kernels/lcal_allgather.cce` source.
 
 The example uses TileXR `CommArgs::peerMems[]` as shared peer-memory windows and moves data through UB with Ascend C `DataCopy`. It intentionally does not use `TileXRUDMARegister`, `tilexr_udma.h`, or UDMA put/get APIs.
 
