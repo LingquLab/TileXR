@@ -67,7 +67,7 @@ export PATH=${TILEXR_UTIL_HOME}/cmake/bin:${PATH}
 export PATH=${TILEXR_UTIL_HOME}/ccache:${TILEXR_UTIL_HOME}/ripgrep:${TILEXR_UTIL_HOME}/sshpass/bin:${PATH}
 export PATH=${TILEXR_UTIL_HOME}/time/bin:${TILEXR_UTIL_HOME}/patch/bin:${TILEXR_UTIL_HOME}/pigz:${PATH}
 
-export LD_LIBRARY_PATH=${MPI_HOME}/lib:${ASCEND_DRIVER_PATH:-/usr/local/Ascend/driver}/lib64/driver:${ASCEND_DRIVER_PATH:-/usr/local/Ascend/driver}/lib64/common:${ASCEND_DRIVER_PATH:-/usr/local/Ascend/driver}/lib64:${ASCEND_HOME_PATH}/${TILEXR_OS_ARCH}-linux/lib64:${ASCEND_HOME_PATH}/${TILEXR_OS_ARCH}-linux/devlib:${LD_LIBRARY_PATH}
+export LD_LIBRARY_PATH=${MPI_HOME}/lib:${ASCEND_DRIVER_PATH:-/usr/local/Ascend/driver}/lib64/driver:${ASCEND_DRIVER_PATH:-/usr/local/Ascend/driver}/lib64/common:${ASCEND_DRIVER_PATH:-/usr/local/Ascend/driver}/lib64:${ASCEND_HOME_PATH}/${TILEXR_OS_ARCH}-linux/lib64:${LD_LIBRARY_PATH}
 
 env_print() {
     line
