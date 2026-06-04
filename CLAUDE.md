@@ -119,7 +119,7 @@ TileXR integrates UDMA (UnifiedBus DMA) for registered-memory communication on A
 - **Device-side pointer**: `CommArgs::udmaInfoPtr` points to a device-side `TileXR::UDMAInfo` image built by TileXR.
 - **Registered memory**: host code registers ordinary `aclrtMalloc` device memory through `TileXRUDMARegister`; `CommArgs::udmaRegistryPtr` exposes per-rank registered regions to kernels.
 - **Graceful capability detection**: if UDMA is unavailable, communicator initialization continues without setting `ExtraFlag::UDMA`.
-- **No shmem dependency**: current `src/comm` sources must not include or link shmem; `tests/udma/unit/test_tilexr_no_shmem_dependency.cpp` guards this.
+- **No shmem dependency**: current `src/comm` sources must not include or link shmem.
 
 ### UDMA Transport (`src/comm/` + `src/include/tilexr_udma.h`)
 

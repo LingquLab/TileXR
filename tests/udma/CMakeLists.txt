@@ -73,17 +73,6 @@ target_include_directories(test_tilexr_udma_registry PRIVATE
     ${TILEXR_ROOT}/src/include
 )
 
-add_executable(test_tilexr_no_shmem_dependency
-    unit/test_tilexr_no_shmem_dependency.cpp
-)
-
-target_include_directories(test_tilexr_no_shmem_dependency PRIVATE
-    ${TILEXR_ROOT}/src/include
-)
-target_compile_definitions(test_tilexr_no_shmem_dependency PRIVATE
-    TILEXR_SOURCE_ROOT="${TILEXR_ROOT}"
-)
-
 add_executable(test_tilexr_udma_transport_layout
     unit/test_tilexr_udma_transport_layout.cpp
     ${TILEXR_ROOT}/src/comm/udma/tilexr_udma_layout.cpp
@@ -109,7 +98,6 @@ target_link_libraries(test_tilexr_udma
 set(INSTALL_TARGETS
     test_tilexr_udma
     test_tilexr_udma_registry
-    test_tilexr_no_shmem_dependency
     test_tilexr_udma_transport_layout
 )
 

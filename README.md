@@ -252,7 +252,6 @@ Use the dedicated UDMA guides when validating A5 / Ascend950 / 950 hardware:
 ```bash
 cd tests/udma
 bash build.sh
-./install/bin/test_tilexr_no_shmem_dependency
 ./install/bin/test_tilexr_udma_transport_layout
 ./install/bin/test_tilexr_udma_registry
 ```

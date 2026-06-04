@@ -25,7 +25,6 @@ tests/udma/
 ├── build.sh
 ├── run_tests.sh
 ├── unit/
-│   ├── test_tilexr_no_shmem_dependency.cpp
 │   ├── test_tilexr_udma_registry.cpp
 │   └── test_tilexr_udma_transport_layout.cpp
 ├── integration/
@@ -77,7 +76,6 @@ Expected useful artifacts:
 
 ```bash
 test -x install/bin/test_tilexr_udma_registry
-test -x install/bin/test_tilexr_no_shmem_dependency
 test -x install/bin/test_tilexr_udma_transport_layout
 test -x install/bin/test_tilexr_udma
 test -x install/bin/tilexr_udma_demo
@@ -90,11 +88,10 @@ If `bisheng` is unavailable, the host-only tests may still build while the AICor
 
 ### 1. Host-Only Unit Tests
 
-These are host-only checks for registered-region metadata, UDMA info layout, and removal of shmem dependencies from TileXR comm sources.
+These are host-only checks for registered-region metadata and UDMA info layout.
 
 ```bash
 cd /path/to/TileXR/tests/udma
-./install/bin/test_tilexr_no_shmem_dependency
 ./install/bin/test_tilexr_udma_transport_layout
 ./install/bin/test_tilexr_udma_registry
 ```
@@ -102,7 +99,6 @@ cd /path/to/TileXR/tests/udma
 Expected:
 
 ```text
-TileXR comm sources have no shmem dependency
 TileXR UDMA transport layout checks passed
 TileXR UDMA registry checks passed
 ```

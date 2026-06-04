@@ -31,7 +31,6 @@ Expected:
 
 ```bash
 test -x install/bin/test_tilexr_udma_registry
-test -x install/bin/test_tilexr_no_shmem_dependency
 test -x install/bin/test_tilexr_udma_transport_layout
 test -x install/bin/test_tilexr_udma
 test -x install/bin/tilexr_udma_demo
@@ -41,7 +40,6 @@ test -x install/bin/tilexr_udma_demo
 
 ```bash
 cd /path/to/TileXR/tests/udma
-./install/bin/test_tilexr_no_shmem_dependency
 ./install/bin/test_tilexr_udma_transport_layout
 ./install/bin/test_tilexr_udma_registry
 
@@ -53,7 +51,6 @@ RANK=0 RANK_SIZE=1 ./install/bin/test_tilexr_udma
 Expected:
 
 - `TileXR UDMA registry checks passed`;
-- `TileXR comm sources have no shmem dependency`;
 - `TileXR UDMA transport layout checks passed`;
 - `test_tilexr_udma` exits 0 and prints `Failed: 0`.
 
