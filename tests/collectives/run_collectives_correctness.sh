@@ -2,7 +2,7 @@
 set -u
 
 usage() {
-  echo "Usage: $0 rank_size count first_npu bin_dir [op]" >&2
+  echo "Usage: $0 rank_size count first_npu bin_dir [allgather|alltoall|allreduce|reducescatter|broadcast|both]" >&2
   echo "Set TILEXR_SKIP_IF_INSUFFICIENT_NPUS=1 to skip cleanly when npu-smi reports fewer devices." >&2
   echo "Set TILEXR_COLLECTIVES_RUN_TIMEOUT_SEC=N to override the per-launch timeout (default: 600)." >&2
 }
@@ -19,6 +19,16 @@ bin_dir="${4:-./install/bin}"
 op="${5:-both}"
 binary="${bin_dir}/test_tilexr_collectives_correctness"
 timeout_sec="${TILEXR_COLLECTIVES_RUN_TIMEOUT_SEC:-600}"
+
+case "${op}" in
+  allgather|alltoall|allreduce|reducescatter|broadcast|both)
+    ;;
+  *)
+    echo "ERROR: op must be allgather, alltoall, allreduce, reducescatter, broadcast, or both" >&2
+    usage
+    exit 1
+    ;;
+esac
 
 if [[ ! -x "${binary}" ]]; then
   echo "ERROR: ${binary} is not executable" >&2
