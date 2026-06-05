@@ -119,7 +119,6 @@ int main()
         { "zero count", recvStorage, 0, TileXR::TILEXR_DATA_TYPE_INT32, 0, comm },
         { "negative count", recvStorage, -1, TileXR::TILEXR_DATA_TYPE_INT32, 0, comm },
         { "negative root", recvStorage, 1, TileXR::TILEXR_DATA_TYPE_INT32, -1, comm },
-        { "root past rank size", recvStorage, 1, TileXR::TILEXR_DATA_TYPE_INT32, 1, comm },
         { "unsupported uint8 datatype", recvStorage, 1024, TileXR::TILEXR_DATA_TYPE_UINT8, 0, comm },
         { "unknown datatype", recvStorage, 1024, static_cast<TileXR::TileXRDataType>(999), 0, comm },
     };
@@ -130,6 +129,9 @@ int main()
                     TileXRBroadcast(testCase.buf, testCase.count, testCase.dataType,
                                     testCase.root, testCase.comm, nullptr));
     }
+    CheckSetupStatus("TileXRBroadcast(root past rank size with uninitialized comm)",
+                     TileXRBroadcast(recvStorage, 1, TileXR::TILEXR_DATA_TYPE_INT32, 1, comm, nullptr),
+                     TileXR::TILEXR_ERROR_NOT_INITIALIZED);
 
     CheckSetupStatus("TileXRCommDestroy(comm)",
                      TileXRCommDestroy(comm),
