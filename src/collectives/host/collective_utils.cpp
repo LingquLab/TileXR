@@ -77,6 +77,7 @@ bool IsSupportedDataType(TileXR::TileXRDataType dataType)
 
 bool IsSupportedReduceOp(TileXR::TileXRReduceOp reduceOp)
 {
+    // The first standalone reduction API surface is SUM-only until other ops pass hardware validation.
     return reduceOp == TileXR::TILEXR_REDUCE_SUM;
 }
 
@@ -177,8 +178,9 @@ uint32_t GetReduceScatterBlockNum(const TileXR::CommArgs &commArgs, int64_t data
         return rankSize * TWO_BLOCK_NUM;
     }
 
-    const bool isDbRing = (rankSize == 4 || rankSize == SMALL_RANK_SIZE) &&
-        (dataSize * SMALL_RANK_SIZE > TWO_MIB && dataSize * SMALL_RANK_SIZE <= THIRTY_TWO_MIB);
+    const bool isDbRingDataSize = dataSize > TWO_MIB / SMALL_RANK_SIZE &&
+        dataSize <= THIRTY_TWO_MIB / SMALL_RANK_SIZE;
+    const bool isDbRing = (rankSize == 4 || rankSize == SMALL_RANK_SIZE) && isDbRingDataSize;
     if ((extraFlag & TileXR::ExtraFlag::TOPO_910_93) != 0 &&
         ((rankSize > SMALL_RANK_SIZE && rankSize % TWO_BLOCK_NUM == 0) || isDbRing)) {
         if (isDbRing) {

@@ -184,6 +184,10 @@ void TestReduceScatterBlockNum()
     CheckUint32("910_93 rank16 large reducescatter uses four-step block count",
                 GetReduceScatterBlockNum(Args(16, TileXR::ExtraFlag::TOPO_910_93), 2LL * 1024 * 1024),
                 34);
+    CheckUint32("910_93 rank4 huge reducescatter does not overflow double ring predicate",
+                GetReduceScatterBlockNum(Args(4, TileXR::ExtraFlag::TOPO_910_93),
+                                         std::numeric_limits<int64_t>::max()),
+                8);
 }
 
 void TestBroadcastBlockNum()
