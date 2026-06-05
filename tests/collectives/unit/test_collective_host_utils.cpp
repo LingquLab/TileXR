@@ -58,6 +58,19 @@ void TestDataTypeSupport()
               IsSupportedDataType(static_cast<TileXR::TileXRDataType>(999)), false);
 }
 
+void TestReduceOpSupport()
+{
+    using TileXRCollectives::Host::IsSupportedReduceOp;
+
+    CheckBool("SUM reduce op supported", IsSupportedReduceOp(TileXR::TILEXR_REDUCE_SUM), true);
+    CheckBool("MAX reduce op unsupported", IsSupportedReduceOp(TileXR::TILEXR_REDUCE_MAX), false);
+    CheckBool("MIN reduce op unsupported", IsSupportedReduceOp(TileXR::TILEXR_REDUCE_MIN), false);
+    CheckBool("PROD reduce op unsupported", IsSupportedReduceOp(TileXR::TILEXR_REDUCE_PROD), false);
+    CheckBool("reserved reduce op unsupported", IsSupportedReduceOp(TileXR::TILEXR_REDUCE_RESERVED), false);
+    CheckBool("unknown reduce op unsupported",
+              IsSupportedReduceOp(static_cast<TileXR::TileXRReduceOp>(999)), false);
+}
+
 void TestCountToBytes()
 {
     using TileXRCollectives::Host::CountToBytes;
@@ -122,6 +135,72 @@ void TestAllToAllBlockNum()
                 32);
 }
 
+void TestAllReduceBlockNum()
+{
+    using TileXRCollectives::Host::GetAllReduceBlockNum;
+
+    CheckUint32("rank2 small allreduce uses two blocks per rank",
+                GetAllReduceBlockNum(Args(2, 0), 1024),
+                4);
+    CheckUint32("rank4 small allreduce uses one block per rank",
+                GetAllReduceBlockNum(Args(4, 0), 1024),
+                4);
+    CheckUint32("rank4 large allreduce uses two blocks per rank",
+                GetAllReduceBlockNum(Args(4, 0), 2 * 1024 * 1024),
+                8);
+    CheckUint32("pcie allreduce uses two blocks per rank",
+                GetAllReduceBlockNum(Args(4, TileXR::ExtraFlag::TOPO_PCIE), 1024),
+                8);
+    CheckUint32("910B2C rank16 small allreduce follows lcal split",
+                GetAllReduceBlockNum(Args(16, TileXR::ExtraFlag::TOPO_910B2C), 1024),
+                16);
+    CheckUint32("910B2C rank16 large allreduce follows lcal split",
+                GetAllReduceBlockNum(Args(16, TileXR::ExtraFlag::TOPO_910B2C), 2 * 1024 * 1024),
+                26);
+    CheckUint32("910_93 rank8 large allreduce uses double ring",
+                GetAllReduceBlockNum(Args(8, TileXR::ExtraFlag::TOPO_910_93), 33LL * 1024 * 1024),
+                34);
+}
+
+void TestReduceScatterBlockNum()
+{
+    using TileXRCollectives::Host::GetReduceScatterBlockNum;
+
+    CheckUint32("rank2 small reducescatter uses two blocks per rank",
+                GetReduceScatterBlockNum(Args(2, 0), 1024),
+                4);
+    CheckUint32("rank4 small reducescatter uses one block per rank",
+                GetReduceScatterBlockNum(Args(4, 0), 1024),
+                4);
+    CheckUint32("rank4 large reducescatter uses two blocks per rank",
+                GetReduceScatterBlockNum(Args(4, 0), 2 * 1024 * 1024),
+                8);
+    CheckUint32("pcie reducescatter uses two blocks per rank",
+                GetReduceScatterBlockNum(Args(4, TileXR::ExtraFlag::TOPO_PCIE), 1024),
+                8);
+    CheckUint32("910_93 rank4 double ring reducescatter",
+                GetReduceScatterBlockNum(Args(4, TileXR::ExtraFlag::TOPO_910_93), 512 * 1024),
+                36);
+    CheckUint32("910_93 rank16 large reducescatter uses four-step block count",
+                GetReduceScatterBlockNum(Args(16, TileXR::ExtraFlag::TOPO_910_93), 2LL * 1024 * 1024),
+                34);
+}
+
+void TestBroadcastBlockNum()
+{
+    using TileXRCollectives::Host::GetBroadcastBlockNum;
+
+    CheckUint32("rank1 broadcast has one block",
+                GetBroadcastBlockNum(Args(1, 0), 1024),
+                1);
+    CheckUint32("rank8 broadcast uses rankSize blocks",
+                GetBroadcastBlockNum(Args(8, 0), 1024),
+                8);
+    CheckUint32("rank9 broadcast unsupported",
+                GetBroadcastBlockNum(Args(9, 0), 1024),
+                0);
+}
+
 void TestKernelShimRejectsInvalidParametersBeforeMagic()
 {
     TileXRCommPtr comm = nullptr;
@@ -167,9 +246,13 @@ void TestKernelShimRejectsInvalidParametersBeforeMagic()
 int main()
 {
     TestDataTypeSupport();
+    TestReduceOpSupport();
     TestCountToBytes();
     TestAllGatherBlockNum();
     TestAllToAllBlockNum();
+    TestAllReduceBlockNum();
+    TestReduceScatterBlockNum();
+    TestBroadcastBlockNum();
     TestKernelShimRejectsInvalidParametersBeforeMagic();
     return g_failures == 0 ? 0 : 1;
 }
