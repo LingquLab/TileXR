@@ -236,14 +236,12 @@ void TestHostRegistrationLivesInCollectives()
     CheckDoesNotContain(kernelPath, kernel, "g_collectiveKernelStub");
 
     const auto registeredTypes = ExtractInitializer(kernelPath, kernel, "kRegisteredCollectiveTypes");
-    if (!registeredTypes.empty()) {
-        const std::string registeredTypesPath = kernelPath + " kRegisteredCollectiveTypes[]";
-        CheckContains(registeredTypesPath, registeredTypes, "TileXR::TileXRType::ALL_GATHER");
-        CheckContains(registeredTypesPath, registeredTypes, "TileXR::TileXRType::ALL2ALL");
-        CheckContains(registeredTypesPath, registeredTypes, "TileXR::TileXRType::ALL_REDUCE");
-        CheckContains(registeredTypesPath, registeredTypes, "TileXR::TileXRType::REDUCE_SCATTER");
-        CheckContains(registeredTypesPath, registeredTypes, "TileXR::TileXRType::BROADCAST");
-    }
+    const std::string registeredTypesPath = kernelPath + " kRegisteredCollectiveTypes[]";
+    CheckContains(registeredTypesPath, registeredTypes, "TileXR::TileXRType::ALL_GATHER");
+    CheckContains(registeredTypesPath, registeredTypes, "TileXR::TileXRType::ALL2ALL");
+    CheckContains(registeredTypesPath, registeredTypes, "TileXR::TileXRType::ALL_REDUCE");
+    CheckContains(registeredTypesPath, registeredTypes, "TileXR::TileXRType::REDUCE_SCATTER");
+    CheckContains(registeredTypesPath, registeredTypes, "TileXR::TileXRType::BROADCAST");
 }
 
 void TestPerfTraceCycleDivisorIsA5Specific()
