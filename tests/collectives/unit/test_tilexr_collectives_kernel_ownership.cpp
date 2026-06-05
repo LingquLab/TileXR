@@ -123,9 +123,9 @@ void TestCollectivesKernelSourcesAreScoped()
     const auto kernelTu = ReadFile(kernelTuPath);
     CheckContains(kernelTuPath, kernelTu, "LCCL_TYPE_AIV_FUNC(LCCL_ALLGATHER_FUNC_AUTO_DEF)");
     CheckContains(kernelTuPath, kernelTu, "LCCL_TYPE_AIV_FUNC(LCCL_ALL2ALL_FUNC_AUTO_DEF)");
-    CheckDoesNotContain(kernelTuPath, kernelTu, "LCCL_ALL_REDUCE_FUNC_AUTO_DEF");
-    CheckDoesNotContain(kernelTuPath, kernelTu, "LCCL_REDUCE_SCATTER_FUNC_AUTO_DEF");
-    CheckDoesNotContain(kernelTuPath, kernelTu, "LCCL_BROADCAST_FUNC_AUTO_DEF");
+    CheckContains(kernelTuPath, kernelTu, "LCCL_TYPE_AIV_FUNC(LCCL_ALL_REDUCE_FUNC_AUTO_DEF)");
+    CheckContains(kernelTuPath, kernelTu, "LCCL_TYPE_AIV_FUNC(LCCL_REDUCE_SCATTER_FUNC_AUTO_DEF)");
+    CheckContains(kernelTuPath, kernelTu, "LCCL_BROADCAST_FUNC_AUTO_DEF()");
 
     const std::string perfTraceKernelPath = "src/collectives/kernels/perf_trace_kernel.h";
     const auto perfTraceKernel = ReadFile(perfTraceKernelPath);
@@ -146,18 +146,35 @@ void TestCollectivesKernelSourcesAreScoped()
     CheckTrue(!kernelFiles.empty(), "expected collectives kernel files to be present");
     bool sawAllGatherCce = false;
     bool sawAllToAllCce = false;
+    bool sawAllReduceCce = false;
+    bool sawReduceScatterCce = false;
+    bool sawBroadcastCce = false;
     for (const auto &path : kernelFiles) {
         const auto text = ReadFile(path);
         CheckDoesNotContain(path, text, "tilexr_comm.h");
+        CheckDoesNotContain(path, text, "reference/ascend-transformer-boost");
+        CheckDoesNotContain(path, text, "LCAL_MAX_RANK_SIZE");
         if (path.find("lcal_allgather") != std::string::npos && path.find(".cce") != std::string::npos) {
             sawAllGatherCce = true;
         }
         if (path.find("lcal_all2all_transpose.cce") != std::string::npos) {
             sawAllToAllCce = true;
         }
+        if (path.find("lcal_allreduce") != std::string::npos && path.find(".cce") != std::string::npos) {
+            sawAllReduceCce = true;
+        }
+        if (path.find("lcal_reduce_scatter") != std::string::npos && path.find(".cce") != std::string::npos) {
+            sawReduceScatterCce = true;
+        }
+        if (path.find("lcal_broadcast") != std::string::npos && path.find(".cce") != std::string::npos) {
+            sawBroadcastCce = true;
+        }
     }
     CheckTrue(sawAllGatherCce, "expected copied allgather .cce sources under src/collectives/kernels");
     CheckTrue(sawAllToAllCce, "expected copied all2all .cce source under src/collectives/kernels");
+    CheckTrue(sawAllReduceCce, "expected copied allreduce .cce sources under src/collectives/kernels");
+    CheckTrue(sawReduceScatterCce, "expected copied reduce_scatter .cce sources under src/collectives/kernels");
+    CheckTrue(sawBroadcastCce, "expected copied broadcast .cce sources under src/collectives/kernels");
 }
 
 void TestHostRegistrationLivesInCollectives()
@@ -173,6 +190,9 @@ void TestHostRegistrationLivesInCollectives()
     CheckContains(kernelPath, kernel, "std::mutex");
     CheckContains(kernelPath, kernel, "TileXR::TileXRType::ALL_GATHER");
     CheckContains(kernelPath, kernel, "TileXR::TileXRType::ALL2ALL");
+    CheckContains(kernelPath, kernel, "TileXR::TileXRType::ALL_REDUCE");
+    CheckContains(kernelPath, kernel, "TileXR::TileXRType::REDUCE_SCATTER");
+    CheckContains(kernelPath, kernel, "TileXR::TileXRType::BROADCAST");
     CheckContains(kernelPath, kernel, "TileXR::TILEXR_DATA_TYPE_INT8");
     CheckContains(kernelPath, kernel, "TileXR::TILEXR_DATA_TYPE_INT16");
     CheckContains(kernelPath, kernel, "TileXR::TILEXR_DATA_TYPE_INT32");
@@ -262,6 +282,9 @@ void TestCommDoesNotOwnCollectiveRuntime()
         "AscendCCLKernelArgs",
         "TileXRAllGather",
         "TileXRAllToAll",
+        "TileXRAllReduce",
+        "TileXRReduceScatter",
+        "TileXRBroadcast",
     };
 
     for (const auto &path : commFiles) {
