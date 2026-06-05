@@ -119,6 +119,12 @@ void TestPerfToolSource()
     CheckContains(path, text, "--profile-dir");
     CheckContains(path, text, "--profile-ai-prompt");
     CheckContains(path, text, "--profile-sample-every");
+    CheckContains(path, text, "--op allgather|alltoall|allreduce|reducescatter|broadcast");
+    CheckContains(path, text, "TileXRAllReduce");
+    CheckContains(path, text, "TileXRReduceScatter");
+    CheckContains(path, text, "TileXRBroadcast");
+    CheckContains(path, text, "reducescatter: count * rank_size * dtype_size");
+    CheckContains(path, text, "broadcast: count * dtype_size");
     CheckContains(path, text, "aclrtCreateEvent");
     CheckContains(path, text, "aclrtRecordEvent");
     CheckContains(path, text, "aclrtEventElapsedTime");
@@ -315,8 +321,11 @@ void TestReadmeDocumentsManualRuns()
     CheckContains(path, text, "algbw(GB/s)");
     CheckContains(path, text, "busbw(GB/s)");
     CheckContains(path, text, "actual send bytes per rank");
-    CheckContains(path, text, "allgather: count * dtype_size");
-    CheckContains(path, text, "alltoall: count * rank_size * dtype_size");
+    CheckContains(path, text, "--op allgather|alltoall|allreduce|reducescatter|broadcast");
+    CheckContains(path, text,
+        "Message-size semantics: allgather/allreduce/broadcast: count * dtype_size; alltoall/reducescatter: count * rank_size * dtype_size.");
+    CheckContains(path, text, "Checked");
+    CheckContains(path, text, "allreduce/reducescatter runs require `--datatype int32`");
     CheckContains(path, text, "rank_size - 1");
     CheckContains(path, text, "trace_index.json");
     CheckContains(path, text, "root-level report.html");

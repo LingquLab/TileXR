@@ -2,7 +2,8 @@
 
 This directory builds source/unit checks plus manual multi-process tools for `libtilexr-collectives`.
 The API/library split is intentional: `tile-comm` owns communicator infrastructure, while `libtilexr-collectives`
-owns `TileXRAllGather`, `TileXRAllToAll`, host launch, and CCE registration.
+owns `TileXRAllGather`, `TileXRAllToAll`, `TileXRAllReduce`, `TileXRReduceScatter`, `TileXRBroadcast`,
+host launch, and CCE registration.
 
 ## Build
 
@@ -50,7 +51,7 @@ cd tests/collectives
   --iters 20 --warmup-iters 5 --datatype int32 --check 1
 ```
 
-Main options are `--op allgather|alltoall`, `--min-bytes`, `--max-bytes`, `--step-factor`, `--iters`,
+Main options are `--op allgather|alltoall|allreduce|reducescatter|broadcast`, `--min-bytes`, `--max-bytes`, `--step-factor`, `--iters`,
 `--warmup-iters`, `--datatype int8|int16|int32|int64|fp16|fp32|bf16`, `--rank-size`, `--rank`,
 `--first-npu`, `--check 0|1`, and `--csv <path>`. Optional thresholds `--min-algbw` and
 `--max-latency-us` are available but are not set by default.
@@ -61,14 +62,14 @@ Output fields:
 op dtype ranks bytes count iters algbw(GB/s) busbw(GB/s) avg(us) min(us) max(us) errors
 ```
 
-The `bytes` column is the actual send bytes per rank for that operation and size row:
-allgather: count * dtype_size; alltoall: count * rank_size * dtype_size. `algbw(GB/s)` is
+The `bytes` column is the actual send bytes per rank for that operation and size row. Message-size semantics: allgather/allreduce/broadcast: count * dtype_size; alltoall/reducescatter: count * rank_size * dtype_size. `algbw(GB/s)` is
 `output_bytes_per_rank / avg_us / 1000`, where `output_bytes_per_rank` is the bytes received by one rank for
-the measured message size. `busbw(GB/s)` is `algbw * (rank_size - 1) / rank_size` for both allgather and
-equal alltoall. CSV output uses the same fields.
+the measured message size. `busbw(GB/s)` is `algbw * (rank_size - 1) / rank_size` for the measured operation.
+CSV output uses the same fields.
 
 `--check=1` validates outputs. INT32 is checked element-by-element with operation-specific expected values;
-other dtypes use deterministic byte-pattern checks. `--check=0` measures only.
+other dtypes use deterministic byte-pattern checks for allgather, alltoall, and broadcast. Checked
+allreduce/reducescatter runs require `--datatype int32`; `--check=0` measures any supported dtype.
 
 ### Operator-Internal Profiling
 
