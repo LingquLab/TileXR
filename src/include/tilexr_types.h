@@ -75,6 +75,14 @@ enum TileXRDataType {
     TILEXR_DATA_TYPE_RESERVED = 255
 };
 
+enum TileXRReduceOp {
+    TILEXR_REDUCE_SUM = 0,
+    TILEXR_REDUCE_MAX = 1,
+    TILEXR_REDUCE_MIN = 2,
+    TILEXR_REDUCE_PROD = 3,
+    TILEXR_REDUCE_RESERVED = 255
+};
+
 // 包含 物理链路、芯片名称 信息。
 struct PhysicalInfo {
     ChipName chipName = ChipName::RESERVED;
