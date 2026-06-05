@@ -33,6 +33,41 @@ std::string ReadFile(const std::string &path)
     return buffer.str();
 }
 
+std::string ExtractInitializer(const std::string &path, const std::string &text, const std::string &symbol)
+{
+    const auto symbolPos = text.find(symbol);
+    if (symbolPos == std::string::npos) {
+        std::cerr << "expected " << path << " to contain initializer symbol: " << symbol << std::endl;
+        ++g_failures;
+        return {};
+    }
+
+    const auto openBrace = text.find('{', symbolPos);
+    if (openBrace == std::string::npos) {
+        std::cerr << "expected " << path << " to contain initializer body for: " << symbol << std::endl;
+        ++g_failures;
+        return {};
+    }
+
+    int depth = 0;
+    for (std::size_t pos = openBrace; pos < text.size(); ++pos) {
+        if (text[pos] == '{') {
+            ++depth;
+            continue;
+        }
+        if (text[pos] == '}') {
+            --depth;
+            if (depth == 0) {
+                return text.substr(openBrace + 1, pos - openBrace - 1);
+            }
+        }
+    }
+
+    std::cerr << "expected " << path << " to contain matching '}' for initializer: " << symbol << std::endl;
+    ++g_failures;
+    return {};
+}
+
 bool DirectoryExists(const std::string &path)
 {
     DIR *dir = opendir(RepoPath(path).c_str());
@@ -188,11 +223,6 @@ void TestHostRegistrationLivesInCollectives()
     CheckContains(kernelPath, kernel, "TileXRCollectivesKernelBinaryData");
     CheckContains(kernelPath, kernel, "TileXRCollectivesKernelBinarySize");
     CheckContains(kernelPath, kernel, "std::mutex");
-    CheckContains(kernelPath, kernel, "TileXR::TileXRType::ALL_GATHER");
-    CheckContains(kernelPath, kernel, "TileXR::TileXRType::ALL2ALL");
-    CheckContains(kernelPath, kernel, "TileXR::TileXRType::ALL_REDUCE");
-    CheckContains(kernelPath, kernel, "TileXR::TileXRType::REDUCE_SCATTER");
-    CheckContains(kernelPath, kernel, "TileXR::TileXRType::BROADCAST");
     CheckContains(kernelPath, kernel, "TileXR::TILEXR_DATA_TYPE_INT8");
     CheckContains(kernelPath, kernel, "TileXR::TILEXR_DATA_TYPE_INT16");
     CheckContains(kernelPath, kernel, "TileXR::TILEXR_DATA_TYPE_INT32");
@@ -204,6 +234,16 @@ void TestHostRegistrationLivesInCollectives()
     CheckContains(kernelPath, kernel, "PreparePerfTraceLaunch");
     CheckContains(kernelPath, kernel, "GetActivePerfTraceSession");
     CheckDoesNotContain(kernelPath, kernel, "g_collectiveKernelStub");
+
+    const auto registeredTypes = ExtractInitializer(kernelPath, kernel, "kRegisteredCollectiveTypes");
+    if (!registeredTypes.empty()) {
+        const std::string registeredTypesPath = kernelPath + " kRegisteredCollectiveTypes[]";
+        CheckContains(registeredTypesPath, registeredTypes, "TileXR::TileXRType::ALL_GATHER");
+        CheckContains(registeredTypesPath, registeredTypes, "TileXR::TileXRType::ALL2ALL");
+        CheckContains(registeredTypesPath, registeredTypes, "TileXR::TileXRType::ALL_REDUCE");
+        CheckContains(registeredTypesPath, registeredTypes, "TileXR::TileXRType::REDUCE_SCATTER");
+        CheckContains(registeredTypesPath, registeredTypes, "TileXR::TileXRType::BROADCAST");
+    }
 }
 
 void TestPerfTraceCycleDivisorIsA5Specific()
