@@ -166,14 +166,16 @@ git commit -m "test: specify standalone collective public APIs"
 
 - [ ] **Step 1: Add reduce-op enum**
 
-In `src/include/tilexr_types.h`, add this enum immediately after `enum TileXRDataType`:
+In `src/include/tilexr_types.h`, add this enum immediately after `enum TileXRDataType`.
+The ordinal values are public ABI and must match the HCCL/repo convention:
+SUM=0, PROD=1, MAX=2, MIN=3.
 
 ```cpp
 enum TileXRReduceOp {
     TILEXR_REDUCE_SUM = 0,
-    TILEXR_REDUCE_MAX = 1,
-    TILEXR_REDUCE_MIN = 2,
-    TILEXR_REDUCE_PROD = 3,
+    TILEXR_REDUCE_PROD = 1,
+    TILEXR_REDUCE_MAX = 2,
+    TILEXR_REDUCE_MIN = 3,
     TILEXR_REDUCE_RESERVED = 255
 };
 ```
