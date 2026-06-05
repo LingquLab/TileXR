@@ -222,6 +222,6 @@ int TileXRBroadcast(void *buf, int64_t count,
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
     return TileXRCollectives::Host::LaunchCollectiveKernel(comm, TileXR::TileXRType::BROADCAST, context,
-        buf, buf, count, dataType, blockDim, stream,
+        buf, buf, bytes, dataType, blockDim, stream,
         TileXRCollectives::Host::CollectiveLaunchAttrs { 0, root });
 }

@@ -144,6 +144,16 @@ void TestCollectivesHostOwnsCollectiveLaunchHelpers()
     CheckContains(kernelHeaderPath, kernelHeader, "int LaunchCollectiveKernel(TileXRCommPtr comm, TileXR::TileXRType type,");
 }
 
+void TestBroadcastLaunchUsesByteCount()
+{
+    const std::string path = "src/collectives/host/tilexr_collectives.cpp";
+    const auto text = ReadFile(path);
+    CheckContains(path, text, "const int64_t bytes = TileXRCollectives::Host::CountToBytes(count, dataType);");
+    CheckContains(path, text,
+                  "buf, buf, bytes, dataType, blockDim, stream,\n"
+                  "        TileXRCollectives::Host::CollectiveLaunchAttrs { 0, root }");
+}
+
 void TestCommBuildDoesNotReferenceCollectives()
 {
     const std::string path = "src/comm/CMakeLists.txt";
@@ -344,6 +354,7 @@ int main()
     TestCoreApiHeaderDoesNotDeclareCollectives();
     TestCollectivesHostUsesOnlyPublicCommExtensionApi();
     TestCollectivesHostOwnsCollectiveLaunchHelpers();
+    TestBroadcastLaunchUsesByteCount();
     TestCommBuildDoesNotReferenceCollectives();
     TestCommInternalDoesNotContainCollectiveRegistration();
     TestCommBuildInstallsPublicHeadersAndKeepsLinksPrivate();
