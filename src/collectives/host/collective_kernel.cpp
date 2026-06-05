@@ -51,11 +51,12 @@ const DataTypeRegistration kDataTypes[] = {
     { TileXR::TILEXR_DATA_TYPE_BFP16, "bfloat16_t" },
 };
 
-// Keep this list aligned with kernels currently emitted by tilexr_lccl_op.cpp.
-// Task 9 can expand it after ALL_REDUCE/REDUCE_SCATTER/BROADCAST are emitted.
 const TileXR::TileXRType kRegisteredCollectiveTypes[] = {
     TileXR::TileXRType::ALL_GATHER,
     TileXR::TileXRType::ALL2ALL,
+    TileXR::TileXRType::ALL_REDUCE,
+    TileXR::TileXRType::REDUCE_SCATTER,
+    TileXR::TileXRType::BROADCAST,
 };
 
 bool IsStandaloneCollectiveType(TileXR::TileXRType type)
@@ -76,6 +77,9 @@ int8_t *GetFunSig(TileXR::TileXRType type, TileXR::TileXRDataType dataType)
 
 std::string KernelName(TileXR::TileXRType type, const DataTypeRegistration &dataType)
 {
+    if (type == TileXR::TileXRType::BROADCAST) {
+        return TileXR::TILEXR_TYPE2NAME.at(type);
+    }
     return TileXR::TILEXR_TYPE2NAME.at(type) + "_" + dataType.kernelTypeName;
 }
 
