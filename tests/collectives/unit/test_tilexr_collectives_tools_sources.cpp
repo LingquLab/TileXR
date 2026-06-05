@@ -89,6 +89,8 @@ void TestCorrectnessRunnerSource()
     CheckContains(path, text, "ExpectedAllGatherValue");
     CheckContains(path, text, "ExpectedAllToAllValue");
     CheckContains(path, text, "CanUseCollisionFreeInt32Pattern");
+    CheckContains(path, text, "validationCount");
+    CheckContains(path, text, "CollectiveOp::REDUCESCATTER");
     CheckContains(path, text, "../common/int32_pattern.h");
     CheckDoesNotContain(path, text, "srcRank * 1000000 + index");
     CheckDoesNotContain(path, text, "dstRank * 1000 + index");

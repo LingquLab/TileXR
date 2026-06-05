@@ -28,11 +28,12 @@ cd tests/collectives
 
 Arguments are `rank_size count first_npu bin_dir [op]`. The binary is
 `test_tilexr_collectives_correctness` and also accepts `--rank-size`, `--rank`, `--count`, `--first-npu`,
-and `--op allgather|alltoall|both`. It initializes ACL, selects `first_npu + rank`, creates a stream,
-calls `TileXRCommInitRankLocal`, runs INT32 `TileXRAllGather` and equal `TileXRAllToAll`, synchronizes,
-copies results back, and validates deterministic rank-specific patterns. The initial equal `TileXRAllToAll`
-kernel path is available only when the communicator reports `TOPO_910_93`; other multi-rank topologies are
-rejected instead of launching a kernel path that would do no work.
+and `--op allgather|alltoall|allreduce|reducescatter|broadcast|both`. It initializes ACL, selects
+`first_npu + rank`, creates a stream, calls `TileXRCommInitRankLocal`, runs the selected INT32 collective,
+synchronizes, copies results back, and validates deterministic rank-specific patterns. `both` runs the
+original `TileXRAllGather` plus equal `TileXRAllToAll` checks. The initial equal `TileXRAllToAll` kernel path
+is available only when the communicator reports `TOPO_910_93`; other multi-rank topologies are rejected
+instead of launching a kernel path that would do no work.
 
 The script writes `collectives_correctness_rank*.log` and tails logs on failure. Multi-rank launches use
 `TILEXR_COLLECTIVES_RUN_TIMEOUT_SEC` as a whole-launch timeout, defaulting to 600 seconds. If any rank fails

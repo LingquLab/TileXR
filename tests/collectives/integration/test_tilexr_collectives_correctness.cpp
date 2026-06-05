@@ -181,7 +181,9 @@ bool ParseOptions(int argc, char **argv, Options &options)
         std::cerr << "ERROR: count is too large" << std::endl;
         return false;
     }
-    if (!CanUseCollisionFreeInt32Pattern(options.rankSize, options.count)) {
+    const int64_t validationCount = options.op == CollectiveOp::REDUCESCATTER ?
+        options.count * static_cast<int64_t>(options.rankSize) : options.count;
+    if (!CanUseCollisionFreeInt32Pattern(options.rankSize, validationCount)) {
         std::cerr << "ERROR: count is too large for collision-free INT32 validation" << std::endl;
         return false;
     }
