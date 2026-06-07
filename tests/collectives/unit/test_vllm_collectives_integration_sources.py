@@ -41,6 +41,20 @@ def test_runtime_uses_tilexr_c_abi_and_not_hccl() -> None:
     assert "hccl" not in runtime_source.lower()
 
 
+def test_runtime_exposes_phase3_collective_c_api() -> None:
+    runtime_source = read_rel("integrations/vllm_ascend/tilexr_collectives/runtime.py")
+    for token in [
+        "TileXRAllReduce",
+        "TileXRReduceScatter",
+        "TileXRBroadcast",
+        "TILEXR_REDUCE_SUM",
+        "def all_reduce(",
+        "def reduce_scatter(",
+        "def broadcast(",
+    ]:
+        assert token in runtime_source
+
+
 def test_torch_helpers_require_contiguous_npu_tensors() -> None:
     source = read_rel("integrations/vllm_ascend/tilexr_collectives/torch_collectives.py")
     for token in [
@@ -54,6 +68,36 @@ def test_torch_helpers_require_contiguous_npu_tensors() -> None:
         assert token in source
     assert "torch.uint8" not in source
     assert "TILEXR_DATA_TYPE_UINT8" not in source
+
+
+def test_torch_helpers_expose_vllm_compatible_collectives() -> None:
+    source = read_rel("integrations/vllm_ascend/tilexr_collectives/torch_collectives.py")
+    for token in [
+        "def _move_dim_to_front(",
+        "def _restore_dim_from_front(",
+        "def all_gather(tensor, rank: int, world_size: int, install_prefix: str, dim: int = -1",
+        "def all_reduce(tensor, rank: int, world_size: int, install_prefix: str",
+        "def reduce_scatter(tensor, rank: int, world_size: int, install_prefix: str, dim: int = -1",
+        "def broadcast(tensor, rank: int, world_size: int, install_prefix: str, root: int = 0",
+    ]:
+        assert token in source
+
+
+def test_vllm_adapter_is_opt_in_and_import_lightweight() -> None:
+    source = read_rel("integrations/vllm_ascend/tilexr_collectives/vllm_adapter.py")
+    for token in [
+        "VLLM_ASCEND_TILEXR_COLLECTIVES",
+        "class TileXRVllmCollectivesAdapter",
+        "def enabled(",
+        "def all_reduce(",
+        "def all_gather(",
+        "def reduce_scatter(",
+        "def all_to_all(",
+        "def should_fallback(",
+    ]:
+        assert token in source
+    assert "import vllm" not in source
+    assert "from vllm" not in source
 
 
 def test_remote_script_is_isolated_and_logs_environment() -> None:
@@ -123,7 +167,10 @@ def test_smoke_launcher_supports_python_override() -> None:
 def main() -> None:
     test_vllm_ascend_shim_files_exist()
     test_runtime_uses_tilexr_c_abi_and_not_hccl()
+    test_runtime_exposes_phase3_collective_c_api()
     test_torch_helpers_require_contiguous_npu_tensors()
+    test_torch_helpers_expose_vllm_compatible_collectives()
+    test_vllm_adapter_is_opt_in_and_import_lightweight()
     test_remote_script_is_isolated_and_logs_environment()
     test_remote_script_supports_selected_python_environment()
     test_smoke_launcher_supports_python_override()
