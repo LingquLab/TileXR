@@ -135,3 +135,54 @@ manual script.
 Common failure reasons include missing CANN environment, too few visible NPUs, devices already in use,
 driver/runtime version mismatch, unsupported topology for the selected collective kernel, or `LD_LIBRARY_PATH`
 not including the TileXR install/build library directories.
+
+## vllm-ascend Shim Smoke on Remote NPU Host
+
+The Phase 2 vllm-ascend shim validation keeps all remote state under a scratch directory and does not modify
+the remote system Python or shell startup files.
+
+```bash
+TILEXR_VLLM_REMOTE=blue \
+TILEXR_VLLM_REMOTE_BASE=/path/to/remote/tilexr_vllm_collectives_$(date +%Y%m%d_%H%M%S) \
+bash tests/collectives/deploy_and_run_vllm_remote.sh
+```
+
+If the remote login shell does not already expose CANN Toolkit or the CCE compiler, pass the remote paths
+explicitly:
+
+```bash
+TILEXR_VLLM_REMOTE_ASCEND_HOME_PATH=/path/to/remote/ascend-toolkit \
+TILEXR_VLLM_REMOTE_ASCEND_DRIVER_PATH=/path/to/remote/ascend-driver \
+TILEXR_VLLM_REMOTE_CMAKE_CCE_COMPILER=/path/to/remote/ascend-toolkit/bin/ccec \
+bash tests/collectives/deploy_and_run_vllm_remote.sh
+```
+
+If the remote default Python does not provide `torch_npu`, select a Python environment explicitly. A direct Python
+path takes precedence over a conda environment name:
+
+```bash
+TILEXR_VLLM_REMOTE_PYTHON=/path/to/remote/python \
+bash tests/collectives/deploy_and_run_vllm_remote.sh
+```
+
+```bash
+TILEXR_VLLM_REMOTE_CONDA_ENV=tt4 \
+bash tests/collectives/deploy_and_run_vllm_remote.sh
+```
+
+Set `TILEXR_VLLM_REMOTE_CONDA_SH` when the remote conda activation script is not available at
+`/home/miniconda3/etc/profile.d/conda.sh`.
+
+The script syncs the current TileXR commit, initializes submodules from local worktrees, dumps the NPU/CANN/Python
+environment, builds `tile-comm` and `tilexr-collectives`, runs the standalone 2-rank AllGather correctness check, and
+runs the Python torch-npu shim AllGather smoke for `int32` and `fp16`.
+
+Expected success lines include:
+
+```text
+PASS TileXR vllm collectives smoke rank_size=2 op=allgather dtype=int32
+PASS TileXR vllm collectives smoke rank_size=2 op=allgather dtype=fp16
+```
+
+If `torch` or `torch-npu` is missing in the selected Python environment, the preflight fails before the multi-rank
+shim smoke. Missing `vllm` or `vllm-ascend` is recorded in the environment dump but does not fail this shim phase.

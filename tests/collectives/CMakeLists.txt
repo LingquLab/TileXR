@@ -304,6 +304,11 @@ if(Python3_Interpreter_FOUND)
         COMMAND ${Python3_EXECUTABLE}
                 ${CMAKE_CURRENT_SOURCE_DIR}/unit/test_collective_profile_report.py
     )
+    add_test(
+        NAME test_vllm_collectives_integration_sources
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/unit/test_vllm_collectives_integration_sources.py
+    )
 endif()
 
 install(TARGETS
