@@ -227,8 +227,9 @@ PASS TileXR vllm collectives smoke rank_size=2 op=broadcast dtype=fp16
 
 If `torch` or `torch-npu` is missing in the selected Python environment, the preflight fails before the multi-rank
 shim smoke. Missing or non-importable `vllm` / `vllm-ascend` is recorded in the environment dump and isolated import
-probe but does not fail this shim phase. On the current `blue` `tt4` environment, the pre-CANN source-tree probe
-records `libhccl.so` missing during default vLLM import. After CANN setup, top-level `vllm` and `vllm_ascend`
-imports pass, but communicator imports still fail on missing `zmq`; the available source trees also declare newer
-torch requirements than `tt4` provides. The PR is not complete until vllm-ascend inference validation is run or the
-remaining environment blocker is resolved and documented.
+probe but does not fail this shim phase. On `blue`, the older `tt4` environment records `libhccl.so` missing during
+default pre-CANN vLLM import, then exposed missing `zmq` and incompatible torch versions for the available vLLM and
+vllm-ascend source trees. The isolated `tilexr-vllm29` environment uses `torch==2.9.0`, `torch-npu==2.9.0`, and
+`triton-ascend==3.2.0`; after CANN setup, its `vllm.distributed.device_communicators.base_device_communicator` and
+`vllm_ascend.distributed.device_communicators.npu_communicator` probes import with `rc=0`. The PR is not complete
+until vllm-ascend inference validation is run or the remaining inference-level blocker is resolved and documented.
