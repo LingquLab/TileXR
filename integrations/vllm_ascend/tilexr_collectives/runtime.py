@@ -13,6 +13,7 @@ TILEXR_DATA_TYPE_FP32 = 4
 TILEXR_DATA_TYPE_INT64 = 5
 TILEXR_DATA_TYPE_UINT8 = 7
 TILEXR_DATA_TYPE_BFP16 = 11
+TILEXR_REDUCE_SUM = 0
 
 
 class TileXRCollectivesError(RuntimeError):
@@ -121,6 +122,35 @@ class TileXRCollectivesRuntime:
             ctypes.c_void_p,
         ]
         self._collectives_lib.TileXRAllToAll.restype = ctypes.c_int
+        self._collectives_lib.TileXRAllReduce.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_int64,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+        ]
+        self._collectives_lib.TileXRAllReduce.restype = ctypes.c_int
+        self._collectives_lib.TileXRReduceScatter.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_int64,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+        ]
+        self._collectives_lib.TileXRReduceScatter.restype = ctypes.c_int
+        self._collectives_lib.TileXRBroadcast.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_int64,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+        ]
+        self._collectives_lib.TileXRBroadcast.restype = ctypes.c_int
 
     def _check(self, operation: str, ret: int, detail: str) -> None:
         if int(ret) != TILEXR_SUCCESS:
@@ -171,6 +201,62 @@ class TileXRCollectivesRuntime:
             ret,
             f"rank={self.rank} count_per_peer={send_count_per_peer} dtype={tilexr_dtype}",
         )
+
+    def all_reduce(
+        self,
+        send_ptr: int,
+        recv_ptr: int,
+        count: int,
+        tilexr_dtype: int,
+        stream_ptr: int | None,
+    ) -> None:
+        ret = self._collectives_lib.TileXRAllReduce(
+            _void_p(send_ptr),
+            _void_p(recv_ptr),
+            ctypes.c_int64(int(count)),
+            ctypes.c_int(int(tilexr_dtype)),
+            ctypes.c_int(TILEXR_REDUCE_SUM),
+            self._comm,
+            _void_p(stream_ptr),
+        )
+        self._check("TileXRAllReduce", ret, f"rank={self.rank} count={count} dtype={tilexr_dtype}")
+
+    def reduce_scatter(
+        self,
+        send_ptr: int,
+        recv_ptr: int,
+        recv_count: int,
+        tilexr_dtype: int,
+        stream_ptr: int | None,
+    ) -> None:
+        ret = self._collectives_lib.TileXRReduceScatter(
+            _void_p(send_ptr),
+            _void_p(recv_ptr),
+            ctypes.c_int64(int(recv_count)),
+            ctypes.c_int(int(tilexr_dtype)),
+            ctypes.c_int(TILEXR_REDUCE_SUM),
+            self._comm,
+            _void_p(stream_ptr),
+        )
+        self._check("TileXRReduceScatter", ret, f"rank={self.rank} recv_count={recv_count} dtype={tilexr_dtype}")
+
+    def broadcast(
+        self,
+        buf_ptr: int,
+        count: int,
+        tilexr_dtype: int,
+        root: int,
+        stream_ptr: int | None,
+    ) -> None:
+        ret = self._collectives_lib.TileXRBroadcast(
+            _void_p(buf_ptr),
+            ctypes.c_int64(int(count)),
+            ctypes.c_int(int(tilexr_dtype)),
+            ctypes.c_int(int(root)),
+            self._comm,
+            _void_p(stream_ptr),
+        )
+        self._check("TileXRBroadcast", ret, f"rank={self.rank} count={count} dtype={tilexr_dtype} root={root}")
 
     def close(self) -> None:
         if self._closed:
