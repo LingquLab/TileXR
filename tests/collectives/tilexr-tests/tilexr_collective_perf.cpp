@@ -164,8 +164,6 @@ void PrintUsage(const char *program)
         << "  --op allgather|alltoall|allreduce|reducescatter|broadcast\n"
         << "  Message-size semantics: allgather/allreduce/broadcast: count * dtype_size; "
            "alltoall/reducescatter: count * rank_size * dtype_size\n"
-        << "  reducescatter: count * rank_size * dtype_size\n"
-        << "  broadcast: count * dtype_size\n"
         << "  --min-bytes N --max-bytes N --step-factor F\n"
         << "  --iters N --warmup-iters N\n"
         << "  --datatype int8|int16|int32|int64|fp16|fp32|bf16\n"

@@ -36,6 +36,7 @@ struct Options {
     int rank = 0;
     int64_t count = 16;
     int firstNpu = 0;
+    int root = 0;
     CollectiveOp op = CollectiveOp::BOTH;
 };
 
@@ -77,8 +78,8 @@ int64_t GetEnvInt64(const char *name, int64_t fallback)
 void PrintUsage(const char *program)
 {
     std::cerr << "Usage: " << program
-              << " --rank-size N --rank R --count C --first-npu D [--op allgather|alltoall|allreduce|reducescatter|broadcast|both]\n"
-              << "Environment fallbacks: TILEXR_RANK_SIZE, TILEXR_RANK, TILEXR_COUNT, TILEXR_FIRST_NPU, TILEXR_OP"
+              << " --rank-size N --rank R --count C --first-npu D [--op allgather|alltoall|allreduce|reducescatter|broadcast|both] [--root R]\n"
+              << "Environment fallbacks: TILEXR_RANK_SIZE, TILEXR_RANK, TILEXR_COUNT, TILEXR_FIRST_NPU, TILEXR_BROADCAST_ROOT, TILEXR_OP"
               << std::endl;
 }
 
@@ -117,6 +118,7 @@ bool ParseOptions(int argc, char **argv, Options &options)
     options.rank = GetEnvInt("TILEXR_RANK", options.rank);
     options.count = GetEnvInt64("TILEXR_COUNT", options.count);
     options.firstNpu = GetEnvInt("TILEXR_FIRST_NPU", options.firstNpu);
+    options.root = GetEnvInt("TILEXR_BROADCAST_ROOT", options.root);
     const char *envOp = std::getenv("TILEXR_OP");
     if (envOp != nullptr && envOp[0] != '\0' && !ParseOp(envOp, options.op)) {
         std::cerr << "ERROR: invalid TILEXR_OP=" << envOp << std::endl;
@@ -156,6 +158,12 @@ bool ParseOptions(int argc, char **argv, Options &options)
                 return false;
             }
             options.firstNpu = std::atoi(value);
+        } else if (arg == "--root") {
+            const char *value = requireValue(arg);
+            if (value == nullptr) {
+                return false;
+            }
+            options.root = std::atoi(value);
         } else if (arg == "--op") {
             const char *value = requireValue(arg);
             if (value == nullptr || !ParseOp(value, options.op)) {
@@ -173,8 +181,8 @@ bool ParseOptions(int argc, char **argv, Options &options)
     }
 
     if (options.rankSize <= 0 || options.rank < 0 || options.rank >= options.rankSize ||
-        options.count <= 0 || options.firstNpu < 0) {
-        std::cerr << "ERROR: invalid rank-size/rank/count/first-npu" << std::endl;
+        options.count <= 0 || options.firstNpu < 0 || options.root < 0 || options.root >= options.rankSize) {
+        std::cerr << "ERROR: invalid rank-size/rank/count/first-npu/root" << std::endl;
         return false;
     }
     if (options.count > std::numeric_limits<int64_t>::max() / std::max(1, options.rankSize)) {
@@ -413,7 +421,7 @@ bool RunReduceScatter(const Options &options, TileXRCommPtr comm, aclrtStream st
 bool RunBroadcast(const Options &options, TileXRCommPtr comm, aclrtStream stream)
 {
     const int64_t count = options.count;
-    const int root = 0;
+    const int root = options.root;
     std::vector<int32_t> hostData(static_cast<size_t>(count));
     for (int64_t i = 0; i < count; ++i) {
         hostData[static_cast<size_t>(i)] = options.rank == root ?

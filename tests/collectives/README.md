@@ -27,14 +27,21 @@ cd tests/collectives
 ./run_collectives_correctness.sh 2 16 0 ../../build/tests/collectives both
 ```
 
-Arguments are `rank_size count first_npu bin_dir [op]`. The binary is
+Arguments are `rank_size count first_npu bin_dir [op] [extra correctness args...]`. The binary is
 `test_tilexr_collectives_correctness` and also accepts `--rank-size`, `--rank`, `--count`, `--first-npu`,
-and `--op allgather|alltoall|allreduce|reducescatter|broadcast|both`. It initializes ACL, selects
+`--root`, and `--op allgather|alltoall|allreduce|reducescatter|broadcast|both`. It initializes ACL, selects
 `first_npu + rank`, creates a stream, calls `TileXRCommInitRankLocal`, runs the selected INT32 collective,
 synchronizes, copies results back, and validates deterministic rank-specific patterns. `both` runs the
 original `TileXRAllGather` plus equal `TileXRAllToAll` checks. The initial equal `TileXRAllToAll` kernel path
 is available only when the communicator reports `TOPO_910_93`; other multi-rank topologies are rejected
 instead of launching a kernel path that would do no work.
+
+Broadcast correctness should cover multiple root choices, for example:
+
+```bash
+./run_collectives_correctness.sh 2 16 0 ../../build/tests/collectives broadcast --root 0
+./run_collectives_correctness.sh 2 16 0 ../../build/tests/collectives broadcast --root 1
+```
 
 The script writes `collectives_correctness_rank*.log` and tails logs on failure. Multi-rank launches use
 `TILEXR_COLLECTIVES_RUN_TIMEOUT_SEC` as a whole-launch timeout, defaulting to 600 seconds. If any rank fails

@@ -81,6 +81,9 @@ void TestCorrectnessRunnerSource()
     CheckContains(path, text, "--count");
     CheckContains(path, text, "--first-npu");
     CheckContains(path, text, "--op");
+    CheckContains(path, text, "--root");
+    CheckContains(path, text, "TILEXR_BROADCAST_ROOT");
+    CheckContains(path, text, "options.root");
     CheckContains(path, text, "aclrtSetDevice");
     CheckContains(path, text, "aclrtCreateStream");
     CheckContains(path, text, "aclrtMalloc");
