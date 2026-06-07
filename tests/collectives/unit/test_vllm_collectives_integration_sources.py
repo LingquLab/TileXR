@@ -170,8 +170,10 @@ def test_remote_script_can_probe_vllm_source_trees_without_crashing() -> None:
         "vllm_ascend.distributed.device_communicators.npu_communicator",
         "probe_vllm_environment \"pre-cann\"",
         "probe_vllm_environment \"post-cann\"",
+        "local probe_label=\"\\${1:?probe label required}\"",
     ]:
         assert token in source
+    assert "local probe_label=\"${1:?probe label required}\"" not in source
 
 
 def test_smoke_launcher_supports_python_override() -> None:

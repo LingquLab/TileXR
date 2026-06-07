@@ -169,7 +169,7 @@ build_vllm_probe_pythonpath() {
 }
 
 probe_vllm_environment() {
-  local probe_label="${1:?probe label required}"
+  local probe_label="\${1:?probe label required}"
   build_vllm_probe_pythonpath
   VLLM_ASCEND_TILEXR_COLLECTIVES=1 TILEXR_VLLM_PROBE_LABEL="\${probe_label}" PYTHONPATH="\${vllm_probe_pythonpath}:\${PYTHONPATH:-}" "\${selected_python}" - <<'PY'
 import importlib.util
