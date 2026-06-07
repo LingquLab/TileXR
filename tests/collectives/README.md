@@ -176,6 +176,9 @@ bash tests/collectives/deploy_and_run_vllm_remote.sh
 Set `TILEXR_VLLM_REMOTE_CONDA_SH` when the remote conda activation script is not available at
 `/home/miniconda3/etc/profile.d/conda.sh`.
 
+Set `TILEXR_VLLM_REMOTE_PYTHONPATH` to prepend an isolated dependency directory or source checkout to the vLLM
+environment probe and Python shim smoke without installing packages into the selected Python environment.
+
 If vLLM and vllm-ascend are available as source trees rather than installed packages, pass their remote source
 roots to make the environment probe add them to `PYTHONPATH`:
 

@@ -10,6 +10,7 @@ OP="${5:-allgather}"
 DTYPE="${6:-int32}"
 TIMEOUT_SEC="${TILEXR_VLLM_SMOKE_TIMEOUT_SEC:-600}"
 PYTHON_BIN="${TILEXR_VLLM_SMOKE_PYTHON:-python3}"
+EXTRA_PYTHONPATH="${TILEXR_VLLM_SMOKE_PYTHONPATH:-}"
 
 if [[ ! "${RANK_SIZE}" =~ ^[0-9]+$ || "${RANK_SIZE}" -le 0 ]]; then
   echo "ERROR: rank_size must be a positive integer" >&2
@@ -47,7 +48,11 @@ echo "  rank_size: ${RANK_SIZE}"
 echo "  op: ${OP}"
 echo "  dtype: ${DTYPE}"
 
-export PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH:-}"
+if [[ -n "${EXTRA_PYTHONPATH}" ]]; then
+  export PYTHONPATH="${SCRIPT_DIR}:${EXTRA_PYTHONPATH}:${PYTHONPATH:-}"
+else
+  export PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH:-}"
+fi
 export TILEXR_INSTALL_PREFIX="${INSTALL_PREFIX}"
 export LD_LIBRARY_PATH="${INSTALL_PREFIX}/lib:${INSTALL_PREFIX}/lib64:${LD_LIBRARY_PATH:-}"
 

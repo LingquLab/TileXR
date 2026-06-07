@@ -144,13 +144,16 @@ def test_remote_script_supports_selected_python_environment() -> None:
         "TILEXR_VLLM_REMOTE_PYTHON",
         "TILEXR_VLLM_REMOTE_CONDA_ENV",
         "TILEXR_VLLM_REMOTE_CONDA_SH",
+        "TILEXR_VLLM_REMOTE_PYTHONPATH",
         "select_remote_python",
         "selected_python=",
+        "remote_pythonpath",
         "dump_selected_python_environment",
         "run_selected_python_preflight",
         "torch.npu.current_stream()",
         "npu_stream",
         "TILEXR_VLLM_SMOKE_PYTHON=\"\\${selected_python}\"",
+        "TILEXR_VLLM_SMOKE_PYTHONPATH=\"\\${remote_pythonpath}\"",
     ]:
         assert token in source
     assert "python3 -m pip show torch" not in source
@@ -171,6 +174,7 @@ def test_remote_script_can_probe_vllm_source_trees_without_crashing() -> None:
         "probe_vllm_environment \"pre-cann\"",
         "probe_vllm_environment \"post-cann\"",
         "local probe_label=\"\\${1:?probe label required}\"",
+        "pythonpath_entries+=(\"\\${remote_pythonpath}\")",
     ]:
         assert token in source
     assert "local probe_label=\"${1:?probe label required}\"" not in source
