@@ -33,7 +33,7 @@ Instead of stalling every rank at coarse barriers, TileXR splits a phase into ti
 
 ## System Requirements
 
-- **User**: root access is typically required for NPU device operations
+- **User**: root access or membership in the Ascend driver user group is typically required for CANN runfile installation and NPU device operations
 - **NPU driver**: 25.5.0 or later, check with `npu-smi info`
 - **CANN**: current build scripts and CMake are aligned to CANN 9.1.0
 - **Core supported chips**: Ascend 910B, 910A5
@@ -68,7 +68,17 @@ git submodule update --init --recursive
 
 ### 2. Prepare Environment
 
+For a fresh checkout, install the repo-managed CANN 9.1.0 toolkit and ops package before building:
+
 ```bash
+bash scripts/cann_download_install.sh
+source scripts/common_env.sh
+```
+
+If the host already has a readable CANN 9.1.0 install, you can use it instead:
+
+```bash
+export ASCEND_HOME_PATH=/usr/local/Ascend/ascend-toolkit/latest
 source scripts/common_env.sh
 ```
 
@@ -80,10 +90,9 @@ For first-time setup of local utilities and optional operator dependencies:
 bash scripts/prepare.sh
 ```
 
-For the full optional MC2/operator stack, also build hcomm and ops-transformer:
+For the full optional MC2/operator stack, also build hcomm and ops-transformer after CANN is available:
 
 ```bash
-bash scripts/cann_download_install.sh
 bash scripts/hcomm_build_install.sh
 bash scripts/ops_build_run.sh
 ```

@@ -83,5 +83,9 @@ success "ops downloaded."
 
 success "begin install."
 bash ${script_path}/cann_local_install.sh
+if [ $? -ne 0 ]; then
+    error "install CANN failed"
+    exit 1
+fi
 
 line
