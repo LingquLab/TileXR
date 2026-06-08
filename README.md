@@ -43,17 +43,13 @@ UDMA builds or smoke tests on 910B or other non-A5 devices are not valid UDMA da
 
 ### System Dependencies
 
-Minimal host packages for cloning the repository and running the setup/build scripts:
-
 ```bash
 apt install -y build-essential git python3
 ```
 
-Optional helpers:
-
-- `cmake >= 3.16`: needed for direct CMake builds if you do not use the CMake installed by `scripts/prepare.sh`.
-- `python3-pip`: needed by `scripts/prepare.sh` when installing the optional ops-transformer Python requirements.
-- `net-tools`: needed only for `scripts/device_connect.sh`, which uses `ifconfig`.
+```bash
+yum install -y gcc gcc-c++ make git python3
+```
 
 ## Quick Start
 
