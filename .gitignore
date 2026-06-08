@@ -22,6 +22,9 @@ cmake-build-*
 # vim cache
 *.swp
 
+# macOS metadata
+.DS_Store
+
 # build & output tempalte dirs
 build/
 build-sdma-tests/
