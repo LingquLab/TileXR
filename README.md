@@ -33,8 +33,7 @@ Instead of stalling every rank at coarse barriers, TileXR splits a phase into ti
 
 ## System Requirements
 
-- **OS**: Ubuntu 20.04 LTS
-- **User**: root access is typically required for NPU device operations
+- **User**: root access or membership in the Ascend driver user group is typically required for CANN runfile installation and NPU device operations
 - **NPU driver**: 25.5.0 or later, check with `npu-smi info`
 - **CANN**: current build scripts and CMake are aligned to CANN 9.1.0
 - **Core supported chips**: Ascend 910B, 910A5
@@ -45,8 +44,11 @@ UDMA builds or smoke tests on 910B or other non-A5 devices are not valid UDMA da
 ### System Dependencies
 
 ```bash
-apt install -y build-essential git git-lfs rdma-core kmod net-tools \
-               libssl-dev libz-dev libeigen3-dev python3 python3-pip
+apt install -y build-essential git python3
+```
+
+```bash
+yum install -y gcc gcc-c++ make git python3
 ```
 
 ## Quick Start
@@ -54,7 +56,7 @@ apt install -y build-essential git git-lfs rdma-core kmod net-tools \
 ### 1. Clone Repository
 
 ```bash
-git clone --recursive https://gitcode.com/LingquLab/TileXR.git
+git clone --recursive https://github.com/LingquLab/TileXR.git
 cd TileXR
 ```
 
@@ -66,11 +68,22 @@ git submodule update --init --recursive
 
 ### 2. Prepare Environment
 
+For a fresh checkout, install the repo-managed CANN 9.1.0 toolkit and ops package before building:
+
 ```bash
+bash scripts/cann_download_install.sh
+source scripts/common_env.sh
+```
+
+If the host already has a readable CANN 9.1.0 install, you can use it instead:
+
+```bash
+export ASCEND_HOME_PATH=/usr/local/Ascend/ascend-toolkit/latest
 source scripts/common_env.sh
 ```
 
 `scripts/common_env.sh` sets `TILEXR_HOME`, `TILEXR_CANN_HOME`, `TILEXR_TEMP_HOME`, architecture, SOC name, and CANN paths.
+For non-root builds, if the system driver headers are not readable, it automatically uses readable driver headers from the repo-managed CANN install while still linking against the system driver libraries.
 
 For first-time setup of local utilities and optional operator dependencies:
 
@@ -78,10 +91,9 @@ For first-time setup of local utilities and optional operator dependencies:
 bash scripts/prepare.sh
 ```
 
-For the full optional MC2/operator stack, also build hcomm and ops-transformer:
+For the full optional MC2/operator stack, also build hcomm and ops-transformer after CANN is available:
 
 ```bash
-bash scripts/cann_download_install.sh
 bash scripts/hcomm_build_install.sh
 bash scripts/ops_build_run.sh
 ```
@@ -458,7 +470,7 @@ bash scripts/plog_grep.sh WARNING
 
 ## License
 
-Copyright (c) 2025 Huawei Technologies Co., Ltd.
+Copyright (c) 2026 Huawei Technologies Co., Ltd.
 
 This program is free software. You may redistribute it and/or modify it under the terms and conditions of CANN Open Software License Agreement Version 2.0.
 
