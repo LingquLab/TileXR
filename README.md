@@ -83,6 +83,7 @@ source scripts/common_env.sh
 ```
 
 `scripts/common_env.sh` sets `TILEXR_HOME`, `TILEXR_CANN_HOME`, `TILEXR_TEMP_HOME`, architecture, SOC name, and CANN paths.
+For non-root builds, if the system driver headers are not readable, it automatically uses readable driver headers from the repo-managed CANN install while still linking against the system driver libraries.
 
 For first-time setup of local utilities and optional operator dependencies:
 

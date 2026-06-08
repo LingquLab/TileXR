@@ -147,6 +147,17 @@ void TestRuntimeEnvDoesNotPrependCannDevlib()
     CheckNotContains(path, text, "${ASCEND_HOME_PATH}/${TILEXR_OS_ARCH}-linux/devlib");
 }
 
+void TestRuntimeEnvUsesReadableDriverShim()
+{
+    const std::string path = "scripts/common_env.sh";
+    const auto text = ReadFile(path);
+
+    CheckContains(path, text, "TILEXR_DRIVER_SHIM_HOME");
+    CheckContains(path, text, "[ ! -r \"${ASCEND_DRIVER_PATH}/kernel/inc\" ]");
+    CheckContains(path, text, "${ASCEND_HOME_PATH}/${TILEXR_OS_ARCH}-linux/include/driver");
+    CheckContains(path, text, "export ASCEND_DRIVER_PATH=${TILEXR_DRIVER_SHIM_HOME}");
+}
+
 void TestRootCMakeRespectsAscendDriverOverride()
 {
     const std::string path = "CMakeLists.txt";

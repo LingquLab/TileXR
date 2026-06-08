@@ -27,6 +27,7 @@ export TILEXR_ENV_HOME=${TILEXR_HOME}/env
 export TILEXR_CANN_HOME=${TILEXR_ENV_HOME}/cann
 export TILEXR_TEMP_HOME=${TILEXR_ENV_HOME}/temp
 export TILEXR_UTIL_HOME=${TILEXR_ENV_HOME}/util
+export TILEXR_DRIVER_SHIM_HOME=${TILEXR_ENV_HOME}/driver-shim
 
 mkdir -p ${TILEXR_ENV_HOME}
 mkdir -p ${TILEXR_TEMP_HOME}
@@ -71,6 +72,15 @@ if [ -z "${ASCEND_HOME_PATH:-}" ]; then
 fi
 
 export ASCEND_DRIVER_PATH=${ASCEND_DRIVER_PATH:-/usr/local/Ascend/driver}
+if [ ! -r "${ASCEND_DRIVER_PATH}/kernel/inc" ] && [ -d "${ASCEND_HOME_PATH}/${TILEXR_OS_ARCH}-linux/include/driver" ]; then
+    mkdir -p "${TILEXR_DRIVER_SHIM_HOME}/kernel" "${TILEXR_DRIVER_SHIM_HOME}/lib64"
+    ln -sfn "${ASCEND_HOME_PATH}/${TILEXR_OS_ARCH}-linux/include/driver" "${TILEXR_DRIVER_SHIM_HOME}/kernel/inc"
+    ln -sfn "${ASCEND_DRIVER_PATH}/lib64/driver" "${TILEXR_DRIVER_SHIM_HOME}/lib64/driver"
+    if [ -d "${ASCEND_DRIVER_PATH}/lib64/common" ]; then
+        ln -sfn "${ASCEND_DRIVER_PATH}/lib64/common" "${TILEXR_DRIVER_SHIM_HOME}/lib64/common"
+    fi
+    export ASCEND_DRIVER_PATH=${TILEXR_DRIVER_SHIM_HOME}
+fi
 
 export PATH=${MPI_HOME}/bin:${PATH}
 export PATH=${TILEXR_UTIL_HOME}/cmake/bin:${PATH}
