@@ -14,7 +14,7 @@
     <mxCell id="b1a" value="vLLM-Ascend Integration&#10;(integrations/vllm_ascend)" style="rounded=1;whiteSpace=wrap;fillColor=#ffffff;strokeColor=#82b366;" vertex="1" parent="b1">
       <mxGeometry x="30" y="40" width="280" height="48" as="geometry"/>
     </mxCell>
-    <mxCell id="b1b" value="MC2 Fused-Operator Examples&#10;(examples/mc2, via ops-transformer)" style="rounded=1;whiteSpace=wrap;fillColor=#fff2cc;strokeColor=#d6b656;fontStyle=1;" vertex="1" parent="b1">
+    <mxCell id="b1b" value="MC2 Fused-Operator Examples&#10;(examples/mc2, via ops-transformer)" style="rounded=1;whiteSpace=wrap;fillColor=#ffffff;strokeColor=#82b366;" vertex="1" parent="b1">
       <mxGeometry x="350" y="40" width="280" height="48" as="geometry"/>
     </mxCell>
     <mxCell id="b1c" value="Tests / Demos / Simulator" style="rounded=1;whiteSpace=wrap;fillColor=#ffffff;strokeColor=#82b366;" vertex="1" parent="b1">
