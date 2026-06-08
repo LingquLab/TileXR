@@ -112,10 +112,10 @@ ops_name() {
     esac
 }
 
-# 修复指定路径及其所有祖先目录的权限为 755（直至 / 或 /home）
+# 修复指定路径及其所有祖先目录的权限为 755（直至 /、/home、/root 或 /tmp）
 fix_permissions() {
     local fix_path=$1
-    while [ "${fix_path}" != "/" ] && [ "${fix_path}" != "/home" ] && [ "${fix_path}" != "/tmp" ]; do
+    while [ "${fix_path}" != "/" ] && [ "${fix_path}" != "/home" ] && [ "${fix_path}" != "/root" ] && [ "${fix_path}" != "/tmp" ]; do
         local perm=`stat -c "%a" ${fix_path}`
         if [ "${perm}" != "755" ]; then
             warn "fix permission to 755 for ${fix_path}"
