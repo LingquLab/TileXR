@@ -33,7 +33,6 @@ Instead of stalling every rank at coarse barriers, TileXR splits a phase into ti
 
 ## System Requirements
 
-- **OS**: Ubuntu 20.04 LTS
 - **User**: root access is typically required for NPU device operations
 - **NPU driver**: 25.5.0 or later, check with `npu-smi info`
 - **CANN**: current build scripts and CMake are aligned to CANN 9.1.0
@@ -44,17 +43,24 @@ UDMA builds or smoke tests on 910B or other non-A5 devices are not valid UDMA da
 
 ### System Dependencies
 
+Minimal host packages for cloning the repository and running the setup/build scripts:
+
 ```bash
-apt install -y build-essential git git-lfs rdma-core kmod net-tools \
-               libssl-dev libz-dev libeigen3-dev python3 python3-pip
+apt install -y build-essential git python3
 ```
+
+Optional helpers:
+
+- `cmake >= 3.16`: needed for direct CMake builds if you do not use the CMake installed by `scripts/prepare.sh`.
+- `python3-pip`: needed by `scripts/prepare.sh` when installing the optional ops-transformer Python requirements.
+- `net-tools`: needed only for `scripts/device_connect.sh`, which uses `ifconfig`.
 
 ## Quick Start
 
 ### 1. Clone Repository
 
 ```bash
-git clone --recursive https://gitcode.com/LingquLab/TileXR.git
+git clone --recursive https://github.com/LingquLab/TileXR.git
 cd TileXR
 ```
 
@@ -458,7 +464,7 @@ bash scripts/plog_grep.sh WARNING
 
 ## License
 
-Copyright (c) 2025 Huawei Technologies Co., Ltd.
+Copyright (c) 2026 Huawei Technologies Co., Ltd.
 
 This program is free software. You may redistribute it and/or modify it under the terms and conditions of CANN Open Software License Agreement Version 2.0.
 
