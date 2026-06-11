@@ -21,6 +21,7 @@ cmake-build-*
 
 # vim cache
 *.swp
+.DS_Store
 
 # build & output tempalte dirs
 build/
