@@ -72,8 +72,7 @@ sign_tmp/
 tests/sdma/install/
 reference/*
 !reference/README.md
-!reference/download_shmem.sh
-!reference/download_ascend_transformer_boost.sh
+!reference/download_cann_repos.sh
 
 CMakeCache.txt
 CMakeFiles/

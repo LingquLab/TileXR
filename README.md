@@ -268,7 +268,7 @@ Optional components:
 | --- | --- | --- | --- |
 | hcomm / HCCL | submodule / CANN communication stack | MC2 fused-operator examples and HCCL tests | Not included or linked by `src/comm` / `libtile-comm.so` |
 | ops-transformer | submodule | `examples/mc2` operator build, packaging, and run scripts | Not needed when only compiling `libtile-comm.so` |
-| shmem | ignored checkout under `reference/shmem/` via `reference/download_shmem.sh` | Historical UDMA experiments and comparison examples | Not included or linked by current `src/comm` |
+| shmem | ignored checkout under `reference/shmem/` via `reference/download_cann_repos.sh shmem` | Historical UDMA experiments and comparison examples | Not included or linked by current `src/comm` |
 
 ## UDMA Validation
 
