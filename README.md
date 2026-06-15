@@ -472,5 +472,3 @@ bash scripts/plog_grep.sh WARNING
 Copyright (c) 2026 Huawei Technologies Co., Ltd.
 
 This program is free software. You may redistribute it and/or modify it under the terms and conditions of CANN Open Software License Agreement Version 2.0.
-
-See the repository license notice for details.
