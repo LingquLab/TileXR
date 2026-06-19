@@ -80,6 +80,53 @@ extern "C" __global__ __aicore__ void tilexr_udma_put_signal_kernel(
     }
 }
 
+extern "C" __global__ __aicore__ void tilexr_udma_all_to_all_kernel(
+    GM_ADDR commArgsGM, GM_ADDR inputGM, GM_ADDR outputGM, GM_ADDR debugGM,
+    int32_t elementsPerPeer, uint64_t outputByteOffset)
+{
+    auto args = reinterpret_cast<__gm__ TileXR::CommArgs*>(commArgsGM);
+    auto input = reinterpret_cast<__gm__ int32_t*>(inputGM);
+    auto output = reinterpret_cast<__gm__ int32_t*>(outputGM);
+    auto debug = reinterpret_cast<__gm__ int32_t*>(debugGM);
+
+    int32_t rank = args->rank;
+    int32_t rankSize = args->rankSize;
+    bool enabled = TileXR::UDMARegistryEnabled(args);
+
+    if (debug != nullptr) {
+        debug[0] = TILEXR_UDMA_DEMO_MAGIC;
+        debug[1] = rank;
+        debug[2] = rankSize;
+        debug[3] = enabled ? 1 : 0;
+        debug[4] = elementsPerPeer;
+        debug[5] = static_cast<int32_t>(outputByteOffset);
+    }
+    if (!enabled) {
+        return;
+    }
+
+    auto selfSrc = input + rank * elementsPerPeer;
+    auto selfDst = output + rank * elementsPerPeer;
+    for (int32_t i = 0; i < elementsPerPeer; ++i) {
+        selfDst[i] = selfSrc[i];
+    }
+
+    uint32_t bytes = static_cast<uint32_t>(elementsPerPeer * sizeof(int32_t));
+    for (int32_t peer = 0; peer < rankSize; ++peer) {
+        if (peer == rank) {
+            continue;
+        }
+        auto localSrc = input + peer * elementsPerPeer;
+        uint64_t remoteOffset = outputByteOffset +
+            static_cast<uint64_t>(rank) * elementsPerPeer * sizeof(int32_t);
+        TileXR::UDMAPutNbi<int32_t>(args, peer, localSrc, remoteOffset, bytes);
+        uint32_t status = TileXR::UDMAQuietStatus(args, peer);
+        if (debug != nullptr) {
+            debug[6 + peer] = static_cast<int32_t>(status);
+        }
+    }
+}
+
 extern "C" __global__ __aicore__ void tilexr_udma_registered_smoke_kernel(
     GM_ADDR commArgsGM, GM_ADDR localGM, GM_ADDR debugGM, uint32_t bytes, uint64_t signal)
 {
@@ -123,6 +170,14 @@ void launch_tilexr_udma_put_signal(
 {
     tilexr_udma_put_signal_kernel<<<blockDim, nullptr, stream>>>(
         commArgs, data, signals, debug, elementsPerRank, signal);
+}
+
+void launch_tilexr_udma_all_to_all(
+    uint32_t blockDim, void* stream, GM_ADDR commArgs, GM_ADDR input, GM_ADDR output,
+    GM_ADDR debug, int32_t elementsPerPeer, uint64_t outputByteOffset)
+{
+    tilexr_udma_all_to_all_kernel<<<blockDim, nullptr, stream>>>(
+        commArgs, input, output, debug, elementsPerPeer, outputByteOffset);
 }
 
 void launch_tilexr_udma_registered_smoke(

@@ -21,12 +21,16 @@
 #include "acl/acl.h"
 #include "tilexr_api.h"
 #include "tilexr_types.h"
+#include "tilexr_udma_alltoall_layout.h"
 
 extern void launch_tilexr_udma_all_gather(
     uint32_t blockDim, void* stream, GM_ADDR commArgs, GM_ADDR data, GM_ADDR debug, int32_t elementsPerRank);
 extern void launch_tilexr_udma_put_signal(
     uint32_t blockDim, void* stream, GM_ADDR commArgs, GM_ADDR data, GM_ADDR signals, GM_ADDR debug,
     int32_t elementsPerRank, uint64_t signal);
+extern void launch_tilexr_udma_all_to_all(
+    uint32_t blockDim, void* stream, GM_ADDR commArgs, GM_ADDR input, GM_ADDR output,
+    GM_ADDR debug, int32_t elementsPerPeer, uint64_t outputByteOffset);
 
 namespace {
 constexpr int32_t kDefaultElementsPerRank = 16;
@@ -341,6 +345,33 @@ bool ValidateData(int rank, int rankSize, const std::vector<int32_t>& data, int3
     return ok;
 }
 
+bool ValidateAllToAllData(
+    int rank, int rankSize, const std::vector<int32_t>& output, int32_t elementsPerPeer)
+{
+    bool ok = true;
+    for (int srcRank = 0; srcRank < rankSize; ++srcRank) {
+        int32_t expected = TileXR::Demo::AllToAllValue(srcRank, rank);
+        for (int32_t i = 0; i < elementsPerPeer; ++i) {
+            size_t offset = static_cast<size_t>(srcRank) * elementsPerPeer + i;
+            if (output[offset] != expected) {
+                std::cerr << "[rank " << rank << "] ALLTOALL MISMATCH at src=" << srcRank
+                          << " elem=" << i << " offset=" << offset
+                          << " got=" << output[offset] << " expected=" << expected << std::endl;
+                ok = false;
+                break;
+            }
+        }
+    }
+
+    std::cout << "[rank " << rank << "] alltoall output sample:";
+    for (int srcRank = 0; srcRank < rankSize; ++srcRank) {
+        size_t offset = static_cast<size_t>(srcRank) * elementsPerPeer;
+        std::cout << " from" << srcRank << "=" << output[offset];
+    }
+    std::cout << std::endl;
+    return TileXR::Demo::ValidateAllToAllOutput(output, rank, rankSize, elementsPerPeer) && ok;
+}
+
 bool ValidateSignals(int rank, int rankSize, const std::vector<uint64_t>& signals)
 {
     bool ok = true;
@@ -446,11 +477,14 @@ int main(int argc, char** argv)
         return 1;
     }
 
+    bool isAllToAll = testType == 2;
     size_t dataCount = static_cast<size_t>(rankSize) * elementsPerRank;
     size_t dataBytes = dataCount * sizeof(int32_t);
+    size_t inputOffset = 0;
+    size_t outputOffset = isAllToAll ? dataBytes : 0;
     size_t signalBytes = static_cast<size_t>(rankSize) * sizeof(uint64_t);
-    size_t signalOffset = dataBytes;
-    size_t payloadBytes = dataBytes + signalBytes;
+    size_t signalOffset = isAllToAll ? dataBytes * 2 : dataBytes;
+    size_t payloadBytes = signalOffset + signalBytes;
     size_t registeredBytes = ((payloadBytes + kUdmaRegistrationAlignment - 1) / kUdmaRegistrationAlignment) *
         kUdmaRegistrationAlignment;
     if (!CheckAcl(rank, "aclrtMalloc debug", aclrtMalloc(reinterpret_cast<void**>(&debug),
@@ -461,6 +495,8 @@ int main(int argc, char** argv)
         return 1;
     }
     auto data = static_cast<int32_t*>(registeredMemory);
+    auto input = reinterpret_cast<int32_t*>(static_cast<uint8_t*>(registeredMemory) + inputOffset);
+    auto output = reinterpret_cast<int32_t*>(static_cast<uint8_t*>(registeredMemory) + outputOffset);
     auto signals = reinterpret_cast<uint64_t*>(static_cast<uint8_t*>(registeredMemory) + signalOffset);
     if (!CheckTileXR(rank, "TileXRUDMARegister",
             TileXRUDMARegister(comm, static_cast<GM_ADDR>(registeredMemory), registeredBytes, &udmaHandle))) {
@@ -470,18 +506,30 @@ int main(int argc, char** argv)
     udmaRegistered = true;
     PrintStatus(rank, "registered UDMA memory base=" + std::to_string(reinterpret_cast<uintptr_t>(registeredMemory)) +
         " bytes=" + std::to_string(registeredBytes) +
-        " dataOffset=0 signalOffset=" + std::to_string(signalOffset));
+        " inputOffset=" + std::to_string(inputOffset) +
+        " outputOffset=" + std::to_string(outputOffset) +
+        " signalOffset=" + std::to_string(signalOffset));
     PrintCommArgs(rank, *commArgsHost, commArgsDev);
 
     std::vector<int32_t> hostData(dataCount, -1);
-    std::fill(hostData.begin() + static_cast<size_t>(rank) * elementsPerRank,
-              hostData.begin() + static_cast<size_t>(rank + 1) * elementsPerRank,
-              1000 + rank);
+    std::vector<int32_t> hostOutput(dataCount, -1);
+    if (isAllToAll) {
+        TileXR::Demo::FillAllToAllInput(hostData, rank, rankSize, elementsPerRank);
+    } else {
+        std::fill(hostData.begin() + static_cast<size_t>(rank) * elementsPerRank,
+                  hostData.begin() + static_cast<size_t>(rank + 1) * elementsPerRank,
+                  1000 + rank);
+    }
     std::vector<uint64_t> hostSignals(static_cast<size_t>(rankSize), 0);
     std::vector<int32_t> hostDebug(kDebugWords, 0);
 
-    if (!CopyHostToDevice(rank, data, dataCount * sizeof(int32_t),
-            hostData.data(), dataCount * sizeof(int32_t), "data") ||
+    bool initOk = CopyHostToDevice(rank, input, dataCount * sizeof(int32_t),
+        hostData.data(), dataCount * sizeof(int32_t), isAllToAll ? "alltoall input" : "data");
+    if (isAllToAll) {
+        initOk = CopyHostToDevice(rank, output, dataCount * sizeof(int32_t),
+            hostOutput.data(), dataCount * sizeof(int32_t), "alltoall output") && initOk;
+    }
+    if (!initOk ||
         !CopyHostToDevice(rank, signals, hostSignals.size() * sizeof(uint64_t),
             hostSignals.data(), hostSignals.size() * sizeof(uint64_t), "signals") ||
         !CopyHostToDevice(rank, debug, hostDebug.size() * sizeof(int32_t),
@@ -500,12 +548,18 @@ int main(int argc, char** argv)
         return 1;
     }
 
-    PrintStatus(rank, testType == 1 ? "launch put-signal kernel" : "launch all-gather kernel");
-    if (testType == 1) {
+    if (testType == 2) {
+        PrintStatus(rank, "launch all-to-all kernel");
+        launch_tilexr_udma_all_to_all(
+            1, stream, commArgsDev, reinterpret_cast<GM_ADDR>(input), reinterpret_cast<GM_ADDR>(output),
+            reinterpret_cast<GM_ADDR>(debug), elementsPerRank, static_cast<uint64_t>(outputOffset));
+    } else if (testType == 1) {
+        PrintStatus(rank, "launch put-signal kernel");
         launch_tilexr_udma_put_signal(
             1, stream, commArgsDev, reinterpret_cast<GM_ADDR>(data), reinterpret_cast<GM_ADDR>(signals),
             reinterpret_cast<GM_ADDR>(debug), elementsPerRank, kSignalValue);
     } else {
+        PrintStatus(rank, "launch all-gather kernel");
         launch_tilexr_udma_all_gather(
             1, stream, commArgsDev, reinterpret_cast<GM_ADDR>(data), reinterpret_cast<GM_ADDR>(debug),
             elementsPerRank);
@@ -525,8 +579,13 @@ int main(int argc, char** argv)
         return 1;
     }
 
-    if (!CopyDeviceToHost(rank, hostData.data(), dataCount * sizeof(int32_t),
-            data, dataCount * sizeof(int32_t), "data") ||
+    bool copyBackOk = CopyDeviceToHost(rank, hostData.data(), dataCount * sizeof(int32_t),
+        data, dataCount * sizeof(int32_t), "data");
+    if (isAllToAll) {
+        copyBackOk = CopyDeviceToHost(rank, hostOutput.data(), dataCount * sizeof(int32_t),
+            output, dataCount * sizeof(int32_t), "alltoall output") && copyBackOk;
+    }
+    if (!copyBackOk ||
         !CopyDeviceToHost(rank, hostSignals.data(), hostSignals.size() * sizeof(uint64_t),
             signals, hostSignals.size() * sizeof(uint64_t), "signals") ||
         !CopyDeviceToHost(rank, hostDebug.data(), hostDebug.size() * sizeof(int32_t),
@@ -539,12 +598,13 @@ int main(int argc, char** argv)
     }
 
     std::cout << "[rank " << rank << "] debug words:";
-    for (size_t i = 0; i < std::min<size_t>(5, hostDebug.size()); ++i) {
+    for (size_t i = 0; i < std::min<size_t>(10, hostDebug.size()); ++i) {
         std::cout << " d" << i << "=" << hostDebug[i];
     }
     std::cout << std::endl;
 
-    bool ok = ValidateData(rank, rankSize, hostData, elementsPerRank);
+    bool ok = isAllToAll ? ValidateAllToAllData(rank, rankSize, hostOutput, elementsPerRank)
+                         : ValidateData(rank, rankSize, hostData, elementsPerRank);
     if (testType == 1) {
         ok = ValidateSignals(rank, rankSize, hostSignals) && ok;
     }

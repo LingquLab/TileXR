@@ -368,6 +368,15 @@ __aicore__ inline void UDMAQuiet(const __gm__ CommArgs* args, int targetRank)
     (void)UDMAPollCQ(udmaInfo, targetRank, 0, wqeCnt);
 }
 
+__aicore__ inline uint32_t UDMAQuietStatus(const __gm__ CommArgs* args, int targetRank)
+{
+    if (!UDMAEnabled(args)) return 0xFFFFFFFFU;
+    __gm__ UDMAInfo* udmaInfo = GetUDMAInfo(args);
+    __gm__ UDMAWQCtx* qpCtxEntry = UDMAGetWQCtx(udmaInfo, targetRank, 0);
+    uint32_t wqeCnt = ld_dev(reinterpret_cast<__gm__ uint32_t*>(qpCtxEntry->wqeCntAddr), 0);
+    return UDMAPollCQ(udmaInfo, targetRank, 0, wqeCnt);
+}
+
 } // namespace TileXR
 
 #endif // TILEXR_UDMA_H

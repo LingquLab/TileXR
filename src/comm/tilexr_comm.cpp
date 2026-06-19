@@ -909,22 +909,26 @@ int TileXRComm::SetMemoryName(string &name)
 
 int TileXRComm::SetIpcPidSdid(string &name, const uint32_t *pids, const int64_t *sdids) const
 {
+    const char *modeEnv = std::getenv("TILEXR_IPC_PID_MODE");
+    bool forcePid = modeEnv != nullptr && std::string(modeEnv) == "pid";
+    bool forceSdid = modeEnv != nullptr && std::string(modeEnv) == "sdid";
+    bool defaultSdid =
+        physicalInfo_.chipName >= ChipName::CHIP_910_9391 && physicalInfo_.chipName < ChipName::CHIP_950;
+    bool useSdid = forceSdid || (!forcePid && defaultSdid);
+    TILEXR_LOG(INFO) << "SetIpcPidSdid mode=" << (useSdid ? "sdid" : "pid");
     for (int i = 0; i < rankSize_; ++i) {
         if (i == rank_) {
             continue;
         }
 
-        if (physicalInfo_.chipName < ChipName::CHIP_910_9391) {
-            // 910B
-            int32_t pidInt32 = pids[i];
+        int32_t pidInt32 = pids[i];
+        if (!useSdid) {
             int rtRet = rtSetIpcMemPid(name.c_str(), &pidInt32, HCCL_IPC_PID_ARRAY_SIZE);
             if (rtRet != RT_ERROR_NONE) {
                 TILEXR_LOG(ERROR) << "err " << rtRet;
                 return TILEXR_ERROR_INTERNAL;
             }
         } else {
-            // 910A3
-            int32_t pidInt32 = pids[i];
             int rtRet = rtSetIpcMemorySuperPodPid(name.c_str(), sdids[i], &pidInt32, HCCL_IPC_PID_ARRAY_SIZE);
             if (rtRet != RT_ERROR_NONE) {
                 TILEXR_LOG(ERROR) << "err " << rtRet;
