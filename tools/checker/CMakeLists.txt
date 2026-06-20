@@ -4,6 +4,7 @@ add_library(tilexr-checker-core STATIC
   src/memory.cpp
   src/world.cpp
   src/oracle.cpp
+  src/shim_runtime.cpp
 )
 
 target_include_directories(tilexr-checker-core
