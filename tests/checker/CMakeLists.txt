@@ -9,3 +9,7 @@ endfunction()
 tilexr_checker_test(test_tilexr_checker_sources
   unit/test_checker_sources.cpp
 )
+
+tilexr_checker_test(test_tilexr_checker_world
+  unit/test_checker_world.cpp
+)
