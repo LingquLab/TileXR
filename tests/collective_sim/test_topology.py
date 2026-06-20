@@ -33,6 +33,11 @@ class TopologyTest(unittest.TestCase):
         )
         self.assertIn("clos:dst_server:1:oversub_2to1", resource_ids_for_transfer(topology(128), 0, 8))
 
+    def test_cross_server_below_oversubscription_threshold_is_not_oversubscribed(self):
+        resources = resource_ids_for_transfer(topology(96), 0, 8)
+        self.assertEqual(resources, ("uplink:src:0", "clos:nonblocking", "uplink:dst:8"))
+        self.assertNotIn("clos:dst_server:1:oversub_2to1", resources)
+
     def test_oversubscription_scale(self):
         self.assertEqual(oversubscription_scale(topology(64)), 1.0)
         self.assertEqual(oversubscription_scale(topology(128)), 0.5)
