@@ -216,8 +216,6 @@ RunResult MakeResultFromStatus(const CheckerStatus &status, const FindingSet &fi
     return result;
 }
 
-}  // namespace
-
 CheckerStatus FinalizeExecutorStatus(const FindingSet &findings,
                                      const std::vector<OutputMismatch> &mismatches) {
     if (!findings.findings().empty() || !mismatches.empty()) {
@@ -228,6 +226,8 @@ CheckerStatus FinalizeExecutorStatus(const FindingSet &findings,
     }
     return CheckerStatus::Ok();
 }
+
+}  // namespace
 
 RunResult CollectiveExecutor::Run(RankWorld *world, const CheckerCase &test_case) {
     FindingSet findings;

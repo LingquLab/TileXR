@@ -20,9 +20,6 @@ struct RunResult {
     size_t event_count = 0;
 };
 
-CheckerStatus FinalizeExecutorStatus(const FindingSet &findings,
-                                     const std::vector<OutputMismatch> &mismatches);
-
 class CollectiveExecutor {
 public:
     RunResult Run(RankWorld *world, const CheckerCase &test_case);

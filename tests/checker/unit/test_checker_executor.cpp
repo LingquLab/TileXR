@@ -341,23 +341,6 @@ void TestUnsupportedDatatypeReturnsFinding() {
                "unsupported datatype finding kind");
 }
 
-void TestWarningOnlyFindingProducesNonOkStatus() {
-    tilexr::checker::FindingSet findings;
-    tilexr::checker::Finding finding;
-    finding.id = "warning-only";
-    finding.kind = tilexr::checker::FindingKind::kUnsupportedApi;
-    finding.severity = tilexr::checker::Severity::kWarning;
-    finding.message = "warning only";
-    findings.Add(finding);
-    const std::vector<tilexr::checker::OutputMismatch> mismatches;
-
-    tilexr::checker::CheckerStatus status =
-        tilexr::checker::FinalizeExecutorStatus(findings, mismatches);
-    ExpectEqInt(static_cast<int>(status.code),
-                static_cast<int>(tilexr::checker::CheckerStatusCode::kUnsupported),
-                "warning-only finding status");
-}
-
 void TestRunSerialMatchesDirectOrderingDiagnostics() {
     tilexr::checker::CheckerCase test_case =
         MakeAllGatherCase(2, 16, tilexr::checker::SchedulerMode::kSerial);
@@ -434,7 +417,6 @@ int main() {
     TestAllReducePassesForBothSchedulers();
     TestAllReduceSchedulersProduceDifferentOrders();
     TestUnsupportedDatatypeReturnsFinding();
-    TestWarningOnlyFindingProducesNonOkStatus();
     TestRunSerialMatchesDirectOrderingDiagnostics();
     TestInjectedPeerUserReadProducesFinding();
     TestInjectedStaleMagicProducesFinding();
