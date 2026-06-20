@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from tilexr_collective_sim.io import load_algorithm, load_calibration, load_case, load_topology
+from tilexr_collective_sim.io import load_algorithm, load_calibration, load_case, load_sweep, load_topology
 from tilexr_collective_sim.model import COMM_BUFFER_ROLES, TRANSFER_OPS
 
 
@@ -86,6 +86,66 @@ class ModelIoTest(unittest.TestCase):
             self.assertEqual(topology.oversubscription_ratio, "2:1")
             self.assertIn("sdma_800g", calibration.curves)
             self.assertEqual(case.message_bytes, (1024, 4096))
+
+    def test_load_sweep_preserves_legacy_cartesian_schema_as_cases(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "sweep.yaml"
+            path.write_text(json.dumps({
+                "sweep": {
+                    "algorithms": ["a.json", "b.json"],
+                    "topologies": ["t64.yaml", "t128.yaml"],
+                    "calibration": "calibration.yaml",
+                    "message_bytes": [1024],
+                    "validate": True,
+                }
+            }), encoding="utf-8")
+
+            sweep = load_sweep(path)
+
+            self.assertEqual(sweep["cases"], (
+                {"algorithm": "a.json", "topology": "t64.yaml"},
+                {"algorithm": "a.json", "topology": "t128.yaml"},
+                {"algorithm": "b.json", "topology": "t64.yaml"},
+                {"algorithm": "b.json", "topology": "t128.yaml"},
+            ))
+
+    def test_duplicate_buffer_ids_fail_load(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "algorithm.json"
+            path.write_text(json.dumps({
+                "name": "bad",
+                "collective": "custom",
+                "rank_count": 1,
+                "buffers": [
+                    {"id": "dup", "rank": 0, "role": "comm_buffer", "chunks": []},
+                    {"id": "dup", "rank": 0, "role": "comm_buffer", "chunks": []},
+                ],
+                "ops": [
+                    {"id": "op", "type": "wait", "rank": 0},
+                ],
+            }), encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "duplicate buffer id"):
+                load_algorithm(path)
+
+    def test_duplicate_op_ids_fail_load(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "algorithm.json"
+            path.write_text(json.dumps({
+                "name": "bad",
+                "collective": "custom",
+                "rank_count": 1,
+                "buffers": [
+                    {"id": "buffer", "rank": 0, "role": "comm_buffer", "chunks": []},
+                ],
+                "ops": [
+                    {"id": "op", "type": "wait", "rank": 0},
+                    {"id": "op", "type": "wait", "rank": 0},
+                ],
+            }), encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "duplicate op id"):
+                load_algorithm(path)
 
 
 if __name__ == "__main__":

@@ -80,6 +80,42 @@ class StaticValidationTest(unittest.TestCase):
         self.assertFalse(report.ok)
         self.assertIn("comm_buffer_endpoint_required", {issue.code for issue in report.issues})
 
+    def test_transfer_endpoint_rank_out_of_range_fails(self):
+        algorithm = valid_algorithm()
+        ops = {
+            "bad_send": OpSpec("bad_send", "send", 0, 1024, "r0_comm", "r1_comm", 0, 2, (), "datacopy"),
+        }
+        report = validate_static(AlgorithmSpec("bad_rank", "allgather", 2, algorithm.buffers, ops, {}), topology())
+        self.assertFalse(report.ok)
+        self.assertIn("invalid_transfer_rank", {issue.code for issue in report.issues})
+
+    def test_missing_transfer_endpoint_rank_fails(self):
+        algorithm = valid_algorithm()
+        ops = {
+            "bad_send": OpSpec("bad_send", "send", 0, 1024, "r0_comm", "r1_comm", 0, None, (), "datacopy"),
+        }
+        report = validate_static(AlgorithmSpec("bad_rank", "allgather", 2, algorithm.buffers, ops, {}), topology())
+        self.assertFalse(report.ok)
+        self.assertIn("missing_transfer_rank", {issue.code for issue in report.issues})
+
+    def test_non_integer_transfer_endpoint_rank_fails_validation(self):
+        algorithm = valid_algorithm()
+        ops = {
+            "bad_send": OpSpec("bad_send", "send", 0, 1024, "r0_comm", "r1_comm", "zero", 1, (), "datacopy"),
+        }
+        report = validate_static(AlgorithmSpec("bad_rank", "allgather", 2, algorithm.buffers, ops, {}), topology())
+        self.assertFalse(report.ok)
+        self.assertIn("invalid_transfer_rank", {issue.code for issue in report.issues})
+
+    def test_transfer_endpoint_rank_must_match_buffer_rank(self):
+        algorithm = valid_algorithm()
+        ops = {
+            "bad_send": OpSpec("bad_send", "send", 0, 1024, "r0_comm", "r1_comm", 1, 1, (), "datacopy"),
+        }
+        report = validate_static(AlgorithmSpec("bad_rank", "allgather", 2, algorithm.buffers, ops, {}), topology())
+        self.assertFalse(report.ok)
+        self.assertIn("transfer_rank_buffer_mismatch", {issue.code for issue in report.issues})
+
     def test_missing_dep_and_cycle_fail(self):
         algorithm = valid_algorithm()
         ops = {

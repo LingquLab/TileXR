@@ -12,6 +12,7 @@ This directory contains the offline collective simulation tool. It evaluates gen
 - P2P uses a message-size curve that approaches 50 GB/s.
 - Uplink uses a message-size curve that approaches 300 GB/s.
 - SDMA local copy uses a default 800 GB/s curve until calibration overrides it.
+- Resource contention is a deterministic reservation model: operations with the same computed start time fair-share matching resources as a batch, then reserve those resources until the batch completes. It does not model continuous dynamic contention between staggered transfers.
 - The tool requires no Ascend hardware.
 
 ## Commands
@@ -33,6 +34,26 @@ The run and sweep commands write:
 - `results.json`
 - `summary.csv`
 - `report.html`
+
+## Sweep Schema
+
+Use `cases` when algorithms and topologies must be paired by compatible rank count:
+
+```json
+{
+  "sweep": {
+    "cases": [
+      {"algorithm": "algorithm.json", "topology": "topology_64p.yaml"},
+      {"algorithm": "algorithm_128p.json", "topology": "topology_128p_2to1.yaml"}
+    ],
+    "calibration": "calibration.yaml",
+    "message_bytes": [1024, 4096, 1048576, 67108864],
+    "validate": true
+  }
+}
+```
+
+The legacy top-level `algorithms` plus `topologies` form is still accepted and expands to the Cartesian product.
 
 ## Test
 

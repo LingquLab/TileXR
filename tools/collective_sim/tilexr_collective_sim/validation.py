@@ -37,6 +37,46 @@ def _transfer_uses_only_comm_endpoints(algorithm: AlgorithmSpec, op: OpSpec) -> 
     return bool(roles) and all(role in COMM_BUFFER_ROLES for role in roles)
 
 
+def _validate_transfer_ranks(algorithm: AlgorithmSpec, op: OpSpec) -> List[ValidationIssue]:
+    issues: List[ValidationIssue] = []
+    for attr in ("src_rank", "dst_rank"):
+        value = getattr(op, attr)
+        if value is None:
+            issues.append(issue("missing_transfer_rank",
+                                f"{op.type} missing {attr}",
+                                op_id=op.id, rank=op.rank))
+            continue
+        try:
+            rank = int(value)
+        except (TypeError, ValueError):
+            issues.append(issue("invalid_transfer_rank",
+                                f"{op.type} {attr}={value!r} is not an integer rank",
+                                op_id=op.id, rank=op.rank))
+            continue
+        if rank < 0 or rank >= algorithm.rank_count:
+            issues.append(issue("invalid_transfer_rank",
+                                f"{op.type} {attr}={rank} outside rank_count={algorithm.rank_count}",
+                                op_id=op.id, rank=op.rank))
+
+    endpoint_pairs = (
+        ("src_rank", op.src_rank, "src_buffer", op.src_buffer),
+        ("dst_rank", op.dst_rank, "dst_buffer", op.dst_buffer),
+    )
+    for rank_attr, rank_value, buffer_attr, buffer_id in endpoint_pairs:
+        if rank_value is None or buffer_id is None or buffer_id not in algorithm.buffers:
+            continue
+        buffer_rank = algorithm.buffers[buffer_id].rank
+        try:
+            rank = int(rank_value)
+        except (TypeError, ValueError):
+            continue
+        if rank != buffer_rank:
+            issues.append(issue("transfer_rank_buffer_mismatch",
+                                f"{op.type} {rank_attr}={rank} does not match {buffer_attr} rank={buffer_rank}",
+                                op_id=op.id, buffer_id=buffer_id, rank=op.rank))
+    return issues
+
+
 def validate_static(algorithm: AlgorithmSpec, topology: Optional[TopologySpec] = None) -> ValidationReport:
     issues: List[ValidationIssue] = []
     if topology is not None and topology.rank_count != algorithm.rank_count:
@@ -59,6 +99,8 @@ def validate_static(algorithm: AlgorithmSpec, topology: Optional[TopologySpec] =
             buffer_id = getattr(op, attr)
             if buffer_id is not None and buffer_id not in algorithm.buffers:
                 issues.append(issue("missing_buffer", f"missing {attr} {buffer_id}", op_id=op.id, buffer_id=buffer_id, rank=op.rank))
+        if op.type in TRANSFER_OPS:
+            issues.extend(_validate_transfer_ranks(algorithm, op))
         if op.type in TRANSFER_OPS and not _transfer_uses_only_comm_endpoints(algorithm, op):
             issues.append(issue("comm_buffer_endpoint_required",
                                 f"{op.type} requires communication-buffer endpoints",

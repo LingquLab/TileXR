@@ -44,6 +44,8 @@ class IntegrationBoundaryTest(unittest.TestCase):
         self.assertIn("SDMA", readme)
         self.assertIn("800 GB/s", readme)
         self.assertIn("no Ascend hardware", readme)
+        self.assertIn("deterministic reservation", readme)
+        self.assertIn("cases", readme)
 
 
 if __name__ == "__main__":

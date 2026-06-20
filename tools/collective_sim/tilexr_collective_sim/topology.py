@@ -46,8 +46,10 @@ def resource_ids_for_transfer(topology: TopologySpec, src_rank: int, dst_rank: i
     dst_server = _server(topology, dst_rank)
     if src_server == dst_server:
         return (f"p2p:s{src_server}:{src_rank}->{dst_rank}",)
-    if topology.rank_count < topology.oversubscription_enabled_from_ranks:
+    if topology.rank_count <= topology.non_blocking_until_ranks:
         clos = "clos:nonblocking"
+    elif topology.rank_count < topology.oversubscription_enabled_from_ranks:
+        clos = "clos:limited"
     else:
         ratio = topology.oversubscription_ratio.replace(":", "to")
         clos = f"clos:dst_server:{dst_server}:oversub_{ratio}"

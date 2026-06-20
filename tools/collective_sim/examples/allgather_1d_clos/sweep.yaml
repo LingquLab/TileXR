@@ -1,1 +1,1 @@
-{"sweep":{"algorithms":["algorithm.json"],"topologies":["topology_64p.yaml"],"calibration":"calibration.yaml","message_bytes":[1024,4096,1048576,67108864],"validate":true}}
+{"sweep":{"cases":[{"algorithm":"algorithm.json","topology":"topology_64p.yaml"},{"algorithm":"algorithm_128p.json","topology":"topology_128p_2to1.yaml"}],"calibration":"calibration.yaml","message_bytes":[1024,4096,1048576,67108864],"validate":true}}

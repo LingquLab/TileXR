@@ -61,20 +61,19 @@ def cmd_sweep(args: argparse.Namespace) -> int:
     sweep = load_sweep(sweep_path)
     calibration = load_calibration(_resolve_from(base, sweep["calibration"]))
     results = []
-    for algorithm_path in sweep["algorithms"]:
-        algorithm = load_algorithm(_resolve_from(base, algorithm_path))
-        for topology_path in sweep["topologies"]:
-            topology = load_topology(_resolve_from(base, topology_path))
-            for size in sweep["message_bytes"]:
-                results.append(
-                    simulate_algorithm(
-                        algorithm,
-                        topology,
-                        calibration,
-                        int(size),
-                        validate=bool(sweep.get("validate", True)),
-                    )
+    for case in sweep["cases"]:
+        algorithm = load_algorithm(_resolve_from(base, case["algorithm"]))
+        topology = load_topology(_resolve_from(base, case["topology"]))
+        for size in sweep["message_bytes"]:
+            results.append(
+                simulate_algorithm(
+                    algorithm,
+                    topology,
+                    calibration,
+                    int(size),
+                    validate=bool(sweep.get("validate", True)),
                 )
+            )
 
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)

@@ -10,9 +10,12 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--rank-count", type=int, default=64)
     parser.add_argument("--message-bytes", type=int, default=1024)
+    parser.add_argument("--out", default="algorithm.json")
     args = parser.parse_args()
 
-    out = Path(__file__).resolve().parent / "algorithm.json"
+    out = Path(args.out)
+    if not out.is_absolute():
+        out = Path(__file__).resolve().parent / out
     out.write_text(
         json.dumps(allgather_direct_algorithm(args.rank_count, args.message_bytes), indent=2) + "\n",
         encoding="utf-8",
