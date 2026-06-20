@@ -49,3 +49,25 @@ Fix for review findings:
 - Files changed:
   - `tools/checker/src/executor.cpp`
   - `tests/checker/unit/test_checker_executor.cpp`
+
+Serial ordering follow-up (2026-06-20):
+- Failing test observed before the fix:
+  - Command:
+    `bash -lc 'source scripts/common_env.sh >/tmp/tilexr_checker_env.out && cmake -S . -B build-checker -DTILEXR_BUILD_CHECKER=ON -DBUILD_TESTING=ON && cmake --build build-checker --target test_tilexr_checker_executor -j"$(nproc)" && ctest --test-dir build-checker -R test_tilexr_checker_executor --output-on-failure'`
+  - Expected failure snippet:
+    `serial injected peer run fails: actual=0 expected=1`
+    `serial injected stale run fails: actual=0 expected=1`
+- Final fix summary:
+  - `CollectiveExecutor::RunAllGatherInt32()` and `RunAllReduceSumInt32()` now always feed executor-owned traces through `CheckOrdering()`, including `SchedulerMode::kSerial`.
+  - Removed the hidden comm-data pre-seed path. The executor now emits real publish copies before any consumer reads, so the trace stays causally valid.
+  - `kSerial` and `kRoundRobin` remain deterministic but differ in read-phase order: serial drains reads/writes per rank after all publishes/stores/waits, while round-robin interleaves ranks by peer during reads.
+  - Executor tests now inject ordering faults through `CollectiveExecutor::SetPostTraceHookForTest()` so `Run()` itself surfaces serial findings.
+- Final verification:
+  - Command:
+    `bash -lc 'source scripts/common_env.sh >/tmp/tilexr_checker_env.out && cmake --build build-checker -j"$(nproc)" && ctest --test-dir build-checker -R "test_tilexr_checker_executor|test_tilexr_checker_diagnostics|test_tilexr_checker_oracles" --output-on-failure'`
+  - Result:
+    `100% tests passed, 0 tests failed out of 3`
+- Commit hash:
+  - pending
+- Concerns:
+  - The test seam is intentionally small, but it does live in the production executor header for now because there was no existing executor-owned injection hook.

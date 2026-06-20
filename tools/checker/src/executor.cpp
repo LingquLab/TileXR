@@ -46,29 +46,11 @@ bool HasFindingKind(const FindingSet &findings, FindingKind kind) {
     return false;
 }
 
-CheckerStatus AddCopyEvent(RankWorld *world, int rank, size_t bytes, const std::string &detail) {
+CheckerStatus PublishInputToCommData(RankWorld *world, int rank, size_t bytes,
+                                     const std::string &detail) {
     ShimRuntime runtime(world);
     return runtime.Copy(rank, rank, BufferRole::kCommData, 0, BufferRole::kUserInput, 0, bytes,
                         TILEXR_CHECKER_HERE, detail);
-}
-
-CheckerStatus SeedCommDataFromInputs(RankWorld *world, const CheckerCase &test_case) {
-    if (world == nullptr) {
-        return CheckerStatus::Fail("rank world is null");
-    }
-    const size_t bytes = static_cast<size_t>(test_case.count) * sizeof(int32_t);
-    std::vector<int32_t> scratch(static_cast<size_t>(test_case.count), 0);
-    for (int rank = 0; rank < test_case.rank_size; ++rank) {
-        CheckerStatus read_status = world->UserInput(rank).ReadBytes(0, scratch.data(), bytes);
-        if (!read_status.ok()) {
-            return read_status;
-        }
-        CheckerStatus write_status = world->CommData(rank, rank).WriteBytes(0, scratch.data(), bytes);
-        if (!write_status.ok()) {
-            return write_status;
-        }
-    }
-    return CheckerStatus::Ok();
 }
 
 CheckerStatus AddStoreEvents(RankWorld *world, const CheckerCase &test_case, int rank) {
@@ -123,33 +105,36 @@ CheckerStatus AddCommDataReadEvent(RankWorld *world, int rank, int owner_rank, s
     return CheckerStatus::Ok();
 }
 
-CheckerStatus ExecuteAllGatherReadsAndWrites(RankWorld *world, const CheckerCase &test_case,
-                                             int rank) {
+CheckerStatus ReadAllGatherPeerToOutput(RankWorld *world, const CheckerCase &test_case, int rank,
+                                        int peer) {
     ShimRuntime runtime(world);
     const size_t bytes = static_cast<size_t>(test_case.count) * sizeof(int32_t);
     std::vector<int32_t> scratch(static_cast<size_t>(test_case.count), 0);
+    CheckerStatus read_event =
+        AddCommDataReadEvent(world, rank, peer, bytes, "read peer comm-data");
+    if (!read_event.ok()) {
+        return read_event;
+    }
+    CheckerStatus read_status = world->CommData(peer, peer).ReadBytes(0, scratch.data(), bytes);
+    if (!read_status.ok()) {
+        return read_status;
+    }
+    CheckerStatus write_status =
+        world->UserOutput(rank).WriteBytes(static_cast<size_t>(peer) * bytes, scratch.data(), bytes);
+    if (!write_status.ok()) {
+        return write_status;
+    }
+    return runtime.RecordWrite(rank, rank, BufferRole::kUserOutput,
+                               static_cast<size_t>(peer) * bytes, bytes, TILEXR_CHECKER_HERE,
+                               "write gathered user output");
+}
+
+CheckerStatus ExecuteAllGatherReadsAndWrites(RankWorld *world, const CheckerCase &test_case,
+                                             int rank) {
     for (int peer = 0; peer < test_case.rank_size; ++peer) {
-        CheckerStatus read_event =
-            AddCommDataReadEvent(world, rank, peer, bytes, "read peer comm-data");
-        if (!read_event.ok()) {
-            return read_event;
-        }
-        CheckerStatus read_status = world->CommData(peer, peer).ReadBytes(0, scratch.data(), bytes);
-        if (!read_status.ok()) {
-            return read_status;
-        }
-        CheckerStatus write_status =
-            world->UserOutput(rank).WriteBytes(static_cast<size_t>(peer) * bytes, scratch.data(),
-                                               bytes);
-        if (!write_status.ok()) {
-            return write_status;
-        }
-        CheckerStatus write_event =
-            runtime.RecordWrite(rank, rank, BufferRole::kUserOutput,
-                                static_cast<size_t>(peer) * bytes, bytes, TILEXR_CHECKER_HERE,
-                                "write gathered user output");
-        if (!write_event.ok()) {
-            return write_event;
+        CheckerStatus status = ReadAllGatherPeerToOutput(world, test_case, rank, peer);
+        if (!status.ok()) {
+            return status;
         }
     }
     return CheckerStatus::Ok();
@@ -185,45 +170,6 @@ CheckerStatus ExecuteAllReduceReadAndWrite(RankWorld *world, const CheckerCase &
                                TILEXR_CHECKER_HERE, "write reduced user output");
 }
 
-template <typename PhaseFn>
-CheckerStatus RunRoundRobinPhases(const CheckerCase &test_case, PhaseFn phase_fn) {
-    const int phase_count = 4;
-    for (int phase = 0; phase < phase_count; ++phase) {
-        for (int rank = 0; rank < test_case.rank_size; ++rank) {
-            CheckerStatus status = phase_fn(rank, phase);
-            if (!status.ok()) {
-                return status;
-            }
-        }
-    }
-    return CheckerStatus::Ok();
-}
-
-template <typename PhaseFn>
-CheckerStatus RunSerialPhases(const CheckerCase &test_case, PhaseFn phase_fn) {
-    const int phase_count = 4;
-    for (int rank = 0; rank < test_case.rank_size; ++rank) {
-        for (int phase = 0; phase < phase_count; ++phase) {
-            CheckerStatus status = phase_fn(rank, phase);
-            if (!status.ok()) {
-                return status;
-            }
-        }
-    }
-    return CheckerStatus::Ok();
-}
-
-template <typename PhaseFn>
-CheckerStatus RunScheduledPhases(const CheckerCase &test_case, PhaseFn phase_fn) {
-    switch (test_case.scheduler) {
-        case SchedulerMode::kSerial:
-            return RunSerialPhases(test_case, phase_fn);
-        case SchedulerMode::kRoundRobin:
-            return RunRoundRobinPhases(test_case, phase_fn);
-    }
-    return CheckerStatus::Fail("unsupported scheduler mode");
-}
-
 RunResult MakeResultFromStatus(const CheckerStatus &status, const FindingSet &findings,
                                const std::vector<OutputMismatch> &mismatches,
                                size_t event_count) {
@@ -236,6 +182,10 @@ RunResult MakeResultFromStatus(const CheckerStatus &status, const FindingSet &fi
 }
 
 }  // namespace
+
+void CollectiveExecutor::SetPostTraceHookForTest(TraceHook hook) {
+    post_trace_hook_ = hook;
+}
 
 RunResult CollectiveExecutor::Run(RankWorld *world, const CheckerCase &test_case) {
     FindingSet findings;
@@ -259,12 +209,6 @@ RunResult CollectiveExecutor::Run(RankWorld *world, const CheckerCase &test_case
     CheckerStatus fill_status = FillRankIndexInt32Inputs(world, test_case);
     if (!fill_status.ok()) {
         return MakeResultFromStatus(fill_status, findings, no_mismatches,
-                                    world->events().events().size());
-    }
-
-    CheckerStatus seed_status = SeedCommDataFromInputs(world, test_case);
-    if (!seed_status.ok()) {
-        return MakeResultFromStatus(seed_status, findings, no_mismatches,
                                     world->events().events().size());
     }
 
@@ -309,28 +253,49 @@ RunResult CollectiveExecutor::RunAllGatherInt32(RankWorld *world, const CheckerC
     }
 
     const size_t bytes = static_cast<size_t>(test_case.count) * sizeof(int32_t);
-    CheckerStatus exec_status = RunScheduledPhases(
-        test_case,
-        [&](int rank, int phase) -> CheckerStatus {
-            switch (phase) {
-                case 0:
-                    return AddCopyEvent(world, rank, bytes, "publish local input to comm-data");
-                case 1:
-                    return AddStoreEvents(world, test_case, rank);
-                case 2:
-                    return AddWaitEvents(world, test_case, rank);
-                case 3:
-                    return ExecuteAllGatherReadsAndWrites(world, test_case, rank);
+    CheckerStatus exec_status = CheckerStatus::Ok();
+    switch (test_case.scheduler) {
+        case SchedulerMode::kSerial:
+            for (int rank = 0; rank < test_case.rank_size && exec_status.ok(); ++rank) {
+                exec_status =
+                    PublishInputToCommData(world, rank, bytes, "publish local input to comm-data");
             }
-            return CheckerStatus::Fail("invalid executor phase");
-        });
+            for (int rank = 0; rank < test_case.rank_size && exec_status.ok(); ++rank) {
+                exec_status = AddStoreEvents(world, test_case, rank);
+            }
+            for (int rank = 0; rank < test_case.rank_size && exec_status.ok(); ++rank) {
+                exec_status = AddWaitEvents(world, test_case, rank);
+            }
+            for (int rank = 0; rank < test_case.rank_size && exec_status.ok(); ++rank) {
+                exec_status = ExecuteAllGatherReadsAndWrites(world, test_case, rank);
+            }
+            break;
+        case SchedulerMode::kRoundRobin:
+            for (int rank = 0; rank < test_case.rank_size && exec_status.ok(); ++rank) {
+                exec_status =
+                    PublishInputToCommData(world, rank, bytes, "publish local input to comm-data");
+            }
+            for (int rank = 0; rank < test_case.rank_size && exec_status.ok(); ++rank) {
+                exec_status = AddStoreEvents(world, test_case, rank);
+            }
+            for (int rank = 0; rank < test_case.rank_size && exec_status.ok(); ++rank) {
+                exec_status = AddWaitEvents(world, test_case, rank);
+            }
+            for (int peer = 0; peer < test_case.rank_size && exec_status.ok(); ++peer) {
+                for (int rank = 0; rank < test_case.rank_size && exec_status.ok(); ++rank) {
+                    exec_status = ReadAllGatherPeerToOutput(world, test_case, rank, peer);
+                }
+            }
+            break;
+    }
     if (!exec_status.ok()) {
         return MakeResultFromStatus(exec_status, findings, mismatches, world->events().events().size());
     }
 
-    if (test_case.scheduler == SchedulerMode::kRoundRobin) {
-        findings = CheckOrdering(world->events());
+    if (post_trace_hook_) {
+        post_trace_hook_(world);
     }
+    findings = CheckOrdering(world->events());
     return MakeResultFromStatus(CheckerStatus::Ok(), findings, mismatches,
                                 world->events().events().size());
 }
@@ -348,28 +313,47 @@ RunResult CollectiveExecutor::RunAllReduceSumInt32(RankWorld *world,
     }
 
     const size_t bytes = static_cast<size_t>(test_case.count) * sizeof(int32_t);
-    CheckerStatus exec_status = RunScheduledPhases(
-        test_case,
-        [&](int rank, int phase) -> CheckerStatus {
-            switch (phase) {
-                case 0:
-                    return AddCopyEvent(world, rank, bytes, "publish local input to comm-data");
-                case 1:
-                    return AddStoreEvents(world, test_case, rank);
-                case 2:
-                    return AddWaitEvents(world, test_case, rank);
-                case 3:
-                    return ExecuteAllReduceReadAndWrite(world, test_case, rank);
+    CheckerStatus exec_status = CheckerStatus::Ok();
+    switch (test_case.scheduler) {
+        case SchedulerMode::kSerial:
+            for (int rank = 0; rank < test_case.rank_size && exec_status.ok(); ++rank) {
+                exec_status =
+                    PublishInputToCommData(world, rank, bytes, "publish local input to comm-data");
             }
-            return CheckerStatus::Fail("invalid executor phase");
-        });
+            for (int rank = 0; rank < test_case.rank_size && exec_status.ok(); ++rank) {
+                exec_status = AddStoreEvents(world, test_case, rank);
+            }
+            for (int rank = 0; rank < test_case.rank_size && exec_status.ok(); ++rank) {
+                exec_status = AddWaitEvents(world, test_case, rank);
+            }
+            for (int rank = 0; rank < test_case.rank_size && exec_status.ok(); ++rank) {
+                exec_status = ExecuteAllReduceReadAndWrite(world, test_case, rank);
+            }
+            break;
+        case SchedulerMode::kRoundRobin:
+            for (int rank = 0; rank < test_case.rank_size && exec_status.ok(); ++rank) {
+                exec_status =
+                    PublishInputToCommData(world, rank, bytes, "publish local input to comm-data");
+            }
+            for (int rank = 0; rank < test_case.rank_size && exec_status.ok(); ++rank) {
+                exec_status = AddStoreEvents(world, test_case, rank);
+            }
+            for (int rank = 0; rank < test_case.rank_size && exec_status.ok(); ++rank) {
+                exec_status = AddWaitEvents(world, test_case, rank);
+            }
+            for (int rank = 0; rank < test_case.rank_size && exec_status.ok(); ++rank) {
+                exec_status = ExecuteAllReduceReadAndWrite(world, test_case, rank);
+            }
+            break;
+    }
     if (!exec_status.ok()) {
         return MakeResultFromStatus(exec_status, findings, mismatches, world->events().events().size());
     }
 
-    if (test_case.scheduler == SchedulerMode::kRoundRobin) {
-        findings = CheckOrdering(world->events());
+    if (post_trace_hook_) {
+        post_trace_hook_(world);
     }
+    findings = CheckOrdering(world->events());
     return MakeResultFromStatus(CheckerStatus::Ok(), findings, mismatches,
                                 world->events().events().size());
 }

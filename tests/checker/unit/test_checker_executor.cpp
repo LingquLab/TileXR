@@ -146,6 +146,21 @@ void InjectStaleMagicWait(tilexr::checker::RankWorld *world, int rank, int peer_
     world->events().Add(wait);
 }
 
+void InjectCommDataReadWithoutProducer(tilexr::checker::RankWorld *world, int rank, int owner_rank) {
+    tilexr::checker::Event event;
+    event.kind = tilexr::checker::EventKind::kRead;
+    event.rank = rank;
+    event.peer_rank = owner_rank;
+    event.buffer_role = tilexr::checker::BufferRole::kCommData;
+    event.slot = rank;
+    event.offset = 0;
+    event.bytes = sizeof(int32_t);
+    event.source_file = __FILE__;
+    event.source_line = __LINE__;
+    event.detail = "injected comm-data read without producer";
+    world->events().Add(event);
+}
+
 void TestAllGatherSerialPasses() {
     tilexr::checker::CheckerCase test_case =
         MakeAllGatherCase(2, 16, tilexr::checker::SchedulerMode::kSerial);
@@ -163,13 +178,13 @@ void TestAllGatherSerialPasses() {
     ExpectEqSize(events.size(), static_cast<size_t>(14), "allgather serial events size");
     if (events.size() >= 8) {
         ExpectEvent(events[0], tilexr::checker::EventKind::kCopy, 0, "serial event 0");
-        ExpectEvent(events[1], tilexr::checker::EventKind::kFlagStore, 0, "serial event 1");
-        ExpectEvent(events[2], tilexr::checker::EventKind::kFlagWait, 0, "serial event 2");
-        ExpectEvent(events[3], tilexr::checker::EventKind::kRead, 0, "serial event 3");
-        ExpectEvent(events[4], tilexr::checker::EventKind::kWrite, 0, "serial event 4");
-        ExpectEvent(events[5], tilexr::checker::EventKind::kRead, 0, "serial event 5");
-        ExpectEvent(events[6], tilexr::checker::EventKind::kWrite, 0, "serial event 6");
-        ExpectEvent(events[7], tilexr::checker::EventKind::kCopy, 1, "serial event 7");
+        ExpectEvent(events[1], tilexr::checker::EventKind::kCopy, 1, "serial event 1");
+        ExpectEvent(events[2], tilexr::checker::EventKind::kFlagStore, 0, "serial event 2");
+        ExpectEvent(events[3], tilexr::checker::EventKind::kFlagStore, 1, "serial event 3");
+        ExpectEvent(events[4], tilexr::checker::EventKind::kFlagWait, 0, "serial event 4");
+        ExpectEvent(events[5], tilexr::checker::EventKind::kFlagWait, 1, "serial event 5");
+        ExpectEvent(events[6], tilexr::checker::EventKind::kRead, 0, "serial event 6");
+        ExpectEvent(events[7], tilexr::checker::EventKind::kWrite, 0, "serial event 7");
     }
 }
 
@@ -224,16 +239,18 @@ void TestAllGatherSchedulersProduceDifferentOrders() {
     ExpectEqSize(serial_events.size(), static_cast<size_t>(14), "serial compare event count");
     ExpectEqSize(round_robin_events.size(), static_cast<size_t>(14), "round robin compare event count");
     if (serial_events.size() >= 8 && round_robin_events.size() >= 5) {
-        ExpectEvent(serial_events[7], tilexr::checker::EventKind::kCopy, 1,
-                    "serial rank 1 starts after rank 0 phases");
+        ExpectEvent(serial_events[10], tilexr::checker::EventKind::kRead, 1,
+                    "serial rank 1 starts reads after rank 0 reads");
         ExpectEvent(round_robin_events[0], tilexr::checker::EventKind::kCopy, 0,
                     "round robin first publish rank 0");
         ExpectEvent(round_robin_events[1], tilexr::checker::EventKind::kCopy, 1,
                     "round robin second publish rank 1");
         ExpectEvent(round_robin_events[2], tilexr::checker::EventKind::kFlagStore, 0,
                     "round robin stores begin after all publishes");
-        ExpectTrue(serial_events[1].kind != round_robin_events[1].kind,
-                   "scheduler orders differ by second event kind");
+        ExpectEvent(round_robin_events[8], tilexr::checker::EventKind::kRead, 1,
+                    "round robin interleaves rank 1 on peer 0 before rank 0 peer 1");
+        ExpectTrue(serial_events[8].rank != round_robin_events[8].rank,
+                   "scheduler orders differ in read phase rank order");
     }
 }
 
@@ -275,36 +292,55 @@ void TestUnsupportedDatatypeReturnsFinding() {
                "unsupported datatype finding kind");
 }
 
-void TestInjectedPeerUserReadProducesFinding() {
+void TestRunSerialReportsInjectedPeerUserReadFinding() {
     tilexr::checker::CheckerCase test_case =
         MakeAllGatherCase(2, 16, tilexr::checker::SchedulerMode::kSerial);
     tilexr::checker::RankWorld world = MakeWorld(test_case);
     tilexr::checker::CollectiveExecutor executor;
+    executor.SetPostTraceHookForTest(
+        [](tilexr::checker::RankWorld *hook_world) { InjectPeerUserRead(hook_world, 1, 0); });
 
     tilexr::checker::RunResult result = executor.Run(&world, test_case);
-    InjectPeerUserRead(&world, 1, 0);
-    tilexr::checker::FindingSet findings = tilexr::checker::CheckOrdering(world.events());
     ExpectEqInt(static_cast<int>(result.status.code),
-                static_cast<int>(tilexr::checker::CheckerStatusCode::kOk),
-                "baseline injected peer run ok");
-    ExpectTrue(HasFindingKind(findings, tilexr::checker::FindingKind::kDirectPeerUserBuffer),
-               "peer user read finding");
+                static_cast<int>(tilexr::checker::CheckerStatusCode::kFail),
+                "serial injected peer run fails");
+    ExpectTrue(HasFindingKind(result.findings,
+                              tilexr::checker::FindingKind::kDirectPeerUserBuffer),
+               "serial run reports peer user read finding");
 }
 
-void TestInjectedStaleMagicProducesFinding() {
+void TestRunSerialReportsInjectedStaleMagicFinding() {
     tilexr::checker::CheckerCase test_case =
         MakeAllReduceCase(tilexr::checker::SchedulerMode::kSerial);
     tilexr::checker::RankWorld world = MakeWorld(test_case);
     tilexr::checker::CollectiveExecutor executor;
+    executor.SetPostTraceHookForTest(
+        [](tilexr::checker::RankWorld *hook_world) { InjectStaleMagicWait(hook_world, 1, 0, 1); });
 
     tilexr::checker::RunResult result = executor.Run(&world, test_case);
-    InjectStaleMagicWait(&world, 1, 0, 1);
-    tilexr::checker::FindingSet findings = tilexr::checker::CheckOrdering(world.events());
     ExpectEqInt(static_cast<int>(result.status.code),
-                static_cast<int>(tilexr::checker::CheckerStatusCode::kOk),
-                "baseline injected stale run ok");
-    ExpectTrue(HasFindingKind(findings, tilexr::checker::FindingKind::kFlagStaleMagic),
-               "stale magic finding");
+                static_cast<int>(tilexr::checker::CheckerStatusCode::kFail),
+                "serial injected stale run fails");
+    ExpectTrue(HasFindingKind(result.findings, tilexr::checker::FindingKind::kFlagStaleMagic),
+               "serial run reports stale magic finding");
+}
+
+void TestRunSerialReportsInjectedReadBeforeCopyFinding() {
+    tilexr::checker::CheckerCase test_case =
+        MakeAllGatherCase(2, 16, tilexr::checker::SchedulerMode::kSerial);
+    tilexr::checker::RankWorld world = MakeWorld(test_case);
+    tilexr::checker::CollectiveExecutor executor;
+    executor.SetPostTraceHookForTest(
+        [](tilexr::checker::RankWorld *hook_world) {
+            InjectCommDataReadWithoutProducer(hook_world, 1, 0);
+        });
+
+    tilexr::checker::RunResult result = executor.Run(&world, test_case);
+    ExpectEqInt(static_cast<int>(result.status.code),
+                static_cast<int>(tilexr::checker::CheckerStatusCode::kFail),
+                "serial injected read-before-copy run fails");
+    ExpectTrue(HasFindingKind(result.findings, tilexr::checker::FindingKind::kReadBeforeCopy),
+               "serial run reports read-before-copy finding");
 }
 
 }  // namespace
@@ -315,7 +351,8 @@ int main() {
     TestAllGatherSchedulersProduceDifferentOrders();
     TestAllReducePassesForBothSchedulers();
     TestUnsupportedDatatypeReturnsFinding();
-    TestInjectedPeerUserReadProducesFinding();
-    TestInjectedStaleMagicProducesFinding();
+    TestRunSerialReportsInjectedPeerUserReadFinding();
+    TestRunSerialReportsInjectedStaleMagicFinding();
+    TestRunSerialReportsInjectedReadBeforeCopyFinding();
     return g_failures == 0 ? 0 : 1;
 }
