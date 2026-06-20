@@ -1,6 +1,7 @@
 #include "tilexr/checker/memory.h"
 
 #include <cstring>
+#include <limits>
 
 namespace tilexr {
 namespace checker {
@@ -10,6 +11,14 @@ namespace {
 CheckerStatus CheckRange(size_t total_size, size_t offset, size_t bytes) {
     if (offset > total_size || bytes > (total_size - offset)) {
         return CheckerStatus::Fail("byte buffer access out of bounds");
+    }
+    return CheckerStatus::Ok();
+}
+
+CheckerStatus CheckInt32Index(size_t index) {
+    const size_t int32_size = sizeof(int32_t);
+    if (index > std::numeric_limits<size_t>::max() / int32_size) {
+        return CheckerStatus::Fail("int32 buffer access index overflow");
     }
     return CheckerStatus::Ok();
 }
@@ -51,12 +60,20 @@ CheckerStatus ByteBuffer::ReadBytes(size_t offset, void *dst, size_t bytes) cons
 }
 
 CheckerStatus ByteBuffer::WriteInt32(size_t index, int32_t value) {
+    CheckerStatus status = CheckInt32Index(index);
+    if (!status.ok()) {
+        return status;
+    }
     return WriteBytes(index * sizeof(int32_t), &value, sizeof(int32_t));
 }
 
 CheckerStatus ByteBuffer::ReadInt32(size_t index, int32_t *value) const {
     if (value == nullptr) {
         return CheckerStatus::Fail("int32 destination is null");
+    }
+    CheckerStatus status = CheckInt32Index(index);
+    if (!status.ok()) {
+        return status;
     }
     return ReadBytes(index * sizeof(int32_t), value, sizeof(int32_t));
 }

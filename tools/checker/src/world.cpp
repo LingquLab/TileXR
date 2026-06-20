@@ -12,8 +12,7 @@ ByteBuffer MakeFlagBuffer() {
 }
 
 void InitializeRankArgs(std::vector<TileXR::CommArgs> *args,
-                        std::vector<std::vector<ByteBuffer> > *comm_data,
-                        std::vector<std::vector<ByteBuffer> > *comm_flags) {
+                        std::vector<std::vector<ByteBuffer> > *comm_data) {
     const int rank_size = static_cast<int>(args->size());
     for (int rank = 0; rank < rank_size; ++rank) {
         TileXR::CommArgs &arg = (*args)[rank];
@@ -61,7 +60,7 @@ RankWorld RankWorld::Create(int rank_size, size_t user_input_bytes,
         world.comm_flags_[rank] = flag_slots;
     }
 
-    InitializeRankArgs(&world.args_, &world.comm_data_, &world.comm_flags_);
+    InitializeRankArgs(&world.args_, &world.comm_data_);
     return world;
 }
 
