@@ -8,7 +8,7 @@ from tilexr_collective_sim.dsl import allgather_direct_algorithm
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--rank-count", type=int, default=4)
+    parser.add_argument("--rank-count", type=int, default=64)
     parser.add_argument("--message-bytes", type=int, default=1024)
     args = parser.parse_args()
 
