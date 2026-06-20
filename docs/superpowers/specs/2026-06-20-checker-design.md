@@ -1,4 +1,4 @@
-# TileXR Collective Checker Design
+# TileXR Checker Design
 
 ## Context
 
@@ -37,6 +37,8 @@ Feasibility checks found these constraints:
   and obvious deadlock patterns.
 - Represent Ascend C asynchronous semantics explicitly instead of replacing everything with synchronous host copies.
 - Produce structured findings with event and source evidence.
+- Provide fast, friendly problem localization for broken operators: a user should see the likely failure class, affected
+  rank/core/buffer, relevant source location, and next debugging action without reading raw traces first.
 - Leave extension points for EP dispatch, UDMA/SDMA models, hardware trace comparison, and later cannsim integration.
 
 ## Non-Goals
@@ -53,8 +55,8 @@ Feasibility checks found these constraints:
 Build a source-preserving, multi-rank checker under a new tool/test surface, for example:
 
 ```text
-tools/collective_checker/
-tests/collective_checker/
+tools/checker/
+tests/checker/
 ```
 
 The checker compiles selected production kernel sources through a checker-specific include path. That include path
@@ -107,6 +109,7 @@ Logical modules:
 - `scheduler/`: deterministic and adversarial interleavings across rank/core/lane events.
 - `collectives/`: AllGather and AllReduce SUM oracles, case generation, output comparison.
 - `ordering/`: happens-before graph, flag matching, lane constraints, deadlock checks.
+- `diagnostics/`: finding classification, source attribution, short failure summaries, and suggested next actions.
 - `report/`: JSON/CSV/HTML outputs, findings, evidence links.
 - `ep/`: reserved plugin namespace for later EP dispatch validation.
 
@@ -227,6 +230,65 @@ Ordering checks should report:
 - direct user-buffer cross-rank transfer
 - impossible or ambiguous flag matching
 
+## Fast Problem Localization
+
+The checker should be useful when an operator is wrong. It should not only print `PASS` or `FAIL`, and it should not
+force users to inspect raw event logs before seeing the likely root cause.
+
+Every failed run should produce a short first-screen summary:
+
+```text
+FAIL allgather rank_size=4 count=16 dtype=int32 scheduler=round_robin
+Top finding:
+  [READ_BEFORE_COPY] rank=2 core=0 buffer=comm_data[rank1]
+  peer_ipc_to_output read can run before producer copy completes.
+  Evidence: event e42 reads bytes 0..63; producer e17 has no HB edge to e42.
+  Source: src/collectives/kernels/kernels/lcal_allgather_big_data.cce:...
+  Next: check missing WaitFlag/PipeBarrier/queue synchronization before peer read.
+Artifacts:
+  findings.json
+  events.jsonl
+  summary.txt
+```
+
+Finding categories should be stable and grep-friendly:
+
+- `OUTPUT_MISMATCH`: final user output differs from the collective oracle.
+- `UNSUPPORTED_API`: shim coverage is missing for a used Ascend C or runtime API.
+- `READ_BEFORE_WRITE`: a buffer read has no completed producer.
+- `READ_BEFORE_COPY`: a consumer can observe a `DataCopy` result before the copy is synchronized.
+- `BUFFER_LIFETIME`: local buffer is reused or freed before all consumers complete.
+- `FLAG_NO_PRODUCER`: a wait has no possible matching flag store.
+- `FLAG_STALE_MAGIC`: wait/store magic does not match the current launch epoch.
+- `DEADLOCK`: all runnable ranks are blocked on unsatisfied waits.
+- `DIRECT_PEER_USER_BUFFER`: cross-rank access bypasses a communication buffer.
+- `AMBIGUOUS_SOURCE`: the checker found a problem but cannot attribute it precisely enough.
+
+Localization should combine dynamic event evidence and static source evidence:
+
+- Dynamic evidence: event ids, rank, core, lane, buffer id, byte range, expected value, actual value, and HB path.
+- Static evidence: source file, line, enclosing function or macro expansion when available.
+- Operator evidence: op, dtype, count, rank size, scheduler, seed, magic epoch, and `extraFlag`.
+- Suggested next action: one concise instruction such as checking a missing flag producer, adding a barrier in the real
+  algorithm, or adding checker shim coverage for an unsupported API.
+
+For output mismatches, the checker should report the smallest useful diff, not a full tensor dump:
+
+- rank and output index
+- expected symbolic value and actual symbolic value
+- producing rank/chunk if known
+- last writer event for that byte range
+- nearest missing or suspicious HB edge when available
+
+For deadlocks, the checker should report the wait cycle:
+
+- blocked ranks and cores
+- wait condition for each blocked execution context
+- expected flag or producer event
+- current magic epoch and observed flag value
+
+The HTML report is optional post-MVP, but the text and JSON diagnostics are MVP requirements.
+
 ## Functional Oracles
 
 The first collective oracles:
@@ -264,7 +326,7 @@ MVP cases:
 - AllReduce SUM INT32, `rankSize=2`, small counts.
 - Schedule modes: `serial` and `round_robin`.
 - Findings for missing flag producer, stale magic, read-before-copy, and direct peer access without comm buffer.
-- JSON reports plus a text summary.
+- JSON reports plus a text summary with top finding and suggested next action.
 
 MVP compile/runtime gates:
 
@@ -273,6 +335,7 @@ MVP compile/runtime gates:
 - Unit tests for fake `CommArgs`, fake IPC layout, and magic ping-pong selection.
 - Unit tests for DataCopy/DataCopyPad event recording and synchronization edges.
 - Unit tests for flag publish/wait matching.
+- Unit tests for diagnostic classification and first-screen summaries for representative failures.
 
 Post-MVP:
 
@@ -351,16 +414,20 @@ Recommended `checker_report.json` fields:
 - `hb_edges`: edge counts by type
 - `findings`: finding references by severity
 - `result`: pass, fail, unsupported, or inconclusive
+- `top_finding`: the highest-priority finding id for first-screen display
 
 Each finding should include:
 
+- `finding_id`
 - `severity`
 - `check_id`
 - `message`
 - `rank`, `core`, and event ids when known
+- buffer id and byte range when known
 - source file and line when statically attributable
 - shortest relevant happens-before path or wait cycle
 - suggested next action
+- confidence: `high`, `medium`, or `low`
 
 The first HTML report can wait until after the JSON/text report is useful. When added, it should clearly label event
 sources as `static_inferred`, `stubbed_runtime`, `simulator_event`, or `measured_aggregate`.
@@ -387,6 +454,8 @@ Tests should be layered:
 - Negative tests that inject missing flag producers, stale magic, read-before-copy, and direct user-buffer peer access.
 - Compile-only tests for checker include shims against selected collective kernel headers.
 - End-to-end checker cases for AllGather and AllReduce SUM.
+- Golden-output tests for `summary.txt` and representative `findings.json` entries, so diagnostics stay friendly and
+  stable over time.
 - Source guard tests ensuring production kernel files are not modified for checker-specific branches.
 
 When hardware is available later, real collectives tests remain separate validation gates. The checker is a no-NPU
@@ -401,6 +470,8 @@ preflight, not a replacement for real hardware correctness and performance runs.
 - Matching original host/API input while avoiding real ACL runtime may require a fake host API layer or a checker-only
   adapter around existing public APIs.
 - Large kernels may instantiate many templates or macros, so compile time and diagnostic quality matter.
+- Source attribution may be imprecise when the failure comes from a macro-heavy include chain. Low-confidence findings
+  must say so and still provide the nearest event and source evidence.
 - AllReduce arithmetic for non-INT32 types needs explicit precision rules before it becomes a correctness target.
 
 ## Approval Criteria
@@ -411,5 +482,6 @@ The design is ready to implement when the following are accepted:
 - Production operator sources remain unmodified for checker support.
 - Header/runtime stubbing is allowed.
 - CANN CPU-domain twin debugging is optional, not a dependency.
+- Failed checks produce fast, friendly diagnostics with a top finding and next action.
 - MVP starts with AllGather and AllReduce SUM, not EP.
 - EP is reserved through plugin-friendly schemas and shared core abstractions.
