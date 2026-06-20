@@ -1,0 +1,561 @@
+{
+  "name": "direct_allgather",
+  "collective": "allgather",
+  "rank_count": 4,
+  "buffers": [
+    {
+      "id": "r0_in",
+      "rank": 0,
+      "role": "user_input",
+      "chunks": [
+        "rank0.chunk0"
+      ]
+    },
+    {
+      "id": "r0_out",
+      "rank": 0,
+      "role": "user_output",
+      "chunks": []
+    },
+    {
+      "id": "r0_comm_from_0",
+      "rank": 0,
+      "role": "comm_buffer",
+      "chunks": []
+    },
+    {
+      "id": "r0_comm_from_1",
+      "rank": 0,
+      "role": "comm_buffer",
+      "chunks": []
+    },
+    {
+      "id": "r0_comm_from_2",
+      "rank": 0,
+      "role": "comm_buffer",
+      "chunks": []
+    },
+    {
+      "id": "r0_comm_from_3",
+      "rank": 0,
+      "role": "comm_buffer",
+      "chunks": []
+    },
+    {
+      "id": "r1_in",
+      "rank": 1,
+      "role": "user_input",
+      "chunks": [
+        "rank1.chunk0"
+      ]
+    },
+    {
+      "id": "r1_out",
+      "rank": 1,
+      "role": "user_output",
+      "chunks": []
+    },
+    {
+      "id": "r1_comm_from_0",
+      "rank": 1,
+      "role": "comm_buffer",
+      "chunks": []
+    },
+    {
+      "id": "r1_comm_from_1",
+      "rank": 1,
+      "role": "comm_buffer",
+      "chunks": []
+    },
+    {
+      "id": "r1_comm_from_2",
+      "rank": 1,
+      "role": "comm_buffer",
+      "chunks": []
+    },
+    {
+      "id": "r1_comm_from_3",
+      "rank": 1,
+      "role": "comm_buffer",
+      "chunks": []
+    },
+    {
+      "id": "r2_in",
+      "rank": 2,
+      "role": "user_input",
+      "chunks": [
+        "rank2.chunk0"
+      ]
+    },
+    {
+      "id": "r2_out",
+      "rank": 2,
+      "role": "user_output",
+      "chunks": []
+    },
+    {
+      "id": "r2_comm_from_0",
+      "rank": 2,
+      "role": "comm_buffer",
+      "chunks": []
+    },
+    {
+      "id": "r2_comm_from_1",
+      "rank": 2,
+      "role": "comm_buffer",
+      "chunks": []
+    },
+    {
+      "id": "r2_comm_from_2",
+      "rank": 2,
+      "role": "comm_buffer",
+      "chunks": []
+    },
+    {
+      "id": "r2_comm_from_3",
+      "rank": 2,
+      "role": "comm_buffer",
+      "chunks": []
+    },
+    {
+      "id": "r3_in",
+      "rank": 3,
+      "role": "user_input",
+      "chunks": [
+        "rank3.chunk0"
+      ]
+    },
+    {
+      "id": "r3_out",
+      "rank": 3,
+      "role": "user_output",
+      "chunks": []
+    },
+    {
+      "id": "r3_comm_from_0",
+      "rank": 3,
+      "role": "comm_buffer",
+      "chunks": []
+    },
+    {
+      "id": "r3_comm_from_1",
+      "rank": 3,
+      "role": "comm_buffer",
+      "chunks": []
+    },
+    {
+      "id": "r3_comm_from_2",
+      "rank": 3,
+      "role": "comm_buffer",
+      "chunks": []
+    },
+    {
+      "id": "r3_comm_from_3",
+      "rank": 3,
+      "role": "comm_buffer",
+      "chunks": []
+    }
+  ],
+  "ops": [
+    {
+      "id": "copy_in_r0",
+      "type": "copy",
+      "rank": 0,
+      "bytes": 1024,
+      "src_buffer": "r0_in",
+      "dst_buffer": "r0_comm_from_0",
+      "mode": "sdma"
+    },
+    {
+      "id": "copy_in_r1",
+      "type": "copy",
+      "rank": 1,
+      "bytes": 1024,
+      "src_buffer": "r1_in",
+      "dst_buffer": "r1_comm_from_1",
+      "mode": "sdma"
+    },
+    {
+      "id": "copy_in_r2",
+      "type": "copy",
+      "rank": 2,
+      "bytes": 1024,
+      "src_buffer": "r2_in",
+      "dst_buffer": "r2_comm_from_2",
+      "mode": "sdma"
+    },
+    {
+      "id": "copy_in_r3",
+      "type": "copy",
+      "rank": 3,
+      "bytes": 1024,
+      "src_buffer": "r3_in",
+      "dst_buffer": "r3_comm_from_3",
+      "mode": "sdma"
+    },
+    {
+      "id": "send_r0_to_r1",
+      "type": "send",
+      "rank": 0,
+      "bytes": 1024,
+      "src_rank": 0,
+      "dst_rank": 1,
+      "src_buffer": "r0_comm_from_0",
+      "dst_buffer": "r1_comm_from_0",
+      "deps": [
+        "copy_in_r0"
+      ],
+      "mode": "datacopy"
+    },
+    {
+      "id": "send_r0_to_r2",
+      "type": "send",
+      "rank": 0,
+      "bytes": 1024,
+      "src_rank": 0,
+      "dst_rank": 2,
+      "src_buffer": "r0_comm_from_0",
+      "dst_buffer": "r2_comm_from_0",
+      "deps": [
+        "copy_in_r0"
+      ],
+      "mode": "datacopy"
+    },
+    {
+      "id": "send_r0_to_r3",
+      "type": "send",
+      "rank": 0,
+      "bytes": 1024,
+      "src_rank": 0,
+      "dst_rank": 3,
+      "src_buffer": "r0_comm_from_0",
+      "dst_buffer": "r3_comm_from_0",
+      "deps": [
+        "copy_in_r0"
+      ],
+      "mode": "datacopy"
+    },
+    {
+      "id": "send_r1_to_r0",
+      "type": "send",
+      "rank": 1,
+      "bytes": 1024,
+      "src_rank": 1,
+      "dst_rank": 0,
+      "src_buffer": "r1_comm_from_1",
+      "dst_buffer": "r0_comm_from_1",
+      "deps": [
+        "copy_in_r1"
+      ],
+      "mode": "datacopy"
+    },
+    {
+      "id": "send_r1_to_r2",
+      "type": "send",
+      "rank": 1,
+      "bytes": 1024,
+      "src_rank": 1,
+      "dst_rank": 2,
+      "src_buffer": "r1_comm_from_1",
+      "dst_buffer": "r2_comm_from_1",
+      "deps": [
+        "copy_in_r1"
+      ],
+      "mode": "datacopy"
+    },
+    {
+      "id": "send_r1_to_r3",
+      "type": "send",
+      "rank": 1,
+      "bytes": 1024,
+      "src_rank": 1,
+      "dst_rank": 3,
+      "src_buffer": "r1_comm_from_1",
+      "dst_buffer": "r3_comm_from_1",
+      "deps": [
+        "copy_in_r1"
+      ],
+      "mode": "datacopy"
+    },
+    {
+      "id": "send_r2_to_r0",
+      "type": "send",
+      "rank": 2,
+      "bytes": 1024,
+      "src_rank": 2,
+      "dst_rank": 0,
+      "src_buffer": "r2_comm_from_2",
+      "dst_buffer": "r0_comm_from_2",
+      "deps": [
+        "copy_in_r2"
+      ],
+      "mode": "datacopy"
+    },
+    {
+      "id": "send_r2_to_r1",
+      "type": "send",
+      "rank": 2,
+      "bytes": 1024,
+      "src_rank": 2,
+      "dst_rank": 1,
+      "src_buffer": "r2_comm_from_2",
+      "dst_buffer": "r1_comm_from_2",
+      "deps": [
+        "copy_in_r2"
+      ],
+      "mode": "datacopy"
+    },
+    {
+      "id": "send_r2_to_r3",
+      "type": "send",
+      "rank": 2,
+      "bytes": 1024,
+      "src_rank": 2,
+      "dst_rank": 3,
+      "src_buffer": "r2_comm_from_2",
+      "dst_buffer": "r3_comm_from_2",
+      "deps": [
+        "copy_in_r2"
+      ],
+      "mode": "datacopy"
+    },
+    {
+      "id": "send_r3_to_r0",
+      "type": "send",
+      "rank": 3,
+      "bytes": 1024,
+      "src_rank": 3,
+      "dst_rank": 0,
+      "src_buffer": "r3_comm_from_3",
+      "dst_buffer": "r0_comm_from_3",
+      "deps": [
+        "copy_in_r3"
+      ],
+      "mode": "datacopy"
+    },
+    {
+      "id": "send_r3_to_r1",
+      "type": "send",
+      "rank": 3,
+      "bytes": 1024,
+      "src_rank": 3,
+      "dst_rank": 1,
+      "src_buffer": "r3_comm_from_3",
+      "dst_buffer": "r1_comm_from_3",
+      "deps": [
+        "copy_in_r3"
+      ],
+      "mode": "datacopy"
+    },
+    {
+      "id": "send_r3_to_r2",
+      "type": "send",
+      "rank": 3,
+      "bytes": 1024,
+      "src_rank": 3,
+      "dst_rank": 2,
+      "src_buffer": "r3_comm_from_3",
+      "dst_buffer": "r2_comm_from_3",
+      "deps": [
+        "copy_in_r3"
+      ],
+      "mode": "datacopy"
+    },
+    {
+      "id": "copy_out_r0_from_0",
+      "type": "copy",
+      "rank": 0,
+      "bytes": 1024,
+      "src_buffer": "r0_comm_from_0",
+      "dst_buffer": "r0_out",
+      "deps": [
+        "copy_in_r0"
+      ],
+      "mode": "sdma"
+    },
+    {
+      "id": "copy_out_r0_from_1",
+      "type": "copy",
+      "rank": 0,
+      "bytes": 1024,
+      "src_buffer": "r0_comm_from_1",
+      "dst_buffer": "r0_out",
+      "deps": [
+        "send_r1_to_r0"
+      ],
+      "mode": "sdma"
+    },
+    {
+      "id": "copy_out_r0_from_2",
+      "type": "copy",
+      "rank": 0,
+      "bytes": 1024,
+      "src_buffer": "r0_comm_from_2",
+      "dst_buffer": "r0_out",
+      "deps": [
+        "send_r2_to_r0"
+      ],
+      "mode": "sdma"
+    },
+    {
+      "id": "copy_out_r0_from_3",
+      "type": "copy",
+      "rank": 0,
+      "bytes": 1024,
+      "src_buffer": "r0_comm_from_3",
+      "dst_buffer": "r0_out",
+      "deps": [
+        "send_r3_to_r0"
+      ],
+      "mode": "sdma"
+    },
+    {
+      "id": "copy_out_r1_from_0",
+      "type": "copy",
+      "rank": 1,
+      "bytes": 1024,
+      "src_buffer": "r1_comm_from_0",
+      "dst_buffer": "r1_out",
+      "deps": [
+        "send_r0_to_r1"
+      ],
+      "mode": "sdma"
+    },
+    {
+      "id": "copy_out_r1_from_1",
+      "type": "copy",
+      "rank": 1,
+      "bytes": 1024,
+      "src_buffer": "r1_comm_from_1",
+      "dst_buffer": "r1_out",
+      "deps": [
+        "copy_in_r1"
+      ],
+      "mode": "sdma"
+    },
+    {
+      "id": "copy_out_r1_from_2",
+      "type": "copy",
+      "rank": 1,
+      "bytes": 1024,
+      "src_buffer": "r1_comm_from_2",
+      "dst_buffer": "r1_out",
+      "deps": [
+        "send_r2_to_r1"
+      ],
+      "mode": "sdma"
+    },
+    {
+      "id": "copy_out_r1_from_3",
+      "type": "copy",
+      "rank": 1,
+      "bytes": 1024,
+      "src_buffer": "r1_comm_from_3",
+      "dst_buffer": "r1_out",
+      "deps": [
+        "send_r3_to_r1"
+      ],
+      "mode": "sdma"
+    },
+    {
+      "id": "copy_out_r2_from_0",
+      "type": "copy",
+      "rank": 2,
+      "bytes": 1024,
+      "src_buffer": "r2_comm_from_0",
+      "dst_buffer": "r2_out",
+      "deps": [
+        "send_r0_to_r2"
+      ],
+      "mode": "sdma"
+    },
+    {
+      "id": "copy_out_r2_from_1",
+      "type": "copy",
+      "rank": 2,
+      "bytes": 1024,
+      "src_buffer": "r2_comm_from_1",
+      "dst_buffer": "r2_out",
+      "deps": [
+        "send_r1_to_r2"
+      ],
+      "mode": "sdma"
+    },
+    {
+      "id": "copy_out_r2_from_2",
+      "type": "copy",
+      "rank": 2,
+      "bytes": 1024,
+      "src_buffer": "r2_comm_from_2",
+      "dst_buffer": "r2_out",
+      "deps": [
+        "copy_in_r2"
+      ],
+      "mode": "sdma"
+    },
+    {
+      "id": "copy_out_r2_from_3",
+      "type": "copy",
+      "rank": 2,
+      "bytes": 1024,
+      "src_buffer": "r2_comm_from_3",
+      "dst_buffer": "r2_out",
+      "deps": [
+        "send_r3_to_r2"
+      ],
+      "mode": "sdma"
+    },
+    {
+      "id": "copy_out_r3_from_0",
+      "type": "copy",
+      "rank": 3,
+      "bytes": 1024,
+      "src_buffer": "r3_comm_from_0",
+      "dst_buffer": "r3_out",
+      "deps": [
+        "send_r0_to_r3"
+      ],
+      "mode": "sdma"
+    },
+    {
+      "id": "copy_out_r3_from_1",
+      "type": "copy",
+      "rank": 3,
+      "bytes": 1024,
+      "src_buffer": "r3_comm_from_1",
+      "dst_buffer": "r3_out",
+      "deps": [
+        "send_r1_to_r3"
+      ],
+      "mode": "sdma"
+    },
+    {
+      "id": "copy_out_r3_from_2",
+      "type": "copy",
+      "rank": 3,
+      "bytes": 1024,
+      "src_buffer": "r3_comm_from_2",
+      "dst_buffer": "r3_out",
+      "deps": [
+        "send_r2_to_r3"
+      ],
+      "mode": "sdma"
+    },
+    {
+      "id": "copy_out_r3_from_3",
+      "type": "copy",
+      "rank": 3,
+      "bytes": 1024,
+      "src_buffer": "r3_comm_from_3",
+      "dst_buffer": "r3_out",
+      "deps": [
+        "copy_in_r3"
+      ],
+      "mode": "sdma"
+    }
+  ],
+  "metadata": {
+    "chunk_bytes": 1024,
+    "description": "direct all-to-all AllGather over communication buffers"
+  }
+}
