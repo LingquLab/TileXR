@@ -34,7 +34,8 @@ The run and sweep commands write:
 - `results.json`
 - `summary.csv`
 - `report.html`: lightweight algorithm-selection index with rank/card navigation
-- `rank_reports/rank_XXX.html`: per-rank interactive congestion timeline files
+- `rank_reports/rank_XXX.html`: per-rank Perfetto UI entry pages
+- `rank_traces/rank_XXX.trace.json`: Perfetto-compatible Chrome JSON traces with send-only slices owned by that rank/card
 
 ## Sweep Schema
 

@@ -3,7 +3,7 @@ import html
 import json
 import re
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping, Optional, Sequence, Tuple
 
 from .model import SimulationResult, dataclass_to_plain
 
@@ -20,6 +20,8 @@ SUMMARY_FIELDS = (
     "data_source",
     "validation_ok",
 )
+
+PERFETTO_UI_URL = "https://ui.perfetto.dev/"
 
 
 def write_result(result: SimulationResult, out_dir: Path) -> None:
@@ -75,13 +77,20 @@ def write_report_bundle_from_plain(result_data: Any, out: Path) -> None:
     items = _as_result_items(result_data)
     index_path = _index_path(out)
     rank_dir = index_path.parent / "rank_reports"
+    trace_dir = index_path.parent / "rank_traces"
     index_path.parent.mkdir(parents=True, exist_ok=True)
     rank_dir.mkdir(parents=True, exist_ok=True)
+    trace_dir.mkdir(parents=True, exist_ok=True)
     index_path.write_text(_render_index_html(items, rank_report_prefix="rank_reports"), encoding="utf-8")
     back_href = f"../{index_path.name}"
     for rank in _rank_ids(items):
         rank_path = rank_dir / f"rank_{rank:03d}.html"
-        rank_path.write_text(_render_rank_html(items, rank, back_href), encoding="utf-8")
+        trace_path = trace_dir / f"rank_{rank:03d}.trace.json"
+        trace_path.write_text(json.dumps(_rank_trace_payload(items, rank), indent=2) + "\n", encoding="utf-8")
+        rank_path.write_text(
+            _render_rank_html(items, rank, back_href, f"../rank_traces/{trace_path.name}"),
+            encoding="utf-8",
+        )
 
 
 def _as_result_items(result_data: Any) -> Sequence[Mapping[str, Any]]:
@@ -214,7 +223,7 @@ def _render_rank_navigation(results: Sequence[Mapping[str, Any]], rank_report_pr
         "    </select>\n"
         "    <button type=\"button\" onclick=\"openSelectedRank()\">Open</button>\n"
         "  </div>\n"
-        "  <p class=\"muted\">Per-rank files contain the detailed congestion drilldown and timeline.</p>\n"
+        "  <p class=\"muted\">Per-rank files link to Perfetto-compatible send timelines and trace JSON.</p>\n"
         "  <div class=\"rank-links\">\n"
         f"{chr(10).join(links)}\n"
         "  </div>\n"
@@ -227,9 +236,8 @@ def _render_rank_navigation(results: Sequence[Mapping[str, Any]], rank_report_pr
     )
 
 
-def _render_rank_html(results: Sequence[Mapping[str, Any]], rank: int, back_href: str) -> str:
-    payload = _rank_payload(results, rank)
-    title = f"TileXR Rank {rank} Timeline"
+def _render_rank_html(results: Sequence[Mapping[str, Any]], rank: int, back_href: str, trace_href: str) -> str:
+    title = f"TileXR Rank {rank} Perfetto Trace"
     return (
         "<!doctype html>\n"
         "<html>\n"
@@ -238,124 +246,189 @@ def _render_rank_html(results: Sequence[Mapping[str, Any]], rank: int, back_href
         f"  <title>{_escape(title)}</title>\n"
         "  <style>\n"
         "    body { font-family: Arial, sans-serif; margin: 24px; color: #222; }\n"
-        "    .toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin: 12px 0; }\n"
-        "    select, input, label { font: inherit; }\n"
-        "    #timelineWrap { overflow-x: auto; border: 1px solid #d0d7de; margin: 12px 0 20px; }\n"
-        "    #timelineSvg { min-width: 900px; display: block; background: #fff; }\n"
         "    table { border-collapse: collapse; width: 100%; margin: 12px 0 28px; }\n"
         "    th, td { border: 1px solid #ccc; padding: 6px 8px; text-align: left; }\n"
         "    th { background: #f2f4f7; }\n"
         "    .muted { color: #666; }\n"
-        "    .metric { display: inline-block; margin-right: 16px; }\n"
-        "    .detail { border: 1px solid #d0d7de; background: #f8fafc; padding: 10px 12px; margin: 12px 0; }\n"
-        "    .selectedRow { background: #fff3cd; }\n"
-        "    rect.eventBar { cursor: pointer; }\n"
-        "    rect.selectedBar { stroke: #111827; stroke-width: 2; }\n"
+        "    .links { display: flex; flex-wrap: wrap; gap: 12px; margin: 16px 0 24px; }\n"
+        "    .links a { border: 1px solid #d0d7de; color: #0969da; padding: 7px 10px; text-decoration: none; }\n"
+        "    .links a:hover { background: #f6f8fa; }\n"
         "  </style>\n"
         "</head>\n"
         "<body>\n"
-        f"  <h1>Rank/Card {rank} Timeline</h1>\n"
+        f"  <h1>Rank/Card {rank} Perfetto Trace</h1>\n"
         f"  <p><a href=\"{_escape(back_href)}\">Back to report</a></p>\n"
-        "  <div class=\"toolbar\">\n"
-        "    <label for=\"resultSelect\">Result</label>\n"
-        "    <select id=\"resultSelect\"></select>\n"
-        "    <label for=\"zoomRange\">Zoom</label>\n"
-        "    <input id=\"zoomRange\" type=\"range\" min=\"1\" max=\"8\" value=\"2\">\n"
-        "    <label><input type=\"checkbox\" class=\"opFilter\" value=\"copy\" checked> copy</label>\n"
-        "    <label><input type=\"checkbox\" class=\"opFilter\" value=\"send\" checked> send</label>\n"
-        "    <label><input type=\"checkbox\" class=\"opFilter\" value=\"recv\" checked> recv</label>\n"
-        "    <label><input type=\"checkbox\" class=\"opFilter\" value=\"put\" checked> put</label>\n"
-        "    <label><input type=\"checkbox\" class=\"opFilter\" value=\"get\" checked> get</label>\n"
+        "  <p class=\"muted\">Only send events owned by this rank/card are exported. "
+        "Open the trace in Perfetto UI and select a slice to inspect its event arguments.</p>\n"
+        "  <div class=\"links\">\n"
+        f"    <a href=\"{_escape(trace_href)}\">Trace JSON</a>\n"
+        f"    <a href=\"{_escape(PERFETTO_UI_URL)}\" target=\"_blank\" rel=\"noopener\">Open Perfetto UI</a>\n"
         "  </div>\n"
-        "  <div id=\"summary\"></div>\n"
-        "  <div id=\"eventDetail\" class=\"detail muted\">Click a timeline bar or table row to inspect an event.</div>\n"
-        "  <div id=\"timelineWrap\"><svg id=\"timelineSvg\" role=\"img\"></svg></div>\n"
-        "  <table>\n"
-        "    <thead><tr><th>op</th><th>type</th><th>owner_rank</th><th>start_us</th>"
-        "<th>end_us</th><th>wait_us</th><th>transfer_us</th><th>effective_gbps</th>"
-        "<th>bottleneck</th><th>resources</th></tr></thead>\n"
-        "    <tbody id=\"eventRows\"></tbody>\n"
-        "  </table>\n"
-        f"  <script id=\"timeline-data\" type=\"application/json\">{_json_script(payload)}</script>\n"
-        "  <script>\n"
-        "    const payload = JSON.parse(document.getElementById('timeline-data').textContent);\n"
-        "    const resultSelect = document.getElementById('resultSelect');\n"
-        "    const zoomRange = document.getElementById('zoomRange');\n"
-        "    const timelineSvg = document.getElementById('timelineSvg');\n"
-        "    const eventRows = document.getElementById('eventRows');\n"
-        "    const summary = document.getElementById('summary');\n"
-        "    const eventDetail = document.getElementById('eventDetail');\n"
-        "    let visibleEvents = [];\n"
-        "    let selectedEventId = '';\n"
-        "    const colors = { copy: '#5b8def', send: '#d95f02', recv: '#1b9e77', put: '#7570b3', get: '#e7298a' };\n"
-        "    function fmt(value) { return Number(value || 0).toFixed(3); }\n"
-        "    function esc(value) { return String(value == null ? '' : value).replace(/[&<>\\\"]/g, function(ch) { return {'&':'&amp;','<':'&lt;','>':'&gt;','\\\"':'&quot;'}[ch]; }); }\n"
-        "    function checkedOps() { return new Set(Array.from(document.querySelectorAll('.opFilter')).filter(function(item) { return item.checked; }).map(function(item) { return item.value; })); }\n"
-        "    function selectedResult() { return payload.results[Number(resultSelect.value || 0)] || {events: []}; }\n"
-        "    function eventKey(event) { return event.op_id + ':' + event.rank + ':' + event.start_us + ':' + event.end_us; }\n"
-        "    function lanesForEvents(events) { const set = new Set(); events.forEach(function(event) { (event.resources || ['none']).forEach(function(resource) { set.add(resource); }); }); return Array.from(set).sort(); }\n"
-        "    function selectEvent(key) {\n"
-        "      selectedEventId = key;\n"
-        "      const event = visibleEvents.find(function(item) { return eventKey(item) === key; });\n"
-        "      document.querySelectorAll('[data-event-id]').forEach(function(node) { node.classList.toggle(node.tagName.toLowerCase() === 'rect' ? 'selectedBar' : 'selectedRow', node.getAttribute('data-event-id') === key); });\n"
-        "      if (!event) { eventDetail.className = 'detail muted'; eventDetail.textContent = 'Click a timeline bar or table row to inspect an event.'; return; }\n"
-        "      eventDetail.className = 'detail';\n"
-        "      eventDetail.innerHTML = '<strong>' + esc(event.op_id) + '</strong>' +\n"
-        "        '<div>type: ' + esc(event.op_type) + ' | owner_rank: ' + esc(event.rank) + ' | bytes: ' + esc(event.message_bytes) + '</div>' +\n"
-        "        '<div>start_us: ' + fmt(event.start_us) + ' | end_us: ' + fmt(event.end_us) + ' | wait_us: ' + fmt(event.wait_us) + ' | transfer_us: ' + fmt(event.transfer_us) + '</div>' +\n"
-        "        '<div>effective_gbps: ' + fmt(event.effective_gbps) + ' | bottleneck: ' + esc(event.bottleneck_resource) + '</div>' +\n"
-        "        '<div>resources: ' + esc((event.resources || []).join(', ')) + '</div>';\n"
-        "    }\n"
-        "    function draw() {\n"
-        "      const result = selectedResult();\n"
-        "      const ops = checkedOps();\n"
-        "      const events = result.events.filter(function(event) { return ops.has(event.op_type); });\n"
-        "      visibleEvents = events;\n"
-        "      const lanes = lanesForEvents(events);\n"
-        "      const maxEnd = Math.max(1, ...events.map(function(event) { return Number(event.end_us || 0); }));\n"
-        "      const zoom = Number(zoomRange.value || 1);\n"
-        "      const width = 900 * zoom;\n"
-        "      const rowHeight = 28;\n"
-        "      const height = Math.max(80, 36 + lanes.length * rowHeight);\n"
-        "      timelineSvg.setAttribute('width', String(width));\n"
-        "      timelineSvg.setAttribute('height', String(height));\n"
-        "      timelineSvg.innerHTML = '';\n"
-        "      const ns = 'http://www.w3.org/2000/svg';\n"
-        "      function svgEl(name) { return document.createElementNS(ns, name); }\n"
-        "      const axis = svgEl('line'); axis.setAttribute('x1', '90'); axis.setAttribute('x2', String(width - 20)); axis.setAttribute('y1', '22'); axis.setAttribute('y2', '22'); axis.setAttribute('stroke', '#8c959f'); timelineSvg.appendChild(axis);\n"
-        "      lanes.forEach(function(lane, index) {\n"
-        "        const y = 36 + index * rowHeight;\n"
-        "        const label = svgEl('text'); label.setAttribute('x', '8'); label.setAttribute('y', String(y + 13)); label.setAttribute('font-size', '11'); label.textContent = lane.length > 18 ? lane.slice(0, 17) + '...' : lane; label.appendChild(svgEl('title')).textContent = lane; timelineSvg.appendChild(label);\n"
-        "        const guide = svgEl('line'); guide.setAttribute('x1', '90'); guide.setAttribute('x2', String(width - 20)); guide.setAttribute('y1', String(y + 7)); guide.setAttribute('y2', String(y + 7)); guide.setAttribute('stroke', '#eef2f7'); timelineSvg.appendChild(guide);\n"
-        "      });\n"
-        "      const laneEventCounts = {};\n"
-        "      events.forEach(function(event) {\n"
-        "        const key = eventKey(event);\n"
-        "        (event.resources || ['none']).forEach(function(lane) {\n"
-        "          const laneIndex = lanes.indexOf(lane);\n"
-        "          if (laneIndex < 0) return;\n"
-        "          const slot = laneEventCounts[lane] || 0;\n"
-        "          laneEventCounts[lane] = slot + 1;\n"
-        "          const y = 36 + laneIndex * rowHeight;\n"
-        "          const x = 90 + Number(event.start_us || 0) / maxEnd * (width - 130);\n"
-        "          const w = Math.max(2, (Number(event.end_us || 0) - Number(event.start_us || 0)) / maxEnd * (width - 130));\n"
-        "          const rect = svgEl('rect'); rect.setAttribute('class', 'eventBar' + (key === selectedEventId ? ' selectedBar' : '')); rect.setAttribute('data-event-id', key); rect.setAttribute('x', String(x)); rect.setAttribute('y', String(y + (slot % 3) * 5)); rect.setAttribute('width', String(w)); rect.setAttribute('height', '5'); rect.setAttribute('rx', '2'); rect.setAttribute('fill', colors[event.op_type] || '#586069'); rect.setAttribute('opacity', '0.82'); rect.addEventListener('click', function() { selectEvent(key); }); rect.appendChild(svgEl('title')).textContent = lane + ' | ' + event.op_id + ' | ' + fmt(event.start_us) + '-' + fmt(event.end_us) + ' us'; timelineSvg.appendChild(rect);\n"
-        "        });\n"
-        "      });\n"
-        "      summary.innerHTML = '<span class=\"metric\">events: ' + events.length + '</span><span class=\"metric\">lanes: ' + lanes.length + '</span><span class=\"metric\">latency_us: ' + fmt(result.latency_us) + '</span><span class=\"metric\">message_bytes: ' + esc(result.message_bytes) + '</span>';\n"
-        "      eventRows.innerHTML = events.map(function(event) { const key = eventKey(event); return '<tr data-event-id=\"' + esc(key) + '\"><td>' + esc(event.op_id) + '</td><td>' + esc(event.op_type) + '</td><td>' + esc(event.rank) + '</td><td>' + fmt(event.start_us) + '</td><td>' + fmt(event.end_us) + '</td><td>' + fmt(event.wait_us) + '</td><td>' + fmt(event.transfer_us) + '</td><td>' + fmt(event.effective_gbps) + '</td><td>' + esc(event.bottleneck_resource) + '</td><td>' + esc((event.resources || []).join(', ')) + '</td></tr>'; }).join('') || '<tr><td colspan=\"10\" class=\"muted\">No events for this filter</td></tr>';\n"
-        "      eventRows.querySelectorAll('tr[data-event-id]').forEach(function(row) { row.addEventListener('click', function() { selectEvent(row.getAttribute('data-event-id') || ''); }); });\n"
-        "      if (selectedEventId && events.some(function(event) { return eventKey(event) === selectedEventId; })) selectEvent(selectedEventId); else selectEvent('');\n"
-        "    }\n"
-        "    payload.results.forEach(function(result, index) { const option = document.createElement('option'); option.value = String(index); option.textContent = result.label; resultSelect.appendChild(option); });\n"
-        "    resultSelect.addEventListener('change', draw);\n"
-        "    zoomRange.addEventListener('input', draw);\n"
-        "    document.querySelectorAll('.opFilter').forEach(function(item) { item.addEventListener('change', draw); });\n"
-        "    draw();\n"
-        "  </script>\n"
+        "  <h2>Trace Contents</h2>\n"
+        f"{_render_rank_trace_summary(results, rank)}\n"
         "</body>\n"
         "</html>\n"
     )
+
+
+def _render_rank_trace_summary(results: Sequence[Mapping[str, Any]], rank: int) -> str:
+    rows = []
+    for result in results:
+        send_events = _rank_send_events(result, rank)
+        rows.append(
+            "    <tr>"
+            f"<td>{_escape(_result_label(result))}</td>"
+            f"<td>{_escape(result.get('collective'))}</td>"
+            f"<td>{_escape(result.get('rank_count'))}</td>"
+            f"<td>{_escape(result.get('message_bytes'))}</td>"
+            f"<td>{_escape(len(send_events))}</td>"
+            f"<td>{_float_cell(result.get('latency_us'))}</td>"
+            f"<td>{_escape(result.get('bottleneck_resource'))}</td>"
+            "</tr>"
+        )
+    if not rows:
+        rows.append("    <tr><td colspan=\"7\" class=\"muted\">No results</td></tr>")
+    return (
+        "  <table>\n"
+        "    <thead><tr><th>result</th><th>collective</th><th>ranks</th><th>bytes</th>"
+        "<th>send_events</th><th>latency_us</th><th>bottleneck</th></tr></thead>\n"
+        f"    <tbody>\n{chr(10).join(rows)}\n    </tbody>\n"
+        "  </table>"
+    )
+
+
+def _rank_trace_payload(results: Sequence[Mapping[str, Any]], rank: int) -> Mapping[str, Any]:
+    trace_events = []
+    process_ids = {}
+    lane_ids = {}
+    next_tid_by_pid = {}
+
+    def lane_id(process_name: str, thread_name: str) -> Tuple[int, int]:
+        if process_name not in process_ids:
+            pid = len(process_ids) + 1
+            process_ids[process_name] = pid
+            next_tid_by_pid[pid] = 1
+            trace_events.append(
+                {
+                    "name": "process_name",
+                    "ph": "M",
+                    "pid": pid,
+                    "args": {"name": process_name},
+                }
+            )
+        pid = process_ids[process_name]
+        key = (pid, thread_name)
+        if key not in lane_ids:
+            tid = next_tid_by_pid[pid]
+            next_tid_by_pid[pid] = tid + 1
+            lane_ids[key] = tid
+            trace_events.append(
+                {
+                    "name": "thread_name",
+                    "ph": "M",
+                    "pid": pid,
+                    "tid": tid,
+                    "args": {"name": thread_name},
+                }
+            )
+        return pid, lane_ids[key]
+
+    for result in results:
+        for event in _rank_send_events(result, rank):
+            process_name, thread_name, dst_rank = _trace_lane(result, event, rank)
+            pid, tid = lane_id(process_name, thread_name)
+            start_us = _float_value(event.get("start_us"))
+            end_us = _float_value(event.get("end_us"))
+            resources = tuple(str(resource) for resource in event.get("resources", []))
+            trace_events.append(
+                {
+                    "name": str(event.get("op_id") or "send"),
+                    "cat": "send",
+                    "ph": "X",
+                    "ts": start_us,
+                    "dur": max(0.0, end_us - start_us),
+                    "pid": pid,
+                    "tid": tid,
+                    "args": {
+                        "algorithm": result.get("algorithm"),
+                        "collective": result.get("collective"),
+                        "rank_count": result.get("rank_count"),
+                        "owner_rank": rank,
+                        "destination_rank": dst_rank,
+                        "message_bytes": event.get("message_bytes"),
+                        "start_us": start_us,
+                        "end_us": end_us,
+                        "wait_us": _float_value(event.get("wait_us")),
+                        "transfer_us": _float_value(event.get("transfer_us")),
+                        "effective_gbps": _float_value(event.get("effective_gbps")),
+                        "bottleneck_resource": event.get("bottleneck_resource"),
+                        "resources": ", ".join(resources),
+                    },
+                }
+            )
+    return {"traceEvents": trace_events, "displayTimeUnit": "us"}
+
+
+def _rank_send_events(result: Mapping[str, Any], rank: int) -> Sequence[Mapping[str, Any]]:
+    events = []
+    for event in _events(result):
+        if event.get("op_type") != "send":
+            continue
+        try:
+            if int(event.get("rank")) != rank:
+                continue
+        except (TypeError, ValueError):
+            continue
+        events.append(event)
+    return tuple(
+        sorted(
+            events,
+            key=lambda event: (
+                _float_value(event.get("start_us")),
+                _float_value(event.get("end_us")),
+                str(event.get("op_id")),
+            ),
+        )
+    )
+
+
+def _trace_lane(result: Mapping[str, Any], event: Mapping[str, Any], rank: int) -> Tuple[str, str, Optional[int]]:
+    resources = tuple(str(resource) for resource in event.get("resources", []))
+    dst_rank = _send_destination(event)
+    thread_name = f"send to rank{dst_rank}" if dst_rank is not None else "send"
+    p2p_resource = next((resource for resource in resources if resource.startswith("p2p:")), None)
+    if p2p_resource:
+        group_name = p2p_resource
+    elif any(resource.startswith("uplink:") or resource.startswith("clos:") for resource in resources):
+        group_name = f"clos-link:rank{rank}"
+    elif resources:
+        group_name = resources[0]
+    else:
+        group_name = f"send:rank{rank}"
+    result_label = _result_label(result)
+    process_name = f"{result_label} / {group_name}" if result_label else group_name
+    return process_name, thread_name, dst_rank
+
+
+def _send_destination(event: Mapping[str, Any]) -> Optional[int]:
+    for resource in event.get("resources", []):
+        text = str(resource)
+        if text.startswith("uplink:dst:"):
+            return _int_or_none(text.rsplit(":", 1)[-1])
+        p2p_match = re.search(r"->(\d+)$", text)
+        if p2p_match:
+            return int(p2p_match.group(1))
+    op_match = re.search(r"_to_r(\d+)(?:\D|$)", str(event.get("op_id") or ""))
+    if op_match:
+        return int(op_match.group(1))
+    return None
+
+
+def _int_or_none(value: Any) -> Optional[int]:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _events(result: Mapping[str, Any]) -> Sequence[Mapping[str, Any]]:
@@ -387,55 +460,12 @@ def _rank_href(rank: int, prefix: str) -> str:
     return f"{prefix}/{filename}"
 
 
-def _rank_payload(results: Sequence[Mapping[str, Any]], rank: int) -> Mapping[str, Any]:
-    payload_results = []
-    for result in results:
-        events = [event for event in _events(result) if _event_involves_rank(event, rank)]
-        payload_results.append(
-            {
-                "label": _result_label(result),
-                "algorithm": result.get("algorithm"),
-                "collective": result.get("collective"),
-                "rank_count": result.get("rank_count"),
-                "message_bytes": result.get("message_bytes"),
-                "latency_us": result.get("latency_us"),
-                "algbw_gbps": result.get("algbw_gbps"),
-                "busbw_gbps": result.get("busbw_gbps"),
-                "bottleneck_resource": result.get("bottleneck_resource"),
-                "events": sorted(events, key=lambda event: (_float_value(event.get("start_us")), _float_value(event.get("end_us")), str(event.get("op_id")))),
-            }
-        )
-    return {"rank": rank, "results": payload_results}
-
-
 def _result_label(result: Mapping[str, Any]) -> str:
     return (
         f"{result.get('algorithm', '')} "
         f"{result.get('rank_count', '')}P "
         f"{result.get('message_bytes', '')}B"
     ).strip()
-
-
-def _event_involves_rank(event: Mapping[str, Any], rank: int) -> bool:
-    try:
-        if int(event.get("rank")) == rank:
-            return True
-    except (TypeError, ValueError):
-        pass
-    return any(_resource_involves_rank(str(resource), rank) for resource in event.get("resources", []))
-
-
-def _resource_involves_rank(resource: str, rank: int) -> bool:
-    if resource in {f"sdma:rank{rank}", f"uplink:src:{rank}", f"uplink:dst:{rank}"}:
-        return True
-    match = re.search(r":(\d+)->(\d+)$", resource)
-    if match:
-        return rank in {int(match.group(1)), int(match.group(2))}
-    return False
-
-
-def _json_script(value: Any) -> str:
-    return json.dumps(value, separators=(",", ":")).replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
 
 
 def _float_cell(value: Any) -> str:

@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 
 from tests.collective_sim.test_semantics import two_rank_allgather
-from tests.collective_sim.test_simulator import calibration, topology
+from tests.collective_sim.test_simulator import calibration, cross_server_send, topology
 from tilexr_collective_sim.report import write_html_report, write_report_bundle, write_result, write_summary
 from tilexr_collective_sim.simulator import simulate_algorithm
 
@@ -47,24 +47,49 @@ class ReportCliTest(unittest.TestCase):
             main = (out / "report.html").read_text(encoding="utf-8")
             rank0_path = out / "rank_reports" / "rank_000.html"
             rank1_path = out / "rank_reports" / "rank_001.html"
+            rank0_trace_path = out / "rank_traces" / "rank_000.trace.json"
             rank0 = rank0_path.read_text(encoding="utf-8")
+            rank0_trace = json.loads(rank0_trace_path.read_text(encoding="utf-8"))["traceEvents"]
 
             self.assertTrue(rank0_path.exists())
             self.assertTrue(rank1_path.exists())
+            self.assertTrue(rank0_trace_path.exists())
             self.assertIn("rankSelect", main)
             self.assertIn("rank_reports/rank_000.html", main)
             self.assertIn("Bottleneck Summary", main)
             self.assertNotIn("send_r0_to_r1", main)
-            self.assertIn("timelineSvg", rank0)
-            self.assertIn("zoomRange", rank0)
-            self.assertIn("resultSelect", rank0)
-            self.assertIn("timeline-data", rank0)
-            self.assertIn("eventDetail", rank0)
-            self.assertIn("selectEvent", rank0)
-            self.assertIn("data-event-id", rank0)
-            self.assertIn("lanes", rank0)
-            self.assertIn("p2p:s0:1-", rank0)
-            self.assertIn("send_r1_to_r0", rank0)
+            self.assertIn("https://ui.perfetto.dev/", rank0)
+            self.assertIn("../rank_traces/rank_000.trace.json", rank0)
+            self.assertNotIn("timelineSvg", rank0)
+            slice_events = [event for event in rank0_trace if event.get("ph") == "X"]
+            self.assertEqual([event["name"] for event in slice_events], ["send_r0_to_r1"])
+            self.assertNotIn("send_r1_to_r0", {event["name"] for event in slice_events})
+            self.assertTrue(all(event.get("cat") == "send" for event in slice_events))
+
+    def test_perfetto_trace_groups_clos_sends_by_rank_link(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            result = simulate_algorithm(cross_server_send(128), topology(128), calibration(), 1024)
+
+            write_report_bundle([result], out)
+
+            trace_events = json.loads((out / "rank_traces" / "rank_000.trace.json").read_text(encoding="utf-8"))["traceEvents"]
+            process_names = {
+                event["args"]["name"]
+                for event in trace_events
+                if event.get("ph") == "M" and event.get("name") == "process_name"
+            }
+            thread_names = {
+                event["args"]["name"]
+                for event in trace_events
+                if event.get("ph") == "M" and event.get("name") == "thread_name"
+            }
+            slice_events = [event for event in trace_events if event.get("ph") == "X"]
+
+            self.assertTrue(any("clos-link:rank0" in name for name in process_names))
+            self.assertFalse(any("uplink:src:0" in name or name.startswith("clos:") for name in process_names))
+            self.assertIn("send to rank8", thread_names)
+            self.assertEqual([event["name"] for event in slice_events], ["send_r0_to_r8"])
 
     def test_cli_validate_and_run_example(self):
         with tempfile.TemporaryDirectory() as tmp:
