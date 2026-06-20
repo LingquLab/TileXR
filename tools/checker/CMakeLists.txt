@@ -8,6 +8,7 @@ add_library(tilexr-checker-core STATIC
   src/diagnostics.cpp
   src/report.cpp
   src/executor.cpp
+  src/cli.cpp
 )
 
 target_include_directories(tilexr-checker-core
@@ -17,3 +18,9 @@ target_include_directories(tilexr-checker-core
 )
 
 target_compile_features(tilexr-checker-core PUBLIC cxx_std_14)
+
+add_executable(tilexr_checker
+  src/checker_main.cpp
+)
+
+target_link_libraries(tilexr_checker PRIVATE tilexr-checker-core)

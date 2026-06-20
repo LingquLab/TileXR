@@ -39,6 +39,14 @@ tilexr_checker_test(test_tilexr_checker_executor
   unit/test_checker_executor.cpp
 )
 
+tilexr_checker_test(test_tilexr_checker_reports
+  unit/test_checker_reports.cpp
+)
+
+tilexr_checker_test(test_tilexr_checker_cli_args
+  unit/test_checker_cli_args.cpp
+)
+
 tilexr_checker_test(test_tilexr_checker_source_preservation
   unit/test_checker_source_preservation.cpp
 )
