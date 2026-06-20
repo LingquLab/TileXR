@@ -218,6 +218,17 @@ RunResult MakeResultFromStatus(const CheckerStatus &status, const FindingSet &fi
 
 }  // namespace
 
+CheckerStatus FinalizeExecutorStatus(const FindingSet &findings,
+                                     const std::vector<OutputMismatch> &mismatches) {
+    if (!findings.findings().empty() || !mismatches.empty()) {
+        if (HasFindingKind(findings, FindingKind::kUnsupportedApi)) {
+            return CheckerStatus::Unsupported("checker executor encountered unsupported case");
+        }
+        return CheckerStatus::Fail("checker executor detected findings or mismatches");
+    }
+    return CheckerStatus::Ok();
+}
+
 RunResult CollectiveExecutor::Run(RankWorld *world, const CheckerCase &test_case) {
     FindingSet findings;
     const std::vector<OutputMismatch> no_mismatches;
@@ -262,15 +273,7 @@ RunResult CollectiveExecutor::Run(RankWorld *world, const CheckerCase &test_case
     const FindingSet output_findings = CheckOutputMismatches(mismatches);
     result.mismatches = mismatches;
     result.findings = MergeFindings(result.findings, output_findings);
-    if (result.findings.HasErrors() || !result.mismatches.empty()) {
-        result.status = CheckerStatus::Fail("checker executor detected findings or mismatches");
-        if (HasFindingKind(result.findings, FindingKind::kUnsupportedApi)) {
-            result.status = CheckerStatus::Unsupported("checker executor encountered unsupported case");
-        }
-        return result;
-    }
-
-    result.status = CheckerStatus::Ok();
+    result.status = FinalizeExecutorStatus(result.findings, result.mismatches);
     return result;
 }
 
