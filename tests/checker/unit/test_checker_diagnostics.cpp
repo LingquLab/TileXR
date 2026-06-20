@@ -121,9 +121,11 @@ void TestOrderingFindingsAndPriority() {
 
 void TestReadBeforeCopySummaryMatchesGolden() {
     tilexr::checker::EventLog events;
-    events.Add(MakeEvent(tilexr::checker::EventKind::kRead, 1, 0,
-                         tilexr::checker::BufferRole::kCommData, 0, 0, 64, 32,
-                         "comm-data read"));
+    tilexr::checker::Event &read_event = events.Add(
+        MakeEvent(tilexr::checker::EventKind::kRead, 1, 0,
+                  tilexr::checker::BufferRole::kCommData, 0, 0, 64, 32,
+                  "comm-data read"));
+    read_event.core = 7;
 
     tilexr::checker::FindingSet findings = tilexr::checker::CheckOrdering(events);
     const tilexr::checker::Finding *top = findings.TopFinding();
@@ -139,6 +141,9 @@ void TestReadBeforeCopySummaryMatchesGolden() {
     const std::string expected = ReadFile(
         SourcePath("tests/checker/golden/read_before_copy_summary.txt"));
     ExpectEqString(summary, expected, "read before copy summary matches golden");
+    ExpectContains(summary, "core: 7", "summary includes core");
+    ExpectContains(summary, "offset: 64", "summary includes offset");
+    ExpectContains(summary, "bytes: 32", "summary includes bytes");
 }
 
 void TestReadBeforeCopySatisfiedByShimProducerModel() {

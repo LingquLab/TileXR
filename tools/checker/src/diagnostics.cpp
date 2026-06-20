@@ -84,12 +84,6 @@ Finding MakeFindingFromEvent(FindingKind kind, Severity severity, const Event &e
     return finding;
 }
 
-bool SameCommDataRange(const Event &lhs, const Event &rhs) {
-    return lhs.rank == rhs.rank && lhs.peer_rank == rhs.peer_rank &&
-           lhs.slot == rhs.slot && lhs.buffer_role == rhs.buffer_role &&
-           lhs.offset == rhs.offset && lhs.bytes == rhs.bytes;
-}
-
 bool SafeAdd(size_t lhs, size_t rhs, size_t *out) {
     if (lhs > static_cast<size_t>(-1) - rhs) {
         return false;

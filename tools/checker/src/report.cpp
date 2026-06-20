@@ -96,12 +96,18 @@ std::string RenderSummary(const CheckerCase &test_case,
         out << "rank: " << top->rank << "\n";
         out << "peer rank: " << top->peer_rank << "\n";
         out << "buffer: " << BufferSummaryName(top->buffer_role) << "\n";
+        out << "core: " << top->core << "\n";
+        out << "offset: " << top->offset << "\n";
+        out << "bytes: " << top->bytes << "\n";
         out << "next action: " << top->next_action << "\n";
     } else {
         out << "top finding: NONE\n";
         out << "rank: -1\n";
         out << "peer rank: -1\n";
         out << "buffer: Metadata\n";
+        out << "core: -1\n";
+        out << "offset: 0\n";
+        out << "bytes: 0\n";
         out << "next action: No action required.\n";
     }
     out << "events: " << event_count << "\n";
