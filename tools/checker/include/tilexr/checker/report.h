@@ -7,9 +7,16 @@
 #include "tilexr/checker/case.h"
 #include "tilexr/checker/diagnostics.h"
 #include "tilexr/checker/event.h"
+#include "tilexr/checker/status.h"
 
 namespace tilexr {
 namespace checker {
+
+std::string RenderSummary(const CheckerCase &test_case,
+                          const CheckerStatus &status,
+                          const FindingSet &findings,
+                          size_t mismatch_count,
+                          size_t event_count);
 
 std::string RenderSummary(const CheckerCase &test_case,
                           const FindingSet &findings,

@@ -1,6 +1,12 @@
 #include <cstdint>
 #include <iostream>
+#include <ostream>
+#include <sstream>
 #include <string>
+
+#include <cstdio>
+
+#include <unistd.h>
 
 #include "tilexr/checker/cli.h"
 
@@ -28,6 +34,42 @@ void ExpectEqString(const std::string &actual, const std::string &expected,
         std::cerr << message << ": actual=" << actual << " expected=" << expected << "\n";
         ++g_failures;
     }
+}
+
+std::string MakeTempDir() {
+    char dir_template[] = "/tmp/tilexr-checker-cli-XXXXXX";
+    char *created = mkdtemp(dir_template);
+    if (created == nullptr) {
+        std::cerr << "mkdtemp failed\n";
+        ++g_failures;
+        return std::string();
+    }
+    return std::string(created);
+}
+
+std::string MakeTempFile() {
+    char file_template[] = "/tmp/tilexr-checker-cli-file-XXXXXX";
+    const int fd = mkstemp(file_template);
+    if (fd < 0) {
+        std::cerr << "mkstemp failed\n";
+        ++g_failures;
+        return std::string();
+    }
+    close(fd);
+    return std::string(file_template);
+}
+
+tilexr::checker::CliOptions MakeValidAllGatherOptions() {
+    tilexr::checker::CliOptions options;
+    options.test_case.op = tilexr::checker::CollectiveOp::kAllGather;
+    options.test_case.rank_size = 4;
+    options.test_case.count = 16;
+    options.test_case.data_type = TileXR::TILEXR_DATA_TYPE_INT32;
+    options.test_case.reduce_op = TileXR::TILEXR_REDUCE_SUM;
+    options.test_case.scheduler = tilexr::checker::SchedulerMode::kRoundRobin;
+    options.test_case.magic = 0x1234;
+    options.output_dir = MakeTempDir();
+    return options;
 }
 
 void TestParseAllGatherRoundRobin() {
@@ -112,11 +154,67 @@ void TestParseInvalidOpReturnsUnsupported() {
                 "invalid op parse status");
 }
 
+void TestRunCheckerCliPassExitCode() {
+    tilexr::checker::CliOptions options = MakeValidAllGatherOptions();
+    std::ostringstream stdout_stream;
+    std::ostringstream stderr_stream;
+
+    const int exit_code =
+        tilexr::checker::RunCheckerCli(options, &stdout_stream, &stderr_stream);
+
+    ExpectEqInt(exit_code, 0, "run cli pass exit code");
+    ExpectTrue(stderr_stream.str().empty(), "run cli pass stderr empty");
+    ExpectTrue(stdout_stream.str().find("checker: PASS") != std::string::npos,
+               "run cli pass stdout");
+}
+
+void TestRunCheckerCliInjectedFindingExitCode() {
+    tilexr::checker::CliOptions options = MakeValidAllGatherOptions();
+    options.inject_read_before_copy = true;
+    std::ostringstream stdout_stream;
+    std::ostringstream stderr_stream;
+
+    const int exit_code =
+        tilexr::checker::RunCheckerCli(options, &stdout_stream, &stderr_stream);
+
+    ExpectEqInt(exit_code, 1, "run cli injected finding exit code");
+    ExpectTrue(stdout_stream.str().find("checker: FAIL") != std::string::npos,
+               "run cli injected finding stdout fail");
+}
+
+void TestRunCheckerCliInvalidOutputDirExitCode() {
+    tilexr::checker::CliOptions options = MakeValidAllGatherOptions();
+    options.output_dir.clear();
+    std::ostringstream stdout_stream;
+    std::ostringstream stderr_stream;
+
+    const int exit_code =
+        tilexr::checker::RunCheckerCli(options, &stdout_stream, &stderr_stream);
+
+    ExpectEqInt(exit_code, 2, "run cli invalid output dir exit code");
+}
+
+void TestRunCheckerCliReportWriteFailureExitCode() {
+    tilexr::checker::CliOptions options = MakeValidAllGatherOptions();
+    options.output_dir = MakeTempFile() + "/child";
+    std::ostringstream stdout_stream;
+    std::ostringstream stderr_stream;
+
+    const int exit_code =
+        tilexr::checker::RunCheckerCli(options, &stdout_stream, &stderr_stream);
+
+    ExpectEqInt(exit_code, 3, "run cli report write failure exit code");
+}
+
 }  // namespace
 
 int main() {
     TestParseAllGatherRoundRobin();
     TestParseAllReduceSumWithInjectionFlags();
     TestParseInvalidOpReturnsUnsupported();
+    TestRunCheckerCliPassExitCode();
+    TestRunCheckerCliInjectedFindingExitCode();
+    TestRunCheckerCliInvalidOutputDirExitCode();
+    TestRunCheckerCliReportWriteFailureExitCode();
     return g_failures == 0 ? 0 : 1;
 }

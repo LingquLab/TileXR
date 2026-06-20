@@ -5,6 +5,7 @@
 
 #include <fstream>
 #include <iostream>
+#include <ostream>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -149,10 +150,41 @@ void TestInjectedBadTraceWritesTopFindingAndNextAction() {
     ExpectContains(summary, "next action:", "summary next action");
 }
 
+void TestPureMismatchSummaryUsesFailStatus() {
+    const tilexr::checker::CheckerCase test_case = MakeAllGatherCase();
+    tilexr::checker::EventLog events;
+    const std::string output_dir = MakeTempDir();
+
+    tilexr::checker::RunResult result;
+    result.status = tilexr::checker::CheckerStatus::Fail("synthetic output mismatch");
+    result.event_count = 0;
+
+    tilexr::checker::OutputMismatch mismatch;
+    mismatch.rank = 0;
+    mismatch.element_index = 3;
+    mismatch.expected = 100003;
+    mismatch.actual = 7;
+    mismatch.context = "synthetic mismatch";
+    result.mismatches.push_back(mismatch);
+
+    tilexr::checker::ReportPaths paths;
+    tilexr::checker::CheckerStatus status =
+        tilexr::checker::WriteReportFiles(output_dir, test_case, result, events, &paths);
+
+    ExpectEqInt(static_cast<int>(status.code),
+                static_cast<int>(tilexr::checker::CheckerStatusCode::kOk),
+                "pure mismatch report writer status");
+    const std::string summary = ReadFile(paths.summary_txt);
+    ExpectContains(summary, "checker: FAIL", "pure mismatch summary fail");
+    ExpectContains(ReadFile(paths.checker_report_json), "\"status\":\"FAIL\"",
+                   "pure mismatch checker report fail");
+}
+
 }  // namespace
 
 int main() {
     TestWriteReportFilesCreatesArtifacts();
     TestInjectedBadTraceWritesTopFindingAndNextAction();
+    TestPureMismatchSummaryUsesFailStatus();
     return g_failures == 0 ? 0 : 1;
 }

@@ -235,7 +235,7 @@ void InjectReadBeforeCopy(EventLog *events) {
     event.rank = 1;
     event.peer_rank = 0;
     event.buffer_role = BufferRole::kCommData;
-    event.slot = 0;
+    event.slot = 99;
     event.offset = 0;
     event.bytes = sizeof(int32_t);
     event.source_file = __FILE__;
@@ -393,6 +393,21 @@ CheckerStatus ParseCliArgs(int argc, const char *const *argv, CliOptions *option
     return CheckerStatus::Ok();
 }
 
+int ExitCodeFromStatus(const CheckerStatus &status) {
+    switch (status.code) {
+        case CheckerStatusCode::kOk:
+            return 0;
+        case CheckerStatusCode::kFail:
+            return 1;
+        case CheckerStatusCode::kUnsupported:
+            return 2;
+        case CheckerStatusCode::kInconclusive:
+        case CheckerStatusCode::kInternalError:
+            return 3;
+    }
+    return 3;
+}
+
 CheckerStatus WriteReportFiles(const std::string &output_dir,
                                const CheckerCase &test_case,
                                const RunResult &result,
@@ -414,7 +429,8 @@ CheckerStatus WriteReportFiles(const std::string &output_dir,
 
     const size_t event_count = events.events().size();
     CheckerStatus status = WriteTextFile(paths->summary_txt,
-                                         RenderSummary(test_case, result.findings, event_count));
+                                         RenderSummary(test_case, result.status, result.findings,
+                                                       result.mismatches.size(), event_count));
     if (!status.ok()) {
         return status;
     }
@@ -516,26 +532,16 @@ int RunCheckerCli(const CliOptions &options, std::ostream *stdout_stream,
         if (stderr_stream != nullptr) {
             (*stderr_stream) << write_status.message << "\n";
         }
-        return 3;
+        return write_status.code == CheckerStatusCode::kUnsupported ? 2 : 3;
     }
 
     if (stdout_stream != nullptr) {
-        (*stdout_stream) << RenderSummary(options.test_case, result.findings,
+        (*stdout_stream) << RenderSummary(options.test_case, result.status, result.findings,
+                                          result.mismatches.size(),
                                           world.events().events().size());
     }
 
-    switch (result.status.code) {
-        case CheckerStatusCode::kOk:
-            return 0;
-        case CheckerStatusCode::kUnsupported:
-            return 2;
-        case CheckerStatusCode::kFail:
-            return 1;
-        case CheckerStatusCode::kInconclusive:
-        case CheckerStatusCode::kInternalError:
-            return 3;
-    }
-    return 3;
+    return ExitCodeFromStatus(result.status);
 }
 
 }  // namespace checker

@@ -85,11 +85,16 @@ const char *EventKindString(EventKind kind) {
 }  // namespace
 
 std::string RenderSummary(const CheckerCase &test_case,
+                          const CheckerStatus &status,
                           const FindingSet &findings,
+                          size_t mismatch_count,
                           size_t event_count) {
     (void)test_case;
+    const bool has_problems =
+        !status.ok() || mismatch_count != 0 || !findings.findings().empty();
+
     std::ostringstream out;
-    out << "checker: " << (findings.HasErrors() ? "FAIL" : "PASS") << "\n";
+    out << "checker: " << (has_problems ? "FAIL" : "PASS") << "\n";
     const Finding *top = findings.TopFinding();
     if (top != nullptr) {
         out << "top finding: " << ToString(top->kind) << "\n";
@@ -108,10 +113,21 @@ std::string RenderSummary(const CheckerCase &test_case,
         out << "core: -1\n";
         out << "offset: 0\n";
         out << "bytes: 0\n";
-        out << "next action: No action required.\n";
+        out << "next action: "
+            << (mismatch_count != 0 ? "Inspect findings.json for output mismatch details."
+                                    : "No action required.")
+            << "\n";
     }
     out << "events: " << event_count << "\n";
     return out.str();
+}
+
+std::string RenderSummary(const CheckerCase &test_case,
+                          const FindingSet &findings,
+                          size_t event_count) {
+    return RenderSummary(test_case, findings.findings().empty() ? CheckerStatus::Ok()
+                                                                : CheckerStatus::Fail("findings"),
+                         findings, 0, event_count);
 }
 
 std::string RenderFindingsJson(const FindingSet &findings) {
