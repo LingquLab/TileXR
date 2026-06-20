@@ -183,10 +183,6 @@ RunResult MakeResultFromStatus(const CheckerStatus &status, const FindingSet &fi
 
 }  // namespace
 
-void CollectiveExecutor::SetPostTraceHookForTest(TraceHook hook) {
-    post_trace_hook_ = hook;
-}
-
 RunResult CollectiveExecutor::Run(RankWorld *world, const CheckerCase &test_case) {
     FindingSet findings;
     const std::vector<OutputMismatch> no_mismatches;
@@ -292,9 +288,6 @@ RunResult CollectiveExecutor::RunAllGatherInt32(RankWorld *world, const CheckerC
         return MakeResultFromStatus(exec_status, findings, mismatches, world->events().events().size());
     }
 
-    if (post_trace_hook_) {
-        post_trace_hook_(world);
-    }
     findings = CheckOrdering(world->events());
     return MakeResultFromStatus(CheckerStatus::Ok(), findings, mismatches,
                                 world->events().events().size());
@@ -350,9 +343,6 @@ RunResult CollectiveExecutor::RunAllReduceSumInt32(RankWorld *world,
         return MakeResultFromStatus(exec_status, findings, mismatches, world->events().events().size());
     }
 
-    if (post_trace_hook_) {
-        post_trace_hook_(world);
-    }
     findings = CheckOrdering(world->events());
     return MakeResultFromStatus(CheckerStatus::Ok(), findings, mismatches,
                                 world->events().events().size());

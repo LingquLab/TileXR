@@ -90,6 +90,18 @@ bool HasFindingKind(const tilexr::checker::FindingSet &findings,
     return false;
 }
 
+size_t FindingCount(const tilexr::checker::FindingSet &findings,
+                    tilexr::checker::FindingKind kind) {
+    size_t count = 0;
+    const std::vector<tilexr::checker::Finding> &items = findings.findings();
+    for (size_t i = 0; i < items.size(); ++i) {
+        if (items[i].kind == kind) {
+            ++count;
+        }
+    }
+    return count;
+}
+
 void ExpectEvent(const tilexr::checker::Event &event, tilexr::checker::EventKind kind, int rank,
                  const char *message) {
     if (event.kind != kind || event.rank != rank) {
@@ -292,55 +304,71 @@ void TestUnsupportedDatatypeReturnsFinding() {
                "unsupported datatype finding kind");
 }
 
-void TestRunSerialReportsInjectedPeerUserReadFinding() {
+void TestRunSerialMatchesDirectOrderingDiagnostics() {
     tilexr::checker::CheckerCase test_case =
         MakeAllGatherCase(2, 16, tilexr::checker::SchedulerMode::kSerial);
     tilexr::checker::RankWorld world = MakeWorld(test_case);
     tilexr::checker::CollectiveExecutor executor;
-    executor.SetPostTraceHookForTest(
-        [](tilexr::checker::RankWorld *hook_world) { InjectPeerUserRead(hook_world, 1, 0); });
 
     tilexr::checker::RunResult result = executor.Run(&world, test_case);
+    tilexr::checker::FindingSet direct_findings = tilexr::checker::CheckOrdering(world.events());
+
     ExpectEqInt(static_cast<int>(result.status.code),
-                static_cast<int>(tilexr::checker::CheckerStatusCode::kFail),
-                "serial injected peer run fails");
-    ExpectTrue(HasFindingKind(result.findings,
-                              tilexr::checker::FindingKind::kDirectPeerUserBuffer),
-               "serial run reports peer user read finding");
+                static_cast<int>(tilexr::checker::CheckerStatusCode::kOk),
+                "serial run status");
+    ExpectEqSize(result.findings.findings().size(), direct_findings.findings().size(),
+                 "serial run/direct ordering finding count match");
+    ExpectEqSize(FindingCount(result.findings, tilexr::checker::FindingKind::kReadBeforeCopy),
+                 FindingCount(direct_findings, tilexr::checker::FindingKind::kReadBeforeCopy),
+                 "serial run/direct read-before-copy finding count match");
 }
 
-void TestRunSerialReportsInjectedStaleMagicFinding() {
+void TestInjectedPeerUserReadProducesFinding() {
+    tilexr::checker::CheckerCase test_case =
+        MakeAllGatherCase(2, 16, tilexr::checker::SchedulerMode::kSerial);
+    tilexr::checker::RankWorld world = MakeWorld(test_case);
+    tilexr::checker::CollectiveExecutor executor;
+
+    tilexr::checker::RunResult result = executor.Run(&world, test_case);
+    InjectPeerUserRead(&world, 1, 0);
+    tilexr::checker::FindingSet findings = tilexr::checker::CheckOrdering(world.events());
+    ExpectEqInt(static_cast<int>(result.status.code),
+                static_cast<int>(tilexr::checker::CheckerStatusCode::kOk),
+                "baseline injected peer run ok");
+    ExpectTrue(HasFindingKind(findings, tilexr::checker::FindingKind::kDirectPeerUserBuffer),
+               "peer user read finding");
+}
+
+void TestInjectedStaleMagicProducesFinding() {
     tilexr::checker::CheckerCase test_case =
         MakeAllReduceCase(tilexr::checker::SchedulerMode::kSerial);
     tilexr::checker::RankWorld world = MakeWorld(test_case);
     tilexr::checker::CollectiveExecutor executor;
-    executor.SetPostTraceHookForTest(
-        [](tilexr::checker::RankWorld *hook_world) { InjectStaleMagicWait(hook_world, 1, 0, 1); });
 
     tilexr::checker::RunResult result = executor.Run(&world, test_case);
+    InjectStaleMagicWait(&world, 1, 0, 1);
+    tilexr::checker::FindingSet findings = tilexr::checker::CheckOrdering(world.events());
     ExpectEqInt(static_cast<int>(result.status.code),
-                static_cast<int>(tilexr::checker::CheckerStatusCode::kFail),
-                "serial injected stale run fails");
-    ExpectTrue(HasFindingKind(result.findings, tilexr::checker::FindingKind::kFlagStaleMagic),
-               "serial run reports stale magic finding");
+                static_cast<int>(tilexr::checker::CheckerStatusCode::kOk),
+                "baseline injected stale run ok");
+    ExpectTrue(HasFindingKind(findings, tilexr::checker::FindingKind::kFlagStaleMagic),
+               "stale magic finding");
 }
 
-void TestRunSerialReportsInjectedReadBeforeCopyFinding() {
+void TestInjectedReadBeforeCopyProducesFinding() {
     tilexr::checker::CheckerCase test_case =
         MakeAllGatherCase(2, 16, tilexr::checker::SchedulerMode::kSerial);
     tilexr::checker::RankWorld world = MakeWorld(test_case);
     tilexr::checker::CollectiveExecutor executor;
-    executor.SetPostTraceHookForTest(
-        [](tilexr::checker::RankWorld *hook_world) {
-            InjectCommDataReadWithoutProducer(hook_world, 1, 0);
-        });
 
     tilexr::checker::RunResult result = executor.Run(&world, test_case);
+    InjectCommDataReadWithoutProducer(&world, 1, 0);
+    tilexr::checker::FindingSet findings = tilexr::checker::CheckOrdering(world.events());
     ExpectEqInt(static_cast<int>(result.status.code),
-                static_cast<int>(tilexr::checker::CheckerStatusCode::kFail),
-                "serial injected read-before-copy run fails");
-    ExpectTrue(HasFindingKind(result.findings, tilexr::checker::FindingKind::kReadBeforeCopy),
-               "serial run reports read-before-copy finding");
+                static_cast<int>(tilexr::checker::CheckerStatusCode::kOk),
+                "baseline injected read-before-copy run ok");
+    ExpectTrue(HasFindingKind(findings, tilexr::checker::FindingKind::kReadBeforeCopy),
+               "read-before-copy finding");
 }
 
 }  // namespace
@@ -351,8 +379,9 @@ int main() {
     TestAllGatherSchedulersProduceDifferentOrders();
     TestAllReducePassesForBothSchedulers();
     TestUnsupportedDatatypeReturnsFinding();
-    TestRunSerialReportsInjectedPeerUserReadFinding();
-    TestRunSerialReportsInjectedStaleMagicFinding();
-    TestRunSerialReportsInjectedReadBeforeCopyFinding();
+    TestRunSerialMatchesDirectOrderingDiagnostics();
+    TestInjectedPeerUserReadProducesFinding();
+    TestInjectedStaleMagicProducesFinding();
+    TestInjectedReadBeforeCopyProducesFinding();
     return g_failures == 0 ? 0 : 1;
 }
