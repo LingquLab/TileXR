@@ -160,7 +160,7 @@ CheckerStatus ShimRuntime::StoreFlag(int rank, int peer_rank, int slot, uint64_t
     }
 
     CheckerStatus write_status =
-        world_->CommFlag(rank, peer_rank).WriteBytes(0, &magic, sizeof(magic));
+        world_->CommFlag(rank, slot).WriteBytes(0, &magic, sizeof(magic));
     if (!write_status.ok()) {
         return write_status;
     }

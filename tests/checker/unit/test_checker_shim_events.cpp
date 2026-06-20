@@ -6,12 +6,20 @@
 #include <string>
 #include <vector>
 
+#include "kernel_operator.h"
 #include "tilexr/checker/shim_runtime.h"
 #include "tilexr/checker/world.h"
 
 namespace {
 
 int g_failures = 0;
+
+void UseCheckerShimTypes() {
+    AscendC::GlobalTensorBase global;
+    AscendC::LocalTensorBase local;
+    (void)global;
+    (void)local;
+}
 
 std::string SourcePath(const std::string &relative_path) {
     return std::string(TILEXR_SOURCE_ROOT) + "/" + relative_path;
@@ -132,31 +140,63 @@ void TestFlagEventsCaptureMagic() {
     tilexr::checker::RankWorld world =
         tilexr::checker::RankWorld::Create(2, 16, 16, 16);
     tilexr::checker::ShimRuntime runtime(&world);
+    UseCheckerShimTypes();
+
+    const int rank = 1;
+    const int peer_rank = 0;
+    const int slot = 1;
+    const uint64_t magic = 0x1234ULL;
 
     tilexr::checker::CheckerStatus store =
-        runtime.StoreFlag(1, 0, 1, 0x1234ULL, TILEXR_CHECKER_HERE, "store flag");
+        runtime.StoreFlag(rank, peer_rank, slot, magic, TILEXR_CHECKER_HERE, "store flag");
     tilexr::checker::CheckerStatus wait =
-        runtime.WaitFlag(0, 1, 0, 0x1234ULL, TILEXR_CHECKER_HERE, "wait flag");
+        runtime.WaitFlag(peer_rank, rank, slot, magic, TILEXR_CHECKER_HERE, "wait flag");
     ExpectTrue(store.ok(), "store flag status ok");
     ExpectTrue(wait.ok(), "wait flag status ok");
 
-    uint64_t stored_magic = 0;
-    ExpectTrue(world.CommFlag(1, 0).ReadBytes(0, &stored_magic, sizeof(stored_magic)).ok(),
-               "read stored flag bytes");
-    ExpectEqU64(stored_magic, 0x1234ULL, "stored flag value");
+    uint64_t stored_magic_at_slot = 0;
+    ExpectTrue(
+        world.CommFlag(rank, slot).ReadBytes(0, &stored_magic_at_slot, sizeof(stored_magic_at_slot))
+            .ok(),
+        "read stored flag bytes at slot");
+    ExpectEqU64(stored_magic_at_slot, magic, "stored flag value at slot");
+
+    if (slot != peer_rank) {
+        uint64_t stored_magic_at_peer_slot = 0;
+        ExpectTrue(world.CommFlag(rank, peer_rank)
+                       .ReadBytes(0, &stored_magic_at_peer_slot,
+                                  sizeof(stored_magic_at_peer_slot))
+                       .ok(),
+                   "read stored flag bytes at peer slot");
+        ExpectEqU64(stored_magic_at_peer_slot, 0, "peer slot remains untouched");
+    }
 
     const std::vector<tilexr::checker::Event> &events = world.events().events();
     ExpectEqSize(events.size(), 2, "flag event count");
     ExpectEqInt(static_cast<int>(events[0].kind),
                 static_cast<int>(tilexr::checker::EventKind::kFlagStore),
                 "store event kind");
-    ExpectEqU64(events[0].magic, 0x1234ULL, "store event magic");
-    ExpectEqInt(events[0].slot, 1, "store event slot");
+    ExpectEqInt(events[0].rank, rank, "store event rank");
+    ExpectEqInt(events[0].peer_rank, peer_rank, "store event peer rank");
+    ExpectEqU64(events[0].magic, magic, "store event magic");
+    ExpectEqInt(events[0].slot, slot, "store event slot");
+    ExpectEqInt(static_cast<int>(events[0].buffer_role),
+                static_cast<int>(tilexr::checker::BufferRole::kCommFlag),
+                "store event role");
+    ExpectEqSize(events[0].offset, 0, "store event offset");
+    ExpectEqSize(events[0].bytes, sizeof(magic), "store event bytes");
     ExpectEqInt(static_cast<int>(events[1].kind),
                 static_cast<int>(tilexr::checker::EventKind::kFlagWait),
                 "wait event kind");
-    ExpectEqU64(events[1].magic, 0x1234ULL, "wait event magic");
-    ExpectEqInt(events[1].slot, 0, "wait event slot");
+    ExpectEqInt(events[1].rank, peer_rank, "wait event rank");
+    ExpectEqInt(events[1].peer_rank, rank, "wait event peer rank");
+    ExpectEqU64(events[1].magic, magic, "wait event magic");
+    ExpectEqInt(events[1].slot, slot, "wait event slot");
+    ExpectEqInt(static_cast<int>(events[1].buffer_role),
+                static_cast<int>(tilexr::checker::BufferRole::kCommFlag),
+                "wait event role");
+    ExpectEqSize(events[1].offset, 0, "wait event offset");
+    ExpectEqSize(events[1].bytes, sizeof(magic), "wait event bytes");
 }
 
 void TestNullWorldAndUnsupportedRoleFail() {
