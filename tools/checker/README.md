@@ -7,4 +7,4 @@ Scope:
 - No NPU runtime dependency is expected for the checker build surface itself.
 - Initial MVP coverage is source-guard smoke testing and checker-core scaffolding.
 - Planned MVP operator coverage for later tasks is AllGather and AllReduce SUM on INT32.
-- Report files for this task live under `.superpowers/sdd/`.
+- Planned checker artifacts are `summary.txt`, `findings.json`, `events.jsonl`, and `checker_report.json`.
