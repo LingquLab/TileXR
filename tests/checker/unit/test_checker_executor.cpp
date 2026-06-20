@@ -35,14 +35,6 @@ void ExpectEqSize(size_t actual, size_t expected, const char *message) {
     }
 }
 
-void ExpectContains(const std::string &text, const std::string &needle,
-                    const char *message) {
-    if (text.find(needle) == std::string::npos) {
-        std::cerr << message << ": missing " << needle << " in " << text << "\n";
-        ++g_failures;
-    }
-}
-
 tilexr::checker::CheckerCase MakeAllGatherCase(int rank_size, int64_t count,
                                                tilexr::checker::SchedulerMode scheduler) {
     tilexr::checker::CheckerCase test_case;
@@ -287,6 +279,51 @@ void TestAllReducePassesForBothSchedulers() {
     }
 }
 
+void TestAllReduceSchedulersProduceDifferentOrders() {
+    tilexr::checker::CheckerCase serial_case =
+        MakeAllReduceCase(tilexr::checker::SchedulerMode::kSerial);
+    tilexr::checker::CheckerCase round_robin_case =
+        MakeAllReduceCase(tilexr::checker::SchedulerMode::kRoundRobin);
+    tilexr::checker::RankWorld serial_world = MakeWorld(serial_case);
+    tilexr::checker::RankWorld round_robin_world = MakeWorld(round_robin_case);
+    tilexr::checker::CollectiveExecutor executor;
+
+    tilexr::checker::RunResult serial_result = executor.Run(&serial_world, serial_case);
+    tilexr::checker::RunResult round_robin_result = executor.Run(&round_robin_world, round_robin_case);
+
+    ExpectEqInt(static_cast<int>(serial_result.status.code),
+                static_cast<int>(tilexr::checker::CheckerStatusCode::kOk),
+                "allreduce serial compare status");
+    ExpectEqInt(static_cast<int>(round_robin_result.status.code),
+                static_cast<int>(tilexr::checker::CheckerStatusCode::kOk),
+                "allreduce round robin compare status");
+    ExpectEqSize(serial_result.mismatches.size(), 0, "allreduce serial compare mismatches");
+    ExpectEqSize(round_robin_result.mismatches.size(), 0, "allreduce round robin compare mismatches");
+    ExpectEqSize(serial_result.findings.findings().size(), 0, "allreduce serial compare findings");
+    ExpectEqSize(round_robin_result.findings.findings().size(), 0, "allreduce round robin compare findings");
+
+    const std::vector<tilexr::checker::Event> &serial_events = serial_world.events().events();
+    const std::vector<tilexr::checker::Event> &round_robin_events = round_robin_world.events().events();
+    ExpectEqSize(serial_events.size(), static_cast<size_t>(12), "allreduce serial compare event count");
+    ExpectEqSize(round_robin_events.size(), static_cast<size_t>(12), "allreduce round robin compare event count");
+    if (serial_events.size() >= 10 && round_robin_events.size() >= 10) {
+        ExpectEvent(serial_events[6], tilexr::checker::EventKind::kRead, 0,
+                    "allreduce serial first read rank 0");
+        ExpectEvent(serial_events[8], tilexr::checker::EventKind::kWrite, 0,
+                    "allreduce serial first write rank 0");
+        ExpectEvent(serial_events[9], tilexr::checker::EventKind::kRead, 1,
+                    "allreduce serial rank 1 starts after rank 0 write");
+        ExpectEvent(round_robin_events[6], tilexr::checker::EventKind::kRead, 0,
+                    "allreduce round robin first read rank 0");
+        ExpectEvent(round_robin_events[7], tilexr::checker::EventKind::kRead, 1,
+                    "allreduce round robin interleaves rank 1 read");
+        ExpectEvent(round_robin_events[10], tilexr::checker::EventKind::kWrite, 0,
+                    "allreduce round robin rank 0 write after all reads");
+        ExpectTrue(serial_events[7].rank != round_robin_events[7].rank,
+                   "allreduce scheduler orders differ in read phase rank order");
+    }
+}
+
 void TestUnsupportedDatatypeReturnsFinding() {
     tilexr::checker::CheckerCase test_case =
         MakeAllGatherCase(2, 16, tilexr::checker::SchedulerMode::kSerial);
@@ -378,6 +415,7 @@ int main() {
     TestAllGatherRoundRobinPasses();
     TestAllGatherSchedulersProduceDifferentOrders();
     TestAllReducePassesForBothSchedulers();
+    TestAllReduceSchedulersProduceDifferentOrders();
     TestUnsupportedDatatypeReturnsFinding();
     TestRunSerialMatchesDirectOrderingDiagnostics();
     TestInjectedPeerUserReadProducesFinding();

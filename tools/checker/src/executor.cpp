@@ -170,6 +170,41 @@ CheckerStatus ExecuteAllReduceReadAndWrite(RankWorld *world, const CheckerCase &
                                TILEXR_CHECKER_HERE, "write reduced user output");
 }
 
+CheckerStatus AccumulateAllReducePeer(RankWorld *world, const CheckerCase &test_case, int rank,
+                                      int peer, std::vector<int32_t> *reduced) {
+    if (reduced == nullptr) {
+        return CheckerStatus::Fail("allreduce accumulator is null");
+    }
+    const size_t bytes = static_cast<size_t>(test_case.count) * sizeof(int32_t);
+    CheckerStatus read_event =
+        AddCommDataReadEvent(world, rank, peer, bytes,
+                             "read peer comm-data for reduction");
+    if (!read_event.ok()) {
+        return read_event;
+    }
+    for (size_t i = 0; i < reduced->size(); ++i) {
+        int32_t value = 0;
+        CheckerStatus read_status = world->CommData(peer, peer).ReadInt32(i, &value);
+        if (!read_status.ok()) {
+            return read_status;
+        }
+        (*reduced)[i] += value;
+    }
+    return CheckerStatus::Ok();
+}
+
+CheckerStatus WriteAllReduceOutput(RankWorld *world, int rank,
+                                   const std::vector<int32_t> &reduced) {
+    ShimRuntime runtime(world);
+    const size_t bytes = reduced.size() * sizeof(int32_t);
+    CheckerStatus write_status = world->UserOutput(rank).WriteBytes(0, reduced.data(), bytes);
+    if (!write_status.ok()) {
+        return write_status;
+    }
+    return runtime.RecordWrite(rank, rank, BufferRole::kUserOutput, 0, bytes,
+                               TILEXR_CHECKER_HERE, "write reduced user output");
+}
+
 RunResult MakeResultFromStatus(const CheckerStatus &status, const FindingSet &findings,
                                const std::vector<OutputMismatch> &mismatches,
                                size_t event_count) {
@@ -334,8 +369,19 @@ RunResult CollectiveExecutor::RunAllReduceSumInt32(RankWorld *world,
             for (int rank = 0; rank < test_case.rank_size && exec_status.ok(); ++rank) {
                 exec_status = AddWaitEvents(world, test_case, rank);
             }
-            for (int rank = 0; rank < test_case.rank_size && exec_status.ok(); ++rank) {
-                exec_status = ExecuteAllReduceReadAndWrite(world, test_case, rank);
+            {
+                const size_t count = static_cast<size_t>(test_case.count);
+                std::vector<std::vector<int32_t> > reduced(
+                    static_cast<size_t>(test_case.rank_size), std::vector<int32_t>(count, 0));
+                for (int peer = 0; peer < test_case.rank_size && exec_status.ok(); ++peer) {
+                    for (int rank = 0; rank < test_case.rank_size && exec_status.ok(); ++rank) {
+                        exec_status =
+                            AccumulateAllReducePeer(world, test_case, rank, peer, &reduced[rank]);
+                    }
+                }
+                for (int rank = 0; rank < test_case.rank_size && exec_status.ok(); ++rank) {
+                    exec_status = WriteAllReduceOutput(world, rank, reduced[rank]);
+                }
             }
             break;
     }
