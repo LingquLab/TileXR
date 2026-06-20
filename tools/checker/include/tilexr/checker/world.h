@@ -25,6 +25,7 @@ public:
 
     ByteBuffer &UserInput(int rank);
     ByteBuffer &UserOutput(int rank);
+    const ByteBuffer &UserOutput(int rank) const;
     ByteBuffer &CommData(int owner_rank, int slot);
     ByteBuffer &CommFlag(int owner_rank, int slot);
     EventLog &events();

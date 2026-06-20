@@ -3,6 +3,7 @@ add_library(tilexr-checker-core STATIC
   src/event.cpp
   src/memory.cpp
   src/world.cpp
+  src/oracle.cpp
 )
 
 target_include_directories(tilexr-checker-core

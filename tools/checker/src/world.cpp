@@ -88,6 +88,10 @@ ByteBuffer &RankWorld::UserOutput(int rank) {
     return user_outputs_.at(static_cast<size_t>(rank));
 }
 
+const ByteBuffer &RankWorld::UserOutput(int rank) const {
+    return user_outputs_.at(static_cast<size_t>(rank));
+}
+
 ByteBuffer &RankWorld::CommData(int owner_rank, int slot) {
     return comm_data_.at(static_cast<size_t>(owner_rank)).at(static_cast<size_t>(slot));
 }
