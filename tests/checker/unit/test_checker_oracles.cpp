@@ -46,6 +46,13 @@ void ExpectEqSize(size_t actual, size_t expected, const char *message) {
     }
 }
 
+void ExpectContains(const std::string &text, const std::string &needle, const char *message) {
+    if (text.find(needle) == std::string::npos) {
+        std::cerr << message << ": text=\"" << text << "\" needle=\"" << needle << "\"\n";
+        ++g_failures;
+    }
+}
+
 tilexr::checker::CheckerCase MakeAllGatherCase(int rank_size, int64_t count) {
     tilexr::checker::CheckerCase test_case;
     test_case.op = tilexr::checker::CollectiveOp::kAllGather;
@@ -147,6 +154,29 @@ int main() {
     }
 
     {
+        tilexr::checker::CheckerCase unsupported_case = MakeAllGatherCase(3, 2);
+        tilexr::checker::RankWorld world =
+            tilexr::checker::RankWorld::Create(3, 2 * sizeof(int32_t), 6 * sizeof(int32_t), 16);
+
+        std::vector<tilexr::checker::OutputMismatch> mismatches =
+            tilexr::checker::CompareInt32Output(world, unsupported_case, 1);
+        ExpectEqSize(mismatches.size(), 1, "unsupported compare returns one failure record");
+        if (mismatches.size() == 1) {
+            ExpectEqInt(mismatches[0].rank, -1, "unsupported compare failure rank");
+            ExpectEqI64(mismatches[0].element_index, -1, "unsupported compare failure index");
+            ExpectEqI32(mismatches[0].expected, 0, "unsupported compare failure expected");
+            ExpectEqI32(mismatches[0].actual, 0, "unsupported compare failure actual");
+            ExpectTrue(!mismatches[0].context.empty(),
+                       "unsupported compare failure context is non-empty");
+            ExpectContains(mismatches[0].context, "allgather rank_size must be 2 or 4",
+                           "unsupported compare failure context includes validation message");
+        }
+
+        mismatches = tilexr::checker::CompareInt32Output(world, unsupported_case, 0);
+        ExpectEqSize(mismatches.size(), 0, "unsupported compare honors zero mismatch budget");
+    }
+
+    {
         tilexr::checker::CheckerCase test_case = MakeAllGatherCase(2, 4);
         tilexr::checker::RankWorld world =
             tilexr::checker::RankWorld::Create(2, 4 * sizeof(int32_t), 8 * sizeof(int32_t), 16);
@@ -172,6 +202,37 @@ int main() {
         ExpectEqInt(mismatches[1].rank, 0, "second mismatch rank");
         ExpectEqI64(mismatches[1].element_index, 3, "second mismatch index");
         ExpectEqI32(mismatches[1].actual, -2, "second mismatch actual");
+    }
+
+    {
+        tilexr::checker::CheckerCase test_case = MakeAllGatherCase(2, 4);
+        tilexr::checker::RankWorld world =
+            tilexr::checker::RankWorld::Create(2, 4 * sizeof(int32_t), 3 * sizeof(int32_t), 16);
+        ExpectTrue(tilexr::checker::FillRankIndexInt32Inputs(&world, test_case).ok(),
+                   "fill inputs before undersized output compare");
+
+        std::vector<int32_t> expected =
+            tilexr::checker::ExpectedAllGatherInt32(world, test_case, 0);
+        for (size_t i = 0; i < 3; ++i) {
+            ExpectTrue(world.UserOutput(0).WriteInt32(i, expected[i]).ok(),
+                       "seed readable undersized output values");
+        }
+
+        std::vector<tilexr::checker::OutputMismatch> mismatches =
+            tilexr::checker::CompareInt32Output(world, test_case, 1);
+        ExpectEqSize(mismatches.size(), 1, "undersized output returns one failure record");
+        if (mismatches.size() == 1) {
+            ExpectEqInt(mismatches[0].rank, 0, "undersized output failure rank");
+            ExpectEqI64(mismatches[0].element_index, 3,
+                        "undersized output first unreadable index");
+            ExpectEqI32(mismatches[0].expected, expected[3], "undersized output failure expected");
+            ExpectEqI32(mismatches[0].actual, 0, "undersized output failure actual");
+            ExpectContains(mismatches[0].context, "byte buffer access out of bounds",
+                           "undersized output failure context includes read error");
+        }
+
+        mismatches = tilexr::checker::CompareInt32Output(world, test_case, 0);
+        ExpectEqSize(mismatches.size(), 0, "undersized output honors zero mismatch budget");
     }
 
     return g_failures == 0 ? 0 : 1;

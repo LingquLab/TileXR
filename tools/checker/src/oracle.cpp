@@ -35,6 +35,17 @@ std::string MismatchContext(const CheckerCase &test_case, int rank, int64_t elem
     return stream.str();
 }
 
+OutputMismatch MakeFailureMismatch(int rank, int64_t element_index, int32_t expected,
+                                   const std::string &context) {
+    OutputMismatch mismatch;
+    mismatch.rank = rank;
+    mismatch.element_index = element_index;
+    mismatch.expected = expected;
+    mismatch.actual = 0;
+    mismatch.context = context;
+    return mismatch;
+}
+
 }  // namespace
 
 CheckerStatus ValidateCase(const CheckerCase &test_case) {
@@ -171,8 +182,13 @@ std::vector<OutputMismatch> CompareInt32Output(const RankWorld &world,
                                                const CheckerCase &test_case,
                                                size_t max_mismatches) {
     std::vector<OutputMismatch> mismatches;
+    if (max_mismatches == 0) {
+        return mismatches;
+    }
     CheckerStatus status = RequireValidInt32Case(test_case);
-    if (!status.ok() || max_mismatches == 0) {
+    if (!status.ok()) {
+        mismatches.push_back(
+            MakeFailureMismatch(-1, -1, 0, "compare validation failed: " + status.message));
         return mismatches;
     }
 
@@ -182,6 +198,10 @@ std::vector<OutputMismatch> CompareInt32Output(const RankWorld &world,
             int32_t actual = 0;
             CheckerStatus read_status = world.UserOutput(rank).ReadInt32(i, &actual);
             if (!read_status.ok()) {
+                mismatches.push_back(MakeFailureMismatch(
+                    rank, static_cast<int64_t>(i), expected[i],
+                    MismatchContext(test_case, rank, static_cast<int64_t>(i)) +
+                        " read failure: " + read_status.message));
                 return mismatches;
             }
             if (actual != expected[i]) {
