@@ -28,3 +28,7 @@ tilexr_checker_test(test_tilexr_checker_shim_events
 tilexr_checker_test(test_tilexr_checker_diagnostics
   unit/test_checker_diagnostics.cpp
 )
+
+tilexr_checker_test(test_tilexr_checker_executor
+  unit/test_checker_executor.cpp
+)

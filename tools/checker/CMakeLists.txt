@@ -7,6 +7,7 @@ add_library(tilexr-checker-core STATIC
   src/shim_runtime.cpp
   src/diagnostics.cpp
   src/report.cpp
+  src/executor.cpp
 )
 
 target_include_directories(tilexr-checker-core
