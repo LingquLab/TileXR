@@ -59,6 +59,11 @@ class ReportCliTest(unittest.TestCase):
             self.assertIn("zoomRange", rank0)
             self.assertIn("resultSelect", rank0)
             self.assertIn("timeline-data", rank0)
+            self.assertIn("eventDetail", rank0)
+            self.assertIn("selectEvent", rank0)
+            self.assertIn("data-event-id", rank0)
+            self.assertIn("lanes", rank0)
+            self.assertIn("p2p:s0:1-", rank0)
             self.assertIn("send_r1_to_r0", rank0)
 
     def test_cli_validate_and_run_example(self):
