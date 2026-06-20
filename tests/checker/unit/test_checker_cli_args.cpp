@@ -9,6 +9,15 @@
 #include <unistd.h>
 
 #include "tilexr/checker/cli.h"
+#include "tilexr/checker/diagnostics.h"
+
+namespace tilexr {
+namespace checker {
+
+CheckerStatus NormalizeExecutorCliStatus(const RunResult &result);
+
+}  // namespace checker
+}  // namespace tilexr
 
 namespace {
 
@@ -168,6 +177,26 @@ void TestRunCheckerCliPassExitCode() {
                "run cli pass stdout");
 }
 
+void TestNormalizeExecutorFailStatusPreservedForReporting() {
+    tilexr::checker::RunResult result;
+    result.status = tilexr::checker::CheckerStatus::Fail("executor found mismatches");
+
+    tilexr::checker::OutputMismatch mismatch;
+    mismatch.rank = 0;
+    mismatch.element_index = 1;
+    mismatch.expected = 1;
+    mismatch.actual = 2;
+    mismatch.context = "synthetic executor mismatch";
+    result.mismatches.push_back(mismatch);
+
+    const tilexr::checker::CheckerStatus status =
+        tilexr::checker::NormalizeExecutorCliStatus(result);
+
+    ExpectEqInt(static_cast<int>(status.code),
+                static_cast<int>(tilexr::checker::CheckerStatusCode::kFail),
+                "normalize executor fail status");
+}
+
 void TestRunCheckerCliInjectedFindingExitCode() {
     tilexr::checker::CliOptions options = MakeValidAllGatherOptions();
     options.inject_read_before_copy = true;
@@ -213,6 +242,7 @@ int main() {
     TestParseAllReduceSumWithInjectionFlags();
     TestParseInvalidOpReturnsUnsupported();
     TestRunCheckerCliPassExitCode();
+    TestNormalizeExecutorFailStatusPreservedForReporting();
     TestRunCheckerCliInjectedFindingExitCode();
     TestRunCheckerCliInvalidOutputDirExitCode();
     TestRunCheckerCliReportWriteFailureExitCode();

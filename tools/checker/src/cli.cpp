@@ -271,6 +271,15 @@ void PrintUsage(std::ostream *stream) {
 
 }  // namespace
 
+CheckerStatus NormalizeExecutorCliStatus(const RunResult &result) {
+    if (result.status.code == CheckerStatusCode::kUnsupported ||
+        result.status.code == CheckerStatusCode::kInconclusive ||
+        result.status.code == CheckerStatusCode::kInternalError) {
+        return result.status;
+    }
+    return FinalizeCliStatus(result);
+}
+
 CheckerStatus ParseCliArgs(int argc, const char *const *argv, CliOptions *options) {
     if (options == nullptr) {
         return CheckerStatus::Fail("cli options pointer is null");
@@ -500,13 +509,15 @@ int RunCheckerCli(const CliOptions &options, std::ostream *stdout_stream,
                                         input_bytes);
     CollectiveExecutor executor;
     RunResult result = executor.Run(&world, options.test_case);
+    result.status = NormalizeExecutorCliStatus(result);
     if (result.status.code == CheckerStatusCode::kUnsupported) {
         if (stderr_stream != nullptr) {
             (*stderr_stream) << result.status.message << "\n";
         }
         return 2;
     }
-    if (!result.status.ok()) {
+    if (result.status.code == CheckerStatusCode::kInconclusive ||
+        result.status.code == CheckerStatusCode::kInternalError) {
         if (stderr_stream != nullptr) {
             (*stderr_stream) << result.status.message << "\n";
         }
