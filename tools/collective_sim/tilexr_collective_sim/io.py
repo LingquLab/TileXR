@@ -122,3 +122,11 @@ def load_case(path: Path) -> CaseSpec:
         message_bytes=tuple(int(value) for value in _required(data, "message_bytes", str(path))),
         validate=bool(data.get("validate", True)),
     )
+
+
+def load_sweep(path: Path) -> Dict[str, Any]:
+    root = load_document(path)
+    data = root.get("sweep", root)
+    for key in ("algorithms", "topologies", "calibration", "message_bytes"):
+        _required(data, key, str(path))
+    return dict(data)

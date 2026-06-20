@@ -2,8 +2,8 @@ import argparse
 import json
 from pathlib import Path
 
-from .io import load_algorithm, load_calibration, load_case, load_topology
-from .model import ValidationReport, report_from_issues
+from .io import load_algorithm, load_calibration, load_case, load_sweep, load_topology
+from .model import ValidationReport, dataclass_to_plain, report_from_issues
 from .report import (
     write_html_report,
     write_html_report_from_plain,
@@ -55,6 +55,41 @@ def cmd_run(args: argparse.Namespace) -> int:
     return 0 if all(result.validation.ok for result in results) else 1
 
 
+def cmd_sweep(args: argparse.Namespace) -> int:
+    sweep_path = Path(args.sweep).resolve()
+    base = sweep_path.parent
+    sweep = load_sweep(sweep_path)
+    calibration = load_calibration(_resolve_from(base, sweep["calibration"]))
+    results = []
+    for algorithm_path in sweep["algorithms"]:
+        algorithm = load_algorithm(_resolve_from(base, algorithm_path))
+        for topology_path in sweep["topologies"]:
+            topology = load_topology(_resolve_from(base, topology_path))
+            for size in sweep["message_bytes"]:
+                results.append(
+                    simulate_algorithm(
+                        algorithm,
+                        topology,
+                        calibration,
+                        int(size),
+                        validate=bool(sweep.get("validate", True)),
+                    )
+                )
+
+    out_dir = Path(args.out)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "results.json").write_text(
+        json.dumps([dataclass_to_plain(result) for result in results], indent=2) + "\n",
+        encoding="utf-8",
+    )
+    if results:
+        write_result(results[0], out_dir)
+    write_summary(results, out_dir / "summary.csv")
+    write_html_report(results, out_dir / "report.html")
+    print(f"wrote {out_dir}")
+    return 0 if all(result.validation.ok for result in results) else 1
+
+
 def cmd_report(args: argparse.Namespace) -> int:
     data = json.loads(Path(args.result).read_text(encoding="utf-8"))
     write_html_report_from_plain(data, Path(args.out))
@@ -75,6 +110,11 @@ def main(argv=None) -> int:
     run.add_argument("case")
     run.add_argument("--out", required=True)
     run.set_defaults(func=cmd_run)
+
+    sweep = subcommands.add_parser("sweep", help="run every algorithm/topology/message-size combination")
+    sweep.add_argument("sweep")
+    sweep.add_argument("--out", required=True)
+    sweep.set_defaults(func=cmd_sweep)
 
     report = subcommands.add_parser("report", help="regenerate static HTML from result JSON")
     report.add_argument("result")
