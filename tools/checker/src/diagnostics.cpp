@@ -90,6 +90,14 @@ bool SameCommDataRange(const Event &lhs, const Event &rhs) {
            lhs.offset == rhs.offset && lhs.bytes == rhs.bytes;
 }
 
+bool SafeAdd(size_t lhs, size_t rhs, size_t *out) {
+    if (lhs > static_cast<size_t>(-1) - rhs) {
+        return false;
+    }
+    *out = lhs + rhs;
+    return true;
+}
+
 bool IsReadSatisfiedByProducer(const Event &read, const Event &producer) {
     if (producer.id >= read.id) {
         return false;
@@ -100,7 +108,21 @@ bool IsReadSatisfiedByProducer(const Event &read, const Event &producer) {
     if (producer.buffer_role != BufferRole::kCommData) {
         return false;
     }
-    return SameCommDataRange(read, producer);
+    if (read.buffer_role != BufferRole::kCommData) {
+        return false;
+    }
+
+    size_t producer_end = 0;
+    size_t read_end = 0;
+    if (!SafeAdd(producer.offset, producer.bytes, &producer_end) ||
+        !SafeAdd(read.offset, read.bytes, &read_end)) {
+        return false;
+    }
+
+    return producer.peer_rank == read.peer_rank &&
+           producer.slot == read.slot &&
+           producer.offset <= read.offset &&
+           producer_end >= read_end;
 }
 
 bool IsMatchingStore(const Event &wait, const Event &store) {
@@ -219,13 +241,12 @@ FindingSet CheckOrdering(const EventLog &events) {
                 const Event &candidate = entries[j];
                 if (IsMatchingStore(event, candidate)) {
                     has_match = true;
-                    break;
                 }
                 if (IsNewerStoreSameWaitSlot(event, candidate)) {
                     has_newer_store = true;
                 }
             }
-            if (!has_match && has_newer_store) {
+            if (has_newer_store) {
                 findings.Add(MakeFindingFromEvent(
                     FindingKind::kFlagStaleMagic, Severity::kError, event,
                     "WaitFlag observed an older magic after a newer producer store on the same slot.",

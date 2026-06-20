@@ -141,6 +141,66 @@ void TestReadBeforeCopySummaryMatchesGolden() {
     ExpectEqString(summary, expected, "read before copy summary matches golden");
 }
 
+void TestReadBeforeCopySatisfiedByShimProducerModel() {
+    tilexr::checker::EventLog events;
+    events.Add(MakeEvent(tilexr::checker::EventKind::kCopy, 1, 0,
+                         tilexr::checker::BufferRole::kCommData, 1, 0, 32, 64,
+                         "producer copy into peer-owned comm data"));
+    events.Add(MakeEvent(tilexr::checker::EventKind::kRead, 0, 0,
+                         tilexr::checker::BufferRole::kCommData, 1, 0, 48, 16,
+                         "consumer read from same physical comm data window"));
+
+    tilexr::checker::FindingSet findings = tilexr::checker::CheckOrdering(events);
+    ExpectEqSize(findings.findings().size(), 0,
+                 "shim producer copy should satisfy later comm-data read");
+}
+
+void TestStaleMagicDetectedEvenWhenExactStoreExists() {
+    tilexr::checker::EventLog events;
+    events.Add(MakeEvent(tilexr::checker::EventKind::kFlagStore, 0, 1,
+                         tilexr::checker::BufferRole::kCommFlag, 3, 0x20, 0,
+                         sizeof(uint64_t), "older exact store"));
+    events.Add(MakeEvent(tilexr::checker::EventKind::kFlagStore, 0, 1,
+                         tilexr::checker::BufferRole::kCommFlag, 3, 0x21, 0,
+                         sizeof(uint64_t), "newer producer store"));
+    events.Add(MakeEvent(tilexr::checker::EventKind::kFlagWait, 1, 0,
+                         tilexr::checker::BufferRole::kCommFlag, 3, 0x20, 0,
+                         sizeof(uint64_t), "wait on stale magic"));
+
+    tilexr::checker::FindingSet findings = tilexr::checker::CheckOrdering(events);
+    ExpectEqSize(findings.findings().size(), 1, "stale magic finding count");
+    const tilexr::checker::Finding *top = findings.TopFinding();
+    ExpectTrue(top != nullptr, "stale magic top finding exists");
+    if (top != nullptr) {
+        ExpectEqInt(static_cast<int>(top->kind),
+                    static_cast<int>(tilexr::checker::FindingKind::kFlagStaleMagic),
+                    "stale magic should be reported despite exact matching store");
+    }
+}
+
+void TestFindingPriorityFavorsStaleMagicOverNoProducer() {
+    tilexr::checker::EventLog events;
+    events.Add(MakeEvent(tilexr::checker::EventKind::kFlagStore, 0, 1,
+                         tilexr::checker::BufferRole::kCommFlag, 3, 0x21, 0,
+                         sizeof(uint64_t), "newer producer store"));
+    events.Add(MakeEvent(tilexr::checker::EventKind::kFlagWait, 1, 0,
+                         tilexr::checker::BufferRole::kCommFlag, 3, 0x20, 0,
+                         sizeof(uint64_t), "stale wait without exact producer"));
+    events.Add(MakeEvent(tilexr::checker::EventKind::kFlagWait, 0, 1,
+                         tilexr::checker::BufferRole::kCommFlag, 5, 0x44, 0,
+                         sizeof(uint64_t), "missing producer wait"));
+
+    tilexr::checker::FindingSet findings = tilexr::checker::CheckOrdering(events);
+    ExpectEqSize(findings.findings().size(), 2, "priority comparison finding count");
+    const tilexr::checker::Finding *top = findings.TopFinding();
+    ExpectTrue(top != nullptr, "priority comparison top finding exists");
+    if (top != nullptr) {
+        ExpectEqInt(static_cast<int>(top->kind),
+                    static_cast<int>(tilexr::checker::FindingKind::kFlagStaleMagic),
+                    "stale magic should outrank no producer");
+    }
+}
+
 void TestDirectPeerUserBufferFinding() {
     tilexr::checker::EventLog events;
     events.Add(MakeEvent(tilexr::checker::EventKind::kRead, 0, 1,
@@ -208,6 +268,9 @@ void TestEventsJsonlIncludesStableKinds() {
 int main() {
     TestOrderingFindingsAndPriority();
     TestReadBeforeCopySummaryMatchesGolden();
+    TestReadBeforeCopySatisfiedByShimProducerModel();
+    TestStaleMagicDetectedEvenWhenExactStoreExists();
+    TestFindingPriorityFavorsStaleMagicOverNoProducer();
     TestDirectPeerUserBufferFinding();
     TestOutputMismatchKindsAndJson();
     TestEventsJsonlIncludesStableKinds();
