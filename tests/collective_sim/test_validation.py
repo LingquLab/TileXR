@@ -49,6 +49,26 @@ class StaticValidationTest(unittest.TestCase):
         self.assertFalse(report.ok)
         self.assertIn("comm_buffer_endpoint_required", {issue.code for issue in report.issues})
 
+    def test_transfer_from_user_input_to_comm_buffer_fails(self):
+        algorithm = valid_algorithm()
+        ops = {
+            "bad_send": OpSpec("bad_send", "send", 0, 1024, "r0_in", "r1_comm", 0, 1, (), "datacopy"),
+        }
+        report = validate_static(AlgorithmSpec("bad", "allgather", 2, algorithm.buffers, ops, {}), topology())
+        self.assertFalse(report.ok)
+        self.assertIn("comm_buffer_endpoint_required", {issue.code for issue in report.issues})
+
+    def test_transfer_from_comm_buffer_to_user_output_fails(self):
+        algorithm = valid_algorithm()
+        buffers = dict(algorithm.buffers)
+        buffers["r1_out"] = BufferSpec("r1_out", 1, "user_output", ())
+        ops = {
+            "bad_recv": OpSpec("bad_recv", "recv", 1, 1024, "r0_comm", "r1_out", 0, 1, (), "datacopy"),
+        }
+        report = validate_static(AlgorithmSpec("bad", "allgather", 2, buffers, ops, {}), topology())
+        self.assertFalse(report.ok)
+        self.assertIn("comm_buffer_endpoint_required", {issue.code for issue in report.issues})
+
     def test_datacopy_without_comm_endpoint_fails(self):
         algorithm = valid_algorithm()
         buffers = dict(algorithm.buffers)

@@ -28,6 +28,15 @@ def _has_comm_endpoint(algorithm: AlgorithmSpec, op: OpSpec) -> bool:
     return any(role in COMM_BUFFER_ROLES for role in roles)
 
 
+def _transfer_uses_only_comm_endpoints(algorithm: AlgorithmSpec, op: OpSpec) -> bool:
+    roles = []
+    if op.src_buffer is not None and op.src_buffer in algorithm.buffers:
+        roles.append(algorithm.buffers[op.src_buffer].role)
+    if op.dst_buffer is not None and op.dst_buffer in algorithm.buffers:
+        roles.append(algorithm.buffers[op.dst_buffer].role)
+    return bool(roles) and all(role in COMM_BUFFER_ROLES for role in roles)
+
+
 def validate_static(algorithm: AlgorithmSpec, topology: Optional[TopologySpec] = None) -> ValidationReport:
     issues: List[ValidationIssue] = []
     if topology is not None and topology.rank_count != algorithm.rank_count:
@@ -50,9 +59,9 @@ def validate_static(algorithm: AlgorithmSpec, topology: Optional[TopologySpec] =
             buffer_id = getattr(op, attr)
             if buffer_id is not None and buffer_id not in algorithm.buffers:
                 issues.append(issue("missing_buffer", f"missing {attr} {buffer_id}", op_id=op.id, buffer_id=buffer_id, rank=op.rank))
-        if op.type in TRANSFER_OPS and not _has_comm_endpoint(algorithm, op):
+        if op.type in TRANSFER_OPS and not _transfer_uses_only_comm_endpoints(algorithm, op):
             issues.append(issue("comm_buffer_endpoint_required",
-                                f"{op.type} requires a communication-buffer endpoint",
+                                f"{op.type} requires communication-buffer endpoints",
                                 op_id=op.id, rank=op.rank))
         if op.type in COPY_OPS and op.mode in COMM_REQUIRED_MODES and not _has_comm_endpoint(algorithm, op):
             issues.append(issue("comm_buffer_endpoint_required",
