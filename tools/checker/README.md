@@ -21,10 +21,14 @@ The checker is off by default. Enable it explicitly:
 ```bash
 source scripts/common_env.sh
 cmake -S . -B build-checker -DTILEXR_BUILD_CHECKER=ON -DBUILD_TESTING=ON
-cmake --build build-checker -j"$(nproc)"
+cmake --build build-checker --target tilexr_checker tilexr_checker_all -j"$(nproc)"
 ```
 
 The CLI binary is produced at `build-checker/tools/checker/tilexr_checker`.
+On a host without the CANN runtime, keep the build checker-only by naming
+checker targets explicitly. Avoid using the build directory's default `all`
+target for this workflow, because the repository-level default target may also
+include CANN-linked production libraries such as `src/comm`.
 
 ## CLI
 

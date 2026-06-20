@@ -89,12 +89,12 @@ std::string RenderSummary(const CheckerCase &test_case,
                           const FindingSet &findings,
                           size_t mismatch_count,
                           size_t event_count) {
-    (void)test_case;
     const bool has_problems =
         !status.ok() || mismatch_count != 0 || !findings.findings().empty();
 
     std::ostringstream out;
     out << "checker: " << (has_problems ? "FAIL" : "PASS") << "\n";
+    out << "case: " << DescribeCase(test_case) << "\n";
     const Finding *top = findings.TopFinding();
     if (top != nullptr) {
         out << "top finding: " << ToString(top->kind) << "\n";
@@ -118,6 +118,7 @@ std::string RenderSummary(const CheckerCase &test_case,
                                     : "No action required.")
             << "\n";
     }
+    out << "mismatches: " << mismatch_count << "\n";
     out << "events: " << event_count << "\n";
     return out.str();
 }

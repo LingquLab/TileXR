@@ -163,6 +163,25 @@ void TestParseInvalidOpReturnsUnsupported() {
                 "invalid op parse status");
 }
 
+void TestParseRankSizeOverflowReturnsUnsupported() {
+    const char *argv[] = {
+        "tilexr_checker",
+        "--op", "allgather",
+        "--rank-size", "2147483648",
+        "--count", "16",
+        "--datatype", "int32",
+    };
+
+    tilexr::checker::CliOptions options;
+    tilexr::checker::CheckerStatus status =
+        tilexr::checker::ParseCliArgs(static_cast<int>(sizeof(argv) / sizeof(argv[0])), argv,
+                                      &options);
+
+    ExpectEqInt(static_cast<int>(status.code),
+                static_cast<int>(tilexr::checker::CheckerStatusCode::kUnsupported),
+                "rank-size overflow parse status");
+}
+
 void TestRunCheckerCliPassExitCode() {
     tilexr::checker::CliOptions options = MakeValidAllGatherOptions();
     std::ostringstream stdout_stream;
@@ -241,6 +260,7 @@ int main() {
     TestParseAllGatherRoundRobin();
     TestParseAllReduceSumWithInjectionFlags();
     TestParseInvalidOpReturnsUnsupported();
+    TestParseRankSizeOverflowReturnsUnsupported();
     TestRunCheckerCliPassExitCode();
     TestNormalizeExecutorFailStatusPreservedForReporting();
     TestRunCheckerCliInjectedFindingExitCode();

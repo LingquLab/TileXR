@@ -54,3 +54,21 @@ tilexr_checker_test(test_tilexr_checker_source_preservation
 tilexr_checker_shim_test(test_tilexr_checker_header_probe
   unit/test_checker_header_probe.cpp
 )
+target_include_directories(test_tilexr_checker_header_probe PRIVATE
+  ${PROJECT_SOURCE_DIR}/src/collectives/host
+)
+
+add_custom_target(tilexr_checker_all
+  DEPENDS
+    tilexr_checker
+    test_tilexr_checker_sources
+    test_tilexr_checker_world
+    test_tilexr_checker_oracles
+    test_tilexr_checker_shim_events
+    test_tilexr_checker_diagnostics
+    test_tilexr_checker_executor
+    test_tilexr_checker_reports
+    test_tilexr_checker_cli_args
+    test_tilexr_checker_source_preservation
+    test_tilexr_checker_header_probe
+)

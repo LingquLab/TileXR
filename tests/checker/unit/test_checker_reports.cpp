@@ -116,6 +116,8 @@ void TestWriteReportFilesCreatesArtifacts() {
     ExpectTrue(!paths.events_jsonl.empty(), "events path set");
     ExpectTrue(!paths.checker_report_json.empty(), "checker report path set");
     ExpectContains(ReadFile(paths.summary_txt), "checker: PASS", "summary pass");
+    ExpectContains(ReadFile(paths.summary_txt), "case: allgather", "summary case");
+    ExpectContains(ReadFile(paths.summary_txt), "mismatches: 0", "summary mismatch count");
     ExpectContains(ReadFile(paths.findings_json), "[]", "findings empty json");
     ExpectContains(ReadFile(paths.events_jsonl), "\"kind\":\"COPY\"", "events include copy");
     ExpectContains(ReadFile(paths.checker_report_json), "\"status\":\"PASS\"",
@@ -145,9 +147,13 @@ void TestInjectedBadTraceWritesTopFindingAndNextAction() {
                 static_cast<int>(tilexr::checker::CheckerStatusCode::kOk),
                 "injected report writer status");
     const std::string summary = ReadFile(paths.summary_txt);
+    const std::string report_json = ReadFile(paths.checker_report_json);
     ExpectContains(summary, "checker: FAIL", "summary fail");
     ExpectContains(summary, "top finding: READ_BEFORE_COPY", "summary top finding");
     ExpectContains(summary, "next action:", "summary next action");
+    ExpectContains(report_json, "\"core\":3", "checker report top finding core");
+    ExpectContains(report_json, "\"source_file\":\"", "checker report top finding source file");
+    ExpectContains(report_json, "\"source_line\":", "checker report top finding source line");
 }
 
 void TestPureMismatchSummaryUsesFailStatus() {
@@ -176,6 +182,7 @@ void TestPureMismatchSummaryUsesFailStatus() {
                 "pure mismatch report writer status");
     const std::string summary = ReadFile(paths.summary_txt);
     ExpectContains(summary, "checker: FAIL", "pure mismatch summary fail");
+    ExpectContains(summary, "mismatches: 1", "pure mismatch summary mismatch count");
     ExpectContains(ReadFile(paths.checker_report_json), "\"status\":\"FAIL\"",
                    "pure mismatch checker report fail");
 }

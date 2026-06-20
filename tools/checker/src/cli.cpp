@@ -1,6 +1,7 @@
 #include "tilexr/checker/cli.h"
 
 #include <cerrno>
+#include <climits>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -96,6 +97,9 @@ CheckerStatus ParseInt(const char *text, int *value) {
     const long parsed = std::strtol(text, &end, 10);
     if (errno != 0 || end == text || *end != '\0') {
         return CheckerStatus::Unsupported(std::string("invalid integer: ") + text);
+    }
+    if (parsed < INT_MIN || parsed > INT_MAX) {
+        return CheckerStatus::Unsupported(std::string("integer out of range: ") + text);
     }
     *value = static_cast<int>(parsed);
     return CheckerStatus::Ok();
@@ -479,9 +483,12 @@ CheckerStatus WriteReportFiles(const std::string &output_dir,
                << "\"next_action\":\"" << EscapeJson(top->next_action) << "\","
                << "\"rank\":" << top->rank << ","
                << "\"peer_rank\":" << top->peer_rank << ","
+               << "\"core\":" << top->core << ","
                << "\"buffer_role\":\"" << ToString(top->buffer_role) << "\","
                << "\"offset\":" << top->offset << ","
-               << "\"bytes\":" << top->bytes
+               << "\"bytes\":" << top->bytes << ","
+               << "\"source_file\":\"" << EscapeJson(top->source_file) << "\","
+               << "\"source_line\":" << top->source_line
                << "}";
     }
     report << "}";
