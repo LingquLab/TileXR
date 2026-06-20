@@ -5,8 +5,8 @@ from pathlib import Path
 from .io import load_algorithm, load_calibration, load_case, load_sweep, load_topology
 from .model import ValidationReport, dataclass_to_plain, report_from_issues
 from .report import (
-    write_html_report,
-    write_html_report_from_plain,
+    write_report_bundle,
+    write_report_bundle_from_plain,
     write_result,
     write_results,
     write_summary,
@@ -50,7 +50,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     write_result(results[0], out_dir)
     write_results(results, out_dir / "results.json")
     write_summary(results, out_dir / "summary.csv")
-    write_html_report(results, out_dir / "report.html")
+    write_report_bundle(results, out_dir)
     print(f"wrote {out_dir}")
     return 0 if all(result.validation.ok for result in results) else 1
 
@@ -84,14 +84,14 @@ def cmd_sweep(args: argparse.Namespace) -> int:
     if results:
         write_result(results[0], out_dir)
     write_summary(results, out_dir / "summary.csv")
-    write_html_report(results, out_dir / "report.html")
+    write_report_bundle(results, out_dir)
     print(f"wrote {out_dir}")
     return 0 if all(result.validation.ok for result in results) else 1
 
 
 def cmd_report(args: argparse.Namespace) -> int:
     data = json.loads(Path(args.result).read_text(encoding="utf-8"))
-    write_html_report_from_plain(data, Path(args.out))
+    write_report_bundle_from_plain(data, Path(args.out))
     print(f"wrote {args.out}")
     return 0
 

@@ -8,7 +8,7 @@ from pathlib import Path
 
 from tests.collective_sim.test_semantics import two_rank_allgather
 from tests.collective_sim.test_simulator import calibration, topology
-from tilexr_collective_sim.report import write_html_report, write_result, write_summary
+from tilexr_collective_sim.report import write_html_report, write_report_bundle, write_result, write_summary
 from tilexr_collective_sim.simulator import simulate_algorithm
 
 
@@ -36,6 +36,30 @@ class ReportCliTest(unittest.TestCase):
             self.assertIn("Congestion Drilldown", html)
             self.assertIn("Rank Timeline", html)
             self.assertIn("estimate", html)
+
+    def test_report_bundle_writes_light_index_and_rank_timelines(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            result = simulate_algorithm(two_rank_allgather(), topology(2), calibration(), 1024)
+
+            write_report_bundle([result], out)
+
+            main = (out / "report.html").read_text(encoding="utf-8")
+            rank0_path = out / "rank_reports" / "rank_000.html"
+            rank1_path = out / "rank_reports" / "rank_001.html"
+            rank0 = rank0_path.read_text(encoding="utf-8")
+
+            self.assertTrue(rank0_path.exists())
+            self.assertTrue(rank1_path.exists())
+            self.assertIn("rankSelect", main)
+            self.assertIn("rank_reports/rank_000.html", main)
+            self.assertIn("Bottleneck Summary", main)
+            self.assertNotIn("send_r0_to_r1", main)
+            self.assertIn("timelineSvg", rank0)
+            self.assertIn("zoomRange", rank0)
+            self.assertIn("resultSelect", rank0)
+            self.assertIn("timeline-data", rank0)
+            self.assertIn("send_r1_to_r0", rank0)
 
     def test_cli_validate_and_run_example(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -81,6 +105,7 @@ class ReportCliTest(unittest.TestCase):
             self.assertTrue((out / "results.json").exists())
             self.assertTrue((out / "summary.csv").exists())
             self.assertTrue((out / "report.html").exists())
+            self.assertTrue((out / "rank_reports" / "rank_000.html").exists())
 
     def test_cli_report_regenerates_html_from_results_json(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -123,6 +148,7 @@ class ReportCliTest(unittest.TestCase):
             )
             self.assertEqual(report.returncode, 0, report.stderr)
             self.assertIn("Algorithm Selection", regenerated.read_text(encoding="utf-8"))
+            self.assertTrue((Path(tmp) / "rank_reports" / "rank_000.html").exists())
 
 
 if __name__ == "__main__":

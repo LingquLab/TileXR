@@ -33,7 +33,8 @@ The run and sweep commands write:
 - `result.json`
 - `results.json`
 - `summary.csv`
-- `report.html`
+- `report.html`: lightweight algorithm-selection index with rank/card navigation
+- `rank_reports/rank_XXX.html`: per-rank interactive congestion timeline files
 
 ## Sweep Schema
 
