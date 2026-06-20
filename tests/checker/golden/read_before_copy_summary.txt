@@ -1,0 +1,7 @@
+checker: FAIL
+top finding: READ_BEFORE_COPY
+rank: 1
+peer rank: 0
+buffer: CommData
+next action: Check whether the producer copy is skipped, delayed, or guarded by the wrong flag.
+events: 1

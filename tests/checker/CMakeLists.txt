@@ -24,3 +24,7 @@ tilexr_checker_test(test_tilexr_checker_oracles
 tilexr_checker_test(test_tilexr_checker_shim_events
   unit/test_checker_shim_events.cpp
 )
+
+tilexr_checker_test(test_tilexr_checker_diagnostics
+  unit/test_checker_diagnostics.cpp
+)
