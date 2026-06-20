@@ -90,6 +90,17 @@ bool HasFindingKind(const tilexr::checker::FindingSet &findings,
     return false;
 }
 
+void ExpectEvent(const tilexr::checker::Event &event, tilexr::checker::EventKind kind, int rank,
+                 const char *message) {
+    if (event.kind != kind || event.rank != rank) {
+        std::cerr << message << ": actual_kind=" << static_cast<int>(event.kind)
+                  << " actual_rank=" << event.rank
+                  << " expected_kind=" << static_cast<int>(kind)
+                  << " expected_rank=" << rank << "\n";
+        ++g_failures;
+    }
+}
+
 void InjectPeerUserRead(tilexr::checker::RankWorld *world, int reader_rank, int owner_rank) {
     tilexr::checker::Event event;
     event.kind = tilexr::checker::EventKind::kRead;
@@ -148,6 +159,18 @@ void TestAllGatherSerialPasses() {
     ExpectEqSize(result.mismatches.size(), 0, "allgather serial mismatches");
     ExpectEqSize(result.findings.findings().size(), 0, "allgather serial findings");
     ExpectEqSize(result.event_count, static_cast<size_t>(14), "allgather serial event count");
+    const std::vector<tilexr::checker::Event> &events = world.events().events();
+    ExpectEqSize(events.size(), static_cast<size_t>(14), "allgather serial events size");
+    if (events.size() >= 8) {
+        ExpectEvent(events[0], tilexr::checker::EventKind::kCopy, 0, "serial event 0");
+        ExpectEvent(events[1], tilexr::checker::EventKind::kFlagStore, 0, "serial event 1");
+        ExpectEvent(events[2], tilexr::checker::EventKind::kFlagWait, 0, "serial event 2");
+        ExpectEvent(events[3], tilexr::checker::EventKind::kRead, 0, "serial event 3");
+        ExpectEvent(events[4], tilexr::checker::EventKind::kWrite, 0, "serial event 4");
+        ExpectEvent(events[5], tilexr::checker::EventKind::kRead, 0, "serial event 5");
+        ExpectEvent(events[6], tilexr::checker::EventKind::kWrite, 0, "serial event 6");
+        ExpectEvent(events[7], tilexr::checker::EventKind::kCopy, 1, "serial event 7");
+    }
 }
 
 void TestAllGatherRoundRobinPasses() {
@@ -163,6 +186,55 @@ void TestAllGatherRoundRobinPasses() {
     ExpectEqSize(result.mismatches.size(), 0, "allgather round robin mismatches");
     ExpectEqSize(result.findings.findings().size(), 0, "allgather round robin findings");
     ExpectEqSize(result.event_count, static_cast<size_t>(60), "allgather round robin event count");
+    const std::vector<tilexr::checker::Event> &events = world.events().events();
+    ExpectEqSize(events.size(), static_cast<size_t>(60), "allgather round robin events size");
+    if (events.size() >= 8) {
+        ExpectEvent(events[0], tilexr::checker::EventKind::kCopy, 0, "round robin event 0");
+        ExpectEvent(events[1], tilexr::checker::EventKind::kCopy, 1, "round robin event 1");
+        ExpectEvent(events[2], tilexr::checker::EventKind::kCopy, 2, "round robin event 2");
+        ExpectEvent(events[3], tilexr::checker::EventKind::kCopy, 3, "round robin event 3");
+        ExpectEvent(events[4], tilexr::checker::EventKind::kFlagStore, 0, "round robin event 4");
+        ExpectEvent(events[5], tilexr::checker::EventKind::kFlagStore, 0, "round robin event 5");
+        ExpectEvent(events[6], tilexr::checker::EventKind::kFlagStore, 0, "round robin event 6");
+        ExpectEvent(events[7], tilexr::checker::EventKind::kFlagStore, 1, "round robin event 7");
+    }
+}
+
+void TestAllGatherSchedulersProduceDifferentOrders() {
+    tilexr::checker::CheckerCase serial_case =
+        MakeAllGatherCase(2, 16, tilexr::checker::SchedulerMode::kSerial);
+    tilexr::checker::CheckerCase round_robin_case =
+        MakeAllGatherCase(2, 16, tilexr::checker::SchedulerMode::kRoundRobin);
+    tilexr::checker::RankWorld serial_world = MakeWorld(serial_case);
+    tilexr::checker::RankWorld round_robin_world = MakeWorld(round_robin_case);
+    tilexr::checker::CollectiveExecutor executor;
+
+    tilexr::checker::RunResult serial_result = executor.Run(&serial_world, serial_case);
+    tilexr::checker::RunResult round_robin_result = executor.Run(&round_robin_world, round_robin_case);
+
+    ExpectEqInt(static_cast<int>(serial_result.status.code),
+                static_cast<int>(tilexr::checker::CheckerStatusCode::kOk),
+                "serial compare status");
+    ExpectEqInt(static_cast<int>(round_robin_result.status.code),
+                static_cast<int>(tilexr::checker::CheckerStatusCode::kOk),
+                "round robin compare status");
+
+    const std::vector<tilexr::checker::Event> &serial_events = serial_world.events().events();
+    const std::vector<tilexr::checker::Event> &round_robin_events = round_robin_world.events().events();
+    ExpectEqSize(serial_events.size(), static_cast<size_t>(14), "serial compare event count");
+    ExpectEqSize(round_robin_events.size(), static_cast<size_t>(14), "round robin compare event count");
+    if (serial_events.size() >= 8 && round_robin_events.size() >= 5) {
+        ExpectEvent(serial_events[7], tilexr::checker::EventKind::kCopy, 1,
+                    "serial rank 1 starts after rank 0 phases");
+        ExpectEvent(round_robin_events[0], tilexr::checker::EventKind::kCopy, 0,
+                    "round robin first publish rank 0");
+        ExpectEvent(round_robin_events[1], tilexr::checker::EventKind::kCopy, 1,
+                    "round robin second publish rank 1");
+        ExpectEvent(round_robin_events[2], tilexr::checker::EventKind::kFlagStore, 0,
+                    "round robin stores begin after all publishes");
+        ExpectTrue(serial_events[1].kind != round_robin_events[1].kind,
+                   "scheduler orders differ by second event kind");
+    }
 }
 
 void TestAllReducePassesForBothSchedulers() {
@@ -197,6 +269,8 @@ void TestUnsupportedDatatypeReturnsFinding() {
     ExpectEqInt(static_cast<int>(result.status.code),
                 static_cast<int>(tilexr::checker::CheckerStatusCode::kUnsupported),
                 "unsupported datatype status");
+    ExpectEqSize(result.mismatches.size(), 0, "unsupported datatype mismatches");
+    ExpectEqSize(result.event_count, static_cast<size_t>(0), "unsupported datatype event count");
     ExpectTrue(HasFindingKind(result.findings, tilexr::checker::FindingKind::kUnsupportedApi),
                "unsupported datatype finding kind");
 }
@@ -238,6 +312,7 @@ void TestInjectedStaleMagicProducesFinding() {
 int main() {
     TestAllGatherSerialPasses();
     TestAllGatherRoundRobinPasses();
+    TestAllGatherSchedulersProduceDifferentOrders();
     TestAllReducePassesForBothSchedulers();
     TestUnsupportedDatatypeReturnsFinding();
     TestInjectedPeerUserReadProducesFinding();

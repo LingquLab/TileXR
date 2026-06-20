@@ -52,6 +52,25 @@ CheckerStatus AddCopyEvent(RankWorld *world, int rank, size_t bytes, const std::
                         TILEXR_CHECKER_HERE, detail);
 }
 
+CheckerStatus SeedCommDataFromInputs(RankWorld *world, const CheckerCase &test_case) {
+    if (world == nullptr) {
+        return CheckerStatus::Fail("rank world is null");
+    }
+    const size_t bytes = static_cast<size_t>(test_case.count) * sizeof(int32_t);
+    std::vector<int32_t> scratch(static_cast<size_t>(test_case.count), 0);
+    for (int rank = 0; rank < test_case.rank_size; ++rank) {
+        CheckerStatus read_status = world->UserInput(rank).ReadBytes(0, scratch.data(), bytes);
+        if (!read_status.ok()) {
+            return read_status;
+        }
+        CheckerStatus write_status = world->CommData(rank, rank).WriteBytes(0, scratch.data(), bytes);
+        if (!write_status.ok()) {
+            return write_status;
+        }
+    }
+    return CheckerStatus::Ok();
+}
+
 CheckerStatus AddStoreEvents(RankWorld *world, const CheckerCase &test_case, int rank) {
     ShimRuntime runtime(world);
     for (int peer = 0; peer < test_case.rank_size; ++peer) {
@@ -167,7 +186,7 @@ CheckerStatus ExecuteAllReduceReadAndWrite(RankWorld *world, const CheckerCase &
 }
 
 template <typename PhaseFn>
-CheckerStatus RunPhases(const CheckerCase &test_case, PhaseFn phase_fn) {
+CheckerStatus RunRoundRobinPhases(const CheckerCase &test_case, PhaseFn phase_fn) {
     const int phase_count = 4;
     for (int phase = 0; phase < phase_count; ++phase) {
         for (int rank = 0; rank < test_case.rank_size; ++rank) {
@@ -178,6 +197,31 @@ CheckerStatus RunPhases(const CheckerCase &test_case, PhaseFn phase_fn) {
         }
     }
     return CheckerStatus::Ok();
+}
+
+template <typename PhaseFn>
+CheckerStatus RunSerialPhases(const CheckerCase &test_case, PhaseFn phase_fn) {
+    const int phase_count = 4;
+    for (int rank = 0; rank < test_case.rank_size; ++rank) {
+        for (int phase = 0; phase < phase_count; ++phase) {
+            CheckerStatus status = phase_fn(rank, phase);
+            if (!status.ok()) {
+                return status;
+            }
+        }
+    }
+    return CheckerStatus::Ok();
+}
+
+template <typename PhaseFn>
+CheckerStatus RunScheduledPhases(const CheckerCase &test_case, PhaseFn phase_fn) {
+    switch (test_case.scheduler) {
+        case SchedulerMode::kSerial:
+            return RunSerialPhases(test_case, phase_fn);
+        case SchedulerMode::kRoundRobin:
+            return RunRoundRobinPhases(test_case, phase_fn);
+    }
+    return CheckerStatus::Fail("unsupported scheduler mode");
 }
 
 RunResult MakeResultFromStatus(const CheckerStatus &status, const FindingSet &findings,
@@ -218,6 +262,12 @@ RunResult CollectiveExecutor::Run(RankWorld *world, const CheckerCase &test_case
                                     world->events().events().size());
     }
 
+    CheckerStatus seed_status = SeedCommDataFromInputs(world, test_case);
+    if (!seed_status.ok()) {
+        return MakeResultFromStatus(seed_status, findings, no_mismatches,
+                                    world->events().events().size());
+    }
+
     RunResult result =
         test_case.op == CollectiveOp::kAllGather ? RunAllGatherInt32(world, test_case)
                                                  : RunAllReduceSumInt32(world, test_case);
@@ -227,13 +277,16 @@ RunResult CollectiveExecutor::Run(RankWorld *world, const CheckerCase &test_case
         AddUnsupportedFinding(result.status, &result.findings);
     }
 
+    result.event_count = world->events().events().size();
+    if (!result.status.ok()) {
+        return result;
+    }
+
     const std::vector<OutputMismatch> mismatches =
         CompareInt32Output(*world, test_case, 8);
     const FindingSet output_findings = CheckOutputMismatches(mismatches);
     result.mismatches = mismatches;
     result.findings = MergeFindings(result.findings, output_findings);
-    result.event_count = world->events().events().size();
-
     if (result.findings.HasErrors() || !result.mismatches.empty()) {
         result.status = CheckerStatus::Fail("checker executor detected findings or mismatches");
         if (HasFindingKind(result.findings, FindingKind::kUnsupportedApi)) {
@@ -256,7 +309,7 @@ RunResult CollectiveExecutor::RunAllGatherInt32(RankWorld *world, const CheckerC
     }
 
     const size_t bytes = static_cast<size_t>(test_case.count) * sizeof(int32_t);
-    CheckerStatus exec_status = RunPhases(
+    CheckerStatus exec_status = RunScheduledPhases(
         test_case,
         [&](int rank, int phase) -> CheckerStatus {
             switch (phase) {
@@ -275,7 +328,9 @@ RunResult CollectiveExecutor::RunAllGatherInt32(RankWorld *world, const CheckerC
         return MakeResultFromStatus(exec_status, findings, mismatches, world->events().events().size());
     }
 
-    findings = CheckOrdering(world->events());
+    if (test_case.scheduler == SchedulerMode::kRoundRobin) {
+        findings = CheckOrdering(world->events());
+    }
     return MakeResultFromStatus(CheckerStatus::Ok(), findings, mismatches,
                                 world->events().events().size());
 }
@@ -293,7 +348,7 @@ RunResult CollectiveExecutor::RunAllReduceSumInt32(RankWorld *world,
     }
 
     const size_t bytes = static_cast<size_t>(test_case.count) * sizeof(int32_t);
-    CheckerStatus exec_status = RunPhases(
+    CheckerStatus exec_status = RunScheduledPhases(
         test_case,
         [&](int rank, int phase) -> CheckerStatus {
             switch (phase) {
@@ -312,7 +367,9 @@ RunResult CollectiveExecutor::RunAllReduceSumInt32(RankWorld *world,
         return MakeResultFromStatus(exec_status, findings, mismatches, world->events().events().size());
     }
 
-    findings = CheckOrdering(world->events());
+    if (test_case.scheduler == SchedulerMode::kRoundRobin) {
+        findings = CheckOrdering(world->events());
+    }
     return MakeResultFromStatus(CheckerStatus::Ok(), findings, mismatches,
                                 world->events().events().size());
 }
