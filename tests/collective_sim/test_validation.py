@@ -107,6 +107,24 @@ class StaticValidationTest(unittest.TestCase):
         self.assertFalse(report.ok)
         self.assertIn("invalid_transfer_rank", {issue.code for issue in report.issues})
 
+    def test_float_transfer_endpoint_rank_fails_validation(self):
+        algorithm = valid_algorithm()
+        ops = {
+            "bad_send": OpSpec("bad_send", "send", 0, 1024, "r0_comm", "r1_comm", 0.5, 1, (), "datacopy"),
+        }
+        report = validate_static(AlgorithmSpec("bad_rank", "allgather", 2, algorithm.buffers, ops, {}), topology())
+        self.assertFalse(report.ok)
+        self.assertIn("invalid_transfer_rank", {issue.code for issue in report.issues})
+
+    def test_bool_transfer_endpoint_rank_fails_validation(self):
+        algorithm = valid_algorithm()
+        ops = {
+            "bad_send": OpSpec("bad_send", "send", 0, 1024, "r0_comm", "r1_comm", True, 1, (), "datacopy"),
+        }
+        report = validate_static(AlgorithmSpec("bad_rank", "allgather", 2, algorithm.buffers, ops, {}), topology())
+        self.assertFalse(report.ok)
+        self.assertIn("invalid_transfer_rank", {issue.code for issue in report.issues})
+
     def test_transfer_endpoint_rank_must_match_buffer_rank(self):
         algorithm = valid_algorithm()
         ops = {

@@ -19,6 +19,24 @@ VALID_OP_TYPES = {"send", "recv", "put", "get", "copy", "reduce", "wait", "barri
 COMM_REQUIRED_MODES = {"datacopy", "udma"}
 
 
+def _parse_endpoint_rank(value) -> Optional[int]:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return None
+        if stripped[0] in ("+", "-"):
+            digits = stripped[1:]
+        else:
+            digits = stripped
+        if digits and all("0" <= char <= "9" for char in digits):
+            return int(stripped)
+    return None
+
+
 def _has_comm_endpoint(algorithm: AlgorithmSpec, op: OpSpec) -> bool:
     roles = []
     if op.src_buffer is not None and op.src_buffer in algorithm.buffers:
@@ -39,6 +57,7 @@ def _transfer_uses_only_comm_endpoints(algorithm: AlgorithmSpec, op: OpSpec) -> 
 
 def _validate_transfer_ranks(algorithm: AlgorithmSpec, op: OpSpec) -> List[ValidationIssue]:
     issues: List[ValidationIssue] = []
+    parsed_ranks = {}
     for attr in ("src_rank", "dst_rank"):
         value = getattr(op, attr)
         if value is None:
@@ -46,13 +65,13 @@ def _validate_transfer_ranks(algorithm: AlgorithmSpec, op: OpSpec) -> List[Valid
                                 f"{op.type} missing {attr}",
                                 op_id=op.id, rank=op.rank))
             continue
-        try:
-            rank = int(value)
-        except (TypeError, ValueError):
+        rank = _parse_endpoint_rank(value)
+        if rank is None:
             issues.append(issue("invalid_transfer_rank",
                                 f"{op.type} {attr}={value!r} is not an integer rank",
                                 op_id=op.id, rank=op.rank))
             continue
+        parsed_ranks[attr] = rank
         if rank < 0 or rank >= algorithm.rank_count:
             issues.append(issue("invalid_transfer_rank",
                                 f"{op.type} {attr}={rank} outside rank_count={algorithm.rank_count}",
@@ -66,9 +85,8 @@ def _validate_transfer_ranks(algorithm: AlgorithmSpec, op: OpSpec) -> List[Valid
         if rank_value is None or buffer_id is None or buffer_id not in algorithm.buffers:
             continue
         buffer_rank = algorithm.buffers[buffer_id].rank
-        try:
-            rank = int(rank_value)
-        except (TypeError, ValueError):
+        rank = parsed_ranks.get(rank_attr)
+        if rank is None:
             continue
         if rank != buffer_rank:
             issues.append(issue("transfer_rank_buffer_mismatch",
