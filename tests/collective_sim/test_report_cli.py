@@ -47,24 +47,54 @@ class ReportCliTest(unittest.TestCase):
             main = (out / "report.html").read_text(encoding="utf-8")
             rank0_path = out / "rank_reports" / "rank_000.html"
             rank1_path = out / "rank_reports" / "rank_001.html"
-            rank0_trace_path = out / "rank_traces" / "rank_000.trace.json"
+            profile_paths = sorted((out / "profiles").glob("profile_*.trace.json"))
             rank0 = rank0_path.read_text(encoding="utf-8")
-            rank0_trace = json.loads(rank0_trace_path.read_text(encoding="utf-8"))["traceEvents"]
+            profile_events = json.loads(profile_paths[0].read_text(encoding="utf-8"))["traceEvents"]
 
             self.assertTrue(rank0_path.exists())
             self.assertTrue(rank1_path.exists())
-            self.assertTrue(rank0_trace_path.exists())
+            self.assertEqual(len(profile_paths), 1)
+            self.assertFalse((out / "rank_traces").exists())
             self.assertIn("rankSelect", main)
             self.assertIn("rank_reports/rank_000.html", main)
+            self.assertIn("profiles/profile_000_two_rank_2p_1024b.trace.json", main)
             self.assertIn("Bottleneck Summary", main)
             self.assertNotIn("send_r0_to_r1", main)
             self.assertIn("https://ui.perfetto.dev/", rank0)
-            self.assertIn("../rank_traces/rank_000.trace.json", rank0)
+            self.assertIn("../profiles/profile_000_two_rank_2p_1024b.trace.json", rank0)
             self.assertNotIn("timelineSvg", rank0)
-            slice_events = [event for event in rank0_trace if event.get("ph") == "X"]
-            self.assertEqual([event["name"] for event in slice_events], ["send_r0_to_r1"])
-            self.assertNotIn("send_r1_to_r0", {event["name"] for event in slice_events})
+            slice_events = [event for event in profile_events if event.get("ph") == "X"]
+            self.assertEqual([event["name"] for event in slice_events], ["send_r0_to_r1", "send_r1_to_r0"])
             self.assertTrue(all(event.get("cat") == "send" for event in slice_events))
+
+    def test_report_bundle_writes_one_perfetto_profile_per_result(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            result_64p_1k = simulate_algorithm(cross_server_send(64), topology(64), calibration(), 1024)
+            result_128p_4k = simulate_algorithm(cross_server_send(128), topology(128), calibration(), 4096)
+
+            write_report_bundle([result_64p_1k, result_128p_4k], out)
+
+            profile_paths = sorted((out / "profiles").glob("profile_*.trace.json"))
+            self.assertEqual(
+                [path.name for path in profile_paths],
+                [
+                    "profile_000_cross_server_send_64p_1024b.trace.json",
+                    "profile_001_cross_server_send_128p_4096b.trace.json",
+                ],
+            )
+            profile_slices = [
+                [
+                    event
+                    for event in json.loads(path.read_text(encoding="utf-8"))["traceEvents"]
+                    if event.get("ph") == "X"
+                ]
+                for path in profile_paths
+            ]
+            self.assertEqual({event["args"]["rank_count"] for event in profile_slices[0]}, {64})
+            self.assertEqual({event["args"]["message_bytes"] for event in profile_slices[0]}, {1024})
+            self.assertEqual({event["args"]["rank_count"] for event in profile_slices[1]}, {128})
+            self.assertEqual({event["args"]["message_bytes"] for event in profile_slices[1]}, {4096})
 
     def test_perfetto_trace_groups_clos_sends_by_rank_link(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -73,7 +103,7 @@ class ReportCliTest(unittest.TestCase):
 
             write_report_bundle([result], out)
 
-            trace_events = json.loads((out / "rank_traces" / "rank_000.trace.json").read_text(encoding="utf-8"))["traceEvents"]
+            trace_events = json.loads((out / "profiles" / "profile_000_cross_server_send_128p_1024b.trace.json").read_text(encoding="utf-8"))["traceEvents"]
             process_names = {
                 event["args"]["name"]
                 for event in trace_events

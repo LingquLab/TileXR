@@ -2,6 +2,7 @@ import csv
 import html
 import json
 import re
+import shutil
 from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence, Tuple
 
@@ -77,18 +78,21 @@ def write_report_bundle_from_plain(result_data: Any, out: Path) -> None:
     items = _as_result_items(result_data)
     index_path = _index_path(out)
     rank_dir = index_path.parent / "rank_reports"
-    trace_dir = index_path.parent / "rank_traces"
+    profile_dir = index_path.parent / "profiles"
     index_path.parent.mkdir(parents=True, exist_ok=True)
-    rank_dir.mkdir(parents=True, exist_ok=True)
-    trace_dir.mkdir(parents=True, exist_ok=True)
-    index_path.write_text(_render_index_html(items, rank_report_prefix="rank_reports"), encoding="utf-8")
+    _reset_generated_dir(profile_dir)
+    _remove_generated_dir(index_path.parent / "rank_traces")
+    _reset_generated_dir(rank_dir)
+    profiles = _write_profile_traces(items, profile_dir)
+    index_path.write_text(
+        _render_index_html(items, rank_report_prefix="rank_reports", profiles=profiles),
+        encoding="utf-8",
+    )
     back_href = f"../{index_path.name}"
     for rank in _rank_ids(items):
         rank_path = rank_dir / f"rank_{rank:03d}.html"
-        trace_path = trace_dir / f"rank_{rank:03d}.trace.json"
-        trace_path.write_text(json.dumps(_rank_trace_payload(items, rank), indent=2) + "\n", encoding="utf-8")
         rank_path.write_text(
-            _render_rank_html(items, rank, back_href, f"../rank_traces/{trace_path.name}"),
+            _render_rank_html(items, rank, back_href, profiles),
             encoding="utf-8",
         )
 
@@ -101,13 +105,27 @@ def _as_result_items(result_data: Any) -> Sequence[Mapping[str, Any]]:
     raise ValueError("result data must be a result object or a list of result objects")
 
 
+def _reset_generated_dir(path: Path) -> None:
+    _remove_generated_dir(path)
+    path.mkdir(parents=True, exist_ok=True)
+
+
+def _remove_generated_dir(path: Path) -> None:
+    if path.is_dir():
+        shutil.rmtree(path)
+
+
 def _index_path(out: Path) -> Path:
     if out.suffix == ".html":
         return out
     return out / "report.html"
 
 
-def _render_index_html(results: Sequence[Mapping[str, Any]], rank_report_prefix: str = "") -> str:
+def _render_index_html(
+    results: Sequence[Mapping[str, Any]],
+    rank_report_prefix: str = "",
+    profiles: Sequence[Mapping[str, Any]] = (),
+) -> str:
     return (
         "<!doctype html>\n"
         "<html>\n"
@@ -135,6 +153,8 @@ def _render_index_html(results: Sequence[Mapping[str, Any]], rank_report_prefix:
         f"{_render_bottleneck_summary(results)}\n"
         "  <h2>Rank Timeline</h2>\n"
         f"{_render_rank_navigation(results, rank_report_prefix)}\n"
+        "  <h2>Perfetto Profiles</h2>\n"
+        f"{_render_profile_table(profiles)}\n"
         "</body>\n"
         "</html>\n"
     )
@@ -205,6 +225,30 @@ def _render_bottleneck_summary(results: Sequence[Mapping[str, Any]]) -> str:
     )
 
 
+def _render_profile_table(profiles: Sequence[Mapping[str, Any]]) -> str:
+    rows = []
+    for profile in profiles:
+        rows.append(
+            "    <tr>"
+            f"<td>{_escape(profile.get('label'))}</td>"
+            f"<td>{_escape(profile.get('collective'))}</td>"
+            f"<td>{_escape(profile.get('rank_count'))}</td>"
+            f"<td>{_escape(profile.get('message_bytes'))}</td>"
+            f"<td>{_escape(profile.get('send_events'))}</td>"
+            f"<td><a href=\"{_escape(profile.get('href'))}\">{_escape(profile.get('filename'))}</a></td>"
+            "</tr>"
+        )
+    if not rows:
+        rows.append("    <tr><td colspan=\"6\" class=\"muted\">No profiles available</td></tr>")
+    return (
+        "  <table>\n"
+        "    <thead><tr><th>profile</th><th>collective</th><th>ranks</th><th>bytes</th>"
+        "<th>send_events</th><th>trace</th></tr></thead>\n"
+        f"    <tbody>\n{chr(10).join(rows)}\n    </tbody>\n"
+        "  </table>"
+    )
+
+
 def _render_rank_navigation(results: Sequence[Mapping[str, Any]], rank_report_prefix: str) -> str:
     ranks = _rank_ids(results)
     if not ranks:
@@ -223,7 +267,7 @@ def _render_rank_navigation(results: Sequence[Mapping[str, Any]], rank_report_pr
         "    </select>\n"
         "    <button type=\"button\" onclick=\"openSelectedRank()\">Open</button>\n"
         "  </div>\n"
-        "  <p class=\"muted\">Per-rank files link to Perfetto-compatible send timelines and trace JSON.</p>\n"
+        "  <p class=\"muted\">Per-rank files link to per-test Perfetto profiles and show send ownership for that rank/card.</p>\n"
         "  <div class=\"rank-links\">\n"
         f"{chr(10).join(links)}\n"
         "  </div>\n"
@@ -236,7 +280,12 @@ def _render_rank_navigation(results: Sequence[Mapping[str, Any]], rank_report_pr
     )
 
 
-def _render_rank_html(results: Sequence[Mapping[str, Any]], rank: int, back_href: str, trace_href: str) -> str:
+def _render_rank_html(
+    results: Sequence[Mapping[str, Any]],
+    rank: int,
+    back_href: str,
+    profiles: Sequence[Mapping[str, Any]],
+) -> str:
     title = f"TileXR Rank {rank} Perfetto Trace"
     return (
         "<!doctype html>\n"
@@ -258,22 +307,25 @@ def _render_rank_html(results: Sequence[Mapping[str, Any]], rank: int, back_href
         "<body>\n"
         f"  <h1>Rank/Card {rank} Perfetto Trace</h1>\n"
         f"  <p><a href=\"{_escape(back_href)}\">Back to report</a></p>\n"
-        "  <p class=\"muted\">Only send events owned by this rank/card are exported. "
-        "Open the trace in Perfetto UI and select a slice to inspect its event arguments.</p>\n"
+        "  <p class=\"muted\">Each Perfetto trace is one collective test only. "
+        "Open a profile in Perfetto UI and select a slice to inspect its event arguments.</p>\n"
         "  <div class=\"links\">\n"
-        f"    <a href=\"{_escape(trace_href)}\">Trace JSON</a>\n"
         f"    <a href=\"{_escape(PERFETTO_UI_URL)}\" target=\"_blank\" rel=\"noopener\">Open Perfetto UI</a>\n"
         "  </div>\n"
-        "  <h2>Trace Contents</h2>\n"
-        f"{_render_rank_trace_summary(results, rank)}\n"
+        "  <h2>Rank/Card Profiles</h2>\n"
+        f"{_render_rank_trace_summary(results, rank, profiles)}\n"
         "</body>\n"
         "</html>\n"
     )
 
 
-def _render_rank_trace_summary(results: Sequence[Mapping[str, Any]], rank: int) -> str:
+def _render_rank_trace_summary(
+    results: Sequence[Mapping[str, Any]],
+    rank: int,
+    profiles: Sequence[Mapping[str, Any]],
+) -> str:
     rows = []
-    for result in results:
+    for result, profile in zip(results, profiles):
         send_events = _rank_send_events(result, rank)
         rows.append(
             "    <tr>"
@@ -284,20 +336,46 @@ def _render_rank_trace_summary(results: Sequence[Mapping[str, Any]], rank: int) 
             f"<td>{_escape(len(send_events))}</td>"
             f"<td>{_float_cell(result.get('latency_us'))}</td>"
             f"<td>{_escape(result.get('bottleneck_resource'))}</td>"
+            f"<td><a href=\"{_escape(profile.get('rank_href'))}\">{_escape(profile.get('filename'))}</a></td>"
             "</tr>"
         )
     if not rows:
-        rows.append("    <tr><td colspan=\"7\" class=\"muted\">No results</td></tr>")
+        rows.append("    <tr><td colspan=\"8\" class=\"muted\">No results</td></tr>")
     return (
         "  <table>\n"
         "    <thead><tr><th>result</th><th>collective</th><th>ranks</th><th>bytes</th>"
-        "<th>send_events</th><th>latency_us</th><th>bottleneck</th></tr></thead>\n"
+        "<th>rank_send_events</th><th>latency_us</th><th>bottleneck</th><th>profile</th></tr></thead>\n"
         f"    <tbody>\n{chr(10).join(rows)}\n    </tbody>\n"
         "  </table>"
     )
 
 
-def _rank_trace_payload(results: Sequence[Mapping[str, Any]], rank: int) -> Mapping[str, Any]:
+def _write_profile_traces(
+    results: Sequence[Mapping[str, Any]],
+    profile_dir: Path,
+) -> Sequence[Mapping[str, Any]]:
+    profiles = []
+    for index, result in enumerate(results):
+        filename = _profile_filename(index, result)
+        trace_path = profile_dir / filename
+        trace_path.write_text(json.dumps(_profile_trace_payload(result), indent=2) + "\n", encoding="utf-8")
+        profiles.append(
+            {
+                "index": index,
+                "filename": filename,
+                "href": f"profiles/{filename}",
+                "rank_href": f"../profiles/{filename}",
+                "label": _result_label(result),
+                "collective": result.get("collective"),
+                "rank_count": result.get("rank_count"),
+                "message_bytes": result.get("message_bytes"),
+                "send_events": len(_send_events(result)),
+            }
+        )
+    return tuple(profiles)
+
+
+def _profile_trace_payload(result: Mapping[str, Any]) -> Mapping[str, Any]:
     trace_events = []
     process_ids = {}
     lane_ids = {}
@@ -333,57 +411,55 @@ def _rank_trace_payload(results: Sequence[Mapping[str, Any]], rank: int) -> Mapp
             )
         return pid, lane_ids[key]
 
-    for result in results:
-        for event in _rank_send_events(result, rank):
-            process_name, thread_name, dst_rank = _trace_lane(result, event, rank)
-            pid, tid = lane_id(process_name, thread_name)
-            start_us = _float_value(event.get("start_us"))
-            end_us = _float_value(event.get("end_us"))
-            resources = tuple(str(resource) for resource in event.get("resources", []))
-            trace_events.append(
-                {
-                    "name": str(event.get("op_id") or "send"),
-                    "cat": "send",
-                    "ph": "X",
-                    "ts": start_us,
-                    "dur": max(0.0, end_us - start_us),
-                    "pid": pid,
-                    "tid": tid,
-                    "args": {
-                        "algorithm": result.get("algorithm"),
-                        "collective": result.get("collective"),
-                        "rank_count": result.get("rank_count"),
-                        "owner_rank": rank,
-                        "destination_rank": dst_rank,
-                        "message_bytes": event.get("message_bytes"),
-                        "start_us": start_us,
-                        "end_us": end_us,
-                        "wait_us": _float_value(event.get("wait_us")),
-                        "transfer_us": _float_value(event.get("transfer_us")),
-                        "effective_gbps": _float_value(event.get("effective_gbps")),
-                        "bottleneck_resource": event.get("bottleneck_resource"),
-                        "resources": ", ".join(resources),
-                    },
-                }
-            )
+    for event in _send_events(result):
+        rank = _event_rank(event)
+        if rank is None:
+            continue
+        process_name, thread_name, dst_rank = _trace_lane(event, rank)
+        pid, tid = lane_id(process_name, thread_name)
+        start_us = _float_value(event.get("start_us"))
+        end_us = _float_value(event.get("end_us"))
+        resources = tuple(str(resource) for resource in event.get("resources", []))
+        trace_events.append(
+            {
+                "name": str(event.get("op_id") or "send"),
+                "cat": "send",
+                "ph": "X",
+                "ts": start_us,
+                "dur": max(0.0, end_us - start_us),
+                "pid": pid,
+                "tid": tid,
+                "args": {
+                    "algorithm": result.get("algorithm"),
+                    "collective": result.get("collective"),
+                    "rank_count": result.get("rank_count"),
+                    "owner_rank": rank,
+                    "destination_rank": dst_rank,
+                    "message_bytes": result.get("message_bytes"),
+                    "event_message_bytes": event.get("message_bytes"),
+                    "start_us": start_us,
+                    "end_us": end_us,
+                    "wait_us": _float_value(event.get("wait_us")),
+                    "transfer_us": _float_value(event.get("transfer_us")),
+                    "effective_gbps": _float_value(event.get("effective_gbps")),
+                    "bottleneck_resource": event.get("bottleneck_resource"),
+                    "resources": ", ".join(resources),
+                },
+            }
+        )
     return {"traceEvents": trace_events, "displayTimeUnit": "us"}
 
 
-def _rank_send_events(result: Mapping[str, Any], rank: int) -> Sequence[Mapping[str, Any]]:
-    events = []
-    for event in _events(result):
-        if event.get("op_type") != "send":
-            continue
-        try:
-            if int(event.get("rank")) != rank:
-                continue
-        except (TypeError, ValueError):
-            continue
-        events.append(event)
+def _send_events(result: Mapping[str, Any]) -> Sequence[Mapping[str, Any]]:
     return tuple(
         sorted(
-            events,
+            (
+                event
+                for event in _events(result)
+                if event.get("op_type") == "send" and _event_rank(event) is not None
+            ),
             key=lambda event: (
+                _event_rank(event),
                 _float_value(event.get("start_us")),
                 _float_value(event.get("end_us")),
                 str(event.get("op_id")),
@@ -392,7 +468,11 @@ def _rank_send_events(result: Mapping[str, Any], rank: int) -> Sequence[Mapping[
     )
 
 
-def _trace_lane(result: Mapping[str, Any], event: Mapping[str, Any], rank: int) -> Tuple[str, str, Optional[int]]:
+def _rank_send_events(result: Mapping[str, Any], rank: int) -> Sequence[Mapping[str, Any]]:
+    return tuple(event for event in _send_events(result) if _event_rank(event) == rank)
+
+
+def _trace_lane(event: Mapping[str, Any], rank: int) -> Tuple[str, str, Optional[int]]:
     resources = tuple(str(resource) for resource in event.get("resources", []))
     dst_rank = _send_destination(event)
     thread_name = f"send to rank{dst_rank}" if dst_rank is not None else "send"
@@ -405,9 +485,7 @@ def _trace_lane(result: Mapping[str, Any], event: Mapping[str, Any], rank: int) 
         group_name = resources[0]
     else:
         group_name = f"send:rank{rank}"
-    result_label = _result_label(result)
-    process_name = f"{result_label} / {group_name}" if result_label else group_name
-    return process_name, thread_name, dst_rank
+    return group_name, thread_name, dst_rank
 
 
 def _send_destination(event: Mapping[str, Any]) -> Optional[int]:
@@ -429,6 +507,10 @@ def _int_or_none(value: Any) -> Optional[int]:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _event_rank(event: Mapping[str, Any]) -> Optional[int]:
+    return _int_or_none(event.get("rank"))
 
 
 def _events(result: Mapping[str, Any]) -> Sequence[Mapping[str, Any]]:
@@ -460,12 +542,26 @@ def _rank_href(rank: int, prefix: str) -> str:
     return f"{prefix}/{filename}"
 
 
+def _profile_filename(index: int, result: Mapping[str, Any]) -> str:
+    algorithm = _slug(result.get("algorithm") or "profile")
+    rank_count = _int_or_none(result.get("rank_count"))
+    message_bytes = _int_or_none(result.get("message_bytes"))
+    rank_part = f"{rank_count}p" if rank_count is not None else "unknownp"
+    byte_part = f"{message_bytes}b" if message_bytes is not None else "unknownb"
+    return f"profile_{index:03d}_{algorithm}_{rank_part}_{byte_part}.trace.json"
+
+
 def _result_label(result: Mapping[str, Any]) -> str:
     return (
         f"{result.get('algorithm', '')} "
         f"{result.get('rank_count', '')}P "
         f"{result.get('message_bytes', '')}B"
     ).strip()
+
+
+def _slug(value: Any) -> str:
+    text = re.sub(r"[^a-zA-Z0-9]+", "_", str(value).strip().lower()).strip("_")
+    return text or "profile"
 
 
 def _float_cell(value: Any) -> str:
