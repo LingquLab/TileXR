@@ -59,11 +59,15 @@ CheckerStatus ResolveRoleBuffer(RankWorld *world, int rank, int peer_rank, Buffe
 
 Event MakeEvent(EventKind kind, int rank, int peer_rank, BufferRole role, int slot,
                 uint64_t magic, size_t offset, size_t bytes, SourceLocation loc,
-                const std::string &detail) {
+                const std::string &detail, RankWorld *world) {
     Event event;
     event.kind = kind;
     event.rank = rank;
     event.peer_rank = peer_rank;
+    if (world != nullptr) {
+        event.server = world->ServerOfRank(rank);
+        event.peer_server = peer_rank >= 0 ? world->ServerOfRank(peer_rank) : -1;
+    }
     event.buffer_role = role;
     event.slot = slot;
     event.magic = magic;
@@ -110,7 +114,7 @@ CheckerStatus ShimRuntime::Copy(int rank, int peer_rank, BufferRole dst_role, si
     }
 
     world_->events().Add(MakeEvent(EventKind::kCopy, rank, peer_rank, dst_role, dst.slot, 0,
-                                   dst_offset, bytes, loc, detail));
+                                   dst_offset, bytes, loc, detail, world_));
     return CheckerStatus::Ok();
 }
 
@@ -129,7 +133,7 @@ CheckerStatus ShimRuntime::RecordRead(int rank, int peer_rank, BufferRole role, 
     }
 
     world_->events().Add(MakeEvent(EventKind::kRead, rank, peer_rank, role, view.slot, 0,
-                                   offset, bytes, loc, detail));
+                                   offset, bytes, loc, detail, world_));
     return CheckerStatus::Ok();
 }
 
@@ -148,7 +152,7 @@ CheckerStatus ShimRuntime::RecordWrite(int rank, int peer_rank, BufferRole role,
     }
 
     world_->events().Add(MakeEvent(EventKind::kWrite, rank, peer_rank, role, view.slot, 0,
-                                   offset, bytes, loc, detail));
+                                   offset, bytes, loc, detail, world_));
     return CheckerStatus::Ok();
 }
 
@@ -167,7 +171,7 @@ CheckerStatus ShimRuntime::StoreFlag(int rank, int peer_rank, int slot, uint64_t
 
     world_->events().Add(MakeEvent(EventKind::kFlagStore, rank, peer_rank,
                                    BufferRole::kCommFlag, slot, magic, 0, sizeof(magic),
-                                   loc, detail));
+                                   loc, detail, world_));
     return CheckerStatus::Ok();
 }
 
@@ -180,7 +184,7 @@ CheckerStatus ShimRuntime::WaitFlag(int rank, int peer_rank, int slot, uint64_t 
 
     world_->events().Add(MakeEvent(EventKind::kFlagWait, rank, peer_rank,
                                    BufferRole::kCommFlag, slot, magic, 0, sizeof(magic),
-                                   loc, detail));
+                                   loc, detail, world_));
     return CheckerStatus::Ok();
 }
 
@@ -192,7 +196,7 @@ CheckerStatus ShimRuntime::Barrier(int rank, int core, SourceLocation loc,
     }
 
     Event event = MakeEvent(EventKind::kBarrier, rank, -1, BufferRole::kMetadata, -1, 0, 0, 0,
-                            loc, detail);
+                            loc, detail, world_);
     event.core = core;
     world_->events().Add(event);
     return CheckerStatus::Ok();

@@ -6,7 +6,11 @@
 #include <string>
 #include <vector>
 
+#define TILEXR_CHECKER_ENABLE_PIPE_TRACE_HOOK
 #include "kernel_operator.h"
+#include "tilexr/checker/diagnostics.h"
+#include "tilexr/checker/report.h"
+#include "tilexr/checker/trace_runtime.h"
 #include "tilexr/checker/shim_runtime.h"
 #include "tilexr/checker/world.h"
 
@@ -240,6 +244,32 @@ void TestRecordWriteAndBarrierEvents() {
     ExpectEqInt(events[1].core, 3, "barrier event core");
 }
 
+void TestEventsCaptureServerTopology() {
+    tilexr::checker::RankWorld world =
+        tilexr::checker::RankWorld::Create(4, 16, 16, 16);
+    world.ConfigureServers(2);
+    tilexr::checker::ShimRuntime runtime(&world);
+
+    ExpectTrue(world.UserInput(0).WriteInt32(0, 7).ok(), "seed cross-server copy input");
+    tilexr::checker::CheckerStatus status =
+        runtime.Copy(0, 3, tilexr::checker::BufferRole::kCommData, 0,
+                     tilexr::checker::BufferRole::kUserInput, 0,
+                     sizeof(int32_t), TILEXR_CHECKER_HERE,
+                     "copy to cross-server peer comm");
+    ExpectTrue(status.ok(), "cross-server copy status ok");
+
+    const std::vector<tilexr::checker::Event> &events = world.events().events();
+    ExpectEqSize(events.size(), 1, "cross-server event count");
+    if (events.empty()) {
+        return;
+    }
+    ExpectEqInt(events[0].server, 0, "cross-server event rank server");
+    ExpectEqInt(events[0].peer_server, 1, "cross-server event peer server");
+    const std::string jsonl = tilexr::checker::RenderEventsJsonl(world.events());
+    ExpectContains(jsonl, "\"server\":0", "events json includes server");
+    ExpectContains(jsonl, "\"peer_server\":1", "events json includes peer server");
+}
+
 void TestCheckerLocalShimIncludePathOnly() {
     const std::string checker_cmake = ReadFile(SourcePath("tests/checker/CMakeLists.txt"));
     const std::string tools_cmake = ReadFile(SourcePath("tools/checker/CMakeLists.txt"));
@@ -250,6 +280,395 @@ void TestCheckerLocalShimIncludePathOnly() {
     ExpectNotContains(tools_cmake, "tools/checker/shim", "checker core should not export shim");
 }
 
+void TestTraceAdapterKeepsAlgorithmShimsThin() {
+    const std::string common_shim =
+        ReadFile(SourcePath("tools/checker/shim/tilexr/checker/collective_trace_shim.h"));
+    const std::string allreduce_adapter =
+        ReadFile(SourcePath("tools/checker/shim/tilexr/checker/allreduce_big_data_trace_shim.h"));
+    const std::string hdb_adapter =
+        ReadFile(SourcePath("tools/checker/shim/tilexr/checker/allgather_hdb_trace_shim.h"));
+
+    ExpectNotContains(common_shim, "#include \"allreduce_big_data.h\"",
+                      "common trace shim should not include a production algorithm");
+    ExpectNotContains(common_shim, "#define CpGM2GMPingPong",
+                      "common trace shim should not own production call macros");
+
+    ExpectContains(allreduce_adapter, "TILEXR_CHECKER_TRACE_TARGET_HEADER",
+                   "allreduce adapter declares target header");
+    ExpectContains(allreduce_adapter, "collective_trace_adapter.h",
+                   "allreduce adapter uses generic trace adapter");
+    ExpectNotContains(allreduce_adapter, "#define CpGM2GMPingPong",
+                      "allreduce adapter should not duplicate trace macros");
+
+    ExpectContains(hdb_adapter, "TILEXR_CHECKER_TRACE_TARGET_HEADER",
+                   "hdb adapter declares target header");
+    ExpectContains(hdb_adapter, "collective_trace_adapter.h",
+                   "hdb adapter uses generic trace adapter");
+    ExpectNotContains(hdb_adapter, "#define CpGM2GMPingPong",
+                      "hdb adapter should not duplicate trace macros");
+}
+
+void TestAscendCPipePrimitivesRecordTraceEvents() {
+    tilexr::checker::CheckerCase test_case;
+    test_case.op = tilexr::checker::CollectiveOp::kAllGather;
+    test_case.rank_size = 2;
+    test_case.count = 4;
+    test_case.data_type = TileXR::TILEXR_DATA_TYPE_INT32;
+    test_case.reduce_op = TileXR::TILEXR_REDUCE_SUM;
+    test_case.scheduler = tilexr::checker::SchedulerMode::kSerial;
+    tilexr::checker::RankWorld world =
+        tilexr::checker::RankWorld::Create(2, 16, 16, 16);
+    tilexr::checker::TraceRuntime runtime(&world, test_case);
+    runtime.SetKernelContext(1, 3, 8);
+    tilexr::checker::TraceRuntime::SetCurrent(&runtime);
+
+    const int set_line = __LINE__ + 1;
+    AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(AscendC::EVENT_ID1);
+    const int wait_line = __LINE__ + 1;
+    AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(AscendC::EVENT_ID1);
+    const int barrier_line = __LINE__ + 1;
+    AscendC::PipeBarrier<AscendC::PIPE_V>();
+
+    tilexr::checker::TraceRuntime::SetCurrent(nullptr);
+    const std::vector<tilexr::checker::Event> &events = world.events().events();
+    ExpectEqSize(events.size(), 3, "pipe primitive event count");
+    if (events.size() < 3) {
+        return;
+    }
+    ExpectEqInt(static_cast<int>(events[0].kind),
+                static_cast<int>(tilexr::checker::EventKind::kPipeSet),
+                "pipe set event kind");
+    ExpectEqInt(static_cast<int>(events[1].kind),
+                static_cast<int>(tilexr::checker::EventKind::kPipeWait),
+                "pipe wait event kind");
+    ExpectEqInt(static_cast<int>(events[2].kind),
+                static_cast<int>(tilexr::checker::EventKind::kPipeBarrier),
+                "pipe barrier event kind");
+    ExpectEqInt(events[0].rank, 1, "pipe set rank");
+    ExpectEqInt(events[0].core, 3, "pipe set core");
+    ExpectEqInt(events[0].event_id, AscendC::EVENT_ID1, "pipe set event id");
+    ExpectEqInt(events[0].pipe, AscendC::PIPE_V, "pipe set pipe");
+    ExpectEqInt(events[1].pipe, AscendC::PIPE_V, "pipe wait pipe");
+    ExpectEqInt(events[2].pipe, AscendC::PIPE_V, "pipe barrier pipe");
+    ExpectContains(events[0].source_file, "test_checker_shim_events.cpp",
+                   "pipe set source file");
+    ExpectEqInt(events[0].source_line, set_line, "pipe set source line");
+    ExpectEqInt(events[1].source_line, wait_line, "pipe wait source line");
+    ExpectEqInt(events[2].source_line, barrier_line, "pipe barrier source line");
+    tilexr::checker::FindingSet findings = tilexr::checker::CheckOrdering(world.events());
+    ExpectEqSize(findings.findings().size(), 0, "matched pipe wait findings");
+}
+
+void TestTraceRuntimeReportsUnresolvedGmCopyAddress() {
+    tilexr::checker::CheckerCase test_case;
+    test_case.op = tilexr::checker::CollectiveOp::kAllReduce;
+    test_case.rank_size = 1;
+    test_case.count = 4;
+    test_case.data_type = TileXR::TILEXR_DATA_TYPE_INT32;
+    test_case.reduce_op = TileXR::TILEXR_REDUCE_SUM;
+    test_case.scheduler = tilexr::checker::SchedulerMode::kSerial;
+    tilexr::checker::RankWorld world =
+        tilexr::checker::RankWorld::Create(1, 16, 16, 16);
+    tilexr::checker::TraceRuntime runtime(&world, test_case);
+    runtime.SetKernelContext(0, 0, 1);
+
+    int32_t src[4] = {1, 2, 3, 4};
+    int32_t dst[4] = {0, 0, 0, 0};
+    const int copy_line = __LINE__ + 3;
+    tilexr::checker::CheckerStatus status =
+        runtime.RecordCopy(dst, src, sizeof(src), TileXR::Op::ADD,
+                           TILEXR_CHECKER_HERE, "unregistered gm copy");
+
+    ExpectTrue(status.ok(), "unresolved gm copy record status");
+    const std::vector<tilexr::checker::Event> &events = world.events().events();
+    ExpectEqSize(events.size(), 1, "unresolved gm copy diagnostic event count");
+    if (events.empty()) {
+        return;
+    }
+    ExpectEqInt(static_cast<int>(events[0].kind),
+                static_cast<int>(tilexr::checker::EventKind::kDiagnostic),
+                "unresolved gm copy diagnostic event kind");
+    ExpectContains(events[0].detail, "unresolved trace address",
+                   "unresolved gm copy diagnostic detail");
+    ExpectContains(events[0].source_file, "test_checker_shim_events.cpp",
+                   "unresolved gm copy diagnostic source file");
+    ExpectEqInt(events[0].source_line, copy_line,
+                "unresolved gm copy diagnostic source line");
+
+    tilexr::checker::FindingSet findings = tilexr::checker::CheckOrdering(world.events());
+    ExpectEqSize(findings.findings().size(), 1,
+                 "unresolved gm copy unsupported finding count");
+    if (findings.findings().empty()) {
+        return;
+    }
+    ExpectEqInt(static_cast<int>(findings.findings()[0].kind),
+                static_cast<int>(tilexr::checker::FindingKind::kUnsupportedApi),
+                "unresolved gm copy unsupported finding kind");
+    ExpectContains(findings.findings()[0].next_action, "RegisterCollectiveTraceRanges",
+                   "unresolved gm copy next action");
+}
+
+void TestRawAscendCDataCopyRecordsTraceRuntimeCopy() {
+    tilexr::checker::CheckerCase test_case;
+    test_case.op = tilexr::checker::CollectiveOp::kAllReduce;
+    test_case.rank_size = 1;
+    test_case.count = 4;
+    test_case.data_type = TileXR::TILEXR_DATA_TYPE_INT32;
+    test_case.reduce_op = TileXR::TILEXR_REDUCE_SUM;
+    test_case.scheduler = tilexr::checker::SchedulerMode::kSerial;
+    tilexr::checker::RankWorld world =
+        tilexr::checker::RankWorld::Create(1, 16, 16, 16);
+    tilexr::checker::TraceRuntime runtime(&world, test_case);
+    runtime.SetKernelContext(0, 2, 4);
+
+    uint8_t src[16] = {0};
+    uint8_t dst[16] = {0};
+    runtime.AddRange(src, sizeof(src), tilexr::checker::BufferRole::kUserInput,
+                     0, 0);
+    runtime.AddRange(dst, sizeof(dst), tilexr::checker::BufferRole::kCommData,
+                     0, 0);
+    tilexr::checker::TraceRuntime::SetCurrent(&runtime);
+    const int copy_line = __LINE__ + 1;
+    AscendC::DataCopy(dst, src, sizeof(src));
+    tilexr::checker::TraceRuntime::SetCurrent(nullptr);
+
+    const std::vector<tilexr::checker::Event> &events = world.events().events();
+    ExpectEqSize(events.size(), 2, "raw DataCopy trace event count");
+    if (events.size() < 2) {
+        return;
+    }
+    ExpectEqInt(static_cast<int>(events[0].kind),
+                static_cast<int>(tilexr::checker::EventKind::kRead),
+                "raw DataCopy read event kind");
+    ExpectEqInt(static_cast<int>(events[1].kind),
+                static_cast<int>(tilexr::checker::EventKind::kCopy),
+                "raw DataCopy copy event kind");
+    ExpectEqInt(events[0].core, 2, "raw DataCopy read core");
+    ExpectEqInt(events[1].core, 2, "raw DataCopy copy core");
+    ExpectEqSize(events[1].bytes, sizeof(src), "raw DataCopy copy bytes");
+    ExpectContains(events[1].source_file, "test_checker_shim_events.cpp",
+                   "raw DataCopy copy source file");
+    ExpectEqInt(events[1].source_line, copy_line,
+                "raw DataCopy copy source line");
+    ExpectContains(events[1].detail, "AscendC::DataCopy",
+                   "raw DataCopy copy detail");
+}
+
+void TestRawAscendCDataCopyReportsUnregisteredAddress() {
+    tilexr::checker::CheckerCase test_case;
+    test_case.op = tilexr::checker::CollectiveOp::kAllReduce;
+    test_case.rank_size = 1;
+    test_case.count = 4;
+    test_case.data_type = TileXR::TILEXR_DATA_TYPE_INT32;
+    tilexr::checker::RankWorld world =
+        tilexr::checker::RankWorld::Create(1, 16, 16, 16);
+    tilexr::checker::TraceRuntime runtime(&world, test_case);
+    runtime.SetKernelContext(0, 0, 1);
+
+    uint8_t src[16] = {0};
+    uint8_t dst[16] = {0};
+    tilexr::checker::TraceRuntime::SetCurrent(&runtime);
+    const int copy_line = __LINE__ + 1;
+    AscendC::DataCopy(dst, src, sizeof(src));
+    tilexr::checker::TraceRuntime::SetCurrent(nullptr);
+
+    const std::vector<tilexr::checker::Event> &events = world.events().events();
+    ExpectEqSize(events.size(), 1, "raw unregistered DataCopy event count");
+    if (events.empty()) {
+        return;
+    }
+    ExpectEqInt(static_cast<int>(events[0].kind),
+                static_cast<int>(tilexr::checker::EventKind::kDiagnostic),
+                "raw unregistered DataCopy diagnostic kind");
+    ExpectContains(events[0].detail, "unresolved trace address",
+                   "raw unregistered DataCopy diagnostic detail");
+    ExpectEqInt(events[0].source_line, copy_line,
+                "raw unregistered DataCopy diagnostic source line");
+
+    tilexr::checker::FindingSet findings =
+        tilexr::checker::CheckOrdering(world.events());
+    ExpectEqSize(findings.findings().size(), 1,
+                 "raw unregistered DataCopy unsupported finding count");
+    if (!findings.findings().empty()) {
+        ExpectEqInt(static_cast<int>(findings.findings()[0].kind),
+                    static_cast<int>(tilexr::checker::FindingKind::kUnsupportedApi),
+                    "raw unregistered DataCopy unsupported kind");
+    }
+}
+
+void TestRawAscendCDataCopyPadRecordsContiguousTraceRuntimeCopy() {
+    tilexr::checker::CheckerCase test_case;
+    test_case.op = tilexr::checker::CollectiveOp::kAllReduce;
+    test_case.rank_size = 1;
+    test_case.count = 4;
+    test_case.data_type = TileXR::TILEXR_DATA_TYPE_INT32;
+    tilexr::checker::RankWorld world =
+        tilexr::checker::RankWorld::Create(1, 32, 32, 32);
+    tilexr::checker::TraceRuntime runtime(&world, test_case);
+    runtime.SetKernelContext(0, 1, 2);
+
+    uint8_t src[32] = {0};
+    uint8_t dst[32] = {0};
+    runtime.AddRange(src, sizeof(src), tilexr::checker::BufferRole::kUserInput,
+                     0, 0);
+    runtime.AddRange(dst, sizeof(dst), tilexr::checker::BufferRole::kCommData,
+                     0, 0);
+    AscendC::DataCopyExtParams params(2, 8, 0, 0, 0);
+    tilexr::checker::TraceRuntime::SetCurrent(&runtime);
+    const int copy_line = __LINE__ + 1;
+    AscendC::DataCopyPad(dst, src, params);
+    tilexr::checker::TraceRuntime::SetCurrent(nullptr);
+
+    const std::vector<tilexr::checker::Event> &events = world.events().events();
+    ExpectEqSize(events.size(), 2, "raw DataCopyPad trace event count");
+    if (events.size() < 2) {
+        return;
+    }
+    ExpectEqInt(static_cast<int>(events[0].kind),
+                static_cast<int>(tilexr::checker::EventKind::kRead),
+                "raw DataCopyPad read event kind");
+    ExpectEqInt(static_cast<int>(events[1].kind),
+                static_cast<int>(tilexr::checker::EventKind::kCopy),
+                "raw DataCopyPad copy event kind");
+    ExpectEqInt(events[1].core, 1, "raw DataCopyPad copy core");
+    ExpectEqSize(events[1].bytes, 16, "raw DataCopyPad copy bytes");
+    ExpectEqInt(events[1].source_line, copy_line,
+                "raw DataCopyPad copy source line");
+    ExpectContains(events[1].detail, "AscendC::DataCopyPad",
+                   "raw DataCopyPad copy detail");
+}
+
+void TestRawAscendCDataCopyPadReportsUnsupportedStride() {
+    tilexr::checker::CheckerCase test_case;
+    test_case.op = tilexr::checker::CollectiveOp::kAllReduce;
+    test_case.rank_size = 1;
+    test_case.count = 4;
+    test_case.data_type = TileXR::TILEXR_DATA_TYPE_INT32;
+    tilexr::checker::RankWorld world =
+        tilexr::checker::RankWorld::Create(1, 32, 32, 32);
+    tilexr::checker::TraceRuntime runtime(&world, test_case);
+    runtime.SetKernelContext(0, 0, 1);
+
+    uint8_t src[32] = {0};
+    uint8_t dst[32] = {0};
+    runtime.AddRange(src, sizeof(src), tilexr::checker::BufferRole::kUserInput,
+                     0, 0);
+    runtime.AddRange(dst, sizeof(dst), tilexr::checker::BufferRole::kCommData,
+                     0, 0);
+    AscendC::DataCopyExtParams params(2, 8, 4, 0, 0);
+    tilexr::checker::TraceRuntime::SetCurrent(&runtime);
+    const int copy_line = __LINE__ + 1;
+    AscendC::DataCopyPad(dst, src, params);
+    tilexr::checker::TraceRuntime::SetCurrent(nullptr);
+
+    const std::vector<tilexr::checker::Event> &events = world.events().events();
+    ExpectEqSize(events.size(), 1, "raw strided DataCopyPad event count");
+    if (events.empty()) {
+        return;
+    }
+    ExpectEqInt(static_cast<int>(events[0].kind),
+                static_cast<int>(tilexr::checker::EventKind::kDiagnostic),
+                "raw strided DataCopyPad diagnostic kind");
+    ExpectContains(events[0].detail, "unsupported trace data copy",
+                   "raw strided DataCopyPad diagnostic detail");
+    ExpectContains(events[0].detail, "AscendC::DataCopyPad",
+                   "raw strided DataCopyPad diagnostic symbol");
+    ExpectEqInt(events[0].source_line, copy_line,
+                "raw strided DataCopyPad diagnostic source line");
+
+    tilexr::checker::FindingSet findings =
+        tilexr::checker::CheckOrdering(world.events());
+    ExpectEqSize(findings.findings().size(), 1,
+                 "raw strided DataCopyPad unsupported finding count");
+    if (!findings.findings().empty()) {
+        ExpectEqInt(static_cast<int>(findings.findings()[0].kind),
+                    static_cast<int>(tilexr::checker::FindingKind::kUnsupportedApi),
+                    "raw strided DataCopyPad unsupported kind");
+    }
+}
+
+void TestTraceRuntimeReportsCopyBeyondRegisteredStorage() {
+    tilexr::checker::CheckerCase test_case;
+    test_case.op = tilexr::checker::CollectiveOp::kAllReduce;
+    test_case.rank_size = 1;
+    test_case.count = 4;
+    test_case.data_type = TileXR::TILEXR_DATA_TYPE_INT32;
+    test_case.reduce_op = TileXR::TILEXR_REDUCE_SUM;
+    test_case.scheduler = tilexr::checker::SchedulerMode::kSerial;
+    tilexr::checker::RankWorld world =
+        tilexr::checker::RankWorld::Create(1, 16, 16, 16);
+    tilexr::checker::TraceRuntime runtime(&world, test_case);
+    runtime.SetKernelContext(0, 0, 1);
+
+    uint8_t src_storage[8] = {0};
+    uint8_t dst_storage[8] = {0};
+    runtime.AddRange(src_storage, 1024, sizeof(src_storage),
+                     tilexr::checker::BufferRole::kUserInput, 0, 0);
+    runtime.AddRange(dst_storage, 1024, sizeof(dst_storage),
+                     tilexr::checker::BufferRole::kCommData, 0, 0);
+    tilexr::checker::CheckerStatus status =
+        runtime.RecordCopy(dst_storage, src_storage, 16, TileXR::Op::ADD,
+                           TILEXR_CHECKER_HERE, "copy beyond backing storage");
+
+    ExpectTrue(status.ok(), "out-of-storage gm copy record status");
+    const std::vector<tilexr::checker::Event> &events = world.events().events();
+    ExpectEqSize(events.size(), 3, "out-of-storage gm copy event count");
+    if (events.size() < 3) {
+        return;
+    }
+    ExpectEqInt(static_cast<int>(events[2].kind),
+                static_cast<int>(tilexr::checker::EventKind::kDiagnostic),
+                "out-of-storage gm copy diagnostic event kind");
+    ExpectContains(events[2].detail, "exceeds registered storage",
+                   "out-of-storage gm copy diagnostic detail");
+
+    tilexr::checker::FindingSet findings = tilexr::checker::CheckOrdering(world.events());
+    ExpectEqSize(findings.findings().size(), 1,
+                 "out-of-storage gm copy unsupported finding count");
+    if (findings.findings().empty()) {
+        return;
+    }
+    ExpectEqInt(static_cast<int>(findings.findings()[0].kind),
+                static_cast<int>(tilexr::checker::FindingKind::kUnsupportedApi),
+                "out-of-storage gm copy unsupported finding kind");
+    ExpectContains(findings.findings()[0].message, "registered checker range",
+                   "out-of-storage gm copy unsupported message");
+}
+
+void TestTraceRuntimeAllowsSparseVirtualIpcWindow() {
+    tilexr::checker::CheckerCase test_case;
+    test_case.op = tilexr::checker::CollectiveOp::kAllReduce;
+    test_case.rank_size = 1;
+    test_case.count = 4;
+    test_case.data_type = TileXR::TILEXR_DATA_TYPE_INT32;
+    test_case.reduce_op = TileXR::TILEXR_REDUCE_SUM;
+    test_case.scheduler = tilexr::checker::SchedulerMode::kSerial;
+    tilexr::checker::RankWorld world =
+        tilexr::checker::RankWorld::Create(1, 16, 16, 16);
+    tilexr::checker::TraceRuntime runtime(&world, test_case);
+    runtime.SetKernelContext(0, 0, 1);
+
+    uint8_t user_input[16] = {0};
+    uint8_t sparse_storage[8] = {0};
+    runtime.AddRange(user_input, sizeof(user_input),
+                     tilexr::checker::BufferRole::kUserInput, 0, 0);
+    const uintptr_t virtual_base = 0x100000000000ULL;
+    runtime.AddVirtualRange(virtual_base, sparse_storage, 1024, sizeof(sparse_storage),
+                            tilexr::checker::BufferRole::kCommData, 0, 0);
+
+    tilexr::checker::CheckerStatus status =
+        runtime.RecordCopy(reinterpret_cast<void *>(virtual_base + 128), user_input, 16,
+                           TileXR::Op::ADD, TILEXR_CHECKER_HERE,
+                           "copy into sparse virtual ipc window");
+
+    ExpectTrue(status.ok(), "sparse virtual copy record status");
+    const std::vector<tilexr::checker::Event> &events = world.events().events();
+    ExpectEqSize(events.size(), 2, "sparse virtual copy event count");
+    tilexr::checker::FindingSet findings = tilexr::checker::CheckOrdering(world.events());
+    ExpectEqSize(findings.findings().size(), 0,
+                 "sparse virtual copy unsupported finding count");
+}
+
 }  // namespace
 
 int main() {
@@ -257,6 +676,16 @@ int main() {
     TestFlagEventsCaptureMagic();
     TestNullWorldAndUnsupportedRoleFail();
     TestRecordWriteAndBarrierEvents();
+    TestEventsCaptureServerTopology();
     TestCheckerLocalShimIncludePathOnly();
+    TestTraceAdapterKeepsAlgorithmShimsThin();
+    TestAscendCPipePrimitivesRecordTraceEvents();
+    TestTraceRuntimeReportsUnresolvedGmCopyAddress();
+    TestRawAscendCDataCopyRecordsTraceRuntimeCopy();
+    TestRawAscendCDataCopyReportsUnregisteredAddress();
+    TestRawAscendCDataCopyPadRecordsContiguousTraceRuntimeCopy();
+    TestRawAscendCDataCopyPadReportsUnsupportedStride();
+    TestTraceRuntimeReportsCopyBeyondRegisteredStorage();
+    TestTraceRuntimeAllowsSparseVirtualIpcWindow();
     return g_failures == 0 ? 0 : 1;
 }

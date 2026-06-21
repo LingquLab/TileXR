@@ -6,8 +6,13 @@
 namespace tilexr {
 namespace checker {
 
-enum class CollectiveOp { kAllGather, kAllReduce };
+enum class CollectiveOp { kAllGather, kAllReduce, kEpDispatch, kEpCombine };
 enum class SchedulerMode { kSerial, kRoundRobin };
+enum class AlgorithmId {
+    kDefault,
+    kAllGatherHierarchyDoubleRing,
+    kAllReduceBigData
+};
 enum class BufferRole {
     kUserInput,
     kUserOutput,
@@ -24,6 +29,10 @@ inline const char *ToString(CollectiveOp op) {
             return "allgather";
         case CollectiveOp::kAllReduce:
             return "allreduce";
+        case CollectiveOp::kEpDispatch:
+            return "ep_dispatch";
+        case CollectiveOp::kEpCombine:
+            return "ep_combine";
     }
     return "unknown";
 }
@@ -34,6 +43,18 @@ inline const char *ToString(SchedulerMode mode) {
             return "serial";
         case SchedulerMode::kRoundRobin:
             return "round_robin";
+    }
+    return "unknown";
+}
+
+inline const char *ToString(AlgorithmId algorithm) {
+    switch (algorithm) {
+        case AlgorithmId::kDefault:
+            return "default";
+        case AlgorithmId::kAllGatherHierarchyDoubleRing:
+            return "allgather_hierarchy_double_ring";
+        case AlgorithmId::kAllReduceBigData:
+            return "allreduce_big_data";
     }
     return "unknown";
 }

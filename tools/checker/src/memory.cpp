@@ -33,6 +33,14 @@ size_t ByteBuffer::size() const {
     return data_.size();
 }
 
+uint8_t *ByteBuffer::data_ptr() {
+    return data_.empty() ? nullptr : data_.data();
+}
+
+const uint8_t *ByteBuffer::data_ptr() const {
+    return data_.empty() ? nullptr : data_.data();
+}
+
 const std::vector<uint8_t> &ByteBuffer::data() const {
     return data_;
 }

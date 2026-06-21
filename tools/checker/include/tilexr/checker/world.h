@@ -18,6 +18,9 @@ public:
                             size_t user_output_bytes, size_t comm_data_bytes);
 
     int rank_size() const;
+    int server_count() const;
+    int ServerOfRank(int rank) const;
+    void ConfigureServers(int server_count);
     uint64_t NextMagic();
 
     TileXR::CommArgs &HostArgs(int rank);
@@ -27,13 +30,16 @@ public:
     ByteBuffer &UserOutput(int rank);
     const ByteBuffer &UserOutput(int rank) const;
     ByteBuffer &CommData(int owner_rank, int slot);
+    const ByteBuffer &CommData(int owner_rank, int slot) const;
     ByteBuffer &CommFlag(int owner_rank, int slot);
     EventLog &events();
     const EventLog &events() const;
 
 private:
     int rank_size_ = 0;
+    int server_count_ = 1;
     uint64_t next_magic_ = 1;
+    std::vector<int> rank_servers_;
     std::vector<TileXR::CommArgs> args_;
     std::vector<ByteBuffer> user_inputs_;
     std::vector<ByteBuffer> user_outputs_;

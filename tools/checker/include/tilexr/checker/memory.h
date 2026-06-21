@@ -16,6 +16,8 @@ public:
     explicit ByteBuffer(size_t size);
 
     size_t size() const;
+    uint8_t *data_ptr();
+    const uint8_t *data_ptr() const;
     const std::vector<uint8_t> &data() const;
     std::vector<uint8_t> &mutable_data();
 

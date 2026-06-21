@@ -16,7 +16,8 @@ std::string RenderSummary(const CheckerCase &test_case,
                           const CheckerStatus &status,
                           const FindingSet &findings,
                           size_t mismatch_count,
-                          size_t event_count);
+                          size_t event_count,
+                          const std::string &timeline_summary = "");
 
 std::string RenderSummary(const CheckerCase &test_case,
                           const FindingSet &findings,

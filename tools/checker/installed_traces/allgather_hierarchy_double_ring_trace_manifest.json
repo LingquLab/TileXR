@@ -1,0 +1,77 @@
+{
+  "adapter_name": "allgather_hierarchy_double_ring",
+  "source_file": "src/collectives/kernels/91093/allgather_hierarchy_double_ring.h",
+  "shim_path": "tools/checker/shim/tilexr/checker/allgather_hdb_trace_shim.h",
+  "runner_source": "tools/checker/src/collective_trace_runner_hdb.cpp",
+  "runner_function": "RunAllGatherHierarchyDoubleRingTrace",
+  "probe_test": "tests/checker/unit/test_checker_allgather_hdb_header_probe.cpp",
+  "probe_cmake_entry": "unit/test_checker_allgather_hdb_header_probe.cpp",
+  "algorithm_enum": "AlgorithmId::kAllGatherHierarchyDoubleRing",
+  "materializer_name": "allgather_hierarchy_double_ring_int32",
+  "schedule_name": "allgather_hierarchy_double_ring_stage_major",
+  "schedule_function": "GetAllGatherHierarchyDoubleRingScheduleSpec",
+  "op": "allgather",
+  "algorithm": "allgather_hierarchy_double_ring",
+  "rank_size": 10,
+  "count": 16,
+  "server_count": 2,
+  "smoke_cases": [
+    {
+      "rank_size": 10,
+      "count": 16,
+      "server_count": 2
+    },
+    {
+      "rank_size": 4,
+      "count": 8388609,
+      "server_count": 2
+    }
+  ],
+  "required_event_coverage": [
+    {
+      "kind": "FLAG_WAIT",
+      "source_file": "src/collectives/kernels/91093/allgather_hierarchy_double_ring.h",
+      "source_line": 126
+    },
+    {
+      "kind": "COPY",
+      "source_file": "src/collectives/kernels/91093/allgather_hierarchy_double_ring.h",
+      "source_line": 139
+    },
+    {
+      "kind": "FLAG_STORE",
+      "source_file": "src/collectives/kernels/91093/allgather_hierarchy_double_ring.h",
+      "source_line": 141
+    },
+    {
+      "kind": "WRITE",
+      "source_file": "src/collectives/kernels/91093/allgather_hierarchy_double_ring.h",
+      "source_line": 174
+    },
+    {
+      "kind": "COPY",
+      "source_file": "src/collectives/kernels/91093/allgather_hierarchy_double_ring.h",
+      "source_line": 207
+    },
+    {
+      "kind": "WRITE",
+      "source_file": "src/collectives/kernels/91093/allgather_hierarchy_double_ring.h",
+      "source_line": 234
+    },
+    {
+      "kind": "PIPE_SET",
+      "source_file": "src/collectives/kernels/collectives.h",
+      "source_line": 268
+    },
+    {
+      "kind": "PIPE_WAIT",
+      "source_file": "src/collectives/kernels/collectives.h",
+      "source_line": 273
+    },
+    {
+      "kind": "PIPE_BARRIER",
+      "source_file": "src/collectives/kernels/collectives.h",
+      "source_line": 442
+    }
+  ]
+}

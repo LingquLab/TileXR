@@ -123,6 +123,16 @@ int main() {
     ExpectEqInt(world4.HostArgs(3).localRank, 3, "rank 3 localRank");
     ExpectEqInt(world4.HostArgs(0).rankSize, 4, "rank 0 rankSize");
     ExpectEqInt(world4.HostArgs(3).localRankSize, 4, "rank 3 localRankSize");
+    world4.ConfigureServers(2);
+    ExpectEqInt(world4.server_count(), 2, "server count configured");
+    ExpectEqInt(world4.ServerOfRank(0), 0, "rank 0 server id");
+    ExpectEqInt(world4.ServerOfRank(1), 0, "rank 1 server id");
+    ExpectEqInt(world4.ServerOfRank(2), 1, "rank 2 server id");
+    ExpectEqInt(world4.ServerOfRank(3), 1, "rank 3 server id");
+    ExpectEqInt(world4.HostArgs(0).localRank, 0, "rank 0 local rank after server config");
+    ExpectEqInt(world4.HostArgs(3).localRank, 1, "rank 3 local rank after server config");
+    ExpectEqInt(world4.HostArgs(3).localRankSize, 2,
+                "rank 3 local rank size after server config");
     ExpectEqU64(world4.HostArgs(2).extraFlag, 0, "extraFlag defaults to zero");
     ExpectNull(world4.HostArgs(1).udmaInfoPtr, "udmaInfoPtr defaults null");
     ExpectNull(world4.HostArgs(1).udmaRegistryPtr, "udmaRegistryPtr defaults null");

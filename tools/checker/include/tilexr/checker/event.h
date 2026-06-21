@@ -19,6 +19,9 @@ enum class EventKind {
     kWrite,
     kFlagStore,
     kFlagWait,
+    kPipeSet,
+    kPipeWait,
+    kPipeBarrier,
     kBarrier,
     kDiagnostic
 };
@@ -28,12 +31,17 @@ struct Event {
     EventKind kind = EventKind::kDiagnostic;
     int rank = -1;
     int peer_rank = -1;
+    int server = -1;
+    int peer_server = -1;
     int core = -1;
     BufferRole buffer_role = BufferRole::kMetadata;
     int slot = -1;
+    int pipe = -1;
+    int event_id = -1;
     uint64_t magic = 0;
     size_t offset = 0;
     size_t bytes = 0;
+    bool allow_future_producer = false;
     std::string source_file;
     int source_line = 0;
     std::string detail;

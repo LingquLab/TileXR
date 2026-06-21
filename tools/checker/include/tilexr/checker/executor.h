@@ -26,7 +26,12 @@ public:
 
 private:
     RunResult RunAllGatherInt32(RankWorld *world, const CheckerCase &test_case);
+    RunResult RunAllGatherHierarchyDoubleRingInt32(RankWorld *world,
+                                                   const CheckerCase &test_case);
     RunResult RunAllReduceSumInt32(RankWorld *world, const CheckerCase &test_case);
+    RunResult RunAllReduceBigDataInt32(RankWorld *world, const CheckerCase &test_case);
+    RunResult RunEpDispatch(RankWorld *world, const CheckerCase &test_case);
+    RunResult RunEpCombine(RankWorld *world, const CheckerCase &test_case);
 };
 
 }  // namespace checker

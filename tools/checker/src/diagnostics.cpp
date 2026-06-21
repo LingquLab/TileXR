@@ -22,16 +22,20 @@ int FindingPriority(FindingKind kind) {
             return 3;
         case FindingKind::kReadBeforeWrite:
             return 4;
-        case FindingKind::kDirectPeerUserBuffer:
+        case FindingKind::kPipeWaitNoProducer:
             return 5;
-        case FindingKind::kOutputMismatch:
+        case FindingKind::kDirectPeerUserBuffer:
             return 6;
-        case FindingKind::kUnsupportedApi:
+        case FindingKind::kOutputMismatch:
             return 7;
-        case FindingKind::kBufferLifetime:
+        case FindingKind::kUnsupportedApi:
             return 8;
-        case FindingKind::kAmbiguousSource:
+        case FindingKind::kEventCoverageGap:
             return 9;
+        case FindingKind::kBufferLifetime:
+            return 10;
+        case FindingKind::kAmbiguousSource:
+            return 11;
     }
     return 10;
 }
@@ -62,6 +66,13 @@ bool ContainsInsensitive(const std::string &text, const std::string &needle) {
     return lower_text.find(lower_needle) != std::string::npos;
 }
 
+bool IsTraceCoverageDiagnostic(const Event &event) {
+    return event.kind == EventKind::kDiagnostic &&
+           (ContainsInsensitive(event.detail, "unresolved trace address") ||
+            ContainsInsensitive(event.detail, "unsupported trace data copy") ||
+            ContainsInsensitive(event.detail, "exceeds registered storage"));
+}
+
 Finding MakeFindingFromEvent(FindingKind kind, Severity severity, const Event &event,
                              const std::string &message,
                              const std::string &next_action,
@@ -72,9 +83,15 @@ Finding MakeFindingFromEvent(FindingKind kind, Severity severity, const Event &e
     finding.severity = severity;
     finding.message = message;
     finding.next_action = next_action;
+    finding.event_log_id = event.id;
     finding.rank = event.rank;
     finding.peer_rank = event.peer_rank;
+    finding.server = event.server;
+    finding.peer_server = event.peer_server;
     finding.core = event.core;
+    finding.pipe = event.pipe;
+    finding.event_id = event.event_id;
+    finding.slot = event.slot;
     finding.buffer_role = event.buffer_role;
     finding.offset = event.offset;
     finding.bytes = event.bytes;
@@ -93,7 +110,7 @@ bool SafeAdd(size_t lhs, size_t rhs, size_t *out) {
 }
 
 bool IsReadSatisfiedByProducer(const Event &read, const Event &producer) {
-    if (producer.id >= read.id) {
+    if (!read.allow_future_producer && producer.id >= read.id) {
         return false;
     }
     if (producer.kind != EventKind::kCopy && producer.kind != EventKind::kWrite) {
@@ -119,22 +136,93 @@ bool IsReadSatisfiedByProducer(const Event &read, const Event &producer) {
            producer_end >= read_end;
 }
 
+bool IsRegisteredWindowReadSatisfiedByProducer(const Event &read, const Event &producer) {
+    if (!read.allow_future_producer && producer.id >= read.id) {
+        return false;
+    }
+    if (read.kind != EventKind::kRead ||
+        read.buffer_role != BufferRole::kRegisteredCommBuffer) {
+        return false;
+    }
+    if ((producer.kind != EventKind::kWrite && producer.kind != EventKind::kCopy) ||
+        producer.buffer_role != BufferRole::kRegisteredCommBuffer) {
+        return false;
+    }
+
+    size_t producer_end = 0;
+    size_t read_end = 0;
+    if (!SafeAdd(producer.offset, producer.bytes, &producer_end) ||
+        !SafeAdd(read.offset, read.bytes, &read_end)) {
+        return false;
+    }
+
+    return producer.rank == read.peer_rank &&
+           producer.peer_rank == read.rank &&
+           producer.slot == read.slot &&
+           producer.offset <= read.offset &&
+           producer_end >= read_end;
+}
+
 bool IsMatchingStore(const Event &wait, const Event &store) {
+    const uint64_t wait_magic_epoch = wait.magic >> 32;
+    const uint64_t store_magic_epoch = store.magic >> 32;
+    const uint32_t wait_value = static_cast<uint32_t>(wait.magic & 0xFFFFFFFFULL);
+    const uint32_t store_value = static_cast<uint32_t>(store.magic & 0xFFFFFFFFULL);
     return store.kind == EventKind::kFlagStore &&
-           store.id < wait.id &&
-           wait.rank == store.peer_rank &&
+           (store.peer_rank == -1 || wait.rank == store.peer_rank) &&
            wait.peer_rank == store.rank &&
            wait.slot == store.slot &&
-           wait.magic == store.magic;
+           wait_magic_epoch == store_magic_epoch &&
+           store_value >= wait_value;
 }
 
 bool IsNewerStoreSameWaitSlot(const Event &wait, const Event &store) {
+    const uint64_t wait_magic_epoch = wait.magic >> 32;
+    const uint64_t store_magic_epoch = store.magic >> 32;
     return store.kind == EventKind::kFlagStore &&
-           store.id < wait.id &&
-           wait.rank == store.peer_rank &&
+           (store.peer_rank == -1 || wait.rank == store.peer_rank) &&
            wait.peer_rank == store.rank &&
            wait.slot == store.slot &&
-           store.magic > wait.magic;
+           store_magic_epoch > wait_magic_epoch;
+}
+
+bool IsMatchingPipeSet(const Event &wait, const Event &set) {
+    return set.kind == EventKind::kPipeSet &&
+           set.id < wait.id &&
+           set.rank == wait.rank &&
+           set.core == wait.core &&
+           set.pipe == wait.pipe &&
+           set.event_id == wait.event_id;
+}
+
+bool HasMatchingStore(const Event &wait, const std::vector<Event> &entries) {
+    for (size_t i = 0; i < entries.size(); ++i) {
+        if (IsMatchingStore(wait, entries[i])) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool IsMutualFlagWait(const Event &lhs, const Event &rhs) {
+    return lhs.kind == EventKind::kFlagWait &&
+           rhs.kind == EventKind::kFlagWait &&
+           lhs.rank == rhs.peer_rank &&
+           lhs.peer_rank == rhs.rank &&
+           lhs.slot == rhs.slot &&
+           lhs.magic == rhs.magic;
+}
+
+Finding MakeDeadlockFinding(const Event &first, const Event &second) {
+    std::ostringstream message;
+    message << "Mutual flag wait cycle: rank " << first.rank << " waits rank "
+            << first.peer_rank << ", and rank " << second.rank << " waits rank "
+            << second.peer_rank << " on slot " << first.slot << ".";
+    Finding finding = MakeFindingFromEvent(
+        FindingKind::kDeadlock, Severity::kFatal, first, message.str(),
+        "Break the cycle by publishing at least one StoreFlag before entering the matching WaitFlag path, or use a phased ordering with distinct magic/slot values.",
+        0.97);
+    return finding;
 }
 
 void SortFindings(std::vector<Finding> *findings) {
@@ -150,6 +238,12 @@ void SortFindings(std::vector<Finding> *findings) {
                   }
                   if (lhs.peer_rank != rhs.peer_rank) {
                       return lhs.peer_rank < rhs.peer_rank;
+                  }
+                  if (lhs.server != rhs.server) {
+                      return lhs.server < rhs.server;
+                  }
+                  if (lhs.peer_server != rhs.peer_server) {
+                      return lhs.peer_server < rhs.peer_server;
                   }
                   return lhs.id < rhs.id;
               });
@@ -202,6 +296,10 @@ const char *ToString(FindingKind kind) {
             return "DEADLOCK";
         case FindingKind::kDirectPeerUserBuffer:
             return "DIRECT_PEER_USER_BUFFER";
+        case FindingKind::kPipeWaitNoProducer:
+            return "PIPE_WAIT_NO_PRODUCER";
+        case FindingKind::kEventCoverageGap:
+            return "EVENT_COVERAGE_GAP";
         case FindingKind::kAmbiguousSource:
             return "AMBIGUOUS_SOURCE";
     }
@@ -225,6 +323,20 @@ const char *ToString(Severity severity) {
 FindingSet CheckOrdering(const EventLog &events) {
     FindingSet findings;
     const std::vector<Event> &entries = events.events();
+    for (size_t i = 0; i < entries.size(); ++i) {
+        const Event &first = entries[i];
+        if (first.kind != EventKind::kFlagWait || HasMatchingStore(first, entries)) {
+            continue;
+        }
+        for (size_t j = i + 1; j < entries.size(); ++j) {
+            const Event &second = entries[j];
+            if (IsMutualFlagWait(first, second) && !HasMatchingStore(second, entries)) {
+                findings.Add(MakeDeadlockFinding(first, second));
+                break;
+            }
+        }
+    }
+
     for (size_t i = 0; i < entries.size(); ++i) {
         const Event &event = entries[i];
 
@@ -252,6 +364,34 @@ FindingSet CheckOrdering(const EventLog &events) {
                     "WaitFlag does not have an earlier matching StoreFlag producer.",
                     "Check whether the producer path skipped the StoreFlag or wrote the wrong peer, slot, or magic.",
                     0.98));
+            }
+        }
+
+        if (IsTraceCoverageDiagnostic(event)) {
+            findings.Add(MakeFindingFromEvent(
+                FindingKind::kUnsupportedApi, Severity::kError, event,
+                "Trace hook observed a GM copy that is not fully covered by a registered checker range.",
+                "Update RegisterCollectiveTraceRanges, InstallCollectiveTracePeerMems, or the adapter shim so this production memory path is visible to the checker.",
+                0.96));
+        }
+
+        if (event.kind == EventKind::kPipeWait) {
+            bool has_match = false;
+            for (size_t j = 0; j < entries.size(); ++j) {
+                if (IsMatchingPipeSet(event, entries[j])) {
+                    has_match = true;
+                    break;
+                }
+            }
+            if (!has_match) {
+                std::ostringstream message;
+                message << "Pipe wait has no earlier matching SetFlag for pipe "
+                        << event.pipe << " event " << event.event_id << ".";
+                findings.Add(MakeFindingFromEvent(
+                    FindingKind::kPipeWaitNoProducer, Severity::kError, event,
+                    message.str(),
+                    "Check the AICore pipe ordering around SetFlag, WaitFlag, PipeBarrier, and DataCopy.",
+                    0.95));
             }
         }
 
@@ -283,6 +423,24 @@ FindingSet CheckOrdering(const EventLog &events) {
                     0.97));
             }
         }
+
+        if (event.kind == EventKind::kRead &&
+            event.buffer_role == BufferRole::kRegisteredCommBuffer) {
+            bool has_producer = false;
+            for (size_t j = 0; j < entries.size(); ++j) {
+                if (IsRegisteredWindowReadSatisfiedByProducer(event, entries[j])) {
+                    has_producer = true;
+                    break;
+                }
+            }
+            if (!has_producer) {
+                findings.Add(MakeFindingFromEvent(
+                    FindingKind::kReadBeforeWrite, Severity::kError, event,
+                    "Registered communication window was read before a covering producer write.",
+                    "Check EP dispatch window header/slot header publication, source slot count, and combine-side window reuse before reading this rank/slot range.",
+                    0.96));
+            }
+        }
     }
     return findings;
 }
@@ -308,12 +466,18 @@ FindingSet CheckOutputMismatches(const std::vector<OutputMismatch> &mismatches) 
                                   : "Inspect the expected output model and the producing rank's write path.";
         finding.rank = mismatch.rank;
         finding.peer_rank = -1;
+        finding.server = -1;
+        finding.peer_server = -1;
         finding.core = -1;
         finding.buffer_role = BufferRole::kUserOutput;
         finding.offset = mismatch.element_index >= 0
                              ? static_cast<size_t>(mismatch.element_index) * sizeof(int32_t)
                              : 0;
         finding.bytes = sizeof(int32_t);
+        finding.has_expected_actual = !unsupported;
+        finding.expected = mismatch.expected;
+        finding.actual = mismatch.actual;
+        finding.context = mismatch.context;
         finding.confidence = unsupported ? 0.85 : 0.92;
         findings.Add(finding);
     }

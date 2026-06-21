@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 
+#include "kernel_operator.h"
 #include "tilexr/checker/case.h"
 #include "tilexr/checker/diagnostics.h"
 #include "tilexr/checker/event.h"
@@ -94,6 +95,18 @@ tilexr::checker::Event MakeEvent(tilexr::checker::EventKind kind, int rank,
     return event;
 }
 
+size_t FindingCount(const tilexr::checker::FindingSet &findings,
+                    tilexr::checker::FindingKind kind) {
+    size_t count = 0;
+    const std::vector<tilexr::checker::Finding> &items = findings.findings();
+    for (size_t i = 0; i < items.size(); ++i) {
+        if (items[i].kind == kind) {
+            ++count;
+        }
+    }
+    return count;
+}
+
 void TestOrderingFindingsAndPriority() {
     tilexr::checker::EventLog events;
     events.Add(MakeEvent(tilexr::checker::EventKind::kRead, 1, 0,
@@ -126,6 +139,8 @@ void TestReadBeforeCopySummaryMatchesGolden() {
                   tilexr::checker::BufferRole::kCommData, 0, 0, 64, 32,
                   "comm-data read"));
     read_event.core = 7;
+    read_event.server = 1;
+    read_event.peer_server = 0;
 
     tilexr::checker::FindingSet findings = tilexr::checker::CheckOrdering(events);
     const tilexr::checker::Finding *top = findings.TopFinding();
@@ -134,6 +149,10 @@ void TestReadBeforeCopySummaryMatchesGolden() {
         ExpectEqInt(static_cast<int>(top->kind),
                     static_cast<int>(tilexr::checker::FindingKind::kReadBeforeCopy),
                     "read before copy finding kind");
+        ExpectEqInt(top->server, 1, "read before copy finding server");
+        ExpectEqInt(top->peer_server, 0, "read before copy finding peer server");
+        ExpectEqInt(static_cast<int>(top->event_log_id), 1,
+                    "read before copy finding event log id");
     }
 
     const std::string summary =
@@ -142,6 +161,8 @@ void TestReadBeforeCopySummaryMatchesGolden() {
         SourcePath("tests/checker/golden/read_before_copy_summary.txt"));
     ExpectEqString(summary, expected, "read before copy summary matches golden");
     ExpectContains(summary, "core: 7", "summary includes core");
+    ExpectContains(summary, "event id: 1", "summary includes event id");
+    ExpectContains(summary, "source: synthetic.cpp:42", "summary includes source location");
     ExpectContains(summary, "offset: 64", "summary includes offset");
     ExpectContains(summary, "bytes: 32", "summary includes bytes");
 }
@@ -160,16 +181,87 @@ void TestReadBeforeCopySatisfiedByShimProducerModel() {
                  "shim producer copy should satisfy later comm-data read");
 }
 
+void TestBlockingTraceReadCanBeSatisfiedByFutureProducer() {
+    tilexr::checker::EventLog events;
+    tilexr::checker::Event read =
+        MakeEvent(tilexr::checker::EventKind::kRead, 1, 0,
+                  tilexr::checker::BufferRole::kCommData, 0, 0, 32, 16,
+                  "blocking trace read");
+    read.allow_future_producer = true;
+    events.Add(read);
+    events.Add(MakeEvent(tilexr::checker::EventKind::kCopy, 0, 0,
+                         tilexr::checker::BufferRole::kCommData, 0, 0, 32, 16,
+                         "producer copy reached after wait"));
+
+    tilexr::checker::FindingSet findings = tilexr::checker::CheckOrdering(events);
+    ExpectEqSize(findings.findings().size(), 0,
+                 "blocking trace read should accept future producer copy");
+}
+
+void TestRegisteredCommBufferReadSatisfiedByWindowProducer() {
+    tilexr::checker::EventLog events;
+    events.Add(MakeEvent(tilexr::checker::EventKind::kWrite, 1, 0,
+                         tilexr::checker::BufferRole::kRegisteredCommBuffer,
+                         0, 0, 128, 64,
+                         "ep dispatch src slot header"));
+    events.Add(MakeEvent(tilexr::checker::EventKind::kRead, 0, 1,
+                         tilexr::checker::BufferRole::kRegisteredCommBuffer,
+                         0, 0, 160, 16,
+                         "ep combine read src slot header"));
+
+    tilexr::checker::FindingSet findings = tilexr::checker::CheckOrdering(events);
+    ExpectEqSize(findings.findings().size(), 0,
+                 "registered comm buffer read should be satisfied by covering write");
+}
+
+void TestRegisteredCommBufferReadBeforeWriteReportsWindowSource() {
+    tilexr::checker::EventLog events;
+    tilexr::checker::Event read =
+        MakeEvent(tilexr::checker::EventKind::kRead, 0, 1,
+                  tilexr::checker::BufferRole::kRegisteredCommBuffer,
+                  1, 0, 288, 64,
+                  "ep combine read missing src slot header");
+    read.source_file = "src/ep/kernels/tilexr_ep_dispatch_kernel.cpp";
+    read.source_line = 159;
+    read.server = 0;
+    read.peer_server = 1;
+    events.Add(read);
+
+    tilexr::checker::FindingSet findings = tilexr::checker::CheckOrdering(events);
+    ExpectEqSize(findings.findings().size(), 1,
+                 "registered comm buffer missing producer finding count");
+    const tilexr::checker::Finding *top = findings.TopFinding();
+    ExpectTrue(top != nullptr, "registered comm buffer top finding exists");
+    if (top != nullptr) {
+        ExpectEqInt(static_cast<int>(top->kind),
+                    static_cast<int>(tilexr::checker::FindingKind::kReadBeforeWrite),
+                    "registered comm buffer finding kind");
+        ExpectEqInt(static_cast<int>(top->buffer_role),
+                    static_cast<int>(tilexr::checker::BufferRole::kRegisteredCommBuffer),
+                    "registered comm buffer finding role");
+        ExpectEqInt(top->slot, 1, "registered comm buffer finding slot");
+        ExpectEqInt(static_cast<int>(top->offset), 288,
+                    "registered comm buffer finding offset");
+        ExpectEqString(top->source_file,
+                       "src/ep/kernels/tilexr_ep_dispatch_kernel.cpp",
+                       "registered comm buffer finding source");
+        ExpectContains(top->message, "Registered communication window",
+                       "registered comm buffer finding message");
+    }
+}
+
 void TestStaleMagicDetectedEvenWhenExactStoreExists() {
     tilexr::checker::EventLog events;
+    const uint64_t old_value = (0x20ULL << 32) | 0ULL;
+    const uint64_t new_value = (0x21ULL << 32) | 0ULL;
     events.Add(MakeEvent(tilexr::checker::EventKind::kFlagStore, 0, 1,
-                         tilexr::checker::BufferRole::kCommFlag, 3, 0x20, 0,
+                         tilexr::checker::BufferRole::kCommFlag, 3, old_value, 0,
                          sizeof(uint64_t), "older exact store"));
     events.Add(MakeEvent(tilexr::checker::EventKind::kFlagStore, 0, 1,
-                         tilexr::checker::BufferRole::kCommFlag, 3, 0x21, 0,
+                         tilexr::checker::BufferRole::kCommFlag, 3, new_value, 0,
                          sizeof(uint64_t), "newer producer store"));
     events.Add(MakeEvent(tilexr::checker::EventKind::kFlagWait, 1, 0,
-                         tilexr::checker::BufferRole::kCommFlag, 3, 0x20, 0,
+                         tilexr::checker::BufferRole::kCommFlag, 3, old_value, 0,
                          sizeof(uint64_t), "wait on stale magic"));
 
     tilexr::checker::FindingSet findings = tilexr::checker::CheckOrdering(events);
@@ -183,13 +275,141 @@ void TestStaleMagicDetectedEvenWhenExactStoreExists() {
     }
 }
 
-void TestFindingPriorityFavorsStaleMagicOverNoProducer() {
+void TestBroadcastFlagStoreSatisfiesConsumerWait() {
     tilexr::checker::EventLog events;
-    events.Add(MakeEvent(tilexr::checker::EventKind::kFlagStore, 0, 1,
-                         tilexr::checker::BufferRole::kCommFlag, 3, 0x21, 0,
-                         sizeof(uint64_t), "newer producer store"));
+    events.Add(MakeEvent(tilexr::checker::EventKind::kFlagStore, 0, -1,
+                         tilexr::checker::BufferRole::kCommFlag, 3, 0x20, 0,
+                         sizeof(uint64_t), "broadcast store"));
     events.Add(MakeEvent(tilexr::checker::EventKind::kFlagWait, 1, 0,
                          tilexr::checker::BufferRole::kCommFlag, 3, 0x20, 0,
+                         sizeof(uint64_t), "consumer wait"));
+
+    tilexr::checker::FindingSet findings = tilexr::checker::CheckOrdering(events);
+    ExpectEqSize(findings.findings().size(), 0,
+                 "broadcast flag store should satisfy consumer wait");
+}
+
+void TestFutureFlagStoreSatisfiesBlockingWait() {
+    tilexr::checker::EventLog events;
+    events.Add(MakeEvent(tilexr::checker::EventKind::kFlagWait, 1, 0,
+                         tilexr::checker::BufferRole::kCommFlag, 3, 0x20, 0,
+                         sizeof(uint64_t), "blocking wait"));
+    events.Add(MakeEvent(tilexr::checker::EventKind::kFlagStore, 0, -1,
+                         tilexr::checker::BufferRole::kCommFlag, 3, 0x20, 0,
+                         sizeof(uint64_t), "producer reaches flag later in trace"));
+
+    tilexr::checker::FindingSet findings = tilexr::checker::CheckOrdering(events);
+    ExpectEqSize(findings.findings().size(), 0,
+                 "future flag store should satisfy blocking wait dependency");
+}
+
+void TestHigherFlagValueSameMagicSatisfiesWait() {
+    tilexr::checker::EventLog events;
+    const uint64_t wait_value = (0x20ULL << 32) | 1ULL;
+    const uint64_t later_value = (0x20ULL << 32) | 3ULL;
+    events.Add(MakeEvent(tilexr::checker::EventKind::kFlagWait, 1, 0,
+                         tilexr::checker::BufferRole::kCommFlag, 3, wait_value, 0,
+                         sizeof(uint64_t), "wait lower value"));
+    events.Add(MakeEvent(tilexr::checker::EventKind::kFlagStore, 0, -1,
+                         tilexr::checker::BufferRole::kCommFlag, 3, later_value, 0,
+                         sizeof(uint64_t), "store higher value with same magic"));
+
+    tilexr::checker::FindingSet findings = tilexr::checker::CheckOrdering(events);
+    ExpectEqSize(findings.findings().size(), 0,
+                 "higher flag value in same magic epoch should satisfy wait");
+}
+
+void TestMutualFlagWaitsReportDeadlock() {
+    tilexr::checker::EventLog events;
+    const uint64_t wait_value = (0x31ULL << 32) | 1ULL;
+    tilexr::checker::Event wait0 = MakeEvent(tilexr::checker::EventKind::kFlagWait, 0, 1,
+                                             tilexr::checker::BufferRole::kCommFlag, 7,
+                                             wait_value, 0, sizeof(uint64_t),
+                                             "rank0 waits rank1");
+    wait0.server = 0;
+    wait0.peer_server = 1;
+    tilexr::checker::Event wait1 = MakeEvent(tilexr::checker::EventKind::kFlagWait, 1, 0,
+                                             tilexr::checker::BufferRole::kCommFlag, 7,
+                                             wait_value, 0, sizeof(uint64_t),
+                                             "rank1 waits rank0");
+    wait1.server = 1;
+    wait1.peer_server = 0;
+    events.Add(wait0);
+    events.Add(wait1);
+
+    tilexr::checker::FindingSet findings = tilexr::checker::CheckOrdering(events);
+    ExpectEqSize(FindingCount(findings, tilexr::checker::FindingKind::kDeadlock),
+                 1, "mutual flag waits deadlock finding count");
+    ExpectEqSize(FindingCount(findings, tilexr::checker::FindingKind::kFlagNoProducer),
+                 2, "mutual flag waits missing producer detail count");
+    const tilexr::checker::Finding *top = findings.TopFinding();
+    ExpectTrue(top != nullptr, "mutual flag waits top finding exists");
+    if (top != nullptr) {
+        ExpectEqInt(static_cast<int>(top->kind),
+                    static_cast<int>(tilexr::checker::FindingKind::kDeadlock),
+                    "mutual flag waits top finding kind");
+        ExpectEqInt(top->rank, 0, "mutual flag waits deadlock rank");
+        ExpectEqInt(top->peer_rank, 1, "mutual flag waits deadlock peer");
+        ExpectContains(top->message, "rank 0 waits rank 1",
+                       "mutual flag waits deadlock message first edge");
+        ExpectContains(top->message, "rank 1 waits rank 0",
+                       "mutual flag waits deadlock message second edge");
+        ExpectContains(top->next_action, "Break the cycle",
+                       "mutual flag waits deadlock next action");
+    }
+}
+
+void TestPipeWaitWithoutProducerIsReported() {
+    tilexr::checker::EventLog events;
+    tilexr::checker::Event wait = MakeEvent(tilexr::checker::EventKind::kPipeWait, 0, -1,
+                                            tilexr::checker::BufferRole::kMetadata, -1, 0, 0,
+                                            0, "pipe wait without producer");
+    wait.core = 3;
+    wait.pipe = AscendC::PIPE_V;
+    wait.event_id = AscendC::EVENT_ID1;
+    events.Add(wait);
+
+    tilexr::checker::FindingSet findings = tilexr::checker::CheckOrdering(events);
+    ExpectEqSize(FindingCount(findings, tilexr::checker::FindingKind::kPipeWaitNoProducer),
+                 1, "pipe wait without producer finding count");
+    const tilexr::checker::Finding *top = findings.TopFinding();
+    ExpectTrue(top != nullptr, "pipe wait missing producer top finding exists");
+    if (top != nullptr) {
+        ExpectEqInt(static_cast<int>(top->kind),
+                    static_cast<int>(tilexr::checker::FindingKind::kPipeWaitNoProducer),
+                    "pipe wait missing producer finding kind");
+    }
+}
+
+void TestPipeWaitIsSatisfiedByEarlierSetOnSameCorePipeAndEvent() {
+    tilexr::checker::EventLog events;
+    tilexr::checker::Event set = MakeEvent(tilexr::checker::EventKind::kPipeSet, 0, -1,
+                                           tilexr::checker::BufferRole::kMetadata, -1, 0, 0, 0,
+                                           "pipe set");
+    set.core = 3;
+    set.pipe = AscendC::PIPE_V;
+    set.event_id = AscendC::EVENT_ID1;
+    events.Add(set);
+
+    tilexr::checker::Event wait = set;
+    wait.kind = tilexr::checker::EventKind::kPipeWait;
+    wait.detail = "pipe wait";
+    events.Add(wait);
+
+    tilexr::checker::FindingSet findings = tilexr::checker::CheckOrdering(events);
+    ExpectEqSize(FindingCount(findings, tilexr::checker::FindingKind::kPipeWaitNoProducer),
+                 0, "matching pipe set should satisfy pipe wait");
+}
+
+void TestFindingPriorityFavorsStaleMagicOverNoProducer() {
+    tilexr::checker::EventLog events;
+    const uint64_t old_value = (0x20ULL << 32) | 0ULL;
+    const uint64_t new_value = (0x21ULL << 32) | 0ULL;
+    events.Add(MakeEvent(tilexr::checker::EventKind::kFlagStore, 0, 1,
+                         tilexr::checker::BufferRole::kCommFlag, 3, new_value, 0,
+                         sizeof(uint64_t), "newer producer store"));
+    events.Add(MakeEvent(tilexr::checker::EventKind::kFlagWait, 1, 0,
+                         tilexr::checker::BufferRole::kCommFlag, 3, old_value, 0,
                          sizeof(uint64_t), "stale wait without exact producer"));
     events.Add(MakeEvent(tilexr::checker::EventKind::kFlagWait, 0, 1,
                          tilexr::checker::BufferRole::kCommFlag, 5, 0x44, 0,
@@ -268,16 +488,50 @@ void TestEventsJsonlIncludesStableKinds() {
                    "events jsonl includes flag store kind");
 }
 
+void TestEventLogPreservesImportedEventIds() {
+    tilexr::checker::EventLog events;
+    tilexr::checker::Event imported =
+        MakeEvent(tilexr::checker::EventKind::kRead, 0, 1,
+                  tilexr::checker::BufferRole::kRegisteredCommBuffer, 3, 0,
+                  128, 64, "imported event");
+    imported.id = 42;
+    events.Add(imported);
+    tilexr::checker::Event generated =
+        MakeEvent(tilexr::checker::EventKind::kWrite, 1, 0,
+                  tilexr::checker::BufferRole::kRegisteredCommBuffer, 3, 0,
+                  128, 64, "generated event after import");
+    events.Add(generated);
+
+    const std::vector<tilexr::checker::Event> &items = events.events();
+    ExpectEqSize(items.size(), 2, "event log preserve ids count");
+    if (items.size() == 2) {
+        ExpectEqInt(static_cast<int>(items[0].id), 42,
+                    "event log preserves imported id");
+        ExpectEqInt(static_cast<int>(items[1].id), 43,
+                    "event log next generated id follows imported id");
+    }
+}
+
 }  // namespace
 
 int main() {
     TestOrderingFindingsAndPriority();
     TestReadBeforeCopySummaryMatchesGolden();
     TestReadBeforeCopySatisfiedByShimProducerModel();
+    TestBlockingTraceReadCanBeSatisfiedByFutureProducer();
+    TestRegisteredCommBufferReadSatisfiedByWindowProducer();
+    TestRegisteredCommBufferReadBeforeWriteReportsWindowSource();
     TestStaleMagicDetectedEvenWhenExactStoreExists();
+    TestBroadcastFlagStoreSatisfiesConsumerWait();
+    TestFutureFlagStoreSatisfiesBlockingWait();
+    TestHigherFlagValueSameMagicSatisfiesWait();
+    TestMutualFlagWaitsReportDeadlock();
+    TestPipeWaitWithoutProducerIsReported();
+    TestPipeWaitIsSatisfiedByEarlierSetOnSameCorePipeAndEvent();
     TestFindingPriorityFavorsStaleMagicOverNoProducer();
     TestDirectPeerUserBufferFinding();
     TestOutputMismatchKindsAndJson();
     TestEventsJsonlIncludesStableKinds();
+    TestEventLogPreservesImportedEventIds();
     return g_failures == 0 ? 0 : 1;
 }

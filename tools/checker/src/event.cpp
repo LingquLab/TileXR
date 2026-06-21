@@ -4,7 +4,11 @@ namespace tilexr {
 namespace checker {
 
 Event &EventLog::Add(Event event) {
-    event.id = next_id_++;
+    if (event.id == 0) {
+        event.id = next_id_++;
+    } else if (event.id >= next_id_) {
+        next_id_ = event.id + 1;
+    }
     events_.push_back(event);
     return events_.back();
 }
