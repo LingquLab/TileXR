@@ -67,11 +67,25 @@ class ReportCliTest(unittest.TestCase):
             self.assertNotIn("timelineSvg", rank0)
             rank0_slices = [event for event in rank0_profile_events if event.get("ph") == "X"]
             rank1_slices = [event for event in rank1_profile_events if event.get("ph") == "X"]
-            self.assertEqual([event["name"] for event in rank0_slices], ["send_r0_to_r1"])
+            self.assertIn("copy_r0_in", {event["name"] for event in rank0_slices})
+            self.assertIn("out_r0_local", {event["name"] for event in rank0_slices})
+            self.assertIn("send_r0_to_r1", {event["name"] for event in rank0_slices})
+            self.assertNotIn("send_r1_to_r0", {event["name"] for event in rank0_slices})
             self.assertEqual({event["args"]["owner_rank"] for event in rank0_slices}, {0})
-            self.assertEqual([event["name"] for event in rank1_slices], ["send_r1_to_r0"])
+            self.assertIn("copy_r1_in", {event["name"] for event in rank1_slices})
+            self.assertIn("out_r1_local", {event["name"] for event in rank1_slices})
+            self.assertIn("send_r1_to_r0", {event["name"] for event in rank1_slices})
+            self.assertNotIn("send_r0_to_r1", {event["name"] for event in rank1_slices})
             self.assertEqual({event["args"]["owner_rank"] for event in rank1_slices}, {1})
-            self.assertTrue(all(event.get("cat") == "send" for event in rank0_slices + rank1_slices))
+            self.assertEqual({event.get("cat") for event in rank0_slices}, {"copy", "send"})
+            self.assertEqual({event.get("cat") for event in rank1_slices}, {"copy", "send"})
+
+            rank0_process_names = {
+                event["args"]["name"]
+                for event in rank0_profile_events
+                if event.get("ph") == "M" and event.get("name") == "process_name"
+            }
+            self.assertIn("sdma:rank0", rank0_process_names)
 
     def test_report_bundle_writes_one_perfetto_profile_per_result_rank(self):
         with tempfile.TemporaryDirectory() as tmp:

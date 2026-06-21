@@ -235,7 +235,7 @@ def _render_profile_table(profiles: Sequence[Mapping[str, Any]]) -> str:
             f"<td>{_escape(profile.get('collective'))}</td>"
             f"<td>{_escape(profile.get('rank_count'))}</td>"
             f"<td>{_escape(profile.get('message_bytes'))}</td>"
-            f"<td>{_escape(profile.get('send_events'))}</td>"
+            f"<td>{_escape(profile.get('events'))}</td>"
             f"<td><a href=\"{_escape(profile.get('href'))}\">{_escape(profile.get('filename'))}</a></td>"
             "</tr>"
         )
@@ -244,7 +244,7 @@ def _render_profile_table(profiles: Sequence[Mapping[str, Any]]) -> str:
     return (
         "  <table>\n"
         "    <thead><tr><th>profile</th><th>rank</th><th>collective</th><th>ranks</th><th>bytes</th>"
-        "<th>send_events</th><th>trace</th></tr></thead>\n"
+        "<th>events</th><th>trace</th></tr></thead>\n"
         f"    <tbody>\n{chr(10).join(rows)}\n    </tbody>\n"
         "  </table>"
     )
@@ -332,7 +332,7 @@ def _render_rank_trace_summary(
     }
     for result_index, result in enumerate(results):
         profile = profiles_by_key.get((result_index, rank))
-        send_events = _rank_send_events(result, rank)
+        rank_events = _rank_profile_events(result, rank)
         profile_cell = _rank_profile_cell(profile)
         rows.append(
             "    <tr>"
@@ -340,7 +340,7 @@ def _render_rank_trace_summary(
             f"<td>{_escape(result.get('collective'))}</td>"
             f"<td>{_escape(result.get('rank_count'))}</td>"
             f"<td>{_escape(result.get('message_bytes'))}</td>"
-            f"<td>{_escape(len(send_events))}</td>"
+            f"<td>{_escape(len(rank_events))}</td>"
             f"<td>{_float_cell(result.get('latency_us'))}</td>"
             f"<td>{_escape(result.get('bottleneck_resource'))}</td>"
             f"<td>{profile_cell}</td>"
@@ -351,7 +351,7 @@ def _render_rank_trace_summary(
     return (
         "  <table>\n"
         "    <thead><tr><th>result</th><th>collective</th><th>ranks</th><th>bytes</th>"
-        "<th>rank_send_events</th><th>latency_us</th><th>bottleneck</th><th>profile</th></tr></thead>\n"
+        "<th>rank_events</th><th>latency_us</th><th>bottleneck</th><th>profile</th></tr></thead>\n"
         f"    <tbody>\n{chr(10).join(rows)}\n    </tbody>\n"
         "  </table>"
     )
@@ -370,7 +370,7 @@ def _write_profile_traces(
     profiles = []
     for index, result in enumerate(results):
         for rank in _result_rank_ids(result):
-            rank_events = _rank_send_events(result, rank)
+            rank_events = _rank_profile_events(result, rank)
             filename = _profile_filename(index, result, rank)
             trace_path = profile_dir / filename
             trace_path.write_text(json.dumps(_profile_trace_payload(result, rank), indent=2) + "\n", encoding="utf-8")
@@ -385,7 +385,7 @@ def _write_profile_traces(
                     "collective": result.get("collective"),
                     "rank_count": result.get("rank_count"),
                     "message_bytes": result.get("message_bytes"),
-                    "send_events": len(rank_events),
+                    "events": len(rank_events),
                 }
             )
     return tuple(profiles)
@@ -427,16 +427,17 @@ def _profile_trace_payload(result: Mapping[str, Any], rank: int) -> Mapping[str,
             )
         return pid, lane_ids[key]
 
-    for event in _rank_send_events(result, rank):
+    for event in _rank_profile_events(result, rank):
         process_name, thread_name, dst_rank = _trace_lane(event, rank)
         pid, tid = lane_id(process_name, thread_name)
         start_us = _float_value(event.get("start_us"))
         end_us = _float_value(event.get("end_us"))
+        op_type = str(event.get("op_type") or "")
         resources = tuple(str(resource) for resource in event.get("resources", []))
         trace_events.append(
             {
-                "name": str(event.get("op_id") or "send"),
-                "cat": "send",
+                "name": str(event.get("op_id") or op_type or "event"),
+                "cat": op_type,
                 "ph": "X",
                 "ts": start_us,
                 "dur": max(0.0, end_us - start_us),
@@ -447,6 +448,7 @@ def _profile_trace_payload(result: Mapping[str, Any], rank: int) -> Mapping[str,
                     "collective": result.get("collective"),
                     "rank_count": result.get("rank_count"),
                     "owner_rank": rank,
+                    "op_type": op_type,
                     "destination_rank": dst_rank,
                     "message_bytes": result.get("message_bytes"),
                     "event_message_bytes": event.get("message_bytes"),
@@ -463,13 +465,13 @@ def _profile_trace_payload(result: Mapping[str, Any], rank: int) -> Mapping[str,
     return {"traceEvents": trace_events, "displayTimeUnit": "us"}
 
 
-def _send_events(result: Mapping[str, Any]) -> Sequence[Mapping[str, Any]]:
+def _profile_events(result: Mapping[str, Any]) -> Sequence[Mapping[str, Any]]:
     return tuple(
         sorted(
             (
                 event
                 for event in _events(result)
-                if event.get("op_type") == "send" and _event_rank(event) is not None
+                if event.get("op_type") in {"copy", "send"} and _event_rank(event) is not None
             ),
             key=lambda event: (
                 _event_rank(event),
@@ -482,16 +484,26 @@ def _send_events(result: Mapping[str, Any]) -> Sequence[Mapping[str, Any]]:
 
 
 def _rank_send_events(result: Mapping[str, Any], rank: int) -> Sequence[Mapping[str, Any]]:
-    return tuple(event for event in _send_events(result) if _event_rank(event) == rank)
+    return tuple(
+        event
+        for event in _profile_events(result)
+        if _event_rank(event) == rank and event.get("op_type") == "send"
+    )
+
+
+def _rank_profile_events(result: Mapping[str, Any], rank: int) -> Sequence[Mapping[str, Any]]:
+    return tuple(event for event in _profile_events(result) if _event_rank(event) == rank)
 
 
 def _result_rank_ids(result: Mapping[str, Any]) -> Sequence[int]:
-    ranks = {_event_rank(event) for event in _send_events(result)}
+    ranks = {_event_rank(event) for event in _profile_events(result)}
     return tuple(sorted(rank for rank in ranks if rank is not None))
 
 
 def _trace_lane(event: Mapping[str, Any], rank: int) -> Tuple[str, str, Optional[int]]:
     resources = tuple(str(resource) for resource in event.get("resources", []))
+    if event.get("op_type") == "copy":
+        return (resources[0] if resources else f"sdma:rank{rank}"), "copy", None
     dst_rank = _send_destination(event)
     thread_name = f"send to rank{dst_rank}" if dst_rank is not None else "send"
     p2p_resource = next((resource for resource in resources if resource.startswith("p2p:")), None)
