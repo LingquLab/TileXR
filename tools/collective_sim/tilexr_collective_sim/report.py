@@ -231,6 +231,7 @@ def _render_profile_table(profiles: Sequence[Mapping[str, Any]]) -> str:
         rows.append(
             "    <tr>"
             f"<td>{_escape(profile.get('label'))}</td>"
+            f"<td>{_escape(profile.get('rank'))}</td>"
             f"<td>{_escape(profile.get('collective'))}</td>"
             f"<td>{_escape(profile.get('rank_count'))}</td>"
             f"<td>{_escape(profile.get('message_bytes'))}</td>"
@@ -239,10 +240,10 @@ def _render_profile_table(profiles: Sequence[Mapping[str, Any]]) -> str:
             "</tr>"
         )
     if not rows:
-        rows.append("    <tr><td colspan=\"6\" class=\"muted\">No profiles available</td></tr>")
+        rows.append("    <tr><td colspan=\"7\" class=\"muted\">No profiles available</td></tr>")
     return (
         "  <table>\n"
-        "    <thead><tr><th>profile</th><th>collective</th><th>ranks</th><th>bytes</th>"
+        "    <thead><tr><th>profile</th><th>rank</th><th>collective</th><th>ranks</th><th>bytes</th>"
         "<th>send_events</th><th>trace</th></tr></thead>\n"
         f"    <tbody>\n{chr(10).join(rows)}\n    </tbody>\n"
         "  </table>"
@@ -325,8 +326,14 @@ def _render_rank_trace_summary(
     profiles: Sequence[Mapping[str, Any]],
 ) -> str:
     rows = []
-    for result, profile in zip(results, profiles):
+    profiles_by_key = {
+        (profile.get("result_index"), profile.get("rank")): profile
+        for profile in profiles
+    }
+    for result_index, result in enumerate(results):
+        profile = profiles_by_key.get((result_index, rank))
         send_events = _rank_send_events(result, rank)
+        profile_cell = _rank_profile_cell(profile)
         rows.append(
             "    <tr>"
             f"<td>{_escape(_result_label(result))}</td>"
@@ -336,7 +343,7 @@ def _render_rank_trace_summary(
             f"<td>{_escape(len(send_events))}</td>"
             f"<td>{_float_cell(result.get('latency_us'))}</td>"
             f"<td>{_escape(result.get('bottleneck_resource'))}</td>"
-            f"<td><a href=\"{_escape(profile.get('rank_href'))}\">{_escape(profile.get('filename'))}</a></td>"
+            f"<td>{profile_cell}</td>"
             "</tr>"
         )
     if not rows:
@@ -350,32 +357,41 @@ def _render_rank_trace_summary(
     )
 
 
+def _rank_profile_cell(profile: Optional[Mapping[str, Any]]) -> str:
+    if profile is None:
+        return "<span class=\"muted\">No send profile</span>"
+    return f"<a href=\"{_escape(profile.get('rank_href'))}\">{_escape(profile.get('filename'))}</a>"
+
+
 def _write_profile_traces(
     results: Sequence[Mapping[str, Any]],
     profile_dir: Path,
 ) -> Sequence[Mapping[str, Any]]:
     profiles = []
     for index, result in enumerate(results):
-        filename = _profile_filename(index, result)
-        trace_path = profile_dir / filename
-        trace_path.write_text(json.dumps(_profile_trace_payload(result), indent=2) + "\n", encoding="utf-8")
-        profiles.append(
-            {
-                "index": index,
-                "filename": filename,
-                "href": f"profiles/{filename}",
-                "rank_href": f"../profiles/{filename}",
-                "label": _result_label(result),
-                "collective": result.get("collective"),
-                "rank_count": result.get("rank_count"),
-                "message_bytes": result.get("message_bytes"),
-                "send_events": len(_send_events(result)),
-            }
-        )
+        for rank in _result_rank_ids(result):
+            rank_events = _rank_send_events(result, rank)
+            filename = _profile_filename(index, result, rank)
+            trace_path = profile_dir / filename
+            trace_path.write_text(json.dumps(_profile_trace_payload(result, rank), indent=2) + "\n", encoding="utf-8")
+            profiles.append(
+                {
+                    "result_index": index,
+                    "rank": rank,
+                    "filename": filename,
+                    "href": f"profiles/{filename}",
+                    "rank_href": f"../profiles/{filename}",
+                    "label": _result_label(result),
+                    "collective": result.get("collective"),
+                    "rank_count": result.get("rank_count"),
+                    "message_bytes": result.get("message_bytes"),
+                    "send_events": len(rank_events),
+                }
+            )
     return tuple(profiles)
 
 
-def _profile_trace_payload(result: Mapping[str, Any]) -> Mapping[str, Any]:
+def _profile_trace_payload(result: Mapping[str, Any], rank: int) -> Mapping[str, Any]:
     trace_events = []
     process_ids = {}
     lane_ids = {}
@@ -411,10 +427,7 @@ def _profile_trace_payload(result: Mapping[str, Any]) -> Mapping[str, Any]:
             )
         return pid, lane_ids[key]
 
-    for event in _send_events(result):
-        rank = _event_rank(event)
-        if rank is None:
-            continue
+    for event in _rank_send_events(result, rank):
         process_name, thread_name, dst_rank = _trace_lane(event, rank)
         pid, tid = lane_id(process_name, thread_name)
         start_us = _float_value(event.get("start_us"))
@@ -470,6 +483,11 @@ def _send_events(result: Mapping[str, Any]) -> Sequence[Mapping[str, Any]]:
 
 def _rank_send_events(result: Mapping[str, Any], rank: int) -> Sequence[Mapping[str, Any]]:
     return tuple(event for event in _send_events(result) if _event_rank(event) == rank)
+
+
+def _result_rank_ids(result: Mapping[str, Any]) -> Sequence[int]:
+    ranks = {_event_rank(event) for event in _send_events(result)}
+    return tuple(sorted(rank for rank in ranks if rank is not None))
 
 
 def _trace_lane(event: Mapping[str, Any], rank: int) -> Tuple[str, str, Optional[int]]:
@@ -542,13 +560,13 @@ def _rank_href(rank: int, prefix: str) -> str:
     return f"{prefix}/{filename}"
 
 
-def _profile_filename(index: int, result: Mapping[str, Any]) -> str:
+def _profile_filename(index: int, result: Mapping[str, Any], rank: int) -> str:
     algorithm = _slug(result.get("algorithm") or "profile")
     rank_count = _int_or_none(result.get("rank_count"))
     message_bytes = _int_or_none(result.get("message_bytes"))
     rank_part = f"{rank_count}p" if rank_count is not None else "unknownp"
     byte_part = f"{message_bytes}b" if message_bytes is not None else "unknownb"
-    return f"profile_{index:03d}_{algorithm}_{rank_part}_{byte_part}.trace.json"
+    return f"profile_{index:03d}_{algorithm}_{rank_part}_{byte_part}_rank{rank:03d}.trace.json"
 
 
 def _result_label(result: Mapping[str, Any]) -> str:

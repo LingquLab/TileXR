@@ -35,7 +35,7 @@ The run and sweep commands write:
 - `summary.csv`
 - `report.html`: lightweight algorithm-selection index with rank/card navigation
 - `rank_reports/rank_XXX.html`: per-rank Perfetto UI entry pages
-- `profiles/profile_XXX_<algorithm>_<ranks>p_<bytes>b.trace.json`: one Perfetto-compatible Chrome JSON trace per collective test; rank count and message size are not mixed inside a profile
+- `profiles/profile_XXX_<algorithm>_<ranks>p_<bytes>b_rankYYY.trace.json`: one Perfetto-compatible Chrome JSON trace per collective test and rank/card; rank count, message size, and owner rank are not mixed inside a profile
 
 ## Sweep Schema
 
