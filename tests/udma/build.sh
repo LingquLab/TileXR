@@ -72,6 +72,7 @@ echo ""
 echo "Available tests:"
 echo "  - test_tilexr_udma_transport_layout : UDMA info layout unit tests"
 echo "  - test_tilexr_udma_registry : registered-memory metadata unit tests"
+echo "  - test_tilexr_udma_allreduce_layout : all-reduce demo layout unit tests"
 echo "  - test_tilexr_udma     : TileXR integration tests"
 if [ -f "${INSTALL_DIR}/bin/tilexr_udma_demo" ]; then
     echo "  - tilexr_udma_demo     : TileXR UDMA communication demo"

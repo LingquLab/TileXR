@@ -1,9 +1,16 @@
 #include <algorithm>
 #include <cstdint>
+#include <fstream>
 #include <iostream>
+#include <sstream>
+#include <string>
 #include <vector>
 
 #include "demo/tilexr_udma_alltoall_layout.h"
+
+#ifndef TILEXR_SOURCE_ROOT
+#define TILEXR_SOURCE_ROOT "."
+#endif
 
 namespace {
 
@@ -19,6 +26,22 @@ int g_failures = 0;
             ++g_failures; \
         } \
     } while (0)
+
+#define CHECK_CONTAINS(text, needle) \
+    do { \
+        if ((text).find(needle) == std::string::npos) { \
+            std::cerr << "CHECK_CONTAINS failed at line " << __LINE__ << ": " << needle << std::endl; \
+            ++g_failures; \
+        } \
+    } while (0)
+
+std::string ReadFile(const std::string& path)
+{
+    std::ifstream in(path.c_str());
+    std::ostringstream out;
+    out << in.rdbuf();
+    return out.str();
+}
 
 void TestAllToAllInputPattern()
 {
@@ -55,12 +78,46 @@ void TestAllToAllOutputValidation()
     CHECK_EQ(TileXR::Demo::ValidateAllToAllOutput(output, rank, rankSize, elementsPerPeer), false);
 }
 
+void TestBuildAllToAllOutput()
+{
+    constexpr int rankSize = 3;
+    constexpr int32_t elementsPerPeer = 2;
+    std::vector<int32_t> allInputs(static_cast<size_t>(rankSize) * rankSize * elementsPerPeer, -1);
+
+    for (int srcRank = 0; srcRank < rankSize; ++srcRank) {
+        std::vector<int32_t> oneInput(static_cast<size_t>(rankSize) * elementsPerPeer, -1);
+        TileXR::Demo::FillAllToAllInput(oneInput, srcRank, rankSize, elementsPerPeer);
+        std::copy(oneInput.begin(), oneInput.end(),
+                  allInputs.begin() + static_cast<size_t>(srcRank) * rankSize * elementsPerPeer);
+    }
+
+    std::vector<int32_t> output(static_cast<size_t>(rankSize) * elementsPerPeer, -1);
+    TileXR::Demo::BuildAllToAllOutputFromInputs(allInputs, 2, rankSize, elementsPerPeer, output);
+
+    CHECK_EQ(TileXR::Demo::ValidateAllToAllOutput(output, 2, rankSize, elementsPerPeer), true);
+}
+
+void TestDemoDebugLayoutSource()
+{
+    const std::string demo =
+        ReadFile(std::string(TILEXR_SOURCE_ROOT) + "/tests/udma/demo/tilexr_udma_demo.cpp");
+    const std::string kernel =
+        ReadFile(std::string(TILEXR_SOURCE_ROOT) + "/tests/udma/demo/tilexr_udma_demo_kernel.cpp");
+
+    CHECK_CONTAINS(demo, "kDebugUdmaStatusBase + TileXR::TILEXR_MAX_RANK_SIZE");
+    CHECK_CONTAINS(demo, "kDebugIpcGather + 1");
+    CHECK_CONTAINS(kernel, "TILEXR_UDMA_DEMO_DEBUG_UDMA_STATUS_BASE + TileXR::TILEXR_MAX_RANK_SIZE");
+    CHECK_CONTAINS(kernel, "TILEXR_UDMA_DEMO_DEBUG_UDMA_STATUS_BASE + peer");
+}
+
 } // namespace
 
 int main()
 {
     TestAllToAllInputPattern();
     TestAllToAllOutputValidation();
+    TestBuildAllToAllOutput();
+    TestDemoDebugLayoutSource();
     if (g_failures != 0) {
         std::cerr << g_failures << " all-to-all layout checks failed" << std::endl;
         return 1;

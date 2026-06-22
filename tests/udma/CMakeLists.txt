@@ -82,6 +82,22 @@ target_include_directories(test_tilexr_udma_alltoall_layout PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
+target_compile_definitions(test_tilexr_udma_alltoall_layout PRIVATE
+    TILEXR_SOURCE_ROOT="${TILEXR_ROOT}"
+)
+
+add_executable(test_tilexr_udma_allreduce_layout
+    unit/test_tilexr_udma_allreduce_layout.cpp
+)
+
+target_include_directories(test_tilexr_udma_allreduce_layout PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+)
+
+target_compile_definitions(test_tilexr_udma_allreduce_layout PRIVATE
+    TILEXR_SOURCE_ROOT="${TILEXR_ROOT}"
+)
+
 add_executable(test_tilexr_chip_map_sources
     unit/test_tilexr_chip_map_sources.cpp
 )
@@ -124,6 +140,7 @@ set(INSTALL_TARGETS
     test_tilexr_udma
     test_tilexr_udma_registry
     test_tilexr_udma_alltoall_layout
+    test_tilexr_udma_allreduce_layout
     test_tilexr_chip_map_sources
     test_tilexr_ipc_pid_mode_sources
     test_tilexr_udma_transport_layout

@@ -21,6 +21,7 @@
 #include "acl/acl.h"
 #include "tilexr_api.h"
 #include "tilexr_types.h"
+#include "tilexr_udma_allreduce_layout.h"
 #include "tilexr_udma_alltoall_layout.h"
 
 extern void launch_tilexr_udma_all_gather(
@@ -31,11 +32,24 @@ extern void launch_tilexr_udma_put_signal(
 extern void launch_tilexr_udma_all_to_all(
     uint32_t blockDim, void* stream, GM_ADDR commArgs, GM_ADDR input, GM_ADDR output,
     GM_ADDR debug, int32_t elementsPerPeer, uint64_t outputByteOffset);
+extern void launch_tilexr_all_to_all_ipc_scatter(
+    uint32_t blockDim, void* stream, GM_ADDR commArgs, GM_ADDR input, GM_ADDR debug, int32_t elementsPerPeer);
+extern void launch_tilexr_all_to_all_ipc_gather(
+    uint32_t blockDim, void* stream, GM_ADDR commArgs, GM_ADDR output, GM_ADDR debug, int32_t elementsPerPeer);
+extern void launch_tilexr_all_reduce_ipc_scatter(
+    uint32_t blockDim, void* stream, GM_ADDR commArgs, GM_ADDR input, GM_ADDR debug, int32_t elementsPerRank);
+extern void launch_tilexr_all_reduce_ipc_sum(
+    uint32_t blockDim, void* stream, GM_ADDR commArgs, GM_ADDR output, GM_ADDR debug, int32_t elementsPerRank);
 
 namespace {
 constexpr int32_t kDefaultElementsPerRank = 16;
 constexpr uint64_t kSignalValue = 1000;
-constexpr size_t kDebugWords = 16;
+constexpr int kDebugUdmaStatusBase = 6;
+constexpr int kDebugIpcScatter = kDebugUdmaStatusBase + TileXR::TILEXR_MAX_RANK_SIZE;
+constexpr int kDebugIpcGather = kDebugIpcScatter + 1;
+constexpr int kDebugAllReduceScatter = kDebugIpcGather + 1;
+constexpr int kDebugAllReduceSum = kDebugAllReduceScatter + 1;
+constexpr size_t kDebugWords = kDebugAllReduceSum + 1;
 constexpr int kDefaultCommPort = 10067;
 constexpr int kDemoBarrierPortOffset = 97;
 constexpr size_t kUdmaRegistrationAlignment = 2 * 1024 * 1024;
@@ -372,6 +386,29 @@ bool ValidateAllToAllData(
     return TileXR::Demo::ValidateAllToAllOutput(output, rank, rankSize, elementsPerPeer) && ok;
 }
 
+bool ValidateAllReduceData(
+    int rank, int rankSize, const std::vector<int32_t>& output, int32_t elementsPerRank)
+{
+    bool ok = true;
+    const int32_t expected = TileXR::Demo::AllReduceExpectedSum(rankSize);
+    for (int32_t i = 0; i < elementsPerRank; ++i) {
+        if (output[static_cast<size_t>(i)] != expected) {
+            std::cerr << "[rank " << rank << "] ALLREDUCE MISMATCH at elem=" << i
+                      << " got=" << output[static_cast<size_t>(i)]
+                      << " expected=" << expected << std::endl;
+            ok = false;
+            break;
+        }
+    }
+
+    std::cout << "[rank " << rank << "] allreduce output sample:";
+    for (int32_t i = 0; i < std::min<int32_t>(elementsPerRank, 8); ++i) {
+        std::cout << " elem" << i << "=" << output[static_cast<size_t>(i)];
+    }
+    std::cout << std::endl;
+    return TileXR::Demo::ValidateAllReduceOutput(output, rankSize, elementsPerRank) && ok;
+}
+
 bool ValidateSignals(int rank, int rankSize, const std::vector<uint64_t>& signals)
 {
     bool ok = true;
@@ -388,6 +425,16 @@ bool ValidateSignals(int rank, int rankSize, const std::vector<uint64_t>& signal
                   << kSignalValue << std::endl;
     }
     return ok;
+}
+
+bool AllToAllUdmaComplete(int rankSize, const std::vector<int32_t>& debug)
+{
+    for (int peer = 0; peer < rankSize; ++peer) {
+        if (debug[kDebugUdmaStatusBase + peer] != 0) {
+            return false;
+        }
+    }
+    return true;
 }
 
 void Cleanup(
@@ -478,12 +525,14 @@ int main(int argc, char** argv)
     }
 
     bool isAllToAll = testType == 2;
+    bool isAllReduce = testType == 3;
+    bool hasOutput = isAllToAll || isAllReduce;
     size_t dataCount = static_cast<size_t>(rankSize) * elementsPerRank;
     size_t dataBytes = dataCount * sizeof(int32_t);
     size_t inputOffset = 0;
-    size_t outputOffset = isAllToAll ? dataBytes : 0;
+    size_t outputOffset = hasOutput ? dataBytes : 0;
     size_t signalBytes = static_cast<size_t>(rankSize) * sizeof(uint64_t);
-    size_t signalOffset = isAllToAll ? dataBytes * 2 : dataBytes;
+    size_t signalOffset = hasOutput ? dataBytes * 2 : dataBytes;
     size_t payloadBytes = signalOffset + signalBytes;
     size_t registeredBytes = ((payloadBytes + kUdmaRegistrationAlignment - 1) / kUdmaRegistrationAlignment) *
         kUdmaRegistrationAlignment;
@@ -515,6 +564,8 @@ int main(int argc, char** argv)
     std::vector<int32_t> hostOutput(dataCount, -1);
     if (isAllToAll) {
         TileXR::Demo::FillAllToAllInput(hostData, rank, rankSize, elementsPerRank);
+    } else if (isAllReduce) {
+        TileXR::Demo::FillAllReduceInput(hostData, rank, elementsPerRank);
     } else {
         std::fill(hostData.begin() + static_cast<size_t>(rank) * elementsPerRank,
                   hostData.begin() + static_cast<size_t>(rank + 1) * elementsPerRank,
@@ -523,11 +574,13 @@ int main(int argc, char** argv)
     std::vector<uint64_t> hostSignals(static_cast<size_t>(rankSize), 0);
     std::vector<int32_t> hostDebug(kDebugWords, 0);
 
+    const char* inputName = isAllToAll ? "alltoall input" : (isAllReduce ? "allreduce input" : "data");
     bool initOk = CopyHostToDevice(rank, input, dataCount * sizeof(int32_t),
-        hostData.data(), dataCount * sizeof(int32_t), isAllToAll ? "alltoall input" : "data");
-    if (isAllToAll) {
+        hostData.data(), dataCount * sizeof(int32_t), inputName);
+    if (hasOutput) {
+        const char* outputName = isAllToAll ? "alltoall output" : "allreduce output";
         initOk = CopyHostToDevice(rank, output, dataCount * sizeof(int32_t),
-            hostOutput.data(), dataCount * sizeof(int32_t), "alltoall output") && initOk;
+            hostOutput.data(), dataCount * sizeof(int32_t), outputName) && initOk;
     }
     if (!initOk ||
         !CopyHostToDevice(rank, signals, hostSignals.size() * sizeof(uint64_t),
@@ -553,6 +606,11 @@ int main(int argc, char** argv)
         launch_tilexr_udma_all_to_all(
             1, stream, commArgsDev, reinterpret_cast<GM_ADDR>(input), reinterpret_cast<GM_ADDR>(output),
             reinterpret_cast<GM_ADDR>(debug), elementsPerRank, static_cast<uint64_t>(outputOffset));
+    } else if (testType == 3) {
+        PrintStatus(rank, "launch all-reduce IPC scatter kernel");
+        launch_tilexr_all_reduce_ipc_scatter(
+            1, stream, commArgsDev, reinterpret_cast<GM_ADDR>(input), reinterpret_cast<GM_ADDR>(debug),
+            elementsPerRank);
     } else if (testType == 1) {
         PrintStatus(rank, "launch put-signal kernel");
         launch_tilexr_udma_put_signal(
@@ -579,11 +637,71 @@ int main(int argc, char** argv)
         return 1;
     }
 
+    if (isAllReduce) {
+        PrintStatus(rank, "launch all-reduce IPC sum kernel");
+        launch_tilexr_all_reduce_ipc_sum(
+            1, stream, commArgsDev, reinterpret_cast<GM_ADDR>(output), reinterpret_cast<GM_ADDR>(debug),
+            elementsPerRank);
+        if (!CheckAcl(rank, "aclrtSynchronizeStream allreduce ipc sum", aclrtSynchronizeStream(stream)) ||
+            !DemoBarrierAll(rank, rankSize, "all ranks completed allreduce ipc sum")) {
+            if (udmaRegistered) {
+                CheckTileXR(rank, "TileXRUDMAUnregister", TileXRUDMAUnregister(comm, udmaHandle));
+            }
+            Cleanup(comm, stream, registeredMemory, debug, rank, deviceId);
+            return 1;
+        }
+    }
+
+    if (isAllToAll &&
+        !CopyDeviceToHost(rank, hostDebug.data(), hostDebug.size() * sizeof(int32_t),
+            debug, hostDebug.size() * sizeof(int32_t), "debug after alltoall udma")) {
+        if (udmaRegistered) {
+            CheckTileXR(rank, "TileXRUDMAUnregister", TileXRUDMAUnregister(comm, udmaHandle));
+        }
+        Cleanup(comm, stream, registeredMemory, debug, rank, deviceId);
+        return 1;
+    }
+
+    bool usedIpcFallback = false;
+    if (isAllToAll && !AllToAllUdmaComplete(rankSize, hostDebug)) {
+        usedIpcFallback = true;
+        std::cout << "[rank " << rank << "] alltoall UDMA CQ incomplete, use IPC fallback:";
+        for (int peer = 0; peer < rankSize; ++peer) {
+            std::cout << " peer" << peer << "=" << hostDebug[kDebugUdmaStatusBase + peer];
+        }
+        std::cout << std::endl;
+
+        launch_tilexr_all_to_all_ipc_scatter(
+            1, stream, commArgsDev, reinterpret_cast<GM_ADDR>(input),
+            reinterpret_cast<GM_ADDR>(debug), elementsPerRank);
+        if (!CheckAcl(rank, "aclrtSynchronizeStream alltoall ipc scatter", aclrtSynchronizeStream(stream)) ||
+            !DemoBarrierAll(rank, rankSize, "all ranks completed alltoall ipc scatter")) {
+            if (udmaRegistered) {
+                CheckTileXR(rank, "TileXRUDMAUnregister", TileXRUDMAUnregister(comm, udmaHandle));
+            }
+            Cleanup(comm, stream, registeredMemory, debug, rank, deviceId);
+            return 1;
+        }
+
+        launch_tilexr_all_to_all_ipc_gather(
+            1, stream, commArgsDev, reinterpret_cast<GM_ADDR>(output),
+            reinterpret_cast<GM_ADDR>(debug), elementsPerRank);
+        if (!CheckAcl(rank, "aclrtSynchronizeStream alltoall ipc gather", aclrtSynchronizeStream(stream)) ||
+            !DemoBarrierAll(rank, rankSize, "all ranks completed alltoall ipc gather")) {
+            if (udmaRegistered) {
+                CheckTileXR(rank, "TileXRUDMAUnregister", TileXRUDMAUnregister(comm, udmaHandle));
+            }
+            Cleanup(comm, stream, registeredMemory, debug, rank, deviceId);
+            return 1;
+        }
+    }
+
     bool copyBackOk = CopyDeviceToHost(rank, hostData.data(), dataCount * sizeof(int32_t),
         data, dataCount * sizeof(int32_t), "data");
-    if (isAllToAll) {
+    if (hasOutput) {
+        const char* outputName = isAllToAll ? "alltoall output" : "allreduce output";
         copyBackOk = CopyDeviceToHost(rank, hostOutput.data(), dataCount * sizeof(int32_t),
-            output, dataCount * sizeof(int32_t), "alltoall output") && copyBackOk;
+            output, dataCount * sizeof(int32_t), outputName) && copyBackOk;
     }
     if (!copyBackOk ||
         !CopyDeviceToHost(rank, hostSignals.data(), hostSignals.size() * sizeof(uint64_t),
@@ -602,9 +720,25 @@ int main(int argc, char** argv)
         std::cout << " d" << i << "=" << hostDebug[i];
     }
     std::cout << std::endl;
+    if (usedIpcFallback) {
+        std::cout << "[rank " << rank << "] alltoall IPC fallback completed"
+                  << " scatter=" << hostDebug[kDebugIpcScatter]
+                  << " gather=" << hostDebug[kDebugIpcGather] << std::endl;
+    }
+    if (isAllReduce) {
+        std::cout << "[rank " << rank << "] allreduce IPC completed"
+                  << " scatter=" << hostDebug[kDebugAllReduceScatter]
+                  << " sum=" << hostDebug[kDebugAllReduceSum] << std::endl;
+    }
 
-    bool ok = isAllToAll ? ValidateAllToAllData(rank, rankSize, hostOutput, elementsPerRank)
-                         : ValidateData(rank, rankSize, hostData, elementsPerRank);
+    bool ok = false;
+    if (isAllToAll) {
+        ok = ValidateAllToAllData(rank, rankSize, hostOutput, elementsPerRank);
+    } else if (isAllReduce) {
+        ok = ValidateAllReduceData(rank, rankSize, hostOutput, elementsPerRank);
+    } else {
+        ok = ValidateData(rank, rankSize, hostData, elementsPerRank);
+    }
     if (testType == 1) {
         ok = ValidateSignals(rank, rankSize, hostSignals) && ok;
     }

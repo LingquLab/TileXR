@@ -50,6 +50,7 @@ required_bins=(
     test_tilexr_udma_transport_layout
     test_tilexr_udma_registry
     test_tilexr_udma_alltoall_layout
+    test_tilexr_udma_allreduce_layout
     test_tilexr_chip_map_sources
     test_tilexr_ipc_pid_mode_sources
     test_tilexr_udma
@@ -84,30 +85,37 @@ TEST3_RESULT=$?
 echo ""
 
 echo "=========================================="
-echo "Test 4: TileXR Chip Map Source Unit Test"
+echo "Test 4: TileXR UDMA All-Reduce Layout Unit Test"
 echo "=========================================="
-"${INSTALL_DIR}/bin/test_tilexr_chip_map_sources"
+"${INSTALL_DIR}/bin/test_tilexr_udma_allreduce_layout"
 TEST4_RESULT=$?
 echo ""
 
 echo "=========================================="
-echo "Test 5: TileXR IPC PID Mode Source Unit Test"
+echo "Test 5: TileXR Chip Map Source Unit Test"
 echo "=========================================="
-"${INSTALL_DIR}/bin/test_tilexr_ipc_pid_mode_sources"
+"${INSTALL_DIR}/bin/test_tilexr_chip_map_sources"
 TEST5_RESULT=$?
 echo ""
 
 echo "=========================================="
-echo "Test 6: TileXR Integration Tests (Single Process)"
+echo "Test 6: TileXR IPC PID Mode Source Unit Test"
 echo "=========================================="
-export RANK=0
-export RANK_SIZE=1
-"${INSTALL_DIR}/bin/test_tilexr_udma"
+"${INSTALL_DIR}/bin/test_tilexr_ipc_pid_mode_sources"
 TEST6_RESULT=$?
 echo ""
 
 echo "=========================================="
-echo "Test 7: TileXR Multi-Process Tests (MPI)"
+echo "Test 7: TileXR Integration Tests (Single Process)"
+echo "=========================================="
+export RANK=0
+export RANK_SIZE=1
+"${INSTALL_DIR}/bin/test_tilexr_udma"
+TEST7_RESULT=$?
+echo ""
+
+echo "=========================================="
+echo "Test 8: TileXR Multi-Process Tests (MPI)"
 echo "=========================================="
 
 if command -v mpirun >/dev/null 2>&1; then
@@ -124,14 +132,14 @@ if command -v mpirun >/dev/null 2>&1; then
         unset RANK
         unset RANK_SIZE
         mpirun -n 2 "${INSTALL_DIR}/bin/test_tilexr_udma"
-        TEST7_RESULT=$?
+        TEST8_RESULT=$?
     else
         echo "SKIP: Need at least 2 usable NPUs for multi-rank test"
-        TEST7_RESULT=0
+        TEST8_RESULT=0
     fi
 else
     echo "SKIP: mpirun not found, skipping multi-process tests"
-    TEST7_RESULT=0
+    TEST8_RESULT=0
 fi
 echo ""
 
@@ -141,15 +149,16 @@ echo "=========================================="
 echo "Test 1 (UDMA Layout):     $([ ${TEST1_RESULT} -eq 0 ] && echo 'PASS' || echo 'FAIL')"
 echo "Test 2 (UDMA Registry):   $([ ${TEST2_RESULT} -eq 0 ] && echo 'PASS' || echo 'FAIL')"
 echo "Test 3 (AllToAll Layout): $([ ${TEST3_RESULT} -eq 0 ] && echo 'PASS' || echo 'FAIL')"
-echo "Test 4 (Chip Map):        $([ ${TEST4_RESULT} -eq 0 ] && echo 'PASS' || echo 'FAIL')"
-echo "Test 5 (IPC PID Mode):    $([ ${TEST5_RESULT} -eq 0 ] && echo 'PASS' || echo 'FAIL')"
-echo "Test 6 (TileXR Single):   $([ ${TEST6_RESULT} -eq 0 ] && echo 'PASS' || echo 'FAIL')"
-echo "Test 7 (TileXR Multi):    $([ ${TEST7_RESULT} -eq 0 ] && echo 'PASS' || echo 'SKIP/FAIL')"
+echo "Test 4 (AllReduce Layout): $([ ${TEST4_RESULT} -eq 0 ] && echo 'PASS' || echo 'FAIL')"
+echo "Test 5 (Chip Map):        $([ ${TEST5_RESULT} -eq 0 ] && echo 'PASS' || echo 'FAIL')"
+echo "Test 6 (IPC PID Mode):    $([ ${TEST6_RESULT} -eq 0 ] && echo 'PASS' || echo 'FAIL')"
+echo "Test 7 (TileXR Single):   $([ ${TEST7_RESULT} -eq 0 ] && echo 'PASS' || echo 'FAIL')"
+echo "Test 8 (TileXR Multi):    $([ ${TEST8_RESULT} -eq 0 ] && echo 'PASS' || echo 'SKIP/FAIL')"
 echo "=========================================="
 
 if [ ${TEST1_RESULT} -ne 0 ] || [ ${TEST2_RESULT} -ne 0 ] || [ ${TEST3_RESULT} -ne 0 ] ||
    [ ${TEST4_RESULT} -ne 0 ] || [ ${TEST5_RESULT} -ne 0 ] || [ ${TEST6_RESULT} -ne 0 ] ||
-   [ ${TEST7_RESULT} -ne 0 ]; then
+   [ ${TEST7_RESULT} -ne 0 ] || [ ${TEST8_RESULT} -ne 0 ]; then
     exit 1
 fi
 

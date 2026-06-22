@@ -47,11 +47,17 @@ void TestRemoteAddressCalculation()
              static_cast<uintptr_t>(0x200040));
 }
 
+void TestRankScaleLimit()
+{
+    CHECK_EQ(TileXR::TILEXR_MAX_RANK_SIZE, 256);
+}
+
 } // namespace
 
 int main()
 {
     TestRemoteAddressCalculation();
+    TestRankScaleLimit();
     if (g_failures != 0) {
         std::cerr << g_failures << " registry checks failed" << std::endl;
         return 1;

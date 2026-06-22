@@ -33,6 +33,7 @@ int main()
 {
     const std::string internal = ReadFile(std::string(TILEXR_SOURCE_ROOT) + "/src/comm/tilexr_internal.cpp");
     CHECK_CONTAINS(internal, "\"Ascend950DT_9592\"");
+    CHECK_CONTAINS(internal, "\"Ascend950PR_9599\"");
     CHECK_CONTAINS(internal, "ChipName::CHIP_950");
 
     if (g_failures != 0) {

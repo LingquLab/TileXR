@@ -46,6 +46,20 @@ inline bool ValidateAllToAllOutput(
     return true;
 }
 
+inline void BuildAllToAllOutputFromInputs(
+    const std::vector<int32_t>& allInputs, int rank, int rankSize, int32_t elementsPerPeer,
+    std::vector<int32_t>& output)
+{
+    for (int srcRank = 0; srcRank < rankSize; ++srcRank) {
+        const size_t srcBase = static_cast<size_t>(srcRank) * rankSize * elementsPerPeer +
+            static_cast<size_t>(rank) * elementsPerPeer;
+        const size_t dstBase = static_cast<size_t>(srcRank) * elementsPerPeer;
+        std::copy(allInputs.begin() + srcBase,
+                  allInputs.begin() + srcBase + elementsPerPeer,
+                  output.begin() + dstBase);
+    }
+}
+
 } // namespace Demo
 } // namespace TileXR
 

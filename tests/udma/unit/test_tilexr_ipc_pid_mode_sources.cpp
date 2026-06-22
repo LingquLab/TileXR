@@ -19,6 +19,14 @@ int g_failures = 0;
         } \
     } while (0)
 
+#define CHECK_NOT_CONTAINS(text, needle) \
+    do { \
+        if ((text).find(needle) != std::string::npos) { \
+            std::cerr << "CHECK_NOT_CONTAINS failed at line " << __LINE__ << ": " << needle << std::endl; \
+            ++g_failures; \
+        } \
+    } while (0)
+
 std::string ReadFile(const std::string& path)
 {
     std::ifstream in(path.c_str());
@@ -37,6 +45,12 @@ int main()
     CHECK_CONTAINS(comm, "physicalInfo_.chipName < ChipName::CHIP_950");
     CHECK_CONTAINS(comm, "rtSetIpcMemPid");
     CHECK_CONTAINS(comm, "rtSetIpcMemorySuperPodPid");
+    CHECK_CONTAINS(comm, "fallback to rtSetIpcMemPid");
+    CHECK_CONTAINS(comm, "OpenIpcMem failed after sdid setup, retry with pid setup");
+    CHECK_CONTAINS(comm, "\"pid_retry\"");
+    CHECK_CONTAINS(comm, "SetMemoryName(retryName)");
+    CHECK_CONTAINS(comm, "GetName(retryName, names)");
+    CHECK_NOT_CONTAINS(comm, "do not support pcie > 2 rank");
     CHECK_CONTAINS(cmake, "TILEXR_UDMA_FORCE_ENABLE");
 
     const std::string transport =

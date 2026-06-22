@@ -40,7 +40,8 @@ const std::unordered_map<std::string, ChipName> CHIP_MAP = {
     {"Ascend950DT_9581", ChipName::CHIP_950},
     {"Ascend950DT_9584", ChipName::CHIP_950},
     {"Ascend950DT_9592", ChipName::CHIP_950},
-    {"Ascend950PR", ChipName::CHIP_950}
+    {"Ascend950PR", ChipName::CHIP_950},
+    {"Ascend950PR_9599", ChipName::CHIP_950}
 };
 
 /**

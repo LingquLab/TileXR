@@ -18,6 +18,7 @@ cd /path/to/TileXR/tests/udma
 bash demo/run_tilexr_udma_demo.sh 0 2 16 2 0
 bash demo/run_tilexr_udma_demo.sh 1 2 16 2 0
 bash demo/run_tilexr_udma_demo.sh 2 2 16 2 0
+bash demo/run_tilexr_udma_demo.sh 3 8 16 8 0
 ```
 
 Arguments:
@@ -30,6 +31,8 @@ run_tilexr_udma_demo.sh <test_type> <rank_size> <elements_per_rank> <npu_count> 
 - `test_type=1`: UDMA put with signal.
 - `test_type=2`: all-to-all UDMA put. Rank `src` sends input slice `dst` to rank `dst`;
   each output is ordered by source rank.
+- `test_type=3`: all-reduce sum. Each rank contributes one local vector and receives
+  the element-wise sum across all ranks.
 - `rank_size`: number of local ranks to launch.
 - `elements_per_rank`: `int32_t` elements in each rank segment.
 - `npu_count`: number of NPUs available to this run.
