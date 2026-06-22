@@ -104,7 +104,7 @@ soc_name() {
 ops_name() {
     name=`soc_name`
     case "${name}" in
-        ascend950) echo "A3" ;;
+        ascend950) echo "950" ;;
         ascend910b) echo "910b" ;;
         ascend910_93) echo "A3" ;;
         ascend310p3) echo "310p" ;;
