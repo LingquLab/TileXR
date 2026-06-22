@@ -9,7 +9,9 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <iostream>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -21,12 +23,19 @@
 #include "acl/acl.h"
 #include "tilexr_api.h"
 #include "tilexr_types.h"
+#include "tilexr_udma_p2p_perf_config.h"
 
 extern void launch_tilexr_udma_all_gather(
     uint32_t blockDim, void* stream, GM_ADDR commArgs, GM_ADDR data, GM_ADDR debug, int32_t elementsPerRank);
 extern void launch_tilexr_udma_put_signal(
     uint32_t blockDim, void* stream, GM_ADDR commArgs, GM_ADDR data, GM_ADDR signals, GM_ADDR debug,
     int32_t elementsPerRank, uint64_t signal);
+extern void launch_tilexr_udma_p2p_perf(
+    uint32_t blockDim, void* stream, GM_ADDR commArgs, GM_ADDR src, GM_ADDR debug,
+    int32_t srcRank, int32_t dstRank, uint64_t dstByteOffset, uint32_t bytes, uint32_t pattern);
+extern void launch_tilexr_memory_p2p_perf(
+    uint32_t blockDim, void* stream, GM_ADDR commArgs, GM_ADDR src, GM_ADDR debug,
+    int32_t srcRank, int32_t dstRank, uint64_t dstByteOffset, uint32_t bytes, uint32_t pattern);
 
 namespace {
 constexpr int32_t kDefaultElementsPerRank = 16;
@@ -37,6 +46,7 @@ constexpr int kDemoBarrierPortOffset = 97;
 constexpr size_t kUdmaRegistrationAlignment = 2 * 1024 * 1024;
 constexpr int kConnectRetryCount = 500;
 constexpr int kConnectRetrySleepMs = 10;
+constexpr size_t kP2PDebugWords = 8;
 
 struct BarrierEndpoint {
     uint16_t port;
@@ -46,6 +56,12 @@ int GetEnvInt(const char* name, int defaultValue)
 {
     const char* value = std::getenv(name);
     return value == nullptr ? defaultValue : std::atoi(value);
+}
+
+const char* GetEnvString(const char* name, const char* defaultValue)
+{
+    const char* value = std::getenv(name);
+    return value == nullptr || value[0] == '\0' ? defaultValue : value;
 }
 
 int GetDeviceIdFromEnv(int rank, int npuCount, int firstNpu)
@@ -359,6 +375,307 @@ bool ValidateSignals(int rank, int rankSize, const std::vector<uint64_t>& signal
     return ok;
 }
 
+uint64_t RoundUpToAlignment(uint64_t value, uint64_t alignment)
+{
+    return ((value + alignment - 1) / alignment) * alignment;
+}
+
+bool WriteTextFile(const std::string& path, const std::string& text)
+{
+    std::ofstream out(path.c_str(), std::ios::out | std::ios::trunc);
+    if (!out) {
+        return false;
+    }
+    out << text;
+    return static_cast<bool>(out);
+}
+
+bool ReadP2PStatusFile(const std::string& path, TileXR::Demo::P2PRankStatus* status)
+{
+    std::ifstream in(path.c_str());
+    if (!in) {
+        return false;
+    }
+    in >> status->status >> status->errors;
+    if (!in) {
+        return false;
+    }
+    if (in >> status->elapsedMs) {
+        return true;
+    }
+    return in.eof();
+}
+
+bool AppendP2PPerfCsvRow(const TileXR::Demo::P2PPerfOptions& options, const TileXR::Demo::P2PPerfRow& row)
+{
+    if (options.csvPath.empty()) {
+        return true;
+    }
+    std::ifstream check(options.csvPath.c_str());
+    bool exists = static_cast<bool>(check);
+    check.close();
+    std::ofstream out(options.csvPath.c_str(), std::ios::out | std::ios::app);
+    if (!out) {
+        return false;
+    }
+    if (!exists) {
+        out << TileXR::Demo::P2PPerfCsvHeader();
+    }
+    out << TileXR::Demo::FormatP2PPerfCsvRow(row);
+    return static_cast<bool>(out);
+}
+
+bool CheckPeerMemsReady(int rank, int rankSize, const TileXR::CommArgs& args)
+{
+    for (int peer = 0; peer < rankSize; ++peer) {
+        if (args.peerMems[peer] == nullptr) {
+            std::cerr << "[rank " << rank << "] ERROR: peerMems[" << peer << "] is null" << std::endl;
+            return false;
+        }
+    }
+    return true;
+}
+
+bool RunP2PPerfMode(
+    int rank, int rankSize, TileXRCommPtr comm, const TileXR::CommArgs& commArgsHost,
+    GM_ADDR commArgsDev, aclrtStream stream,
+    const TileXR::Demo::P2PPerfOptions& options)
+{
+    std::string error;
+    if (!TileXR::Demo::ValidateP2PPerfOptions(options, rankSize, &error)) {
+        std::cerr << "[rank " << rank << "] ERROR: " << error << std::endl;
+        return false;
+    }
+
+    void* registeredMemory = nullptr;
+    uint32_t* debug = nullptr;
+    TileXRUDMAMemHandle udmaHandle = 0;
+    bool udmaRegistered = false;
+    aclrtEvent startEvent = nullptr;
+    aclrtEvent stopEvent = nullptr;
+
+    const bool useMemoryTransport = options.transport == TileXR::Demo::P2PTransport::Memory;
+    const uint64_t srcOffset = 0;
+    const uint64_t dstOffset = useMemoryTransport ? TileXR::IPC_DATA_OFFSET : options.maxBytes;
+    const uint64_t debugOffset = useMemoryTransport ? options.maxBytes : dstOffset + options.maxBytes;
+    const uint64_t payloadBytes = debugOffset + kP2PDebugWords * sizeof(uint32_t);
+    const uint64_t registeredBytes = RoundUpToAlignment(payloadBytes, kUdmaRegistrationAlignment);
+
+    auto cleanup = [&]() {
+        if (startEvent != nullptr) {
+            CheckAcl(rank, "aclrtDestroyEvent start", aclrtDestroyEvent(startEvent));
+        }
+        if (stopEvent != nullptr) {
+            CheckAcl(rank, "aclrtDestroyEvent stop", aclrtDestroyEvent(stopEvent));
+        }
+        if (udmaRegistered) {
+            CheckTileXR(rank, "TileXRUDMAUnregister", TileXRUDMAUnregister(comm, udmaHandle));
+        }
+        if (registeredMemory != nullptr) {
+            PrintStatus(rank, "aclrtFree p2p registered memory");
+            aclrtFree(registeredMemory);
+        }
+    };
+
+    const std::string memoryName = useMemoryTransport ? "p2p memory local scratch" : "p2p registered memory";
+    if (!CheckAcl(rank, "aclrtMalloc " + memoryName,
+            aclrtMalloc(&registeredMemory, registeredBytes, ACL_MEM_MALLOC_HUGE_FIRST))) {
+        cleanup();
+        return false;
+    }
+    auto base = static_cast<uint8_t*>(registeredMemory);
+    auto srcDev = base + srcOffset;
+    auto dstDev = useMemoryTransport ? nullptr : base + dstOffset;
+    debug = reinterpret_cast<uint32_t*>(base + debugOffset);
+
+    if (!useMemoryTransport) {
+        if (!CheckTileXR(rank, "TileXRUDMARegister p2p",
+                TileXRUDMARegister(comm, static_cast<GM_ADDR>(registeredMemory), registeredBytes, &udmaHandle))) {
+            cleanup();
+            return false;
+        }
+        udmaRegistered = true;
+    }
+    PrintStatus(rank, std::string("p2p transport=") + TileXR::Demo::P2PTransportName(options.transport) +
+        " memory base=" + std::to_string(reinterpret_cast<uintptr_t>(registeredMemory)) +
+        " bytes=" + std::to_string(registeredBytes) +
+        " srcOffset=" + std::to_string(srcOffset) +
+        " dstOffset=" + std::to_string(dstOffset) +
+        " debugOffset=" + std::to_string(debugOffset));
+
+    if (!CheckAcl(rank, "aclrtCreateEvent start", aclrtCreateEvent(&startEvent)) ||
+        !CheckAcl(rank, "aclrtCreateEvent stop", aclrtCreateEvent(&stopEvent))) {
+        cleanup();
+        return false;
+    }
+
+    bool ok = true;
+    for (uint64_t bytes : TileXR::Demo::BuildP2PPerfSizeSweep(options)) {
+        const uint32_t transferBytes = static_cast<uint32_t>(bytes);
+        const uint32_t pattern = TileXR::Demo::P2PPattern(options.srcRank, options.dstRank, bytes);
+        std::vector<uint8_t> hostSrc(static_cast<size_t>(bytes), 0);
+        std::vector<uint8_t> hostDst(static_cast<size_t>(bytes), 0);
+        std::vector<uint32_t> hostDebug(kP2PDebugWords, 0);
+        TileXR::Demo::FillP2PPattern(hostSrc, pattern);
+
+        if (!CopyHostToDevice(rank, srcDev, static_cast<size_t>(bytes), hostSrc.data(), static_cast<size_t>(bytes),
+                "p2p src") ||
+            (!useMemoryTransport &&
+                !CopyHostToDevice(rank, dstDev, static_cast<size_t>(bytes), hostDst.data(), static_cast<size_t>(bytes),
+                    "p2p dst")) ||
+            !CopyHostToDevice(rank, debug, hostDebug.size() * sizeof(uint32_t), hostDebug.data(),
+                hostDebug.size() * sizeof(uint32_t), "p2p debug")) {
+            ok = false;
+            break;
+        }
+        if (useMemoryTransport && rank == options.dstRank) {
+            void* dstPeerWindow = reinterpret_cast<void*>(commArgsHost.peerMems[rank] + TileXR::IPC_DATA_OFFSET);
+            if (!CopyHostToDevice(rank, dstPeerWindow, static_cast<size_t>(bytes), hostDst.data(),
+                    static_cast<size_t>(bytes), "p2p memory dst window")) {
+                ok = false;
+                break;
+            }
+        }
+        if (!DemoBarrierAll(rank, rankSize, "p2p initialized bytes=" + std::to_string(bytes))) {
+            ok = false;
+            break;
+        }
+
+        for (int i = 0; i < options.warmupIters; ++i) {
+            if (useMemoryTransport) {
+                launch_tilexr_memory_p2p_perf(1, stream, commArgsDev, reinterpret_cast<GM_ADDR>(srcDev),
+                    reinterpret_cast<GM_ADDR>(debug), options.srcRank, options.dstRank, dstOffset,
+                    transferBytes, pattern);
+            } else {
+                launch_tilexr_udma_p2p_perf(1, stream, commArgsDev, reinterpret_cast<GM_ADDR>(srcDev),
+                    reinterpret_cast<GM_ADDR>(debug), options.srcRank, options.dstRank, dstOffset,
+                    transferBytes, pattern);
+            }
+            if (!CheckAcl(rank, "aclrtSynchronizeStream p2p warmup", aclrtSynchronizeStream(stream))) {
+                ok = false;
+                break;
+            }
+        }
+        if (!ok || !DemoBarrierAll(rank, rankSize, "p2p warmup done bytes=" + std::to_string(bytes))) {
+            ok = false;
+            break;
+        }
+
+        if (!CheckAcl(rank, "aclrtRecordEvent start", aclrtRecordEvent(startEvent, stream))) {
+            ok = false;
+            break;
+        }
+        for (int i = 0; i < options.iters; ++i) {
+            if (useMemoryTransport) {
+                launch_tilexr_memory_p2p_perf(1, stream, commArgsDev, reinterpret_cast<GM_ADDR>(srcDev),
+                    reinterpret_cast<GM_ADDR>(debug), options.srcRank, options.dstRank, dstOffset,
+                    transferBytes, pattern);
+            } else {
+                launch_tilexr_udma_p2p_perf(1, stream, commArgsDev, reinterpret_cast<GM_ADDR>(srcDev),
+                    reinterpret_cast<GM_ADDR>(debug), options.srcRank, options.dstRank, dstOffset,
+                    transferBytes, pattern);
+            }
+        }
+        if (!CheckAcl(rank, "aclrtRecordEvent stop", aclrtRecordEvent(stopEvent, stream)) ||
+            !CheckAcl(rank, "aclrtSynchronizeStream p2p measured", aclrtSynchronizeStream(stream))) {
+            ok = false;
+            break;
+        }
+
+        float elapsedMs = 0.0f;
+        if (!CheckAcl(rank, "aclrtEventElapsedTime p2p", aclrtEventElapsedTime(&elapsedMs, startEvent, stopEvent))) {
+            ok = false;
+            break;
+        }
+        if (!DemoBarrierAll(rank, rankSize, "p2p measured done bytes=" + std::to_string(bytes))) {
+            ok = false;
+            break;
+        }
+
+        uint64_t errors = 0;
+        if (rank == options.dstRank && options.check) {
+            const void* validateSrc = useMemoryTransport ?
+                reinterpret_cast<void*>(commArgsHost.peerMems[rank] + TileXR::IPC_DATA_OFFSET) :
+                static_cast<const void*>(dstDev);
+            if (!CopyDeviceToHost(rank, hostDst.data(), static_cast<size_t>(bytes), validateSrc,
+                    static_cast<size_t>(bytes), "p2p dst")) {
+                ok = false;
+                break;
+            }
+            errors = TileXR::Demo::CountP2PMismatches(hostDst, pattern, bytes);
+        }
+        if (rank == options.srcRank) {
+            if (!CopyDeviceToHost(rank, hostDebug.data(), hostDebug.size() * sizeof(uint32_t), debug,
+                    hostDebug.size() * sizeof(uint32_t), "p2p debug")) {
+                ok = false;
+                break;
+            }
+        }
+
+        TileXR::Demo::P2PRankStatus localStatus;
+        localStatus.status = rank == options.srcRank ? hostDebug[5] : 0;
+        localStatus.errors = rank == options.dstRank ? errors : 0;
+        localStatus.elapsedMs = elapsedMs;
+        if (!options.logDir.empty()) {
+            std::string statusPath = options.logDir + "/p2p_rank_" + std::to_string(rank) +
+                "_" + std::to_string(bytes) + ".status";
+            std::ostringstream statusText;
+            statusText << localStatus.status << ' ' << localStatus.errors << ' ' << localStatus.elapsedMs << '\n';
+            if (!WriteTextFile(statusPath, statusText.str())) {
+                std::cerr << "[rank " << rank << "] ERROR: failed to write " << statusPath << std::endl;
+                ok = false;
+                break;
+            }
+        }
+        if (!DemoBarrierAll(rank, rankSize, "p2p status files bytes=" + std::to_string(bytes))) {
+            ok = false;
+            break;
+        }
+
+        if (rank == 0) {
+            TileXR::Demo::P2PRankStatus srcStatus = localStatus;
+            TileXR::Demo::P2PRankStatus dstStatus = localStatus;
+            if (options.srcRank != 0) {
+                std::string srcPath = options.logDir + "/p2p_rank_" + std::to_string(options.srcRank) +
+                    "_" + std::to_string(bytes) + ".status";
+                if (!ReadP2PStatusFile(srcPath, &srcStatus)) {
+                    std::cerr << "[rank " << rank << "] ERROR: failed to read " << srcPath << std::endl;
+                    ok = false;
+                    break;
+                }
+            }
+            if (options.dstRank != 0) {
+                std::string dstPath = options.logDir + "/p2p_rank_" + std::to_string(options.dstRank) +
+                    "_" + std::to_string(bytes) + ".status";
+                if (!ReadP2PStatusFile(dstPath, &dstStatus)) {
+                    std::cerr << "[rank " << rank << "] ERROR: failed to read " << dstPath << std::endl;
+                    ok = false;
+                    break;
+                }
+            }
+            TileXR::Demo::P2PPerfRow row =
+                TileXR::Demo::BuildP2PPerfRow(options, rankSize, bytes, srcStatus, dstStatus);
+            if (!AppendP2PPerfCsvRow(options, row)) {
+                std::cerr << "[rank " << rank << "] ERROR: failed to append CSV " << options.csvPath << std::endl;
+                ok = false;
+                break;
+            }
+            std::cout << "[rank " << rank << "] p2p row: "
+                      << TileXR::Demo::FormatP2PPerfCsvRow(row);
+            if (row.status != 0 || row.errors != 0) {
+                ok = false;
+            }
+        }
+        if (!DemoBarrierAll(rank, rankSize, "p2p csv written bytes=" + std::to_string(bytes))) {
+            ok = false;
+            break;
+        }
+    }
+
+    cleanup();
+    return ok;
+}
+
 void Cleanup(
     TileXRCommPtr comm, aclrtStream stream, void* registeredMemory, int32_t* debug, int rank, int deviceId)
 {
@@ -390,6 +707,25 @@ int main(int argc, char** argv)
     int32_t elementsPerRank = argc > argIndex ? std::atoi(argv[argIndex++]) : kDefaultElementsPerRank;
     int npuCount = argc > argIndex ? std::atoi(argv[argIndex++]) : GetEnvInt("TILEXR_DEMO_NPUS", 8);
     int firstNpu = argc > argIndex ? std::atoi(argv[argIndex++]) : GetEnvInt("TILEXR_DEMO_FIRST_NPU", 0);
+    TileXR::Demo::P2PPerfOptions p2pOptions;
+    if (testType == 4) {
+        p2pOptions.srcRank = argc > argIndex ? std::atoi(argv[argIndex++]) : GetEnvInt("TILEXR_P2P_SRC_RANK", 0);
+        p2pOptions.dstRank = argc > argIndex ? std::atoi(argv[argIndex++]) : GetEnvInt("TILEXR_P2P_DST_RANK", 1);
+        p2pOptions.minBytes = argc > argIndex ? std::strtoull(argv[argIndex++], nullptr, 10) :
+            static_cast<uint64_t>(GetEnvInt("TILEXR_P2P_MIN_BYTES", 4096));
+        p2pOptions.maxBytes = argc > argIndex ? std::strtoull(argv[argIndex++], nullptr, 10) :
+            static_cast<uint64_t>(GetEnvInt("TILEXR_P2P_MAX_BYTES", 4096));
+        p2pOptions.stepFactor = argc > argIndex ? std::strtoull(argv[argIndex++], nullptr, 10) :
+            static_cast<uint64_t>(GetEnvInt("TILEXR_P2P_STEP_FACTOR", 2));
+        p2pOptions.iters = argc > argIndex ? std::atoi(argv[argIndex++]) : GetEnvInt("TILEXR_P2P_ITERS", 100);
+        p2pOptions.warmupIters = argc > argIndex ? std::atoi(argv[argIndex++]) :
+            GetEnvInt("TILEXR_P2P_WARMUP_ITERS", 10);
+        p2pOptions.check = (argc > argIndex ? std::atoi(argv[argIndex++]) : GetEnvInt("TILEXR_P2P_CHECK", 1)) != 0;
+        p2pOptions.csvPath = argc > argIndex ? argv[argIndex++] : GetEnvString("TILEXR_P2P_CSV", "");
+        p2pOptions.logDir = argc > argIndex ? argv[argIndex++] : GetEnvString("TILEXR_P2P_LOG_DIR", "");
+        std::string transportName = argc > argIndex ? argv[argIndex++] : GetEnvString("TILEXR_P2P_TRANSPORT", "direct_urma");
+        p2pOptions.transport = TileXR::Demo::ParseP2PTransport(transportName);
+    }
     int deviceId = GetDeviceIdFromEnv(rank, npuCount, firstNpu);
 
     std::cout << "========================================" << std::endl;
@@ -398,6 +734,19 @@ int main(int argc, char** argv)
     std::cout << "[rank " << rank << "] argv: rankSize=" << rankSize << " rank=" << rank
               << " testType=" << testType << " elementsPerRank=" << elementsPerRank
               << " npuCount=" << npuCount << " firstNpu=" << firstNpu << std::endl;
+    if (testType == 4) {
+        std::cout << "[rank " << rank << "] p2p: src=" << p2pOptions.srcRank
+                  << " dst=" << p2pOptions.dstRank
+                  << " minBytes=" << p2pOptions.minBytes
+                  << " maxBytes=" << p2pOptions.maxBytes
+                  << " stepFactor=" << p2pOptions.stepFactor
+                  << " iters=" << p2pOptions.iters
+                  << " warmupIters=" << p2pOptions.warmupIters
+                  << " check=" << (p2pOptions.check ? 1 : 0)
+                  << " transport=" << TileXR::Demo::P2PTransportName(p2pOptions.transport)
+                  << " csv=" << p2pOptions.csvPath
+                  << " logDir=" << p2pOptions.logDir << std::endl;
+    }
     std::cout << "[rank " << rank << "] PID=" << getpid()
               << " TILEXR_COMM_ID=" << (std::getenv("TILEXR_COMM_ID") ? std::getenv("TILEXR_COMM_ID") : "<unset>")
               << " LD_LIBRARY_PATH=" << (std::getenv("LD_LIBRARY_PATH") ? std::getenv("LD_LIBRARY_PATH") : "<unset>")
@@ -439,11 +788,29 @@ int main(int argc, char** argv)
     }
     PrintCommArgs(rank, *commArgsHost, commArgsDev);
 
-    if ((commArgsHost->extraFlag & TileXR::ExtraFlag::UDMA) == 0 || commArgsHost->udmaInfoPtr == nullptr) {
+    if (testType == 4 && p2pOptions.transport == TileXR::Demo::P2PTransport::Memory &&
+        !CheckPeerMemsReady(rank, rankSize, *commArgsHost)) {
+        Cleanup(comm, stream, registeredMemory, debug, rank, deviceId);
+        return 1;
+    }
+
+    if ((testType != 4 || p2pOptions.transport == TileXR::Demo::P2PTransport::DirectUrma) &&
+        ((commArgsHost->extraFlag & TileXR::ExtraFlag::UDMA) == 0 || commArgsHost->udmaInfoPtr == nullptr)) {
         std::cerr << "[rank " << rank << "] ERROR: TileXR UDMA is not enabled. "
                   << "Check A5/Ascend950 hardware support, CANN/driver setup, and LD_LIBRARY_PATH." << std::endl;
         Cleanup(comm, stream, registeredMemory, debug, rank, deviceId);
         return 1;
+    }
+
+    if (testType == 4) {
+        bool ok = RunP2PPerfMode(rank, rankSize, comm, *commArgsHost, commArgsDev, stream, p2pOptions);
+        Cleanup(comm, stream, registeredMemory, debug, rank, deviceId);
+        if (!ok) {
+            std::cerr << "[rank " << rank << "] TileXR UDMA P2P perf failed" << std::endl;
+            return 1;
+        }
+        std::cout << "[rank " << rank << "] TileXR UDMA P2P perf success" << std::endl;
+        return 0;
     }
 
     size_t dataCount = static_cast<size_t>(rankSize) * elementsPerRank;

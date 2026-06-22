@@ -17,6 +17,7 @@ The demo target requires `bisheng`. If `bisheng` is not available, `build.sh` st
 cd /path/to/TileXR/tests/udma
 bash demo/run_tilexr_udma_demo.sh 0 2 16 2 0
 bash demo/run_tilexr_udma_demo.sh 1 2 16 2 0
+bash demo/run_tilexr_udma_p2p_perf.sh 0 1 4096 16777216 2 20 5 0
 ```
 
 Arguments:
@@ -27,12 +28,16 @@ run_tilexr_udma_demo.sh <test_type> <rank_size> <elements_per_rank> <npu_count> 
 
 - `test_type=0`: all-gather style UDMA put.
 - `test_type=1`: UDMA put with signal.
+- `test_type=4`: directed 2-card P2P performance mode. Use
+  `demo/run_tilexr_udma_p2p_perf.sh` instead of calling the binary directly.
 - `rank_size`: number of local ranks to launch.
 - `elements_per_rank`: `int32_t` elements in each rank segment.
 - `npu_count`: number of NPUs available to this run.
 - `first_npu`: first physical NPU id to use.
 
 Each run writes per-rank logs under `tests/udma/logs/tilexr_udma_demo_*`.
+P2P performance runs write logs under `tests/udma/logs/tilexr_udma_p2p_perf_*`
+and append CSV rows to `p2p_perf.csv`.
 
 Run this demo only on A5 / Ascend950 / 950 hardware. Builds or smoke tests on other Ascend chips are not valid UDMA runtime validation.
 
