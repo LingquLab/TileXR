@@ -20,12 +20,21 @@ warmup_iters=${7:-5}
 first_npu=${8:-0}
 check=${9:-1}
 transport=${10:-direct_urma}
+block_dim=${11:-1}
+traffic=${12:-unidir}
 
 source "${TILEXR_ROOT}/scripts/common_env.sh"
 
 export TILEXR_COMM_ID=${TILEXR_COMM_ID:-127.0.0.1:10067}
 export TILEXR_DEMO_NPUS=2
 export TILEXR_DEMO_FIRST_NPU=${first_npu}
+if [ "${transport}" = "direct_urma_multi_jetty" ] ||
+    [ "${transport}" = "direct_urma_multi_jetty_parallel" ] ||
+    [ "${transport}" = "direct_urma_multi_jetty_parallel_fixed_wqe" ]; then
+    export TILEXR_UDMA_QP_NUM="${block_dim}"
+else
+    export TILEXR_UDMA_QP_NUM="${TILEXR_UDMA_QP_NUM:-1}"
+fi
 export LD_LIBRARY_PATH="${INSTALL_DIR}/lib:${INSTALL_DIR}/lib64:${TILEXR_ROOT}/install/lib:${TILEXR_ROOT}/install/lib64:/usr/local/lib:${LD_LIBRARY_PATH:-}"
 
 bin="${INSTALL_DIR}/bin/tilexr_udma_demo"
@@ -34,7 +43,7 @@ if [ ! -x "${bin}" ]; then
     exit 1
 fi
 
-log_dir="${UDMA_DIR}/logs/tilexr_udma_p2p_perf_$(date +%Y%m%d_%H%M%S)_${transport}_${src_rank}to${dst_rank}"
+log_dir="${UDMA_DIR}/logs/tilexr_udma_p2p_perf_$(date +%Y%m%d_%H%M%S)_${transport}_${traffic}_bd${block_dim}_${src_rank}to${dst_rank}"
 csv_path="${log_dir}/p2p_perf.csv"
 mkdir -p "${log_dir}"
 
@@ -52,6 +61,9 @@ echo "Warmup iters:  ${warmup_iters}"
 echo "First NPU:     ${first_npu}"
 echo "Check:         ${check}"
 echo "Transport:     ${transport}"
+echo "Block dim:     ${block_dim}"
+echo "Traffic:       ${traffic}"
+echo "UDMA QP num:   ${TILEXR_UDMA_QP_NUM}"
 echo "TILEXR_COMM_ID:${TILEXR_COMM_ID}"
 echo "Log dir:       ${log_dir}"
 echo "CSV:           ${csv_path}"
@@ -65,6 +77,7 @@ for rank in 0 1; do
         2 "${rank}" 4 0 2 "${first_npu}" \
         "${src_rank}" "${dst_rank}" "${min_bytes}" "${max_bytes}" "${step_factor}" \
         "${iters}" "${warmup_iters}" "${check}" "${csv_path}" "${log_dir}" "${transport}" \
+        "${block_dim}" "${traffic}" \
         >"${log_file}" 2>&1 &
     pids+=("$!")
 done

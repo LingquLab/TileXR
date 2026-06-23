@@ -14,7 +14,18 @@ constexpr uint64_t kP2PMemoryMaxBytes = 100ULL * 1024ULL * 1024ULL;
 
 enum class P2PTransport {
     DirectUrma,
+    DirectUrmaMultiWqe,
+    DirectUrmaMultiJetty,
+    DirectUrmaMultiJettyParallel,
+    DirectUrmaMultiJettyParallelFixedWqe,
     Memory,
+    DataAsFlag,
+    Invalid,
+};
+
+enum class P2PTraffic {
+    UniDir,
+    BiDir,
     Invalid,
 };
 
@@ -23,8 +34,30 @@ inline const char* P2PTransportName(P2PTransport transport)
     switch (transport) {
         case P2PTransport::DirectUrma:
             return "direct_urma";
+        case P2PTransport::DirectUrmaMultiWqe:
+            return "direct_urma_multi_wqe";
+        case P2PTransport::DirectUrmaMultiJetty:
+            return "direct_urma_multi_jetty";
+        case P2PTransport::DirectUrmaMultiJettyParallel:
+            return "direct_urma_multi_jetty_parallel";
+        case P2PTransport::DirectUrmaMultiJettyParallelFixedWqe:
+            return "direct_urma_multi_jetty_parallel_fixed_wqe";
         case P2PTransport::Memory:
             return "memory";
+        case P2PTransport::DataAsFlag:
+            return "data_as_flag";
+        default:
+            return "invalid";
+    }
+}
+
+inline const char* P2PTrafficName(P2PTraffic traffic)
+{
+    switch (traffic) {
+        case P2PTraffic::UniDir:
+            return "unidir";
+        case P2PTraffic::BiDir:
+            return "bidir";
         default:
             return "invalid";
     }
@@ -35,10 +68,39 @@ inline P2PTransport ParseP2PTransport(const std::string& name)
     if (name == "direct_urma" || name == "udma") {
         return P2PTransport::DirectUrma;
     }
+    if (name == "direct_urma_multi_wqe" || name == "direct-urma-multi-wqe" || name == "udma_multi_wqe") {
+        return P2PTransport::DirectUrmaMultiWqe;
+    }
+    if (name == "direct_urma_multi_jetty" || name == "direct-urma-multi-jetty" || name == "udma_multi_jetty") {
+        return P2PTransport::DirectUrmaMultiJetty;
+    }
+    if (name == "direct_urma_multi_jetty_parallel" || name == "direct-urma-multi-jetty-parallel" ||
+        name == "udma_multi_jetty_parallel") {
+        return P2PTransport::DirectUrmaMultiJettyParallel;
+    }
+    if (name == "direct_urma_multi_jetty_parallel_fixed_wqe" ||
+        name == "direct-urma-multi-jetty-parallel-fixed-wqe" ||
+        name == "udma_multi_jetty_parallel_fixed_wqe" || name == "fixed_wqe_multi_jetty_parallel") {
+        return P2PTransport::DirectUrmaMultiJettyParallelFixedWqe;
+    }
     if (name == "memory" || name == "ipc" || name == "datacopy") {
         return P2PTransport::Memory;
     }
+    if (name == "data_as_flag" || name == "data-as-flag" || name == "daf") {
+        return P2PTransport::DataAsFlag;
+    }
     return P2PTransport::Invalid;
+}
+
+inline P2PTraffic ParseP2PTraffic(const std::string& name)
+{
+    if (name == "unidir" || name == "uni" || name == "single") {
+        return P2PTraffic::UniDir;
+    }
+    if (name == "bidir" || name == "bi" || name == "duplex" || name == "full_duplex") {
+        return P2PTraffic::BiDir;
+    }
+    return P2PTraffic::Invalid;
 }
 
 struct P2PPerfOptions {
@@ -53,9 +115,14 @@ struct P2PPerfOptions {
     std::string csvPath;
     std::string logDir;
     P2PTransport transport = P2PTransport::DirectUrma;
+    P2PTraffic traffic = P2PTraffic::UniDir;
+    uint32_t blockDim = 1;
 };
 
 struct P2PPerfRow {
+    P2PTransport transport = P2PTransport::DirectUrma;
+    P2PTraffic traffic = P2PTraffic::UniDir;
+    uint32_t blockDim = 1;
     int srcRank = 0;
     int dstRank = 1;
     int rankSize = 2;
@@ -78,6 +145,68 @@ struct P2PRankStatus {
 inline std::string DirectionName(int srcRank, int dstRank)
 {
     return std::to_string(srcRank) + "to" + std::to_string(dstRank);
+}
+
+inline std::string TrafficDirectionName(int srcRank, int dstRank, P2PTraffic traffic)
+{
+    if (traffic == P2PTraffic::BiDir) {
+        return DirectionName(srcRank, dstRank) + "+" + DirectionName(dstRank, srcRank);
+    }
+    return DirectionName(srcRank, dstRank);
+}
+
+inline uint64_t DataAsFlagWindowBytes(uint64_t payloadBytes)
+{
+    return ((payloadBytes + 479ULL) / 480ULL) * 512ULL;
+}
+
+inline uint64_t P2PAlignUp(uint64_t value, uint64_t alignment)
+{
+    if (alignment == 0ULL) {
+        return value;
+    }
+    const uint64_t remainder = value % alignment;
+    return remainder == 0ULL ? value : value + alignment - remainder;
+}
+
+inline uint64_t P2PFixedWqeStrideBytes(uint64_t payloadBytes)
+{
+    constexpr uint64_t kFixedWqeAddressAlignment = 64ULL;
+    return P2PAlignUp(payloadBytes, kFixedWqeAddressAlignment);
+}
+
+inline uint64_t P2PFixedWqeWindowBytes(uint64_t payloadBytes, uint32_t blockDim)
+{
+    if (blockDim == 0U) {
+        return 0;
+    }
+    return P2PFixedWqeStrideBytes(payloadBytes) * static_cast<uint64_t>(blockDim - 1U) + payloadBytes;
+}
+
+inline uint64_t P2PTransportWindowBytes(P2PTransport transport, uint64_t payloadBytes)
+{
+    return transport == P2PTransport::DataAsFlag ? DataAsFlagWindowBytes(payloadBytes) : payloadBytes;
+}
+
+inline uint64_t P2PTransportWindowBytes(P2PTransport transport, uint64_t payloadBytes, uint32_t blockDim)
+{
+    if (transport == P2PTransport::DirectUrmaMultiJettyParallelFixedWqe) {
+        return P2PFixedWqeWindowBytes(payloadBytes, blockDim);
+    }
+    return P2PTransportWindowBytes(transport, payloadBytes);
+}
+
+inline int ActiveP2PFlowCount(P2PTraffic traffic)
+{
+    return traffic == P2PTraffic::BiDir ? 2 : 1;
+}
+
+inline uint64_t P2PEffectiveTransferBytes(P2PTransport transport, uint64_t payloadBytes, uint32_t blockDim)
+{
+    if (transport == P2PTransport::DirectUrmaMultiJettyParallelFixedWqe) {
+        return payloadBytes * static_cast<uint64_t>(blockDim);
+    }
+    return payloadBytes;
 }
 
 inline bool ValidateP2PPerfOptions(const P2PPerfOptions& options, int rankSize, std::string* error)
@@ -107,11 +236,20 @@ inline bool ValidateP2PPerfOptions(const P2PPerfOptions& options, int rankSize, 
     if (options.iters <= 0 || options.warmupIters < 0) {
         return fail("iters must be positive and warmup_iters must be nonnegative");
     }
-    if (options.transport == P2PTransport::Invalid) {
-        return fail("transport must be direct_urma or memory");
+    if (options.blockDim == 0U || options.blockDim > 64U) {
+        return fail("block_dim must be in [1, 64]");
     }
-    if (options.transport == P2PTransport::Memory && options.maxBytes > kP2PMemoryMaxBytes) {
-        return fail("memory transport max_bytes must fit in the TileXR IPC data window");
+    if (options.transport == P2PTransport::Invalid) {
+        return fail("transport must be direct_urma, direct_urma_multi_wqe, direct_urma_multi_jetty, "
+                    "direct_urma_multi_jetty_parallel, direct_urma_multi_jetty_parallel_fixed_wqe, "
+                    "memory, or data_as_flag");
+    }
+    if (options.traffic == P2PTraffic::Invalid) {
+        return fail("traffic must be unidir or bidir");
+    }
+    if ((options.transport == P2PTransport::Memory || options.transport == P2PTransport::DataAsFlag) &&
+        P2PTransportWindowBytes(options.transport, options.maxBytes, options.blockDim) > kP2PMemoryMaxBytes) {
+        return fail("memory/data_as_flag transport max_bytes must fit in the TileXR IPC data window");
     }
     return true;
 }
@@ -165,16 +303,43 @@ inline uint64_t CountP2PMismatches(const std::vector<uint8_t>& data, uint32_t pa
     return errors;
 }
 
+inline uint64_t CountP2PTransportMismatches(
+    const std::vector<uint8_t>& data, uint32_t pattern, uint64_t payloadBytes,
+    P2PTransport transport, uint32_t blockDim)
+{
+    if (transport != P2PTransport::DirectUrmaMultiJettyParallelFixedWqe) {
+        return CountP2PMismatches(data, pattern, payloadBytes);
+    }
+
+    uint64_t errors = 0;
+    const uint64_t strideBytes = P2PFixedWqeStrideBytes(payloadBytes);
+    for (uint32_t qpIdx = 0; qpIdx < blockDim; ++qpIdx) {
+        const uint64_t offset = strideBytes * static_cast<uint64_t>(qpIdx);
+        for (uint64_t i = 0; i < payloadBytes && offset + i < data.size(); ++i) {
+            if (data[static_cast<size_t>(offset + i)] != P2PPatternByte(pattern, offset + i)) {
+                ++errors;
+            }
+        }
+    }
+    return errors;
+}
+
 inline std::string P2PPerfCsvHeader()
 {
-    return "direction,src,dst,ranks,bytes,iters,avg_us,min_us,max_us,bw_GBps,status,errors,log_dir\n";
+    return "transport,traffic,block_dim,direction,src,dst,ranks,bytes,iters,avg_us,min_us,max_us,"
+        "bw_GBps,per_flow_bw_GBps,status,errors,log_dir\n";
 }
 
 inline std::string FormatP2PPerfCsvRow(const P2PPerfRow& row)
 {
-    const double bwGBps = row.avgUs > 0.0 ? static_cast<double>(row.bytes) / row.avgUs / 1000.0 : 0.0;
+    const uint64_t effectiveBytes = P2PEffectiveTransferBytes(row.transport, row.bytes, row.blockDim);
+    const double perFlowBwGBps = row.avgUs > 0.0 ? static_cast<double>(effectiveBytes) / row.avgUs / 1000.0 : 0.0;
+    const double bwGBps = perFlowBwGBps * static_cast<double>(ActiveP2PFlowCount(row.traffic));
     std::ostringstream out;
-    out << DirectionName(row.srcRank, row.dstRank) << ','
+    out << P2PTransportName(row.transport) << ','
+        << P2PTrafficName(row.traffic) << ','
+        << row.blockDim << ','
+        << TrafficDirectionName(row.srcRank, row.dstRank, row.traffic) << ','
         << row.srcRank << ','
         << row.dstRank << ','
         << row.rankSize << ','
@@ -185,6 +350,7 @@ inline std::string FormatP2PPerfCsvRow(const P2PPerfRow& row)
         << row.minUs << ','
         << row.maxUs << ','
         << bwGBps << ','
+        << perFlowBwGBps << ','
         << row.status << ','
         << row.errors << ','
         << row.logDir << '\n';
@@ -199,15 +365,21 @@ inline P2PPerfRow BuildP2PPerfRow(
     const P2PRankStatus& dstStatus)
 {
     P2PPerfRow row;
+    row.transport = options.transport;
+    row.traffic = options.traffic;
+    row.blockDim = options.blockDim;
     row.srcRank = options.srcRank;
     row.dstRank = options.dstRank;
     row.rankSize = rankSize;
     row.bytes = bytes;
     row.iters = options.iters;
-    row.avgUs = options.iters > 0 ?
-        static_cast<double>(srcStatus.elapsedMs) * 1000.0 / static_cast<double>(options.iters) : 0.0;
-    row.status = srcStatus.status;
-    row.errors = dstStatus.errors;
+    const bool bothRanksActive =
+        options.traffic == P2PTraffic::BiDir || options.transport == P2PTransport::DataAsFlag;
+    const float elapsedMs = bothRanksActive && dstStatus.elapsedMs > srcStatus.elapsedMs ?
+        dstStatus.elapsedMs : srcStatus.elapsedMs;
+    row.avgUs = options.iters > 0 ? static_cast<double>(elapsedMs) * 1000.0 / static_cast<double>(options.iters) : 0.0;
+    row.status = bothRanksActive ? (srcStatus.status | dstStatus.status) : srcStatus.status;
+    row.errors = bothRanksActive ? (srcStatus.errors + dstStatus.errors) : dstStatus.errors;
     row.logDir = options.logDir;
     return row;
 }

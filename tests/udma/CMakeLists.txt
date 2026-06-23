@@ -52,6 +52,7 @@ message(STATUS "Found tile-comm: ${TILEXR_LIB}")
 include_directories(
     ${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc/
     ${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc/runtime/
+    ${ASCEND_HOME_PATH}/${ARCH}-linux/asc/include/
     ${ASCEND_HOME_PATH}/${ARCH}-linux/include/
     ${ASCEND_DRIVER_PATH}/kernel/inc
     ${TILEXR_ROOT}/3rdparty
@@ -170,6 +171,7 @@ if(BUILD_TILEXR_UDMA_DEMO)
             -I${ASCEND_HOME_PATH}/${ARCH}-linux/tikcpp/tikcfw/interface
             -I${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc/
             -I${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc/runtime/
+            -I${ASCEND_HOME_PATH}/${ARCH}-linux/asc/include/
             -I${ASCEND_HOME_PATH}/${ARCH}-linux/include/
             -I${ASCEND_DRIVER_PATH}/kernel/inc
             -I${TILEXR_ROOT}/3rdparty
