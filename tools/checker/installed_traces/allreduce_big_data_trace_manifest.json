@@ -1,0 +1,67 @@
+{
+  "adapter_name": "allreduce_big_data",
+  "source_file": "src/collectives/kernels/allreduce_big_data.h",
+  "shim_path": "tools/checker/shim/tilexr/checker/allreduce_big_data_trace_shim.h",
+  "runner_source": "tools/checker/src/collective_trace_runner.cpp",
+  "runner_function": "RunAllReduceBigDataTrace",
+  "probe_test": "tests/checker/unit/test_checker_allreduce_big_data_header_probe.cpp",
+  "probe_cmake_entry": "unit/test_checker_allreduce_big_data_header_probe.cpp",
+  "algorithm_enum": "AlgorithmId::kAllReduceBigData",
+  "materializer_name": "allreduce_big_data_sum_int32",
+  "schedule_name": "allreduce_big_data_block_major",
+  "schedule_function": "GetAllReduceBigDataScheduleSpec",
+  "op": "allreduce",
+  "algorithm": "allreduce_big_data",
+  "rank_size": 4,
+  "count": 524288,
+  "server_count": 2,
+  "smoke_cases": [
+    {
+      "rank_size": 4,
+      "count": 524288,
+      "server_count": 2
+    },
+    {
+      "rank_size": 6,
+      "count": 524288,
+      "server_count": 3
+    }
+  ],
+  "required_event_coverage": [
+    {
+      "kind": "FLAG_STORE",
+      "source_file": "src/collectives/kernels/allreduce_big_data.h",
+      "source_line": 130
+    },
+    {
+      "kind": "FLAG_WAIT",
+      "source_file": "src/collectives/kernels/allreduce_big_data.h",
+      "source_line": 144
+    },
+    {
+      "kind": "COPY",
+      "source_file": "src/collectives/kernels/allreduce_big_data.h",
+      "source_line": 156
+    },
+    {
+      "kind": "WRITE",
+      "source_file": "src/collectives/kernels/allreduce_big_data.h",
+      "source_line": 207
+    },
+    {
+      "kind": "PIPE_SET",
+      "source_file": "src/collectives/kernels/collectives.h",
+      "source_line": 268
+    },
+    {
+      "kind": "PIPE_WAIT",
+      "source_file": "src/collectives/kernels/collectives.h",
+      "source_line": 273
+    },
+    {
+      "kind": "PIPE_BARRIER",
+      "source_file": "src/collectives/kernels/collectives.h",
+      "source_line": 442
+    }
+  ]
+}

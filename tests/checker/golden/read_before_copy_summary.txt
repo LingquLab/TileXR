@@ -1,0 +1,19 @@
+checker: FAIL
+case: allgather(ranks=2,servers=1,count=4,dtype=2,reduce=0,scheduler=serial,algorithm=default,magic=34)
+algorithm: default
+top finding: READ_BEFORE_COPY
+rank: 1
+peer rank: 0
+server: 1
+peer server: 0
+server scope: cross_server
+event id: 1
+source: synthetic.cpp:42
+buffer: CommData
+core: 7
+slot: 0
+offset: 64
+bytes: 32
+next action: Check whether the producer copy is skipped, delayed, or guarded by the wrong flag.
+mismatches: 0
+events: 1
