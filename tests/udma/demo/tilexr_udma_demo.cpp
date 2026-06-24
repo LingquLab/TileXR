@@ -666,24 +666,24 @@ bool RunP2PPerfMode(
             break;
         }
 
+        if (useDataAsFlagTransport && IsP2PReceiveRank(rank, options) &&
+            !ClearLocalPeerWindow(rank, commArgsHost, dstOffset,
+                TileXR::Demo::P2PTransportWindowBytes(options.transport, bytes), "p2p data_as_flag measured window")) {
+            ok = false;
+            break;
+        }
+        if (useDataAsFlagTransport &&
+            !DemoBarrierAll(rank, rankSize,
+                "p2p data_as_flag measured clear bytes=" + std::to_string(bytes))) {
+            ok = false;
+            break;
+        }
+
         if (!CheckAcl(rank, "aclrtRecordEvent start", aclrtRecordEvent(startEvent, stream))) {
             ok = false;
             break;
         }
         for (int i = 0; i < options.iters; ++i) {
-            if (useDataAsFlagTransport && IsP2PReceiveRank(rank, options) &&
-                !ClearLocalPeerWindow(rank, commArgsHost, dstOffset,
-                    TileXR::Demo::P2PTransportWindowBytes(options.transport, bytes), "p2p data_as_flag measured window")) {
-                ok = false;
-                break;
-            }
-            if (useDataAsFlagTransport &&
-                !DemoBarrierAll(rank, rankSize,
-                    "p2p data_as_flag measured clear bytes=" + std::to_string(bytes) +
-                    " iter=" + std::to_string(i))) {
-                ok = false;
-                break;
-            }
             LaunchP2PKernel(stream, commArgsDev, reinterpret_cast<GM_ADDR>(srcDev), reinterpret_cast<GM_ADDR>(dstDev),
                 reinterpret_cast<GM_ADDR>(debug), options, dstOffset, transferBytes, pattern);
         }
