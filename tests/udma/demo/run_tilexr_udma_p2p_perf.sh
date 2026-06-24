@@ -28,9 +28,7 @@ source "${TILEXR_ROOT}/scripts/common_env.sh"
 export TILEXR_COMM_ID=${TILEXR_COMM_ID:-127.0.0.1:10067}
 export TILEXR_DEMO_NPUS=2
 export TILEXR_DEMO_FIRST_NPU=${first_npu}
-if [ "${transport}" = "direct_urma_multi_jetty" ] ||
-    [ "${transport}" = "direct_urma_multi_jetty_parallel" ] ||
-    [ "${transport}" = "direct_urma_multi_jetty_parallel_fixed_wqe" ]; then
+if [ "${transport}" = "direct_urma" ] || [ "${transport}" = "udma" ]; then
     export TILEXR_UDMA_QP_NUM="${block_dim}"
 else
     export TILEXR_UDMA_QP_NUM="${TILEXR_UDMA_QP_NUM:-1}"

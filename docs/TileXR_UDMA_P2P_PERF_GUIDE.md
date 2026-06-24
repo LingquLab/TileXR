@@ -30,13 +30,15 @@ The final output should include:
 
 Use `rank_size=2`. Each run launches two local ranks, one rank per NPU.
 
-The P2P perf mode now supports two transport modes:
+The P2P perf mode supports three user-facing transport modes:
 
-- `direct_urma`: the AIV kernel posts a direct TileXR UDMA put from ordinary
-  `aclrtMalloc` memory registered by `TileXRUDMARegister`.
-- `memory`: the AIV kernel uses Ascend C `DataCopyPad` to copy bytes from the
-  source rank's local GM through UB into the destination rank's TileXR IPC peer
-  memory window, `CommArgs::peerMems[dst] + IPC_DATA_OFFSET`.
+- `direct_urma`: registered-memory UDMA transfer. Internally this path uses
+  the parallel multi-jetty kernel; `block_dim=1` with one QP is the single-jetty
+  baseline, while `block_dim=N` with `TILEXR_UDMA_QP_NUM=N` uses up to `N`
+  QPs/jettys in parallel.
+- `memory`: peer-memory IPC comparison using Ascend C `DataCopyPad`.
+- `data_as_flag`: peer-memory IPC comparison where each 512B block carries
+  480B payload plus a 32B ready flag.
 
 For `direct_urma`, for a selected direction:
 
@@ -53,6 +55,13 @@ For `memory`, for the same selected direction:
 - the destination address is its peer IPC data window on the receiver;
 - the receiver validates by copying its local IPC data window back to host.
 
+For `data_as_flag`, for the same selected direction:
+
+- the sender rank launches `tilexr_data_as_flag_p2p_perf_kernel`;
+- each 512B block carries 480B payload plus a 32B ready flag in the receiver's
+  peer IPC memory window;
+- the receiver validates by copying its local IPC data window back to host.
+
 Run both directions independently so each result row has an unambiguous source
 and destination. For current comparison work, `0->1` is usually enough because
 `0->1` and `1->0` were observed to be effectively identical on the tested
@@ -64,9 +73,9 @@ Important scope notes:
 - `memory` measures peer-memory IPC semantics implemented with AIV
   `DataCopyPad`. It is a useful baseline, not the same hardware data path as
   UDMA queue based direct URMA.
-- `memory` is limited by the TileXR IPC data window. The current wrapper rejects
-  sizes above 100 MiB.
-- The current memory comparison kernel uses one AIV block in the runner. Large
+- `memory` and `data_as_flag` are limited by the TileXR IPC data window. The
+  current wrapper rejects sizes above 100 MiB.
+- The current IPC comparison kernels use one AIV block in the runner. Large
   messages therefore reflect single-block GM->UB->peer-GM copy throughput.
 
 ## Metrics
@@ -269,6 +278,7 @@ Example:
 cd /path/to/TileXR/tests/udma
 bash demo/run_tilexr_udma_p2p_perf.sh 0 1 4096 67108864 2 100 10 2 1 direct_urma
 bash demo/run_tilexr_udma_p2p_perf.sh 0 1 4096 67108864 2 100 10 2 1 memory
+bash demo/run_tilexr_udma_p2p_perf.sh 0 1 4096 67108864 2 100 10 2 1 data_as_flag
 ```
 
 Arguments:
@@ -279,7 +289,7 @@ Arguments:
 - `first_npu`: first physical NPU id used by local rank 0. For physical cards
   2 and 3, pass `2`.
 - `check`: `1` validates destination bytes after each size.
-- `transport`: `direct_urma` or `memory`; default is `direct_urma`.
+- `transport`: `direct_urma`, `memory`, or `data_as_flag`; default is `direct_urma`.
 
 The script should:
 
@@ -356,13 +366,23 @@ for bytes in 33554432 41943040 50331648 58720256 62914560 67108864 75497472 8388
 done
 ```
 
+### Run data-as-flag semantics
+
+Use the same sweep and only change the transport:
+
+```bash
+cd /path/to/TileXR/tests/udma
+bash demo/run_tilexr_udma_p2p_perf.sh 0 1 4096 67108864 2 100 10 2 1 data_as_flag
+```
+
 Success criteria:
 
 - both rank processes exit with code 0;
 - every row has `status=0`;
 - every row has `errors=0`;
 - for `direct_urma`, per-rank logs include UDMA enabled in `CommArgs`;
-- for `memory`, per-rank logs show non-null `peerMems[]` for the tested ranks;
+- for `memory` and `data_as_flag`, per-rank logs show non-null `peerMems[]`
+  for the tested ranks;
 - no rank log contains `MISMATCH`, `TileXR UDMA demo failed`, or `ERROR`.
 
 ## Plot The Curve
@@ -381,7 +401,7 @@ python3 demo/plot_tilexr_udma_p2p_perf.py \
   --output logs/tilexr_udma_p2p_perf_curve.png
 ```
 
-For the current direct URMA vs memory comparison, pass both CSVs and label the
+For a transport comparison, pass both CSVs and label the
 series explicitly:
 
 ```bash
@@ -406,6 +426,9 @@ The plot uses:
 - x tick labels: human-readable `KB`, `MB`, or `GB`;
 - y-axis: `bw_GBps` for bandwidth or `avg_us` for latency;
 - one line per direction or per explicit label.
+
+Use labels that match the compared transport set, for example
+`direct_urma,memory` or `direct_urma,data_as_flag`.
 
 If multiple CSV files are passed, merge rows by direction and bytes before
 plotting. When `--labels` is used, merge rows by label and bytes instead, which
@@ -469,6 +492,8 @@ Look for:
   is consistent with the current single-AIV-block `DataCopyPad` IPC-window
   baseline entering sustained GM->UB->peer-GM throughput, not with a 64 MiB
   correctness boundary.
+- `data_as_flag` differs from `memory` because it spends part of each 512B block
+  on the embedded ready flag; compare it as a separate IPC baseline.
 
 Keep the raw logs with the CSV and curve. They are needed to confirm UDMA was
 enabled and to inspect `CommArgs`, registered memory offsets, and debug words.
