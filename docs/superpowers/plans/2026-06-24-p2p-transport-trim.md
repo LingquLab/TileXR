@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- User-facing transport names must be exactly `direct_urma`, `memory`, and `data_as_flag`.
+- User-facing transport names must be exactly `direct_urma`, `memory`, and `data_as_flag`. 
 - `direct_urma` must use the current parallel multi-jetty implementation internally.
 - `direct_urma` with `block_dim=1` and one QP must behave like the previous single-QP direct URMA path.
 - `direct_urma` with `block_dim=N` and `TILEXR_UDMA_QP_NUM=N` must use up to `N` QPs/jettys in parallel.
