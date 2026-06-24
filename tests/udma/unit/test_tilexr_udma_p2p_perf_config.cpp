@@ -33,18 +33,6 @@ int main()
     Require(TileXR::Demo::DirectionName(0, 1) == "0to1", "direction name mismatch");
     Require(TileXR::Demo::P2PTransportName(TileXR::Demo::P2PTransport::DirectUrma) == "direct_urma",
         "direct transport name mismatch");
-    Require(TileXR::Demo::P2PTransportName(TileXR::Demo::P2PTransport::DirectUrmaMultiWqe) ==
-            "direct_urma_multi_wqe",
-        "direct_urma_multi_wqe transport name mismatch");
-    Require(TileXR::Demo::P2PTransportName(TileXR::Demo::P2PTransport::DirectUrmaMultiJetty) ==
-            "direct_urma_multi_jetty",
-        "direct_urma_multi_jetty transport name mismatch");
-    Require(TileXR::Demo::P2PTransportName(TileXR::Demo::P2PTransport::DirectUrmaMultiJettyParallel) ==
-            "direct_urma_multi_jetty_parallel",
-        "direct_urma_multi_jetty_parallel transport name mismatch");
-    Require(TileXR::Demo::P2PTransportName(TileXR::Demo::P2PTransport::DirectUrmaMultiJettyParallelFixedWqe) ==
-            "direct_urma_multi_jetty_parallel_fixed_wqe",
-        "direct_urma_multi_jetty_parallel_fixed_wqe transport name mismatch");
     Require(TileXR::Demo::P2PTransportName(TileXR::Demo::P2PTransport::Memory) == "memory",
         "memory transport name mismatch");
     Require(TileXR::Demo::P2PTransportName(TileXR::Demo::P2PTransport::DataAsFlag) == "data_as_flag",
@@ -55,22 +43,22 @@ int main()
         "bidir traffic name mismatch");
     Require(TileXR::Demo::ParseP2PTransport("direct_urma") == TileXR::Demo::P2PTransport::DirectUrma,
         "direct transport parse mismatch");
-    Require(TileXR::Demo::ParseP2PTransport("direct_urma_multi_wqe") ==
-            TileXR::Demo::P2PTransport::DirectUrmaMultiWqe,
-        "direct_urma_multi_wqe transport parse mismatch");
-    Require(TileXR::Demo::ParseP2PTransport("direct_urma_multi_jetty") ==
-            TileXR::Demo::P2PTransport::DirectUrmaMultiJetty,
-        "direct_urma_multi_jetty transport parse mismatch");
-    Require(TileXR::Demo::ParseP2PTransport("direct_urma_multi_jetty_parallel") ==
-            TileXR::Demo::P2PTransport::DirectUrmaMultiJettyParallel,
-        "direct_urma_multi_jetty_parallel transport parse mismatch");
-    Require(TileXR::Demo::ParseP2PTransport("direct_urma_multi_jetty_parallel_fixed_wqe") ==
-            TileXR::Demo::P2PTransport::DirectUrmaMultiJettyParallelFixedWqe,
-        "direct_urma_multi_jetty_parallel_fixed_wqe transport parse mismatch");
+    Require(TileXR::Demo::ParseP2PTransport("udma") == TileXR::Demo::P2PTransport::DirectUrma,
+        "udma alias parse mismatch");
     Require(TileXR::Demo::ParseP2PTransport("memory") == TileXR::Demo::P2PTransport::Memory,
         "memory transport parse mismatch");
     Require(TileXR::Demo::ParseP2PTransport("data_as_flag") == TileXR::Demo::P2PTransport::DataAsFlag,
         "data_as_flag transport parse mismatch");
+    Require(TileXR::Demo::ParseP2PTransport("direct_urma_multi_wqe") == TileXR::Demo::P2PTransport::Invalid,
+        "direct_urma_multi_wqe must be rejected");
+    Require(TileXR::Demo::ParseP2PTransport("direct_urma_multi_jetty") == TileXR::Demo::P2PTransport::Invalid,
+        "direct_urma_multi_jetty must be rejected");
+    Require(TileXR::Demo::ParseP2PTransport("direct_urma_multi_jetty_parallel") ==
+            TileXR::Demo::P2PTransport::Invalid,
+        "direct_urma_multi_jetty_parallel must be rejected");
+    Require(TileXR::Demo::ParseP2PTransport("direct_urma_multi_jetty_parallel_fixed_wqe") ==
+            TileXR::Demo::P2PTransport::Invalid,
+        "direct_urma_multi_jetty_parallel_fixed_wqe must be rejected");
     Require(TileXR::Demo::ParseP2PTraffic("unidir") == TileXR::Demo::P2PTraffic::UniDir,
         "unidir traffic parse mismatch");
     Require(TileXR::Demo::ParseP2PTraffic("bidir") == TileXR::Demo::P2PTraffic::BiDir,
@@ -83,32 +71,19 @@ int main()
         "data_as_flag 480B layout mismatch");
     Require(TileXR::Demo::P2PTransportWindowBytes(TileXR::Demo::P2PTransport::DataAsFlag, 481) == 1024,
         "data_as_flag 481B layout mismatch");
-    Require(TileXR::Demo::P2PFixedWqeStrideBytes(8) == 64, "fixed-wqe small payload stride mismatch");
-    Require(TileXR::Demo::P2PFixedWqeWindowBytes(8, 4) == 200,
-        "fixed-wqe small payload window layout mismatch");
-    Require(TileXR::Demo::P2PTransportWindowBytes(
-                TileXR::Demo::P2PTransport::DirectUrmaMultiJettyParallelFixedWqe, 4096, 4) == 16384,
-        "fixed-wqe large payload window layout mismatch");
+    Require(TileXR::Demo::P2PTransportWindowBytes(TileXR::Demo::P2PTransport::DirectUrma, 4096, 8) == 4096,
+        "direct_urma window must equal payload bytes");
     Require(TileXR::Demo::ActiveP2PFlowCount(TileXR::Demo::P2PTraffic::UniDir) == 1,
         "unidir active flow count mismatch");
     Require(TileXR::Demo::ActiveP2PFlowCount(TileXR::Demo::P2PTraffic::BiDir) == 2,
         "bidir active flow count mismatch");
     options.transport = TileXR::Demo::P2PTransport::Memory;
     Require(TileXR::Demo::ValidateP2PPerfOptions(options, 2, &error), "memory transport options rejected");
-    options.transport = TileXR::Demo::P2PTransport::DirectUrmaMultiWqe;
+    options.transport = TileXR::Demo::P2PTransport::DirectUrma;
     options.traffic = TileXR::Demo::P2PTraffic::BiDir;
     options.blockDim = 8;
     Require(TileXR::Demo::ValidateP2PPerfOptions(options, 2, &error),
-        "valid direct_urma_multi_wqe options rejected");
-    options.transport = TileXR::Demo::P2PTransport::DirectUrmaMultiJetty;
-    Require(TileXR::Demo::ValidateP2PPerfOptions(options, 2, &error),
-        "valid direct_urma_multi_jetty options rejected");
-    options.transport = TileXR::Demo::P2PTransport::DirectUrmaMultiJettyParallel;
-    Require(TileXR::Demo::ValidateP2PPerfOptions(options, 2, &error),
-        "valid direct_urma_multi_jetty_parallel options rejected");
-    options.transport = TileXR::Demo::P2PTransport::DirectUrmaMultiJettyParallelFixedWqe;
-    Require(TileXR::Demo::ValidateP2PPerfOptions(options, 2, &error),
-        "valid direct_urma_multi_jetty_parallel_fixed_wqe options rejected");
+        "valid direct_urma multi-jetty options rejected");
     options.transport = TileXR::Demo::P2PTransport::DataAsFlag;
     options.traffic = TileXR::Demo::P2PTraffic::BiDir;
     options.blockDim = 4;
@@ -134,17 +109,9 @@ int main()
     Require(TileXR::Demo::CountP2PMismatches(bytes, pattern, 4096) == 0, "pattern validation failed");
     bytes[17] ^= 0xff;
     Require(TileXR::Demo::CountP2PMismatches(bytes, pattern, 4096) == 1, "mismatch count failed");
-    std::vector<uint8_t> fixedWqeBytes(TileXR::Demo::P2PFixedWqeWindowBytes(8, 4), 0);
-    TileXR::Demo::FillP2PPattern(fixedWqeBytes, pattern);
-    fixedWqeBytes[12] = 0;
-    fixedWqeBytes[32] ^= 0xff;
-    Require(TileXR::Demo::CountP2PTransportMismatches(fixedWqeBytes, pattern, 8,
-                TileXR::Demo::P2PTransport::DirectUrmaMultiJettyParallelFixedWqe, 4) == 0,
-        "fixed-wqe mismatch checker must ignore padding");
-    fixedWqeBytes[64] ^= 0xff;
-    Require(TileXR::Demo::CountP2PTransportMismatches(fixedWqeBytes, pattern, 8,
-                TileXR::Demo::P2PTransport::DirectUrmaMultiJettyParallelFixedWqe, 4) == 1,
-        "fixed-wqe mismatch checker must validate qp payload");
+    Require(TileXR::Demo::CountP2PTransportMismatches(
+                bytes, pattern, 4096, TileXR::Demo::P2PTransport::DirectUrma, 8) == 1,
+        "direct_urma mismatch checker must validate payload bytes");
 
     TileXR::Demo::P2PPerfRow row;
     row.srcRank = 1;
@@ -166,28 +133,13 @@ int main()
     Require(bidirCsv ==
             "data_as_flag,bidir,4,1to0+0to1,1,0,2,4096,20,8.000,0.000,0.000,1.024,0.512,0,0,logs/run\n",
         "bidir csv row mismatch");
-    row.transport = TileXR::Demo::P2PTransport::DirectUrmaMultiWqe;
+    row.transport = TileXR::Demo::P2PTransport::DirectUrma;
     row.traffic = TileXR::Demo::P2PTraffic::UniDir;
     row.blockDim = 8;
-    const std::string multiWqeCsv = TileXR::Demo::FormatP2PPerfCsvRow(row);
-    Require(multiWqeCsv ==
-            "direct_urma_multi_wqe,unidir,8,1to0,1,0,2,4096,20,8.000,0.000,0.000,0.512,0.512,0,0,logs/run\n",
-        "direct_urma_multi_wqe csv row mismatch");
-    row.transport = TileXR::Demo::P2PTransport::DirectUrmaMultiJetty;
-    const std::string multiJettyCsv = TileXR::Demo::FormatP2PPerfCsvRow(row);
-    Require(multiJettyCsv ==
-            "direct_urma_multi_jetty,unidir,8,1to0,1,0,2,4096,20,8.000,0.000,0.000,0.512,0.512,0,0,logs/run\n",
-        "direct_urma_multi_jetty csv row mismatch");
-    row.transport = TileXR::Demo::P2PTransport::DirectUrmaMultiJettyParallel;
-    const std::string multiJettyParallelCsv = TileXR::Demo::FormatP2PPerfCsvRow(row);
-    Require(multiJettyParallelCsv ==
-            "direct_urma_multi_jetty_parallel,unidir,8,1to0,1,0,2,4096,20,8.000,0.000,0.000,0.512,0.512,0,0,logs/run\n",
-        "direct_urma_multi_jetty_parallel csv row mismatch");
-    row.transport = TileXR::Demo::P2PTransport::DirectUrmaMultiJettyParallelFixedWqe;
-    const std::string multiJettyParallelFixedWqeCsv = TileXR::Demo::FormatP2PPerfCsvRow(row);
-    Require(multiJettyParallelFixedWqeCsv ==
-            "direct_urma_multi_jetty_parallel_fixed_wqe,unidir,8,1to0,1,0,2,4096,20,8.000,0.000,0.000,4.096,4.096,0,0,logs/run\n",
-        "direct_urma_multi_jetty_parallel_fixed_wqe csv row mismatch");
+    const std::string directUrmaParallelCsv = TileXR::Demo::FormatP2PPerfCsvRow(row);
+    Require(directUrmaParallelCsv ==
+            "direct_urma,unidir,8,1to0,1,0,2,4096,20,8.000,0.000,0.000,0.512,0.512,0,0,logs/run\n",
+        "direct_urma parallel csv row mismatch");
 
     TileXR::Demo::P2PRankStatus srcSample;
     srcSample.status = 0;
