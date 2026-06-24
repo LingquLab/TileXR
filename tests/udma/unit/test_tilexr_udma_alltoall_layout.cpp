@@ -97,6 +97,35 @@ void TestBuildAllToAllOutput()
     CHECK_EQ(TileXR::Demo::ValidateAllToAllOutput(output, 2, rankSize, elementsPerPeer), true);
 }
 
+void TestAllToAllMaxRank256With64MiBPerRank()
+{
+    constexpr int rankSize = 256;
+    constexpr size_t perRankBytes = 64ULL * 1024ULL * 1024ULL;
+    constexpr int32_t elementsPerPeer =
+        static_cast<int32_t>(perRankBytes / (sizeof(int32_t) * rankSize));
+    CHECK_EQ(elementsPerPeer, 65536);
+
+    std::vector<int32_t> buffer(static_cast<size_t>(rankSize) * elementsPerPeer, -1);
+    const int sampleRanks[] = {0, 1, 127, 255};
+    for (int rank : sampleRanks) {
+        TileXR::Demo::FillAllToAllInput(buffer, rank, rankSize, elementsPerPeer);
+        CHECK_EQ(buffer[0], TileXR::Demo::AllToAllValue(rank, 0));
+        CHECK_EQ(buffer[static_cast<size_t>(rankSize - 1) * elementsPerPeer],
+                 TileXR::Demo::AllToAllValue(rank, rankSize - 1));
+        CHECK_EQ(buffer[static_cast<size_t>(rankSize) * elementsPerPeer - 1],
+                 TileXR::Demo::AllToAllValue(rank, rankSize - 1));
+
+        for (int srcRank = 0; srcRank < rankSize; ++srcRank) {
+            std::fill(buffer.begin() + static_cast<size_t>(srcRank) * elementsPerPeer,
+                      buffer.begin() + static_cast<size_t>(srcRank + 1) * elementsPerPeer,
+                      TileXR::Demo::AllToAllValue(srcRank, rank));
+        }
+        CHECK_EQ(TileXR::Demo::ValidateAllToAllOutput(buffer, rank, rankSize, elementsPerPeer), true);
+        buffer[static_cast<size_t>(rankSize) * elementsPerPeer - 1] = -1;
+        CHECK_EQ(TileXR::Demo::ValidateAllToAllOutput(buffer, rank, rankSize, elementsPerPeer), false);
+    }
+}
+
 void TestDemoDebugLayoutSource()
 {
     const std::string demo =
@@ -110,6 +139,30 @@ void TestDemoDebugLayoutSource()
     CHECK_CONTAINS(kernel, "TILEXR_UDMA_DEMO_DEBUG_UDMA_STATUS_BASE + peer");
 }
 
+void TestAllToAllDataAsFlagSource()
+{
+    const std::string demo =
+        ReadFile(std::string(TILEXR_SOURCE_ROOT) + "/tests/udma/demo/tilexr_udma_demo.cpp");
+    const std::string kernel =
+        ReadFile(std::string(TILEXR_SOURCE_ROOT) + "/tests/udma/demo/tilexr_udma_demo_kernel.cpp");
+
+    CHECK_CONTAINS(demo, "useAllToAllDataAsFlagIpc");
+    CHECK_CONTAINS(demo, "TILEXR_DEMO_ALLTOALL_USE_UDMA");
+    CHECK_CONTAINS(demo, "skip TileXRUDMARegister for alltoall data-as-flag IPC path");
+    CHECK_CONTAINS(demo, "forceAllToAllIpcFallback");
+    CHECK_CONTAINS(demo, "strictAllToAllUdma");
+    CHECK_CONTAINS(demo, "ERROR: strict alltoall UDMA registration failed");
+    CHECK_CONTAINS(demo, "ERROR: strict alltoall UDMA CQ incomplete");
+    CHECK_CONTAINS(demo, "TileXRUDMARegister failed; use alltoall data-as-flag IPC fallback");
+    CHECK_CONTAINS(demo, "skip all-to-all UDMA kernel; use data-as-flag IPC fallback");
+    CHECK_CONTAINS(kernel, "#include \"tilexr_data_as_flag.h\"");
+    CHECK_CONTAINS(kernel, "TILEXR_UDMA_DEMO_DATA_AS_FLAG_STAGING_OFFSET");
+    CHECK_CONTAINS(kernel, "DataAsFlagBlockCountForPayloadBytes");
+    CHECK_CONTAINS(kernel, "DataAsFlagInit");
+    CHECK_CONTAINS(kernel, "DataAsFlagSend");
+    CHECK_CONTAINS(kernel, "DataAsFlagCheckAndRecv");
+}
+
 } // namespace
 
 int main()
@@ -117,7 +170,9 @@ int main()
     TestAllToAllInputPattern();
     TestAllToAllOutputValidation();
     TestBuildAllToAllOutput();
+    TestAllToAllMaxRank256With64MiBPerRank();
     TestDemoDebugLayoutSource();
+    TestAllToAllDataAsFlagSource();
     if (g_failures != 0) {
         std::cerr << g_failures << " all-to-all layout checks failed" << std::endl;
         return 1;

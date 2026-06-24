@@ -124,6 +124,10 @@ target_include_directories(test_tilexr_udma_transport_layout PRIVATE
     ${TILEXR_ROOT}/src/comm
 )
 
+target_compile_definitions(test_tilexr_udma_transport_layout PRIVATE
+    TILEXR_SOURCE_ROOT="${TILEXR_ROOT}"
+)
+
 # 集成测试：TileXR UDMA
 add_executable(test_tilexr_udma
     integration/test_tilexr_udma.cpp
@@ -207,6 +211,7 @@ if(BUILD_TILEXR_UDMA_DEMO)
             -I${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc/
             -I${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc/runtime/
             -I${ASCEND_HOME_PATH}/${ARCH}-linux/include/
+            -I${ASCEND_HOME_PATH}/${ARCH}-linux/asc/include/
             -I${ASCEND_DRIVER_PATH}/kernel/inc
             -I${TILEXR_ROOT}/3rdparty
             -I${TILEXR_ROOT}/src/include
@@ -240,6 +245,7 @@ if(BUILD_TILEXR_UDMA_DEMO)
             DEPENDS
                 "${CMAKE_CURRENT_SOURCE_DIR}/demo/tilexr_udma_demo_kernel.cpp"
                 "${TILEXR_ROOT}/src/include/tilexr_udma.h"
+                "${TILEXR_ROOT}/src/include/tilexr_data_as_flag.h"
             VERBATIM
             COMMENT "Building TileXR UDMA demo kernel with bisheng"
         )

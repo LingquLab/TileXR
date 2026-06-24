@@ -346,6 +346,14 @@ int TileXRComm::RegisterUDMAMemory(GM_ADDR localPtr, size_t bytes, TileXRUDMAMem
         TILEXR_LOG(ERROR) << "TileXR UDMA memory registration failed: " << ret;
         return TILEXR_ERROR_INTERNAL;
     }
+    udmaInfoDev_ = udmaTransport_->GetUDMAInfoDev();
+    commArgs_.udmaInfoPtr = udmaInfoDev_;
+    ret = UpdateCommArgsDev();
+    if (ret != TILEXR_SUCCESS) {
+        TILEXR_LOG(ERROR) << "TileXRUDMARegister failed to refresh CommArgs after UDMA info update: " << ret;
+        udmaTransport_->UnregisterMemory(localPtr);
+        return ret;
+    }
 
     if (socketExchange_ == nullptr) {
         TILEXR_LOG(ERROR) << "TileXRUDMARegister requires live socket exchange";

@@ -20,6 +20,7 @@
 
 #include "acl/acl.h"
 #include "tilexr_api.h"
+#include "tilexr_data_as_flag.h"
 #include "tilexr_types.h"
 #include "tilexr_udma_allreduce_layout.h"
 #include "tilexr_udma_alltoall_layout.h"
@@ -437,6 +438,37 @@ bool AllToAllUdmaComplete(int rankSize, const std::vector<int32_t>& debug)
     return true;
 }
 
+void PrintAllToAllUdmaDebug(int rank, int rankSize, const std::vector<int32_t>& debug)
+{
+    constexpr int rangeBase = kDebugUdmaStatusBase + 16;
+    constexpr int wqeBeforeBase = kDebugUdmaStatusBase + 32;
+    constexpr int wqeAfterBase = kDebugUdmaStatusBase + 48;
+    constexpr int localTokenBase = kDebugUdmaStatusBase + 64;
+    constexpr int remoteBaseLowBase = kDebugUdmaStatusBase + 80;
+    constexpr int memAddrLowBase = kDebugUdmaStatusBase + 96;
+    constexpr int tpnBase = kDebugUdmaStatusBase + 112;
+    std::cout << "[rank " << rank << "] alltoall udma peer debug:";
+    for (int peer = 0; peer < rankSize && peer < 16; ++peer) {
+        std::cout << " peer" << peer
+                  << "{status=" << debug[kDebugUdmaStatusBase + peer]
+                  << ",range=" << debug[rangeBase + peer]
+                  << ",wqe=" << debug[wqeBeforeBase + peer] << "->" << debug[wqeAfterBase + peer]
+                  << ",token=" << debug[localTokenBase + peer]
+                  << ",regLo=" << debug[remoteBaseLowBase + peer]
+                  << ",memLo=" << debug[memAddrLowBase + peer]
+                  << ",tpn=" << debug[tpnBase + peer]
+                  << "}";
+    }
+    std::cout << std::endl;
+}
+
+size_t AllToAllDataAsFlagStagingBytes(int rankSize, int32_t elementsPerPeer)
+{
+    const uint64_t payloadBytes = static_cast<uint64_t>(elementsPerPeer) * sizeof(int32_t);
+    const uint64_t blocks = TileXR::DataAsFlagBlockCountForPayloadBytes(payloadBytes);
+    return static_cast<size_t>(static_cast<uint64_t>(rankSize) * blocks * TileXR::DATA_AS_FLAG_BLOCK_BYTES);
+}
+
 void Cleanup(
     TileXRCommPtr comm, aclrtStream stream, void* registeredMemory, int32_t* debug, int rank, int deviceId)
 {
@@ -526,9 +558,24 @@ int main(int argc, char** argv)
 
     bool isAllToAll = testType == 2;
     bool isAllReduce = testType == 3;
+    bool strictAllToAllUdma = isAllToAll && GetEnvInt("TILEXR_DEMO_ALLTOALL_USE_UDMA", 0) != 0;
+    bool dumpAllToAllOnStrictFail = isAllToAll && GetEnvInt("TILEXR_DEMO_ALLTOALL_DUMP_ON_STRICT_FAIL", 0) != 0;
+    bool useAllToAllDataAsFlagIpc = isAllToAll && !strictAllToAllUdma;
+    bool forceAllToAllIpcFallback = false;
     bool hasOutput = isAllToAll || isAllReduce;
     size_t dataCount = static_cast<size_t>(rankSize) * elementsPerRank;
     size_t dataBytes = dataCount * sizeof(int32_t);
+    if (isAllToAll) {
+        const size_t stagingBytes = AllToAllDataAsFlagStagingBytes(rankSize, elementsPerRank);
+        if (stagingBytes > static_cast<size_t>(TileXR::IPC_BUFF_MAX_SIZE)) {
+            std::cerr << "[rank " << rank << "] ERROR: alltoall data-as-flag IPC fallback staging requires "
+                      << stagingBytes << " bytes, exceeds IPC data capacity "
+                      << TileXR::IPC_BUFF_MAX_SIZE << std::endl;
+            Cleanup(comm, stream, registeredMemory, debug, rank, deviceId);
+            return 1;
+        }
+        PrintStatus(rank, "alltoall data-as-flag staging bytes=" + std::to_string(stagingBytes));
+    }
     size_t inputOffset = 0;
     size_t outputOffset = hasOutput ? dataBytes : 0;
     size_t signalBytes = static_cast<size_t>(rankSize) * sizeof(uint64_t);
@@ -547,12 +594,30 @@ int main(int argc, char** argv)
     auto input = reinterpret_cast<int32_t*>(static_cast<uint8_t*>(registeredMemory) + inputOffset);
     auto output = reinterpret_cast<int32_t*>(static_cast<uint8_t*>(registeredMemory) + outputOffset);
     auto signals = reinterpret_cast<uint64_t*>(static_cast<uint8_t*>(registeredMemory) + signalOffset);
-    if (!CheckTileXR(rank, "TileXRUDMARegister",
-            TileXRUDMARegister(comm, static_cast<GM_ADDR>(registeredMemory), registeredBytes, &udmaHandle))) {
-        Cleanup(comm, stream, registeredMemory, debug, rank, deviceId);
-        return 1;
+    if (useAllToAllDataAsFlagIpc) {
+        PrintStatus(rank, "skip TileXRUDMARegister for alltoall data-as-flag IPC path");
+        forceAllToAllIpcFallback = true;
+    } else {
+        int registerRet =
+            TileXRUDMARegister(comm, static_cast<GM_ADDR>(registeredMemory), registeredBytes, &udmaHandle);
+        if (registerRet != TileXR::TILEXR_SUCCESS) {
+            if (!isAllToAll || strictAllToAllUdma) {
+                if (strictAllToAllUdma) {
+                    std::cerr << "[rank " << rank << "] ERROR: strict alltoall UDMA registration failed"
+                              << " ret=" << registerRet << std::endl;
+                }
+                CheckTileXR(rank, "TileXRUDMARegister", registerRet);
+                Cleanup(comm, stream, registeredMemory, debug, rank, deviceId);
+                return 1;
+            }
+            std::cerr << "[rank " << rank
+                      << "] WARNING: TileXRUDMARegister failed; use alltoall data-as-flag IPC fallback"
+                      << " ret=" << registerRet << std::endl;
+            forceAllToAllIpcFallback = true;
+        } else {
+            udmaRegistered = true;
+        }
     }
-    udmaRegistered = true;
     PrintStatus(rank, "registered UDMA memory base=" + std::to_string(reinterpret_cast<uintptr_t>(registeredMemory)) +
         " bytes=" + std::to_string(registeredBytes) +
         " inputOffset=" + std::to_string(inputOffset) +
@@ -602,10 +667,14 @@ int main(int argc, char** argv)
     }
 
     if (testType == 2) {
-        PrintStatus(rank, "launch all-to-all kernel");
-        launch_tilexr_udma_all_to_all(
-            1, stream, commArgsDev, reinterpret_cast<GM_ADDR>(input), reinterpret_cast<GM_ADDR>(output),
-            reinterpret_cast<GM_ADDR>(debug), elementsPerRank, static_cast<uint64_t>(outputOffset));
+        if (forceAllToAllIpcFallback) {
+            PrintStatus(rank, "skip all-to-all UDMA kernel; use data-as-flag IPC fallback");
+        } else {
+            PrintStatus(rank, "launch all-to-all kernel");
+            launch_tilexr_udma_all_to_all(
+                1, stream, commArgsDev, reinterpret_cast<GM_ADDR>(input), reinterpret_cast<GM_ADDR>(output),
+                reinterpret_cast<GM_ADDR>(debug), elementsPerRank, static_cast<uint64_t>(outputOffset));
+        }
     } else if (testType == 3) {
         PrintStatus(rank, "launch all-reduce IPC scatter kernel");
         launch_tilexr_all_reduce_ipc_scatter(
@@ -663,9 +732,40 @@ int main(int argc, char** argv)
     }
 
     bool usedIpcFallback = false;
-    if (isAllToAll && !AllToAllUdmaComplete(rankSize, hostDebug)) {
+    bool allToAllUdmaComplete = !isAllToAll || AllToAllUdmaComplete(rankSize, hostDebug);
+    if (isAllToAll && strictAllToAllUdma && !allToAllUdmaComplete) {
+        std::cerr << "[rank " << rank << "] ERROR: strict alltoall UDMA CQ incomplete:";
+        for (int peer = 0; peer < rankSize; ++peer) {
+            std::cerr << " peer" << peer << "=" << hostDebug[kDebugUdmaStatusBase + peer];
+        }
+        std::cerr << std::endl;
+        PrintAllToAllUdmaDebug(rank, rankSize, hostDebug);
+        if (dumpAllToAllOnStrictFail) {
+            std::vector<int32_t> strictFailOutput(dataCount, 0);
+            if (CopyDeviceToHost(rank, strictFailOutput.data(), dataBytes,
+                    output, dataBytes, "alltoall output after strict UDMA fail")) {
+                (void)ValidateAllToAllData(rank, rankSize, strictFailOutput, elementsPerRank);
+            }
+        }
+        if (udmaRegistered) {
+            CheckTileXR(rank, "TileXRUDMAUnregister", TileXRUDMAUnregister(comm, udmaHandle));
+        }
+        Cleanup(comm, stream, registeredMemory, debug, rank, deviceId);
+        return 1;
+    }
+    if (isAllToAll && (forceAllToAllIpcFallback || !allToAllUdmaComplete)) {
         usedIpcFallback = true;
-        std::cout << "[rank " << rank << "] alltoall UDMA CQ incomplete, use IPC fallback:";
+        std::cout << "[rank " << rank << "] alltoall use data-as-flag IPC fallback";
+        if (forceAllToAllIpcFallback) {
+            if (useAllToAllDataAsFlagIpc) {
+                std::cout << " by default";
+            } else {
+                std::cout << " after UDMA registration failure";
+            }
+        } else {
+            std::cout << " after UDMA CQ incomplete";
+        }
+        std::cout << ":";
         for (int peer = 0; peer < rankSize; ++peer) {
             std::cout << " peer" << peer << "=" << hostDebug[kDebugUdmaStatusBase + peer];
         }
@@ -720,6 +820,9 @@ int main(int argc, char** argv)
         std::cout << " d" << i << "=" << hostDebug[i];
     }
     std::cout << std::endl;
+    if (isAllToAll) {
+        PrintAllToAllUdmaDebug(rank, rankSize, hostDebug);
+    }
     if (usedIpcFallback) {
         std::cout << "[rank " << rank << "] alltoall IPC fallback completed"
                   << " scatter=" << hostDebug[kDebugIpcScatter]
