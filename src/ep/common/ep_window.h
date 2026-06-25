@@ -11,6 +11,9 @@ constexpr int64_t kEpWindowHeaderBytes = 64;
 constexpr int64_t kEpSrcSlotHeaderBytes = 64;
 constexpr int32_t kEpStepWindowCleared = 71;
 constexpr int32_t kEpStepDispatchReady = 72;
+constexpr int32_t kEpStepCombineWindowCleared = 73;
+constexpr int32_t kEpStepCombineReady = 74;
+constexpr int32_t kEpStepDispatchDrained = 75;
 constexpr uint32_t kEpWindowMagic = 0x54584550U;
 
 struct EpWindowHeader {

@@ -64,9 +64,19 @@ void TestPublicHeader()
     CheckContains("src/include/tilexr_ep.h", contents, "#ifdef __cplusplus");
     CheckContains("src/include/tilexr_ep.h", contents, "extern \"C\"");
     CheckContains("src/include/tilexr_ep.h", contents, "int TileXRMoeEpDispatch(");
+    CheckContains("src/include/tilexr_ep.h", contents, "int TileXRMoeEpDispatchV2(");
+    CheckContains("src/include/tilexr_ep.h", contents, "int TileXRMoeEpCombine(");
     CheckContains("src/include/tilexr_ep.h", contents, "TileXRCommPtr comm");
     CheckContains("src/include/tilexr_ep.h", contents, "TileXR::TileXRDataType dtype");
     CheckContains("src/include/tilexr_ep.h", contents, "aclrtStream stream");
+    CheckContains("src/include/tilexr_ep.h", contents, "xActiveMask");
+    CheckContains("src/include/tilexr_ep.h", contents, "dynamicScalesOut");
+    CheckContains("src/include/tilexr_ep.h", contents, "tpRecvCountsOut");
+    CheckContains("src/include/tilexr_ep.h", contents, "expandScalesOut");
+    CheckContains("src/include/tilexr_ep.h", contents, "workspace");
+    CheckContains("src/include/tilexr_ep.h", contents, "quantMode");
+    CheckContains("src/include/tilexr_ep.h", contents, "tpWorldSize");
+    CheckContains("src/include/tilexr_ep.h", contents, "sharedExpertNum");
 }
 
 void TestBuildPlacement()
@@ -101,6 +111,16 @@ void TestEpSocDefaultFollowsEnvironment()
     CheckContains("src/ep/CMakeLists.txt", epCmake, "Ascend910B");
 }
 
+void TestChipMapRecognizesAscend950Dt9582()
+{
+    std::string internal;
+    if (!ReadFile("src/comm/tilexr_internal.cpp", &internal)) {
+        return;
+    }
+
+    CheckContains("src/comm/tilexr_internal.cpp", internal, "\"Ascend950DT_9582\", ChipName::CHIP_950");
+}
+
 void TestEpKernelUsesCceArchFlags()
 {
     std::string epCmake;
@@ -115,6 +135,19 @@ void TestEpKernelUsesCceArchFlags()
     CheckNotContains("src/ep/CMakeLists.txt", epCmake, "--npu-arch=");
     CheckNotContains("src/ep/CMakeLists.txt", epCmake, "--cce-auto-infer-kernel-type=false");
     CheckNotContains("src/ep/CMakeLists.txt", epCmake, "--cce-fatobj-link");
+}
+
+void TestSyncFlagBuffersUseFullFlagUnit()
+{
+    std::string syncHeader;
+    if (!ReadFile("src/include/tilexr_sync.h", &syncHeader)) {
+        return;
+    }
+
+    CheckContains("src/include/tilexr_sync.h", syncHeader,
+        "LocalTensor<int64_t> localSet = tBuf.GetWithOffset<int64_t>(FLAG_UNIT_INT_NUM, 0);");
+    CheckContains("src/include/tilexr_sync.h", syncHeader,
+        "LocalTensor<int64_t> localWait = tBuf.GetWithOffset<int64_t>(FLAG_UNIT_INT_NUM, 0);");
 }
 
 const char *kRemoteDeployScript = "tests/ep/demo/deploy_and_run_remote.sh";
@@ -173,6 +206,33 @@ void TestDemoRunnerUsesLibAndLib64Paths()
     CheckContains("tests/ep/demo/run_tilexr_ep_dispatch_demo.sh", runner, "${INSTALL_DIR}/lib");
 }
 
+void TestDispatchDemoRegistersAlignedUdmaWorkspace()
+{
+    std::string demo;
+    if (!ReadFile("tests/ep/demo/tilexr_ep_dispatch_demo.cpp", &demo)) {
+        return;
+    }
+
+    CheckContains("tests/ep/demo/tilexr_ep_dispatch_demo.cpp", demo, "AlignAddress");
+    CheckContains("tests/ep/demo/tilexr_ep_dispatch_demo.cpp", demo, "rawWorkspaceDev");
+    CheckContains("tests/ep/demo/tilexr_ep_dispatch_demo.cpp", demo,
+        "workspaceDev = reinterpret_cast<void *>(AlignAddress(");
+    CheckContains("tests/ep/demo/tilexr_ep_dispatch_demo.cpp", demo,
+        "TileXRUDMARegister(comm, static_cast<GM_ADDR>(workspaceDev), workspaceBytes");
+}
+
+void TestDispatchDemoUsesHostBarrierBeforeValidation()
+{
+    std::string demo;
+    if (!ReadFile("tests/ep/demo/tilexr_ep_dispatch_demo.cpp", &demo)) {
+        return;
+    }
+
+    CheckContains("tests/ep/demo/tilexr_ep_dispatch_demo.cpp", demo, "DemoBarrierAll");
+    CheckContains("tests/ep/demo/tilexr_ep_dispatch_demo.cpp", demo, "TILEXR_DEMO_BARRIER_ADDR");
+    CheckContains("tests/ep/demo/tilexr_ep_dispatch_demo.cpp", demo, "dispatch synchronized");
+}
+
 void TestNoForbiddenDependencies()
 {
     const std::vector<std::string> paths = {
@@ -182,7 +242,7 @@ void TestNoForbiddenDependencies()
         "src/ep/host/ep_layout.cpp",
     };
     const std::vector<std::string> forbidden = {
-        "examples/mc2",
+        "src/mc2",
         "3rdparty/ops-transformer",
         "GetHcclContext",
         "TileXRUDMARegister",
@@ -208,11 +268,15 @@ int main()
     TestPublicHeader();
     TestBuildPlacement();
     TestEpSocDefaultFollowsEnvironment();
+    TestChipMapRecognizesAscend950Dt9582();
     TestEpKernelUsesCceArchFlags();
+    TestSyncFlagBuffersUseFullFlagUnit();
     TestRemoteDeployScriptCleansRemoteCheckout();
     TestRemoteDeployScriptInitializesEpSubmodulesOnly();
     TestRemoteDeployScriptDoesNotExposePrivateRemoteDefaults();
     TestDemoRunnerUsesLibAndLib64Paths();
+    TestDispatchDemoRegistersAlignedUdmaWorkspace();
+    TestDispatchDemoUsesHostBarrierBeforeValidation();
     TestNoForbiddenDependencies();
     return g_failures == 0 ? 0 : 1;
 }

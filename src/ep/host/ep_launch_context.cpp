@@ -38,4 +38,38 @@ int TileXREpPrepareLaunchContext(const EpDispatchParams &params, EpHostLaunchCon
     return TileXR::TILEXR_SUCCESS;
 }
 
+int TileXREpPrepareCombineLaunchContext(const EpCombineParams &params, EpHostLaunchContext *context)
+{
+    if (context == nullptr) {
+        return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    *context = EpHostLaunchContext {};
+
+    int ret = TileXRGetCommArgsHost(params.comm, context->hostArgs);
+    if (ret != TileXR::TILEXR_SUCCESS) {
+        return ret;
+    }
+    if (context->hostArgs == nullptr) {
+        *context = EpHostLaunchContext {};
+        return TileXR::TILEXR_ERROR_NOT_INITIALIZED;
+    }
+
+    ret = TileXRGetCommArgsDev(params.comm, context->devArgs);
+    if (ret != TileXR::TILEXR_SUCCESS) {
+        *context = EpHostLaunchContext {};
+        return ret;
+    }
+    if (context->devArgs == nullptr) {
+        *context = EpHostLaunchContext {};
+        return TileXR::TILEXR_ERROR_NOT_INITIALIZED;
+    }
+
+    ret = TileXREpValidateCombineConfig(params, *context->hostArgs, &context->window);
+    if (ret != TileXR::TILEXR_SUCCESS) {
+        *context = EpHostLaunchContext {};
+        return ret;
+    }
+    return TileXR::TILEXR_SUCCESS;
+}
+
 } // namespace TileXREp

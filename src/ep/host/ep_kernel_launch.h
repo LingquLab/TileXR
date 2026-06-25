@@ -6,6 +6,7 @@
 namespace TileXREp {
 
 int TileXREpLaunchDispatchKernel(const EpDispatchParams &params, const EpHostLaunchContext &context);
+int TileXREpLaunchCombineKernel(const EpCombineParams &params, const EpHostLaunchContext &context);
 
 } // namespace TileXREp
 

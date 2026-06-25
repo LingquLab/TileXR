@@ -17,6 +17,7 @@ struct EpWindowConfig {
     int64_t dtypeBytes = 0;
     int64_t maxRoutesPerSrc = 0;
     int64_t rowBytes = 0;
+    int64_t payloadRowBytes = 0;
     int64_t payloadBytesPerSlot = 0;
     int64_t assistBytesPerSlot = 0;
     int64_t slotBytes = 0;
@@ -29,6 +30,18 @@ bool TileXREpIsSupportedDataType(TileXR::TileXRDataType dtype);
 
 int TileXREpBuildWindowConfig(int64_t rankSize, int64_t bs, int64_t h, int64_t topK,
     int64_t moeExpertNum, TileXR::TileXRDataType dtype, EpWindowConfig *out);
+
+int TileXREpBuildDispatchWindowConfig(int64_t rankSize, int64_t bs, int64_t h, int64_t topK,
+    int64_t moeExpertNum, int64_t sharedExpertNum, int64_t sharedExpertRankNum, TileXR::TileXRDataType dtype,
+    EpWindowConfig *out);
+
+int TileXREpBuildDispatchWindowConfigForExpertRanks(int64_t rankSize, int64_t expertRankSize, int64_t bs,
+    int64_t h, int64_t topK, int64_t moeExpertNum, int64_t sharedExpertNum, int64_t sharedExpertRankNum,
+    TileXR::TileXRDataType dtype, EpWindowConfig *out);
+
+int TileXREpBuildDispatchWindowConfigForExpertRanks(int64_t rankSize, int64_t expertRankSize, int64_t bs,
+    int64_t h, int64_t topK, int64_t moeExpertNum, int64_t sharedExpertNum, int64_t sharedExpertRankNum,
+    TileXR::TileXRDataType dtype, int64_t payloadExtraBytes, EpWindowConfig *out);
 
 int TileXREpDstRank(int32_t expertId, int64_t localExpertNum);
 int TileXREpLocalExpert(int32_t expertId, int64_t localExpertNum);

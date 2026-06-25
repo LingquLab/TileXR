@@ -57,6 +57,9 @@ int64_t TileXREpAlignUp(int64_t value, int64_t alignment)
 
 int64_t TileXREpDataTypeSize(TileXR::TileXRDataType dtype)
 {
+    if (dtype == TileXR::TILEXR_DATA_TYPE_INT8) {
+        return 1;
+    }
     if (dtype == TileXR::TILEXR_DATA_TYPE_FP16 || dtype == TileXR::TILEXR_DATA_TYPE_BFP16) {
         return 2;
     }
@@ -71,9 +74,35 @@ bool TileXREpIsSupportedDataType(TileXR::TileXRDataType dtype)
 int TileXREpBuildWindowConfig(int64_t rankSize, int64_t bs, int64_t h, int64_t topK,
     int64_t moeExpertNum, TileXR::TileXRDataType dtype, EpWindowConfig *out)
 {
-    if (out == nullptr || !IsPositive(rankSize) || rankSize > TileXR::TILEXR_MAX_RANK_SIZE || !IsPositive(bs) ||
-        !IsPositive(h) || !IsPositive(topK) || !IsPositive(moeExpertNum) || moeExpertNum % rankSize != 0 ||
-        !TileXREpIsSupportedDataType(dtype)) {
+    return TileXREpBuildDispatchWindowConfig(rankSize, bs, h, topK, moeExpertNum, 0, 0, dtype, out);
+}
+
+int TileXREpBuildDispatchWindowConfig(int64_t rankSize, int64_t bs, int64_t h, int64_t topK,
+    int64_t moeExpertNum, int64_t sharedExpertNum, int64_t sharedExpertRankNum, TileXR::TileXRDataType dtype,
+    EpWindowConfig *out)
+{
+    return TileXREpBuildDispatchWindowConfigForExpertRanks(rankSize, rankSize, bs, h, topK, moeExpertNum,
+        sharedExpertNum, sharedExpertRankNum, dtype, out);
+}
+
+int TileXREpBuildDispatchWindowConfigForExpertRanks(int64_t rankSize, int64_t expertRankSize, int64_t bs,
+    int64_t h, int64_t topK, int64_t moeExpertNum, int64_t sharedExpertNum, int64_t sharedExpertRankNum,
+    TileXR::TileXRDataType dtype, EpWindowConfig *out)
+{
+    return TileXREpBuildDispatchWindowConfigForExpertRanks(rankSize, expertRankSize, bs, h, topK, moeExpertNum,
+        sharedExpertNum, sharedExpertRankNum, dtype, 0, out);
+}
+
+int TileXREpBuildDispatchWindowConfigForExpertRanks(int64_t rankSize, int64_t expertRankSize, int64_t bs,
+    int64_t h, int64_t topK, int64_t moeExpertNum, int64_t sharedExpertNum, int64_t sharedExpertRankNum,
+    TileXR::TileXRDataType dtype, int64_t payloadExtraBytes, EpWindowConfig *out)
+{
+    const int64_t moeRankNum = expertRankSize - sharedExpertRankNum;
+    if (out == nullptr || !IsPositive(rankSize) || rankSize > TileXR::TILEXR_MAX_RANK_SIZE ||
+        !IsPositive(expertRankSize) || expertRankSize > rankSize || !IsPositive(bs) || !IsPositive(h) ||
+        !IsPositive(topK) || !IsPositive(moeExpertNum) || sharedExpertNum < 0 || sharedExpertRankNum < 0 ||
+        sharedExpertRankNum > expertRankSize || !IsPositive(moeRankNum) ||
+        moeExpertNum % moeRankNum != 0 || payloadExtraBytes < 0 || !TileXREpIsSupportedDataType(dtype)) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
 
@@ -83,19 +112,24 @@ int TileXREpBuildWindowConfig(int64_t rankSize, int64_t bs, int64_t h, int64_t t
     next.h = h;
     next.topK = topK;
     next.moeExpertNum = moeExpertNum;
-    next.localExpertNum = moeExpertNum / rankSize;
+    next.localExpertNum = sharedExpertRankNum > 0 ? moeExpertNum / moeRankNum : moeExpertNum / expertRankSize;
     next.dtypeBytes = TileXREpDataTypeSize(dtype);
 
-    if (!MulInt64(bs, topK, &next.maxRoutesPerSrc)) {
+    int64_t routesPerToken = 0;
+    if (!AddInt64(topK, sharedExpertNum, &routesPerToken) || !MulInt64(bs, routesPerToken, &next.maxRoutesPerSrc)) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
 
     if (!MulInt64(h, next.dtypeBytes, &next.rowBytes)) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
+    next.payloadRowBytes = next.rowBytes;
 
     int64_t payloadBytes = 0;
-    if (!MulInt64(next.maxRoutesPerSrc, next.rowBytes, &payloadBytes)) {
+    int64_t scaleBytes = 0;
+    if (!MulInt64(next.maxRoutesPerSrc, next.payloadRowBytes, &payloadBytes) ||
+        !MulInt64(next.maxRoutesPerSrc, payloadExtraBytes, &scaleBytes) ||
+        !AddInt64(payloadBytes, scaleBytes, &payloadBytes)) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
     next.payloadBytesPerSlot = TileXREpAlignUp(payloadBytes, kEpWindowAlignmentBytes);

@@ -1,6 +1,6 @@
 # TileXR EP Dispatch Tests
 
-This tree tests the standalone TileXR EP module under `src/ep`. It is independent from `examples/mc2`; the MVP route does not use HCCL window helpers, shmem, or UDMA.
+This tree tests the standalone TileXR EP module under `src/ep`. It is independent from `src/mc2`; the MVP route does not use HCCL window helpers, shmem, or UDMA.
 
 ## Source-Only Tests
 

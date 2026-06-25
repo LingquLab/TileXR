@@ -85,6 +85,8 @@ add_custom_command(
         -o "${TILEXR_EP_KERNEL_SO}"
     DEPENDS
         "${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_ep_dispatch_kernel.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_ep_dispatch_helpers.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_ep_combine_helpers.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/common/ep_window.h"
         "${CMAKE_SOURCE_DIR}/src/include/comm_args.h"
         "${CMAKE_SOURCE_DIR}/src/include/tilexr_sync.h"
