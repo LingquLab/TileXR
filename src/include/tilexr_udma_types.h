@@ -52,6 +52,7 @@ struct UDMAWQCtx {
     UDMADBMode dbMode;
     uint64_t dbAddr;
     uint32_t sl;
+    uint32_t localTokenId;
     uint64_t wqeCntAddr;
     uint64_t amoAddr;
 };

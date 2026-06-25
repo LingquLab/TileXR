@@ -346,6 +346,14 @@ int TileXRComm::RegisterUDMAMemory(GM_ADDR localPtr, size_t bytes, TileXRUDMAMem
         TILEXR_LOG(ERROR) << "TileXR UDMA memory registration failed: " << ret;
         return TILEXR_ERROR_INTERNAL;
     }
+    udmaInfoDev_ = udmaTransport_->GetUDMAInfoDev();
+    commArgs_.udmaInfoPtr = udmaInfoDev_;
+    ret = UpdateCommArgsDev();
+    if (ret != TILEXR_SUCCESS) {
+        TILEXR_LOG(ERROR) << "TileXRUDMARegister failed to refresh CommArgs after UDMA info update: " << ret;
+        udmaTransport_->UnregisterMemory(localPtr);
+        return ret;
+    }
 
     if (socketExchange_ == nullptr) {
         TILEXR_LOG(ERROR) << "TileXRUDMARegister requires live socket exchange";
@@ -646,10 +654,6 @@ int TileXRComm::EnablePeerAccess()
         } else if (physicalInfo_.physicalLink == PhysicalLink::RESERVED) {
             physicalInfo_.physicalLink = PhysicalLink::PCIE;
             commArgs_.extraFlag |= ExtraFlag::TOPO_PCIE;
-            if (rankSize_ > PING_PONG_SIZE) {
-                TILEXR_LOG(ERROR) << "do not support pcie > 2 rank! rankSize_ = " << rankSize_;
-                return TILEXR_ERROR_INTERNAL;
-            }
         }
 
         physicalInfo_.coreNum = GetCoreNum(physicalInfo_.chipName);
@@ -864,6 +868,30 @@ int TileXRComm::InitCommMem()
     }
 
     if (OpenIpcMem(names) != TILEXR_SUCCESS) {
+        const char *modeEnv = std::getenv("TILEXR_IPC_PID_MODE");
+        const bool forceSdid = modeEnv != nullptr && std::string(modeEnv) == "sdid";
+        if (forceSdid) {
+            TILEXR_LOG(WARN) << "OpenIpcMem failed after sdid setup, retry with pid setup";
+            string retryName;
+            if (setenv("TILEXR_IPC_PID_MODE", "pid_retry", 1) != 0 ||
+                SetMemoryName(retryName) != TILEXR_SUCCESS ||
+                SetIpcPidSdid(retryName, pids, sdids) != TILEXR_SUCCESS) {
+                TILEXR_LOG(ERROR) << "SetIpcPidSdid pid retry failed!";
+                setenv("TILEXR_IPC_PID_MODE", "sdid", 1);
+                return TILEXR_ERROR_INTERNAL;
+            }
+            retryName.resize(IPC_NAME_SIZE);
+            ret = GetName(retryName, names);
+            if (ret != TILEXR_SUCCESS) {
+                TILEXR_LOG(ERROR) << "GetName pid retry error! ret: " << ret;
+                setenv("TILEXR_IPC_PID_MODE", "sdid", 1);
+                return ret;
+            }
+            setenv("TILEXR_IPC_PID_MODE", "sdid", 1);
+            if (OpenIpcMem(names) == TILEXR_SUCCESS) {
+                return TILEXR_SUCCESS;
+            }
+        }
         TILEXR_LOG(ERROR) << "rank: " << rank_ << " OpenIpcMem failed!";
         return TILEXR_ERROR_INTERNAL;
     }
@@ -909,26 +937,35 @@ int TileXRComm::SetMemoryName(string &name)
 
 int TileXRComm::SetIpcPidSdid(string &name, const uint32_t *pids, const int64_t *sdids) const
 {
+    const char *modeEnv = std::getenv("TILEXR_IPC_PID_MODE");
+    bool forcePid = modeEnv != nullptr && std::string(modeEnv) == "pid";
+    bool forceSdid = modeEnv != nullptr && std::string(modeEnv) == "sdid";
+    bool defaultSdid =
+        physicalInfo_.chipName >= ChipName::CHIP_910_9391 && physicalInfo_.chipName < ChipName::CHIP_950;
+    bool useSdid = forceSdid || (!forcePid && defaultSdid);
+    TILEXR_LOG(INFO) << "SetIpcPidSdid mode=" << (useSdid ? "sdid" : "pid");
     for (int i = 0; i < rankSize_; ++i) {
         if (i == rank_) {
             continue;
         }
 
-        if (physicalInfo_.chipName < ChipName::CHIP_910_9391) {
-            // 910B
-            int32_t pidInt32 = pids[i];
+        int32_t pidInt32 = pids[i];
+        if (!useSdid) {
             int rtRet = rtSetIpcMemPid(name.c_str(), &pidInt32, HCCL_IPC_PID_ARRAY_SIZE);
             if (rtRet != RT_ERROR_NONE) {
                 TILEXR_LOG(ERROR) << "err " << rtRet;
                 return TILEXR_ERROR_INTERNAL;
             }
         } else {
-            // 910A3
-            int32_t pidInt32 = pids[i];
             int rtRet = rtSetIpcMemorySuperPodPid(name.c_str(), sdids[i], &pidInt32, HCCL_IPC_PID_ARRAY_SIZE);
             if (rtRet != RT_ERROR_NONE) {
-                TILEXR_LOG(ERROR) << "err " << rtRet;
-                return TILEXR_ERROR_INTERNAL;
+                TILEXR_LOG(WARN) << "rtSetIpcMemorySuperPodPid err " << rtRet
+                                  << ", fallback to rtSetIpcMemPid";
+                rtRet = rtSetIpcMemPid(name.c_str(), &pidInt32, HCCL_IPC_PID_ARRAY_SIZE);
+                if (rtRet != RT_ERROR_NONE) {
+                    TILEXR_LOG(ERROR) << "err " << rtRet;
+                    return TILEXR_ERROR_INTERNAL;
+                }
             }
         }
     }

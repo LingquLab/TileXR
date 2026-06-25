@@ -182,23 +182,28 @@ __aicore__ inline void UDMAFillNotifyData(
 
 __aicore__ inline void UDMAFillSqeCtx(
     __gm__ UDMASqeCtx* sqeCtx, __gm__ uint8_t* remoteAddr, __gm__ UDMAMemInfo* remoteMemInfo,
-    uint32_t curHead, UDMAOpcode opcode, const UDMASignalParams* signalParams)
+    uint32_t curHead, uint32_t depth, UDMAOpcode opcode, const UDMASignalParams* signalParams)
 {
+    sqeCtx->sqeBbIdx = curHead % depth;
     sqeCtx->opcode = static_cast<uint32_t>(opcode);
     sqeCtx->flag = 0b00100010;
+    sqeCtx->rsv0 = 0;
     sqeCtx->nf = 0;
     sqeCtx->tokenEn = remoteMemInfo->tokenValueValid;
     sqeCtx->rmtJettyType = remoteMemInfo->rmtJettyType;
-    sqeCtx->owner = (curHead & TILEXR_UDMA_SQ_BB_COUNT) == 0 ? 1 : 0;
+    sqeCtx->owner = (curHead & depth) == 0 ? 1 : 0;
     sqeCtx->targetHint = remoteMemInfo->targetHint;
+    sqeCtx->rsv1 = 0;
     sqeCtx->inlineMsgLen = 0;
     sqeCtx->tpId = remoteMemInfo->tpn;
     sqeCtx->sgeNum = 1;
     sqeCtx->rmtJettyOrSegId = remoteMemInfo->tid;
+    sqeCtx->rsv2 = 0;
     sqeCtx->rmtTokenValue = remoteMemInfo->rmtTokenValue;
     sqeCtx->udfType = 0;
     sqeCtx->reduceDataType = 0;
     sqeCtx->reduceOpcode = 0;
+    sqeCtx->rsv3 = 0;
     uint64_t remoteAddrValue = reinterpret_cast<uint64_t>(remoteAddr);
     sqeCtx->rmtAddrLOrTokenId = remoteAddrValue & 0xFFFFFFFF;
     sqeCtx->rmtAddrHOrTokenValue = (remoteAddrValue >> 32) & 0xFFFFFFFF;
@@ -209,10 +214,11 @@ __aicore__ inline void UDMAFillSqeCtx(
 }
 
 __aicore__ inline void UDMAFillSgeCtx(
-    __gm__ UDMASgeCtx* sgeCtx, uint64_t messageLen, __gm__ uint8_t* localAddr)
+    __gm__ UDMASgeCtx* sgeCtx, uint64_t messageLen, __gm__ uint8_t* localAddr,
+    __gm__ UDMAWQCtx* qpCtxEntry)
 {
     sgeCtx->len = messageLen;
-    sgeCtx->tokenId = 0;
+    sgeCtx->tokenId = qpCtxEntry->localTokenId;
     sgeCtx->va = reinterpret_cast<uint64_t>(localAddr);
 }
 
@@ -240,18 +246,19 @@ __aicore__ inline void UDMAPostSend(
 {
     __gm__ UDMAWQCtx* qpCtxEntry = UDMAGetWQCtx(udmaInfo, pe, qpIdx);
     uint32_t wqeSize = 1U << qpCtxEntry->baseBkShift;
+    uint32_t depth = qpCtxEntry->depth;
     uint32_t curHead = ld_dev(reinterpret_cast<__gm__ uint32_t*>(qpCtxEntry->headAddr), 0);
     uint32_t wqeCnt = ld_dev(reinterpret_cast<__gm__ uint32_t*>(qpCtxEntry->wqeCntAddr), 0);
     UDMAPollCQWhenSQOverflow(udmaInfo, qpCtxEntry, wqeCnt, pe, qpIdx);
 
     __gm__ UDMAMemInfo* remoteMemInfo = UDMAGetRemoteMemInfo(udmaInfo, pe);
     __gm__ uint8_t* wqeAddr =
-        reinterpret_cast<__gm__ uint8_t*>(qpCtxEntry->bufAddr + wqeSize * (curHead % TILEXR_UDMA_SQ_BB_COUNT));
+        reinterpret_cast<__gm__ uint8_t*>(qpCtxEntry->bufAddr + wqeSize * (curHead % depth));
     __gm__ UDMASqeCtx* sqeCtx = reinterpret_cast<__gm__ UDMASqeCtx*>(wqeAddr);
-    UDMAFillSqeCtx(sqeCtx, remoteAddr, remoteMemInfo, curHead, opcode, signalParams);
+    UDMAFillSqeCtx(sqeCtx, remoteAddr, remoteMemInfo, curHead, qpCtxEntry->depth, opcode, signalParams);
 
     __gm__ UDMASgeCtx* sgeCtx = reinterpret_cast<__gm__ UDMASgeCtx*>(UDMAGetSgeCtxAddr(wqeAddr, opcode));
-    UDMAFillSgeCtx(sgeCtx, messageLen, localAddr);
+    UDMAFillSgeCtx(sgeCtx, messageLen, localAddr, qpCtxEntry);
     uint32_t wqeBbCnt = UDMAWqeBBCnt(opcode);
     UDMACleanCacheLines(wqeAddr, wqeSize * wqeBbCnt);
     curHead += wqeBbCnt;
@@ -366,6 +373,15 @@ __aicore__ inline void UDMAQuiet(const __gm__ CommArgs* args, int targetRank)
     __gm__ UDMAWQCtx* qpCtxEntry = UDMAGetWQCtx(udmaInfo, targetRank, 0);
     uint32_t wqeCnt = ld_dev(reinterpret_cast<__gm__ uint32_t*>(qpCtxEntry->wqeCntAddr), 0);
     (void)UDMAPollCQ(udmaInfo, targetRank, 0, wqeCnt);
+}
+
+__aicore__ inline uint32_t UDMAQuietStatus(const __gm__ CommArgs* args, int targetRank)
+{
+    if (!UDMAEnabled(args)) return 0xFFFFFFFFU;
+    __gm__ UDMAInfo* udmaInfo = GetUDMAInfo(args);
+    __gm__ UDMAWQCtx* qpCtxEntry = UDMAGetWQCtx(udmaInfo, targetRank, 0);
+    uint32_t wqeCnt = ld_dev(reinterpret_cast<__gm__ uint32_t*>(qpCtxEntry->wqeCntAddr), 0);
+    return UDMAPollCQ(udmaInfo, targetRank, 0, wqeCnt);
 }
 
 } // namespace TileXR
