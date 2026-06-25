@@ -26,15 +26,6 @@ int TileXRAllGather(void *sendBuf, void *recvBuf, int64_t sendCount,
 int TileXRAllToAll(void *sendBuf, void *recvBuf, int64_t sendCount,
                    TileXR::TileXRDataType dataType, TileXRCommPtr comm,
                    aclrtStream stream);
-int TileXRAllReduce(void *sendBuf, void *recvBuf, int64_t count,
-                    TileXR::TileXRDataType dataType, TileXR::TileXRReduceOp op,
-                    TileXRCommPtr comm, aclrtStream stream);
-int TileXRReduceScatter(void *sendBuf, void *recvBuf, int64_t recvCount,
-                        TileXR::TileXRDataType dataType, TileXR::TileXRReduceOp op,
-                        TileXRCommPtr comm, aclrtStream stream);
-int TileXRBroadcast(void *buf, int64_t count,
-                    TileXR::TileXRDataType dataType, int root,
-                    TileXRCommPtr comm, aclrtStream stream);
 
 }
 

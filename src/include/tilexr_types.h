@@ -20,6 +20,7 @@ constexpr int TILEXR_ERROR_MKIRT = -2;
 constexpr int TILEXR_ERROR_PARA_CHECK_FAIL = -3;
 constexpr int TILEXR_ERROR_INTERNAL = -4;
 constexpr int TILEXR_ERROR_TIMEOUT = -5;
+constexpr int TILEXR_ERROR_NOT_SUPPORT = -6;
 constexpr int TILEXR_ERROR_NOT_FOUND = -7;
 constexpr int64_t TILEXR_INVALID_VALUE = -1;
 
@@ -73,14 +74,6 @@ enum TileXRDataType {
     TILEXR_DATA_TYPE_FP8E5M2 = 16,
     TILEXR_DATA_TYPE_FP8E8M0 = 17,
     TILEXR_DATA_TYPE_RESERVED = 255
-};
-
-enum TileXRReduceOp {
-    TILEXR_REDUCE_SUM = 0,
-    TILEXR_REDUCE_PROD = 1,
-    TILEXR_REDUCE_MAX = 2,
-    TILEXR_REDUCE_MIN = 3,
-    TILEXR_REDUCE_RESERVED = 255
 };
 
 // 包含 物理链路、芯片名称 信息。

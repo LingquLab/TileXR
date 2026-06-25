@@ -238,7 +238,7 @@ public:
         AscendC::WaitFlag<HardEvent::MTE2_S>(EVENT_ID0);
         GlobalTensor<int64_t> globalSet;
         globalSet.SetGlobalBuffer(setAddr, FLAG_UNIT_INT_NUM);
-        LocalTensor<int64_t> localSet = tBuf.GetWithOffset<int64_t>(1, 0);
+        LocalTensor<int64_t> localSet = tBuf.GetWithOffset<int64_t>(FLAG_UNIT_INT_NUM, 0);
         localSet.SetValue(0, setValue);
 
         // 将global同步标识拷贝至local
@@ -260,7 +260,7 @@ public:
     {
         GlobalTensor<int64_t> globalWait;
         globalWait.SetGlobalBuffer(waitAddr, FLAG_UNIT_INT_NUM);
-        LocalTensor<int64_t> localWait = tBuf.GetWithOffset<int64_t>(1, 0);
+        LocalTensor<int64_t> localWait = tBuf.GetWithOffset<int64_t>(FLAG_UNIT_INT_NUM, 0);
         // 将global拷贝至local
         DataCopy(localWait, globalWait, FLAG_UNIT_INT_NUM);
         AscendC::SetFlag<HardEvent::MTE2_S>(EVENT_ID0);
