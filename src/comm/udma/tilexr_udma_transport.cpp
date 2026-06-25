@@ -33,6 +33,20 @@ uint32_t Log2Uint64(uint64_t value)
     return result;
 }
 
+uint32_t GetEnvUint(const char* name, uint32_t defaultValue, uint32_t minValue, uint32_t maxValue)
+{
+    const char* value = std::getenv(name);
+    if (value == nullptr || value[0] == '\0') {
+        return defaultValue;
+    }
+    char* end = nullptr;
+    unsigned long parsed = std::strtoul(value, &end, 10);
+    if (end == value || *end != '\0' || parsed < minValue || parsed > maxValue) {
+        return defaultValue;
+    }
+    return static_cast<uint32_t>(parsed);
+}
+
 HccpEid SwapEidForDevice(const HccpEid& hccpEid)
 {
     HccpEid swapped {};
@@ -293,20 +307,20 @@ struct TileXRUDMATransport::PerEidState {
     void* ctxHandle = nullptr;
     void* tokenHandle = nullptr;
     void* chanHandle = nullptr;
-    void* cqHandle = nullptr;
-    void* qpHandle = nullptr;
-    CqInfoT cqInfo {};
-    QpCreateInfo qpInfo {};
-    std::vector<void*> remoteQpHandles;
-    std::vector<uint32_t> tpnList;
-    void* cqPiAddr = nullptr;
-    void* cqCiAddr = nullptr;
-    void* sqPiAddr = nullptr;
-    void* sqCiAddr = nullptr;
-    void* wqeCntAddr = nullptr;
-    void* amoAddr = nullptr;
-    UDMAWQCtx localWq {};
-    UDMACQCtx localCq {};
+    std::vector<void*> cqHandles;
+    std::vector<CqInfoT> cqInfos;
+    std::vector<void*> qpHandles;
+    std::vector<QpCreateInfo> qpInfos;
+    std::vector<std::vector<void*>> remoteQpHandlesByQp;
+    std::vector<std::vector<uint32_t>> tpnListByQp;
+    std::vector<void*> cqPiAddrs;
+    std::vector<void*> cqCiAddrs;
+    std::vector<void*> sqPiAddrs;
+    std::vector<void*> sqCiAddrs;
+    std::vector<void*> wqeCntAddrs;
+    std::vector<void*> amoAddrs;
+    std::vector<UDMAWQCtx> localWqs;
+    std::vector<UDMACQCtx> localCqs;
 };
 
 TileXRUDMATransport::TileXRUDMATransport() = default;
@@ -328,6 +342,7 @@ int TileXRUDMATransport::Init(const TileXRUDMATransportOptions& options)
         return TILEXR_ERROR_PARA_CHECK_FAIL;
     }
     options_ = options;
+    qpNum_ = GetEnvUint("TILEXR_UDMA_QP_NUM", 1, 1, 64);
 
     int ret = loader_.Load();
     if (ret != TILEXR_HCCP_LOADER_SUCCESS) {
@@ -586,8 +601,20 @@ int TileXRUDMATransport::CreateQueues()
         state.eidIndex = ctxEntry.first;
         state.ctxHandle = ctxEntry.second;
         state.tokenHandle = tokenHandleByEid_[ctxEntry.first];
-        state.remoteQpHandles.assign(options_.rankSize, nullptr);
-        state.tpnList.assign(options_.rankSize, 0);
+        state.qpHandles.assign(qpNum_, nullptr);
+        state.qpInfos.resize(qpNum_);
+        state.remoteQpHandlesByQp.assign(qpNum_, std::vector<void*>(options_.rankSize, nullptr));
+        state.tpnListByQp.assign(qpNum_, std::vector<uint32_t>(options_.rankSize, 0));
+        state.cqHandles.assign(qpNum_, nullptr);
+        state.cqInfos.resize(qpNum_);
+        state.cqPiAddrs.assign(qpNum_, nullptr);
+        state.cqCiAddrs.assign(qpNum_, nullptr);
+        state.sqPiAddrs.assign(qpNum_, nullptr);
+        state.sqCiAddrs.assign(qpNum_, nullptr);
+        state.wqeCntAddrs.assign(qpNum_, nullptr);
+        state.amoAddrs.assign(qpNum_, nullptr);
+        state.localWqs.resize(qpNum_);
+        state.localCqs.resize(qpNum_);
 
         ChanInfoT chanInfo {};
         chanInfo.in.dataPlaneFlag.bs.poolCqCstm = 1;
@@ -596,62 +623,66 @@ int TileXRUDMATransport::CreateQueues()
             return TILEXR_ERROR_INTERNAL;
         }
 
-        state.cqInfo.in.chanHandle = state.chanHandle;
-        state.cqInfo.in.depth = TILEXR_UDMA_CQ_DEPTH;
-        state.cqInfo.in.ub.mode = JFC_MODE_USER_CTL_NORMAL;
-        ret = loader_.RaCtxCqCreate(state.ctxHandle, &state.cqInfo, &state.cqHandle);
-        if (ret != 0) {
-            return TILEXR_ERROR_INTERNAL;
-        }
-        state.localCq.cqn = 0;
-        state.localCq.bufAddr = state.cqInfo.out.bufAddr;
-        state.localCq.baseBkShift = Log2Uint64(state.cqInfo.out.cqeSize);
-        state.localCq.depth = state.cqInfo.in.depth;
-        if (AllocDeviceScalar(&state.cqPiAddr, sizeof(uint32_t)) != TILEXR_SUCCESS ||
-            AllocDeviceScalar(&state.cqCiAddr, sizeof(uint32_t)) != TILEXR_SUCCESS) {
-            return TILEXR_ERROR_INTERNAL;
-        }
-        state.localCq.headAddr = reinterpret_cast<uintptr_t>(state.cqPiAddr);
-        state.localCq.tailAddr = reinterpret_cast<uintptr_t>(state.cqCiAddr);
-        state.localCq.dbMode = UDMADBMode::SW_DB;
-        state.localCq.dbAddr = state.cqInfo.out.swdbAddr;
+        for (uint32_t qpIdx = 0; qpIdx < qpNum_; ++qpIdx) {
+            state.cqInfos[qpIdx].in.chanHandle = state.chanHandle;
+            state.cqInfos[qpIdx].in.depth = TILEXR_UDMA_CQ_DEPTH;
+            state.cqInfos[qpIdx].in.ub.mode = JFC_MODE_USER_CTL_NORMAL;
+            ret = loader_.RaCtxCqCreate(state.ctxHandle, &state.cqInfos[qpIdx], &state.cqHandles[qpIdx]);
+            if (ret != 0) {
+                return TILEXR_ERROR_INTERNAL;
+            }
+            auto& localCq = state.localCqs[qpIdx];
+            localCq.cqn = qpIdx;
+            localCq.bufAddr = state.cqInfos[qpIdx].out.bufAddr;
+            localCq.baseBkShift = Log2Uint64(state.cqInfos[qpIdx].out.cqeSize);
+            localCq.depth = state.cqInfos[qpIdx].in.depth;
+            if (AllocDeviceScalar(&state.cqPiAddrs[qpIdx], sizeof(uint32_t)) != TILEXR_SUCCESS ||
+                AllocDeviceScalar(&state.cqCiAddrs[qpIdx], sizeof(uint32_t)) != TILEXR_SUCCESS) {
+                return TILEXR_ERROR_INTERNAL;
+            }
+            localCq.headAddr = reinterpret_cast<uintptr_t>(state.cqPiAddrs[qpIdx]);
+            localCq.tailAddr = reinterpret_cast<uintptr_t>(state.cqCiAddrs[qpIdx]);
+            localCq.dbMode = UDMADBMode::SW_DB;
+            localCq.dbAddr = state.cqInfos[qpIdx].out.swdbAddr;
 
-        QpCreateAttr qpAttr {};
-        qpAttr.scqHandle = state.cqHandle;
-        qpAttr.rcqHandle = state.cqHandle;
-        qpAttr.srqHandle = state.cqHandle;
-        qpAttr.sqDepth = TILEXR_UDMA_SQ_DEPTH;
-        qpAttr.rqDepth = TILEXR_UDMA_RQ_DEPTH_DEFAULT;
-        qpAttr.transportMode = CONN_RM;
-        qpAttr.ub.mode = JETTY_MODE_USER_CTL_NORMAL;
-        qpAttr.ub.flag.value = 1;
-        qpAttr.ub.jfsFlag.value = 2;
-        qpAttr.ub.tokenValue = TILEXR_UDMA_TOKEN_VALUE;
-        qpAttr.ub.rnrRetry = 7;
-        qpAttr.ub.extMode.piType = 0;
-        qpAttr.ub.extMode.cstmFlag.bs.sqCstm = 0;
-        qpAttr.ub.extMode.sqebbNum = TILEXR_UDMA_SQ_DEPTH;
-        qpAttr.ub.tokenIdHandle = state.tokenHandle;
-        ret = loader_.RaCtxQpCreate(state.ctxHandle, &qpAttr, &state.qpInfo, &state.qpHandle);
-        if (ret != 0) {
-            return TILEXR_ERROR_INTERNAL;
+            QpCreateAttr qpAttr {};
+            qpAttr.scqHandle = state.cqHandles[qpIdx];
+            qpAttr.rcqHandle = state.cqHandles[qpIdx];
+            qpAttr.srqHandle = state.cqHandles[qpIdx];
+            qpAttr.sqDepth = TILEXR_UDMA_SQ_DEPTH;
+            qpAttr.rqDepth = TILEXR_UDMA_RQ_DEPTH_DEFAULT;
+            qpAttr.transportMode = CONN_RM;
+            qpAttr.ub.mode = JETTY_MODE_USER_CTL_NORMAL;
+            qpAttr.ub.flag.value = 1;
+            qpAttr.ub.jfsFlag.value = 2;
+            qpAttr.ub.tokenValue = TILEXR_UDMA_TOKEN_VALUE;
+            qpAttr.ub.rnrRetry = 7;
+            qpAttr.ub.extMode.piType = 0;
+            qpAttr.ub.extMode.cstmFlag.bs.sqCstm = 0;
+            qpAttr.ub.extMode.sqebbNum = TILEXR_UDMA_SQ_DEPTH;
+            qpAttr.ub.tokenIdHandle = state.tokenHandle;
+            ret = loader_.RaCtxQpCreate(state.ctxHandle, &qpAttr, &state.qpInfos[qpIdx], &state.qpHandles[qpIdx]);
+            if (ret != 0) {
+                return TILEXR_ERROR_INTERNAL;
+            }
+            auto& localWq = state.localWqs[qpIdx];
+            localWq.wqn = qpIdx;
+            localWq.bufAddr = state.qpInfos[qpIdx].ub.sqBuffVa;
+            localWq.baseBkShift = Log2Uint64(state.qpInfos[qpIdx].ub.wqebbSize);
+            localWq.depth = TILEXR_UDMA_SQ_BB_COUNT;
+            if (AllocDeviceScalar(&state.sqPiAddrs[qpIdx], sizeof(uint32_t)) != TILEXR_SUCCESS ||
+                AllocDeviceScalar(&state.sqCiAddrs[qpIdx], sizeof(uint32_t)) != TILEXR_SUCCESS ||
+                AllocDeviceScalar(&state.wqeCntAddrs[qpIdx], sizeof(uint32_t)) != TILEXR_SUCCESS ||
+                AllocDeviceScalar(&state.amoAddrs[qpIdx], sizeof(uint64_t)) != TILEXR_SUCCESS) {
+                return TILEXR_ERROR_INTERNAL;
+            }
+            localWq.headAddr = reinterpret_cast<uintptr_t>(state.sqPiAddrs[qpIdx]);
+            localWq.tailAddr = reinterpret_cast<uintptr_t>(state.sqCiAddrs[qpIdx]);
+            localWq.dbMode = UDMADBMode::SW_DB;
+            localWq.dbAddr = state.qpInfos[qpIdx].ub.dbAddr;
+            localWq.wqeCntAddr = reinterpret_cast<uintptr_t>(state.wqeCntAddrs[qpIdx]);
+            localWq.amoAddr = reinterpret_cast<uintptr_t>(state.amoAddrs[qpIdx]);
         }
-        state.localWq.wqn = 0;
-        state.localWq.bufAddr = state.qpInfo.ub.sqBuffVa;
-        state.localWq.baseBkShift = Log2Uint64(state.qpInfo.ub.wqebbSize);
-        state.localWq.depth = TILEXR_UDMA_SQ_BB_COUNT;
-        if (AllocDeviceScalar(&state.sqPiAddr, sizeof(uint32_t)) != TILEXR_SUCCESS ||
-            AllocDeviceScalar(&state.sqCiAddr, sizeof(uint32_t)) != TILEXR_SUCCESS ||
-            AllocDeviceScalar(&state.wqeCntAddr, sizeof(uint32_t)) != TILEXR_SUCCESS ||
-            AllocDeviceScalar(&state.amoAddr, sizeof(uint64_t)) != TILEXR_SUCCESS) {
-            return TILEXR_ERROR_INTERNAL;
-        }
-        state.localWq.headAddr = reinterpret_cast<uintptr_t>(state.sqPiAddr);
-        state.localWq.tailAddr = reinterpret_cast<uintptr_t>(state.sqCiAddr);
-        state.localWq.dbMode = UDMADBMode::SW_DB;
-        state.localWq.dbAddr = state.qpInfo.ub.dbAddr;
-        state.localWq.wqeCntAddr = reinterpret_cast<uintptr_t>(state.wqeCntAddr);
-        state.localWq.amoAddr = reinterpret_cast<uintptr_t>(state.amoAddr);
         states_[state.eidIndex] = state;
     }
     return states_.empty() ? TILEXR_ERROR_INTERNAL : TILEXR_SUCCESS;
@@ -659,28 +690,32 @@ int TileXRUDMATransport::CreateQueues()
 
 int TileXRUDMATransport::ImportQueues()
 {
-    std::vector<QpImportInfoT> localImports(eidCount_);
-    std::vector<QpKeyT> localKeys(eidCount_);
+    const size_t routeCount = static_cast<size_t>(eidCount_) * qpNum_;
+    std::vector<QpImportInfoT> localImports(routeCount);
+    std::vector<QpKeyT> localKeys(routeCount);
     for (const auto& stateEntry : states_) {
         const auto& state = stateEntry.second;
         if (state.eidIndex >= eidCount_) {
             return TILEXR_ERROR_INTERNAL;
         }
-        localImports[state.eidIndex].in.ub.mode = JETTY_IMPORT_MODE_NORMAL;
-        localImports[state.eidIndex].in.ub.tokenValue = TILEXR_UDMA_TOKEN_VALUE;
-        localImports[state.eidIndex].in.ub.policy = JETTY_GRP_POLICY_RR;
-        localImports[state.eidIndex].in.ub.type = TARGET_TYPE_JETTY;
-        localImports[state.eidIndex].in.ub.flag.bs.tokenPolicy = TOKEN_POLICY_PLAIN_TEXT;
-        localImports[state.eidIndex].in.ub.tpType = 1;
-        localKeys[state.eidIndex] = state.qpInfo.key;
+        for (uint32_t qpIdx = 0; qpIdx < qpNum_; ++qpIdx) {
+            const size_t localIndex = static_cast<size_t>(state.eidIndex) * qpNum_ + qpIdx;
+            localImports[localIndex].in.ub.mode = JETTY_IMPORT_MODE_NORMAL;
+            localImports[localIndex].in.ub.tokenValue = TILEXR_UDMA_TOKEN_VALUE;
+            localImports[localIndex].in.ub.policy = JETTY_GRP_POLICY_RR;
+            localImports[localIndex].in.ub.type = TARGET_TYPE_JETTY;
+            localImports[localIndex].in.ub.flag.bs.tokenPolicy = TOKEN_POLICY_PLAIN_TEXT;
+            localImports[localIndex].in.ub.tpType = 1;
+            localKeys[localIndex] = state.qpInfos[qpIdx].key;
+        }
     }
 
-    std::vector<QpImportInfoT> allImports(options_.rankSize * eidCount_);
+    std::vector<QpImportInfoT> allImports(options_.rankSize * routeCount);
     int ret = options_.exchange->AllGather(localImports.data(), localImports.size(), allImports.data());
     if (ret != TILEXR_SUCCESS) {
         return ret;
     }
-    std::vector<QpKeyT> allKeys(options_.rankSize * eidCount_);
+    std::vector<QpKeyT> allKeys(options_.rankSize * routeCount);
     ret = options_.exchange->AllGather(localKeys.data(), localKeys.size(), allKeys.data());
     if (ret != TILEXR_SUCCESS) {
         return ret;
@@ -700,13 +735,16 @@ int TileXRUDMATransport::ImportQueues()
             if (remoteEid >= eidCount_) {
                 return TILEXR_ERROR_INTERNAL;
             }
-            QpImportInfoT importInfo = allImports[peer * eidCount_ + remoteEid];
-            importInfo.in.key = allKeys[peer * eidCount_ + remoteEid];
-            ret = loader_.RaCtxQpImport(state.ctxHandle, &importInfo, &state.remoteQpHandles[peer]);
-            if (ret != 0) {
-                return TILEXR_ERROR_INTERNAL;
+            for (uint32_t qpIdx = 0; qpIdx < qpNum_; ++qpIdx) {
+                const size_t remoteIndex = (static_cast<size_t>(peer) * eidCount_ + remoteEid) * qpNum_ + qpIdx;
+                QpImportInfoT importInfo = allImports[remoteIndex];
+                importInfo.in.key = allKeys[remoteIndex];
+                ret = loader_.RaCtxQpImport(state.ctxHandle, &importInfo, &state.remoteQpHandlesByQp[qpIdx][peer]);
+                if (ret != 0) {
+                    return TILEXR_ERROR_INTERNAL;
+                }
+                state.tpnListByQp[qpIdx][peer] = importInfo.out.ub.tpn;
             }
-            state.tpnList[peer] = importInfo.out.ub.tpn;
         }
     }
     return TILEXR_SUCCESS;
@@ -768,11 +806,12 @@ int TileXRUDMATransport::RefreshUDMAInfo()
         return TILEXR_ERROR_INTERNAL;
     }
 
-    std::vector<UDMAWQCtx> sq(options_.rankSize);
-    std::vector<UDMAWQCtx> rq(options_.rankSize);
-    std::vector<UDMACQCtx> scq(options_.rankSize);
-    std::vector<UDMACQCtx> rcq(options_.rankSize);
-    std::vector<UDMAMemInfo> mem(options_.rankSize);
+    const size_t queueEntries = static_cast<size_t>(options_.rankSize) * qpNum_;
+    std::vector<UDMAWQCtx> sq(queueEntries);
+    std::vector<UDMAWQCtx> rq(queueEntries);
+    std::vector<UDMACQCtx> scq(queueEntries);
+    std::vector<UDMACQCtx> rcq(queueEntries);
+    std::vector<UDMAMemInfo> mem(queueEntries);
 
     for (int rank = 0; rank < options_.rankSize; ++rank) {
         uint32_t localEid = fallbackEid;
@@ -786,26 +825,29 @@ int TileXRUDMATransport::RefreshUDMAInfo()
             stateIt = fallbackIt;
         }
         const auto& state = stateIt->second;
-        sq[rank] = state.localWq;
-        rq[rank] = state.localWq;
-        scq[rank] = state.localCq;
-        rcq[rank] = state.localCq;
-        if (rank == options_.rank) {
-            const auto localMemIt = localMemInfoByEid_.find(localEid);
-            if (localMemIt != localMemInfoByEid_.end()) {
-                mem[rank] = localMemIt->second;
+        for (uint32_t qpIdx = 0; qpIdx < qpNum_; ++qpIdx) {
+            const size_t entryIndex = static_cast<size_t>(rank) * qpNum_ + qpIdx;
+            sq[entryIndex] = state.localWqs[qpIdx];
+            rq[entryIndex] = state.localWqs[qpIdx];
+            scq[entryIndex] = state.localCqs[qpIdx];
+            rcq[entryIndex] = state.localCqs[qpIdx];
+            if (rank == options_.rank) {
+                const auto localMemIt = localMemInfoByEid_.find(localEid);
+                if (localMemIt != localMemInfoByEid_.end()) {
+                    mem[entryIndex] = localMemIt->second;
+                }
+            } else {
+                mem[entryIndex] = allMem[rank * eidCount_ + remoteEid];
+                mem[entryIndex].tpn = state.tpnListByQp[qpIdx][rank];
             }
-        } else {
-            mem[rank] = allMem[rank * eidCount_ + remoteEid];
-            mem[rank].tpn = state.tpnList[rank];
+            mem[entryIndex].eidAddr = reinterpret_cast<uint64_t>(
+                eidTableDev_ + (rank * eidCount_ + remoteEid) * sizeof(HccpEid));
         }
-        mem[rank].eidAddr = reinterpret_cast<uint64_t>(
-            eidTableDev_ + (rank * eidCount_ + remoteEid) * sizeof(HccpEid));
     }
 
     if (udmaInfoDev_ == nullptr) {
         const size_t oneRankSize = 2 * sizeof(UDMAWQCtx) + 2 * sizeof(UDMACQCtx) + sizeof(UDMAMemInfo);
-        udmaInfoSize_ = static_cast<uint32_t>(sizeof(UDMAInfo) + oneRankSize * options_.rankSize);
+        udmaInfoSize_ = static_cast<uint32_t>(sizeof(UDMAInfo) + oneRankSize * options_.rankSize * qpNum_);
         ret = aclrtMalloc(reinterpret_cast<void**>(&udmaInfoDev_), udmaInfoSize_, ACL_MEM_MALLOC_HUGE_FIRST);
         if (ret != ACL_SUCCESS) {
             return TILEXR_ERROR_INTERNAL;
@@ -814,7 +856,7 @@ int TileXRUDMATransport::RefreshUDMAInfo()
 
     UDMAInfo info {};
     std::vector<uint8_t> image;
-    ret = BuildUDMAInfoImage(reinterpret_cast<uintptr_t>(udmaInfoDev_), sq, rq, scq, rcq, mem, info, image);
+    ret = BuildUDMAInfoImage(reinterpret_cast<uintptr_t>(udmaInfoDev_), qpNum_, sq, rq, scq, rcq, mem, info, image);
     if (ret != TILEXR_UDMA_LAYOUT_SUCCESS) {
         return TILEXR_ERROR_PARA_CHECK_FAIL;
     }
@@ -1002,26 +1044,44 @@ void TileXRUDMATransport::CleanupQueues()
 {
     for (auto& stateEntry : states_) {
         auto& state = stateEntry.second;
-        for (void* remoteQp : state.remoteQpHandles) {
-            if (remoteQp != nullptr && state.ctxHandle != nullptr) {
-                loader_.RaCtxQpUnimport(state.ctxHandle, remoteQp);
+        for (auto& remoteQpHandles : state.remoteQpHandlesByQp) {
+            for (void* remoteQp : remoteQpHandles) {
+                if (remoteQp != nullptr && state.ctxHandle != nullptr) {
+                    loader_.RaCtxQpUnimport(state.ctxHandle, remoteQp);
+                }
             }
         }
-        if (state.qpHandle != nullptr) {
-            loader_.RaCtxQpDestroy(state.qpHandle);
+        for (void* qpHandle : state.qpHandles) {
+            if (qpHandle != nullptr) {
+                loader_.RaCtxQpDestroy(qpHandle);
+            }
         }
-        if (state.cqHandle != nullptr && state.ctxHandle != nullptr) {
-            loader_.RaCtxCqDestroy(state.ctxHandle, state.cqHandle);
+        for (void* cqHandle : state.cqHandles) {
+            if (cqHandle != nullptr && state.ctxHandle != nullptr) {
+                loader_.RaCtxCqDestroy(state.ctxHandle, cqHandle);
+            }
         }
         if (state.chanHandle != nullptr && state.ctxHandle != nullptr) {
             loader_.RaCtxChanDestroy(state.ctxHandle, state.chanHandle);
         }
-        FreeDeviceScalar(state.cqPiAddr);
-        FreeDeviceScalar(state.cqCiAddr);
-        FreeDeviceScalar(state.sqPiAddr);
-        FreeDeviceScalar(state.sqCiAddr);
-        FreeDeviceScalar(state.wqeCntAddr);
-        FreeDeviceScalar(state.amoAddr);
+        for (void*& ptr : state.cqPiAddrs) {
+            FreeDeviceScalar(ptr);
+        }
+        for (void*& ptr : state.cqCiAddrs) {
+            FreeDeviceScalar(ptr);
+        }
+        for (void*& ptr : state.sqPiAddrs) {
+            FreeDeviceScalar(ptr);
+        }
+        for (void*& ptr : state.sqCiAddrs) {
+            FreeDeviceScalar(ptr);
+        }
+        for (void*& ptr : state.wqeCntAddrs) {
+            FreeDeviceScalar(ptr);
+        }
+        for (void*& ptr : state.amoAddrs) {
+            FreeDeviceScalar(ptr);
+        }
     }
     states_.clear();
 }
