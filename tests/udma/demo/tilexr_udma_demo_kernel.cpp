@@ -17,7 +17,7 @@ constexpr uint32_t TILEXR_UDMA_DEMO_P2P_MAX_DEBUG_BLOCKS = 16;
 constexpr uint32_t TILEXR_UDMA_DEMO_MEMORY_VISIBLE_ACK_BYTES = 32;
 constexpr uint32_t TILEXR_UDMA_DEMO_MEMORY_VISIBLE_ACK_VALUE = 0xace00001u;
 constexpr uint32_t TILEXR_UDMA_DEMO_MEMORY_VISIBLE_ACK_FLAG_BASE =
-    static_cast<uint32_t>(TileXR::IPC_DATA_OFFSET) / 2U;
+    static_cast<uint32_t>(TileXR::IPC_DATA_OFFSET);
 
 __aicore__ inline uint32_t TileXRUdmaDemoCeilDiv(uint32_t value, uint32_t divisor)
 {
@@ -171,6 +171,14 @@ __aicore__ inline bool TileXRUdmaDemoCheckMemoryVisibleAck(
     AscendC::SetFlag<AscendC::HardEvent::MTE2_S>(EVENT_ID0);
     AscendC::WaitFlag<AscendC::HardEvent::MTE2_S>(EVENT_ID0);
     return local.GetValue(0) == expectedValue;
+}
+
+__aicore__ inline bool TileXRUdmaDemoCheckMemoryVisibleAckScalar(
+    GM_ADDR ackGM, uint32_t expectedValue)
+{
+    AscendC::GlobalTensor<uint32_t> ackGlobal;
+    ackGlobal.SetGlobalBuffer(reinterpret_cast<__gm__ uint32_t*>(ackGM), 8);
+    return ackGlobal.GetValue(0) == expectedValue;
 }
 
 __aicore__ inline void TileXRUdmaDemoDataAsFlagSlice(
@@ -499,7 +507,23 @@ extern "C" __global__ __aicore__ void tilexr_memory_visible_ack_p2p_perf_kernel(
         }
         if (isReceiver && status == 0) {
             GM_ADDR ackAddr = localBase + ackOffset;
-            while (!TileXRUdmaDemoCheckMemoryVisibleAck(ackAddr, tBuf, ackValue)) {
+            uint32_t polls = 0;
+            uint32_t observed = 0;
+            for (polls = 0; polls < 100000; ++polls) {
+                if (TileXRUdmaDemoCheckMemoryVisibleAckScalar(ackAddr, ackValue)) {
+                    break;
+                }
+            }
+            if (polls >= 100000) {
+                status = 3;
+                AscendC::GlobalTensor<uint32_t> ag;
+                ag.SetGlobalBuffer(reinterpret_cast<__gm__ uint32_t*>(ackAddr), 8);
+                observed = ag.GetValue(0);
+            }
+            if (debug != nullptr && blockIdx == 0) {
+                debug[28] = polls;
+                debug[29] = observed;
+                debug[30] = ackValue;
             }
         }
 

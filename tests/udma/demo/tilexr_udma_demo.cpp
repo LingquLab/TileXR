@@ -612,7 +612,12 @@ bool RunP2PPerfMode(
     const uint64_t srcOffset = 0;
     const uint64_t dstWindowBytes =
         TileXR::Demo::P2PTransportWindowBytes(options.transport, options.maxBytes, options.blockDim);
-    const uint64_t dstOffset = useIpcTransport ? TileXR::IPC_DATA_OFFSET : dstWindowBytes;
+    const uint64_t ackFlagBytes = useMemoryVisibleAckTransport
+        ? TileXR::Demo::MemoryVisibleAckFlagBytes(options.blockDim)
+        : 0ULL;
+    const uint64_t dstOffset = useIpcTransport
+        ? TileXR::IPC_DATA_OFFSET + ackFlagBytes
+        : dstWindowBytes;
     const uint64_t localDstOffset = dstWindowBytes;
     const uint64_t debugOffset = useIpcTransport ? localDstOffset + dstWindowBytes : dstOffset + dstWindowBytes;
     const uint64_t payloadBytes = debugOffset + kP2PDebugWords * sizeof(uint32_t);
@@ -794,8 +799,9 @@ bool RunP2PPerfMode(
                 ok = false;
                 break;
             }
+            const uint64_t validateOffset = useMemoryVisibleAckTransport ? dstOffset : TileXR::IPC_DATA_OFFSET;
             const void* validateSrc = (useMemoryTransport || useMemoryVisibleAckTransport) ?
-                reinterpret_cast<void*>(commArgsHost.peerMems[rank] + TileXR::IPC_DATA_OFFSET) :
+                reinterpret_cast<void*>(commArgsHost.peerMems[rank] + validateOffset) :
                 static_cast<const void*>(dstDev);
             if (!CopyDeviceToHost(rank, hostDst.data(), static_cast<size_t>(transferWindowBytes), validateSrc,
                     static_cast<size_t>(transferWindowBytes), "p2p dst")) {

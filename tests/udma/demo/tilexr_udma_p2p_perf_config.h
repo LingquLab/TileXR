@@ -14,7 +14,7 @@ namespace Demo {
 
 constexpr uint64_t kP2PMemoryMaxBytes = 100ULL * 1024ULL * 1024ULL;
 constexpr uint64_t kMemoryVisibleAckBytes = 32ULL;
-constexpr uint64_t kMemoryVisibleAckFlagBaseOffset = static_cast<uint64_t>(TileXR::IPC_DATA_OFFSET) / 2ULL;
+constexpr uint64_t kMemoryVisibleAckFlagBaseOffset = static_cast<uint64_t>(TileXR::IPC_DATA_OFFSET);
 
 enum class P2PTransport {
     DirectUrma,
