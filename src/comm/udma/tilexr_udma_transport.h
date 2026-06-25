@@ -53,7 +53,9 @@ private:
     int BuildRoutes();
     int CreateContexts();
     int CreateQueues();
+    int CreatePeerQueue(PerEidState& state, int peer);
     int ImportQueues();
+    int EnsureUDMAInfoBuffer();
     int RefreshUDMAInfo();
     int RegisterMemoryOnContexts(GM_ADDR localPtr, size_t bytes);
     int ExchangeAndImportMemory();

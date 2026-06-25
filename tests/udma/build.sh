@@ -27,8 +27,28 @@ mkdir -p "${INSTALL_DIR}"
 
 cd "${BUILD_DIR}"
 
+find_bisheng_dir() {
+    if command -v bisheng >/dev/null 2>&1; then
+        dirname "$(command -v bisheng)"
+        return 0
+    fi
+    for candidate in \
+        "${ASCEND_HOME_PATH}/compiler/bisheng" \
+        "${ASCEND_HOME_PATH}/tools/bisheng_compiler/bin/bisheng"; do
+        if [ -x "${candidate}" ]; then
+            dirname "${candidate}"
+            return 0
+        fi
+    done
+    find /usr/local/Ascend -path "*/tools/bisheng_compiler/bin/bisheng" -type f -executable 2>/dev/null |
+        head -n 1 |
+        xargs -r dirname
+}
+
 # 配置
-if command -v bisheng >/dev/null 2>&1; then
+BISHENG_DIR=$(find_bisheng_dir)
+if [ -n "${BISHENG_DIR}" ]; then
+    export PATH="${BISHENG_DIR}:${PATH}"
     DEMO_OPTION="-DBUILD_TILEXR_UDMA_DEMO=ON"
 else
     echo "WARN: bisheng not found; TileXR UDMA communication demo target will be skipped."
@@ -52,6 +72,7 @@ echo ""
 echo "Available tests:"
 echo "  - test_tilexr_udma_transport_layout : UDMA info layout unit tests"
 echo "  - test_tilexr_udma_registry : registered-memory metadata unit tests"
+echo "  - test_tilexr_udma_allreduce_layout : all-reduce demo layout unit tests"
 echo "  - test_tilexr_udma     : TileXR integration tests"
 if [ -f "${INSTALL_DIR}/bin/tilexr_udma_demo" ]; then
     echo "  - tilexr_udma_demo     : TileXR UDMA communication demo"

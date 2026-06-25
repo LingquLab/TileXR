@@ -21,7 +21,7 @@ source "${TILEXR_ROOT}/scripts/common_env.sh"
 export TILEXR_COMM_ID=${TILEXR_COMM_ID:-127.0.0.1:10067}
 export TILEXR_DEMO_NPUS=${npu_count}
 export TILEXR_DEMO_FIRST_NPU=${first_npu}
-export LD_LIBRARY_PATH="${INSTALL_DIR}/lib:${TILEXR_ROOT}/install/lib:/usr/local/lib:${LD_LIBRARY_PATH:-}"
+export LD_LIBRARY_PATH="${INSTALL_DIR}/lib:${INSTALL_DIR}/lib64:${TILEXR_ROOT}/install/lib:${TILEXR_ROOT}/install/lib64:/usr/local/lib:${LD_LIBRARY_PATH:-}"
 
 bin="${INSTALL_DIR}/bin/tilexr_udma_demo"
 if [ ! -x "${bin}" ]; then
@@ -36,7 +36,7 @@ echo "=========================================="
 echo "  TileXR UDMA Communication Demo"
 echo "=========================================="
 echo "Binary:            ${bin}"
-echo "Test type:         ${test_type} (0=all-gather put, 1=put-signal)"
+echo "Test type:         ${test_type} (0=all-gather put, 1=put-signal, 2=all-to-all, 3=all-reduce)"
 echo "Rank size:         ${rank_size}"
 echo "Elements/rank:     ${elements_per_rank}"
 echo "NPU count:         ${npu_count}"

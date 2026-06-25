@@ -43,7 +43,7 @@ message(STATUS "TILEXR_ROOT: ${TILEXR_ROOT}")
 
 # 查找库
 find_library(TILEXR_LIB tile-comm
-    HINTS "${TILEXR_ROOT}/install/lib" "${TILEXR_ROOT}/build/src/comm"
+    HINTS "${TILEXR_ROOT}/install/lib" "${TILEXR_ROOT}/install/lib64" "${TILEXR_ROOT}/build/src/comm"
     REQUIRED)
 
 message(STATUS "Found tile-comm: ${TILEXR_LIB}")
@@ -71,6 +71,47 @@ add_executable(test_tilexr_udma_registry
 
 target_include_directories(test_tilexr_udma_registry PRIVATE
     ${TILEXR_ROOT}/src/include
+    ${CMAKE_CURRENT_SOURCE_DIR}
+)
+
+add_executable(test_tilexr_udma_alltoall_layout
+    unit/test_tilexr_udma_alltoall_layout.cpp
+)
+
+target_include_directories(test_tilexr_udma_alltoall_layout PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+)
+
+target_compile_definitions(test_tilexr_udma_alltoall_layout PRIVATE
+    TILEXR_SOURCE_ROOT="${TILEXR_ROOT}"
+)
+
+add_executable(test_tilexr_udma_allreduce_layout
+    unit/test_tilexr_udma_allreduce_layout.cpp
+)
+
+target_include_directories(test_tilexr_udma_allreduce_layout PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+)
+
+target_compile_definitions(test_tilexr_udma_allreduce_layout PRIVATE
+    TILEXR_SOURCE_ROOT="${TILEXR_ROOT}"
+)
+
+add_executable(test_tilexr_chip_map_sources
+    unit/test_tilexr_chip_map_sources.cpp
+)
+
+target_compile_definitions(test_tilexr_chip_map_sources PRIVATE
+    TILEXR_SOURCE_ROOT="${TILEXR_ROOT}"
+)
+
+add_executable(test_tilexr_ipc_pid_mode_sources
+    unit/test_tilexr_ipc_pid_mode_sources.cpp
+)
+
+target_compile_definitions(test_tilexr_ipc_pid_mode_sources PRIVATE
+    TILEXR_SOURCE_ROOT="${TILEXR_ROOT}"
 )
 
 add_executable(test_tilexr_udma_transport_layout
@@ -81,6 +122,10 @@ add_executable(test_tilexr_udma_transport_layout
 target_include_directories(test_tilexr_udma_transport_layout PRIVATE
     ${TILEXR_ROOT}/src/include
     ${TILEXR_ROOT}/src/comm
+)
+
+target_compile_definitions(test_tilexr_udma_transport_layout PRIVATE
+    TILEXR_SOURCE_ROOT="${TILEXR_ROOT}"
 )
 
 # 集成测试：TileXR UDMA
@@ -98,6 +143,10 @@ target_link_libraries(test_tilexr_udma
 set(INSTALL_TARGETS
     test_tilexr_udma
     test_tilexr_udma_registry
+    test_tilexr_udma_alltoall_layout
+    test_tilexr_udma_allreduce_layout
+    test_tilexr_chip_map_sources
+    test_tilexr_ipc_pid_mode_sources
     test_tilexr_udma_transport_layout
 )
 
@@ -162,6 +211,7 @@ if(BUILD_TILEXR_UDMA_DEMO)
             -I${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc/
             -I${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc/runtime/
             -I${ASCEND_HOME_PATH}/${ARCH}-linux/include/
+            -I${ASCEND_HOME_PATH}/${ARCH}-linux/asc/include/
             -I${ASCEND_DRIVER_PATH}/kernel/inc
             -I${TILEXR_ROOT}/3rdparty
             -I${TILEXR_ROOT}/src/include
@@ -175,6 +225,7 @@ if(BUILD_TILEXR_UDMA_DEMO)
                 -shared
                 ${TILEXR_UDMA_KERNEL_LINK_OPTIONS}
                 -DCATLASS_ARCH=${TILEXR_UDMA_CATLASS_ARCH}
+                -DTILEXR_UDMA_FORCE_ENABLE=1
                 ${TILEXR_UDMA_DEMO_KERNEL_INCLUDES}
                 "${CMAKE_CURRENT_SOURCE_DIR}/demo/tilexr_udma_demo_kernel.cpp"
                 -L${ASCEND_DRIVER_PATH}/lib64/driver
@@ -194,6 +245,7 @@ if(BUILD_TILEXR_UDMA_DEMO)
             DEPENDS
                 "${CMAKE_CURRENT_SOURCE_DIR}/demo/tilexr_udma_demo_kernel.cpp"
                 "${TILEXR_ROOT}/src/include/tilexr_udma.h"
+                "${TILEXR_ROOT}/src/include/tilexr_data_as_flag.h"
             VERBATIM
             COMMENT "Building TileXR UDMA demo kernel with bisheng"
         )

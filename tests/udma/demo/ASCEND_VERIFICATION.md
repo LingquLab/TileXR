@@ -12,7 +12,7 @@ Verify that the TileXR UDMA demo:
 - builds against TileXR's public demo API without including `shmem.h` in the host demo source;
 - initializes UDMA through TileXR's own comm transport, without linking shmem;
 - registers ordinary `aclrtMalloc` device memory through `TileXRUDMARegister`;
-- runs device-side UDMA put and put-signal kernels successfully;
+- runs device-side UDMA put, put-signal, and all-to-all kernels successfully;
 - does not report data mismatches or signal mismatches in rank logs.
 
 ## Hardware And Environment
@@ -157,14 +157,68 @@ grep -R "TileXR UDMA demo success" "$latest"
 grep -R "DATA MISMATCH\\|expected non-local signals\\|TileXR UDMA demo failed\\|ERROR" "$latest" || true
 ```
 
+## Test 3: UDMA All-To-All
+
+Run the all-to-all variant:
+
+```bash
+cd /path/to/TileXR/tests/udma
+bash demo/run_tilexr_udma_demo.sh 2 2 16 2 0
+```
+
+Expected:
+
+- script exits with code 0;
+- each rank log contains `TileXR UDMA demo success`;
+- each rank log prints `alltoall output sample`;
+- rank 0 output sample includes `from0=100000` and `from1=101000`;
+- rank 1 output sample includes `from0=100001` and `from1=101001`;
+- no log contains `ALLTOALL MISMATCH`, `ERROR`, or `TileXR UDMA demo failed`.
+
+Quick log check:
+
+```bash
+latest=$(ls -td logs/tilexr_udma_demo_* | head -n1)
+grep -R "alltoall output sample" "$latest"
+grep -R "TileXR UDMA demo success" "$latest"
+grep -R "ALLTOALL MISMATCH\\|TileXR UDMA demo failed\\|ERROR" "$latest" || true
+```
+
+## IPC PID And SDID Modes
+
+The communicator supports an override for peer IPC-memory setup:
+
+```bash
+TILEXR_IPC_PID_MODE=pid  bash demo/run_tilexr_udma_demo.sh 2 2 16 2 0
+TILEXR_IPC_PID_MODE=sdid bash demo/run_tilexr_udma_demo.sh 2 2 16 2 0
+```
+
+Expected mode behavior:
+
+- unset: TileXR chooses the chip default;
+- `pid`: force `rtSetIpcMemPid`;
+- `sdid`: force `rtSetIpcMemorySuperPodPid`.
+
+On the verified Ascend950DT_9592 host, the default mode is `pid`. Default and
+explicit `pid` mode both reached `TileXRCommInitRankLocal success`,
+`InitUDMA success`, and `TileXRUDMARegister success`. Explicit `sdid` mode failed
+during IPC open with runtime error `507899`, so Ascend950DT_9592 should use PID
+mode on that host.
+
+If default or explicit `pid` mode initializes but a rank's debug words report CQ
+status `514`, the failure is in the UDMA data-plane completion path after
+registration, not in all-to-all payload layout. The local self-copy segment
+should still appear in the all-to-all output sample.
+
 ## Optional Larger Runs
 
-If the machine has more usable devices, repeat both test types with more ranks:
+If the machine has more usable devices, repeat all test types with more ranks:
 
 ```bash
 cd /path/to/TileXR/tests/udma
 bash demo/run_tilexr_udma_demo.sh 0 4 64 4 0
 bash demo/run_tilexr_udma_demo.sh 1 4 64 4 0
+bash demo/run_tilexr_udma_demo.sh 2 4 64 4 0
 ```
 
 Expected result samples for four ranks should include:
@@ -199,9 +253,13 @@ Test 1 command and result:
 Test 1 log directory:
 Test 2 command and result:
 Test 2 log directory:
+Test 3 command and result:
+Test 3 log directory:
+PID/SDID mode results:
 Optional larger run result:
 
 Any ERROR lines:
 Any DATA MISMATCH lines:
+Any ALLTOALL MISMATCH lines:
 Any signal mismatch lines:
 ```
