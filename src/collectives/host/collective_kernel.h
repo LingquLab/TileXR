@@ -34,16 +34,10 @@ struct AscendCCLKernelArgs {
     const void *perfTrace = nullptr;
 };
 
-struct CollectiveLaunchAttrs {
-    int op = 0;
-    int root = 0;
-};
-
 int LaunchCollectiveKernel(TileXRCommPtr comm, TileXR::TileXRType type, const HostLaunchContext &context,
                            void *sendBuf, void *recvBuf, int64_t kernelCount,
                            TileXR::TileXRDataType dataType, uint32_t blockDim,
-                           aclrtStream stream,
-                           CollectiveLaunchAttrs attrs = CollectiveLaunchAttrs {});
+                           aclrtStream stream);
 
 } // namespace Host
 } // namespace TileXRCollectives

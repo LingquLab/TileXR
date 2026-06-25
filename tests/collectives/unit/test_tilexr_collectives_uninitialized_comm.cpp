@@ -46,17 +46,6 @@ int main()
     CheckStatus("TileXRAllToAll(uninitialized comm)",
                 TileXRAllToAll(sendStorage, recvStorage, 1, TileXR::TILEXR_DATA_TYPE_INT32, comm, nullptr),
                 TileXR::TILEXR_ERROR_NOT_INITIALIZED);
-    CheckStatus("TileXRAllReduce(uninitialized comm)",
-                TileXRAllReduce(sendStorage, recvStorage, 1, TileXR::TILEXR_DATA_TYPE_INT32,
-                                TileXR::TILEXR_REDUCE_SUM, comm, nullptr),
-                TileXR::TILEXR_ERROR_NOT_INITIALIZED);
-    CheckStatus("TileXRReduceScatter(uninitialized comm)",
-                TileXRReduceScatter(sendStorage, recvStorage, 1, TileXR::TILEXR_DATA_TYPE_INT32,
-                                    TileXR::TILEXR_REDUCE_SUM, comm, nullptr),
-                TileXR::TILEXR_ERROR_NOT_INITIALIZED);
-    CheckStatus("TileXRBroadcast(uninitialized comm)",
-                TileXRBroadcast(recvStorage, 1, TileXR::TILEXR_DATA_TYPE_INT32, 0, comm, nullptr),
-                TileXR::TILEXR_ERROR_NOT_INITIALIZED);
 
     int64_t magic = -1;
     CheckStatus("TileXRCommNextMagic(comm, &magic)",

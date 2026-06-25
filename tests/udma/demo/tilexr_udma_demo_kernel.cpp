@@ -80,6 +80,55 @@ extern "C" __global__ __aicore__ void tilexr_udma_put_signal_kernel(
     }
 }
 
+extern "C" __global__ __aicore__ void tilexr_udma_slot_signal_get_probe_kernel(
+    GM_ADDR commArgsGM, GM_ADDR dataGM, GM_ADDR signalGM, GM_ADDR debugGM,
+    int32_t elementsPerRank, uint64_t signal)
+{
+    auto args = reinterpret_cast<__gm__ TileXR::CommArgs*>(commArgsGM);
+    auto data = reinterpret_cast<__gm__ int32_t*>(dataGM);
+    auto signals = reinterpret_cast<__gm__ uint64_t*>(signalGM);
+    auto debug = reinterpret_cast<__gm__ int32_t*>(debugGM);
+
+    int32_t rank = args->rank;
+    int32_t rankSize = args->rankSize;
+    bool enabled = TileXR::UDMARegistryEnabled(args);
+
+    if (debug != nullptr) {
+        debug[0] = TILEXR_UDMA_DEMO_MAGIC;
+        debug[1] = rank;
+        debug[2] = rankSize;
+        debug[3] = enabled ? 1 : 0;
+        debug[4] = elementsPerRank;
+        debug[5] = 2;
+    }
+    if (!enabled) {
+        return;
+    }
+
+    uint64_t signalBaseOffset = static_cast<uint64_t>(rankSize) * elementsPerRank * sizeof(int32_t);
+    for (int32_t peer = 0; peer < rankSize; ++peer) {
+        if (peer == rank) {
+            continue;
+        }
+        TileXR::UDMAPutSignalNbi<int32_t>(args, peer, data + rank * elementsPerRank,
+            rank * static_cast<uint64_t>(elementsPerRank) * sizeof(int32_t), sizeof(int32_t),
+            signalBaseOffset + static_cast<uint64_t>(rank) * sizeof(uint64_t), signal);
+        TileXR::UDMAQuiet(args, peer);
+    }
+
+    for (int32_t peer = 0; peer < rankSize; ++peer) {
+        if (peer == rank) {
+            continue;
+        }
+        while (signals[peer] != signal) {
+        }
+        TileXR::UDMAGetNbi<int32_t>(args, peer, data + peer * elementsPerRank,
+            peer * static_cast<uint64_t>(elementsPerRank) * sizeof(int32_t),
+            static_cast<uint32_t>(elementsPerRank * sizeof(int32_t)));
+        TileXR::UDMAQuiet(args, peer);
+    }
+}
+
 extern "C" __global__ __aicore__ void tilexr_udma_registered_smoke_kernel(
     GM_ADDR commArgsGM, GM_ADDR localGM, GM_ADDR debugGM, uint32_t bytes, uint64_t signal)
 {
@@ -122,6 +171,14 @@ void launch_tilexr_udma_put_signal(
     int32_t elementsPerRank, uint64_t signal)
 {
     tilexr_udma_put_signal_kernel<<<blockDim, nullptr, stream>>>(
+        commArgs, data, signals, debug, elementsPerRank, signal);
+}
+
+void launch_tilexr_udma_slot_signal_get_probe(
+    uint32_t blockDim, void* stream, GM_ADDR commArgs, GM_ADDR data, GM_ADDR signals, GM_ADDR debug,
+    int32_t elementsPerRank, uint64_t signal)
+{
+    tilexr_udma_slot_signal_get_probe_kernel<<<blockDim, nullptr, stream>>>(
         commArgs, data, signals, debug, elementsPerRank, signal);
 }
 

@@ -34,9 +34,6 @@ constexpr int64_t kMaxHostBufferBytes = 1LL << 30;
 enum class CollectiveOp {
     ALLGATHER,
     ALLTOALL,
-    ALLREDUCE,
-    REDUCESCATTER,
-    BROADCAST,
 };
 
 struct DataTypeInfo {
@@ -99,47 +96,6 @@ using TileXRCollectivesTest::CanUseCollisionFreeInt32Pattern;
 using TileXRCollectivesTest::ExpectedAllGatherValue;
 using TileXRCollectivesTest::ExpectedAllToAllValue;
 
-bool IsReductionOp(CollectiveOp op)
-{
-    return op == CollectiveOp::ALLREDUCE || op == CollectiveOp::REDUCESCATTER;
-}
-
-std::string OpName(CollectiveOp op)
-{
-    switch (op) {
-        case CollectiveOp::ALLGATHER:
-            return "allgather";
-        case CollectiveOp::ALLTOALL:
-            return "alltoall";
-        case CollectiveOp::ALLREDUCE:
-            return "allreduce";
-        case CollectiveOp::REDUCESCATTER:
-            return "reducescatter";
-        case CollectiveOp::BROADCAST:
-            return "broadcast";
-    }
-    return "unknown";
-}
-
-int32_t ExpectedAllReduceSum(int rankSize, int64_t index)
-{
-    int64_t sum = 0;
-    for (int rank = 0; rank < rankSize; ++rank) {
-        sum += ExpectedAllGatherValue(rankSize, rank, index);
-    }
-    return static_cast<int32_t>(sum);
-}
-
-int32_t ExpectedReduceScatterSum(int rankSize, int rank, int64_t recvCount, int64_t index)
-{
-    const int64_t globalIndex = static_cast<int64_t>(rank) * recvCount + index;
-    int64_t sum = 0;
-    for (int srcRank = 0; srcRank < rankSize; ++srcRank) {
-        sum += ExpectedAllGatherValue(rankSize, srcRank, globalIndex);
-    }
-    return static_cast<int32_t>(sum);
-}
-
 uint8_t PatternByte(int rank, int peer, int64_t byteIndex)
 {
     return static_cast<uint8_t>((rank * 37 + peer * 13 + byteIndex) & 0xff);
@@ -161,9 +117,7 @@ void PrintUsage(const char *program)
 {
     std::cerr
         << "Usage: " << program << " [options]\n"
-        << "  --op allgather|alltoall|allreduce|reducescatter|broadcast\n"
-        << "  Message-size semantics: allgather/allreduce/broadcast: count * dtype_size; "
-           "alltoall/reducescatter: count * rank_size * dtype_size\n"
+        << "  --op allgather|alltoall\n"
         << "  --min-bytes N --max-bytes N --step-factor F\n"
         << "  --iters N --warmup-iters N\n"
         << "  --datatype int8|int16|int32|int64|fp16|fp32|bf16\n"
@@ -277,58 +231,26 @@ bool ComputeMessageSizes(const Options &options, int64_t count, int64_t &sendEle
         return false;
     }
     const int64_t rankSize = static_cast<int64_t>(options.rankSize);
+    if (!CheckedMulInt64(count, rankSize, recvElements)) {
+        return false;
+    }
     sendElements = count;
-    recvElements = count;
-    switch (options.op) {
-        case CollectiveOp::ALLGATHER:
-            if (!CheckedMulInt64(count, rankSize, recvElements)) {
-                return false;
-            }
-            break;
-        case CollectiveOp::ALLTOALL:
-            if (!CheckedMulInt64(count, rankSize, sendElements) ||
-                !CheckedMulInt64(count, rankSize, recvElements)) {
-                return false;
-            }
-            break;
-        case CollectiveOp::ALLREDUCE:
-            break;
-        case CollectiveOp::REDUCESCATTER:
-            if (!CheckedMulInt64(count, rankSize, sendElements)) {
-                return false;
-            }
-            break;
-        case CollectiveOp::BROADCAST:
-            break;
+    if (options.op == CollectiveOp::ALLTOALL && !CheckedMulInt64(count, rankSize, sendElements)) {
+        return false;
     }
     return CheckedBytesForElements(sendElements, options.dtype.bytes, sendBytes) &&
         CheckedBytesForElements(recvElements, options.dtype.bytes, recvBytes) &&
         FitsHostBufferLimit(sendBytes) && FitsHostBufferLimit(recvBytes);
 }
 
-int64_t MessageSizeDivisor(const Options &options)
-{
-    const int64_t divisor = (options.op == CollectiveOp::ALLTOALL ||
-                             options.op == CollectiveOp::REDUCESCATTER) ?
-        static_cast<int64_t>(options.rankSize) * static_cast<int64_t>(options.dtype.bytes) :
-        static_cast<int64_t>(options.dtype.bytes);
-    return divisor;
-}
-
 bool ValidateMaxMessageSize(const Options &options)
 {
-    int64_t count = options.maxBytes / MessageSizeDivisor(options);
+    int64_t count = options.maxBytes / static_cast<int64_t>(options.dtype.bytes);
     if (count <= 0) {
         count = 1;
     }
-    int64_t validationCount = count;
-    if (options.op == CollectiveOp::REDUCESCATTER &&
-        !CheckedMulInt64(count, static_cast<int64_t>(options.rankSize), validationCount)) {
-        std::cerr << "ERROR: message size too large" << std::endl;
-        return false;
-    }
     if (options.check && options.dtype.name == "int32" &&
-        !CanUseCollisionFreeInt32Pattern(options.rankSize, validationCount)) {
+        !CanUseCollisionFreeInt32Pattern(options.rankSize, count)) {
         std::cerr << "ERROR: message size is too large for collision-free INT32 validation" << std::endl;
         return false;
     }
@@ -393,15 +315,8 @@ bool ParseOptions(int argc, char **argv, Options &options)
                 options.op = CollectiveOp::ALLGATHER;
             } else if (op == "alltoall") {
                 options.op = CollectiveOp::ALLTOALL;
-            } else if (op == "allreduce") {
-                options.op = CollectiveOp::ALLREDUCE;
-            } else if (op == "reducescatter") {
-                options.op = CollectiveOp::REDUCESCATTER;
-            } else if (op == "broadcast") {
-                options.op = CollectiveOp::BROADCAST;
             } else {
-                std::cerr << "ERROR: --op must be allgather, alltoall, allreduce, reducescatter, or broadcast"
-                          << std::endl;
+                std::cerr << "ERROR: --op must be allgather or alltoall" << std::endl;
                 return false;
             }
         } else if (arg == "--min-bytes") {
@@ -555,10 +470,6 @@ bool ParseOptions(int argc, char **argv, Options &options)
         std::cerr << "ERROR: --profile-sample-every must be positive" << std::endl;
         return false;
     }
-    if (options.check && options.dtype.name != "int32" && IsReductionOp(options.op)) {
-        std::cerr << "ERROR: --check=1 for allreduce/reducescatter requires --datatype int32" << std::endl;
-        return false;
-    }
     if (!ValidateMaxMessageSize(options)) {
         return false;
     }
@@ -586,86 +497,45 @@ bool CheckTileXR(int rank, const std::string &step, int ret)
 bool CallCollective(const Options &options, void *sendBuf, void *recvBuf, int64_t count, TileXRCommPtr comm,
                     aclrtStream stream)
 {
-    switch (options.op) {
-        case CollectiveOp::ALLGATHER:
-            return CheckTileXR(options.rank, "TileXRAllGather",
-                TileXRAllGather(sendBuf, recvBuf, count, options.dtype.type, comm, stream));
-        case CollectiveOp::ALLTOALL:
-            return CheckTileXR(options.rank, "TileXRAllToAll",
-                TileXRAllToAll(sendBuf, recvBuf, count, options.dtype.type, comm, stream));
-        case CollectiveOp::ALLREDUCE:
-            return CheckTileXR(options.rank, "TileXRAllReduce",
-                TileXRAllReduce(sendBuf, recvBuf, count, options.dtype.type,
-                                TileXR::TILEXR_REDUCE_SUM, comm, stream));
-        case CollectiveOp::REDUCESCATTER:
-            return CheckTileXR(options.rank, "TileXRReduceScatter",
-                TileXRReduceScatter(sendBuf, recvBuf, count, options.dtype.type,
-                                    TileXR::TILEXR_REDUCE_SUM, comm, stream));
-        case CollectiveOp::BROADCAST:
-            return CheckTileXR(options.rank, "TileXRBroadcast",
-                TileXRBroadcast(sendBuf, count, options.dtype.type, 0, comm, stream));
+    if (options.op == CollectiveOp::ALLGATHER) {
+        return CheckTileXR(options.rank, "TileXRAllGather",
+            TileXRAllGather(sendBuf, recvBuf, count, options.dtype.type, comm, stream));
     }
-    return false;
+    return CheckTileXR(options.rank, "TileXRAllToAll",
+        TileXRAllToAll(sendBuf, recvBuf, count, options.dtype.type, comm, stream));
 }
 
 bool FillPattern(const Options &options, int64_t count, std::vector<uint8_t> &send, std::vector<uint8_t> &recv)
 {
     if (options.dtype.name == "int32") {
-        switch (options.op) {
-            case CollectiveOp::ALLGATHER:
-            case CollectiveOp::ALLREDUCE:
+        if (options.op == CollectiveOp::ALLGATHER) {
+            for (int64_t i = 0; i < count; ++i) {
+                StoreInt32(send, i, ExpectedAllGatherValue(options.rankSize, options.rank, i));
+            }
+        } else {
+            for (int dst = 0; dst < options.rankSize; ++dst) {
                 for (int64_t i = 0; i < count; ++i) {
-                    StoreInt32(send, i, ExpectedAllGatherValue(options.rankSize, options.rank, i));
+                    StoreInt32(send, static_cast<int64_t>(dst) * count + i,
+                        ExpectedAllToAllValue(options.rankSize, options.rank, dst, i));
                 }
-                break;
-            case CollectiveOp::ALLTOALL:
-                for (int dst = 0; dst < options.rankSize; ++dst) {
-                    for (int64_t i = 0; i < count; ++i) {
-                        StoreInt32(send, static_cast<int64_t>(dst) * count + i,
-                            ExpectedAllToAllValue(options.rankSize, options.rank, dst, i));
-                    }
-                }
-                break;
-            case CollectiveOp::REDUCESCATTER:
-                for (int64_t i = 0; i < count * static_cast<int64_t>(options.rankSize); ++i) {
-                    StoreInt32(send, i, ExpectedAllGatherValue(options.rankSize, options.rank, i));
-                }
-                break;
-            case CollectiveOp::BROADCAST:
-                for (int64_t i = 0; i < count; ++i) {
-                    const int32_t value = options.rank == 0 ?
-                        ExpectedAllGatherValue(options.rankSize, 0, i) : -1;
-                    StoreInt32(send, i, value);
-                }
-                break;
+            }
         }
         std::fill(recv.begin(), recv.end(), 0xff);
         return true;
     }
 
-    switch (options.op) {
-        case CollectiveOp::ALLGATHER:
-        case CollectiveOp::ALLREDUCE:
-        case CollectiveOp::REDUCESCATTER:
-            for (size_t i = 0; i < send.size(); ++i) {
-                send[i] = PatternByte(options.rank, 0, static_cast<int64_t>(i));
-            }
-            break;
-        case CollectiveOp::ALLTOALL: {
-            const size_t bytesPerPeer = static_cast<size_t>(count) * options.dtype.bytes;
-            for (int dst = 0; dst < options.rankSize; ++dst) {
-                for (size_t i = 0; i < bytesPerPeer; ++i) {
-                    send[static_cast<size_t>(dst) * bytesPerPeer + i] =
-                        PatternByte(options.rank, dst, static_cast<int64_t>(i));
-                }
-            }
-            break;
+    if (options.op == CollectiveOp::ALLGATHER) {
+        for (size_t i = 0; i < send.size(); ++i) {
+            send[i] = PatternByte(options.rank, 0, static_cast<int64_t>(i));
         }
-        case CollectiveOp::BROADCAST:
-            for (size_t i = 0; i < send.size(); ++i) {
-                send[i] = options.rank == 0 ? PatternByte(0, 0, static_cast<int64_t>(i)) : 0xff;
+    } else {
+        const size_t bytesPerPeer = static_cast<size_t>(count) * options.dtype.bytes;
+        for (int dst = 0; dst < options.rankSize; ++dst) {
+            for (size_t i = 0; i < bytesPerPeer; ++i) {
+                send[static_cast<size_t>(dst) * bytesPerPeer + i] =
+                    PatternByte(options.rank, dst, static_cast<int64_t>(i));
             }
-            break;
+        }
     }
     std::fill(recv.begin(), recv.end(), 0xff);
     return true;
@@ -674,83 +544,38 @@ bool FillPattern(const Options &options, int64_t count, std::vector<uint8_t> &se
 int ValidateInt32(const Options &options, int64_t count, const std::vector<uint8_t> &recv)
 {
     int errors = 0;
-    switch (options.op) {
-        case CollectiveOp::ALLGATHER:
-            for (int src = 0; src < options.rankSize; ++src) {
-                for (int64_t i = 0; i < count; ++i) {
-                    const int64_t index = static_cast<int64_t>(src) * count + i;
-                    const int32_t expected = ExpectedAllGatherValue(options.rankSize, src, i);
-                    const int32_t actual = LoadInt32(recv, index);
-                    if (actual != expected) {
-                        if (errors < 8) {
-                            std::cerr << "[rank " << options.rank << "] allgather mismatch src=" << src
-                                      << " i=" << i << " expected=" << expected
-                                      << " actual=" << actual << std::endl;
-                        }
-                        ++errors;
-                    }
-                }
-            }
-            break;
-        case CollectiveOp::ALLTOALL:
-            for (int src = 0; src < options.rankSize; ++src) {
-                for (int64_t i = 0; i < count; ++i) {
-                    const int64_t index = static_cast<int64_t>(src) * count + i;
-                    const int32_t expected = ExpectedAllToAllValue(options.rankSize, src, options.rank, i);
-                    const int32_t actual = LoadInt32(recv, index);
-                    if (actual != expected) {
-                        if (errors < 8) {
-                            std::cerr << "[rank " << options.rank << "] alltoall mismatch src=" << src
-                                      << " i=" << i << " expected=" << expected
-                                      << " actual=" << actual << std::endl;
-                        }
-                        ++errors;
-                    }
-                }
-            }
-            break;
-        case CollectiveOp::ALLREDUCE:
+    if (options.op == CollectiveOp::ALLGATHER) {
+        for (int src = 0; src < options.rankSize; ++src) {
             for (int64_t i = 0; i < count; ++i) {
-                const int32_t expected = ExpectedAllReduceSum(options.rankSize, i);
-                const int32_t actual = LoadInt32(recv, i);
+                const int64_t index = static_cast<int64_t>(src) * count + i;
+                const int32_t expected = ExpectedAllGatherValue(options.rankSize, src, i);
+                const int32_t actual = LoadInt32(recv, index);
                 if (actual != expected) {
                     if (errors < 8) {
-                        std::cerr << "[rank " << options.rank << "] allreduce mismatch"
+                        std::cerr << "[rank " << options.rank << "] allgather mismatch src=" << src
                                   << " i=" << i << " expected=" << expected
                                   << " actual=" << actual << std::endl;
                     }
                     ++errors;
                 }
             }
-            break;
-        case CollectiveOp::REDUCESCATTER:
+        }
+    } else {
+        for (int src = 0; src < options.rankSize; ++src) {
             for (int64_t i = 0; i < count; ++i) {
-                const int32_t expected = ExpectedReduceScatterSum(options.rankSize, options.rank, count, i);
-                const int32_t actual = LoadInt32(recv, i);
+                const int64_t index = static_cast<int64_t>(src) * count + i;
+                const int32_t expected = ExpectedAllToAllValue(options.rankSize, src, options.rank, i);
+                const int32_t actual = LoadInt32(recv, index);
                 if (actual != expected) {
                     if (errors < 8) {
-                        std::cerr << "[rank " << options.rank << "] reducescatter mismatch"
+                        std::cerr << "[rank " << options.rank << "] alltoall mismatch src=" << src
                                   << " i=" << i << " expected=" << expected
                                   << " actual=" << actual << std::endl;
                     }
                     ++errors;
                 }
             }
-            break;
-        case CollectiveOp::BROADCAST:
-            for (int64_t i = 0; i < count; ++i) {
-                const int32_t expected = ExpectedAllGatherValue(options.rankSize, 0, i);
-                const int32_t actual = LoadInt32(recv, i);
-                if (actual != expected) {
-                    if (errors < 8) {
-                        std::cerr << "[rank " << options.rank << "] broadcast mismatch"
-                                  << " i=" << i << " expected=" << expected
-                                  << " actual=" << actual << std::endl;
-                    }
-                    ++errors;
-                }
-            }
-            break;
+        }
     }
     return errors;
 }
@@ -759,59 +584,36 @@ int ValidateBytePattern(const Options &options, int64_t count, const std::vector
 {
     int errors = 0;
     const size_t bytesPerPeer = static_cast<size_t>(count) * options.dtype.bytes;
-    switch (options.op) {
-        case CollectiveOp::ALLGATHER:
-            for (int src = 0; src < options.rankSize; ++src) {
-                for (size_t i = 0; i < bytesPerPeer; ++i) {
-                    const uint8_t expected = PatternByte(src, 0, static_cast<int64_t>(i));
-                    const uint8_t actual = recv[static_cast<size_t>(src) * bytesPerPeer + i];
-                    if (actual != expected) {
-                        if (errors < 8) {
-                            std::cerr << "[rank " << options.rank << "] byte allgather mismatch src=" << src
-                                      << " byte=" << i << " expected=" << static_cast<int>(expected)
-                                      << " actual=" << static_cast<int>(actual) << std::endl;
-                        }
-                        ++errors;
-                    }
-                }
-            }
-            break;
-        case CollectiveOp::ALLTOALL:
-            for (int src = 0; src < options.rankSize; ++src) {
-                for (size_t i = 0; i < bytesPerPeer; ++i) {
-                    const uint8_t expected = PatternByte(src, options.rank, static_cast<int64_t>(i));
-                    const uint8_t actual = recv[static_cast<size_t>(src) * bytesPerPeer + i];
-                    if (actual != expected) {
-                        if (errors < 8) {
-                            std::cerr << "[rank " << options.rank << "] byte alltoall mismatch src=" << src
-                                      << " byte=" << i << " expected=" << static_cast<int>(expected)
-                                      << " actual=" << static_cast<int>(actual) << std::endl;
-                        }
-                        ++errors;
-                    }
-                }
-            }
-            break;
-        case CollectiveOp::BROADCAST:
+    if (options.op == CollectiveOp::ALLGATHER) {
+        for (int src = 0; src < options.rankSize; ++src) {
             for (size_t i = 0; i < bytesPerPeer; ++i) {
-                const uint8_t expected = PatternByte(0, 0, static_cast<int64_t>(i));
-                const uint8_t actual = recv[i];
+                const uint8_t expected = PatternByte(src, 0, static_cast<int64_t>(i));
+                const uint8_t actual = recv[static_cast<size_t>(src) * bytesPerPeer + i];
                 if (actual != expected) {
                     if (errors < 8) {
-                        std::cerr << "[rank " << options.rank << "] byte broadcast mismatch"
+                        std::cerr << "[rank " << options.rank << "] byte allgather mismatch src=" << src
                                   << " byte=" << i << " expected=" << static_cast<int>(expected)
                                   << " actual=" << static_cast<int>(actual) << std::endl;
                     }
                     ++errors;
                 }
             }
-            break;
-        case CollectiveOp::ALLREDUCE:
-        case CollectiveOp::REDUCESCATTER:
-            std::cerr << "[rank " << options.rank
-                      << "] ERROR: byte validation is unsupported for allreduce/reducescatter" << std::endl;
-            ++errors;
-            break;
+        }
+    } else {
+        for (int src = 0; src < options.rankSize; ++src) {
+            for (size_t i = 0; i < bytesPerPeer; ++i) {
+                const uint8_t expected = PatternByte(src, options.rank, static_cast<int64_t>(i));
+                const uint8_t actual = recv[static_cast<size_t>(src) * bytesPerPeer + i];
+                if (actual != expected) {
+                    if (errors < 8) {
+                        std::cerr << "[rank " << options.rank << "] byte alltoall mismatch src=" << src
+                                  << " byte=" << i << " expected=" << static_cast<int>(expected)
+                                  << " actual=" << static_cast<int>(actual) << std::endl;
+                    }
+                    ++errors;
+                }
+            }
+        }
     }
     return errors;
 }
@@ -1078,7 +880,7 @@ int main(int argc, char **argv)
     }
 
     for (int64_t bytes = options.minBytes;;) {
-        int64_t count = bytes / MessageSizeDivisor(options);
+        int64_t count = bytes / static_cast<int64_t>(options.dtype.bytes);
         if (count <= 0) {
             count = 1;
         }
@@ -1101,20 +903,14 @@ int main(int argc, char **argv)
         void *devRecv = nullptr;
         bool ok = CheckAcl(options.rank, "aclrtMalloc send",
             aclrtMalloc(&devSend, static_cast<size_t>(sendBytes), ACL_MEM_MALLOC_HUGE_FIRST)) &&
+            CheckAcl(options.rank, "aclrtMalloc recv",
+                aclrtMalloc(&devRecv, static_cast<size_t>(recvBytes), ACL_MEM_MALLOC_HUGE_FIRST)) &&
             CheckAcl(options.rank, "aclrtMemcpy H2D send",
                 aclrtMemcpy(devSend, static_cast<size_t>(sendBytes), hostSend.data(),
-                    static_cast<size_t>(sendBytes), ACL_MEMCPY_HOST_TO_DEVICE));
-        if (ok) {
-            if (options.op == CollectiveOp::BROADCAST) {
-                devRecv = devSend;
-            } else {
-                ok = CheckAcl(options.rank, "aclrtMalloc recv",
-                        aclrtMalloc(&devRecv, static_cast<size_t>(recvBytes), ACL_MEM_MALLOC_HUGE_FIRST)) &&
-                    CheckAcl(options.rank, "aclrtMemcpy H2D recv",
-                        aclrtMemcpy(devRecv, static_cast<size_t>(recvBytes), hostRecv.data(),
-                            static_cast<size_t>(recvBytes), ACL_MEMCPY_HOST_TO_DEVICE));
-            }
-        }
+                    static_cast<size_t>(sendBytes), ACL_MEMCPY_HOST_TO_DEVICE)) &&
+            CheckAcl(options.rank, "aclrtMemcpy H2D recv",
+                aclrtMemcpy(devRecv, static_cast<size_t>(recvBytes), hostRecv.data(),
+                    static_cast<size_t>(recvBytes), ACL_MEMCPY_HOST_TO_DEVICE));
 
         Measurement measurement;
         if (ok) {
@@ -1124,17 +920,10 @@ int main(int argc, char **argv)
 
         int errors = 0;
         if (ok && options.check) {
-            if (options.op != CollectiveOp::BROADCAST) {
-                std::fill(hostRecv.begin(), hostRecv.end(), 0xff);
-                ok = CheckAcl(options.rank, "aclrtMemcpy H2D devRecv sentinel",
+            std::fill(hostRecv.begin(), hostRecv.end(), 0xff);
+            ok = CheckAcl(options.rank, "aclrtMemcpy H2D devRecv sentinel",
                     aclrtMemcpy(devRecv, static_cast<size_t>(recvBytes), hostRecv.data(),
-                        static_cast<size_t>(recvBytes), ACL_MEMCPY_HOST_TO_DEVICE));
-            } else {
-                ok = CheckAcl(options.rank, "aclrtMemcpy H2D broadcast check input",
-                    aclrtMemcpy(devSend, static_cast<size_t>(sendBytes), hostSend.data(),
-                        static_cast<size_t>(sendBytes), ACL_MEMCPY_HOST_TO_DEVICE));
-            }
-            ok = ok &&
+                        static_cast<size_t>(recvBytes), ACL_MEMCPY_HOST_TO_DEVICE)) &&
                 CallCollective(options, devSend, devRecv, count, comm, stream) &&
                 CheckAcl(options.rank, "aclrtSynchronizeStream check", aclrtSynchronizeStream(stream)) &&
                 CheckAcl(options.rank, "aclrtMemcpy D2H recv",
@@ -1151,7 +940,7 @@ int main(int argc, char **argv)
         if (devSend != nullptr) {
             aclrtFree(devSend);
         }
-        if (devRecv != nullptr && devRecv != devSend) {
+        if (devRecv != nullptr) {
             aclrtFree(devRecv);
         }
         if (!ok) {
@@ -1159,7 +948,7 @@ int main(int argc, char **argv)
             return 1;
         }
 
-        const std::string opName = OpName(options.op);
+        const std::string opName = options.op == CollectiveOp::ALLGATHER ? "allgather" : "alltoall";
         const int64_t outputBytesPerRank = recvBytes;
         const double algBw = ComputeAlgBandwidthGbps(outputBytesPerRank, measurement.avgUs);
         const double busBw = ComputeBusBandwidthGbps(options.op, options.rankSize, algBw);

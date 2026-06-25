@@ -33,6 +33,18 @@ int TileXRHccpLoader::Load()
         return TILEXR_HCCP_LOADER_SUCCESS;
     }
 
+    hcclV1Handle_ = dlopen("libhccl.so", RTLD_NOW);
+    if (hcclV1Handle_ == nullptr) {
+        TILEXR_LOG(WARN) << "TileXR UDMA failed to open libhccl.so: " << dlerror();
+        Unload();
+        return TILEXR_HCCP_LOADER_NOT_FOUND;
+    }
+    hcclV2Handle_ = dlopen("libhccl_v2.so", RTLD_NOW);
+    if (hcclV2Handle_ == nullptr) {
+        TILEXR_LOG(WARN) << "TileXR UDMA failed to open libhccl_v2.so: " << dlerror();
+        Unload();
+        return TILEXR_HCCP_LOADER_NOT_FOUND;
+    }
     raHandle_ = dlopen("libra.so", RTLD_NOW);
     if (raHandle_ == nullptr) {
         TILEXR_LOG(WARN) << "TileXR UDMA failed to open libra.so: " << dlerror();
@@ -47,30 +59,30 @@ int TileXRHccpLoader::Load()
     }
 
     int ret = TILEXR_HCCP_LOADER_SUCCESS;
-    ret |= LoadSymbol(raHandle_, RaInit, "RaInit", "ra_init");
-    ret |= LoadSymbol(raHandle_, RaDeinit, "RaDeinit", "ra_deinit");
+    ret |= LoadSymbol(hcclV2Handle_, RaInit, "RaInit", "ra_init");
+    ret |= LoadSymbol(hcclV2Handle_, RaDeinit, "RaDeinit", "ra_deinit");
     ret |= LoadSymbol(tsdHandle_, TsdProcessOpen, "TsdProcessOpen", "tsd_process_open");
     ret |= LoadSymbol(tsdHandle_, TsdProcessClose, "TsdProcessClose", "tsd_process_close");
-    ret |= LoadSymbol(raHandle_, RaGetDevEidInfoNum, "RaGetDevEidInfoNum", "ra_get_dev_eid_info_num");
-    ret |= LoadSymbol(raHandle_, RaGetDevEidInfoList, "RaGetDevEidInfoList", "ra_get_dev_eid_info_list");
-    ret |= LoadSymbol(raHandle_, RaCtxInit, "RaCtxInit", "ra_ctx_init");
+    ret |= LoadSymbol(hcclV2Handle_, RaGetDevEidInfoNum, "RaGetDevEidInfoNum", "ra_get_dev_eid_info_num");
+    ret |= LoadSymbol(hcclV2Handle_, RaGetDevEidInfoList, "RaGetDevEidInfoList", "ra_get_dev_eid_info_list");
+    ret |= LoadSymbol(hcclV2Handle_, RaCtxInit, "RaCtxInit", "ra_ctx_init");
     ret |= LoadSymbol(raHandle_, RaCtxChanCreate, "RaCtxChanCreate", "ra_ctx_chan_create");
-    ret |= LoadSymbol(raHandle_, RaCtxCqCreate, "RaCtxCqCreate", "ra_ctx_cq_create");
-    ret |= LoadSymbol(raHandle_, RaCtxQpCreate, "RaCtxQpCreate", "ra_ctx_qp_create");
-    ret |= LoadSymbol(raHandle_, RaCtxTokenIdAlloc, "RaCtxTokenIdAlloc", "ra_ctx_token_id_alloc");
-    ret |= LoadSymbol(raHandle_, RaCtxQpImport, "RaCtxQpImport", "ra_ctx_qp_import");
-    ret |= LoadSymbol(raHandle_, RaCtxQpBind, "RaCtxQpBind", "ra_ctx_qp_bind");
-    ret |= LoadSymbol(raHandle_, RaCtxLmemRegister, "RaCtxLmemRegister", "ra_ctx_lmem_register");
-    ret |= LoadSymbol(raHandle_, RaCtxRmemImport, "RaCtxRmemImport", "ra_ctx_rmem_import");
-    ret |= LoadSymbol(raHandle_, RaCtxRmemUnimport, "RaCtxRmemUnimport", "ra_ctx_rmem_unimport");
-    ret |= LoadSymbol(raHandle_, RaCtxLmemUnregister, "RaCtxLmemUnregister", "ra_ctx_lmem_unregister");
-    ret |= LoadSymbol(raHandle_, RaCtxQpUnbind, "RaCtxQpUnbind", "ra_ctx_qp_unbind");
-    ret |= LoadSymbol(raHandle_, RaCtxQpUnimport, "RaCtxQpUnimport", "ra_ctx_qp_unimport");
-    ret |= LoadSymbol(raHandle_, RaCtxTokenIdFree, "RaCtxTokenIdFree", "ra_ctx_token_id_free");
-    ret |= LoadSymbol(raHandle_, RaCtxQpDestroy, "RaCtxQpDestroy", "ra_ctx_qp_destroy");
-    ret |= LoadSymbol(raHandle_, RaCtxCqDestroy, "RaCtxCqDestroy", "ra_ctx_cq_destroy");
+    ret |= LoadSymbol(hcclV2Handle_, RaCtxCqCreate, "RaCtxCqCreate", "ra_ctx_cq_create");
+    ret |= LoadSymbol(hcclV2Handle_, RaCtxQpCreate, "RaCtxQpCreate", "ra_ctx_qp_create");
+    ret |= LoadSymbol(hcclV2Handle_, RaCtxTokenIdAlloc, "RaCtxTokenIdAlloc", "ra_ctx_token_id_alloc");
+    ret |= LoadSymbol(hcclV2Handle_, RaCtxQpImport, "RaCtxQpImport", "ra_ctx_qp_import");
+    ret |= LoadSymbol(hcclV2Handle_, RaCtxQpBind, "RaCtxQpBind", "ra_ctx_qp_bind");
+    ret |= LoadSymbol(hcclV2Handle_, RaCtxLmemRegister, "RaCtxLmemRegister", "ra_ctx_lmem_register");
+    ret |= LoadSymbol(hcclV2Handle_, RaCtxRmemImport, "RaCtxRmemImport", "ra_ctx_rmem_import");
+    ret |= LoadSymbol(hcclV2Handle_, RaCtxRmemUnimport, "RaCtxRmemUnimport", "ra_ctx_rmem_unimport");
+    ret |= LoadSymbol(hcclV2Handle_, RaCtxLmemUnregister, "RaCtxLmemUnregister", "ra_ctx_lmem_unregister");
+    ret |= LoadSymbol(hcclV2Handle_, RaCtxQpUnbind, "RaCtxQpUnbind", "ra_ctx_qp_unbind");
+    ret |= LoadSymbol(hcclV2Handle_, RaCtxQpUnimport, "RaCtxQpUnimport", "ra_ctx_qp_unimport");
+    ret |= LoadSymbol(hcclV2Handle_, RaCtxTokenIdFree, "RaCtxTokenIdFree", "ra_ctx_token_id_free");
+    ret |= LoadSymbol(hcclV2Handle_, RaCtxQpDestroy, "RaCtxQpDestroy", "ra_ctx_qp_destroy");
+    ret |= LoadSymbol(hcclV2Handle_, RaCtxCqDestroy, "RaCtxCqDestroy", "ra_ctx_cq_destroy");
     ret |= LoadSymbol(raHandle_, RaCtxChanDestroy, "RaCtxChanDestroy", "ra_ctx_chan_destroy");
-    ret |= LoadSymbol(raHandle_, RaCtxDeinit, "RaCtxDeinit", "ra_ctx_deinit");
+    ret |= LoadSymbol(hcclV2Handle_, RaCtxDeinit, "RaCtxDeinit", "ra_ctx_deinit");
     if (ret != TILEXR_HCCP_LOADER_SUCCESS) {
         Unload();
         return TILEXR_HCCP_LOADER_NOT_FOUND;
@@ -118,6 +130,14 @@ void TileXRHccpLoader::Unload()
     if (raHandle_ != nullptr) {
         dlclose(raHandle_);
         raHandle_ = nullptr;
+    }
+    if (hcclV2Handle_ != nullptr) {
+        dlclose(hcclV2Handle_);
+        hcclV2Handle_ = nullptr;
+    }
+    if (hcclV1Handle_ != nullptr) {
+        dlclose(hcclV1Handle_);
+        hcclV1Handle_ = nullptr;
     }
     loaded_ = false;
 }

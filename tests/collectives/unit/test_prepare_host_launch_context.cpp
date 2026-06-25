@@ -209,22 +209,6 @@ void CheckPerfTraceLaunchMetadata()
     CheckMagic("trace stats size", static_cast<int64_t>(session.hostStats.size()),
                static_cast<int64_t>(commArgs.rankSize) * 4 * TileXR::TILEXR_PERF_STAGE_COUNT);
 
-    deviceTrace = reinterpret_cast<const void *>(0x1);
-    CheckStatus("PreparePerfTraceLaunch reducescatter message bytes",
-                TileXRCollectives::Host::PreparePerfTraceLaunch(
-                    &session, commArgs, TileXR::TileXRType::REDUCE_SCATTER,
-                    TileXR::TILEXR_DATA_TYPE_FP16, 4, 4096, nullptr, &deviceTrace),
-                TileXR::TILEXR_SUCCESS);
-    CheckMagic("reducescatter trace messageBytes", session.header.messageBytes, 16384);
-
-    deviceTrace = reinterpret_cast<const void *>(0x1);
-    CheckStatus("PreparePerfTraceLaunch broadcast message bytes",
-                TileXRCollectives::Host::PreparePerfTraceLaunch(
-                    &session, commArgs, TileXR::TileXRType::BROADCAST,
-                    TileXR::TILEXR_DATA_TYPE_FP16, 4, 4096, nullptr, &deviceTrace),
-                TileXR::TILEXR_SUCCESS);
-    CheckMagic("broadcast trace messageBytes", session.header.messageBytes, 4096);
-
     CheckStatus("PreparePerfTraceLaunch null deviceTrace",
                 TileXRCollectives::Host::PreparePerfTraceLaunch(
                     &session, commArgs, TileXR::TileXRType::ALL_GATHER,

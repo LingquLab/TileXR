@@ -1,4 +1,3 @@
-#include <cstddef>
 #include <cstdint>
 #include <iostream>
 
@@ -15,15 +14,6 @@ struct ValidationCase {
     void *recvBuf;
     int64_t sendCount;
     TileXR::TileXRDataType dataType;
-    TileXRCommPtr comm;
-};
-
-struct BroadcastValidationCase {
-    const char *name;
-    void *buf;
-    int64_t count;
-    TileXR::TileXRDataType dataType;
-    int root;
     TileXRCommPtr comm;
 };
 
@@ -78,60 +68,6 @@ int main()
                     TileXRAllToAll(testCase.sendBuf, testCase.recvBuf, testCase.sendCount,
                                    testCase.dataType, testCase.comm, nullptr));
     }
-
-    for (const auto& testCase : cases) {
-        CheckStatus("TileXRAllReduce", testCase,
-                    TileXRAllReduce(testCase.sendBuf, testCase.recvBuf, testCase.sendCount,
-                                    testCase.dataType, TileXR::TILEXR_REDUCE_SUM,
-                                    testCase.comm, nullptr));
-        CheckStatus("TileXRReduceScatter", testCase,
-                    TileXRReduceScatter(testCase.sendBuf, testCase.recvBuf, testCase.sendCount,
-                                        testCase.dataType, TileXR::TILEXR_REDUCE_SUM,
-                                        testCase.comm, nullptr));
-    }
-
-    const ValidationCase unsupportedReduceOps[] = {
-        { "prod reduce op", sendStorage, recvStorage, 1, TileXR::TILEXR_DATA_TYPE_INT32, comm },
-        { "max reduce op", sendStorage, recvStorage, 1, TileXR::TILEXR_DATA_TYPE_INT32, comm },
-        { "min reduce op", sendStorage, recvStorage, 1, TileXR::TILEXR_DATA_TYPE_INT32, comm },
-        { "reserved reduce op", sendStorage, recvStorage, 1, TileXR::TILEXR_DATA_TYPE_INT32, comm },
-    };
-    const TileXR::TileXRReduceOp reduceOps[] = {
-        TileXR::TILEXR_REDUCE_PROD,
-        TileXR::TILEXR_REDUCE_MAX,
-        TileXR::TILEXR_REDUCE_MIN,
-        TileXR::TILEXR_REDUCE_RESERVED,
-    };
-    for (size_t i = 0; i < sizeof(reduceOps) / sizeof(reduceOps[0]); ++i) {
-        CheckStatus("TileXRAllReduce", unsupportedReduceOps[i],
-                    TileXRAllReduce(unsupportedReduceOps[i].sendBuf, unsupportedReduceOps[i].recvBuf,
-                                    unsupportedReduceOps[i].sendCount, unsupportedReduceOps[i].dataType,
-                                    reduceOps[i], unsupportedReduceOps[i].comm, nullptr));
-        CheckStatus("TileXRReduceScatter", unsupportedReduceOps[i],
-                    TileXRReduceScatter(unsupportedReduceOps[i].sendBuf, unsupportedReduceOps[i].recvBuf,
-                                        unsupportedReduceOps[i].sendCount, unsupportedReduceOps[i].dataType,
-                                        reduceOps[i], unsupportedReduceOps[i].comm, nullptr));
-    }
-
-    const BroadcastValidationCase broadcastCases[] = {
-        { "null comm", recvStorage, 1, TileXR::TILEXR_DATA_TYPE_INT32, 0, nullptr },
-        { "buffer null", nullptr, 1, TileXR::TILEXR_DATA_TYPE_FP16, 0, comm },
-        { "zero count", recvStorage, 0, TileXR::TILEXR_DATA_TYPE_INT32, 0, comm },
-        { "negative count", recvStorage, -1, TileXR::TILEXR_DATA_TYPE_INT32, 0, comm },
-        { "negative root", recvStorage, 1, TileXR::TILEXR_DATA_TYPE_INT32, -1, comm },
-        { "unsupported uint8 datatype", recvStorage, 1024, TileXR::TILEXR_DATA_TYPE_UINT8, 0, comm },
-        { "unknown datatype", recvStorage, 1024, static_cast<TileXR::TileXRDataType>(999), 0, comm },
-    };
-    for (const auto& testCase : broadcastCases) {
-        ValidationCase adapted { testCase.name, testCase.buf, testCase.buf, testCase.count,
-            testCase.dataType, testCase.comm };
-        CheckStatus("TileXRBroadcast", adapted,
-                    TileXRBroadcast(testCase.buf, testCase.count, testCase.dataType,
-                                    testCase.root, testCase.comm, nullptr));
-    }
-    CheckSetupStatus("TileXRBroadcast(root past rank size with uninitialized comm)",
-                     TileXRBroadcast(recvStorage, 1, TileXR::TILEXR_DATA_TYPE_INT32, 1, comm, nullptr),
-                     TileXR::TILEXR_ERROR_NOT_INITIALIZED);
 
     CheckSetupStatus("TileXRCommDestroy(comm)",
                      TileXRCommDestroy(comm),

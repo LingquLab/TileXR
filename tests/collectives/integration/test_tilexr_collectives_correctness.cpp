@@ -25,9 +25,6 @@ namespace {
 enum class CollectiveOp {
     ALLGATHER,
     ALLTOALL,
-    ALLREDUCE,
-    REDUCESCATTER,
-    BROADCAST,
     BOTH,
 };
 
@@ -36,32 +33,12 @@ struct Options {
     int rank = 0;
     int64_t count = 16;
     int firstNpu = 0;
-    int root = 0;
     CollectiveOp op = CollectiveOp::BOTH;
 };
 
 using TileXRCollectivesTest::CanUseCollisionFreeInt32Pattern;
 using TileXRCollectivesTest::ExpectedAllGatherValue;
 using TileXRCollectivesTest::ExpectedAllToAllValue;
-
-int32_t ExpectedAllReduceSum(int rankSize, int64_t index)
-{
-    int64_t sum = 0;
-    for (int rank = 0; rank < rankSize; ++rank) {
-        sum += ExpectedAllGatherValue(rankSize, rank, index);
-    }
-    return static_cast<int32_t>(sum);
-}
-
-int32_t ExpectedReduceScatterSum(int rankSize, int rank, int64_t recvCount, int64_t index)
-{
-    const int64_t globalIndex = static_cast<int64_t>(rank) * recvCount + index;
-    int64_t sum = 0;
-    for (int srcRank = 0; srcRank < rankSize; ++srcRank) {
-        sum += ExpectedAllGatherValue(rankSize, srcRank, globalIndex);
-    }
-    return static_cast<int32_t>(sum);
-}
 
 int GetEnvInt(const char *name, int fallback)
 {
@@ -78,8 +55,8 @@ int64_t GetEnvInt64(const char *name, int64_t fallback)
 void PrintUsage(const char *program)
 {
     std::cerr << "Usage: " << program
-              << " --rank-size N --rank R --count C --first-npu D [--op allgather|alltoall|allreduce|reducescatter|broadcast|both] [--root R]\n"
-              << "Environment fallbacks: TILEXR_RANK_SIZE, TILEXR_RANK, TILEXR_COUNT, TILEXR_FIRST_NPU, TILEXR_BROADCAST_ROOT, TILEXR_OP"
+              << " --rank-size N --rank R --count C --first-npu D [--op allgather|alltoall|both]\n"
+              << "Environment fallbacks: TILEXR_RANK_SIZE, TILEXR_RANK, TILEXR_COUNT, TILEXR_FIRST_NPU, TILEXR_OP"
               << std::endl;
 }
 
@@ -91,18 +68,6 @@ bool ParseOp(const std::string &value, CollectiveOp &op)
     }
     if (value == "alltoall") {
         op = CollectiveOp::ALLTOALL;
-        return true;
-    }
-    if (value == "allreduce") {
-        op = CollectiveOp::ALLREDUCE;
-        return true;
-    }
-    if (value == "reducescatter") {
-        op = CollectiveOp::REDUCESCATTER;
-        return true;
-    }
-    if (value == "broadcast") {
-        op = CollectiveOp::BROADCAST;
         return true;
     }
     if (value == "both") {
@@ -118,7 +83,6 @@ bool ParseOptions(int argc, char **argv, Options &options)
     options.rank = GetEnvInt("TILEXR_RANK", options.rank);
     options.count = GetEnvInt64("TILEXR_COUNT", options.count);
     options.firstNpu = GetEnvInt("TILEXR_FIRST_NPU", options.firstNpu);
-    options.root = GetEnvInt("TILEXR_BROADCAST_ROOT", options.root);
     const char *envOp = std::getenv("TILEXR_OP");
     if (envOp != nullptr && envOp[0] != '\0' && !ParseOp(envOp, options.op)) {
         std::cerr << "ERROR: invalid TILEXR_OP=" << envOp << std::endl;
@@ -158,17 +122,10 @@ bool ParseOptions(int argc, char **argv, Options &options)
                 return false;
             }
             options.firstNpu = std::atoi(value);
-        } else if (arg == "--root") {
-            const char *value = requireValue(arg);
-            if (value == nullptr) {
-                return false;
-            }
-            options.root = std::atoi(value);
         } else if (arg == "--op") {
             const char *value = requireValue(arg);
             if (value == nullptr || !ParseOp(value, options.op)) {
-                std::cerr << "ERROR: --op must be allgather, alltoall, allreduce, reducescatter, broadcast, or both"
-                          << std::endl;
+                std::cerr << "ERROR: --op must be allgather, alltoall, or both" << std::endl;
                 return false;
             }
         } else if (arg == "--help" || arg == "-h") {
@@ -181,17 +138,15 @@ bool ParseOptions(int argc, char **argv, Options &options)
     }
 
     if (options.rankSize <= 0 || options.rank < 0 || options.rank >= options.rankSize ||
-        options.count <= 0 || options.firstNpu < 0 || options.root < 0 || options.root >= options.rankSize) {
-        std::cerr << "ERROR: invalid rank-size/rank/count/first-npu/root" << std::endl;
+        options.count <= 0 || options.firstNpu < 0) {
+        std::cerr << "ERROR: invalid rank-size/rank/count/first-npu" << std::endl;
         return false;
     }
     if (options.count > std::numeric_limits<int64_t>::max() / std::max(1, options.rankSize)) {
         std::cerr << "ERROR: count is too large" << std::endl;
         return false;
     }
-    const int64_t validationCount = options.op == CollectiveOp::REDUCESCATTER ?
-        options.count * static_cast<int64_t>(options.rankSize) : options.count;
-    if (!CanUseCollisionFreeInt32Pattern(options.rankSize, validationCount)) {
+    if (!CanUseCollisionFreeInt32Pattern(options.rankSize, options.count)) {
         std::cerr << "ERROR: count is too large for collision-free INT32 validation" << std::endl;
         return false;
     }
@@ -332,128 +287,6 @@ bool RunAllToAll(const Options &options, TileXRCommPtr comm, aclrtStream stream)
     return ok;
 }
 
-bool RunAllReduce(const Options &options, TileXRCommPtr comm, aclrtStream stream)
-{
-    const int64_t count = options.count;
-    std::vector<int32_t> hostSend(static_cast<size_t>(count));
-    std::vector<int32_t> hostRecv(static_cast<size_t>(count), -1);
-    for (int64_t i = 0; i < count; ++i) {
-        hostSend[static_cast<size_t>(i)] = ExpectedAllGatherValue(options.rankSize, options.rank, i);
-    }
-
-    int32_t *devSend = nullptr;
-    int32_t *devRecv = nullptr;
-    const size_t bytes = hostSend.size() * sizeof(int32_t);
-    bool ok = AllocDeviceInt32(options.rank, "allreduce send", count, &devSend) &&
-        AllocDeviceInt32(options.rank, "allreduce recv", count, &devRecv) &&
-        CopyHostToDevice(options.rank, devSend, bytes, hostSend.data(), bytes, "allreduce send") &&
-        CopyHostToDevice(options.rank, devRecv, bytes, hostRecv.data(), bytes, "allreduce recv") &&
-        CheckTileXR(options.rank, "TileXRAllReduce",
-            TileXRAllReduce(devSend, devRecv, count, TileXR::TILEXR_DATA_TYPE_INT32,
-                            TileXR::TILEXR_REDUCE_SUM, comm, stream)) &&
-        CheckAcl(options.rank, "aclrtSynchronizeStream allreduce", aclrtSynchronizeStream(stream)) &&
-        CopyDeviceToHost(options.rank, hostRecv.data(), bytes, devRecv, bytes, "allreduce result");
-
-    if (ok) {
-        for (int64_t i = 0; i < count; ++i) {
-            const int32_t expected = ExpectedAllReduceSum(options.rankSize, i);
-            const int32_t actual = hostRecv[static_cast<size_t>(i)];
-            if (actual != expected) {
-                std::cerr << "[rank " << options.rank << "] AllReduce mismatch i=" << i
-                          << " expected=" << expected << " actual=" << actual << std::endl;
-                ok = false;
-                break;
-            }
-        }
-    }
-
-    FreeDevice(devSend);
-    FreeDevice(devRecv);
-    return ok;
-}
-
-bool RunReduceScatter(const Options &options, TileXRCommPtr comm, aclrtStream stream)
-{
-    const int64_t recvCount = options.count;
-    if (recvCount > std::numeric_limits<int64_t>::max() / std::max(1, options.rankSize)) {
-        std::cerr << "[rank " << options.rank << "] ERROR: reducescatter send count is too large" << std::endl;
-        return false;
-    }
-    const int64_t sendCount = recvCount * options.rankSize;
-    std::vector<int32_t> hostSend(static_cast<size_t>(sendCount));
-    std::vector<int32_t> hostRecv(static_cast<size_t>(recvCount), -1);
-    for (int64_t i = 0; i < sendCount; ++i) {
-        hostSend[static_cast<size_t>(i)] = ExpectedAllGatherValue(options.rankSize, options.rank, i);
-    }
-
-    int32_t *devSend = nullptr;
-    int32_t *devRecv = nullptr;
-    const size_t sendBytes = hostSend.size() * sizeof(int32_t);
-    const size_t recvBytes = hostRecv.size() * sizeof(int32_t);
-    bool ok = AllocDeviceInt32(options.rank, "reducescatter send", sendCount, &devSend) &&
-        AllocDeviceInt32(options.rank, "reducescatter recv", recvCount, &devRecv) &&
-        CopyHostToDevice(options.rank, devSend, sendBytes, hostSend.data(), sendBytes, "reducescatter send") &&
-        CopyHostToDevice(options.rank, devRecv, recvBytes, hostRecv.data(), recvBytes, "reducescatter recv") &&
-        CheckTileXR(options.rank, "TileXRReduceScatter",
-            TileXRReduceScatter(devSend, devRecv, recvCount, TileXR::TILEXR_DATA_TYPE_INT32,
-                                TileXR::TILEXR_REDUCE_SUM, comm, stream)) &&
-        CheckAcl(options.rank, "aclrtSynchronizeStream reducescatter", aclrtSynchronizeStream(stream)) &&
-        CopyDeviceToHost(options.rank, hostRecv.data(), recvBytes, devRecv, recvBytes, "reducescatter result");
-
-    if (ok) {
-        for (int64_t i = 0; i < recvCount; ++i) {
-            const int32_t expected = ExpectedReduceScatterSum(options.rankSize, options.rank, recvCount, i);
-            const int32_t actual = hostRecv[static_cast<size_t>(i)];
-            if (actual != expected) {
-                std::cerr << "[rank " << options.rank << "] ReduceScatter mismatch i=" << i
-                          << " expected=" << expected << " actual=" << actual << std::endl;
-                ok = false;
-                break;
-            }
-        }
-    }
-
-    FreeDevice(devSend);
-    FreeDevice(devRecv);
-    return ok;
-}
-
-bool RunBroadcast(const Options &options, TileXRCommPtr comm, aclrtStream stream)
-{
-    const int64_t count = options.count;
-    const int root = options.root;
-    std::vector<int32_t> hostData(static_cast<size_t>(count));
-    for (int64_t i = 0; i < count; ++i) {
-        hostData[static_cast<size_t>(i)] = options.rank == root ?
-            ExpectedAllGatherValue(options.rankSize, root, i) : -1;
-    }
-
-    int32_t *devBuf = nullptr;
-    const size_t bytes = hostData.size() * sizeof(int32_t);
-    bool ok = AllocDeviceInt32(options.rank, "broadcast buffer", count, &devBuf) &&
-        CopyHostToDevice(options.rank, devBuf, bytes, hostData.data(), bytes, "broadcast buffer") &&
-        CheckTileXR(options.rank, "TileXRBroadcast",
-            TileXRBroadcast(devBuf, count, TileXR::TILEXR_DATA_TYPE_INT32, root, comm, stream)) &&
-        CheckAcl(options.rank, "aclrtSynchronizeStream broadcast", aclrtSynchronizeStream(stream)) &&
-        CopyDeviceToHost(options.rank, hostData.data(), bytes, devBuf, bytes, "broadcast result");
-
-    if (ok) {
-        for (int64_t i = 0; i < count; ++i) {
-            const int32_t expected = ExpectedAllGatherValue(options.rankSize, root, i);
-            const int32_t actual = hostData[static_cast<size_t>(i)];
-            if (actual != expected) {
-                std::cerr << "[rank " << options.rank << "] Broadcast mismatch i=" << i
-                          << " expected=" << expected << " actual=" << actual << std::endl;
-                ok = false;
-                break;
-            }
-        }
-    }
-
-    FreeDevice(devBuf);
-    return ok;
-}
-
 void Cleanup(TileXRCommPtr comm, aclrtStream stream, int deviceId, bool deviceSet)
 {
     if (comm != nullptr) {
@@ -504,15 +337,6 @@ int main(int argc, char **argv)
     }
     if (options.op == CollectiveOp::ALLTOALL || options.op == CollectiveOp::BOTH) {
         ok = RunAllToAll(options, comm, stream) && ok;
-    }
-    if (options.op == CollectiveOp::ALLREDUCE) {
-        ok = RunAllReduce(options, comm, stream) && ok;
-    }
-    if (options.op == CollectiveOp::REDUCESCATTER) {
-        ok = RunReduceScatter(options, comm, stream) && ok;
-    }
-    if (options.op == CollectiveOp::BROADCAST) {
-        ok = RunBroadcast(options, comm, stream) && ok;
     }
 
     Cleanup(comm, stream, deviceId, deviceSet);
