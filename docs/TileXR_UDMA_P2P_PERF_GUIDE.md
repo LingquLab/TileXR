@@ -30,13 +30,19 @@ The final output should include:
 
 Use `rank_size=2`. Each run launches two local ranks, one rank per NPU.
 
-The P2P perf mode supports three user-facing transport modes:
+The P2P perf mode supports five user-facing transport modes:
 
 - `direct_urma`: registered-memory UDMA transfer. Internally this path uses
   the parallel multi-jetty kernel; `block_dim=1` with one QP is the single-jetty
   baseline, while `block_dim=N` with `TILEXR_UDMA_QP_NUM=N` uses up to `N`
   QPs/jettys in parallel.
 - `memory`: peer-memory IPC comparison using Ascend C `DataCopyPad`.
+- `memory_visible_ack`: peer-memory IPC comparison where the sender writes a
+  tail flag after the payload and the receiver polls that flag inside the
+  measured kernel window.
+- `memory_visible_ack_perf`: the same payload plus tail-flag write, with host
+  verification after the measured window so the CSV timing stays focused on
+  sender-side write-path performance.
 - `data_as_flag`: peer-memory IPC comparison where each 512B block carries
   480B payload plus a 32B ready flag.
 
@@ -54,6 +60,21 @@ For `memory`, for the same selected direction:
 - only the sender rank performs the device-side copy;
 - the destination address is its peer IPC data window on the receiver;
 - the receiver validates by copying its local IPC data window back to host.
+
+For `memory_visible_ack`, for the same selected direction:
+
+- the sender rank writes the payload to the receiver's IPC data window;
+- after its payload slice, each sender block writes a tail ack flag in the
+  receiver's IPC data window;
+- the receiver rank polls the expected ack value inside the measured kernel
+  window, so the reported latency includes receiver-observed visibility.
+
+For `memory_visible_ack_perf`, for the same selected direction:
+
+- the sender rank writes payload and tail ack exactly like `memory_visible_ack`;
+- the receiver does not poll inside the measured kernel window;
+- after timing stops, the host waits for the tail ack and then validates the
+  payload, so this mode is useful for write-path performance sweeps.
 
 For `data_as_flag`, for the same selected direction:
 
@@ -73,7 +94,8 @@ Important scope notes:
 - `memory` measures peer-memory IPC semantics implemented with AIV
   `DataCopyPad`. It is a useful baseline, not the same hardware data path as
   UDMA queue based direct URMA.
-- `memory` and `data_as_flag` are limited by the TileXR IPC data window. The
+- `memory`, `memory_visible_ack`, `memory_visible_ack_perf`, and `data_as_flag`
+  are limited by the TileXR IPC data window. The
   current wrapper rejects sizes above 100 MiB.
 - The current IPC comparison kernels use one AIV block in the runner. Large
   messages therefore reflect single-block GM->UB->peer-GM copy throughput.
@@ -278,6 +300,8 @@ Example:
 cd /path/to/TileXR/tests/udma
 bash demo/run_tilexr_udma_p2p_perf.sh 0 1 4096 67108864 2 100 10 2 1 direct_urma
 bash demo/run_tilexr_udma_p2p_perf.sh 0 1 4096 67108864 2 100 10 2 1 memory
+bash demo/run_tilexr_udma_p2p_perf.sh 0 1 4096 67108864 2 100 10 2 1 memory_visible_ack
+bash demo/run_tilexr_udma_p2p_perf.sh 0 1 4096 67108864 2 100 10 2 1 memory_visible_ack_perf
 bash demo/run_tilexr_udma_p2p_perf.sh 0 1 4096 67108864 2 100 10 2 1 data_as_flag
 ```
 
@@ -289,7 +313,8 @@ Arguments:
 - `first_npu`: first physical NPU id used by local rank 0. For physical cards
   2 and 3, pass `2`.
 - `check`: `1` validates destination bytes after each size.
-- `transport`: `direct_urma`, `memory`, or `data_as_flag`; default is `direct_urma`.
+- `transport`: `direct_urma`, `memory`, `memory_visible_ack`,
+  `memory_visible_ack_perf`, or `data_as_flag`; default is `direct_urma`.
 
 The script should:
 
@@ -381,8 +406,9 @@ Success criteria:
 - every row has `status=0`;
 - every row has `errors=0`;
 - for `direct_urma`, per-rank logs include UDMA enabled in `CommArgs`;
-- for `memory` and `data_as_flag`, per-rank logs show non-null `peerMems[]`
-  for the tested ranks;
+- for IPC transports (`memory`, `memory_visible_ack`,
+  `memory_visible_ack_perf`, and `data_as_flag`), per-rank logs show non-null
+  `peerMems[]` for the tested ranks;
 - no rank log contains `MISMATCH`, `TileXR UDMA demo failed`, or `ERROR`.
 
 ## Plot The Curve
@@ -494,6 +520,8 @@ Look for:
   correctness boundary.
 - `data_as_flag` differs from `memory` because it spends part of each 512B block
   on the embedded ready flag; compare it as a separate IPC baseline.
+- `memory_visible_ack_perf` is the mode to use when comparing sender-side
+  payload write bandwidth with an out-of-window receiver visibility check.
 
 Keep the raw logs with the CSV and curve. They are needed to confirm UDMA was
 enabled and to inspect `CommArgs`, registered memory offsets, and debug words.

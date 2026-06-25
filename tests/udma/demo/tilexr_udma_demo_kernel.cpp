@@ -451,7 +451,7 @@ extern "C" __global__ __aicore__ void tilexr_memory_p2p_perf_kernel(
 extern "C" __global__ __aicore__ void tilexr_memory_visible_ack_p2p_perf_kernel(
     GM_ADDR commArgsGM, GM_ADDR srcGM, GM_ADDR debugGM,
     int32_t srcRank, int32_t dstRank, uint64_t dstByteOffset,
-    uint32_t bytes, uint32_t pattern, int32_t traffic, uint32_t token)
+    uint32_t bytes, uint32_t pattern, int32_t traffic, uint32_t token, int32_t receiverWait)
 {
     if constexpr (g_coreType == AscendC::AIV) {
         auto args = reinterpret_cast<__gm__ TileXR::CommArgs*>(commArgsGM);
@@ -505,7 +505,7 @@ extern "C" __global__ __aicore__ void tilexr_memory_visible_ack_p2p_perf_kernel(
                 peerBase + dstByteOffset + offset, srcGM + offset, tBuf, sliceBytes);
             TileXRUdmaDemoWriteMemoryVisibleAck(peerBase + ackOffset, tBuf, ackValue);
         }
-        if (isReceiver && status == 0) {
+        if (isReceiver && status == 0 && receiverWait != 0) {
             GM_ADDR ackAddr = localBase + ackOffset;
             uint32_t polls = 0;
             uint32_t observed = 0;
@@ -658,10 +658,10 @@ void launch_tilexr_memory_p2p_perf(
 void launch_tilexr_memory_visible_ack_p2p_perf(
     uint32_t blockDim, void* stream, GM_ADDR commArgs, GM_ADDR src, GM_ADDR debug,
     int32_t srcRank, int32_t dstRank, uint64_t dstByteOffset, uint32_t bytes, uint32_t pattern, int32_t traffic,
-    uint32_t token)
+    uint32_t token, int32_t receiverWait)
 {
     tilexr_memory_visible_ack_p2p_perf_kernel<<<blockDim, nullptr, stream>>>(
-        commArgs, src, debug, srcRank, dstRank, dstByteOffset, bytes, pattern, traffic, token);
+        commArgs, src, debug, srcRank, dstRank, dstByteOffset, bytes, pattern, traffic, token, receiverWait);
 }
 
 void launch_tilexr_data_as_flag_p2p_perf(

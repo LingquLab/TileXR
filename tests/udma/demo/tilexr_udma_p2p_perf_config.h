@@ -20,6 +20,7 @@ enum class P2PTransport {
     DirectUrma,
     Memory,
     MemoryVisibleAck,
+    MemoryVisibleAckPerf,
     DataAsFlag,
     Invalid,
 };
@@ -39,6 +40,8 @@ inline const char* P2PTransportName(P2PTransport transport)
             return "memory";
         case P2PTransport::MemoryVisibleAck:
             return "memory_visible_ack";
+        case P2PTransport::MemoryVisibleAckPerf:
+            return "memory_visible_ack_perf";
         case P2PTransport::DataAsFlag:
             return "data_as_flag";
         default:
@@ -68,6 +71,9 @@ inline P2PTransport ParseP2PTransport(const std::string& name)
     }
     if (name == "memory_visible_ack" || name == "memory-visible-ack" || name == "memory_ack") {
         return P2PTransport::MemoryVisibleAck;
+    }
+    if (name == "memory_visible_ack_perf" || name == "memory-visible-ack-perf" || name == "memory_ack_perf") {
+        return P2PTransport::MemoryVisibleAckPerf;
     }
     if (name == "data_as_flag" || name == "data-as-flag" || name == "daf") {
         return P2PTransport::DataAsFlag;
@@ -163,7 +169,7 @@ inline uint64_t P2PTransportWindowBytes(P2PTransport transport, uint64_t payload
     if (transport == P2PTransport::DataAsFlag) {
         return DataAsFlagWindowBytes(payloadBytes);
     }
-    if (transport == P2PTransport::MemoryVisibleAck) {
+    if (transport == P2PTransport::MemoryVisibleAck || transport == P2PTransport::MemoryVisibleAckPerf) {
         return MemoryVisibleAckWindowBytes(payloadBytes);
     }
     return payloadBytes;
@@ -218,16 +224,17 @@ inline bool ValidateP2PPerfOptions(const P2PPerfOptions& options, int rankSize, 
         return fail("block_dim must be in [1, 64]");
     }
     if (options.transport == P2PTransport::Invalid) {
-        return fail("transport must be direct_urma, memory, memory_visible_ack, or data_as_flag");
+        return fail("transport must be direct_urma, memory, memory_visible_ack, memory_visible_ack_perf, or data_as_flag");
     }
     if (options.traffic == P2PTraffic::Invalid) {
         return fail("traffic must be unidir or bidir");
     }
     if ((options.transport == P2PTransport::Memory ||
             options.transport == P2PTransport::MemoryVisibleAck ||
+            options.transport == P2PTransport::MemoryVisibleAckPerf ||
             options.transport == P2PTransport::DataAsFlag) &&
         P2PTransportWindowBytes(options.transport, options.maxBytes, options.blockDim) > kP2PMemoryMaxBytes) {
-        return fail("memory/memory_visible_ack/data_as_flag transport max_bytes must fit in the TileXR IPC data window");
+        return fail("memory/memory_visible_ack/memory_visible_ack_perf/data_as_flag transport max_bytes must fit in the TileXR IPC data window");
     }
     return true;
 }
