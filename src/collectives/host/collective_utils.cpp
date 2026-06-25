@@ -81,6 +81,20 @@ bool IsSupportedReduceOp(TileXR::TileXRReduceOp reduceOp)
     return reduceOp == TileXR::TILEXR_REDUCE_SUM;
 }
 
+bool IsSupportedReduceDataType(const TileXR::CommArgs &commArgs, TileXR::TileXRDataType dataType)
+{
+    if (!IsSupportedDataType(dataType)) {
+        return false;
+    }
+
+    // Ascend950 currently reuses dav-c310 atomics, which do not support int64 reductions.
+    if ((commArgs.extraFlag & TileXR::ExtraFlag::TOPO_910A5) != 0 &&
+        dataType == TileXR::TILEXR_DATA_TYPE_INT64) {
+        return false;
+    }
+    return true;
+}
+
 int64_t CountToBytes(int64_t count, TileXR::TileXRDataType dataType)
 {
     if (count < 0) {

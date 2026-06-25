@@ -10,7 +10,7 @@
 #ifndef TILEXR_LCCL_OP_H
 #define TILEXR_LCCL_OP_H
 
-#if defined(__DAV_C220_VEC__) || defined(__DAV_C220_CUBE__)
+#if defined(__DAV_C220_VEC__) || defined(__DAV_C220_CUBE__) || defined(__DAV_C310_VEC__)
 
 #include "op_def.h"
 #include "allgather.h"

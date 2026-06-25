@@ -222,8 +222,17 @@ private:
     {
         PipeBarrier<PIPE_ALL>();
         if (op != -1) {
-#ifdef __DAV_C220_VEC__
+#if defined(__DAV_C220_VEC__)
             SetAtomicOpType<T>(op);
+#elif defined(__DAV_C310_VEC__)
+            if constexpr (std::is_same_v<T, int8_t> ||
+                std::is_same_v<T, int16_t> ||
+                std::is_same_v<T, int32_t> ||
+                std::is_same_v<T, float> ||
+                std::is_same_v<T, float16_t> ||
+                std::is_same_v<T, bfloat16_t>) {
+                SetAtomicOpType<T>(op);
+            }
 #endif
         }
         PipeBarrier<PIPE_ALL>();

@@ -22,6 +22,8 @@ bool IsSupportedDataType(TileXR::TileXRDataType dataType);
 
 bool IsSupportedReduceOp(TileXR::TileXRReduceOp reduceOp);
 
+bool IsSupportedReduceDataType(const TileXR::CommArgs &commArgs, TileXR::TileXRDataType dataType);
+
 int64_t CountToBytes(int64_t count, TileXR::TileXRDataType dataType);
 
 uint32_t GetAllGatherBlockNum(const TileXR::CommArgs &commArgs, int64_t dataSize);

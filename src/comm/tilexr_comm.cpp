@@ -55,6 +55,22 @@ static bool g_udmaUnavailable = false;
 static std::mutex g_sdmaMtx;
 static bool g_sdmaUnavailable = false;
 
+bool IsEnvEnabled(const char *name, bool defaultValue)
+{
+    const char *value = std::getenv(name);
+    if (value == nullptr) {
+        return defaultValue;
+    }
+    const std::string str(value);
+    if (str == "0" || str == "false" || str == "FALSE" || str == "off" || str == "OFF") {
+        return false;
+    }
+    if (str == "1" || str == "true" || str == "TRUE" || str == "on" || str == "ON") {
+        return true;
+    }
+    return defaultValue;
+}
+
 
 // 如果是互联的链路，返回false； 对910B2C那些不互联的链路，返回true
 bool SkipUnusedChannel910B2C(int curRank, int peerRank, ChipName chipName)
@@ -132,6 +148,10 @@ int TileXRComm::InitUDMA()
 {
     if (rankSize_ <= 1) {
         TILEXR_LOG(INFO) << "InitUDMA skipped for single-rank communicator";
+        return TILEXR_SUCCESS;
+    }
+    if (!IsEnvEnabled("TILEXR_ENABLE_UDMA", true)) {
+        TILEXR_LOG(INFO) << "TileXR UDMA disabled by environment";
         return TILEXR_SUCCESS;
     }
 
@@ -648,7 +668,7 @@ int TileXRComm::EnablePeerAccess()
 
         // 如果310P未来通信域要支持两卡四芯的话，这里需要做更改。并且现在默认服务器上机器只有一个链路种类。
         if (value == TOPOLOGY_HCCS || value == TOPOLOGY_SIO || value == TOPOLOGY_HCCS_SW ||
-            GetChipName() == ChipName::CHIP_910B2C) {
+            GetChipName() == ChipName::CHIP_910B2C || GetChipName() == ChipName::CHIP_950) {
             physicalInfo_.physicalLink = PhysicalLink::HCCS;
             commArgs_.extraFlag &= ~(ExtraFlag::TOPO_PCIE);
         } else if (physicalInfo_.physicalLink == PhysicalLink::RESERVED) {

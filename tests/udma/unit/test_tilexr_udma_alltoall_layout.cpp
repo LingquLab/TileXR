@@ -154,13 +154,50 @@ void TestAllToAllDataAsFlagSource()
     CHECK_CONTAINS(demo, "ERROR: strict alltoall UDMA registration failed");
     CHECK_CONTAINS(demo, "ERROR: strict alltoall UDMA CQ incomplete");
     CHECK_CONTAINS(demo, "TileXRUDMARegister failed; use alltoall data-as-flag IPC fallback");
-    CHECK_CONTAINS(demo, "skip all-to-all UDMA kernel; use data-as-flag IPC fallback");
+    CHECK_CONTAINS(demo, "allToAllIpcFallbackLabel");
     CHECK_CONTAINS(kernel, "#include \"tilexr_data_as_flag.h\"");
     CHECK_CONTAINS(kernel, "TILEXR_UDMA_DEMO_DATA_AS_FLAG_STAGING_OFFSET");
     CHECK_CONTAINS(kernel, "DataAsFlagBlockCountForPayloadBytes");
     CHECK_CONTAINS(kernel, "DataAsFlagInit");
     CHECK_CONTAINS(kernel, "DataAsFlagSend");
     CHECK_CONTAINS(kernel, "DataAsFlagCheckAndRecv");
+}
+
+void TestAllToAllChunkedUdmaSource()
+{
+    const std::string demo =
+        ReadFile(std::string(TILEXR_SOURCE_ROOT) + "/tests/udma/demo/tilexr_udma_demo.cpp");
+    const std::string layout =
+        ReadFile(std::string(TILEXR_SOURCE_ROOT) + "/tests/udma/demo/tilexr_udma_alltoall_layout.h");
+    const std::string kernel =
+        ReadFile(std::string(TILEXR_SOURCE_ROOT) + "/tests/udma/demo/tilexr_udma_demo_kernel.cpp");
+
+    CHECK_CONTAINS(layout, "struct AllToAllChunkPlan");
+    CHECK_CONTAINS(layout, "PlanAllToAllUdmaChunks");
+    CHECK_CONTAINS(layout, "kAllToAllUdmaMaxRegisteredBytes");
+    CHECK_CONTAINS(demo, "PlanAllToAllUdmaChunks");
+    CHECK_CONTAINS(demo, "alltoall UDMA chunk plan");
+    CHECK_CONTAINS(demo, "skip IPC staging capacity guard for strict UDMA alltoall");
+    CHECK_CONTAINS(demo, "AllToAllPlainIpcStagingBytes");
+    CHECK_CONTAINS(demo, "alltoall plain IPC staging bytes=");
+    CHECK_CONTAINS(demo, "TILEXR_DEMO_ALLTOALL_REPEAT");
+    CHECK_CONTAINS(demo, "TILEXR_DEMO_ALLTOALL_SYNC_AT_END");
+    CHECK_CONTAINS(demo, "TILEXR_DEMO_ALLTOALL_PLAIN_IPC");
+    CHECK_CONTAINS(demo, "skip TileXRUDMARegister for alltoall plain IPC path");
+    CHECK_CONTAINS(demo, "TILEXR_DEMO_ALLTOALL_FUSED_IPC");
+    CHECK_CONTAINS(demo, "skip TileXRUDMARegister for alltoall fused IPC path");
+    CHECK_CONTAINS(demo, "alltoall fused IPC: single kernel send+flag+recv");
+    CHECK_CONTAINS(demo, "alltoall use ");
+    CHECK_CONTAINS(demo, "plain IPC fallback");
+    CHECK_CONTAINS(demo, "launch all-to-all kernel iter=");
+    CHECK_CONTAINS(demo, "for (uint32_t pass = 0; pass < chunkPlan.passCount; ++pass)");
+    CHECK_CONTAINS(demo, "registered output chunk");
+    CHECK_CONTAINS(kernel, "tilexr_all_to_all_plain_ipc_scatter_kernel");
+    CHECK_CONTAINS(kernel, "tilexr_all_to_all_plain_ipc_gather_kernel");
+    CHECK_CONTAINS(kernel, "tilexr_all_to_all_fused_ipc_kernel");
+    CHECK_CONTAINS(kernel, "launch_tilexr_all_to_all_fused_ipc");
+    CHECK_CONTAINS(kernel, "inputElementOffset");
+    CHECK_CONTAINS(kernel, "chunkElements");
 }
 
 } // namespace
@@ -173,6 +210,7 @@ int main()
     TestAllToAllMaxRank256With64MiBPerRank();
     TestDemoDebugLayoutSource();
     TestAllToAllDataAsFlagSource();
+    TestAllToAllChunkedUdmaSource();
     if (g_failures != 0) {
         std::cerr << g_failures << " all-to-all layout checks failed" << std::endl;
         return 1;

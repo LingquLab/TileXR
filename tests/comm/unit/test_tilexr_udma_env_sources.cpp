@@ -31,16 +31,14 @@ std::string ReadFile(const std::string& path)
 
 int main()
 {
-    const std::string internal = ReadFile(std::string(TILEXR_SOURCE_ROOT) + "/src/comm/tilexr_internal.cpp");
-    CHECK_CONTAINS(internal, "\"Ascend950DT_9582\"");
-    CHECK_CONTAINS(internal, "\"Ascend950DT_9592\"");
-    CHECK_CONTAINS(internal, "\"Ascend950PR_9599\"");
-    CHECK_CONTAINS(internal, "ChipName::CHIP_950");
-
+    const std::string comm = ReadFile(std::string(TILEXR_SOURCE_ROOT) + "/src/comm/tilexr_comm.cpp");
+    CHECK_CONTAINS(comm, "TILEXR_ENABLE_UDMA");
+    CHECK_CONTAINS(comm, "TileXR UDMA disabled by environment");
+    CHECK_CONTAINS(comm, "IsEnvEnabled(\"TILEXR_ENABLE_UDMA\", true)");
     if (g_failures != 0) {
-        std::cerr << g_failures << " chip map source checks failed" << std::endl;
+        std::cerr << g_failures << " UDMA env source checks failed" << std::endl;
         return 1;
     }
-    std::cout << "TileXR chip map source checks passed" << std::endl;
+    std::cout << "TileXR UDMA env source checks passed" << std::endl;
     return 0;
 }

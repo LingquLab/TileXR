@@ -1,4 +1,4 @@
-#ifdef __DAV_C220_VEC__
+#if defined(__DAV_C220_VEC__) || defined(__DAV_C310_VEC__)
 
 #include "lccl_op.h"
 

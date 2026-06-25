@@ -146,6 +146,9 @@ int TileXRAllReduce(void *sendBuf, void *recvBuf, int64_t count,
     if (ret != TileXR::TILEXR_SUCCESS) {
         return ret;
     }
+    if (!TileXRCollectives::Host::IsSupportedReduceDataType(*context.hostArgs, dataType)) {
+        return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
 
     const int64_t bytes = TileXRCollectives::Host::CountToBytes(count, dataType);
     if (context.hostArgs->rankSize <= 1) {
@@ -171,6 +174,9 @@ int TileXRReduceScatter(void *sendBuf, void *recvBuf, int64_t recvCount,
     ret = TileXRCollectives::Host::PrepareHostLaunchContext(comm, context);
     if (ret != TileXR::TILEXR_SUCCESS) {
         return ret;
+    }
+    if (!TileXRCollectives::Host::IsSupportedReduceDataType(*context.hostArgs, dataType)) {
+        return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
 
     const int64_t bytes = TileXRCollectives::Host::CountToBytes(recvCount, dataType);

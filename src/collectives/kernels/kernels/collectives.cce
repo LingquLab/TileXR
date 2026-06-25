@@ -10,7 +10,7 @@
 #ifndef TILEXR_KERNEL_COLLECTIVES_CCE
 #define TILEXR_KERNEL_COLLECTIVES_CCE
 
-#if !defined(__DAV_C220_VEC__) && !defined(__DAV_M200_VEC__) && !defined(__DAV_C220_CUBE__)
+#if !defined(__DAV_C220_VEC__) && !defined(__DAV_C310_VEC__) && !defined(__DAV_M200_VEC__) && !defined(__DAV_C220_CUBE__)
 #define __aicore__
 #define __ubuf__
 #define __gm__
@@ -574,9 +574,18 @@ __attribute__((always_inline)) inline __aicore__ void ProcessData(int64_t dataSi
         return;
     }
     AscendC::PipeBarrier<PIPE_ALL>();
-    #ifdef __DAV_C220_VEC__
+#ifdef __DAV_C220_VEC__
     SetAtomicOpType<T>(op);
-    #endif
+#elif defined(__DAV_C310_VEC__)
+    if constexpr (std::is_same_v<T, int8_t> ||
+        std::is_same_v<T, int16_t> ||
+        std::is_same_v<T, int32_t> ||
+        std::is_same_v<T, float> ||
+        std::is_same_v<T, float16_t> ||
+        std::is_same_v<T, bfloat16_t>) {
+        SetAtomicOpType<T>(op);
+    }
+#endif
     AscendC::PipeBarrier<PIPE_ALL>();
 
     while (dataSizeRemain >= UB_SINGLE_ADD_SIZE_MAX) {
@@ -619,6 +628,15 @@ __attribute__((always_inline)) inline __aicore__ void ProcessDataNew(int64_t dat
     AscendC::PipeBarrier<PIPE_ALL>();
 #ifdef __DAV_C220_VEC__
     SetAtomicOpType<T>(op);
+#elif defined(__DAV_C310_VEC__)
+    if constexpr (std::is_same_v<T, int8_t> ||
+        std::is_same_v<T, int16_t> ||
+        std::is_same_v<T, int32_t> ||
+        std::is_same_v<T, float> ||
+        std::is_same_v<T, float16_t> ||
+        std::is_same_v<T, bfloat16_t>) {
+        SetAtomicOpType<T>(op);
+    }
 #endif
     AscendC::PipeBarrier<PIPE_ALL>();
 

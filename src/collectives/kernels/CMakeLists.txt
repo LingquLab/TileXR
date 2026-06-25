@@ -8,6 +8,13 @@ enable_language(CCE)
 
 set(TILEXR_COLLECTIVES_1OP_BIN_SIZE 5242880 CACHE STRING "Padded size for TileXR collectives CCE binary")
 option(TILEXR_COLLECTIVES_ENABLE_PROFILING "Enable TileXR collectives kernel profiling helpers" OFF)
+set(TILEXR_COLLECTIVES_DEFAULT_SOC_TYPE "$ENV{TILEXR_SOC_NAME}")
+if(NOT TILEXR_COLLECTIVES_DEFAULT_SOC_TYPE)
+    set(TILEXR_COLLECTIVES_DEFAULT_SOC_TYPE "Ascend910B")
+endif()
+set(TILEXR_COLLECTIVES_SOC_TYPE "${TILEXR_COLLECTIVES_DEFAULT_SOC_TYPE}" CACHE STRING
+    "TileXR collectives kernel SOC type")
+string(TOLOWER "${TILEXR_COLLECTIVES_SOC_TYPE}" TILEXR_COLLECTIVES_SOC_TYPE_LOWER)
 
 set(CCE_COMPILE_OPTION
         -O2
@@ -15,13 +22,18 @@ set(CCE_COMPILE_OPTION
         --cce-aicore-only
         -Wno-deprecated-declarations
         "SHELL:-mllvm -cce-aicore-long-call"
-        "SHELL:-mllvm -cce-aicore-function-stack-size=16000"
+        "SHELL:-mllvm -cce-aicore-stack-size=0x8000"
+        "SHELL:-mllvm -cce-aicore-function-stack-size=0x8000"
         "SHELL:-mllvm -cce-aicore-record-overflow=false"
         "SHELL:-mllvm -cce-aicore-addr-transform"
         "SHELL:-mllvm --cce-aicore-jump-expand=true"
 )
 
-set(AIV_ARCH dav-c220-vec)
+if(TILEXR_COLLECTIVES_SOC_TYPE_LOWER MATCHES "ascend950|ascend910_9|ascend910-9|a5")
+    set(AIV_ARCH dav-c310-vec)
+else()
+    set(AIV_ARCH dav-c220-vec)
+endif()
 set_source_files_properties(tilexr_lccl_op.cpp PROPERTIES LANGUAGE CCE)
 
 include_directories(

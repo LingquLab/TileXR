@@ -71,6 +71,27 @@ void TestReduceOpSupport()
               IsSupportedReduceOp(static_cast<TileXR::TileXRReduceOp>(999)), false);
 }
 
+void TestReduceDataTypeSupport()
+{
+    using TileXRCollectives::Host::IsSupportedReduceDataType;
+
+    const auto defaultArgs = Args(2, 0);
+    CheckBool("default int64 reduce supported",
+              IsSupportedReduceDataType(defaultArgs, TileXR::TILEXR_DATA_TYPE_INT64),
+              true);
+
+    const auto ascend950Args = Args(2, TileXR::ExtraFlag::TOPO_910A5 | TileXR::ExtraFlag::TOPO_910_93);
+    CheckBool("Ascend950 int32 reduce supported",
+              IsSupportedReduceDataType(ascend950Args, TileXR::TILEXR_DATA_TYPE_INT32),
+              true);
+    CheckBool("Ascend950 fp16 reduce supported",
+              IsSupportedReduceDataType(ascend950Args, TileXR::TILEXR_DATA_TYPE_FP16),
+              true);
+    CheckBool("Ascend950 int64 reduce unsupported",
+              IsSupportedReduceDataType(ascend950Args, TileXR::TILEXR_DATA_TYPE_INT64),
+              false);
+}
+
 void TestCountToBytes()
 {
     using TileXRCollectives::Host::CountToBytes;
@@ -251,6 +272,7 @@ int main()
 {
     TestDataTypeSupport();
     TestReduceOpSupport();
+    TestReduceDataTypeSupport();
     TestCountToBytes();
     TestAllGatherBlockNum();
     TestAllToAllBlockNum();

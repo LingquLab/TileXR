@@ -123,6 +123,16 @@ void TestDumpInitCleansFailedAllocations()
     CheckContains(path, text, "std::free(memory);");
 }
 
+void TestAscend950UsesHccsTopologyForPeerLinks()
+{
+    const std::string path = "src/comm/tilexr_comm.cpp";
+    const auto text = ReadFile(path);
+
+    CheckContains(path, text, "GetChipName() == ChipName::CHIP_950");
+    CheckContains(path, text, "physicalInfo_.physicalLink = PhysicalLink::HCCS;");
+    CheckContains(path, text, "commArgs_.extraFlag &= ~(ExtraFlag::TOPO_PCIE);");
+}
+
 void TestSocketExchangeUsesDirectConnectionsOnly()
 {
     const std::string cppPath = "src/comm/tools/socket/tilexr_sock_exchange.cpp";
@@ -187,6 +197,7 @@ int main()
     TestCommInitChecksDeviceCommArgsSync();
     TestCWrappersDoNotPublishFailedCommunicators();
     TestDumpInitCleansFailedAllocations();
+    TestAscend950UsesHccsTopologyForPeerLinks();
     TestSocketExchangeUsesDirectConnectionsOnly();
     TestRuntimeEnvDoesNotPrependCannDevlib();
     TestRootCMakeRespectsAscendDriverOverride();

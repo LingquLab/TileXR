@@ -39,9 +39,18 @@ target_compile_definitions(test_tilexr_source_guards PRIVATE
     TILEXR_SOURCE_ROOT="${TILEXR_ROOT}"
 )
 
+add_executable(test_tilexr_udma_env_sources
+    unit/test_tilexr_udma_env_sources.cpp
+)
+
+target_compile_definitions(test_tilexr_udma_env_sources PRIVATE
+    TILEXR_SOURCE_ROOT="${TILEXR_ROOT}"
+)
+
 install(TARGETS
     test_tilexr_log
     test_tilexr_log_spdlog_compile
     test_tilexr_source_guards
+    test_tilexr_udma_env_sources
     RUNTIME DESTINATION ${CMAKE_INSTALL_PREFIX}/bin
 )

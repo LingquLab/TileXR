@@ -32,10 +32,22 @@ extern void launch_tilexr_udma_put_signal(
     int32_t elementsPerRank, uint64_t signal);
 extern void launch_tilexr_udma_all_to_all(
     uint32_t blockDim, void* stream, GM_ADDR commArgs, GM_ADDR input, GM_ADDR output,
-    GM_ADDR debug, int32_t elementsPerPeer, uint64_t outputByteOffset);
+    GM_ADDR debug, int32_t elementsPerPeer, uint64_t outputByteOffset, int32_t inputElementOffset,
+    int32_t chunkElements);
 extern void launch_tilexr_all_to_all_ipc_scatter(
     uint32_t blockDim, void* stream, GM_ADDR commArgs, GM_ADDR input, GM_ADDR debug, int32_t elementsPerPeer);
 extern void launch_tilexr_all_to_all_ipc_gather(
+    uint32_t blockDim, void* stream, GM_ADDR commArgs, GM_ADDR output, GM_ADDR debug, int32_t elementsPerPeer);
+extern void launch_tilexr_all_to_all_plain_ipc_scatter(
+    uint32_t blockDim, void* stream, GM_ADDR commArgs, GM_ADDR input, GM_ADDR debug, int32_t elementsPerPeer);
+extern void launch_tilexr_all_to_all_plain_ipc_gather(
+    uint32_t blockDim, void* stream, GM_ADDR commArgs, GM_ADDR output, GM_ADDR debug, int32_t elementsPerPeer);
+extern void launch_tilexr_all_to_all_fused_ipc(
+    uint32_t blockDim, void* stream, GM_ADDR commArgs, GM_ADDR input, GM_ADDR output,
+    GM_ADDR debug, int32_t elementsPerPeer, int32_t round);
+extern void launch_tilexr_all_to_all_ipc_scatter_dma(
+    uint32_t blockDim, void* stream, GM_ADDR commArgs, GM_ADDR input, GM_ADDR debug, int32_t elementsPerPeer);
+extern void launch_tilexr_all_to_all_ipc_gather_dma(
     uint32_t blockDim, void* stream, GM_ADDR commArgs, GM_ADDR output, GM_ADDR debug, int32_t elementsPerPeer);
 extern void launch_tilexr_all_reduce_ipc_scatter(
     uint32_t blockDim, void* stream, GM_ADDR commArgs, GM_ADDR input, GM_ADDR debug, int32_t elementsPerRank);
@@ -469,6 +481,54 @@ size_t AllToAllDataAsFlagStagingBytes(int rankSize, int32_t elementsPerPeer)
     return static_cast<size_t>(static_cast<uint64_t>(rankSize) * blocks * TileXR::DATA_AS_FLAG_BLOCK_BYTES);
 }
 
+size_t AllToAllPlainIpcStagingBytes(int rankSize, int32_t elementsPerPeer)
+{
+    return static_cast<size_t>(rankSize) * static_cast<size_t>(rankSize) *
+        static_cast<size_t>(elementsPerPeer) * sizeof(int32_t);
+}
+
+bool CopyChunkHostToDevice(
+    int rank, int32_t* chunkInput, int32_t* chunkOutput, int rankSize, int32_t elementsPerRank,
+    int32_t chunkOffset, int32_t chunkElements, const std::vector<int32_t>& hostInput,
+    std::vector<int32_t>& hostOutput)
+{
+    std::vector<int32_t> inputChunk(static_cast<size_t>(rankSize) * chunkElements, 0);
+    std::vector<int32_t> outputChunk(static_cast<size_t>(rankSize) * chunkElements, -1);
+    for (int peer = 0; peer < rankSize; ++peer) {
+        const size_t srcBase = static_cast<size_t>(peer) * elementsPerRank + chunkOffset;
+        const size_t dstBase = static_cast<size_t>(peer) * chunkElements;
+        std::copy(hostInput.begin() + srcBase,
+                  hostInput.begin() + srcBase + chunkElements,
+                  inputChunk.begin() + dstBase);
+        std::copy(hostOutput.begin() + srcBase,
+                  hostOutput.begin() + srcBase + chunkElements,
+                  outputChunk.begin() + dstBase);
+    }
+    return CopyHostToDevice(rank, chunkInput, inputChunk.size() * sizeof(int32_t),
+               inputChunk.data(), inputChunk.size() * sizeof(int32_t), "registered input chunk") &&
+        CopyHostToDevice(rank, chunkOutput, outputChunk.size() * sizeof(int32_t),
+            outputChunk.data(), outputChunk.size() * sizeof(int32_t), "registered output chunk");
+}
+
+bool CopyChunkDeviceToHost(
+    int rank, const int32_t* chunkOutput, int rankSize, int32_t elementsPerRank,
+    int32_t chunkOffset, int32_t chunkElements, std::vector<int32_t>& hostOutput)
+{
+    std::vector<int32_t> outputChunk(static_cast<size_t>(rankSize) * chunkElements, -1);
+    if (!CopyDeviceToHost(rank, outputChunk.data(), outputChunk.size() * sizeof(int32_t),
+            chunkOutput, outputChunk.size() * sizeof(int32_t), "registered output chunk")) {
+        return false;
+    }
+    for (int peer = 0; peer < rankSize; ++peer) {
+        const size_t dstBase = static_cast<size_t>(peer) * elementsPerRank + chunkOffset;
+        const size_t srcBase = static_cast<size_t>(peer) * chunkElements;
+        std::copy(outputChunk.begin() + srcBase,
+                  outputChunk.begin() + srcBase + chunkElements,
+                  hostOutput.begin() + dstBase);
+    }
+    return true;
+}
+
 void Cleanup(
     TileXRCommPtr comm, aclrtStream stream, void* registeredMemory, int32_t* debug, int rank, int deviceId)
 {
@@ -559,34 +619,69 @@ int main(int argc, char** argv)
     bool isAllToAll = testType == 2;
     bool isAllReduce = testType == 3;
     bool strictAllToAllUdma = isAllToAll && GetEnvInt("TILEXR_DEMO_ALLTOALL_USE_UDMA", 0) != 0;
+    int allToAllRepeat = isAllToAll ? std::max(1, GetEnvInt("TILEXR_DEMO_ALLTOALL_REPEAT", 1)) : 1;
+    bool syncAllToAllAtEnd =
+        isAllToAll && GetEnvInt("TILEXR_DEMO_ALLTOALL_SYNC_AT_END", 0) != 0;
+    bool useAllToAllPlainIpc = isAllToAll && GetEnvInt("TILEXR_DEMO_ALLTOALL_PLAIN_IPC", 0) != 0;
+    bool useAllToAllFusedIpc = isAllToAll && GetEnvInt("TILEXR_DEMO_ALLTOALL_FUSED_IPC", 0) != 0;
     bool dumpAllToAllOnStrictFail = isAllToAll && GetEnvInt("TILEXR_DEMO_ALLTOALL_DUMP_ON_STRICT_FAIL", 0) != 0;
-    bool useAllToAllDataAsFlagIpc = isAllToAll && !strictAllToAllUdma;
+    bool useAllToAllDataAsFlagIpc = isAllToAll && !strictAllToAllUdma && !useAllToAllPlainIpc && !useAllToAllFusedIpc;
+    const char* allToAllIpcFallbackLabel =
+        useAllToAllFusedIpc ? "fused IPC" :
+        (useAllToAllPlainIpc ? "plain IPC fallback" : "data-as-flag IPC fallback");
     bool forceAllToAllIpcFallback = false;
     bool hasOutput = isAllToAll || isAllReduce;
     size_t dataCount = static_cast<size_t>(rankSize) * elementsPerRank;
     size_t dataBytes = dataCount * sizeof(int32_t);
+    const TileXR::Demo::AllToAllChunkPlan chunkPlan =
+        isAllToAll ? TileXR::Demo::PlanAllToAllUdmaChunks(rankSize, elementsPerRank) :
+            TileXR::Demo::AllToAllChunkPlan {};
     if (isAllToAll) {
-        const size_t stagingBytes = AllToAllDataAsFlagStagingBytes(rankSize, elementsPerRank);
-        if (stagingBytes > static_cast<size_t>(TileXR::IPC_BUFF_MAX_SIZE)) {
-            std::cerr << "[rank " << rank << "] ERROR: alltoall data-as-flag IPC fallback staging requires "
-                      << stagingBytes << " bytes, exceeds IPC data capacity "
+        const size_t dataAsFlagStagingBytes = AllToAllDataAsFlagStagingBytes(rankSize, elementsPerRank);
+        const size_t plainIpcStagingBytes = AllToAllPlainIpcStagingBytes(rankSize, elementsPerRank);
+        const size_t selectedIpcStagingBytes = useAllToAllPlainIpc ? plainIpcStagingBytes : dataAsFlagStagingBytes;
+        if (useAllToAllPlainIpc && plainIpcStagingBytes > static_cast<size_t>(TileXR::IPC_BUFF_MAX_SIZE)) {
+            std::cerr << "[rank " << rank << "] ERROR: alltoall plain IPC fallback staging requires "
+                      << plainIpcStagingBytes << " bytes, exceeds IPC data capacity "
                       << TileXR::IPC_BUFF_MAX_SIZE << std::endl;
             Cleanup(comm, stream, registeredMemory, debug, rank, deviceId);
             return 1;
         }
-        PrintStatus(rank, "alltoall data-as-flag staging bytes=" + std::to_string(stagingBytes));
+        if (useAllToAllDataAsFlagIpc && dataAsFlagStagingBytes > static_cast<size_t>(TileXR::IPC_BUFF_MAX_SIZE)) {
+            std::cerr << "[rank " << rank << "] ERROR: alltoall data-as-flag IPC fallback staging requires "
+                      << dataAsFlagStagingBytes << " bytes, exceeds IPC data capacity "
+                      << TileXR::IPC_BUFF_MAX_SIZE << std::endl;
+            Cleanup(comm, stream, registeredMemory, debug, rank, deviceId);
+            return 1;
+        }
+        PrintStatus(rank, "alltoall plain IPC staging bytes=" + std::to_string(plainIpcStagingBytes));
+        PrintStatus(rank, "alltoall data-as-flag staging bytes=" + std::to_string(dataAsFlagStagingBytes));
+        if (strictAllToAllUdma && selectedIpcStagingBytes > static_cast<size_t>(TileXR::IPC_BUFF_MAX_SIZE)) {
+            PrintStatus(rank, "skip IPC staging capacity guard for strict UDMA alltoall");
+        }
+        PrintStatus(rank, "alltoall repeat=" + std::to_string(allToAllRepeat) +
+            " syncAtEnd=" + std::string(syncAllToAllAtEnd ? "true" : "false"));
+        PrintStatus(rank, "alltoall UDMA chunk plan: passCount=" + std::to_string(chunkPlan.passCount) +
+            " chunkElements=" + std::to_string(chunkPlan.chunkElements) +
+            " registeredBytes=" + std::to_string(chunkPlan.registeredBytes));
     }
     size_t inputOffset = 0;
-    size_t outputOffset = hasOutput ? dataBytes : 0;
+    const size_t activeBytesPerRank = isAllToAll && strictAllToAllUdma ? chunkPlan.chunkBytesPerRank : dataBytes;
+    size_t outputOffset = hasOutput ? activeBytesPerRank : 0;
     size_t signalBytes = static_cast<size_t>(rankSize) * sizeof(uint64_t);
-    size_t signalOffset = hasOutput ? dataBytes * 2 : dataBytes;
+    size_t signalOffset = hasOutput ? (outputOffset + activeBytesPerRank) : activeBytesPerRank;
     size_t payloadBytes = signalOffset + signalBytes;
-    size_t registeredBytes = ((payloadBytes + kUdmaRegistrationAlignment - 1) / kUdmaRegistrationAlignment) *
+    size_t allocBytes = ((payloadBytes + kUdmaRegistrationAlignment - 1) / kUdmaRegistrationAlignment) *
         kUdmaRegistrationAlignment;
+    size_t registeredBytes = allocBytes;
+    if (isAllToAll && strictAllToAllUdma) {
+        registeredBytes = ((chunkPlan.registeredBytes + kUdmaRegistrationAlignment - 1) /
+            kUdmaRegistrationAlignment) * kUdmaRegistrationAlignment;
+    }
     if (!CheckAcl(rank, "aclrtMalloc debug", aclrtMalloc(reinterpret_cast<void**>(&debug),
             kDebugWords * sizeof(int32_t), ACL_MEM_MALLOC_HUGE_FIRST)) ||
         !CheckAcl(rank, "aclrtMalloc registered memory", aclrtMalloc(&registeredMemory,
-            registeredBytes, ACL_MEM_MALLOC_HUGE_FIRST))) {
+            allocBytes, ACL_MEM_MALLOC_HUGE_FIRST))) {
         Cleanup(comm, stream, registeredMemory, debug, rank, deviceId);
         return 1;
     }
@@ -594,9 +689,18 @@ int main(int argc, char** argv)
     auto input = reinterpret_cast<int32_t*>(static_cast<uint8_t*>(registeredMemory) + inputOffset);
     auto output = reinterpret_cast<int32_t*>(static_cast<uint8_t*>(registeredMemory) + outputOffset);
     auto signals = reinterpret_cast<uint64_t*>(static_cast<uint8_t*>(registeredMemory) + signalOffset);
-    if (useAllToAllDataAsFlagIpc) {
+    const bool chunkedStrictAllToAll = isAllToAll && strictAllToAllUdma && chunkPlan.passCount > 1;
+    if (useAllToAllFusedIpc) {
+        PrintStatus(rank, "skip TileXRUDMARegister for alltoall fused IPC path");
+        forceAllToAllIpcFallback = true;
+    } else if (useAllToAllPlainIpc) {
+        PrintStatus(rank, "skip TileXRUDMARegister for alltoall plain IPC path");
+        forceAllToAllIpcFallback = true;
+    } else if (useAllToAllDataAsFlagIpc) {
         PrintStatus(rank, "skip TileXRUDMARegister for alltoall data-as-flag IPC path");
         forceAllToAllIpcFallback = true;
+    } else if (chunkedStrictAllToAll) {
+        PrintStatus(rank, "defer TileXRUDMARegister to per-pass registered output chunk");
     } else {
         int registerRet =
             TileXRUDMARegister(comm, static_cast<GM_ADDR>(registeredMemory), registeredBytes, &udmaHandle);
@@ -640,12 +744,17 @@ int main(int argc, char** argv)
     std::vector<int32_t> hostDebug(kDebugWords, 0);
 
     const char* inputName = isAllToAll ? "alltoall input" : (isAllReduce ? "allreduce input" : "data");
-    bool initOk = CopyHostToDevice(rank, input, dataCount * sizeof(int32_t),
-        hostData.data(), dataCount * sizeof(int32_t), inputName);
-    if (hasOutput) {
-        const char* outputName = isAllToAll ? "alltoall output" : "allreduce output";
-        initOk = CopyHostToDevice(rank, output, dataCount * sizeof(int32_t),
-            hostOutput.data(), dataCount * sizeof(int32_t), outputName) && initOk;
+    bool initOk = true;
+    if (!chunkedStrictAllToAll) {
+        initOk = CopyHostToDevice(rank, input, dataCount * sizeof(int32_t),
+            hostData.data(), dataCount * sizeof(int32_t), inputName);
+        if (hasOutput) {
+            const char* outputName = isAllToAll ? "alltoall output" : "allreduce output";
+            initOk = CopyHostToDevice(rank, output, dataCount * sizeof(int32_t),
+                hostOutput.data(), dataCount * sizeof(int32_t), outputName) && initOk;
+        }
+    } else {
+        std::fill(hostOutput.begin(), hostOutput.end(), -1);
     }
     if (!initOk ||
         !CopyHostToDevice(rank, signals, hostSignals.size() * sizeof(uint64_t),
@@ -668,12 +777,89 @@ int main(int argc, char** argv)
 
     if (testType == 2) {
         if (forceAllToAllIpcFallback) {
-            PrintStatus(rank, "skip all-to-all UDMA kernel; use data-as-flag IPC fallback");
+            PrintStatus(rank, std::string("skip all-to-all UDMA kernel; use ") + allToAllIpcFallbackLabel);
+        } else if (chunkedStrictAllToAll) {
+            for (uint32_t pass = 0; pass < chunkPlan.passCount; ++pass) {
+                const int32_t chunkOffset = static_cast<int32_t>(pass) * chunkPlan.chunkElements;
+                const int32_t chunkElements = std::min(
+                    chunkPlan.chunkElements, elementsPerRank - chunkOffset);
+                if (!CopyChunkHostToDevice(rank, input, output, rankSize, elementsPerRank,
+                        chunkOffset, chunkElements, hostData, hostOutput)) {
+                    if (udmaRegistered) {
+                        CheckTileXR(rank, "TileXRUDMAUnregister", TileXRUDMAUnregister(comm, udmaHandle));
+                    }
+                    Cleanup(comm, stream, registeredMemory, debug, rank, deviceId);
+                    return 1;
+                }
+                if (!udmaRegistered) {
+                    int registerRet =
+                        TileXRUDMARegister(comm, static_cast<GM_ADDR>(registeredMemory), registeredBytes, &udmaHandle);
+                    if (registerRet != TileXR::TILEXR_SUCCESS) {
+                        std::cerr << "[rank " << rank << "] ERROR: strict alltoall UDMA registration failed"
+                                  << " ret=" << registerRet << std::endl;
+                        CheckTileXR(rank, "TileXRUDMARegister", registerRet);
+                        Cleanup(comm, stream, registeredMemory, debug, rank, deviceId);
+                        return 1;
+                    }
+                    udmaRegistered = true;
+                }
+                PrintStatus(rank, "launch all-to-all kernel pass=" + std::to_string(pass));
+                launch_tilexr_udma_all_to_all(
+                    static_cast<uint32_t>(rankSize), stream, commArgsDev, reinterpret_cast<GM_ADDR>(input), reinterpret_cast<GM_ADDR>(output),
+                    reinterpret_cast<GM_ADDR>(debug), chunkElements, static_cast<uint64_t>(outputOffset),
+                    0, chunkElements);
+                if (!CheckAcl(rank, "aclrtSynchronizeStream", aclrtSynchronizeStream(stream)) ||
+                    !DemoBarrierAll(rank, rankSize, "all ranks completed demo kernels")) {
+                    if (udmaRegistered) {
+                        CheckTileXR(rank, "TileXRUDMAUnregister", TileXRUDMAUnregister(comm, udmaHandle));
+                    }
+                    Cleanup(comm, stream, registeredMemory, debug, rank, deviceId);
+                    return 1;
+                }
+                if (!CopyDeviceToHost(rank, hostDebug.data(), hostDebug.size() * sizeof(int32_t),
+                        debug, hostDebug.size() * sizeof(int32_t), "debug after alltoall udma")) {
+                    if (udmaRegistered) {
+                        CheckTileXR(rank, "TileXRUDMAUnregister", TileXRUDMAUnregister(comm, udmaHandle));
+                    }
+                    Cleanup(comm, stream, registeredMemory, debug, rank, deviceId);
+                    return 1;
+                }
+                if (!AllToAllUdmaComplete(rankSize, hostDebug)) {
+                    std::cerr << "[rank " << rank << "] ERROR: strict alltoall UDMA CQ incomplete:" << std::endl;
+                    PrintAllToAllUdmaDebug(rank, rankSize, hostDebug);
+                    if (udmaRegistered) {
+                        CheckTileXR(rank, "TileXRUDMAUnregister", TileXRUDMAUnregister(comm, udmaHandle));
+                    }
+                    Cleanup(comm, stream, registeredMemory, debug, rank, deviceId);
+                    return 1;
+                }
+                if (!CopyChunkDeviceToHost(rank, output, rankSize, elementsPerRank,
+                        chunkOffset, chunkElements, hostOutput)) {
+                    if (udmaRegistered) {
+                        CheckTileXR(rank, "TileXRUDMAUnregister", TileXRUDMAUnregister(comm, udmaHandle));
+                    }
+                    Cleanup(comm, stream, registeredMemory, debug, rank, deviceId);
+                    return 1;
+                }
+                CheckTileXR(rank, "TileXRUDMAUnregister", TileXRUDMAUnregister(comm, udmaHandle));
+                udmaRegistered = false;
+            }
         } else {
-            PrintStatus(rank, "launch all-to-all kernel");
-            launch_tilexr_udma_all_to_all(
-                1, stream, commArgsDev, reinterpret_cast<GM_ADDR>(input), reinterpret_cast<GM_ADDR>(output),
-                reinterpret_cast<GM_ADDR>(debug), elementsPerRank, static_cast<uint64_t>(outputOffset));
+            for (int iter = 0; iter < allToAllRepeat; ++iter) {
+                PrintStatus(rank, "launch all-to-all kernel iter=" + std::to_string(iter));
+                launch_tilexr_udma_all_to_all(
+                    static_cast<uint32_t>(rankSize), stream, commArgsDev, reinterpret_cast<GM_ADDR>(input), reinterpret_cast<GM_ADDR>(output),
+                    reinterpret_cast<GM_ADDR>(debug), elementsPerRank, static_cast<uint64_t>(outputOffset), 0,
+                    elementsPerRank);
+                if (!syncAllToAllAtEnd &&
+                    !CheckAcl(rank, "aclrtSynchronizeStream", aclrtSynchronizeStream(stream))) {
+                    if (udmaRegistered) {
+                        CheckTileXR(rank, "TileXRUDMAUnregister", TileXRUDMAUnregister(comm, udmaHandle));
+                    }
+                    Cleanup(comm, stream, registeredMemory, debug, rank, deviceId);
+                    return 1;
+                }
+            }
         }
     } else if (testType == 3) {
         PrintStatus(rank, "launch all-reduce IPC scatter kernel");
@@ -755,10 +941,14 @@ int main(int argc, char** argv)
     }
     if (isAllToAll && (forceAllToAllIpcFallback || !allToAllUdmaComplete)) {
         usedIpcFallback = true;
-        std::cout << "[rank " << rank << "] alltoall use data-as-flag IPC fallback";
+        std::cout << "[rank " << rank << "] alltoall use " << allToAllIpcFallbackLabel;
         if (forceAllToAllIpcFallback) {
             if (useAllToAllDataAsFlagIpc) {
                 std::cout << " by default";
+            } else if (useAllToAllPlainIpc) {
+                std::cout << " by request";
+            } else if (useAllToAllFusedIpc) {
+                std::cout << " by request";
             } else {
                 std::cout << " after UDMA registration failure";
             }
@@ -771,34 +961,126 @@ int main(int argc, char** argv)
         }
         std::cout << std::endl;
 
-        launch_tilexr_all_to_all_ipc_scatter(
-            1, stream, commArgsDev, reinterpret_cast<GM_ADDR>(input),
-            reinterpret_cast<GM_ADDR>(debug), elementsPerRank);
-        if (!CheckAcl(rank, "aclrtSynchronizeStream alltoall ipc scatter", aclrtSynchronizeStream(stream)) ||
-            !DemoBarrierAll(rank, rankSize, "all ranks completed alltoall ipc scatter")) {
-            if (udmaRegistered) {
-                CheckTileXR(rank, "TileXRUDMAUnregister", TileXRUDMAUnregister(comm, udmaHandle));
+        if (useAllToAllFusedIpc) {
+            PrintStatus(rank, "alltoall fused IPC: single kernel send+flag+recv");
+            if (syncAllToAllAtEnd) {
+                for (int iter = 0; iter < allToAllRepeat; ++iter) {
+                    launch_tilexr_all_to_all_fused_ipc(
+                        1, stream, commArgsDev, reinterpret_cast<GM_ADDR>(input),
+                        reinterpret_cast<GM_ADDR>(output), reinterpret_cast<GM_ADDR>(debug),
+                        elementsPerRank, iter + 1);
+                }
+                if (!CheckAcl(rank, "aclrtSynchronizeStream alltoall fused ipc", aclrtSynchronizeStream(stream)) ||
+                    !DemoBarrierAll(rank, rankSize, "all ranks completed alltoall fused ipc")) {
+                    if (udmaRegistered) {
+                        CheckTileXR(rank, "TileXRUDMAUnregister", TileXRUDMAUnregister(comm, udmaHandle));
+                    }
+                    Cleanup(comm, stream, registeredMemory, debug, rank, deviceId);
+                    return 1;
+                }
+            } else {
+                for (int iter = 0; iter < allToAllRepeat; ++iter) {
+                    launch_tilexr_all_to_all_fused_ipc(
+                        1, stream, commArgsDev, reinterpret_cast<GM_ADDR>(input),
+                        reinterpret_cast<GM_ADDR>(output), reinterpret_cast<GM_ADDR>(debug),
+                        elementsPerRank, iter + 1);
+                    if (!CheckAcl(rank, "aclrtSynchronizeStream alltoall fused ipc", aclrtSynchronizeStream(stream)) ||
+                        !DemoBarrierAll(rank, rankSize, "all ranks completed alltoall fused ipc")) {
+                        if (udmaRegistered) {
+                            CheckTileXR(rank, "TileXRUDMAUnregister", TileXRUDMAUnregister(comm, udmaHandle));
+                        }
+                        Cleanup(comm, stream, registeredMemory, debug, rank, deviceId);
+                        return 1;
+                    }
+                }
             }
-            Cleanup(comm, stream, registeredMemory, debug, rank, deviceId);
-            return 1;
-        }
+        } else if (syncAllToAllAtEnd) {
+            for (int iter = 0; iter < allToAllRepeat; ++iter) {
+                if (useAllToAllPlainIpc) {
+                    launch_tilexr_all_to_all_plain_ipc_scatter(
+                        1, stream, commArgsDev, reinterpret_cast<GM_ADDR>(input),
+                        reinterpret_cast<GM_ADDR>(debug), elementsPerRank);
+                } else {
+                    launch_tilexr_all_to_all_ipc_scatter(
+                        1, stream, commArgsDev, reinterpret_cast<GM_ADDR>(input),
+                        reinterpret_cast<GM_ADDR>(debug), elementsPerRank);
+                }
+            }
+            if (!CheckAcl(rank, "aclrtSynchronizeStream alltoall ipc scatter", aclrtSynchronizeStream(stream)) ||
+                !DemoBarrierAll(rank, rankSize, "all ranks completed alltoall ipc scatter")) {
+                if (udmaRegistered) {
+                    CheckTileXR(rank, "TileXRUDMAUnregister", TileXRUDMAUnregister(comm, udmaHandle));
+                }
+                Cleanup(comm, stream, registeredMemory, debug, rank, deviceId);
+                return 1;
+            }
 
-        launch_tilexr_all_to_all_ipc_gather(
-            1, stream, commArgsDev, reinterpret_cast<GM_ADDR>(output),
-            reinterpret_cast<GM_ADDR>(debug), elementsPerRank);
-        if (!CheckAcl(rank, "aclrtSynchronizeStream alltoall ipc gather", aclrtSynchronizeStream(stream)) ||
-            !DemoBarrierAll(rank, rankSize, "all ranks completed alltoall ipc gather")) {
-            if (udmaRegistered) {
-                CheckTileXR(rank, "TileXRUDMAUnregister", TileXRUDMAUnregister(comm, udmaHandle));
+            for (int iter = 0; iter < allToAllRepeat; ++iter) {
+                if (useAllToAllPlainIpc) {
+                    launch_tilexr_all_to_all_plain_ipc_gather(
+                        1, stream, commArgsDev, reinterpret_cast<GM_ADDR>(output),
+                        reinterpret_cast<GM_ADDR>(debug), elementsPerRank);
+                } else {
+                    launch_tilexr_all_to_all_ipc_gather(
+                        1, stream, commArgsDev, reinterpret_cast<GM_ADDR>(output),
+                        reinterpret_cast<GM_ADDR>(debug), elementsPerRank);
+                }
             }
-            Cleanup(comm, stream, registeredMemory, debug, rank, deviceId);
-            return 1;
+            if (!CheckAcl(rank, "aclrtSynchronizeStream alltoall ipc gather", aclrtSynchronizeStream(stream)) ||
+                !DemoBarrierAll(rank, rankSize, "all ranks completed alltoall ipc gather")) {
+                if (udmaRegistered) {
+                    CheckTileXR(rank, "TileXRUDMAUnregister", TileXRUDMAUnregister(comm, udmaHandle));
+                }
+                Cleanup(comm, stream, registeredMemory, debug, rank, deviceId);
+                return 1;
+            }
+        } else {
+            for (int iter = 0; iter < allToAllRepeat; ++iter) {
+                if (useAllToAllPlainIpc) {
+                    launch_tilexr_all_to_all_plain_ipc_scatter(
+                        1, stream, commArgsDev, reinterpret_cast<GM_ADDR>(input),
+                        reinterpret_cast<GM_ADDR>(debug), elementsPerRank);
+                } else {
+                    launch_tilexr_all_to_all_ipc_scatter(
+                        1, stream, commArgsDev, reinterpret_cast<GM_ADDR>(input),
+                        reinterpret_cast<GM_ADDR>(debug), elementsPerRank);
+                }
+                if (!CheckAcl(rank, "aclrtSynchronizeStream alltoall ipc scatter", aclrtSynchronizeStream(stream)) ||
+                    !DemoBarrierAll(rank, rankSize, "all ranks completed alltoall ipc scatter")) {
+                    if (udmaRegistered) {
+                        CheckTileXR(rank, "TileXRUDMAUnregister", TileXRUDMAUnregister(comm, udmaHandle));
+                    }
+                    Cleanup(comm, stream, registeredMemory, debug, rank, deviceId);
+                    return 1;
+                }
+
+                if (useAllToAllPlainIpc) {
+                    launch_tilexr_all_to_all_plain_ipc_gather(
+                        1, stream, commArgsDev, reinterpret_cast<GM_ADDR>(output),
+                        reinterpret_cast<GM_ADDR>(debug), elementsPerRank);
+                } else {
+                    launch_tilexr_all_to_all_ipc_gather(
+                        1, stream, commArgsDev, reinterpret_cast<GM_ADDR>(output),
+                        reinterpret_cast<GM_ADDR>(debug), elementsPerRank);
+                }
+                if (!CheckAcl(rank, "aclrtSynchronizeStream alltoall ipc gather", aclrtSynchronizeStream(stream)) ||
+                    !DemoBarrierAll(rank, rankSize, "all ranks completed alltoall ipc gather")) {
+                    if (udmaRegistered) {
+                        CheckTileXR(rank, "TileXRUDMAUnregister", TileXRUDMAUnregister(comm, udmaHandle));
+                    }
+                    Cleanup(comm, stream, registeredMemory, debug, rank, deviceId);
+                    return 1;
+                }
+            }
         }
     }
 
-    bool copyBackOk = CopyDeviceToHost(rank, hostData.data(), dataCount * sizeof(int32_t),
-        data, dataCount * sizeof(int32_t), "data");
-    if (hasOutput) {
+    bool copyBackOk = true;
+    if (!chunkedStrictAllToAll) {
+        copyBackOk = CopyDeviceToHost(rank, hostData.data(), dataCount * sizeof(int32_t),
+            data, dataCount * sizeof(int32_t), "data");
+    }
+    if (hasOutput && !chunkedStrictAllToAll) {
         const char* outputName = isAllToAll ? "alltoall output" : "allreduce output";
         copyBackOk = CopyDeviceToHost(rank, hostOutput.data(), dataCount * sizeof(int32_t),
             output, dataCount * sizeof(int32_t), outputName) && copyBackOk;

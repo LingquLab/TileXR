@@ -7,6 +7,7 @@
 #define TILEXR_UDMA_ALLTOALL_LAYOUT_H
 
 #include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <vector>
@@ -15,10 +16,48 @@ namespace TileXR {
 namespace Demo {
 
 constexpr int32_t kAllToAllBaseValue = 100000;
+constexpr size_t kAllToAllUdmaMaxRegisteredBytes = 64ULL * 1024ULL * 1024ULL;
+
+struct AllToAllChunkPlan {
+    uint32_t passCount = 1;
+    int32_t chunkElements = 0;
+    size_t chunkBytesPerRank = 0;
+    size_t registeredBytes = 0;
+};
 
 inline int32_t AllToAllValue(int srcRank, int dstRank)
 {
     return kAllToAllBaseValue + srcRank * 1000 + dstRank;
+}
+
+inline AllToAllChunkPlan PlanAllToAllUdmaChunks(int rankSize, int32_t elementsPerPeer)
+{
+    AllToAllChunkPlan plan {};
+    if (rankSize <= 0 || elementsPerPeer <= 0) {
+        return plan;
+    }
+
+    const size_t totalBytesPerRank = static_cast<size_t>(rankSize) * static_cast<size_t>(elementsPerPeer) *
+        sizeof(int32_t);
+    const size_t maxChunkBytesPerRank =
+        std::max<size_t>(sizeof(int32_t) * static_cast<size_t>(rankSize), kAllToAllUdmaMaxRegisteredBytes / 2);
+    size_t chunkElements = maxChunkBytesPerRank / (static_cast<size_t>(rankSize) * sizeof(int32_t));
+    if (chunkElements == 0) {
+        chunkElements = 1;
+    }
+    if (chunkElements > static_cast<size_t>(elementsPerPeer)) {
+        chunkElements = static_cast<size_t>(elementsPerPeer);
+    }
+
+    plan.chunkElements = static_cast<int32_t>(chunkElements);
+    plan.chunkBytesPerRank = static_cast<size_t>(rankSize) * chunkElements * sizeof(int32_t);
+    plan.registeredBytes = plan.chunkBytesPerRank * 2;
+    plan.passCount = static_cast<uint32_t>(
+        (static_cast<size_t>(elementsPerPeer) + chunkElements - 1) / chunkElements);
+    if (plan.chunkBytesPerRank > totalBytesPerRank) {
+        plan.chunkBytesPerRank = totalBytesPerRank;
+    }
+    return plan;
 }
 
 inline void FillAllToAllInput(

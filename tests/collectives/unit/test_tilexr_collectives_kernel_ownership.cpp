@@ -150,12 +150,22 @@ void TestCollectivesOwnsCceBuild()
     CheckContains(kernelsCmakePath, kernelsCmake, "tilexr_collectives_op");
     CheckContains(kernelsCmakePath, kernelsCmake, "TILEXR_COLLECTIVES_ENABLE_PROFILING");
     CheckDoesNotContain(kernelsCmakePath, kernelsCmake, "src/comm");
+    CheckContains(kernelsCmakePath, kernelsCmake, "\"SHELL:-mllvm -cce-aicore-stack-size=0x8000\"");
+    CheckContains(kernelsCmakePath, kernelsCmake, "\"SHELL:-mllvm -cce-aicore-function-stack-size=0x8000\"");
+    CheckDoesNotContain(kernelsCmakePath, kernelsCmake, "-cce-aicore-function-stack-size=16000");
+    CheckContains(kernelsCmakePath, kernelsCmake, "set(TILEXR_COLLECTIVES_DEFAULT_SOC_TYPE \"$ENV{TILEXR_SOC_NAME}\")");
+    CheckContains(kernelsCmakePath, kernelsCmake, "set(TILEXR_COLLECTIVES_SOC_TYPE \"${TILEXR_COLLECTIVES_DEFAULT_SOC_TYPE}\"");
+    CheckContains(kernelsCmakePath, kernelsCmake, "string(TOLOWER \"${TILEXR_COLLECTIVES_SOC_TYPE}\" TILEXR_COLLECTIVES_SOC_TYPE_LOWER)");
+    CheckContains(kernelsCmakePath, kernelsCmake, "MATCHES \"ascend950|ascend910_9|ascend910-9|a5\"");
+    CheckContains(kernelsCmakePath, kernelsCmake, "set(AIV_ARCH dav-c310-vec)");
+    CheckContains(kernelsCmakePath, kernelsCmake, "set(AIV_ARCH dav-c220-vec)");
 }
 
 void TestCollectivesKernelSourcesAreScoped()
 {
     const std::string kernelTuPath = "src/collectives/kernels/tilexr_lccl_op.cpp";
     const auto kernelTu = ReadFile(kernelTuPath);
+    CheckContains(kernelTuPath, kernelTu, "__DAV_C310_VEC__");
     CheckContains(kernelTuPath, kernelTu, "LCCL_TYPE_AIV_FUNC(LCCL_ALLGATHER_FUNC_AUTO_DEF)");
     CheckContains(kernelTuPath, kernelTu, "LCCL_TYPE_AIV_FUNC(LCCL_ALL2ALL_FUNC_AUTO_DEF)");
     CheckContains(kernelTuPath, kernelTu, "LCCL_TYPE_AIV_FUNC(LCCL_ALL_REDUCE_FUNC_AUTO_DEF)");
@@ -210,6 +220,47 @@ void TestCollectivesKernelSourcesAreScoped()
     CheckTrue(sawAllReduceCce, "expected copied allreduce .cce sources under src/collectives/kernels");
     CheckTrue(sawReduceScatterCce, "expected copied reduce_scatter .cce sources under src/collectives/kernels");
     CheckTrue(sawBroadcastCce, "expected copied broadcast .cce sources under src/collectives/kernels");
+}
+
+void TestCollectivesDavC310GateMatchesAscend950Build()
+{
+    const std::string lcclOpPath = "src/collectives/kernels/lccl_op.h";
+    const auto lcclOp = ReadFile(lcclOpPath);
+    CheckContains(lcclOpPath, lcclOp, "__DAV_C310_VEC__");
+
+    const std::string collectivesPath = "src/collectives/kernels/collectives.h";
+    const auto collectives = ReadFile(collectivesPath);
+    CheckContains(collectivesPath, collectives, "__DAV_C310_VEC__");
+
+    const std::string dataCopyPath = "src/collectives/kernels/datacopy_gm2gm.h";
+    const auto dataCopy = ReadFile(dataCopyPath);
+    CheckContains(dataCopyPath, dataCopy, "__DAV_C310_VEC__");
+    CheckContains(dataCopyPath, dataCopy, "std::is_same_v<T, int8_t>");
+    CheckContains(dataCopyPath, dataCopy, "std::is_same_v<T, float16_t>");
+    CheckContains(dataCopyPath, dataCopy, "std::is_same_v<T, bfloat16_t>");
+
+    const std::string ccePath = "src/collectives/kernels/kernels/collectives.cce";
+    const auto cce = ReadFile(ccePath);
+    CheckContains(ccePath, cce, "__DAV_C310_VEC__");
+    CheckContains(ccePath, cce, "std::is_same_v<T, int32_t>");
+    CheckContains(ccePath, cce, "std::is_same_v<T, bfloat16_t>");
+}
+
+void TestAscend950ReduceTypeGuardExists()
+{
+    const std::string utilsHeaderPath = "src/collectives/host/collective_utils.h";
+    const auto utilsHeader = ReadFile(utilsHeaderPath);
+    CheckContains(utilsHeaderPath, utilsHeader, "IsSupportedReduceDataType");
+
+    const std::string utilsPath = "src/collectives/host/collective_utils.cpp";
+    const auto utils = ReadFile(utilsPath);
+    CheckContains(utilsPath, utils, "IsSupportedReduceDataType");
+    CheckContains(utilsPath, utils, "TileXR::ExtraFlag::TOPO_910A5");
+    CheckContains(utilsPath, utils, "TileXR::TILEXR_DATA_TYPE_INT64");
+
+    const std::string apiPath = "src/collectives/host/tilexr_collectives.cpp";
+    const auto api = ReadFile(apiPath);
+    CheckContains(apiPath, api, "IsSupportedReduceDataType(*context.hostArgs, dataType)");
 }
 
 void TestHostRegistrationLivesInCollectives()
@@ -339,6 +390,8 @@ int main()
 {
     TestCollectivesOwnsCceBuild();
     TestCollectivesKernelSourcesAreScoped();
+    TestCollectivesDavC310GateMatchesAscend950Build();
+    TestAscend950ReduceTypeGuardExists();
     TestHostRegistrationLivesInCollectives();
     TestPerfTraceCycleDivisorIsA5Specific();
     TestDeviceKernelArgsMatchHostLaunchAbi();
