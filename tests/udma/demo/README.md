@@ -45,9 +45,10 @@ The P2P performance scripts expose four user-facing transports:
 uses the current parallel multi-jetty implementation internally; `block_dim=1`
 with one QP matches the previous single-QP direct URMA baseline, while
 `block_dim=N` with `TILEXR_UDMA_QP_NUM=N` uses up to `N` QPs/jettys in parallel.
-`memory_visible_ack` extends `memory` with a receiver-observed tail flag so the
-timed window includes peer visibility acknowledgement without copying the
-payload back into a separate destination buffer.
+`memory_visible_ack` extends `memory` with a receiver-observed tail flag. The
+receiver waits for the flag inside the measured kernel window, so timings include
+peer visibility acknowledgement without copying the payload back into a separate
+destination buffer.
 
 Run this demo only on A5 / Ascend950 / 950 hardware. Builds or smoke tests on other Ascend chips are not valid UDMA runtime validation.
 

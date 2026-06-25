@@ -497,6 +497,11 @@ extern "C" __global__ __aicore__ void tilexr_memory_visible_ack_p2p_perf_kernel(
                 peerBase + dstByteOffset + offset, srcGM + offset, tBuf, sliceBytes);
             TileXRUdmaDemoWriteMemoryVisibleAck(peerBase + ackOffset, tBuf, ackValue);
         }
+        if (isReceiver && status == 0) {
+            GM_ADDR ackAddr = localBase + ackOffset;
+            while (!TileXRUdmaDemoCheckMemoryVisibleAck(ackAddr, tBuf, ackValue)) {
+            }
+        }
 
         TileXRUdmaDemoFoldDebugStatus(debug, blockIdx, status);
         if (debug != nullptr && blockIdx == 0) {
