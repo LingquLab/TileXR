@@ -13,17 +13,9 @@ fix_permissions ${TILEXR_CANN_HOME}
 chmod +x ${TILEXR_TEMP_HOME}/Ascend-cann-toolkit_*${TILEXR_CANN_VER}*${TILEXR_OS_ARCH}.run
 
 colorful_time bash ${TILEXR_TEMP_HOME}/Ascend-cann-toolkit_*${TILEXR_CANN_VER}*${TILEXR_OS_ARCH}.run --full -q --force --install-path=${TILEXR_CANN_HOME}
-if [ $? -ne 0 ]; then
-    error "install CANN toolkit failed"
-    exit 1
-fi
 
 chmod +x ${TILEXR_TEMP_HOME}/Ascend-cann-${TILEXR_OPS_NAME}-ops*${TILEXR_CANN_VER}*${TILEXR_OS_ARCH}.run
 
 colorful_time bash ${TILEXR_TEMP_HOME}/Ascend-cann-${TILEXR_OPS_NAME}-ops*${TILEXR_CANN_VER}*${TILEXR_OS_ARCH}.run --install -q --install-path=${TILEXR_CANN_HOME}
-if [ $? -ne 0 ]; then
-    error "install CANN ops failed"
-    exit 1
-fi
 
 line

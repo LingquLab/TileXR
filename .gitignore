@@ -22,9 +22,6 @@ cmake-build-*
 # vim cache
 *.swp
 
-# macOS metadata
-.DS_Store
-
 # build & output tempalte dirs
 build/
 build-sdma-tests/
@@ -66,8 +63,6 @@ env/cann/
 env/temp/
 env/
 third_party/
-3rdparty/open_source/*
-!3rdparty/open_source/README.md
 utils/
 sign_tmp/
 **/build_device/

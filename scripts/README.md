@@ -59,20 +59,6 @@ bash scripts/cann_local_install.sh
 
 ## Dependency Building
 
-### `download_open_source_deps.sh`
-**Purpose**: Download fixed-version source archives used by `prepare.sh`.
-
-**Usage**:
-```bash
-bash scripts/download_open_source_deps.sh
-bash scripts/download_open_source_deps.sh --check
-```
-
-**What it does**:
-- Downloads archives into `3rdparty/open_source/`
-- Verifies every archive with SHA256
-- Reuses valid existing archives
-
 ### `hcomm_build_install.sh`
 **Purpose**: Build and install hcomm submodule.
 

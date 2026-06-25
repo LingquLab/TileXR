@@ -18,12 +18,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 src/
   comm/           # Core TileXR communication library -> libtile-comm.so
     udma/         # TileXR-owned HCCP/RA UDMA transport
-  include/        # Public C/C++ headers
-examples/         # Example workloads built on the TileXR runtime
-  mc2/            # Fused collective operator examples (AllGather+Add, AllGather+MatMul)
+  mc2/            # Fused collective operators (AllGather+Add, AllGather+MatMul)
     all_gather_add/       # Fused AllGather + element-wise Add
     all_gather_matmul/    # Fused AllGather + MatMul (with op_api, tests/)
     common/               # Shared MC2 utilities and new_mc2_mm abstractions
+  include/        # Public C/C++ headers
 op-simulator/     # Operator simulation and testing without physical hardware
 tests/            # Test suites (UDMA, integration tests)
 scripts/          # Build and utility scripts (see scripts/README.md)
@@ -99,7 +98,7 @@ Operator simulator:
 cd op-simulator && bash run_test_ca.sh
 ```
 
-`all_gather_matmul` has its own unit/system tests under `examples/mc2/all_gather_matmul/tests/{ut,st}/`.
+`all_gather_matmul` has its own unit/system tests under `src/mc2/all_gather_matmul/tests/{ut,st}/`.
 
 Logs: `bash scripts/plog_grep.sh ERROR` filters device logs.
 
@@ -143,9 +142,9 @@ TileXR integrates UDMA (UnifiedBus DMA) for registered-memory communication on A
 - **`tilexr_sync.h`** — `SyncCollectives` class: AICore kernel-side flag-based synchronization primitives. Two flag regions per rank: inner (intra-rank/card) and outer (inter-rank). Flags encode `(magic << 32) | value` to allow multi-round reuse without reset.
 - **`comm_args.h`** — `CommArgs` struct with send matrices, peer memory pointers, and DFX debug info.
 
-### Collective Operator Examples (`examples/mc2/`)
+### Collective Operators (`src/mc2/`)
 
-These are examples built on the runtime, not core libraries. Each operator follows the ops-transformer two-phase calling convention:
+Each operator follows the ops-transformer two-phase calling convention:
 1. **Host side:** operator definition (`_def.cpp`), tiling (`_tiling.cpp`), aclnn API (`aclnn_*.h/cpp`), and for `all_gather_matmul` an additional `op_api/` and `op_graph/` layer.
 2. **Kernel side:** AICore kernel implementation (`op_kernel/*.cpp`).
 
@@ -161,7 +160,7 @@ Functional and performance simulation of AICore kernels without physical hardwar
 ## Key Notes
 
 - **Git submodules** must be initialized: `git submodule update --init --recursive`
-- `examples/mc2/` and `src/comm/` can be built independently via their own `CMakeLists.txt`
+- `src/mc2/` and `src/comm/` can be built independently via their own `CMakeLists.txt`
 - All build and utility scripts are in `scripts/` directory (see `scripts/README.md`)
 
 ### CANN Version Compatibility

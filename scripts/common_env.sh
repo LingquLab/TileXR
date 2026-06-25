@@ -27,7 +27,6 @@ export TILEXR_ENV_HOME=${TILEXR_HOME}/env
 export TILEXR_CANN_HOME=${TILEXR_ENV_HOME}/cann
 export TILEXR_TEMP_HOME=${TILEXR_ENV_HOME}/temp
 export TILEXR_UTIL_HOME=${TILEXR_ENV_HOME}/util
-export TILEXR_DRIVER_SHIM_HOME=${TILEXR_ENV_HOME}/driver-shim
 
 mkdir -p ${TILEXR_ENV_HOME}
 mkdir -p ${TILEXR_TEMP_HOME}
@@ -63,31 +62,12 @@ if [ -f ${TILEXR_CANN_HOME}/cann/vendors/custom_transformer/bin/set_env.bash ]; 
     source ${TILEXR_CANN_HOME}/cann/vendors/custom_transformer/bin/set_env.bash
 fi
 
-if [ -z "${ASCEND_HOME_PATH:-}" ]; then
-    if [ -f "${TILEXR_CANN_HOME}/cann/set_env.sh" ]; then
-        export ASCEND_HOME_PATH=${TILEXR_CANN_HOME}/cann
-    else
-        export ASCEND_HOME_PATH=/usr/local/Ascend/ascend-toolkit/latest
-    fi
-fi
-
-export ASCEND_DRIVER_PATH=${ASCEND_DRIVER_PATH:-/usr/local/Ascend/driver}
-if [ ! -r "${ASCEND_DRIVER_PATH}/kernel/inc" ] && [ -d "${ASCEND_HOME_PATH}/${TILEXR_OS_ARCH}-linux/include/driver" ]; then
-    mkdir -p "${TILEXR_DRIVER_SHIM_HOME}/kernel" "${TILEXR_DRIVER_SHIM_HOME}/lib64"
-    ln -sfn "${ASCEND_HOME_PATH}/${TILEXR_OS_ARCH}-linux/include/driver" "${TILEXR_DRIVER_SHIM_HOME}/kernel/inc"
-    ln -sfn "${ASCEND_DRIVER_PATH}/lib64/driver" "${TILEXR_DRIVER_SHIM_HOME}/lib64/driver"
-    if [ -d "${ASCEND_DRIVER_PATH}/lib64/common" ]; then
-        ln -sfn "${ASCEND_DRIVER_PATH}/lib64/common" "${TILEXR_DRIVER_SHIM_HOME}/lib64/common"
-    fi
-    export ASCEND_DRIVER_PATH=${TILEXR_DRIVER_SHIM_HOME}
-fi
-
 export PATH=${MPI_HOME}/bin:${PATH}
 export PATH=${TILEXR_UTIL_HOME}/cmake/bin:${PATH}
 export PATH=${TILEXR_UTIL_HOME}/ccache:${TILEXR_UTIL_HOME}/ripgrep:${TILEXR_UTIL_HOME}/sshpass/bin:${PATH}
 export PATH=${TILEXR_UTIL_HOME}/time/bin:${TILEXR_UTIL_HOME}/patch/bin:${TILEXR_UTIL_HOME}/pigz:${PATH}
 
-export LD_LIBRARY_PATH=${MPI_HOME}/lib:${ASCEND_DRIVER_PATH}/lib64/driver:${ASCEND_DRIVER_PATH}/lib64/common:${ASCEND_DRIVER_PATH}/lib64:${ASCEND_HOME_PATH}/${TILEXR_OS_ARCH}-linux/lib64:${LD_LIBRARY_PATH:-}
+export LD_LIBRARY_PATH=${MPI_HOME}/lib:${ASCEND_DRIVER_PATH:-/usr/local/Ascend/driver}/lib64/driver:${ASCEND_DRIVER_PATH:-/usr/local/Ascend/driver}/lib64/common:${ASCEND_DRIVER_PATH:-/usr/local/Ascend/driver}/lib64:${ASCEND_HOME_PATH}/${TILEXR_OS_ARCH}-linux/lib64:${LD_LIBRARY_PATH}
 
 env_print() {
     line

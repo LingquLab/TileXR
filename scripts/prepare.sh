@@ -3,8 +3,6 @@
 script_path=`realpath $(dirname "${BASH_SOURCE[0]}")`
 source ${script_path}/common_env.sh
 
-bash ${script_path}/download_open_source_deps.sh
-
 echo "" > ${TILEXR_TEMP_HOME}/3rd.log
 
 pkg_name=time
