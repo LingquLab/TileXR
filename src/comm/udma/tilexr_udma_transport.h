@@ -73,7 +73,6 @@ private:
     uint32_t logicDevId_ = 0;
     uint32_t deviceIdOffset_ = 0;
     uint32_t eidCount_ = 0;
-    uint32_t qpNum_ = 1;
     std::map<uint32_t, void*> ctxHandleByEid_;
     std::map<uint32_t, void*> tokenHandleByEid_;
     std::map<int, uint32_t> peerLocalEid_;

@@ -45,7 +45,7 @@ void TestHostLayoutUsesDeviceRelativePointers()
     constexpr uintptr_t deviceBase = 0x100000000ULL;
     TileXR::UDMAInfo info = {};
     std::vector<uint8_t> bytes;
-    const int ret = TileXR::BuildUDMAInfoImage(deviceBase, 1, sq, rq, scq, rcq, mem, info, bytes);
+    const int ret = TileXR::BuildUDMAInfoImage(deviceBase, sq, rq, scq, rcq, mem, info, bytes);
 
     CHECK_EQ(ret, TileXR::TILEXR_UDMA_LAYOUT_SUCCESS);
     CHECK_EQ(info.qpNum, 1U);
@@ -81,34 +81,8 @@ void TestRejectsMismatchedArrays()
 
     TileXR::UDMAInfo info = {};
     std::vector<uint8_t> bytes;
-    const int ret = TileXR::BuildUDMAInfoImage(0x1000, 1, sq, rq, scq, rcq, mem, info, bytes);
+    const int ret = TileXR::BuildUDMAInfoImage(0x1000, sq, rq, scq, rcq, mem, info, bytes);
     CHECK_EQ(ret, TileXR::TILEXR_UDMA_LAYOUT_INVALID);
-}
-
-void TestHostLayoutSupportsMultipleQps()
-{
-    std::vector<TileXR::UDMAWQCtx> sq(4);
-    std::vector<TileXR::UDMAWQCtx> rq(4);
-    std::vector<TileXR::UDMACQCtx> scq(4);
-    std::vector<TileXR::UDMACQCtx> rcq(4);
-    std::vector<TileXR::UDMAMemInfo> mem(4);
-
-    sq[3].bufAddr = 0x8000;
-    mem[3].tpn = 17;
-
-    constexpr uintptr_t deviceBase = 0x200000000ULL;
-    TileXR::UDMAInfo info = {};
-    std::vector<uint8_t> bytes;
-    const int ret = TileXR::BuildUDMAInfoImage(deviceBase, 2, sq, rq, scq, rcq, mem, info, bytes);
-
-    CHECK_EQ(ret, TileXR::TILEXR_UDMA_LAYOUT_SUCCESS);
-    CHECK_EQ(info.qpNum, 2U);
-    const auto* imageSq = reinterpret_cast<const TileXR::UDMAWQCtx*>(
-        bytes.data() + (info.sqPtr - deviceBase));
-    const auto* imageMem = reinterpret_cast<const TileXR::UDMAMemInfo*>(
-        bytes.data() + (info.memPtr - deviceBase));
-    CHECK_EQ(imageSq[3].bufAddr, static_cast<uint64_t>(0x8000));
-    CHECK_EQ(imageMem[3].tpn, 17U);
 }
 
 } // namespace
@@ -117,7 +91,6 @@ int main()
 {
     TestHostLayoutUsesDeviceRelativePointers();
     TestRejectsMismatchedArrays();
-    TestHostLayoutSupportsMultipleQps();
     if (g_failures != 0) {
         std::cerr << g_failures << " UDMA transport layout checks failed" << std::endl;
         return 1;
