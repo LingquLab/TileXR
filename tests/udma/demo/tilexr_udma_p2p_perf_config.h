@@ -7,20 +7,14 @@
 #include <string>
 #include <vector>
 
-#include "comm_args.h"
-
 namespace TileXR {
 namespace Demo {
 
 constexpr uint64_t kP2PMemoryMaxBytes = 100ULL * 1024ULL * 1024ULL;
-constexpr uint64_t kMemoryVisibleAckBytes = 32ULL;
-constexpr uint64_t kMemoryVisibleAckFlagBaseOffset = static_cast<uint64_t>(TileXR::IPC_DATA_OFFSET);
 
 enum class P2PTransport {
     DirectUrma,
     Memory,
-    MemoryVisibleAck,
-    MemoryVisibleAckPerf,
     DataAsFlag,
     Invalid,
 };
@@ -38,10 +32,6 @@ inline const char* P2PTransportName(P2PTransport transport)
             return "direct_urma";
         case P2PTransport::Memory:
             return "memory";
-        case P2PTransport::MemoryVisibleAck:
-            return "memory_visible_ack";
-        case P2PTransport::MemoryVisibleAckPerf:
-            return "memory_visible_ack_perf";
         case P2PTransport::DataAsFlag:
             return "data_as_flag";
         default:
@@ -68,12 +58,6 @@ inline P2PTransport ParseP2PTransport(const std::string& name)
     }
     if (name == "memory" || name == "ipc" || name == "datacopy") {
         return P2PTransport::Memory;
-    }
-    if (name == "memory_visible_ack" || name == "memory-visible-ack" || name == "memory_ack") {
-        return P2PTransport::MemoryVisibleAck;
-    }
-    if (name == "memory_visible_ack_perf" || name == "memory-visible-ack-perf" || name == "memory_ack_perf") {
-        return P2PTransport::MemoryVisibleAckPerf;
     }
     if (name == "data_as_flag" || name == "data-as-flag" || name == "daf") {
         return P2PTransport::DataAsFlag;
@@ -149,30 +133,9 @@ inline uint64_t DataAsFlagWindowBytes(uint64_t payloadBytes)
     return ((payloadBytes + 479ULL) / 480ULL) * 512ULL;
 }
 
-inline uint64_t MemoryVisibleAckWindowBytes(uint64_t payloadBytes)
-{
-    return payloadBytes;
-}
-
-inline uint64_t MemoryVisibleAckFlagOffset(uint32_t blockIdx)
-{
-    return kMemoryVisibleAckFlagBaseOffset + static_cast<uint64_t>(blockIdx) * kMemoryVisibleAckBytes;
-}
-
-inline uint64_t MemoryVisibleAckFlagBytes(uint32_t blockDim)
-{
-    return static_cast<uint64_t>(blockDim) * kMemoryVisibleAckBytes;
-}
-
 inline uint64_t P2PTransportWindowBytes(P2PTransport transport, uint64_t payloadBytes)
 {
-    if (transport == P2PTransport::DataAsFlag) {
-        return DataAsFlagWindowBytes(payloadBytes);
-    }
-    if (transport == P2PTransport::MemoryVisibleAck || transport == P2PTransport::MemoryVisibleAckPerf) {
-        return MemoryVisibleAckWindowBytes(payloadBytes);
-    }
-    return payloadBytes;
+    return transport == P2PTransport::DataAsFlag ? DataAsFlagWindowBytes(payloadBytes) : payloadBytes;
 }
 
 inline uint64_t P2PTransportWindowBytes(P2PTransport transport, uint64_t payloadBytes, uint32_t blockDim)
@@ -224,17 +187,14 @@ inline bool ValidateP2PPerfOptions(const P2PPerfOptions& options, int rankSize, 
         return fail("block_dim must be in [1, 64]");
     }
     if (options.transport == P2PTransport::Invalid) {
-        return fail("transport must be direct_urma, memory, memory_visible_ack, memory_visible_ack_perf, or data_as_flag");
+        return fail("transport must be direct_urma, memory, or data_as_flag");
     }
     if (options.traffic == P2PTraffic::Invalid) {
         return fail("traffic must be unidir or bidir");
     }
-    if ((options.transport == P2PTransport::Memory ||
-            options.transport == P2PTransport::MemoryVisibleAck ||
-            options.transport == P2PTransport::MemoryVisibleAckPerf ||
-            options.transport == P2PTransport::DataAsFlag) &&
+    if ((options.transport == P2PTransport::Memory || options.transport == P2PTransport::DataAsFlag) &&
         P2PTransportWindowBytes(options.transport, options.maxBytes, options.blockDim) > kP2PMemoryMaxBytes) {
-        return fail("memory/memory_visible_ack/memory_visible_ack_perf/data_as_flag transport max_bytes must fit in the TileXR IPC data window");
+        return fail("memory/data_as_flag transport max_bytes must fit in the TileXR IPC data window");
     }
     return true;
 }
@@ -262,11 +222,6 @@ inline uint32_t P2PPattern(int srcRank, int dstRank, uint64_t bytes)
     pattern ^= static_cast<uint32_t>((dstRank & 0xff) << 8);
     pattern ^= static_cast<uint32_t>(bytes & 0xffu);
     return pattern;
-}
-
-inline uint32_t MemoryVisibleAckValue(uint32_t pattern, uint64_t bytes, uint32_t blockIdx, uint32_t token)
-{
-    return 0xace00001u ^ pattern ^ static_cast<uint32_t>(bytes) ^ blockIdx ^ (token << 16);
 }
 
 inline uint8_t P2PPatternByte(uint32_t pattern, uint64_t index)
@@ -352,9 +307,7 @@ inline P2PPerfRow BuildP2PPerfRow(
     row.bytes = bytes;
     row.iters = options.iters;
     const bool bothRanksActive =
-        options.traffic == P2PTraffic::BiDir ||
-        options.transport == P2PTransport::MemoryVisibleAck ||
-        options.transport == P2PTransport::DataAsFlag;
+        options.traffic == P2PTraffic::BiDir || options.transport == P2PTransport::DataAsFlag;
     const float elapsedMs = bothRanksActive && dstStatus.elapsedMs > srcStatus.elapsedMs ?
         dstStatus.elapsedMs : srcStatus.elapsedMs;
     row.avgUs = options.iters > 0 ? static_cast<double>(elapsedMs) * 1000.0 / static_cast<double>(options.iters) : 0.0;

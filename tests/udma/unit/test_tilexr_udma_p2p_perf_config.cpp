@@ -35,11 +35,6 @@ int main()
         "direct transport name mismatch");
     Require(TileXR::Demo::P2PTransportName(TileXR::Demo::P2PTransport::Memory) == "memory",
         "memory transport name mismatch");
-    Require(TileXR::Demo::P2PTransportName(TileXR::Demo::P2PTransport::MemoryVisibleAck) == "memory_visible_ack",
-        "memory_visible_ack transport name mismatch");
-    Require(TileXR::Demo::P2PTransportName(TileXR::Demo::P2PTransport::MemoryVisibleAckPerf) ==
-            "memory_visible_ack_perf",
-        "memory_visible_ack_perf transport name mismatch");
     Require(TileXR::Demo::P2PTransportName(TileXR::Demo::P2PTransport::DataAsFlag) == "data_as_flag",
         "data_as_flag transport name mismatch");
     Require(TileXR::Demo::P2PTrafficName(TileXR::Demo::P2PTraffic::UniDir) == "unidir",
@@ -52,11 +47,6 @@ int main()
         "udma alias parse mismatch");
     Require(TileXR::Demo::ParseP2PTransport("memory") == TileXR::Demo::P2PTransport::Memory,
         "memory transport parse mismatch");
-    Require(TileXR::Demo::ParseP2PTransport("memory_visible_ack") == TileXR::Demo::P2PTransport::MemoryVisibleAck,
-        "memory_visible_ack transport parse mismatch");
-    Require(TileXR::Demo::ParseP2PTransport("memory_visible_ack_perf") ==
-            TileXR::Demo::P2PTransport::MemoryVisibleAckPerf,
-        "memory_visible_ack_perf transport parse mismatch");
     Require(TileXR::Demo::ParseP2PTransport("data_as_flag") == TileXR::Demo::P2PTransport::DataAsFlag,
         "data_as_flag transport parse mismatch");
     Require(TileXR::Demo::ParseP2PTransport("direct_urma_multi_wqe") == TileXR::Demo::P2PTransport::Invalid,
@@ -81,17 +71,6 @@ int main()
         "data_as_flag 480B layout mismatch");
     Require(TileXR::Demo::P2PTransportWindowBytes(TileXR::Demo::P2PTransport::DataAsFlag, 481) == 1024,
         "data_as_flag 481B layout mismatch");
-    Require(TileXR::Demo::P2PTransportWindowBytes(TileXR::Demo::P2PTransport::MemoryVisibleAck, 4096) == 4096,
-        "memory_visible_ack data window must equal payload bytes");
-    Require(TileXR::Demo::P2PTransportWindowBytes(TileXR::Demo::P2PTransport::MemoryVisibleAck, 4096, 4) == 4096,
-        "memory_visible_ack data window must not include ack flags");
-    Require(TileXR::Demo::P2PTransportWindowBytes(TileXR::Demo::P2PTransport::MemoryVisibleAckPerf, 4096, 4) == 4096,
-        "memory_visible_ack_perf data window must not include ack flags");
-    Require(TileXR::Demo::MemoryVisibleAckFlagOffset(3) ==
-            TileXR::Demo::kMemoryVisibleAckFlagBaseOffset + 3ULL * TileXR::Demo::kMemoryVisibleAckBytes,
-        "memory_visible_ack flag offset mismatch");
-    Require(TileXR::Demo::MemoryVisibleAckFlagBytes(4) == 128,
-        "memory_visible_ack flag bytes mismatch");
     Require(TileXR::Demo::P2PTransportWindowBytes(TileXR::Demo::P2PTransport::DirectUrma, 4096, 8) == 4096,
         "direct_urma window must equal payload bytes");
     Require(TileXR::Demo::ActiveP2PFlowCount(TileXR::Demo::P2PTraffic::UniDir) == 1,
@@ -100,12 +79,6 @@ int main()
         "bidir active flow count mismatch");
     options.transport = TileXR::Demo::P2PTransport::Memory;
     Require(TileXR::Demo::ValidateP2PPerfOptions(options, 2, &error), "memory transport options rejected");
-    options.transport = TileXR::Demo::P2PTransport::MemoryVisibleAck;
-    Require(TileXR::Demo::ValidateP2PPerfOptions(options, 2, &error),
-        "memory_visible_ack transport options rejected");
-    options.transport = TileXR::Demo::P2PTransport::MemoryVisibleAckPerf;
-    Require(TileXR::Demo::ValidateP2PPerfOptions(options, 2, &error),
-        "memory_visible_ack_perf transport options rejected");
     options.transport = TileXR::Demo::P2PTransport::DirectUrma;
     options.traffic = TileXR::Demo::P2PTraffic::BiDir;
     options.blockDim = 8;
@@ -139,9 +112,6 @@ int main()
     Require(TileXR::Demo::CountP2PTransportMismatches(
                 bytes, pattern, 4096, TileXR::Demo::P2PTransport::DirectUrma, 8) == 1,
         "direct_urma mismatch checker must validate payload bytes");
-    Require(TileXR::Demo::MemoryVisibleAckValue(pattern, 4096, 3, 7) ==
-            (0xace00001u ^ pattern ^ 4096u ^ 3u ^ (7u << 16)),
-        "memory_visible_ack value mismatch");
 
     TileXR::Demo::P2PPerfRow row;
     row.srcRank = 1;
@@ -171,19 +141,6 @@ int main()
             "direct_urma,unidir,8,1to0,1,0,2,4096,20,8.000,0.000,0.000,0.512,0.512,0,0,logs/run\n",
         "direct_urma parallel csv row mismatch");
 
-    row.transport = TileXR::Demo::P2PTransport::MemoryVisibleAck;
-    row.traffic = TileXR::Demo::P2PTraffic::UniDir;
-    row.blockDim = 1;
-    const std::string memoryVisibleAckCsv = TileXR::Demo::FormatP2PPerfCsvRow(row);
-    Require(memoryVisibleAckCsv ==
-            "memory_visible_ack,unidir,1,1to0,1,0,2,4096,20,8.000,0.000,0.000,0.512,0.512,0,0,logs/run\n",
-        "memory_visible_ack csv row mismatch");
-    row.transport = TileXR::Demo::P2PTransport::MemoryVisibleAckPerf;
-    const std::string memoryVisibleAckPerfCsv = TileXR::Demo::FormatP2PPerfCsvRow(row);
-    Require(memoryVisibleAckPerfCsv ==
-            "memory_visible_ack_perf,unidir,1,1to0,1,0,2,4096,20,8.000,0.000,0.000,0.512,0.512,0,0,logs/run\n",
-        "memory_visible_ack_perf csv row mismatch");
-
     TileXR::Demo::P2PRankStatus srcSample;
     srcSample.status = 0;
     srcSample.errors = 0;
@@ -204,26 +161,6 @@ int main()
     Require(aggregated.traffic == TileXR::Demo::P2PTraffic::UniDir,
         "p2p row must preserve traffic");
     Require(aggregated.blockDim == 4, "p2p row must preserve block_dim");
-
-    options.transport = TileXR::Demo::P2PTransport::MemoryVisibleAck;
-    options.traffic = TileXR::Demo::P2PTraffic::UniDir;
-    dstSample.status = 4;
-    dstSample.errors = 7;
-    dstSample.elapsedMs = 10.0f;
-    const TileXR::Demo::P2PPerfRow ackAggregated =
-        TileXR::Demo::BuildP2PPerfRow(options, 2, 4096, srcSample, dstSample);
-    Require(std::fabs(ackAggregated.avgUs - 500.0) < 0.001,
-        "memory_visible_ack row must use max rank elapsed time");
-    Require(ackAggregated.status == 4, "memory_visible_ack row must combine rank status");
-    Require(ackAggregated.errors == 7, "memory_visible_ack row must sum rank errors");
-
-    options.transport = TileXR::Demo::P2PTransport::MemoryVisibleAckPerf;
-    const TileXR::Demo::P2PPerfRow ackPerfAggregated =
-        TileXR::Demo::BuildP2PPerfRow(options, 2, 4096, srcSample, dstSample);
-    Require(std::fabs(ackPerfAggregated.avgUs - 320.0) < 0.001,
-        "memory_visible_ack_perf row must use src rank elapsed time");
-    Require(ackPerfAggregated.status == 0, "memory_visible_ack_perf row must use src rank status");
-    Require(ackPerfAggregated.errors == 7, "memory_visible_ack_perf row must preserve dst errors");
 
     options.traffic = TileXR::Demo::P2PTraffic::BiDir;
     dstSample.status = 4;

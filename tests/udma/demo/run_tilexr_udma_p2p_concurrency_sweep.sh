@@ -15,7 +15,7 @@ iters=${4:-20}
 warmup_iters=${5:-5}
 first_npu=${6:-2}
 check=${7:-1}
-transports_csv=${8:-direct_urma,memory,memory_visible_ack,memory_visible_ack_perf,data_as_flag}
+transports_csv=${8:-direct_urma,memory,data_as_flag}
 traffic_csv=${9:-unidir,bidir}
 block_dims_csv=${10:-1,2,4,8}
 
