@@ -4,6 +4,7 @@
  */
 
 #include "kernel_operator.h"
+#include "comm_args.h"
 #include "tilexr_data_as_flag.h"
 #include "tilexr_udma.h"
 
@@ -15,6 +16,8 @@ constexpr uint32_t TILEXR_UDMA_DEMO_P2P_COPY_TILE_BYTES =
 constexpr uint32_t TILEXR_UDMA_DEMO_P2P_MAX_DEBUG_BLOCKS = 16;
 constexpr uint32_t TILEXR_UDMA_DEMO_MEMORY_VISIBLE_ACK_BYTES = 32;
 constexpr uint32_t TILEXR_UDMA_DEMO_MEMORY_VISIBLE_ACK_VALUE = 0xace00001u;
+constexpr uint32_t TILEXR_UDMA_DEMO_MEMORY_VISIBLE_ACK_FLAG_BASE =
+    static_cast<uint32_t>(TileXR::IPC_DATA_OFFSET) / 2U;
 
 __aicore__ inline uint32_t TileXRUdmaDemoCeilDiv(uint32_t value, uint32_t divisor)
 {
@@ -120,11 +123,10 @@ __aicore__ inline uint32_t TileXRUdmaDemoFoldDebugStatus(
     return status;
 }
 
-__aicore__ inline uint32_t TileXRUdmaDemoMemoryVisibleAckOffset(uint32_t bytes)
+__aicore__ inline uint32_t TileXRUdmaDemoMemoryVisibleAckOffset(uint32_t blockIdx)
 {
-    return ((bytes + TILEXR_UDMA_DEMO_MEMORY_VISIBLE_ACK_BYTES - 1U) /
-               TILEXR_UDMA_DEMO_MEMORY_VISIBLE_ACK_BYTES) *
-        TILEXR_UDMA_DEMO_MEMORY_VISIBLE_ACK_BYTES;
+    return TILEXR_UDMA_DEMO_MEMORY_VISIBLE_ACK_FLAG_BASE +
+        blockIdx * TILEXR_UDMA_DEMO_MEMORY_VISIBLE_ACK_BYTES;
 }
 
 __aicore__ inline uint32_t TileXRUdmaDemoMemoryVisibleAckValue(
@@ -138,10 +140,12 @@ __aicore__ inline void TileXRUdmaDemoWriteMemoryVisibleAck(
 {
     AscendC::LocalTensor<uint32_t> local =
         tBuf.GetWithOffset<uint32_t>(
-            TILEXR_UDMA_DEMO_MEMORY_VISIBLE_ACK_BYTES, TILEXR_UDMA_DEMO_P2P_SYNC_UB_BYTES);
-    AscendC::Duplicate<uint32_t>(local, ackValue, TILEXR_UDMA_DEMO_MEMORY_VISIBLE_ACK_BYTES / sizeof(uint32_t));
-    AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
-    AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
+            TILEXR_UDMA_DEMO_MEMORY_VISIBLE_ACK_BYTES, 0);
+    for (uint32_t i = 0; i < TILEXR_UDMA_DEMO_MEMORY_VISIBLE_ACK_BYTES / sizeof(uint32_t); ++i) {
+        local.SetValue(i, ackValue);
+    }
+    AscendC::SetFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID0);
+    AscendC::WaitFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID0);
 
     AscendC::GlobalTensor<uint32_t> ackGlobal;
     ackGlobal.SetGlobalBuffer(reinterpret_cast<__gm__ uint32_t*>(ackGM),
@@ -157,7 +161,7 @@ __aicore__ inline bool TileXRUdmaDemoCheckMemoryVisibleAck(
 {
     AscendC::LocalTensor<uint32_t> local =
         tBuf.GetWithOffset<uint32_t>(
-            TILEXR_UDMA_DEMO_MEMORY_VISIBLE_ACK_BYTES, TILEXR_UDMA_DEMO_P2P_SYNC_UB_BYTES);
+            TILEXR_UDMA_DEMO_MEMORY_VISIBLE_ACK_BYTES, 0);
     AscendC::GlobalTensor<uint32_t> ackGlobal;
     ackGlobal.SetGlobalBuffer(reinterpret_cast<__gm__ uint32_t*>(ackGM),
         TILEXR_UDMA_DEMO_MEMORY_VISIBLE_ACK_BYTES / sizeof(uint32_t));
@@ -486,18 +490,12 @@ extern "C" __global__ __aicore__ void tilexr_memory_visible_ack_p2p_perf_kernel(
         pipe.InitBuffer(tBuf, TILEXR_UDMA_DEMO_P2P_UB_BYTES);
 
         uint32_t status = 0;
-        const uint32_t ackOffset = TileXRUdmaDemoMemoryVisibleAckOffset(bytes) +
-            blockIdx * TILEXR_UDMA_DEMO_MEMORY_VISIBLE_ACK_BYTES;
+        const uint32_t ackOffset = TileXRUdmaDemoMemoryVisibleAckOffset(blockIdx);
         const uint32_t ackValue = TileXRUdmaDemoMemoryVisibleAckValue(pattern, bytes, blockIdx, token);
         if (isSender) {
             TileXRUdmaDemoCopyBytesGmToGm(
                 peerBase + dstByteOffset + offset, srcGM + offset, tBuf, sliceBytes);
-            TileXRUdmaDemoWriteMemoryVisibleAck(peerBase + dstByteOffset + ackOffset, tBuf, ackValue);
-        }
-        if (isReceiver && status == 0) {
-            GM_ADDR ackAddr = localBase + dstByteOffset + ackOffset;
-            while (!TileXRUdmaDemoCheckMemoryVisibleAck(ackAddr, tBuf, ackValue)) {
-            }
+            TileXRUdmaDemoWriteMemoryVisibleAck(peerBase + ackOffset, tBuf, ackValue);
         }
 
         TileXRUdmaDemoFoldDebugStatus(debug, blockIdx, status);

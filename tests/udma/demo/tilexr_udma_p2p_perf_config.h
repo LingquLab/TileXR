@@ -7,10 +7,14 @@
 #include <string>
 #include <vector>
 
+#include "comm_args.h"
+
 namespace TileXR {
 namespace Demo {
 
 constexpr uint64_t kP2PMemoryMaxBytes = 100ULL * 1024ULL * 1024ULL;
+constexpr uint64_t kMemoryVisibleAckBytes = 32ULL;
+constexpr uint64_t kMemoryVisibleAckFlagBaseOffset = static_cast<uint64_t>(TileXR::IPC_DATA_OFFSET) / 2ULL;
 
 enum class P2PTransport {
     DirectUrma,
@@ -141,7 +145,17 @@ inline uint64_t DataAsFlagWindowBytes(uint64_t payloadBytes)
 
 inline uint64_t MemoryVisibleAckWindowBytes(uint64_t payloadBytes)
 {
-    return ((payloadBytes + 31ULL) / 32ULL) * 32ULL + 32ULL;
+    return payloadBytes;
+}
+
+inline uint64_t MemoryVisibleAckFlagOffset(uint32_t blockIdx)
+{
+    return kMemoryVisibleAckFlagBaseOffset + static_cast<uint64_t>(blockIdx) * kMemoryVisibleAckBytes;
+}
+
+inline uint64_t MemoryVisibleAckFlagBytes(uint32_t blockDim)
+{
+    return static_cast<uint64_t>(blockDim) * kMemoryVisibleAckBytes;
 }
 
 inline uint64_t P2PTransportWindowBytes(P2PTransport transport, uint64_t payloadBytes)
@@ -157,10 +171,7 @@ inline uint64_t P2PTransportWindowBytes(P2PTransport transport, uint64_t payload
 
 inline uint64_t P2PTransportWindowBytes(P2PTransport transport, uint64_t payloadBytes, uint32_t blockDim)
 {
-    if (transport == P2PTransport::MemoryVisibleAck) {
-        return ((payloadBytes + 31ULL) / 32ULL) * 32ULL +
-            static_cast<uint64_t>(blockDim) * 32ULL;
-    }
+    (void)blockDim;
     return P2PTransportWindowBytes(transport, payloadBytes);
 }
 
@@ -244,6 +255,11 @@ inline uint32_t P2PPattern(int srcRank, int dstRank, uint64_t bytes)
     pattern ^= static_cast<uint32_t>((dstRank & 0xff) << 8);
     pattern ^= static_cast<uint32_t>(bytes & 0xffu);
     return pattern;
+}
+
+inline uint32_t MemoryVisibleAckValue(uint32_t pattern, uint64_t bytes, uint32_t blockIdx, uint32_t token)
+{
+    return 0xace00001u ^ pattern ^ static_cast<uint32_t>(bytes) ^ blockIdx ^ (token << 16);
 }
 
 inline uint8_t P2PPatternByte(uint32_t pattern, uint64_t index)

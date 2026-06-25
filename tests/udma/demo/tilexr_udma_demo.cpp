@@ -509,6 +509,58 @@ bool ClearLocalPeerWindow(
         static_cast<size_t>(bytes)));
 }
 
+bool WaitForMemoryVisibleAck(
+    int rank,
+    const TileXR::CommArgs& commArgsHost,
+    uint64_t payloadBytes,
+    uint32_t pattern,
+    uint32_t blockDim,
+    uint32_t token)
+{
+    constexpr int kAckPollCount = 2000;
+    constexpr int kAckPollSleepUs = 100;
+    std::vector<uint32_t> ackWords(8, 0);
+    uint32_t lastObserved = 0;
+    uint32_t lastExpected = 0;
+    for (int poll = 0; poll < kAckPollCount; ++poll) {
+        bool allReady = true;
+        for (uint32_t block = 0; block < blockDim; ++block) {
+            const void* ackAddr = reinterpret_cast<void*>(
+                commArgsHost.peerMems[rank] + TileXR::Demo::MemoryVisibleAckFlagOffset(block));
+            const aclError ret = aclrtMemcpy(ackWords.data(), ackWords.size() * sizeof(uint32_t), ackAddr,
+                ackWords.size() * sizeof(uint32_t), ACL_MEMCPY_DEVICE_TO_HOST);
+            if (ret != ACL_SUCCESS) {
+                std::cerr << "[rank " << rank << "] ERROR: aclrtMemcpy D2H p2p visible ack failed, ret="
+                          << ret << std::endl;
+                return false;
+            }
+            const uint32_t expected = TileXR::Demo::MemoryVisibleAckValue(pattern, payloadBytes, block, token);
+            lastObserved = ackWords[0];
+            lastExpected = expected;
+            if (ackWords[0] != expected) {
+                allReady = false;
+                break;
+            }
+        }
+        if (allReady) {
+            return true;
+        }
+        usleep(kAckPollSleepUs);
+    }
+    std::cerr << "[rank " << rank << "] ERROR: timed out waiting for memory_visible_ack bytes="
+              << payloadBytes << " token=" << token
+              << " flagOffset=" << TileXR::Demo::MemoryVisibleAckFlagOffset(0)
+              << " observed=0x" << std::hex << lastObserved
+              << " expected=0x" << lastExpected << std::dec << std::endl;
+    return false;
+}
+
+bool ClearMemoryVisibleAckFlags(int rank, const TileXR::CommArgs& commArgsHost, uint32_t blockDim)
+{
+    return ClearLocalPeerWindow(rank, commArgsHost, TileXR::Demo::kMemoryVisibleAckFlagBaseOffset,
+        TileXR::Demo::MemoryVisibleAckFlagBytes(blockDim), "p2p visible ack flags");
+}
+
 void LaunchP2PKernel(
     aclrtStream stream, GM_ADDR commArgsDev, GM_ADDR srcDev, GM_ADDR dstDev, GM_ADDR debugDev,
     const TileXR::Demo::P2PPerfOptions& options, uint64_t dstOffset, uint32_t transferBytes, uint32_t pattern,
@@ -646,6 +698,10 @@ bool RunP2PPerfMode(
                 ok = false;
                 break;
             }
+            if (useMemoryVisibleAckTransport && !ClearMemoryVisibleAckFlags(rank, commArgsHost, options.blockDim)) {
+                ok = false;
+                break;
+            }
         }
         if (!DemoBarrierAll(rank, rankSize, "p2p initialized bytes=" + std::to_string(bytes))) {
             ok = false;
@@ -657,6 +713,11 @@ bool RunP2PPerfMode(
                 !ClearLocalPeerWindow(rank, commArgsHost, dstOffset,
                     TileXR::Demo::P2PTransportWindowBytes(options.transport, bytes, options.blockDim),
                     "p2p visible warmup window")) {
+                ok = false;
+                break;
+            }
+            if (useMemoryVisibleAckTransport && IsP2PReceiveRank(rank, options) &&
+                !ClearMemoryVisibleAckFlags(rank, commArgsHost, options.blockDim)) {
                 ok = false;
                 break;
             }
@@ -684,6 +745,11 @@ bool RunP2PPerfMode(
             !ClearLocalPeerWindow(rank, commArgsHost, dstOffset,
                 TileXR::Demo::P2PTransportWindowBytes(options.transport, bytes, options.blockDim),
                 "p2p visible measured window")) {
+            ok = false;
+            break;
+        }
+        if (useMemoryVisibleAckTransport && IsP2PReceiveRank(rank, options) &&
+            !ClearMemoryVisibleAckFlags(rank, commArgsHost, options.blockDim)) {
             ok = false;
             break;
         }
@@ -722,6 +788,12 @@ bool RunP2PPerfMode(
 
         uint64_t errors = 0;
         if (IsP2PReceiveRank(rank, options) && options.check) {
+            if (useMemoryVisibleAckTransport &&
+                !WaitForMemoryVisibleAck(rank, commArgsHost, bytes, pattern, options.blockDim,
+                    static_cast<uint32_t>(options.warmupIters + options.iters))) {
+                ok = false;
+                break;
+            }
             const void* validateSrc = (useMemoryTransport || useMemoryVisibleAckTransport) ?
                 reinterpret_cast<void*>(commArgsHost.peerMems[rank] + TileXR::IPC_DATA_OFFSET) :
                 static_cast<const void*>(dstDev);

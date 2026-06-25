@@ -75,10 +75,15 @@ int main()
         "data_as_flag 480B layout mismatch");
     Require(TileXR::Demo::P2PTransportWindowBytes(TileXR::Demo::P2PTransport::DataAsFlag, 481) == 1024,
         "data_as_flag 481B layout mismatch");
-    Require(TileXR::Demo::P2PTransportWindowBytes(TileXR::Demo::P2PTransport::MemoryVisibleAck, 4096) == 4128,
-        "memory_visible_ack window must include the tail flag");
-    Require(TileXR::Demo::P2PTransportWindowBytes(TileXR::Demo::P2PTransport::MemoryVisibleAck, 4096, 4) == 4224,
-        "memory_visible_ack window must include one tail flag per block");
+    Require(TileXR::Demo::P2PTransportWindowBytes(TileXR::Demo::P2PTransport::MemoryVisibleAck, 4096) == 4096,
+        "memory_visible_ack data window must equal payload bytes");
+    Require(TileXR::Demo::P2PTransportWindowBytes(TileXR::Demo::P2PTransport::MemoryVisibleAck, 4096, 4) == 4096,
+        "memory_visible_ack data window must not include ack flags");
+    Require(TileXR::Demo::MemoryVisibleAckFlagOffset(3) ==
+            TileXR::Demo::kMemoryVisibleAckFlagBaseOffset + 3ULL * TileXR::Demo::kMemoryVisibleAckBytes,
+        "memory_visible_ack flag offset mismatch");
+    Require(TileXR::Demo::MemoryVisibleAckFlagBytes(4) == 128,
+        "memory_visible_ack flag bytes mismatch");
     Require(TileXR::Demo::P2PTransportWindowBytes(TileXR::Demo::P2PTransport::DirectUrma, 4096, 8) == 4096,
         "direct_urma window must equal payload bytes");
     Require(TileXR::Demo::ActiveP2PFlowCount(TileXR::Demo::P2PTraffic::UniDir) == 1,
@@ -123,6 +128,9 @@ int main()
     Require(TileXR::Demo::CountP2PTransportMismatches(
                 bytes, pattern, 4096, TileXR::Demo::P2PTransport::DirectUrma, 8) == 1,
         "direct_urma mismatch checker must validate payload bytes");
+    Require(TileXR::Demo::MemoryVisibleAckValue(pattern, 4096, 3, 7) ==
+            (0xace00001u ^ pattern ^ 4096u ^ 3u ^ (7u << 16)),
+        "memory_visible_ack value mismatch");
 
     TileXR::Demo::P2PPerfRow row;
     row.srcRank = 1;
