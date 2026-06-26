@@ -42,6 +42,9 @@ int main()
         "memory_consume transport name mismatch");
     Require(TileXR::Demo::P2PTransportName(TileXR::Demo::P2PTransport::DataAsFlag) == "data_as_flag",
         "data_as_flag transport name mismatch");
+    Require(TileXR::Demo::P2PTransportName(TileXR::Demo::P2PTransport::DataAsFlagEpochOrdered) ==
+            "data_as_flag_epoch_ordered",
+        "data_as_flag_epoch_ordered transport name mismatch");
     Require(TileXR::Demo::P2PTrafficName(TileXR::Demo::P2PTraffic::UniDir) == "unidir",
         "unidir traffic name mismatch");
     Require(TileXR::Demo::P2PTrafficName(TileXR::Demo::P2PTraffic::BiDir) == "bidir",
@@ -65,6 +68,15 @@ int main()
         "mem_consume alias parse mismatch");
     Require(TileXR::Demo::ParseP2PTransport("data_as_flag") == TileXR::Demo::P2PTransport::DataAsFlag,
         "data_as_flag transport parse mismatch");
+    Require(TileXR::Demo::ParseP2PTransport("data_as_flag_epoch_ordered") ==
+            TileXR::Demo::P2PTransport::DataAsFlagEpochOrdered,
+        "data_as_flag_epoch_ordered transport parse mismatch");
+    Require(TileXR::Demo::ParseP2PTransport("data-as-flag-epoch-ordered") ==
+            TileXR::Demo::P2PTransport::DataAsFlagEpochOrdered,
+        "data-as-flag-epoch-ordered alias parse mismatch");
+    Require(TileXR::Demo::ParseP2PTransport("daf_epoch_ordered") ==
+            TileXR::Demo::P2PTransport::DataAsFlagEpochOrdered,
+        "daf_epoch_ordered alias parse mismatch");
     Require(TileXR::Demo::ParseP2PTransport("direct_urma_multi_wqe") == TileXR::Demo::P2PTransport::Invalid,
         "direct_urma_multi_wqe must be rejected");
     Require(TileXR::Demo::ParseP2PTransport("direct_urma_multi_jetty") == TileXR::Demo::P2PTransport::Invalid,
@@ -87,12 +99,26 @@ int main()
         "data_as_flag 480B layout mismatch");
     Require(TileXR::Demo::P2PTransportWindowBytes(TileXR::Demo::P2PTransport::DataAsFlag, 481) == 1024,
         "data_as_flag 481B layout mismatch");
+    Require(TileXR::Demo::P2PTransportWindowBytes(
+                TileXR::Demo::P2PTransport::DataAsFlagEpochOrdered, 0) == 0,
+        "data_as_flag_epoch_ordered zero layout mismatch");
+    Require(TileXR::Demo::P2PTransportWindowBytes(
+                TileXR::Demo::P2PTransport::DataAsFlagEpochOrdered, 480) == 512,
+        "data_as_flag_epoch_ordered 480B layout mismatch");
+    Require(TileXR::Demo::P2PTransportWindowBytes(
+                TileXR::Demo::P2PTransport::DataAsFlagEpochOrdered, 481) == 1024,
+        "data_as_flag_epoch_ordered 481B layout mismatch");
     Require(TileXR::Demo::P2PTransportWindowBytes(TileXR::Demo::P2PTransport::DirectUrma, 4096, 8) == 4096,
         "direct_urma window must equal payload bytes");
     Require(TileXR::Demo::P2PTransportWindowBytes(TileXR::Demo::P2PTransport::MemoryConsume, 4096, 4) == 4096,
         "memory_consume window must equal payload bytes");
     Require(TileXR::Demo::P2PTransportUsesIpc(TileXR::Demo::P2PTransport::MemoryConsume),
         "memory_consume must use IPC peer window");
+    Require(TileXR::Demo::P2PTransportUsesIpc(TileXR::Demo::P2PTransport::DataAsFlagEpochOrdered),
+        "data_as_flag_epoch_ordered must use IPC peer window");
+    Require(TileXR::Demo::P2PTransportBothRanksActive(
+                TileXR::Demo::P2PTransport::DataAsFlagEpochOrdered, TileXR::Demo::P2PTraffic::UniDir),
+        "data_as_flag_epoch_ordered unidir must keep receiver active");
     Require(TileXR::Demo::ActiveP2PFlowCount(TileXR::Demo::P2PTraffic::UniDir) == 1,
         "unidir active flow count mismatch");
     Require(TileXR::Demo::ActiveP2PFlowCount(TileXR::Demo::P2PTraffic::BiDir) == 2,
@@ -109,6 +135,12 @@ int main()
     options.blockDim = 4;
     Require(TileXR::Demo::ValidateP2PPerfOptions(options, 2, &error),
         "valid data_as_flag bidir options rejected");
+    options.transport = TileXR::Demo::P2PTransport::DataAsFlagEpochOrdered;
+    options.traffic = TileXR::Demo::P2PTraffic::UniDir;
+    options.blockDim = 4;
+    options.maxBytes = 16384;
+    Require(TileXR::Demo::ValidateP2PPerfOptions(options, 2, &error),
+        "valid data_as_flag_epoch_ordered options rejected");
     options.transport = TileXR::Demo::P2PTransport::MemoryConsume;
     options.traffic = TileXR::Demo::P2PTraffic::UniDir;
     options.blockDim = 4;
@@ -163,6 +195,13 @@ int main()
     Require(bidirCsv ==
             "data_as_flag,bidir,4,1to0+0to1,1,0,2,4096,20,8.000,0.000,0.000,1.024,0.512,0,0,logs/run\n",
         "bidir csv row mismatch");
+    row.transport = TileXR::Demo::P2PTransport::DataAsFlagEpochOrdered;
+    row.traffic = TileXR::Demo::P2PTraffic::UniDir;
+    row.blockDim = 4;
+    const std::string epochOrderedCsv = TileXR::Demo::FormatP2PPerfCsvRow(row);
+    Require(epochOrderedCsv ==
+            "data_as_flag_epoch_ordered,unidir,4,1to0,1,0,2,4096,20,8.000,0.000,0.000,0.512,0.512,0,0,logs/run\n",
+        "data_as_flag_epoch_ordered csv row mismatch");
     row.transport = TileXR::Demo::P2PTransport::DirectUrma;
     row.traffic = TileXR::Demo::P2PTraffic::UniDir;
     row.blockDim = 8;
