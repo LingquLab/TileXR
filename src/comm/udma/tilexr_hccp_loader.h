@@ -76,8 +76,6 @@ private:
     int LoadSymbol(void* handle, T& dst, const char* primary, const char* fallback);
     void ResetSymbols();
 
-    void* hcclV1Handle_ = nullptr;
-    void* hcclV2Handle_ = nullptr;
     void* raHandle_ = nullptr;
     void* tsdHandle_ = nullptr;
     bool loaded_ = false;
