@@ -422,9 +422,7 @@ __aicore__ inline uint64_t DataAsFlagLoadEpochFlag(
             dataAsFlagGM + static_cast<uint64_t>(blockIndex) * DATA_AS_FLAG_BLOCK_BYTES +
             DATA_AS_FLAG_FLAG_OFFSET_BYTES)));
     AscendC::LocalTensor<int64_t> flagLocal = scratch.template ReinterpretCast<int64_t>();
-    AscendC::DataCopyExtParams params {1U, sizeof(int64_t), 0U, 0U, 0U};
-    AscendC::DataCopyPadExtParams<int64_t> padParams {false, 0U, 0U, 0U};
-    AscendC::DataCopyPad(flagLocal, flagGlobal, params, padParams);
+    AscendC::DataCopy(flagLocal, flagGlobal, DATA_AS_FLAG_FLAG_BYTES / sizeof(int64_t));
     AscendC::SetFlag<AscendC::HardEvent::MTE2_S>(EVENT_ID0);
     AscendC::WaitFlag<AscendC::HardEvent::MTE2_S>(EVENT_ID0);
     return static_cast<uint64_t>(flagLocal.GetValue(0));
