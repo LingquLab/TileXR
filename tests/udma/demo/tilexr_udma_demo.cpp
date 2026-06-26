@@ -27,9 +27,6 @@ extern void launch_tilexr_udma_all_gather(
 extern void launch_tilexr_udma_put_signal(
     uint32_t blockDim, void* stream, GM_ADDR commArgs, GM_ADDR data, GM_ADDR signals, GM_ADDR debug,
     int32_t elementsPerRank, uint64_t signal);
-extern void launch_tilexr_udma_slot_signal_get_probe(
-    uint32_t blockDim, void* stream, GM_ADDR commArgs, GM_ADDR data, GM_ADDR signals, GM_ADDR debug,
-    int32_t elementsPerRank, uint64_t signal);
 
 namespace {
 constexpr int32_t kDefaultElementsPerRank = 16;
@@ -42,50 +39,34 @@ constexpr int kConnectRetryCount = 500;
 constexpr int kConnectRetrySleepMs = 10;
 
 struct BarrierEndpoint {
-    std::string host;
     uint16_t port;
 };
 
 int GetEnvInt(const char* name, int defaultValue)
 {
     const char* value = std::getenv(name);
-    return value == nullptr || value[0] == '\0' ? defaultValue : std::atoi(value);
-}
-
-bool EnvEnabled(const char* name)
-{
-    const char* value = std::getenv(name);
-    return value != nullptr && (std::string(value) == "1" || std::string(value) == "true" ||
-        std::string(value) == "TRUE" || std::string(value) == "on" || std::string(value) == "ON");
-}
-
-std::vector<int> ParseDeviceList(const char* devices)
-{
-    std::vector<int> parsed;
-    if (devices == nullptr || devices[0] == '\0') {
-        return parsed;
-    }
-    std::string list(devices);
-    size_t start = 0;
-    while (start <= list.size()) {
-        const size_t comma = list.find(',', start);
-        const size_t end = comma == std::string::npos ? list.size() : comma;
-        if (end > start) {
-            parsed.push_back(std::atoi(list.substr(start, end - start).c_str()));
-        }
-        if (comma == std::string::npos) {
-            break;
-        }
-        start = comma + 1;
-    }
-    return parsed;
+    return value == nullptr ? defaultValue : std::atoi(value);
 }
 
 int GetDeviceIdFromEnv(int rank, int npuCount, int firstNpu)
 {
-    const std::vector<int> devices = ParseDeviceList(std::getenv("TILEXR_DEMO_DEVICES"));
-    if (!devices.empty()) {
-        return devices[rank % static_cast<int>(devices.size())];
+    const char* devices = std::getenv("TILEXR_DEMO_DEVICES");
+    if (devices != nullptr && devices[0] != '\0') {
+        std::string list(devices);
+        size_t start = 0;
+        int index = 0;
+        while (start <= list.size()) {
+            const size_t comma = list.find(',', start);
+            const size_t end = comma == std::string::npos ? list.size() : comma;
+            if (index == rank && end > start) {
+                return std::atoi(list.substr(start, end - start).c_str());
+            }
+            if (comma == std::string::npos) {
+                break;
+            }
+            start = comma + 1;
+            ++index;
+        }
     }
     return rank % npuCount + firstNpu;
 }
@@ -170,37 +151,20 @@ bool CopyDeviceToHost(int rank, void* dst, size_t dstSize, const void* src, size
 
 BarrierEndpoint GetBarrierEndpoint()
 {
-    std::string host = "127.0.0.1";
     int basePort = kDefaultCommPort;
     const char* commId = std::getenv("TILEXR_COMM_ID");
-    if (commId != nullptr && commId[0] != '\0') {
+    if (commId != nullptr) {
         std::string value(commId);
         size_t colon = value.rfind(':');
-        if (colon != std::string::npos) {
-            host = value.substr(0, colon);
-            if (colon + 1 < value.size()) {
-                basePort = std::atoi(value.c_str() + colon + 1);
-            }
-        }
-    }
-    const char* barrierAddr = std::getenv("TILEXR_DEMO_BARRIER_ADDR");
-    if (barrierAddr != nullptr && barrierAddr[0] != '\0') {
-        std::string value(barrierAddr);
-        size_t colon = value.rfind(':');
-        if (colon == std::string::npos) {
-            host = value;
-        } else {
-            host = value.substr(0, colon);
-            if (colon + 1 < value.size()) {
-                basePort = std::atoi(value.c_str() + colon + 1) - kDemoBarrierPortOffset;
-            }
+        if (colon != std::string::npos && colon + 1 < value.size()) {
+            basePort = std::atoi(value.c_str() + colon + 1);
         }
     }
     int barrierPort = basePort + kDemoBarrierPortOffset;
     if (barrierPort <= 0 || barrierPort > 65535) {
         barrierPort = kDefaultCommPort + kDemoBarrierPortOffset;
     }
-    return BarrierEndpoint{host, static_cast<uint16_t>(barrierPort)};
+    return BarrierEndpoint{static_cast<uint16_t>(barrierPort)};
 }
 
 bool SendAll(int fd, const void* data, size_t bytes)
@@ -256,7 +220,7 @@ int CreateBarrierServer(uint16_t port)
     }
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     addr.sin_port = htons(port);
     if (bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0 ||
         listen(fd, SOMAXCONN) != 0) {
@@ -266,13 +230,11 @@ int CreateBarrierServer(uint16_t port)
     return fd;
 }
 
-int ConnectBarrierServer(const std::string& host, uint16_t port)
+int ConnectBarrierServer(uint16_t port)
 {
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
-    if (inet_pton(AF_INET, host.c_str(), &addr.sin_addr) != 1) {
-        return -1;
-    }
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     addr.sin_port = htons(port);
 
     for (int attempt = 0; attempt < kConnectRetryCount; ++attempt) {
@@ -296,15 +258,14 @@ bool DemoBarrierAll(int rank, int rankSize, const std::string& step)
     }
 
     BarrierEndpoint endpoint = GetBarrierEndpoint();
-    PrintStatus(rank, "demo tcp barrier begin: " + step + " host=" + endpoint.host +
-        " port=" + std::to_string(endpoint.port));
+    PrintStatus(rank, "demo tcp barrier begin: " + step + " port=" + std::to_string(endpoint.port));
     constexpr uint8_t kArrive = 1;
     constexpr uint8_t kRelease = 2;
 
     if (rank == 0) {
         int serverFd = CreateBarrierServer(endpoint.port);
         if (serverFd < 0) {
-            std::cerr << "[rank " << rank << "] ERROR: failed to create demo barrier server on 0.0.0.0:"
+            std::cerr << "[rank " << rank << "] ERROR: failed to create demo barrier server on 127.0.0.1:"
                       << endpoint.port << ", errno=" << errno << std::endl;
             return false;
         }
@@ -335,10 +296,10 @@ bool DemoBarrierAll(int rank, int rankSize, const std::string& step)
             return false;
         }
     } else {
-        int fd = ConnectBarrierServer(endpoint.host, endpoint.port);
+        int fd = ConnectBarrierServer(endpoint.port);
         if (fd < 0) {
-            std::cerr << "[rank " << rank << "] ERROR: failed to connect demo barrier on "
-                      << endpoint.host << ":" << endpoint.port << std::endl;
+            std::cerr << "[rank " << rank << "] ERROR: failed to connect demo barrier on 127.0.0.1:"
+                      << endpoint.port << std::endl;
             return false;
         }
         uint8_t release = 0;
@@ -425,9 +386,8 @@ int main(int argc, char** argv)
     int argIndex = 1;
     int rankSize = argc > argIndex ? std::atoi(argv[argIndex++]) : GetRankSizeFromEnv();
     int rank = argc > argIndex ? std::atoi(argv[argIndex++]) : GetRankFromEnv();
-    int testType = argc > argIndex ? std::atoi(argv[argIndex++]) : GetEnvInt("TILEXR_DEMO_TEST_TYPE", 0);
-    int32_t elementsPerRank = argc > argIndex ? std::atoi(argv[argIndex++]) :
-        GetEnvInt("TILEXR_DEMO_ELEMENTS_PER_RANK", kDefaultElementsPerRank);
+    int testType = argc > argIndex ? std::atoi(argv[argIndex++]) : 0;
+    int32_t elementsPerRank = argc > argIndex ? std::atoi(argv[argIndex++]) : kDefaultElementsPerRank;
     int npuCount = argc > argIndex ? std::atoi(argv[argIndex++]) : GetEnvInt("TILEXR_DEMO_NPUS", 8);
     int firstNpu = argc > argIndex ? std::atoi(argv[argIndex++]) : GetEnvInt("TILEXR_DEMO_FIRST_NPU", 0);
     int deviceId = GetDeviceIdFromEnv(rank, npuCount, firstNpu);
@@ -478,21 +438,6 @@ int main(int argc, char** argv)
         return 1;
     }
     PrintCommArgs(rank, *commArgsHost, commArgsDev);
-
-    bool sdmaAvailable = false;
-    GM_ADDR sdmaWorkspace = nullptr;
-    if (!CheckTileXR(rank, "TileXRSDMAAvailable", TileXRSDMAAvailable(comm, &sdmaAvailable)) ||
-        !CheckTileXR(rank, "TileXRGetSDMAWorkspaceDev", TileXRGetSDMAWorkspaceDev(comm, &sdmaWorkspace))) {
-        Cleanup(comm, stream, registeredMemory, debug, rank, deviceId);
-        return 1;
-    }
-    std::cout << "[rank " << rank << "] SDMA available=" << (sdmaAvailable ? "true" : "false")
-              << " sdmaWorkspacePtr=" << static_cast<void*>(sdmaWorkspace) << std::endl;
-    if (EnvEnabled("TILEXR_DEMO_REQUIRE_SDMA") && (!sdmaAvailable || sdmaWorkspace == nullptr)) {
-        std::cerr << "[rank " << rank << "] ERROR: TileXR SDMA is required but unavailable" << std::endl;
-        Cleanup(comm, stream, registeredMemory, debug, rank, deviceId);
-        return 1;
-    }
 
     if ((commArgsHost->extraFlag & TileXR::ExtraFlag::UDMA) == 0 || commArgsHost->udmaInfoPtr == nullptr) {
         std::cerr << "[rank " << rank << "] ERROR: TileXR UDMA is not enabled. "
@@ -555,14 +500,9 @@ int main(int argc, char** argv)
         return 1;
     }
 
-    PrintStatus(rank, testType == 1 ? "launch put-signal kernel" :
-            (testType == 2 ? "launch slot signal-get probe kernel" : "launch all-gather kernel"));
+    PrintStatus(rank, testType == 1 ? "launch put-signal kernel" : "launch all-gather kernel");
     if (testType == 1) {
         launch_tilexr_udma_put_signal(
-            1, stream, commArgsDev, reinterpret_cast<GM_ADDR>(data), reinterpret_cast<GM_ADDR>(signals),
-            reinterpret_cast<GM_ADDR>(debug), elementsPerRank, kSignalValue);
-    } else if (testType == 2) {
-        launch_tilexr_udma_slot_signal_get_probe(
             1, stream, commArgsDev, reinterpret_cast<GM_ADDR>(data), reinterpret_cast<GM_ADDR>(signals),
             reinterpret_cast<GM_ADDR>(debug), elementsPerRank, kSignalValue);
     } else {
@@ -605,7 +545,7 @@ int main(int argc, char** argv)
     std::cout << std::endl;
 
     bool ok = ValidateData(rank, rankSize, hostData, elementsPerRank);
-    if (testType == 1 || testType == 2) {
+    if (testType == 1) {
         ok = ValidateSignals(rank, rankSize, hostSignals) && ok;
     }
 
