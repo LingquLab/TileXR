@@ -704,6 +704,96 @@ extern "C" __global__ __aicore__ void tilexr_data_as_flag_p2p_perf_kernel(
     }
 }
 
+extern "C" __global__ __aicore__ void tilexr_data_as_flag_epoch_ordered_p2p_perf_kernel(
+    GM_ADDR commArgsGM, GM_ADDR srcGM, GM_ADDR dstGM, GM_ADDR debugGM,
+    int32_t srcRank, int32_t dstRank, uint64_t dstByteOffset,
+    uint32_t bytes, uint32_t pattern, int32_t traffic, int32_t magic, int32_t step)
+{
+    if constexpr (g_coreType == AscendC::AIV) {
+        auto args = reinterpret_cast<__gm__ TileXR::CommArgs*>(commArgsGM);
+        auto debug = reinterpret_cast<__gm__ uint32_t*>(debugGM);
+        auto src = reinterpret_cast<__gm__ uint8_t*>(srcGM);
+        auto dst = reinterpret_cast<__gm__ uint8_t*>(dstGM);
+
+        int32_t rank = args->rank;
+        uint32_t blockIdx = AscendC::GetBlockIdx();
+        uint32_t blockNum = AscendC::GetBlockNum();
+        const uint64_t epoch = TileXR::DataAsFlagEpoch(magic, step);
+        if (debug != nullptr && blockIdx == 0) {
+            debug[0] = TILEXR_UDMA_DEMO_MAGIC;
+            debug[1] = rank;
+            debug[2] = 1;
+            debug[3] = bytes;
+            debug[4] = pattern;
+            debug[5] = 0xffffffffu;
+            debug[6] = blockNum;
+            debug[7] = static_cast<uint32_t>(epoch & 0xffffffffu);
+        }
+
+        bool isSender = false;
+        bool isReceiver = false;
+        int32_t peer = -1;
+        if (blockNum == 0 ||
+            !TileXRUdmaDemoResolveDataAsFlagRole(rank, srcRank, dstRank, traffic, isSender, isReceiver, peer) ||
+            peer < 0 || peer >= args->rankSize) {
+            return;
+        }
+
+        AscendC::GlobalTensor<GM_ADDR> peerMems;
+        peerMems.SetGlobalBuffer(&(args->peerMems[0]), TileXR::TILEXR_MAX_RANK_SIZE);
+        GM_ADDR peerBase = peerMems.GetValue(peer);
+        GM_ADDR localBase = peerMems.GetValue(rank);
+        if (peerBase == nullptr || localBase == nullptr || dst == nullptr || (isSender && src == nullptr)) {
+            uint32_t status = TileXRUdmaDemoFoldDebugStatus(debug, blockIdx, 2);
+            if (debug != nullptr && blockIdx == 0) {
+                debug[5] = status;
+            }
+            return;
+        }
+
+        uint32_t payloadOffset = 0;
+        uint32_t sliceBytes = 0;
+        uint32_t dataAsFlagOffset = 0;
+        TileXRUdmaDemoDataAsFlagSlice(bytes, blockNum, blockIdx, payloadOffset, sliceBytes, dataAsFlagOffset);
+        if (debug != nullptr && blockIdx < 8) {
+            debug[16 + blockIdx] = payloadOffset;
+            debug[24 + blockIdx] = sliceBytes;
+        }
+        if (sliceBytes == 0) {
+            TileXRUdmaDemoFoldDebugStatus(debug, blockIdx, 0);
+            return;
+        }
+
+        AscendC::TPipe pipe;
+        AscendC::TBuf<AscendC::QuePosition::VECCALC> tBuf;
+        pipe.InitBuffer(tBuf, TILEXR_UDMA_DEMO_P2P_UB_BYTES);
+        AscendC::LocalTensor<uint8_t> scratch = tBuf.Get<uint8_t>();
+
+        uint32_t status = 0;
+        if (isSender) {
+            uint32_t sentBlocks = TileXR::DataAsFlagSendEpochOrdered(
+                reinterpret_cast<__gm__ uint8_t*>(peerBase + dstByteOffset + dataAsFlagOffset),
+                src + payloadOffset, sliceBytes, epoch, scratch);
+            if (sentBlocks == 0U) {
+                status = 3;
+            }
+        }
+        if (isReceiver && status == 0) {
+            bool strict = false;
+            bool received = TileXR::DataAsFlagCheckAndRecvEpochOrdered(
+                reinterpret_cast<__gm__ uint8_t*>(localBase + dstByteOffset + dataAsFlagOffset),
+                sliceBytes, dst + payloadOffset, epoch, scratch, strict);
+            if (!received) {
+                status = 4;
+            }
+        }
+        TileXRUdmaDemoFoldDebugStatus(debug, blockIdx, status);
+        if (debug != nullptr && blockIdx == 0) {
+            debug[5] = status;
+        }
+    }
+}
+
 void launch_tilexr_udma_all_gather(
     uint32_t blockDim, void* stream, GM_ADDR commArgs, GM_ADDR data, GM_ADDR debug, int32_t elementsPerRank)
 {
@@ -765,4 +855,13 @@ void launch_tilexr_data_as_flag_p2p_perf(
 {
     tilexr_data_as_flag_p2p_perf_kernel<<<blockDim, nullptr, stream>>>(
         commArgs, src, dst, debug, srcRank, dstRank, dstByteOffset, bytes, pattern, traffic);
+}
+
+void launch_tilexr_data_as_flag_epoch_ordered_p2p_perf(
+    uint32_t blockDim, void* stream, GM_ADDR commArgs, GM_ADDR src, GM_ADDR dst, GM_ADDR debug,
+    int32_t srcRank, int32_t dstRank, uint64_t dstByteOffset,
+    uint32_t bytes, uint32_t pattern, int32_t traffic, int32_t magic, int32_t step)
+{
+    tilexr_data_as_flag_epoch_ordered_p2p_perf_kernel<<<blockDim, nullptr, stream>>>(
+        commArgs, src, dst, debug, srcRank, dstRank, dstByteOffset, bytes, pattern, traffic, magic, step);
 }

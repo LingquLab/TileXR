@@ -74,6 +74,18 @@ void TestMemoryConsumeSweepDefault()
     CheckContains(path, text, "direct_urma,memory,memory_consume,data_as_flag");
 }
 
+void TestDataAsFlagEpochOrderedSource()
+{
+    const std::string kernelPath = "tests/udma/demo/tilexr_udma_demo_kernel.cpp";
+    const std::string kernelText = ReadFile(kernelPath);
+    CheckContains(kernelPath, kernelText, "tilexr_data_as_flag_epoch_ordered_p2p_perf_kernel");
+    CheckContains(kernelPath, kernelText, "launch_tilexr_data_as_flag_epoch_ordered_p2p_perf");
+    CheckContains(kernelPath, kernelText, "DataAsFlagEpoch(magic, step)");
+    CheckContains(kernelPath, kernelText, "DataAsFlagSendEpochOrdered");
+    CheckContains(kernelPath, kernelText, "DataAsFlagCheckAndRecvEpochOrdered");
+    CheckContains(kernelPath, kernelText, "int32_t magic, int32_t step");
+}
+
 } // namespace
 
 int main()
@@ -81,6 +93,7 @@ int main()
     TestMemoryConsumeKernelUsesSyncCollectives();
     TestMemoryConsumeHostWiring();
     TestMemoryConsumeSweepDefault();
+    TestDataAsFlagEpochOrderedSource();
     if (g_failures != 0) {
         std::cerr << g_failures << " TileXR UDMA P2P source guard checks failed" << std::endl;
         return 1;
