@@ -35,6 +35,8 @@ int main()
         "direct transport name mismatch");
     Require(TileXR::Demo::P2PTransportName(TileXR::Demo::P2PTransport::Memory) == "memory",
         "memory transport name mismatch");
+    Require(TileXR::Demo::P2PTransportName(TileXR::Demo::P2PTransport::MemoryConsume) == "memory_consume",
+        "memory_consume transport name mismatch");
     Require(TileXR::Demo::P2PTransportName(TileXR::Demo::P2PTransport::DataAsFlag) == "data_as_flag",
         "data_as_flag transport name mismatch");
     Require(TileXR::Demo::P2PTrafficName(TileXR::Demo::P2PTraffic::UniDir) == "unidir",
@@ -47,6 +49,12 @@ int main()
         "udma alias parse mismatch");
     Require(TileXR::Demo::ParseP2PTransport("memory") == TileXR::Demo::P2PTransport::Memory,
         "memory transport parse mismatch");
+    Require(TileXR::Demo::ParseP2PTransport("memory_consume") == TileXR::Demo::P2PTransport::MemoryConsume,
+        "memory_consume transport parse mismatch");
+    Require(TileXR::Demo::ParseP2PTransport("memory-consume") == TileXR::Demo::P2PTransport::MemoryConsume,
+        "memory-consume alias parse mismatch");
+    Require(TileXR::Demo::ParseP2PTransport("mem_consume") == TileXR::Demo::P2PTransport::MemoryConsume,
+        "mem_consume alias parse mismatch");
     Require(TileXR::Demo::ParseP2PTransport("data_as_flag") == TileXR::Demo::P2PTransport::DataAsFlag,
         "data_as_flag transport parse mismatch");
     Require(TileXR::Demo::ParseP2PTransport("direct_urma_multi_wqe") == TileXR::Demo::P2PTransport::Invalid,
@@ -73,6 +81,10 @@ int main()
         "data_as_flag 481B layout mismatch");
     Require(TileXR::Demo::P2PTransportWindowBytes(TileXR::Demo::P2PTransport::DirectUrma, 4096, 8) == 4096,
         "direct_urma window must equal payload bytes");
+    Require(TileXR::Demo::P2PTransportWindowBytes(TileXR::Demo::P2PTransport::MemoryConsume, 4096, 4) == 4096,
+        "memory_consume window must equal payload bytes");
+    Require(TileXR::Demo::P2PTransportUsesIpc(TileXR::Demo::P2PTransport::MemoryConsume),
+        "memory_consume must use IPC peer window");
     Require(TileXR::Demo::ActiveP2PFlowCount(TileXR::Demo::P2PTraffic::UniDir) == 1,
         "unidir active flow count mismatch");
     Require(TileXR::Demo::ActiveP2PFlowCount(TileXR::Demo::P2PTraffic::BiDir) == 2,
@@ -89,6 +101,16 @@ int main()
     options.blockDim = 4;
     Require(TileXR::Demo::ValidateP2PPerfOptions(options, 2, &error),
         "valid data_as_flag bidir options rejected");
+    options.transport = TileXR::Demo::P2PTransport::MemoryConsume;
+    options.traffic = TileXR::Demo::P2PTraffic::UniDir;
+    options.blockDim = 4;
+    options.maxBytes = 16384;
+    Require(TileXR::Demo::ValidateP2PPerfOptions(options, 2, &error),
+        "valid memory_consume options rejected");
+    options.maxBytes = TileXR::Demo::kP2PMemoryMaxBytes + 1;
+    Require(!TileXR::Demo::ValidateP2PPerfOptions(options, 2, &error),
+        "oversized memory_consume transport accepted");
+    options.maxBytes = 16384;
     options.blockDim = 0;
     Require(!TileXR::Demo::ValidateP2PPerfOptions(options, 2, &error), "block_dim=0 accepted");
     options.blockDim = 4;
@@ -172,6 +194,30 @@ int main()
         "bidir row must use max rank elapsed time");
     Require(bidirAggregated.status == 4, "bidir row must combine rank status");
     Require(bidirAggregated.errors == 7, "bidir row must sum rank errors");
+
+    options.transport = TileXR::Demo::P2PTransport::MemoryConsume;
+    options.traffic = TileXR::Demo::P2PTraffic::UniDir;
+    options.blockDim = 4;
+    options.srcRank = 1;
+    options.dstRank = 0;
+    srcSample.status = 1;
+    srcSample.errors = 2;
+    srcSample.elapsedMs = 6.4f;
+    dstSample.status = 4;
+    dstSample.errors = 7;
+    dstSample.elapsedMs = 10.0f;
+    const TileXR::Demo::P2PPerfRow memoryConsumeAggregated =
+        TileXR::Demo::BuildP2PPerfRow(options, 2, 4096, srcSample, dstSample);
+    Require(std::fabs(memoryConsumeAggregated.avgUs - 500.0) < 0.001,
+        "memory_consume unidir row must use max rank elapsed time");
+    Require(memoryConsumeAggregated.status == 5,
+        "memory_consume unidir row must combine rank status");
+    Require(memoryConsumeAggregated.errors == 9,
+        "memory_consume unidir row must sum rank errors");
+    const std::string memoryConsumeCsv = TileXR::Demo::FormatP2PPerfCsvRow(memoryConsumeAggregated);
+    Require(memoryConsumeCsv ==
+            "memory_consume,unidir,4,1to0,1,0,2,4096,20,500.000,0.000,0.000,0.008,0.008,5,9,\n",
+        "memory_consume csv row mismatch");
 
     options.dstRank = 1;
     Require(!TileXR::Demo::ValidateP2PPerfOptions(options, 2, &error), "same src/dst accepted");

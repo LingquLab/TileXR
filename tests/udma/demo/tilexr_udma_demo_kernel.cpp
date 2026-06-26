@@ -5,6 +5,7 @@
 
 #include "kernel_operator.h"
 #include "tilexr_data_as_flag.h"
+#include "tilexr_sync.h"
 #include "tilexr_udma.h"
 
 constexpr int32_t TILEXR_UDMA_DEMO_MAGIC = 0x5444554d; // "TDUM"
@@ -74,6 +75,42 @@ __aicore__ inline bool TileXRUdmaDemoResolvePeer(
 }
 
 __aicore__ inline bool TileXRUdmaDemoResolveDataAsFlagRole(
+    int32_t rank, int32_t srcRank, int32_t dstRank, int32_t traffic,
+    bool& isSender, bool& isReceiver, int32_t& peer)
+{
+    const bool bidir = traffic == 1;
+    isSender = false;
+    isReceiver = false;
+    peer = -1;
+    if (bidir) {
+        if (rank == srcRank) {
+            isSender = true;
+            isReceiver = true;
+            peer = dstRank;
+            return true;
+        }
+        if (rank == dstRank) {
+            isSender = true;
+            isReceiver = true;
+            peer = srcRank;
+            return true;
+        }
+        return false;
+    }
+    if (rank == srcRank) {
+        isSender = true;
+        peer = dstRank;
+        return true;
+    }
+    if (rank == dstRank) {
+        isReceiver = true;
+        peer = srcRank;
+        return true;
+    }
+    return false;
+}
+
+__aicore__ inline bool TileXRUdmaDemoResolveMemoryConsumeRole(
     int32_t rank, int32_t srcRank, int32_t dstRank, int32_t traffic,
     bool& isSender, bool& isReceiver, int32_t& peer)
 {
@@ -385,6 +422,93 @@ extern "C" __global__ __aicore__ void tilexr_memory_p2p_perf_kernel(
     }
 }
 
+extern "C" __global__ __aicore__ void tilexr_memory_consume_p2p_perf_kernel(
+    GM_ADDR commArgsGM, GM_ADDR srcGM, GM_ADDR dstGM, GM_ADDR debugGM,
+    int32_t srcRank, int32_t dstRank, uint64_t dstByteOffset,
+    uint32_t bytes, uint32_t pattern, int32_t traffic, int32_t magic, int32_t step)
+{
+    if constexpr (g_coreType == AscendC::AIV) {
+        auto args = reinterpret_cast<__gm__ TileXR::CommArgs*>(commArgsGM);
+        auto debug = reinterpret_cast<__gm__ uint32_t*>(debugGM);
+        auto dst = reinterpret_cast<__gm__ uint8_t*>(dstGM);
+
+        int32_t rank = args->rank;
+        uint32_t blockIdx = AscendC::GetBlockIdx();
+        uint32_t blockNum = AscendC::GetBlockNum();
+        if (debug != nullptr && blockIdx == 0) {
+            debug[0] = TILEXR_UDMA_DEMO_MAGIC;
+            debug[1] = rank;
+            debug[2] = 1;
+            debug[3] = bytes;
+            debug[4] = pattern;
+            debug[5] = 0xffffffffu;
+            debug[6] = blockNum;
+            debug[7] = static_cast<uint32_t>(magic);
+        }
+
+        bool isSender = false;
+        bool isReceiver = false;
+        int32_t peer = -1;
+        if (blockNum == 0 ||
+            !TileXRUdmaDemoResolveMemoryConsumeRole(rank, srcRank, dstRank, traffic, isSender, isReceiver, peer) ||
+            peer < 0 || peer >= args->rankSize) {
+            return;
+        }
+
+        AscendC::GlobalTensor<GM_ADDR> peerMems;
+        peerMems.SetGlobalBuffer(&(args->peerMems[0]), TileXR::TILEXR_MAX_RANK_SIZE);
+        GM_ADDR shareAddrs[TileXR::TILEXR_MAX_RANK_SIZE];
+        for (int32_t i = 0; i < args->rankSize; ++i) {
+            shareAddrs[i] = peerMems.GetValue(i);
+        }
+        GM_ADDR peerBase = shareAddrs[peer];
+        GM_ADDR localBase = shareAddrs[rank];
+        if (peerBase == nullptr || localBase == nullptr || (isReceiver && dst == nullptr) ||
+            (isSender && srcGM == nullptr)) {
+            uint32_t status = TileXRUdmaDemoFoldDebugStatus(debug, blockIdx, 2);
+            if (debug != nullptr && blockIdx == 0) {
+                debug[5] = status;
+            }
+            return;
+        }
+
+        uint32_t offset = 0;
+        uint32_t sliceBytes = 0;
+        TileXRUdmaDemoBlockSlice(bytes, blockNum, blockIdx, offset, sliceBytes);
+        if (debug != nullptr && blockIdx < 8) {
+            debug[16 + blockIdx] = offset;
+            debug[24 + blockIdx] = sliceBytes;
+        }
+        if (sliceBytes == 0) {
+            TileXRUdmaDemoFoldDebugStatus(debug, blockIdx, 0);
+            return;
+        }
+
+        AscendC::TPipe pipe;
+        AscendC::TBuf<AscendC::QuePosition::VECCALC> tBuf;
+        pipe.InitBuffer(tBuf, TILEXR_UDMA_DEMO_P2P_UB_BYTES);
+        SyncCollectives sync;
+        sync.Init(rank, args->rankSize, shareAddrs, tBuf);
+
+        uint32_t status = 0;
+        if (isSender) {
+            TileXRUdmaDemoCopyBytesGmToGm(
+                peerBase + dstByteOffset + offset, srcGM + offset, tBuf, sliceBytes);
+            sync.SetOuterFlag(magic, step);
+        }
+        if (isReceiver && status == 0) {
+            sync.WaitOuterFlag(magic, step, peer, blockIdx);
+            TileXRUdmaDemoCopyBytesGmToGm(
+                reinterpret_cast<GM_ADDR>(dst + offset), localBase + dstByteOffset + offset, tBuf, sliceBytes);
+        }
+
+        TileXRUdmaDemoFoldDebugStatus(debug, blockIdx, status);
+        if (debug != nullptr && blockIdx == 0) {
+            debug[5] = status;
+        }
+    }
+}
+
 extern "C" __global__ __aicore__ void tilexr_data_as_flag_p2p_perf_kernel(
     GM_ADDR commArgsGM, GM_ADDR srcGM, GM_ADDR dstGM, GM_ADDR debugGM,
     int32_t srcRank, int32_t dstRank, uint64_t dstByteOffset,
@@ -504,6 +628,15 @@ void launch_tilexr_memory_p2p_perf(
 {
     tilexr_memory_p2p_perf_kernel<<<blockDim, nullptr, stream>>>(
         commArgs, src, debug, srcRank, dstRank, dstByteOffset, bytes, pattern, traffic);
+}
+
+void launch_tilexr_memory_consume_p2p_perf(
+    uint32_t blockDim, void* stream, GM_ADDR commArgs, GM_ADDR src, GM_ADDR dst, GM_ADDR debug,
+    int32_t srcRank, int32_t dstRank, uint64_t dstByteOffset,
+    uint32_t bytes, uint32_t pattern, int32_t traffic, int32_t magic, int32_t step)
+{
+    tilexr_memory_consume_p2p_perf_kernel<<<blockDim, nullptr, stream>>>(
+        commArgs, src, dst, debug, srcRank, dstRank, dstByteOffset, bytes, pattern, traffic, magic, step);
 }
 
 void launch_tilexr_data_as_flag_p2p_perf(

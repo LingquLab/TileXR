@@ -15,6 +15,7 @@ constexpr uint64_t kP2PMemoryMaxBytes = 100ULL * 1024ULL * 1024ULL;
 enum class P2PTransport {
     DirectUrma,
     Memory,
+    MemoryConsume,
     DataAsFlag,
     Invalid,
 };
@@ -32,6 +33,8 @@ inline const char* P2PTransportName(P2PTransport transport)
             return "direct_urma";
         case P2PTransport::Memory:
             return "memory";
+        case P2PTransport::MemoryConsume:
+            return "memory_consume";
         case P2PTransport::DataAsFlag:
             return "data_as_flag";
         default:
@@ -58,6 +61,9 @@ inline P2PTransport ParseP2PTransport(const std::string& name)
     }
     if (name == "memory" || name == "ipc" || name == "datacopy") {
         return P2PTransport::Memory;
+    }
+    if (name == "memory_consume" || name == "memory-consume" || name == "mem_consume") {
+        return P2PTransport::MemoryConsume;
     }
     if (name == "data_as_flag" || name == "data-as-flag" || name == "daf") {
         return P2PTransport::DataAsFlag;
@@ -144,6 +150,20 @@ inline uint64_t P2PTransportWindowBytes(P2PTransport transport, uint64_t payload
     return P2PTransportWindowBytes(transport, payloadBytes);
 }
 
+inline bool P2PTransportUsesIpc(P2PTransport transport)
+{
+    return transport == P2PTransport::Memory ||
+        transport == P2PTransport::MemoryConsume ||
+        transport == P2PTransport::DataAsFlag;
+}
+
+inline bool P2PTransportBothRanksActive(P2PTransport transport, P2PTraffic traffic)
+{
+    return traffic == P2PTraffic::BiDir ||
+        transport == P2PTransport::MemoryConsume ||
+        transport == P2PTransport::DataAsFlag;
+}
+
 inline int ActiveP2PFlowCount(P2PTraffic traffic)
 {
     return traffic == P2PTraffic::BiDir ? 2 : 1;
@@ -187,14 +207,14 @@ inline bool ValidateP2PPerfOptions(const P2PPerfOptions& options, int rankSize, 
         return fail("block_dim must be in [1, 64]");
     }
     if (options.transport == P2PTransport::Invalid) {
-        return fail("transport must be direct_urma, memory, or data_as_flag");
+        return fail("transport must be direct_urma, memory, memory_consume, or data_as_flag");
     }
     if (options.traffic == P2PTraffic::Invalid) {
         return fail("traffic must be unidir or bidir");
     }
-    if ((options.transport == P2PTransport::Memory || options.transport == P2PTransport::DataAsFlag) &&
+    if (P2PTransportUsesIpc(options.transport) &&
         P2PTransportWindowBytes(options.transport, options.maxBytes, options.blockDim) > kP2PMemoryMaxBytes) {
-        return fail("memory/data_as_flag transport max_bytes must fit in the TileXR IPC data window");
+        return fail("memory/memory_consume/data_as_flag transport max_bytes must fit in the TileXR IPC data window");
     }
     return true;
 }
@@ -306,8 +326,7 @@ inline P2PPerfRow BuildP2PPerfRow(
     row.rankSize = rankSize;
     row.bytes = bytes;
     row.iters = options.iters;
-    const bool bothRanksActive =
-        options.traffic == P2PTraffic::BiDir || options.transport == P2PTransport::DataAsFlag;
+    const bool bothRanksActive = P2PTransportBothRanksActive(options.transport, options.traffic);
     const float elapsedMs = bothRanksActive && dstStatus.elapsedMs > srcStatus.elapsedMs ?
         dstStatus.elapsedMs : srcStatus.elapsedMs;
     row.avgUs = options.iters > 0 ? static_cast<double>(elapsedMs) * 1000.0 / static_cast<double>(options.iters) : 0.0;
