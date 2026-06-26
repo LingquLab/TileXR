@@ -353,6 +353,11 @@ int TileXRUDMATransport::Init(const TileXRUDMATransportOptions& options)
         Shutdown();
         return ret;
     }
+    ret = ImportQueues();
+    if (ret != TILEXR_SUCCESS) {
+        Shutdown();
+        return ret;
+    }
     ret = RefreshUDMAInfo();
     if (ret != TILEXR_SUCCESS) {
         Shutdown();
@@ -421,12 +426,10 @@ int TileXRUDMATransport::BuildRoutes()
     eidCount_ = eidNum;
 
     uint32_t localId = static_cast<uint32_t>(options_.devId);
-    const bool useTopoRoutes = std::getenv("TILEXR_UDMA_TOPO_ROUTE") != nullptr &&
-        std::strcmp(std::getenv("TILEXR_UDMA_TOPO_ROUTE"), "0") != 0;
     bool topoReady = false;
     TileXRRootInfo rootInfo {};
     std::vector<TileXRTopoEdge> topoEdges;
-    if (useTopoRoutes && ParseRootInfo(rootInfo)) {
+    if (ParseRootInfo(rootInfo)) {
         if (rootInfo.eidCount > eidCount_) {
             eidCount_ = rootInfo.eidCount;
         }
@@ -832,13 +835,6 @@ int TileXRUDMATransport::RegisterMemory(GM_ADDR localPtr, size_t bytes)
         return ret;
     }
     registeredPtr_ = localPtr;
-    if (!queuesImported_) {
-        ret = ImportQueues();
-        if (ret != TILEXR_SUCCESS) {
-            return ret;
-        }
-        queuesImported_ = true;
-    }
     ret = ExchangeAndImportMemory();
     if (ret != TILEXR_SUCCESS) {
         return ret;
@@ -862,10 +858,7 @@ int TileXRUDMATransport::RegisterMemoryOnContexts(GM_ADDR localPtr, size_t bytes
         mrInfo.in.ub.tokenValue = TILEXR_UDMA_TOKEN_VALUE;
         mrInfo.in.ub.tokenIdHandle = tokenHandle;
         mrInfo.in.ub.flags.bs.access = MEM_SEG_ACCESS_DEFAULT;
-        mrInfo.in.ub.flags.bs.cacheable = 0;
         mrInfo.in.ub.flags.bs.tokenIdValid = 1;
-        mrInfo.in.ub.flags.bs.nonPin = 0;
-        mrInfo.in.ub.flags.bs.userIova = 0;
         mrInfo.in.ub.flags.bs.tokenPolicy = MEM_SEG_TOKEN_PLAIN_TEXT;
         void* lmemHandle = nullptr;
         int ret = loader_.RaCtxLmemRegister(ctxEntry.second, &mrInfo, &lmemHandle);
@@ -1031,7 +1024,6 @@ void TileXRUDMATransport::CleanupQueues()
         FreeDeviceScalar(state.amoAddr);
     }
     states_.clear();
-    queuesImported_ = false;
 }
 
 void TileXRUDMATransport::CleanupContexts()

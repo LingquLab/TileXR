@@ -69,7 +69,6 @@ private:
     bool available_ = false;
     bool tsdOpened_ = false;
     bool raInitialized_ = false;
-    bool queuesImported_ = false;
     pid_t subPid_ = 0;
     uint32_t logicDevId_ = 0;
     uint32_t deviceIdOffset_ = 0;
