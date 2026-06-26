@@ -707,7 +707,7 @@ extern "C" __global__ __aicore__ void tilexr_data_as_flag_p2p_perf_kernel(
 extern "C" __global__ __aicore__ void tilexr_data_as_flag_epoch_ordered_p2p_perf_kernel(
     GM_ADDR commArgsGM, GM_ADDR srcGM, GM_ADDR dstGM, GM_ADDR debugGM,
     int32_t srcRank, int32_t dstRank, uint64_t dstByteOffset,
-    uint32_t bytes, uint32_t pattern, int32_t traffic, int32_t magic, int32_t step)
+    uint32_t bytes, uint32_t pattern, int32_t traffic, int32_t magic, int32_t step, int32_t strict)
 {
     if constexpr (g_coreType == AscendC::AIV) {
         auto args = reinterpret_cast<__gm__ TileXR::CommArgs*>(commArgsGM);
@@ -779,10 +779,10 @@ extern "C" __global__ __aicore__ void tilexr_data_as_flag_epoch_ordered_p2p_perf
             }
         }
         if (isReceiver && status == 0) {
-            bool strict = false;
+            bool strictMode = strict != 0;
             bool received = TileXR::DataAsFlagCheckAndRecvEpochOrdered(
                 reinterpret_cast<__gm__ uint8_t*>(localBase + dstByteOffset + dataAsFlagOffset),
-                sliceBytes, dst + payloadOffset, epoch, scratch, strict);
+                sliceBytes, dst + payloadOffset, epoch, scratch, strictMode);
             if (!received) {
                 status = 4;
             }
@@ -860,8 +860,8 @@ void launch_tilexr_data_as_flag_p2p_perf(
 void launch_tilexr_data_as_flag_epoch_ordered_p2p_perf(
     uint32_t blockDim, void* stream, GM_ADDR commArgs, GM_ADDR src, GM_ADDR dst, GM_ADDR debug,
     int32_t srcRank, int32_t dstRank, uint64_t dstByteOffset,
-    uint32_t bytes, uint32_t pattern, int32_t traffic, int32_t magic, int32_t step)
+    uint32_t bytes, uint32_t pattern, int32_t traffic, int32_t magic, int32_t step, int32_t strict)
 {
     tilexr_data_as_flag_epoch_ordered_p2p_perf_kernel<<<blockDim, nullptr, stream>>>(
-        commArgs, src, dst, debug, srcRank, dstRank, dstByteOffset, bytes, pattern, traffic, magic, step);
+        commArgs, src, dst, debug, srcRank, dstRank, dstByteOffset, bytes, pattern, traffic, magic, step, strict);
 }

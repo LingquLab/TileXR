@@ -49,7 +49,7 @@ extern void launch_tilexr_data_as_flag_p2p_perf(
 extern void launch_tilexr_data_as_flag_epoch_ordered_p2p_perf(
     uint32_t blockDim, void* stream, GM_ADDR commArgs, GM_ADDR src, GM_ADDR dst, GM_ADDR debug,
     int32_t srcRank, int32_t dstRank, uint64_t dstByteOffset,
-    uint32_t bytes, uint32_t pattern, int32_t traffic, int32_t magic, int32_t step);
+    uint32_t bytes, uint32_t pattern, int32_t traffic, int32_t magic, int32_t step, int32_t strict);
 
 namespace {
 constexpr int32_t kDefaultElementsPerRank = 16;
@@ -546,6 +546,7 @@ void LaunchP2PKernel(
     uint32_t transferBytes, uint32_t pattern, int32_t magic, int32_t step)
 {
     const int32_t traffic = options.traffic == TileXR::Demo::P2PTraffic::BiDir ? 1 : 0;
+    const int32_t dataAsFlagStrict = GetEnvFlag("TILEXR_DATA_AS_FLAG_STRICT", false) ? 1 : 0;
     if (options.transport == TileXR::Demo::P2PTransport::Memory) {
         launch_tilexr_memory_p2p_perf(options.blockDim, stream, commArgsDev, srcDev, debugDev,
             options.srcRank, options.dstRank, dstOffset, transferBytes, pattern, traffic);
@@ -559,7 +560,8 @@ void LaunchP2PKernel(
     if (options.transport == TileXR::Demo::P2PTransport::DataAsFlagEpochOrdered) {
         launch_tilexr_data_as_flag_epoch_ordered_p2p_perf(
             options.blockDim, stream, commArgsDev, srcDev, dstDev, debugDev,
-            options.srcRank, options.dstRank, dstOffset, transferBytes, pattern, traffic, magic, step);
+            options.srcRank, options.dstRank, dstOffset, transferBytes, pattern, traffic, magic, step,
+            dataAsFlagStrict);
         return;
     }
     if (options.transport == TileXR::Demo::P2PTransport::DataAsFlag) {
