@@ -303,7 +303,7 @@ __aicore__ inline void DataAsFlagCopyEpochFlagsToGM(
         static_cast<uint16_t>(batchBlocks),
         DATA_AS_FLAG_FLAG_BYTES,
         0U,
-        DATA_AS_FLAG_PAYLOAD_BYTES / DATA_AS_FLAG_ALIGN_BYTES,
+        DATA_AS_FLAG_PAYLOAD_BYTES,
         0U};
     AscendC::DataCopyPad(flagGlobal, flagScratch, flagParams);
 }
