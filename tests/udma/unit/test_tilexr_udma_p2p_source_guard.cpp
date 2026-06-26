@@ -90,6 +90,7 @@ void TestDataAsFlagEpochOrderedSource()
     const std::string headerPath = "src/include/tilexr_data_as_flag.h";
     const std::string headerText = ReadFile(headerPath);
     CheckContains(headerPath, headerText, "DataAsFlagEpochReady");
+    CheckContains(headerPath, headerText, "lastBlock != blockOffset");
 
     const std::string hostPath = "tests/udma/demo/tilexr_udma_demo.cpp";
     const std::string hostText = ReadFile(hostPath);

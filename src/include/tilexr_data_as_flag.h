@@ -438,10 +438,13 @@ __aicore__ inline bool DataAsFlagCheckBatchEpochStrict(
     if (batchBlocks == 0U) {
         return false;
     }
-    for (uint32_t i = 0; i < batchBlocks; ++i) {
-        if (!DataAsFlagEpochReady(DataAsFlagLoadEpochFlag(dataAsFlagGM, blockOffset + i, scratch), epoch)) {
-            return false;
-        }
+    if (!DataAsFlagEpochReady(DataAsFlagLoadEpochFlag(dataAsFlagGM, blockOffset, scratch), epoch)) {
+        return false;
+    }
+    const uint32_t lastBlock = blockOffset + batchBlocks - 1U;
+    if (lastBlock != blockOffset &&
+        !DataAsFlagEpochReady(DataAsFlagLoadEpochFlag(dataAsFlagGM, lastBlock, scratch), epoch)) {
+        return false;
     }
     return true;
 }
