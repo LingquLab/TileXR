@@ -16,7 +16,7 @@ namespace TileXR {
 namespace Demo {
 
 constexpr int32_t kAllToAllBaseValue = 100000;
-constexpr size_t kAllToAllUdmaMaxRegisteredBytes = 64ULL * 1024ULL * 1024ULL;
+constexpr size_t kAllToAllUdmaMaxRegisteredBytes = 128ULL * 1024ULL * 1024ULL;
 
 struct AllToAllChunkPlan {
     uint32_t passCount = 1;
