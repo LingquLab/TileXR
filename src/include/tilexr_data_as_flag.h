@@ -295,17 +295,18 @@ __aicore__ inline void DataAsFlagCopyEpochFlagsToGM(
     AscendC::LocalTensor<uint8_t>& flagScratch,
     uint32_t batchBlocks)
 {
-    AscendC::GlobalTensor<uint8_t> flagGlobal;
+    AscendC::GlobalTensor<int64_t> flagGlobal;
     flagGlobal.SetGlobalBuffer(
-        dstDataAsFlagGM + static_cast<uint64_t>(dstBlockOffset) * DATA_AS_FLAG_BLOCK_BYTES +
-        DATA_AS_FLAG_FLAG_OFFSET_BYTES);
-    AscendC::DataCopyExtParams flagParams {
-        static_cast<uint16_t>(batchBlocks),
-        DATA_AS_FLAG_FLAG_BYTES,
-        0U,
-        DATA_AS_FLAG_PAYLOAD_BYTES,
-        0U};
-    AscendC::DataCopyPad(flagGlobal, flagScratch, flagParams);
+        reinterpret_cast<__gm__ int64_t*>(
+            dstDataAsFlagGM + static_cast<uint64_t>(dstBlockOffset) * DATA_AS_FLAG_BLOCK_BYTES +
+            DATA_AS_FLAG_FLAG_OFFSET_BYTES));
+    AscendC::LocalTensor<int64_t> flagWords = flagScratch.template ReinterpretCast<int64_t>();
+    constexpr uint32_t kFlagWords = DATA_AS_FLAG_FLAG_BYTES / sizeof(int64_t);
+    constexpr uint32_t kBlockWords = DATA_AS_FLAG_BLOCK_BYTES / sizeof(int64_t);
+    for (uint32_t i = 0; i < batchBlocks; ++i) {
+        AscendC::DataCopy(flagGlobal[static_cast<uint64_t>(i) * kBlockWords],
+            flagWords[static_cast<uint64_t>(i) * kFlagWords], kFlagWords);
+    }
 }
 
 __aicore__ inline uint32_t DataAsFlagSendEpochOrdered(
