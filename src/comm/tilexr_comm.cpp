@@ -646,6 +646,10 @@ int TileXRComm::EnablePeerAccess()
         } else if (physicalInfo_.physicalLink == PhysicalLink::RESERVED) {
             physicalInfo_.physicalLink = PhysicalLink::PCIE;
             commArgs_.extraFlag |= ExtraFlag::TOPO_PCIE;
+            if (rankSize_ > PING_PONG_SIZE) {
+                TILEXR_LOG(ERROR) << "do not support pcie > 2 rank! rankSize_ = " << rankSize_;
+                return TILEXR_ERROR_INTERNAL;
+            }
         }
 
         physicalInfo_.coreNum = GetCoreNum(physicalInfo_.chipName);
