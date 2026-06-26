@@ -43,7 +43,7 @@ message(STATUS "TILEXR_ROOT: ${TILEXR_ROOT}")
 
 # 查找库
 find_library(TILEXR_LIB tile-comm
-    HINTS "${TILEXR_ROOT}/install/lib" "${TILEXR_ROOT}/build/src/comm"
+    HINTS "${TILEXR_ROOT}/install/lib" "${TILEXR_ROOT}/install/lib64" "${TILEXR_ROOT}/build/src/comm"
     REQUIRED)
 
 message(STATUS "Found tile-comm: ${TILEXR_LIB}")
@@ -52,6 +52,7 @@ message(STATUS "Found tile-comm: ${TILEXR_LIB}")
 include_directories(
     ${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc/
     ${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc/runtime/
+    ${ASCEND_HOME_PATH}/${ARCH}-linux/asc/include/
     ${ASCEND_HOME_PATH}/${ARCH}-linux/include/
     ${ASCEND_DRIVER_PATH}/kernel/inc
     ${TILEXR_ROOT}/3rdparty
@@ -83,6 +84,22 @@ target_include_directories(test_tilexr_udma_transport_layout PRIVATE
     ${TILEXR_ROOT}/src/comm
 )
 
+add_executable(test_tilexr_udma_p2p_perf_config
+    unit/test_tilexr_udma_p2p_perf_config.cpp
+)
+
+target_include_directories(test_tilexr_udma_p2p_perf_config PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+)
+
+add_executable(test_tilexr_udma_p2p_source_guard
+    unit/test_tilexr_udma_p2p_source_guard.cpp
+)
+
+target_compile_definitions(test_tilexr_udma_p2p_source_guard PRIVATE
+    TILEXR_SOURCE_ROOT="${TILEXR_ROOT}"
+)
+
 # 集成测试：TileXR UDMA
 add_executable(test_tilexr_udma
     integration/test_tilexr_udma.cpp
@@ -99,6 +116,8 @@ set(INSTALL_TARGETS
     test_tilexr_udma
     test_tilexr_udma_registry
     test_tilexr_udma_transport_layout
+    test_tilexr_udma_p2p_perf_config
+    test_tilexr_udma_p2p_source_guard
 )
 
 if(BUILD_TILEXR_UDMA_DEMO)
@@ -161,6 +180,7 @@ if(BUILD_TILEXR_UDMA_DEMO)
             -I${ASCEND_HOME_PATH}/${ARCH}-linux/tikcpp/tikcfw/interface
             -I${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc/
             -I${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc/runtime/
+            -I${ASCEND_HOME_PATH}/${ARCH}-linux/asc/include/
             -I${ASCEND_HOME_PATH}/${ARCH}-linux/include/
             -I${ASCEND_DRIVER_PATH}/kernel/inc
             -I${TILEXR_ROOT}/3rdparty
@@ -175,6 +195,7 @@ if(BUILD_TILEXR_UDMA_DEMO)
                 -shared
                 ${TILEXR_UDMA_KERNEL_LINK_OPTIONS}
                 -DCATLASS_ARCH=${TILEXR_UDMA_CATLASS_ARCH}
+                -DTILEXR_UDMA_FORCE_ENABLE=1
                 ${TILEXR_UDMA_DEMO_KERNEL_INCLUDES}
                 "${CMAKE_CURRENT_SOURCE_DIR}/demo/tilexr_udma_demo_kernel.cpp"
                 -L${ASCEND_DRIVER_PATH}/lib64/driver

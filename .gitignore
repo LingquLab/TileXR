@@ -87,3 +87,10 @@ comm/Makefile
 comm/cmake_install.cmake
 install_manifest.txt
 patches/
+.tmp
+*.md
+tests/udma/logs
+*.diff
+*.bz2
+tmp
+.kilo
