@@ -84,6 +84,13 @@ void TestDataAsFlagEpochOrderedSource()
     CheckContains(kernelPath, kernelText, "DataAsFlagSendEpochOrdered");
     CheckContains(kernelPath, kernelText, "DataAsFlagCheckAndRecvEpochOrdered");
     CheckContains(kernelPath, kernelText, "int32_t magic, int32_t step");
+
+    const std::string hostPath = "tests/udma/demo/tilexr_udma_demo.cpp";
+    const std::string hostText = ReadFile(hostPath);
+    CheckContains(hostPath, hostText, "launch_tilexr_data_as_flag_epoch_ordered_p2p_perf");
+    CheckContains(hostPath, hostText, "P2PTransport::DataAsFlagEpochOrdered");
+    CheckContains(hostPath, hostText, "magic, step");
+    CheckContains(hostPath, hostText, "useLegacyDataAsFlagTransport");
 }
 
 } // namespace

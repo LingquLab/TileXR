@@ -46,6 +46,10 @@ extern void launch_tilexr_memory_consume_p2p_perf(
 extern void launch_tilexr_data_as_flag_p2p_perf(
     uint32_t blockDim, void* stream, GM_ADDR commArgs, GM_ADDR src, GM_ADDR dst, GM_ADDR debug,
     int32_t srcRank, int32_t dstRank, uint64_t dstByteOffset, uint32_t bytes, uint32_t pattern, int32_t traffic);
+extern void launch_tilexr_data_as_flag_epoch_ordered_p2p_perf(
+    uint32_t blockDim, void* stream, GM_ADDR commArgs, GM_ADDR src, GM_ADDR dst, GM_ADDR debug,
+    int32_t srcRank, int32_t dstRank, uint64_t dstByteOffset,
+    uint32_t bytes, uint32_t pattern, int32_t traffic, int32_t magic, int32_t step);
 
 namespace {
 constexpr int32_t kDefaultElementsPerRank = 16;
@@ -552,6 +556,12 @@ void LaunchP2PKernel(
             options.srcRank, options.dstRank, dstOffset, transferBytes, pattern, traffic, magic, step);
         return;
     }
+    if (options.transport == TileXR::Demo::P2PTransport::DataAsFlagEpochOrdered) {
+        launch_tilexr_data_as_flag_epoch_ordered_p2p_perf(
+            options.blockDim, stream, commArgsDev, srcDev, dstDev, debugDev,
+            options.srcRank, options.dstRank, dstOffset, transferBytes, pattern, traffic, magic, step);
+        return;
+    }
     if (options.transport == TileXR::Demo::P2PTransport::DataAsFlag) {
         launch_tilexr_data_as_flag_p2p_perf(options.blockDim, stream, commArgsDev, srcDev, dstDev, debugDev,
             options.srcRank, options.dstRank, dstOffset, transferBytes, pattern, traffic);
@@ -585,7 +595,7 @@ bool RunP2PPerfMode(
     aclrtEvent stopEvent = nullptr;
 
     const bool useMemoryTransport = options.transport == TileXR::Demo::P2PTransport::Memory;
-    const bool useDataAsFlagTransport = options.transport == TileXR::Demo::P2PTransport::DataAsFlag;
+    const bool useLegacyDataAsFlagTransport = options.transport == TileXR::Demo::P2PTransport::DataAsFlag;
     const bool useIpcTransport = TileXR::Demo::P2PTransportUsesIpc(options.transport);
     const bool bothRanksActive = TileXR::Demo::P2PTransportBothRanksActive(options.transport, options.traffic);
     const uint64_t srcOffset = 0;
@@ -685,13 +695,13 @@ bool RunP2PPerfMode(
 
         const int32_t warmupMagic = ++launchMagic;
         for (int i = 0; i < options.warmupIters; ++i) {
-            if (useDataAsFlagTransport && IsP2PReceiveRank(rank, options) &&
+            if (useLegacyDataAsFlagTransport && IsP2PReceiveRank(rank, options) &&
                 !ClearLocalPeerWindow(rank, commArgsHost, dstOffset,
                     TileXR::Demo::P2PTransportWindowBytes(options.transport, bytes), "p2p data_as_flag warmup window")) {
                 ok = false;
                 break;
             }
-            if (useDataAsFlagTransport &&
+            if (useLegacyDataAsFlagTransport &&
                 !DemoBarrierAll(rank, rankSize,
                     "p2p data_as_flag warmup clear bytes=" + std::to_string(bytes) +
                     " iter=" + std::to_string(i))) {
@@ -710,13 +720,13 @@ bool RunP2PPerfMode(
             break;
         }
 
-        if (useDataAsFlagTransport && IsP2PReceiveRank(rank, options) &&
+        if (useLegacyDataAsFlagTransport && IsP2PReceiveRank(rank, options) &&
             !ClearLocalPeerWindow(rank, commArgsHost, dstOffset,
                 TileXR::Demo::P2PTransportWindowBytes(options.transport, bytes), "p2p data_as_flag measured window")) {
             ok = false;
             break;
         }
-        if (useDataAsFlagTransport &&
+        if (useLegacyDataAsFlagTransport &&
             !DemoBarrierAll(rank, rankSize,
                 "p2p data_as_flag measured clear bytes=" + std::to_string(bytes))) {
             ok = false;
