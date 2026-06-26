@@ -33,9 +33,9 @@ rm -f ${TILEXR_OPS_HOME}/build_out/cann-ops*.run
 
 opsdir=${TILEXR_OPS_HOME}/mc2/${ops}
 if [ ! -d "$opsdir" ]; then
-    cp -rf ${TILEXR_HOME}/src/mc2/${ops} ${TILEXR_OPS_HOME}/mc2
+    cp -rf ${TILEXR_HOME}/examples/mc2/${ops} ${TILEXR_OPS_HOME}/mc2
 fi
-cp -rf ${TILEXR_HOME}/src/mc2/* ${TILEXR_OPS_HOME}/mc2/
+cp -rf ${TILEXR_HOME}/examples/mc2/* ${TILEXR_OPS_HOME}/mc2/
 
 commargs=${TILEXR_OPS_HOME}/common/include/kernel/comm_args.h
 if [ ! -f "$commargs" ]; then
@@ -45,7 +45,7 @@ tilexrsync=${TILEXR_OPS_HOME}/common/include/kernel/tilexr_sync.h
 if [ ! -f "$tilexrsync" ]; then
     cp -rf ${TILEXR_HOME}/src/include/tilexr_sync.h ${TILEXR_OPS_HOME}/common/include/kernel
 fi
-cp -f ${TILEXR_HOME}/src/mc2/build.sh ${TILEXR_OPS_HOME}/build.sh
+cp -f ${TILEXR_HOME}/examples/mc2/build.sh ${TILEXR_OPS_HOME}/build.sh
 CMD="bash build.sh --pkg -j`nproc` -p ${TILEXR_CANN_HOME}/cann --soc=${TILEXR_SOC_NAME} --ops=${ops}"
 warn ${CMD}
 colorful_time ${CMD}

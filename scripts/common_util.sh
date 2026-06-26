@@ -37,7 +37,12 @@ warn()    { echo -e "[WARN] \033[0;33m🔶\033[0m $@"; }
 
 line()    { echo "##########################################################"; }
 
-davinci_detect() { echo `lspci -n -D | grep -o '19e5:d[0-9a-f]\{3\}' | head -n1 | cut -d: -f2`; }
+davinci_detect() {
+    if ! command -v lspci >/dev/null 2>&1; then
+        return
+    fi
+    lspci -n -D 2>/dev/null | grep -o '19e5:d[0-9a-f]\{3\}' | head -n1 | cut -d: -f2
+}
 
 npu_smi_chip_detect() {
     if ! command -v npu-smi >/dev/null 2>&1; then
@@ -75,10 +80,6 @@ ascend_dev_num() {
 }
 
 soc_name() {
-    declare -A SOC_MAP=(
-        ["d802"]="ascend910b"
-        ["d803"]="ascend910_93"
-    )
     local npu_name
     npu_name=`npu_smi_chip_detect`
     case "${npu_name}" in
@@ -93,28 +94,35 @@ soc_name() {
         echo "ascend910b"
         return
     fi
-    echo "${SOC_MAP[$davinci_type]}"
+    case "${davinci_type}" in
+        d802) echo "ascend910b" ;;
+        d803) echo "ascend910_93" ;;
+        *) echo "ascend910b" ;;
+    esac
 }
 
 ops_name() {
-    declare -A OPS_MAP=(
-        ["ascend950"]="A3"
-        ["ascend910b"]="910b"
-        ["ascend910_93"]="A3"
-        ["ascend310p3"]="310p"
-    )
     name=`soc_name`
-    echo "${OPS_MAP[$name]}"
+    case "${name}" in
+        ascend950) echo "950" ;;
+        ascend910b) echo "910b" ;;
+        ascend910_93) echo "A3" ;;
+        ascend310p3) echo "310p" ;;
+        *) echo "910b" ;;
+    esac
 }
 
-# 修复指定路径及其所有祖先目录的权限为 755（直至 / 或 /home）
+# 修复指定路径及其所有祖先目录的权限为 755（直至 /、/home、/root 或 /tmp）
 fix_permissions() {
     local fix_path=$1
-    while [ "${fix_path}" != "/" ] && [ "${fix_path}" != "/home" ]; do
+    while [ "${fix_path}" != "/" ] && [ "${fix_path}" != "/home" ] && [ "${fix_path}" != "/root" ] && [ "${fix_path}" != "/tmp" ]; do
         local perm=`stat -c "%a" ${fix_path}`
         if [ "${perm}" != "755" ]; then
             warn "fix permission to 755 for ${fix_path}"
-            chmod 755 ${fix_path}
+            if ! chmod 755 ${fix_path}; then
+                warn "skip permission fix for ${fix_path}"
+                return
+            fi
         fi
         fix_path=$(dirname "${fix_path}")
     done
