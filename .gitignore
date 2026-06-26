@@ -21,6 +21,10 @@ cmake-build-*
 
 # vim cache
 *.swp
+.DS_Store
+
+# macOS metadata
+.DS_Store
 
 # build & output tempalte dirs
 build/
@@ -63,6 +67,8 @@ env/cann/
 env/temp/
 env/
 third_party/
+3rdparty/open_source/*
+!3rdparty/open_source/README.md
 utils/
 sign_tmp/
 **/build_device/
@@ -70,8 +76,7 @@ sign_tmp/
 tests/sdma/install/
 reference/*
 !reference/README.md
-!reference/download_shmem.sh
-!reference/download_ascend_transformer_boost.sh
+!reference/download_cann_repos.sh
 
 CMakeCache.txt
 CMakeFiles/

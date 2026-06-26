@@ -127,11 +127,11 @@ Local validation in this branch on the development host:
 Hardware validation on `blue`:
 
 - Verification directory:
-  `/home/d00520898/tilexr_sdma_verify_20260530/TileXR`.
+  `/home/<remote-user>/tilexr_sdma_verify_20260530/TileXR`.
 - Hardware: 8 x Ascend 910B3, driver `25.5.0`, device 0 used for demo.
 - CANN 9.0.0 path: `/home/gsn3/Ascend/cann-9.0.0`.
 - CANN 9.1.0 path:
-  `/home/d00520898/tilexr_sdma_verify_20260530/TileXR/env/cann/cann-9.1.0`.
+  `/home/<remote-user>/tilexr_sdma_verify_20260530/TileXR/env/cann/cann-9.1.0`.
 - Both CANN versions configured with `TILEXR_HAVE_PTO_SDMA: ON` and linked
   `libnnopbase.so` from `${ARCH}-linux/lib64` while resolving
   `libascend_hal.so` from `/usr/local/Ascend/driver/lib64/driver`.

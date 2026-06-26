@@ -25,6 +25,14 @@ constexpr int64_t ALL_GATHER_SMALL_DATA_SIZE = 2 * 1024 * 1024;
 constexpr int64_t SMALL_DATA_SIZE_910_93 = 32LL * 1024 * 1024;
 constexpr uint32_t SMALL_RANK_SIZE = 8;
 constexpr uint32_t ALLTOALL_TWO_STEP_BLOCK_NUM = 16;
+constexpr uint32_t THREE_STEP_BLOCK_NUM = 3;
+constexpr uint32_t ALL_REDUCE_DB_RING_BLOCK_NUM = 34;
+constexpr uint32_t REDUCE_SCATTER_FOUR_STEP_BLOCK_NUM = 34;
+constexpr uint32_t REDUCE_SCATTER_DB_RING_BLOCK_NUM = 36;
+constexpr uint32_t BROADCAST_MAX_RANK_SIZE = 8;
+constexpr int64_t ONE_MIB = 1LL * 1024 * 1024;
+constexpr int64_t TWO_MIB = 2LL * 1024 * 1024;
+constexpr int64_t THIRTY_TWO_MIB = 32LL * 1024 * 1024;
 
 int64_t DataTypeSize(TileXR::TileXRDataType dataType)
 {
@@ -65,6 +73,12 @@ uint32_t RankSizeOrZero(const TileXR::CommArgs &commArgs)
 bool IsSupportedDataType(TileXR::TileXRDataType dataType)
 {
     return DataTypeSize(dataType) > 0;
+}
+
+bool IsSupportedReduceOp(TileXR::TileXRReduceOp reduceOp)
+{
+    // The first standalone reduction API surface is SUM-only until other ops pass hardware validation.
+    return reduceOp == TileXR::TILEXR_REDUCE_SUM;
 }
 
 int64_t CountToBytes(int64_t count, TileXR::TileXRDataType dataType)
@@ -123,6 +137,68 @@ uint32_t GetAllToAllBlockNum(const TileXR::CommArgs &commArgs, int64_t dataSize)
     }
     return rankSize <= ALLTOALL_TWO_STEP_BLOCK_NUM ?
         rankSize * TWO_BLOCK_NUM : ALLTOALL_TWO_STEP_BLOCK_NUM * TWO_BLOCK_NUM;
+}
+
+uint32_t GetAllReduceBlockNum(const TileXR::CommArgs &commArgs, int64_t dataSize)
+{
+    const uint32_t rankSize = RankSizeOrZero(commArgs);
+    if (rankSize == 0 || dataSize < 0) {
+        return 0;
+    }
+
+    const uint32_t extraFlag = commArgs.extraFlag;
+    if ((extraFlag & TileXR::ExtraFlag::TOPO_PCIE) != 0) {
+        return rankSize * TWO_BLOCK_NUM;
+    }
+    if ((extraFlag & TileXR::ExtraFlag::TOPO_910B2C) != 0 && rankSize > SMALL_RANK_SIZE) {
+        return dataSize < TWO_MIB ? rankSize :
+            (rankSize / TWO_BLOCK_NUM * THREE_STEP_BLOCK_NUM + TWO_BLOCK_NUM);
+    }
+    if (GetParallel()) {
+        return rankSize;
+    }
+    if ((extraFlag & TileXR::ExtraFlag::TOPO_910_93) != 0 &&
+        dataSize > THIRTY_TWO_MIB && rankSize != TileXR::RANK_SIZE_TWO) {
+        return rankSize % TileXR::RANK_SIZE_TWO == 0 ?
+            ALL_REDUCE_DB_RING_BLOCK_NUM : rankSize * THREE_STEP_BLOCK_NUM;
+    }
+    return (rankSize == TileXR::RANK_SIZE_TWO || dataSize >= TWO_MIB) ?
+        rankSize * TWO_BLOCK_NUM : rankSize;
+}
+
+uint32_t GetReduceScatterBlockNum(const TileXR::CommArgs &commArgs, int64_t dataSize)
+{
+    const uint32_t rankSize = RankSizeOrZero(commArgs);
+    if (rankSize == 0 || dataSize < 0) {
+        return 0;
+    }
+
+    const uint32_t extraFlag = commArgs.extraFlag;
+    if ((extraFlag & TileXR::ExtraFlag::TOPO_PCIE) != 0) {
+        return rankSize * TWO_BLOCK_NUM;
+    }
+
+    const bool isDbRingDataSize = dataSize > TWO_MIB / SMALL_RANK_SIZE &&
+        dataSize <= THIRTY_TWO_MIB / SMALL_RANK_SIZE;
+    const bool isDbRing = (rankSize == 4 || rankSize == SMALL_RANK_SIZE) && isDbRingDataSize;
+    if ((extraFlag & TileXR::ExtraFlag::TOPO_910_93) != 0 &&
+        ((rankSize > SMALL_RANK_SIZE && rankSize % TWO_BLOCK_NUM == 0) || isDbRing)) {
+        if (isDbRing) {
+            return REDUCE_SCATTER_DB_RING_BLOCK_NUM;
+        }
+        return dataSize <= ONE_MIB ? rankSize : REDUCE_SCATTER_FOUR_STEP_BLOCK_NUM;
+    }
+    return (rankSize == TileXR::RANK_SIZE_TWO || dataSize >= TWO_MIB) ?
+        rankSize * TWO_BLOCK_NUM : rankSize;
+}
+
+uint32_t GetBroadcastBlockNum(const TileXR::CommArgs &commArgs, int64_t dataSize)
+{
+    const uint32_t rankSize = RankSizeOrZero(commArgs);
+    if (rankSize == 0 || dataSize < 0 || rankSize > BROADCAST_MAX_RANK_SIZE) {
+        return 0;
+    }
+    return rankSize;
 }
 
 } // namespace Host

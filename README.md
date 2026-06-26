@@ -14,21 +14,26 @@ TileXR is designed around three ideas from the current architecture deck:
 
 The current codebase implements the base communication runtime, flag-based synchronization, MC2 examples, and an A5 UDMA registered-memory path. Broader dynamic scheduling, CMO best-effort scheduling, and CCU offload are design targets and should be treated as roadmap unless a specific implementation file says otherwise.
 
+<p align="center">
+  <img src="docs/diagrams/tile-rendezvous.drawio.svg" alt="From BSP phases to tile-level asynchronous rendezvous" width="900"/>
+</p>
+
+Instead of stalling every rank at coarse barriers, TileXR splits a phase into tiles and lets each tile be produced, transferred, flag-synchronized, and consumed independently — so work on different tiles overlaps and the device advances without repeated host round-trips.
+
 ## Features
 
 - **Core communication runtime**: `libtile-comm.so` initializes ranks, shared buffers, peer memory mappings, socket exchange, device `CommArgs`, and DFX state. It builds only against CANN runtime/ACL/driver APIs and TileXR-owned types — it does not include or link hcomm, HCCL, shmem, or ops-transformer.
 - **Optional TileXR collectives**: `libtilexr-collectives.so`, built only when `TILEXR_BUILD_COLLECTIVES=ON`, layers standalone `TileXRAllGather` and equal-size `TileXRAllToAll` APIs on top of `libtile-comm.so`.
-- **Standalone EP dispatch MVP**: `libtilexr-ep.so` and `libtilexr_ep_dispatch_kernel.so` provide a first TileXR-native MoE EP dispatch route under `src/ep`, independent from `src/mc2`, shmem, and UDMA.
+- **Standalone EP dispatch MVP**: `libtilexr-ep.so` and `libtilexr_ep_dispatch_kernel.so` provide a first TileXR-native MoE EP dispatch route under `src/ep`, independent from `examples/mc2`, shmem, and UDMA.
 - **Tile-level synchronization**: device-side flag regions and magic values support reusable fine-grained synchronization rounds.
-- **MC2 fused operators**: AllGather+Add and AllGather+MatMul examples under `src/mc2/`.
+- **MC2 fused-operator examples**: AllGather+Add and AllGather+MatMul examples under `examples/mc2/`, built through the ops-transformer flow (not part of the core runtime libraries).
 - **Registered-memory UDMA path**: host code registers ordinary `aclrtMalloc` device memory with `TileXRUDMARegister`; device kernels use `tilexr_udma.h` wrappers for put/get/signal.
 - **On-card SDMA transport**: an opt-in (`TILEXR_ENABLE_SDMA=1`) local GM-to-GM copy path. Host code queries it with `TileXRSDMAAvailable` / `TileXRGetSDMAWorkspaceDev`; device kernels use `tilexr_sdma.h` (`SDMACopyNbi`, `SDMAWait`). Separate from UDMA: SDMA is local to one device, UDMA targets registered remote memory.
 - **Operator simulator**: `op-simulator/` supports functional/performance simulation for selected AICore kernels without physical hardware.
 
 ## System Requirements
 
-- **OS**: Ubuntu 20.04 LTS
-- **User**: root access is typically required for NPU device operations
+- **User**: root access or membership in the Ascend driver user group is typically required for CANN runfile installation and NPU device operations
 - **NPU driver**: 25.5.0 or later, check with `npu-smi info`
 - **CANN**: current build scripts and CMake are aligned to CANN 9.1.0
 - **Core supported chips**: Ascend 910B, 910A5
@@ -39,8 +44,11 @@ UDMA builds or smoke tests on 910B or other non-A5 devices are not valid UDMA da
 ### System Dependencies
 
 ```bash
-apt install -y build-essential git git-lfs rdma-core kmod net-tools \
-               libssl-dev libz-dev libeigen3-dev python3 python3-pip
+apt install -y build-essential git python3
+```
+
+```bash
+yum install -y gcc gcc-c++ make git python3
 ```
 
 ## Quick Start
@@ -48,7 +56,7 @@ apt install -y build-essential git git-lfs rdma-core kmod net-tools \
 ### 1. Clone Repository
 
 ```bash
-git clone --recursive https://gitcode.com/LingquLab/TileXR.git
+git clone --recursive https://github.com/LingquLab/TileXR.git
 cd TileXR
 ```
 
@@ -60,11 +68,22 @@ git submodule update --init --recursive
 
 ### 2. Prepare Environment
 
+For a fresh checkout, install the repo-managed CANN 9.1.0 toolkit and ops package before building:
+
 ```bash
+bash scripts/cann_download_install.sh
+source scripts/common_env.sh
+```
+
+If the host already has a readable CANN 9.1.0 install, you can use it instead:
+
+```bash
+export ASCEND_HOME_PATH=/usr/local/Ascend/ascend-toolkit/latest
 source scripts/common_env.sh
 ```
 
 `scripts/common_env.sh` sets `TILEXR_HOME`, `TILEXR_CANN_HOME`, `TILEXR_TEMP_HOME`, architecture, SOC name, and CANN paths.
+For non-root builds, if the system driver headers are not readable, it automatically uses readable driver headers from the repo-managed CANN install while still linking against the system driver libraries.
 
 For first-time setup of local utilities and optional operator dependencies:
 
@@ -72,10 +91,9 @@ For first-time setup of local utilities and optional operator dependencies:
 bash scripts/prepare.sh
 ```
 
-For the full optional MC2/operator stack, also build hcomm and ops-transformer:
+For the full optional MC2/operator stack, also build hcomm and ops-transformer after CANN is available:
 
 ```bash
-bash scripts/cann_download_install.sh
 bash scripts/hcomm_build_install.sh
 bash scripts/ops_build_run.sh
 ```
@@ -135,8 +153,9 @@ TileXR/
 |   |   `-- sdma/             # On-card PTO SDMA local copy transport
 |   |-- collectives/          # Optional TileXR collectives library
 |   |-- ep/                   # Standalone TileXR EP dispatch MVP
-|   |-- include/              # Public C/C++ and device headers
-|   `-- mc2/                  # Fused collective operators
+|   `-- include/              # Public C/C++ and device headers
+|-- examples/                 # Example workloads built on the TileXR runtime
+|   `-- mc2/                  # Fused collective operator examples (via ops-transformer)
 |       |-- all_gather_add/
 |       |-- all_gather_matmul/
 |       `-- common/
@@ -155,6 +174,12 @@ TileXR/
 
 ## Architecture
 
+The runtime is layered: applications and integrations sit on top of the TileXR libraries, which expose a public API and device headers over three interchangeable transports, all built on the CANN runtime, driver HAL, and Ascend NPU hardware.
+
+<p align="center">
+  <img src="docs/diagrams/architecture-overview.drawio.svg" alt="TileXR layered architecture" width="940"/>
+</p>
+
 ### Core Runtime
 
 `src/comm/` builds `libtile-comm.so` and exposes the public API in `src/include/tilexr_api.h`. This library is intentionally independent of hcomm, HCCL, shmem, and ops-transformer. It uses CANN runtime/ACL/driver APIs plus TileXR-owned communication metadata and datatypes.
@@ -165,7 +190,11 @@ Important host-side entry points, grouped by role:
 - **CommArgs access**: `TileXRGetCommArgsHost` (host view), `TileXRGetCommArgsDev` (device pointer for kernels).
 - **Synchronization rounds**: `TileXRCommNextMagic` hands out a fresh magic value so callers can reuse flag memory across rounds; the optional collectives library uses it to schedule per-launch synchronization.
 
-The runtime allocates shared IPC buffers, exchanges peer mappings, uploads `CommArgs` to device memory, and records topology/capability flags in `CommArgs::extraFlag`.
+The runtime allocates shared IPC buffers, exchanges peer mappings, uploads `CommArgs` to device memory, and records topology/capability flags in `CommArgs::extraFlag`. UDMA and SDMA are brought up as best-effort capabilities — if either is unavailable, initialization continues without setting its `extraFlag` bit.
+
+<p align="center">
+  <img src="docs/diagrams/comm-init-flow.drawio.svg" alt="Communicator initialization flow" width="640"/>
+</p>
 
 ### Device Synchronization
 
@@ -196,7 +225,15 @@ Initial collectives APIs:
 - The MVP route uses `CommArgs::peerMems[]`, `TileXR::IPC_DATA_OFFSET`, and `SyncCollectives` for peer-memory communication. Each rank writes its own IPC window, peers read from that window after synchronization.
 - Shared EP window metadata is written through MTE/UB copies so peer ranks observe slot headers and assist tuples consistently.
 
-This EP path is intentionally independent from `src/mc2`, ops-transformer runtime helpers, shmem, and UDMA. A future route can add a UDMA backend with TileXR-registered receive windows while keeping the peer-memory path as fallback.
+This EP path is intentionally independent from `examples/mc2`, ops-transformer runtime helpers, shmem, and UDMA. A future route can add a UDMA backend with TileXR-registered receive windows while keeping the peer-memory path as fallback.
+
+### Transports Overview
+
+TileXR offers three data-plane transports that kernels select by data size, link state, peer readiness, and capability flags. IPC/MTE uses same-host peer-memory windows, UDMA targets registered remote memory on A5 / Ascend950, and SDMA performs a local on-card copy within a single device.
+
+<p align="center">
+  <img src="docs/diagrams/transport-paths.drawio.svg" alt="TileXR transport data paths between ranks" width="940"/>
+</p>
 
 ### UDMA Registered Memory
 
@@ -222,9 +259,9 @@ SDMA is a first-class local on-card GM-to-GM copy path, separate from UDMA. It i
 
 Enabled initialization is best-effort: if PTO SDMA headers or runtime resources are unavailable, communicator initialization continues without setting `ExtraFlag::SDMA`, and `SDMACopyNbi` returns event handle `0` while `SDMAWait` reports completion. See [docs/SDMA_TRANSPORT.md](docs/SDMA_TRANSPORT.md) for the full transport guide.
 
-### MC2 Operators
+### MC2 Operator Examples
 
-`src/mc2/` contains fused communication+compute examples following the ops-transformer host/tiling/kernel split:
+`examples/mc2/` contains fused communication+compute **examples** following the ops-transformer host/tiling/kernel split. They are built through `scripts/ops_build_run.sh` and are not part of the core runtime libraries:
 
 - `all_gather_add`: example AllGather plus element-wise Add, fixed shape and rank-size constraints.
 - `all_gather_matmul`: AllGather plus MatMul with aclnn API, graph integration, and tests.
@@ -242,8 +279,7 @@ Optional components:
 | Component | Version / Source | Used by | Notes |
 | --- | --- | --- | --- |
 | hcomm / HCCL | submodule / CANN communication stack | MC2 fused-operator examples and HCCL tests | Not included or linked by `src/comm` / `libtile-comm.so` |
-| ops-transformer | submodule | `src/mc2` operator build, packaging, and run scripts | Not needed when only compiling `libtile-comm.so` |
-| shmem | ignored checkout under `reference/shmem/` via `reference/download_shmem.sh` | Historical UDMA experiments and comparison examples | Not included or linked by current `src/comm` |
+| ops-transformer | submodule | `examples/mc2` operator build, packaging, and run scripts | Not needed when only compiling `libtile-comm.so` |
 
 ## UDMA Validation
 
@@ -405,6 +441,7 @@ bash scripts/driver_fix.sh
 - [tests/collectives/README.md](tests/collectives/README.md): optional collectives correctness and performance tools
 - [tests/ep/README.md](tests/ep/README.md): standalone EP dispatch build, demo, and future UDMA backend notes
 - [CLAUDE.md](CLAUDE.md): repository guidance for AI coding agents
+- [docs/diagrams/](docs/diagrams/): editable draw.io sources for the README architecture diagrams (SVGs embed the diagram XML, so they reopen in draw.io)
 
 ## Troubleshooting
 
@@ -432,7 +469,7 @@ bash scripts/plog_grep.sh WARNING
 
 ## License
 
-Copyright (c) 2025 Huawei Technologies Co., Ltd.
+Copyright (c) 2026 Huawei Technologies Co., Ltd.
 
 This program is free software. You may redistribute it and/or modify it under the terms and conditions of CANN Open Software License Agreement Version 2.0.
 

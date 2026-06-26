@@ -84,7 +84,7 @@ Early UDMA design notes used a patched shmem library to expose UDMA queue inform
 - `tile-comm` does not link `libshmem.so` or `libaclshmem.so`.
 - UDMA metadata is built by TileXR from HCCP/RA contexts and uploaded as `TileXR::UDMAInfo`.
 
-The ignored `reference/shmem/` checkout can be created with `reference/download_shmem.sh` for reference, experiments, and upstream comparison, but it is not part of the current TileXR UDMA acceptance flow.
+The ignored `reference/shmem/` checkout can be created with `reference/download_cann_repos.sh shmem` for reference, experiments, and upstream comparison, but it is not part of the current TileXR UDMA acceptance flow.
 
 ## Validation Scope
 

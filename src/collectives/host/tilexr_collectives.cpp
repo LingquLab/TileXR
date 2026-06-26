@@ -30,6 +30,31 @@ int ValidateCommon(void *sendBuf, void *recvBuf, int64_t sendCount,
     return TileXR::TILEXR_SUCCESS;
 }
 
+int ValidateReduce(void *sendBuf, void *recvBuf, int64_t count,
+                   TileXR::TileXRDataType dataType, TileXR::TileXRReduceOp op,
+                   TileXRCommPtr comm)
+{
+    const int ret = ValidateCommon(sendBuf, recvBuf, count, dataType, comm);
+    if (ret != TileXR::TILEXR_SUCCESS) {
+        return ret;
+    }
+    return TileXRCollectives::Host::IsSupportedReduceOp(op) ?
+        TileXR::TILEXR_SUCCESS : TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
+}
+
+int ValidateBroadcastLocal(void *buf, int64_t count, TileXR::TileXRDataType dataType,
+                           int root, TileXRCommPtr comm)
+{
+    if (comm == nullptr || buf == nullptr || count <= 0 ||
+        !TileXRCollectives::Host::IsSupportedDataType(dataType) || root < 0) {
+        return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    if (TileXRCollectives::Host::CountToBytes(count, dataType) < 0) {
+        return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    return TileXR::TILEXR_SUCCESS;
+}
+
 int LoopbackCopy(void *sendBuf, void *recvBuf, int64_t bytes, aclrtStream stream)
 {
     if (sendBuf == recvBuf) {
@@ -105,4 +130,98 @@ int TileXRAllToAll(void *sendBuf, void *recvBuf, int64_t sendCount,
     }
     return TileXRCollectives::Host::LaunchCollectiveKernel(comm, TileXR::TileXRType::ALL2ALL, context,
         sendBuf, recvBuf, kernelCount, dataType, blockDim, stream);
+}
+
+int TileXRAllReduce(void *sendBuf, void *recvBuf, int64_t count,
+                    TileXR::TileXRDataType dataType, TileXR::TileXRReduceOp op,
+                    TileXRCommPtr comm, aclrtStream stream)
+{
+    int ret = ValidateReduce(sendBuf, recvBuf, count, dataType, op, comm);
+    if (ret != TileXR::TILEXR_SUCCESS) {
+        return ret;
+    }
+
+    TileXRCollectives::Host::HostLaunchContext context;
+    ret = TileXRCollectives::Host::PrepareHostLaunchContext(comm, context);
+    if (ret != TileXR::TILEXR_SUCCESS) {
+        return ret;
+    }
+
+    const int64_t bytes = TileXRCollectives::Host::CountToBytes(count, dataType);
+    if (context.hostArgs->rankSize <= 1) {
+        return LoopbackCopy(sendBuf, recvBuf, bytes, stream);
+    }
+
+    const uint32_t blockDim = TileXRCollectives::Host::GetAllReduceBlockNum(*context.hostArgs, bytes);
+    return TileXRCollectives::Host::LaunchCollectiveKernel(comm, TileXR::TileXRType::ALL_REDUCE, context,
+        sendBuf, recvBuf, count, dataType, blockDim, stream,
+        TileXRCollectives::Host::CollectiveLaunchAttrs { static_cast<int>(op), 0 });
+}
+
+int TileXRReduceScatter(void *sendBuf, void *recvBuf, int64_t recvCount,
+                        TileXR::TileXRDataType dataType, TileXR::TileXRReduceOp op,
+                        TileXRCommPtr comm, aclrtStream stream)
+{
+    int ret = ValidateReduce(sendBuf, recvBuf, recvCount, dataType, op, comm);
+    if (ret != TileXR::TILEXR_SUCCESS) {
+        return ret;
+    }
+
+    TileXRCollectives::Host::HostLaunchContext context;
+    ret = TileXRCollectives::Host::PrepareHostLaunchContext(comm, context);
+    if (ret != TileXR::TILEXR_SUCCESS) {
+        return ret;
+    }
+
+    const int64_t bytes = TileXRCollectives::Host::CountToBytes(recvCount, dataType);
+    const int rankSize = context.hostArgs->rankSize;
+    if (rankSize <= 1) {
+        return LoopbackCopy(sendBuf, recvBuf, bytes, stream);
+    }
+    if (recvCount > std::numeric_limits<int64_t>::max() / static_cast<int64_t>(rankSize)) {
+        return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+
+    const int64_t inputCount = recvCount * static_cast<int64_t>(rankSize);
+    const int64_t inputBytes = TileXRCollectives::Host::CountToBytes(inputCount, dataType);
+    if (inputBytes < 0) {
+        return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+
+    const uint32_t blockDim = TileXRCollectives::Host::GetReduceScatterBlockNum(*context.hostArgs, bytes);
+    return TileXRCollectives::Host::LaunchCollectiveKernel(comm, TileXR::TileXRType::REDUCE_SCATTER, context,
+        sendBuf, recvBuf, recvCount, dataType, blockDim, stream,
+        TileXRCollectives::Host::CollectiveLaunchAttrs { static_cast<int>(op), 0 });
+}
+
+int TileXRBroadcast(void *buf, int64_t count,
+                    TileXR::TileXRDataType dataType, int root,
+                    TileXRCommPtr comm, aclrtStream stream)
+{
+    int ret = ValidateBroadcastLocal(buf, count, dataType, root, comm);
+    if (ret != TileXR::TILEXR_SUCCESS) {
+        return ret;
+    }
+
+    TileXRCollectives::Host::HostLaunchContext context;
+    ret = TileXRCollectives::Host::PrepareHostLaunchContext(comm, context);
+    if (ret != TileXR::TILEXR_SUCCESS) {
+        return ret;
+    }
+    if (root >= context.hostArgs->rankSize) {
+        return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+
+    const int64_t bytes = TileXRCollectives::Host::CountToBytes(count, dataType);
+    if (context.hostArgs->rankSize <= 1) {
+        return TileXR::TILEXR_SUCCESS;
+    }
+
+    const uint32_t blockDim = TileXRCollectives::Host::GetBroadcastBlockNum(*context.hostArgs, bytes);
+    if (blockDim == 0) {
+        return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    return TileXRCollectives::Host::LaunchCollectiveKernel(comm, TileXR::TileXRType::BROADCAST, context,
+        buf, buf, bytes, dataType, blockDim, stream,
+        TileXRCollectives::Host::CollectiveLaunchAttrs { 0, root });
 }

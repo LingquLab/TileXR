@@ -75,6 +75,10 @@ void TestCollectivesHeaderDeclaresPublicApis()
     CheckContains(path, text, "extern \"C\"");
     CheckContains(path, text, "int TileXRAllGather(void *sendBuf, void *recvBuf, int64_t sendCount,");
     CheckContains(path, text, "int TileXRAllToAll(void *sendBuf, void *recvBuf, int64_t sendCount,");
+    CheckContains(path, text, "int TileXRAllReduce(void *sendBuf, void *recvBuf, int64_t count,");
+    CheckContains(path, text, "TileXR::TileXRReduceOp op,");
+    CheckContains(path, text, "int TileXRReduceScatter(void *sendBuf, void *recvBuf, int64_t recvCount,");
+    CheckContains(path, text, "int TileXRBroadcast(void *buf, int64_t count,");
 }
 
 void TestCoreApiHeaderDoesNotDeclareCollectives()
@@ -84,6 +88,9 @@ void TestCoreApiHeaderDoesNotDeclareCollectives()
     CheckContains(path, text, "int TileXRCommNextMagic(TileXRCommPtr comm, int64_t *magic);");
     CheckDoesNotContain(path, text, "TileXRAllGather");
     CheckDoesNotContain(path, text, "TileXRAllToAll");
+    CheckDoesNotContain(path, text, "TileXRAllReduce");
+    CheckDoesNotContain(path, text, "TileXRReduceScatter");
+    CheckDoesNotContain(path, text, "TileXRBroadcast");
 }
 
 void TestCollectivesHostUsesOnlyPublicCommExtensionApi()
@@ -135,6 +142,16 @@ void TestCollectivesHostOwnsCollectiveLaunchHelpers()
     CheckContains(kernelHeaderPath, kernelHeader, "namespace Host");
     CheckContains(kernelHeaderPath, kernelHeader, "struct AscendCCLKernelArgs");
     CheckContains(kernelHeaderPath, kernelHeader, "int LaunchCollectiveKernel(TileXRCommPtr comm, TileXR::TileXRType type,");
+}
+
+void TestBroadcastLaunchUsesByteCount()
+{
+    const std::string path = "src/collectives/host/tilexr_collectives.cpp";
+    const auto text = ReadFile(path);
+    CheckContains(path, text, "const int64_t bytes = TileXRCollectives::Host::CountToBytes(count, dataType);");
+    CheckContains(path, text,
+                  "buf, buf, bytes, dataType, blockDim, stream,\n"
+                  "        TileXRCollectives::Host::CollectiveLaunchAttrs { 0, root }");
 }
 
 void TestCommBuildDoesNotReferenceCollectives()
@@ -337,6 +354,7 @@ int main()
     TestCoreApiHeaderDoesNotDeclareCollectives();
     TestCollectivesHostUsesOnlyPublicCommExtensionApi();
     TestCollectivesHostOwnsCollectiveLaunchHelpers();
+    TestBroadcastLaunchUsesByteCount();
     TestCommBuildDoesNotReferenceCollectives();
     TestCommInternalDoesNotContainCollectiveRegistration();
     TestCommBuildInstallsPublicHeadersAndKeepsLinksPrivate();

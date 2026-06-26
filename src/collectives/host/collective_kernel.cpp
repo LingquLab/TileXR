@@ -51,10 +51,22 @@ const DataTypeRegistration kDataTypes[] = {
     { TileXR::TILEXR_DATA_TYPE_BFP16, "bfloat16_t" },
 };
 
-const TileXR::TileXRType kCollectiveTypes[] = {
+const TileXR::TileXRType kRegisteredCollectiveTypes[] = {
     TileXR::TileXRType::ALL_GATHER,
     TileXR::TileXRType::ALL2ALL,
+    TileXR::TileXRType::ALL_REDUCE,
+    TileXR::TileXRType::REDUCE_SCATTER,
+    TileXR::TileXRType::BROADCAST,
 };
+
+bool IsStandaloneCollectiveType(TileXR::TileXRType type)
+{
+    return type == TileXR::TileXRType::ALL_GATHER ||
+        type == TileXR::TileXRType::ALL2ALL ||
+        type == TileXR::TileXRType::ALL_REDUCE ||
+        type == TileXR::TileXRType::REDUCE_SCATTER ||
+        type == TileXR::TileXRType::BROADCAST;
+}
 
 int8_t *GetFunSig(TileXR::TileXRType type, TileXR::TileXRDataType dataType)
 {
@@ -65,6 +77,9 @@ int8_t *GetFunSig(TileXR::TileXRType type, TileXR::TileXRDataType dataType)
 
 std::string KernelName(TileXR::TileXRType type, const DataTypeRegistration &dataType)
 {
+    if (type == TileXR::TileXRType::BROADCAST) {
+        return TileXR::TILEXR_TYPE2NAME.at(type);
+    }
     return TileXR::TILEXR_TYPE2NAME.at(type) + "_" + dataType.kernelTypeName;
 }
 
@@ -91,7 +106,7 @@ int RegisterCollectivesKernelsLocked()
         return g_registrationStatus;
     }
 
-    for (const auto type : kCollectiveTypes) {
+    for (const auto type : kRegisteredCollectiveTypes) {
         for (const auto &dataType : kDataTypes) {
             const std::string name = KernelName(type, dataType);
             rtRet = rtFunctionRegister(binHandle, GetFunSig(type, dataType.dataType),
@@ -120,9 +135,10 @@ int EnsureCollectivesKernelsRegistered()
 int LaunchCollectiveKernel(TileXRCommPtr comm, TileXR::TileXRType type, const HostLaunchContext &context,
                            void *sendBuf, void *recvBuf, int64_t kernelCount,
                            TileXR::TileXRDataType dataType, uint32_t blockDim,
-                           aclrtStream stream)
+                           aclrtStream stream,
+                           CollectiveLaunchAttrs attrs)
 {
-    if ((type != TileXR::TileXRType::ALL_GATHER && type != TileXR::TileXRType::ALL2ALL) ||
+    if (!IsStandaloneCollectiveType(type) ||
         comm == nullptr || context.hostArgs == nullptr || context.devArgs == nullptr || sendBuf == nullptr || recvBuf == nullptr ||
         kernelCount <= 0 || blockDim == 0 || !IsSupportedDataType(dataType)) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
@@ -145,7 +161,8 @@ int LaunchCollectiveKernel(TileXRCommPtr comm, TileXR::TileXRType type, const Ho
     args.commArgsPtr = context.devArgs;
     args.count = kernelCount;
     args.magic = magic;
-    args.op = 0;
+    args.op = attrs.op;
+    args.root = attrs.root;
 
     const void *perfTrace = nullptr;
     const int perfRet = PreparePerfTraceLaunch(GetActivePerfTraceSession(), *context.hostArgs,

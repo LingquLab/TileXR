@@ -81,6 +81,23 @@ bool ComputeRequiredBytes(uint64_t statsOffset, uint64_t statsBytes, size_t *req
     return true;
 }
 
+int64_t ComputeLaunchMessageBytes(TileXR::TileXRType opType, TileXR::TileXRDataType dataType,
+                                  int64_t count, int rankSize)
+{
+    if (opType == TileXR::TileXRType::BROADCAST) {
+        return count;
+    }
+
+    int64_t elementCount = count;
+    if (opType == TileXR::TileXRType::REDUCE_SCATTER) {
+        if (rankSize <= 0 || count > std::numeric_limits<int64_t>::max() / static_cast<int64_t>(rankSize)) {
+            return -1;
+        }
+        elementCount = count * static_cast<int64_t>(rankSize);
+    }
+    return CountToBytes(elementCount, dataType);
+}
+
 } // namespace
 
 PerfTraceSession *GetActivePerfTraceSession()
@@ -141,7 +158,7 @@ int PreparePerfTraceLaunch(PerfTraceSession *session, const TileXR::CommArgs &co
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
 
-    const int64_t messageBytes = CountToBytes(count, dataType);
+    const int64_t messageBytes = ComputeLaunchMessageBytes(opType, dataType, count, commArgs.rankSize);
     if (messageBytes < 0) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
