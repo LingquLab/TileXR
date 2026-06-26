@@ -87,6 +87,10 @@ void TestDataAsFlagEpochOrderedSource()
     CheckContains(kernelPath, kernelText, "int32_t strict");
     CheckContains(kernelPath, kernelText, "strict != 0");
 
+    const std::string headerPath = "src/include/tilexr_data_as_flag.h";
+    const std::string headerText = ReadFile(headerPath);
+    CheckContains(headerPath, headerText, "DataAsFlagEpochReady");
+
     const std::string hostPath = "tests/udma/demo/tilexr_udma_demo.cpp";
     const std::string hostText = ReadFile(hostPath);
     CheckContains(hostPath, hostText, "launch_tilexr_data_as_flag_epoch_ordered_p2p_perf");

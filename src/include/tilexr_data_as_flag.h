@@ -58,6 +58,12 @@ TILEXR_DATA_AS_FLAG_INLINE uint64_t DataAsFlagEpoch(int32_t magic, int32_t step)
         static_cast<uint32_t>(step);
 }
 
+TILEXR_DATA_AS_FLAG_INLINE bool DataAsFlagEpochReady(uint64_t observed, uint64_t expected)
+{
+    constexpr uint64_t kMagicMask = 0xffffffff00000000ULL;
+    return (observed & kMagicMask) == (expected & kMagicMask) && observed >= expected;
+}
+
 #if TILEXR_ASCENDC_AICORE_COMPILE
 
 __aicore__ inline uint32_t DataAsFlagScratchBytes(const AscendC::LocalTensor<uint8_t>& scratch)
@@ -435,7 +441,7 @@ __aicore__ inline bool DataAsFlagCheckBatchEpochStrict(
         return false;
     }
     for (uint32_t i = 0; i < batchBlocks; ++i) {
-        if (DataAsFlagLoadEpochFlag(dataAsFlagGM, blockOffset + i, scratch) != epoch) {
+        if (!DataAsFlagEpochReady(DataAsFlagLoadEpochFlag(dataAsFlagGM, blockOffset + i, scratch), epoch)) {
             return false;
         }
     }
@@ -542,7 +548,7 @@ __aicore__ inline bool DataAsFlagCheckAndRecvEpochOrdered(
         const uint32_t remainingBlocks = totalBlocks - processedBlocks;
         const uint32_t batchBlocks = remainingBlocks < batchCapacity ? remainingBlocks : batchCapacity;
         const uint32_t lastBlock = processedBlocks + batchBlocks - 1U;
-        while (DataAsFlagLoadEpochFlag(dataAsFlagGM, lastBlock, recvScratch) != epoch) {
+        while (!DataAsFlagEpochReady(DataAsFlagLoadEpochFlag(dataAsFlagGM, lastBlock, recvScratch), epoch)) {
         }
         if (strict &&
             !DataAsFlagCheckBatchEpochStrict(dataAsFlagGM, processedBlocks, batchBlocks, epoch, recvScratch)) {
