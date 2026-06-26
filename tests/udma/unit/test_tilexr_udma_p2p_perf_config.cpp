@@ -33,6 +33,9 @@ int main()
     Require(TileXR::Demo::DirectionName(0, 1) == "0to1", "direction name mismatch");
     Require(TileXR::Demo::P2PTransportName(TileXR::Demo::P2PTransport::DirectUrma) == "direct_urma",
         "direct transport name mismatch");
+    Require(TileXR::Demo::P2PTransportName(TileXR::Demo::P2PTransport::DirectUrmaPostOnly) ==
+            "direct_urma_post_only",
+        "direct post-only transport name mismatch");
     Require(TileXR::Demo::P2PTransportName(TileXR::Demo::P2PTransport::Memory) == "memory",
         "memory transport name mismatch");
     Require(TileXR::Demo::P2PTransportName(TileXR::Demo::P2PTransport::MemoryConsume) == "memory_consume",
@@ -47,6 +50,11 @@ int main()
         "direct transport parse mismatch");
     Require(TileXR::Demo::ParseP2PTransport("udma") == TileXR::Demo::P2PTransport::DirectUrma,
         "udma alias parse mismatch");
+    Require(TileXR::Demo::ParseP2PTransport("direct_urma_post_only") ==
+            TileXR::Demo::P2PTransport::DirectUrmaPostOnly,
+        "direct_urma_post_only transport parse mismatch");
+    Require(TileXR::Demo::ParseP2PTransport("post_only") == TileXR::Demo::P2PTransport::DirectUrmaPostOnly,
+        "post_only alias parse mismatch");
     Require(TileXR::Demo::ParseP2PTransport("memory") == TileXR::Demo::P2PTransport::Memory,
         "memory transport parse mismatch");
     Require(TileXR::Demo::ParseP2PTransport("memory_consume") == TileXR::Demo::P2PTransport::MemoryConsume,

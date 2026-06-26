@@ -33,6 +33,9 @@ extern void launch_tilexr_udma_put_signal(
 extern void launch_tilexr_udma_p2p_perf(
     uint32_t blockDim, void* stream, GM_ADDR commArgs, GM_ADDR src, GM_ADDR debug,
     int32_t srcRank, int32_t dstRank, uint64_t dstByteOffset, uint32_t bytes, uint32_t pattern, int32_t traffic);
+extern void launch_tilexr_udma_p2p_post_only_perf(
+    uint32_t blockDim, void* stream, GM_ADDR commArgs, GM_ADDR src, GM_ADDR debug,
+    int32_t srcRank, int32_t dstRank, uint64_t dstByteOffset, uint32_t bytes, uint32_t pattern, int32_t traffic);
 extern void launch_tilexr_memory_p2p_perf(
     uint32_t blockDim, void* stream, GM_ADDR commArgs, GM_ADDR src, GM_ADDR debug,
     int32_t srcRank, int32_t dstRank, uint64_t dstByteOffset, uint32_t bytes, uint32_t pattern, int32_t traffic);
@@ -53,7 +56,8 @@ constexpr int kDemoBarrierPortOffset = 97;
 constexpr size_t kUdmaRegistrationAlignment = 2 * 1024 * 1024;
 constexpr int kConnectRetryCount = 500;
 constexpr int kConnectRetrySleepMs = 10;
-constexpr size_t kP2PDebugWords = 32;
+constexpr size_t kP2PDebugWords = 64;
+constexpr uint32_t kA5CycleToUsDivisor = 1000;
 constexpr int32_t kP2PMagicBase = 0x5444554d; // "TDUM"
 
 struct BarrierEndpoint {
@@ -418,6 +422,10 @@ bool ReadP2PStatusFile(const std::string& path, TileXR::Demo::P2PRankStatus* sta
         return false;
     }
     if (in >> status->elapsedMs) {
+        if (in >> status->avgUsOverride) {
+            return true;
+        }
+        status->avgUsOverride = 0.0;
         return true;
     }
     return in.eof();
@@ -487,7 +495,25 @@ void PrintP2PDebugSummary(int rank, const std::vector<uint32_t>& debug, uint32_t
         << " status=" << (debug.size() > 5 ? debug[5] : 0xffffffffu)
         << " blockNum=" << (debug.size() > 6 ? debug[6] : 0)
         << " qpNum=" << (debug.size() > 7 ? debug[7] : 0)
-        << " jettyCount=" << (debug.size() > 15 ? debug[15] : 0);
+        << " jettyCount=" << (debug.size() > 15 ? debug[15] : 0)
+        << " postCycles=" << (debug.size() > 29 ?
+            ((static_cast<uint64_t>(debug[29]) << 32) | debug[28]) : 0)
+        << " postCycleSum=" << (debug.size() > 31 ?
+            ((static_cast<uint64_t>(debug[31]) << 32) | debug[30]) : 0)
+        << " validateSum=" << (debug.size() > 33 ?
+            ((static_cast<uint64_t>(debug[33]) << 32) | debug[32]) : 0)
+        << " ctxSum=" << (debug.size() > 35 ?
+            ((static_cast<uint64_t>(debug[35]) << 32) | debug[34]) : 0)
+        << " sqeSum=" << (debug.size() > 37 ?
+            ((static_cast<uint64_t>(debug[37]) << 32) | debug[36]) : 0)
+        << " sgeSum=" << (debug.size() > 39 ?
+            ((static_cast<uint64_t>(debug[39]) << 32) | debug[38]) : 0)
+        << " cleanSum=" << (debug.size() > 41 ?
+            ((static_cast<uint64_t>(debug[41]) << 32) | debug[40]) : 0)
+        << " doorbellSum=" << (debug.size() > 43 ?
+            ((static_cast<uint64_t>(debug[43]) << 32) | debug[42]) : 0)
+        << " quietSum=" << (debug.size() > 45 ?
+            ((static_cast<uint64_t>(debug[45]) << 32) | debug[44]) : 0);
     const uint32_t limit = std::min<uint32_t>(blockDim, 8U);
     for (uint32_t i = 0; i < limit; ++i) {
         out << " b" << i
@@ -528,6 +554,11 @@ void LaunchP2PKernel(
     }
     if (options.transport == TileXR::Demo::P2PTransport::DataAsFlag) {
         launch_tilexr_data_as_flag_p2p_perf(options.blockDim, stream, commArgsDev, srcDev, dstDev, debugDev,
+            options.srcRank, options.dstRank, dstOffset, transferBytes, pattern, traffic);
+        return;
+    }
+    if (options.transport == TileXR::Demo::P2PTransport::DirectUrmaPostOnly) {
+        launch_tilexr_udma_p2p_post_only_perf(options.blockDim, stream, commArgsDev, srcDev, debugDev,
             options.srcRank, options.dstRank, dstOffset, transferBytes, pattern, traffic);
         return;
     }
@@ -691,6 +722,12 @@ bool RunP2PPerfMode(
             ok = false;
             break;
         }
+        if (options.transport == TileXR::Demo::P2PTransport::DirectUrmaPostOnly &&
+            !CopyHostToDevice(rank, debug, hostDebug.size() * sizeof(uint32_t), hostDebug.data(),
+                hostDebug.size() * sizeof(uint32_t), "p2p post-only debug reset")) {
+            ok = false;
+            break;
+        }
 
         if (!CheckAcl(rank, "aclrtRecordEvent start", aclrtRecordEvent(startEvent, stream))) {
             ok = false;
@@ -744,6 +781,15 @@ bool RunP2PPerfMode(
             FoldP2PDebugStatus(hostDebug, options.blockDim) : 0;
         localStatus.errors = IsP2PReceiveRank(rank, options) ? errors : 0;
         localStatus.elapsedMs = elapsedMs;
+        if (options.transport == TileXR::Demo::P2PTransport::DirectUrmaPostOnly &&
+            IsP2PSourceRank(rank, options) && hostDebug.size() > 31) {
+            const uint64_t postCycleSum = (static_cast<uint64_t>(hostDebug[31]) << 32) | hostDebug[30];
+            localStatus.avgUsOverride = options.iters > 0 ?
+                static_cast<double>(postCycleSum) /
+                    static_cast<double>(options.iters) /
+                    static_cast<double>(kA5CycleToUsDivisor) :
+                0.0;
+        }
         if (IsP2PSourceRank(rank, options) &&
             (GetEnvFlag("TILEXR_P2P_DEBUG_SUMMARY", false) || localStatus.status != 0 || errors != 0)) {
             PrintP2PDebugSummary(rank, hostDebug, options.blockDim);
@@ -752,7 +798,8 @@ bool RunP2PPerfMode(
             std::string statusPath = options.logDir + "/p2p_rank_" + std::to_string(rank) +
                 "_" + std::to_string(bytes) + ".status";
             std::ostringstream statusText;
-            statusText << localStatus.status << ' ' << localStatus.errors << ' ' << localStatus.elapsedMs << '\n';
+            statusText << localStatus.status << ' ' << localStatus.errors << ' '
+                       << localStatus.elapsedMs << ' ' << localStatus.avgUsOverride << '\n';
             if (!WriteTextFile(statusPath, statusText.str())) {
                 std::cerr << "[rank " << rank << "] ERROR: failed to write " << statusPath << std::endl;
                 ok = false;

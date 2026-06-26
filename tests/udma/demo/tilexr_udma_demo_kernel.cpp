@@ -155,6 +155,17 @@ __aicore__ inline uint32_t TileXRUdmaDemoFoldDebugStatus(
     return status;
 }
 
+__aicore__ inline void TileXRUdmaDemoAddCycleSum(__gm__ uint32_t* debug, uint32_t lowIdx, uint64_t cycles)
+{
+    if (debug == nullptr) {
+        return;
+    }
+    uint64_t sum = (static_cast<uint64_t>(debug[lowIdx + 1]) << 32) | debug[lowIdx];
+    sum += cycles;
+    debug[lowIdx] = static_cast<uint32_t>(sum & 0xffffffffu);
+    debug[lowIdx + 1] = static_cast<uint32_t>(sum >> 32);
+}
+
 __aicore__ inline void TileXRUdmaDemoDataAsFlagSlice(
     uint32_t bytes, uint32_t blockNum, uint32_t blockIdx,
     uint32_t& payloadOffset, uint32_t& sliceBytes, uint32_t& dataAsFlagOffset)
@@ -366,6 +377,107 @@ extern "C" __global__ __aicore__ void tilexr_udma_p2p_perf_kernel(
     if (debug != nullptr && blockIdx == 0) {
         debug[5] = status;
         debug[15] = jettyCount;
+    }
+}
+
+extern "C" __global__ __aicore__ void tilexr_udma_p2p_post_only_perf_kernel(
+    GM_ADDR commArgsGM, GM_ADDR srcGM, GM_ADDR debugGM,
+    int32_t srcRank, int32_t dstRank, uint64_t dstByteOffset,
+    uint32_t bytes, uint32_t pattern, int32_t traffic)
+{
+    auto args = reinterpret_cast<__gm__ TileXR::CommArgs*>(commArgsGM);
+    auto src = reinterpret_cast<__gm__ uint8_t*>(srcGM);
+    auto debug = reinterpret_cast<__gm__ uint32_t*>(debugGM);
+
+    int32_t rank = args->rank;
+    uint32_t blockIdx = AscendC::GetBlockIdx();
+    uint32_t blockNum = AscendC::GetBlockNum();
+    bool enabled = TileXR::UDMARegistryEnabled(args);
+    uint32_t qpNum = enabled ? TileXR::GetUDMAInfo(args)->qpNum : 0;
+    if (debug != nullptr && blockIdx == 0) {
+        debug[0] = TILEXR_UDMA_DEMO_MAGIC;
+        debug[1] = rank;
+        debug[2] = enabled ? 1 : 0;
+        debug[3] = bytes;
+        debug[4] = pattern;
+        debug[5] = 0xffffffffu;
+        debug[6] = blockNum;
+        debug[7] = qpNum;
+    }
+
+    int32_t peer = -1;
+    if (!enabled || blockNum == 0 || qpNum == 0 ||
+        !TileXRUdmaDemoResolvePeer(rank, srcRank, dstRank, traffic, peer)) {
+        return;
+    }
+    uint32_t jettyCount = blockNum < qpNum ? blockNum : qpNum;
+    if (blockIdx >= jettyCount) {
+        TileXRUdmaDemoFoldDebugStatus(debug, blockIdx, 0);
+        return;
+    }
+
+    uint32_t offset = 0;
+    uint32_t sliceBytes = 0;
+    TileXRUdmaDemoWqeSlice(bytes, jettyCount, blockIdx, offset, sliceBytes);
+    if (debug != nullptr && blockIdx < 8) {
+        debug[16 + blockIdx] = offset;
+        debug[24 + blockIdx] = sliceBytes;
+    }
+    if (sliceBytes == 0) {
+        TileXRUdmaDemoFoldDebugStatus(debug, blockIdx, 0);
+        return;
+    }
+
+    uint64_t startCycle = static_cast<uint64_t>(AscendC::GetSystemCycle());
+    auto udmaInfo = TileXR::GetUDMAInfo(args);
+    auto registry = TileXR::GetUDMARegistry(args);
+    if (!TileXR::UDMARegisteredRangeValid(registry, peer, dstByteOffset + offset, sliceBytes)) {
+        TileXRUdmaDemoFoldDebugStatus(debug, blockIdx, 0xffffffffu);
+        return;
+    }
+    uint64_t validateCycle = static_cast<uint64_t>(AscendC::GetSystemCycle());
+    __gm__ TileXR::UDMAWQCtx* qpCtxEntry = TileXR::UDMAGetWQCtx(udmaInfo, peer, blockIdx);
+    uint32_t wqeSize = 1U << qpCtxEntry->baseBkShift;
+    uint32_t curHead = ld_dev(reinterpret_cast<__gm__ uint32_t*>(qpCtxEntry->headAddr), 0);
+    uint32_t wqeCnt = ld_dev(reinterpret_cast<__gm__ uint32_t*>(qpCtxEntry->wqeCntAddr), 0);
+    TileXR::UDMAPollCQWhenSQOverflow(udmaInfo, qpCtxEntry, wqeCnt, peer, blockIdx);
+    __gm__ TileXR::UDMAMemInfo* remoteMemInfo = TileXR::UDMAGetRemoteMemInfo(udmaInfo, peer, blockIdx);
+    __gm__ uint8_t* remoteAddr = TileXR::UDMARegisteredRemoteAddr(registry, peer, dstByteOffset + offset);
+    __gm__ uint8_t* wqeAddr =
+        reinterpret_cast<__gm__ uint8_t*>(qpCtxEntry->bufAddr + wqeSize * (curHead % TileXR::TILEXR_UDMA_SQ_BB_COUNT));
+    __gm__ TileXR::UDMASqeCtx* sqeCtx = reinterpret_cast<__gm__ TileXR::UDMASqeCtx*>(wqeAddr);
+    uint64_t ctxCycle = static_cast<uint64_t>(AscendC::GetSystemCycle());
+    TileXR::UDMAFillSqeCtx(sqeCtx, remoteAddr, remoteMemInfo, curHead, TileXR::UDMAOpcode::WRITE, nullptr);
+    uint64_t sqeCycle = static_cast<uint64_t>(AscendC::GetSystemCycle());
+    __gm__ TileXR::UDMASgeCtx* sgeCtx =
+        reinterpret_cast<__gm__ TileXR::UDMASgeCtx*>(TileXR::UDMAGetSgeCtxAddr(wqeAddr, TileXR::UDMAOpcode::WRITE));
+    TileXR::UDMAFillSgeCtx(sgeCtx, sliceBytes, src + offset);
+    uint64_t sgeCycle = static_cast<uint64_t>(AscendC::GetSystemCycle());
+    uint32_t wqeBbCnt = TileXR::UDMAWqeBBCnt(TileXR::UDMAOpcode::WRITE);
+    TileXR::UDMACleanCacheLines(wqeAddr, wqeSize * wqeBbCnt);
+    uint64_t cleanCycle = static_cast<uint64_t>(AscendC::GetSystemCycle());
+    curHead += wqeBbCnt;
+    TileXR::UDMAPostSendUpdateInfo(curHead, qpCtxEntry);
+    ++wqeCnt;
+    st_dev(wqeCnt, reinterpret_cast<__gm__ uint32_t*>(qpCtxEntry->wqeCntAddr), 0);
+    uint64_t endCycle = static_cast<uint64_t>(AscendC::GetSystemCycle());
+    uint32_t status = TileXR::UDMAQuietStatusQp(args, peer, blockIdx);
+    uint64_t quietCycle = static_cast<uint64_t>(AscendC::GetSystemCycle());
+    TileXRUdmaDemoFoldDebugStatus(debug, blockIdx, status);
+    if (debug != nullptr && blockIdx == 0) {
+        uint64_t delta = endCycle - startCycle;
+        TileXRUdmaDemoAddCycleSum(debug, 30, delta);
+        TileXRUdmaDemoAddCycleSum(debug, 32, validateCycle - startCycle);
+        TileXRUdmaDemoAddCycleSum(debug, 34, ctxCycle - validateCycle);
+        TileXRUdmaDemoAddCycleSum(debug, 36, sqeCycle - ctxCycle);
+        TileXRUdmaDemoAddCycleSum(debug, 38, sgeCycle - sqeCycle);
+        TileXRUdmaDemoAddCycleSum(debug, 40, cleanCycle - sgeCycle);
+        TileXRUdmaDemoAddCycleSum(debug, 42, endCycle - cleanCycle);
+        TileXRUdmaDemoAddCycleSum(debug, 44, quietCycle - endCycle);
+        debug[5] = status;
+        debug[15] = jettyCount;
+        debug[28] = static_cast<uint32_t>(delta & 0xffffffffu);
+        debug[29] = static_cast<uint32_t>(delta >> 32);
     }
 }
 
@@ -619,6 +731,14 @@ void launch_tilexr_udma_p2p_perf(
     int32_t srcRank, int32_t dstRank, uint64_t dstByteOffset, uint32_t bytes, uint32_t pattern, int32_t traffic)
 {
     tilexr_udma_p2p_perf_kernel<<<blockDim, nullptr, stream>>>(
+        commArgs, src, debug, srcRank, dstRank, dstByteOffset, bytes, pattern, traffic);
+}
+
+void launch_tilexr_udma_p2p_post_only_perf(
+    uint32_t blockDim, void* stream, GM_ADDR commArgs, GM_ADDR src, GM_ADDR debug,
+    int32_t srcRank, int32_t dstRank, uint64_t dstByteOffset, uint32_t bytes, uint32_t pattern, int32_t traffic)
+{
+    tilexr_udma_p2p_post_only_perf_kernel<<<blockDim, nullptr, stream>>>(
         commArgs, src, debug, srcRank, dstRank, dstByteOffset, bytes, pattern, traffic);
 }
 

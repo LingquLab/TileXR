@@ -14,6 +14,7 @@ constexpr uint64_t kP2PMemoryMaxBytes = 100ULL * 1024ULL * 1024ULL;
 
 enum class P2PTransport {
     DirectUrma,
+    DirectUrmaPostOnly,
     Memory,
     MemoryConsume,
     DataAsFlag,
@@ -31,6 +32,8 @@ inline const char* P2PTransportName(P2PTransport transport)
     switch (transport) {
         case P2PTransport::DirectUrma:
             return "direct_urma";
+        case P2PTransport::DirectUrmaPostOnly:
+            return "direct_urma_post_only";
         case P2PTransport::Memory:
             return "memory";
         case P2PTransport::MemoryConsume:
@@ -58,6 +61,9 @@ inline P2PTransport ParseP2PTransport(const std::string& name)
 {
     if (name == "direct_urma" || name == "udma") {
         return P2PTransport::DirectUrma;
+    }
+    if (name == "direct_urma_post_only" || name == "udma_post_only" || name == "post_only") {
+        return P2PTransport::DirectUrmaPostOnly;
     }
     if (name == "memory" || name == "ipc" || name == "datacopy") {
         return P2PTransport::Memory;
@@ -119,6 +125,7 @@ struct P2PRankStatus {
     uint32_t status = 0;
     uint64_t errors = 0;
     float elapsedMs = 0.0f;
+    double avgUsOverride = 0.0;
 };
 
 inline std::string DirectionName(int srcRank, int dstRank)
@@ -207,7 +214,7 @@ inline bool ValidateP2PPerfOptions(const P2PPerfOptions& options, int rankSize, 
         return fail("block_dim must be in [1, 64]");
     }
     if (options.transport == P2PTransport::Invalid) {
-        return fail("transport must be direct_urma, memory, memory_consume, or data_as_flag");
+        return fail("transport must be direct_urma, direct_urma_post_only, memory, memory_consume, or data_as_flag");
     }
     if (options.traffic == P2PTraffic::Invalid) {
         return fail("traffic must be unidir or bidir");
@@ -330,6 +337,9 @@ inline P2PPerfRow BuildP2PPerfRow(
     const float elapsedMs = bothRanksActive && dstStatus.elapsedMs > srcStatus.elapsedMs ?
         dstStatus.elapsedMs : srcStatus.elapsedMs;
     row.avgUs = options.iters > 0 ? static_cast<double>(elapsedMs) * 1000.0 / static_cast<double>(options.iters) : 0.0;
+    if (options.transport == P2PTransport::DirectUrmaPostOnly && srcStatus.avgUsOverride > 0.0) {
+        row.avgUs = srcStatus.avgUsOverride;
+    }
     row.status = bothRanksActive ? (srcStatus.status | dstStatus.status) : srcStatus.status;
     row.errors = bothRanksActive ? (srcStatus.errors + dstStatus.errors) : dstStatus.errors;
     row.logDir = options.logDir;
