@@ -397,3 +397,87 @@ msprof --output="$PROF_DIR" \
 | `tests/udma/demo/tilexr_udma_demo_kernel.cpp` | kernel 改多核分片 + self-copy 改 DataCopyPad |
 | `tests/udma/demo/tilexr_udma_demo.cpp` | 两处 launch blockDim: 1 → rankSize |
 | `tests/udma/demo/run_fused_prof.sh` | msprof 采集用启动脚本(新增) |
+
+---
+
+## 8. 性能扩展测试(4 rank,强制 UDMA)
+
+测试条件:`TILEXR_DEMO_ALLTOALL_USE_UDMA=1`,4 张 Ascend950DT,`blockDim=rankSize=4`,每 peer 数据量分别为 8M / 32M / 64M。其中 8M 走 host 侧 demo 内置的 `aclrtSynchronizeStream` + `chrono` 计时(单 pass,100 次循环);32M/64M 因超过单次 lmem 注册上限(64MB)需多 pass,取 kernel 侧 msprof `op_summary` 各 pass task duration 求和。
+
+### 8.1 数据量定义
+
+- `elementsPerRank` = 每 peer 元素数(8M = 2097152 个 int32)
+- 总 input = `rankSize × perPeer` = 4 × 8M = 32MB(每个 dstRank 收到 4 份)
+- 注意 **self 份(8MB)走本地 DataCopyPad,不占网络**
+- 单卡单向 P2P 数据量(纯网络)= `(rankSize-1) × perPeer` = 3 × perPeer
+
+### 8.2 总览结果
+
+| 每 peer 数据量 | pass 数 | 总 kernel 耗时 | 每 pass 耗时 | 单向 P2P 带宽 |
+|---------------|---------|-----------------|-------------|------------------|
+| **8M** | 1 | ~200 μs | 200 μs | ~120 GB/s |
+| **32M** | 4 | ~708 μs | ~177 μs | ~136 GB/s |
+| **64M** | 8 | ~1439 μs | ~180 μs | ~133 GB/s |
+
+### 8.3 8M/peer 单 pass(100 次,仅末尾 sync)
+
+`TILEXR_DEMO_ALLTOALL_REPEAT=100 TILEXR_DEMO_ALLTOALL_SYNC_AT_END=1`,host 侧 chrono 计时:
+
+| Rank | 100 次总耗时 | 单次 | 带宽(含 self 份) |
+|------|------------|------|-------------------|
+| rank0 | 20.74 ms | 207.4 μs | 161.8 GB/s |
+| rank1 | 20.04 ms | 200.4 μs | 167.4 GB/s |
+| rank2 | 19.97 ms | 199.7 μs | 168.1 GB/s |
+| rank3 | 19.92 ms | 199.2 μs | 168.4 GB/s |
+
+注:总 payload = `rankSize × elementsPerRank × 4 = 32MB`(含 self 份,本地拷贝),扣除后纯网络单向 P2P 带宽约 ~120 GB/s。
+
+### 8.4 32M/peer(4 pass,msprof)
+
+| Device | pass0 | pass1 | pass2 | pass3 | 总计 |
+|--------|-------|-------|-------|-------|------|
+| dev0 | 183.6 | 172.9 | 178.9 | 173.5 | 708.9 μs |
+| dev1 | 184.0 | 173.0 | 173.2 | 173.3 | 703.5 μs |
+| dev2 | 191.6 | 172.7 | 173.8 | 173.9 | 712.0 μs |
+| dev3 | 193.1 | 172.6 | 178.4 | 172.3 | 716.4 μs |
+
+### 8.5 64M/peer(8 pass,msprof)
+
+| Device | pass0 | pass1-7 均值 | 总计 |
+|--------|-------|-------------|------|
+| dev0 | 192.7 | ~177.6 | 1435.8 μs |
+| dev1 | 193.7 | ~178.8 | 1445.2 μs |
+| dev2 | 194.1 | ~179.2 | 1448.7 μs |
+| dev3 | 188.4 | ~176.9 | 1427.4 μs |
+
+### 8.6 带宽换算
+
+| 项目 | 8M | 32M | 64M |
+|------|-----|-----|-----|
+| 单向 P2P(净) | 24MB ÷ ~120 GB/s | 96MB ÷ ~136 GB/s | 192MB ÷ ~133 GB/s |
+| 双向 P2P | 48MB ÷ ~240 GB/s | 192MB ÷ ~271 GB/s | 384MB ÷ ~267 GB/s |
+| 含 self(含本地) | 32MB ÷ ~168 GB/s | 128MB ÷ ~181 GB/s | 256MB ÷ ~178 GB/s |
+
+### 8.7 分析
+
+1. **每 pass 耗时稳定在 ~177-200μs**,与 payload 大小无关(每 pass 仍是 8M/peer),说明 kernel 耗时由 **per-pass 的 Quiet 轮询时间主导**,而非带宽受限。
+2. **单向 P2P 带宽约 120-136 GB/s**,接近物理链路上限,瓶颈不在带宽。
+3. **根因分析**:"发一个等一个"的串行 Quiet 模式使每 pass 必须 4 个 peer 串行完成 `PutNbi` 后再 `UDMAQuietStatus` 轮询 CQ,导致每 pass 固定 ~180μs,与 payload 大小无关。
+4. **优化方向**:若 PutNbi 后不立即 Quiet,增大 QP 数(4× QP 方案),可让 per-pass 的 Quiet 等待时间隐藏到 payload 传输中,提升大 payload 场景吞吐。
+
+### 8.8 计时代码说明
+
+`tests/udma/demo/tilexr_udma_demo.cpp` strict UDMA 单 pass 路径(`:847` else 分支)加 host 计时:每次前 `aclrtSynchronizeStream` + `chrono::steady_clock` 记点,循环后再次 sync,输出 `total/perIter/payload/bw`;其中 `syncAllToAllAtEnd=true` 时仅在末尾做一次同步。
+
+---
+
+## 9. 文件清单(更新)
+
+| 文件 | 改动 |
+|------|------|
+| `tests/udma/demo/tilexr_udma_demo_kernel.cpp` | kernel 多核分片 + self-copy 改 DataCopyPad |
+| `tests/udma/demo/tilexr_udma_demo.cpp` | 两处 launch blockDim: 1 → rankSize + strict 单 pass 计时代码 |
+| `tests/udma/demo/run_fused_prof.sh` | msprof 采集用启动脚本(新增) |
+| `tests/udma/run_bw_4p_8m.sh` | 8M 100 次带宽测试脚本(新增) |
+| `tests/udma/run_prof_4p_32m.sh` | 32M msprof 测试脚本(新增) |
+| `tests/udma/run_prof_4p_64m.sh` | 64M msprof 测试脚本(新增) |

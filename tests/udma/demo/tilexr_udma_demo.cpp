@@ -845,8 +845,18 @@ int main(int argc, char** argv)
                 udmaRegistered = false;
             }
         } else {
+            if (!CheckAcl(rank, "aclrtSynchronizeStream pre-alltoall", aclrtSynchronizeStream(stream))) {
+                if (udmaRegistered) {
+                    CheckTileXR(rank, "TileXRUDMAUnregister", TileXRUDMAUnregister(comm, udmaHandle));
+                }
+                Cleanup(comm, stream, registeredMemory, debug, rank, deviceId);
+                return 1;
+            }
+            auto a2aStart = std::chrono::steady_clock::now();
             for (int iter = 0; iter < allToAllRepeat; ++iter) {
-                PrintStatus(rank, "launch all-to-all kernel iter=" + std::to_string(iter));
+                if (iter == 0) {
+                    PrintStatus(rank, "launch all-to-all kernel repeat=" + std::to_string(allToAllRepeat));
+                }
                 launch_tilexr_udma_all_to_all(
                     static_cast<uint32_t>(rankSize), stream, commArgsDev, reinterpret_cast<GM_ADDR>(input), reinterpret_cast<GM_ADDR>(output),
                     reinterpret_cast<GM_ADDR>(debug), elementsPerRank, static_cast<uint64_t>(outputOffset), 0,
@@ -860,6 +870,22 @@ int main(int argc, char** argv)
                     return 1;
                 }
             }
+            if (syncAllToAllAtEnd &&
+                !CheckAcl(rank, "aclrtSynchronizeStream post-alltoall", aclrtSynchronizeStream(stream))) {
+                if (udmaRegistered) {
+                    CheckTileXR(rank, "TileXRUDMAUnregister", TileXRUDMAUnregister(comm, udmaHandle));
+                }
+                Cleanup(comm, stream, registeredMemory, debug, rank, deviceId);
+                return 1;
+            }
+            auto a2aEnd = std::chrono::steady_clock::now();
+            double a2aMs = std::chrono::duration<double, std::milli>(a2aEnd - a2aStart).count();
+            double a2aPerIterUs = (allToAllRepeat > 0) ? (a2aMs * 1000.0 / static_cast<double>(allToAllRepeat)) : 0.0;
+            double payloadBytes = static_cast<double>(rankSize) * static_cast<double>(elementsPerRank) * sizeof(int32_t);
+            double bwGbs = (a2aPerIterUs > 0.0) ? (payloadBytes / (a2aPerIterUs * 1e3)) : 0.0;
+            std::cout << "[rank " << rank << "] alltoall udma " << allToAllRepeat
+                      << " iters total=" << a2aMs << " ms perIter=" << a2aPerIterUs
+                      << " us payload=" << payloadBytes << " bytes bw=" << bwGbs << " GB/s" << std::endl;
         }
     } else if (testType == 3) {
         PrintStatus(rank, "launch all-reduce IPC scatter kernel");
