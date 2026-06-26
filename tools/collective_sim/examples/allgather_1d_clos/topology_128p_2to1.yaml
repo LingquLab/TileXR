@@ -1,0 +1,1 @@
+{"topology":{"type":"one_d_clos","rank_count":128,"ranks_per_server":8,"intra_server":{"kind":"full_mesh","bandwidth_curve":"p2p_50g"},"uplink":{"bandwidth_curve":"uplink_300g"},"clos":{"mode":"simplified_pool","non_blocking_until_ranks":64,"oversubscription":{"enabled_from_ranks":128,"ratio":"2:1"},"congestion":{"model":"destination_pool_fair_share"}}}}
