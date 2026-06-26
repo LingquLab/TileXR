@@ -1,0 +1,65 @@
+<mxfile host="Electron">
+  <diagram id="LcsXoi0Xj4OfbS1yPQKF" name="第 1 页">
+    <mxGraphModel dx="2228" dy="863" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1160" pageHeight="640" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="title" parent="1" style="text;html=1;align=center;verticalAlign=middle;fontSize=20;fontStyle=1;fontFamily=Comic Sans MS;" value="TileXR Transports — Data Paths Between Ranks" vertex="1">
+          <mxGeometry height="30" width="1080" x="40" y="10" as="geometry" />
+        </mxCell>
+        <mxCell id="r0" parent="1" style="swimlane;startSize=30;fillColor=#dae8fc;strokeColor=#6c8ebf;fontStyle=1;whiteSpace=wrap;fontFamily=Comic Sans MS;" value="Rank 0  —  Ascend NPU (device)" vertex="1">
+          <mxGeometry height="380" width="360" x="60" y="70" as="geometry" />
+        </mxCell>
+        <mxCell id="r0k" parent="r0" style="rounded=1;whiteSpace=wrap;fillColor=#fff2cc;strokeColor=#d6b656;fontStyle=1;fontFamily=Comic Sans MS;" value="AICore Kernel&#xa;tilexr_sync flags + device put/get" vertex="1">
+          <mxGeometry height="56" width="300" x="30" y="46" as="geometry" />
+        </mxCell>
+        <mxCell id="r0ipc" parent="r0" style="rounded=1;whiteSpace=wrap;fillColor=#ffffff;strokeColor=#6c8ebf;fontFamily=Comic Sans MS;" value="IPC / MTE window&#xa;2 MB flags + 100 MB data" vertex="1">
+          <mxGeometry height="52" width="300" x="30" y="118" as="geometry" />
+        </mxCell>
+        <mxCell id="r0udma" parent="r0" style="rounded=1;whiteSpace=wrap;fillColor=#ffffff;strokeColor=#b85450;fontFamily=Comic Sans MS;" value="UDMA registered memory&#xa;aclrtMalloc + TileXRUDMARegister" vertex="1">
+          <mxGeometry height="52" width="300" x="30" y="186" as="geometry" />
+        </mxCell>
+        <mxCell id="r0sdma" parent="r0" style="rounded=1;whiteSpace=wrap;fillColor=#ffffff;strokeColor=#9673a6;fontFamily=Comic Sans MS;" value="SDMA workspace (GM)&#xa;sdmaWorkspacePtr" vertex="1">
+          <mxGeometry height="52" width="300" x="30" y="254" as="geometry" />
+        </mxCell>
+        <mxCell id="r0sdma2" parent="r0" style="rounded=1;whiteSpace=wrap;fillColor=#ffffff;strokeColor=#9673a6;dashed=1;fontFamily=Comic Sans MS;" value="SDMA workspace (GM) dst" vertex="1">
+          <mxGeometry height="40" width="300" x="30" y="318" as="geometry" />
+        </mxCell>
+        <mxCell id="r1" parent="1" style="swimlane;startSize=30;fillColor=#dae8fc;strokeColor=#6c8ebf;fontStyle=1;whiteSpace=wrap;fontFamily=Comic Sans MS;" value="Rank 1  —  Ascend NPU (device)" vertex="1">
+          <mxGeometry height="380" width="360" x="740" y="70" as="geometry" />
+        </mxCell>
+        <mxCell id="r1k" parent="r1" style="rounded=1;whiteSpace=wrap;fillColor=#fff2cc;strokeColor=#d6b656;fontStyle=1;fontFamily=Comic Sans MS;" value="AICore Kernel&#xa;tilexr_sync flags + device put/get" vertex="1">
+          <mxGeometry height="56" width="300" x="30" y="46" as="geometry" />
+        </mxCell>
+        <mxCell id="r1ipc" parent="r1" style="rounded=1;whiteSpace=wrap;fillColor=#ffffff;strokeColor=#6c8ebf;fontFamily=Comic Sans MS;" value="IPC / MTE window&#xa;2 MB flags + 100 MB data" vertex="1">
+          <mxGeometry height="52" width="300" x="30" y="118" as="geometry" />
+        </mxCell>
+        <mxCell id="r1udma" parent="r1" style="rounded=1;whiteSpace=wrap;fillColor=#ffffff;strokeColor=#b85450;fontFamily=Comic Sans MS;" value="UDMA registered memory&#xa;aclrtMalloc + TileXRUDMARegister" vertex="1">
+          <mxGeometry height="52" width="300" x="30" y="186" as="geometry" />
+        </mxCell>
+        <mxCell id="r1note" parent="r1" style="text;html=1;align=center;whiteSpace=wrap;fontColor=#9673a6;fontStyle=2;fontFamily=Comic Sans MS;" value="(SDMA is local to one device&#xa;— no cross-rank path)" vertex="1">
+          <mxGeometry height="100" width="300" x="30" y="258" as="geometry" />
+        </mxCell>
+        <mxCell id="eipc" edge="1" parent="1" source="r0ipc" style="rounded=1;startArrow=classic;endArrow=classic;strokeColor=#6c8ebf;strokeWidth=2;fontColor=#1f4e79;exitX=1;exitY=0.5;entryX=0;entryY=0.5;fontFamily=Comic Sans MS;" target="r1ipc" value="IPC / MTE peer mapping (peerMems[])">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="eudma" edge="1" parent="1" source="r0udma" style="rounded=1;startArrow=classic;endArrow=classic;strokeColor=#b85450;strokeWidth=2;fontColor=#a02020;exitX=1;exitY=0.5;entryX=0;entryY=0.5;fontFamily=Comic Sans MS;" target="r1udma" value="UDMA put / get / signal / quiet  (HCCP / RA over UnifiedBus)">
+          <mxGeometry relative="1" x="0.0526" y="12" as="geometry">
+            <mxPoint as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="esdma" edge="1" parent="1" source="r0sdma" style="edgeStyle=orthogonalEdgeStyle;rounded=1;endArrow=classic;strokeColor=#9673a6;strokeWidth=2;fontColor=#6a3d9a;exitX=0;exitY=0.5;entryX=0;entryY=0.5;fontFamily=Comic Sans MS;" target="r0sdma2" value="SDMA on-card GM-to-GM copy (SDMACopyNbi / SDMAWait)">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="70" y="350" />
+              <mxPoint x="70" y="408" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="sel" parent="1" style="rounded=1;whiteSpace=wrap;fillColor=#f5f5f5;strokeColor=#666666;align=center;fontFamily=Comic Sans MS;" value="Kernels pick a transport by data size, link state, peer readiness, and capability flags (CommArgs::extraFlag).&#xa;IPC/MTE: same-host peer windows  •  UDMA: registered remote memory (A5 / Ascend950)  •  SDMA: local single-device copy." vertex="1">
+          <mxGeometry height="70" width="1040" x="60" y="480" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

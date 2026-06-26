@@ -1,0 +1,70 @@
+{
+  "adapter_name": "ep_dispatch",
+  "source_file": "src/ep/kernels/tilexr_ep_dispatch_kernel.cpp",
+  "shim_path": "",
+  "runner_source": "tools/checker/src/ep_dispatch_oracle_runner.cpp",
+  "runner_function": "RunEpDispatchTrace",
+  "probe_test": "tests/checker/unit/test_checker_ep_dispatch_oracle_probe.cpp",
+  "probe_cmake_entry": "test_tilexr_checker_ep_dispatch_oracle_probe",
+  "algorithm_enum": "CollectiveOp::kEpDispatch",
+  "materializer_name": "ep_dispatch_source_aligned_cpu_oracle",
+  "schedule_name": "ep_dispatch_rank_major",
+  "schedule_function": "GetEpDispatchOracleScheduleSpec",
+  "op": "ep_dispatch",
+  "algorithm": "default",
+  "rank_size": 2,
+  "server_count": 2,
+  "datatype": "fp16",
+  "smoke_cases": [
+    {
+      "rank_size": 2,
+      "server_count": 2,
+      "bs": 3,
+      "h": 4,
+      "top_k": 2,
+      "moe_expert_num": 4,
+      "datatype": "fp16"
+    },
+    {
+      "rank_size": 4,
+      "server_count": 2,
+      "bs": 4,
+      "h": 8,
+      "top_k": 2,
+      "moe_expert_num": 8,
+      "datatype": "bfp16"
+    }
+  ],
+  "required_event_coverage": [
+    {
+      "kind": "COPY",
+      "source_file": "src/ep/kernels/tilexr_ep_dispatch_kernel.cpp",
+      "source_line": 296
+    },
+    {
+      "kind": "WRITE",
+      "source_file": "src/ep/kernels/tilexr_ep_dispatch_kernel.cpp",
+      "source_line": 298
+    },
+    {
+      "kind": "WRITE",
+      "source_file": "src/ep/kernels/tilexr_ep_dispatch_kernel.cpp",
+      "source_line": 327
+    },
+    {
+      "kind": "COPY",
+      "source_file": "src/ep/kernels/tilexr_ep_dispatch_kernel.cpp",
+      "source_line": 335
+    },
+    {
+      "kind": "WRITE",
+      "source_file": "src/ep/kernels/tilexr_ep_dispatch_kernel.cpp",
+      "source_line": 338
+    },
+    {
+      "kind": "WRITE",
+      "source_file": "src/ep/kernels/tilexr_ep_dispatch_kernel.cpp",
+      "source_line": 344
+    }
+  ]
+}
