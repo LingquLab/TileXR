@@ -305,8 +305,7 @@ __aicore__ inline void DataAsFlagCopyEpochFlagsToGM(
         0U,
         DATA_AS_FLAG_PAYLOAD_BYTES / DATA_AS_FLAG_ALIGN_BYTES,
         0U};
-    AscendC::DataCopyPadExtParams<uint8_t> padParams {false, 0U, 0U, 0U};
-    AscendC::DataCopyPad(flagGlobal, flagScratch, flagParams, padParams);
+    AscendC::DataCopyPad(flagGlobal, flagScratch, flagParams);
 }
 
 __aicore__ inline uint32_t DataAsFlagSendEpochOrdered(
