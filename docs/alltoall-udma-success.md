@@ -553,3 +553,74 @@ msprof --output="$PROF_DIR" \
 2. **证实瓶颈是 per-pass Quiet 轮询,不是带宽**:pass 数减半,payload 翻倍,总耗时基本守恒——说明每 pass 的 Quiet 等待时间(~150-170μs 固定开销)主导,而非数据传输时间。
 3. **128MB 上限本身是安全的**:注册稳定通过,无功能问题,可作为低风险基线保留(减少 pass 数降低 host 侧 launch/同步开销)。
 4. **真正提速方向**:需消除 per-pass 串行 Quiet——即多 QP 方案(让 Quiet 等待隐藏到并行传输中),而非增大单次注册。
+
+
+## 11. 8p UDMA AllToAll 性能(141.62.19.156,Ascend950DT ×8)
+
+**测试环境**
+- 服务器:141.62.19.156(root),8 × Ascend950DT(Chip V120/9584),CANN 9.1.T560,bisheng 工具链。
+- 所有 8 卡 health=OK(对比 148/152 的 CCU config error)。
+- 代码:HEAD 28a45d6(single-QP,128MB lmem 上限)。**156 上因 URMA 单次注册 128MB 会 ret=528101,故把 kAllToAllUdmaMaxRegisteredBytes 临时调为 32MB** 后构建(8M=4pass / 32M=16pass / 64M=32pass)。该改动仅 156 本地构建用,本地仓库仍保持 128MB。
+- 8 rank alltoall,TILEXR_DEMO_DEVICES="0,1,2,3,4,5,6,7",force UDMA(TILEXR_DEMO_ALLTOALL_USE_UDMA=1),repeat=1。
+- msprof:--task-time=l0 --ai-core=on --aic-mode=sample-based --aic-freq=100 --aic-metrics=PipeUtilization --aicpu=on --runtime-api=on,kernel Task Duration 取自各 device 的 op_summary_*.csv 中 	ilexr_udma_all_to_all_kernel 行 Task Duration 之和。
+
+**8M/peer(ELEM=2097152,4 pass,msprof Task Duration μs)**
+
+| Device | pass 数 | 各 pass 总和(μs) | per-pass 均值(μs) |
+|--------|---------|------------------|--------------------|
+| dev0 | 4 | 232.1 | 58.0 |
+| dev1 | 4 | 235.2 | 58.8 |
+| dev2 | 4 | 233.8 | 58.5 |
+| dev3 | 4 | 234.1 | 58.5 |
+| dev4 | 4 | 235.2 | 58.8 |
+| dev5 | 4 | 237.3 | 59.3 |
+| dev6 | 4 | 239.6 | 59.9 |
+| dev7 | 4 | 231.4 | 57.9 |
+
+- kernel 侧总耗时 ~235 μs。payload = 8M×8 = 64MB → 聚合 p2p 带宽 ≈ **272 GB/s**。
+
+**32M/peer(ELEM=8388608,16 pass,msprof Task Duration μs)**
+
+| Device | pass 数 | 各 pass 总和(μs) |
+|--------|---------|------------------|
+| dev0 | 16 | 919.4 |
+| dev1 | 16 | 910.4 |
+| dev2 | 16 | 917.7 |
+| dev3 | 16 | 911.7 |
+| dev4 | 16 | 904.9 |
+| dev5 | 16 | 922.5 |
+| dev6 | 16 | 910.6 |
+| dev7 | 16 | 911.8 |
+
+- kernel 侧总耗时 ~915 μs。payload = 32M×8 = 256MB → 聚合 p2p 带宽 ≈ **280 GB/s**。
+
+**64M/peer(ELEM=16777216,32 pass,msprof Task Duration μs)**
+
+| Device | pass 数 | 各 pass 总和(μs) |
+|--------|---------|------------------|
+| dev0 | 32 | 1820.2 |
+| dev1 | 32 | 1816.8 |
+| dev2 | 32 | 1824.9 |
+| dev3 | 32 | 1803.1 |
+| dev4 | 32 | 1810.6 |
+| dev5 | 32 | 1822.4 |
+| dev6 | 32 | 1809.3 |
+| dev7 | 32 | 1797.5 |
+
+- kernel 侧总耗时 ~1810 μs。payload = 64M×8 = 512MB → 聚合 p2p 带宽 ≈ **283 GB/s**。
+
+**11.1 三档汇总与带宽**
+
+| 场景 | pass 数 | kernel 总耗时(μs) | payload | 聚合 p2p 带宽 |
+|------|---------|-------------------|---------|---------------|
+| 8M/peer  | 4  | ~235  | 64MB  | ~272 GB/s |
+| 32M/peer | 16 | ~915  | 256MB | ~280 GB/s |
+| 64M/peer | 32 | ~1810 | 512MB | ~283 GB/s |
+
+**11.2 分析**
+
+1. **8 卡稳定跑通**:156 上 8 卡 health 全 OK,UDMA P2P 可达所有 peer(尽管 hccn_tool -g -link 只显示到 dev0/1 的 UP 链路,实际 UDMA 走 HCCS 路径能到 dev2-7 互连——2-2/4-5/6-7 等任意对 2 卡 alltoall 均成功)。
+2. **带宽随数据量上升并趋于稳定**:8M→64M,带宽从 272 升到 283 GB/s,趋近 HCCS 渐近带宽,说明大 payload 下 per-pass 固定开销(Quiet 轮询 ~150-170μs)被摊薄。
+3. **per-pass 耗时稳定**:8M per-pass ~58μs(2M elem/peer),32M per-pass ~57μs(512K elem/peer,但 pass 数 4 倍),64M per-pass ~57μs —— per-pass 耗时基本由 Quiet 等待主导,与单 pass payload 关系不大(32MB 注册上限下每 pass chunkElements 固定 524288)。
+4. **与 4 卡(144)对比**:4p 8M ~200μs/120GB/s,8p 8M ~235μs/272GB/s —— 8 卡聚合带宽显著提升(2.3×),耗时仅增 17%,说明 UDMA P2P 在 8 卡下扩展性良好。
+5. **32MB 注册上限的代价**:相对 144 的 128MB 上限,156 被迫用 32MB,导致 64M 需 32 pass(144 只需 4 pass)。但 kernel 总耗时 1810μs 仍在合理范围,带宽 283 GB/s 不输 144 的 133 GB/s(64M),说明 pass 数增加的固定开销被 8 卡并行摊薄。
