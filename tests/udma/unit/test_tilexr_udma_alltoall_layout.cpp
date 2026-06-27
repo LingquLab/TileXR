@@ -217,6 +217,28 @@ void TestAllToAllChunkedUdmaSource()
     CHECK_CONTAINS(kernel, "chunkElements");
 }
 
+void TestAllToAllBigDataSource()
+{
+    const std::string demo =
+        ReadFile(std::string(TILEXR_SOURCE_ROOT) + "/tests/udma/demo/tilexr_udma_demo.cpp");
+    const std::string kernel =
+        ReadFile(std::string(TILEXR_SOURCE_ROOT) + "/tests/udma/demo/tilexr_udma_demo_kernel.cpp");
+
+    CHECK_CONTAINS(demo, "testType == 7");
+    CHECK_CONTAINS(demo, "PlanAllToAllBigDataUdma");
+    CHECK_CONTAINS(demo, "bigdata alltoall registered dataBytes=");
+    CHECK_CONTAINS(demo, "launch_tilexr_udma_all_to_all_bigdata");
+    CHECK_CONTAINS(demo, "alltoall udma-bigdata");
+    CHECK_CONTAINS(demo, "ERROR: bigdata alltoall UDMA registration failed");
+    CHECK_CONTAINS(kernel, "tilexr_udma_all_to_all_bigdata_kernel");
+    CHECK_CONTAINS(kernel, "launch_tilexr_udma_all_to_all_bigdata");
+    CHECK_CONTAINS(kernel, "readySignalOffset");
+    CHECK_CONTAINS(kernel, "ackSignalOffset");
+    CHECK_CONTAINS(kernel, "UDMAPutSignalNbi<int32_t>");
+    CHECK_CONTAINS(kernel, "UDMAPutSignalNbi<uint64_t>");
+    CHECK_CONTAINS(kernel, "ackSignal");
+}
+
 } // namespace
 
 int main()
@@ -229,6 +251,7 @@ int main()
     TestDemoDebugLayoutSource();
     TestAllToAllDataAsFlagSource();
     TestAllToAllChunkedUdmaSource();
+    TestAllToAllBigDataSource();
     if (g_failures != 0) {
         std::cerr << g_failures << " all-to-all layout checks failed" << std::endl;
         return 1;
