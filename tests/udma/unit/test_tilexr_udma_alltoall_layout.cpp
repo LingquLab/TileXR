@@ -126,6 +126,23 @@ void TestAllToAllMaxRank256With64MiBPerRank()
     }
 }
 
+void TestAllToAllBigDataPlan()
+{
+    constexpr int rankSize = 8;
+    constexpr int32_t elementsPerPeer = 16 * 1024 * 1024; // 64 MiB per peer for int32_t.
+    const auto plan = TileXR::Demo::PlanAllToAllBigDataUdma(rankSize, elementsPerPeer);
+
+    CHECK_EQ(TileXR::Demo::kAllToAllBigDataMaxRegisteredBytes, 64ULL * 1024ULL * 1024ULL);
+    CHECK_EQ(plan.registeredBytes, TileXR::Demo::kAllToAllBigDataMaxRegisteredBytes);
+    CHECK_EQ(plan.signalBytes, 2ULL * static_cast<size_t>(rankSize) * sizeof(uint64_t));
+    CHECK_EQ(plan.readySignalOffset, plan.dataBytes);
+    CHECK_EQ(plan.ackSignalOffset, plan.dataBytes + static_cast<size_t>(rankSize) * sizeof(uint64_t));
+    CHECK_EQ(plan.dataBytes + plan.signalBytes <= plan.registeredBytes, true);
+    CHECK_EQ(plan.chunkElements > 0, true);
+    CHECK_EQ(plan.chunkBytesPerPeer, static_cast<size_t>(plan.chunkElements) * sizeof(int32_t));
+    CHECK_EQ(plan.passCount > 1, true);
+}
+
 void TestDemoDebugLayoutSource()
 {
     const std::string demo =
@@ -208,6 +225,7 @@ int main()
     TestAllToAllOutputValidation();
     TestBuildAllToAllOutput();
     TestAllToAllMaxRank256With64MiBPerRank();
+    TestAllToAllBigDataPlan();
     TestDemoDebugLayoutSource();
     TestAllToAllDataAsFlagSource();
     TestAllToAllChunkedUdmaSource();
