@@ -38,6 +38,11 @@ int main()
         "direct post-only transport name mismatch");
     Require(TileXR::Demo::P2PTransportName(TileXR::Demo::P2PTransport::Memory) == "memory",
         "memory transport name mismatch");
+    Require(TileXR::Demo::P2PTransportName(TileXR::Demo::P2PTransport::MemorySegmented) == "memory_segmented",
+        "memory_segmented transport name mismatch");
+    Require(TileXR::Demo::P2PTransportName(TileXR::Demo::P2PTransport::MemorySegmentedRotate) ==
+            "memory_segmented_rotate",
+        "memory_segmented_rotate transport name mismatch");
     Require(TileXR::Demo::P2PTransportName(TileXR::Demo::P2PTransport::MemoryConsume) == "memory_consume",
         "memory_consume transport name mismatch");
     Require(TileXR::Demo::P2PTransportName(TileXR::Demo::P2PTransport::DataAsFlag) == "data_as_flag",
@@ -60,6 +65,16 @@ int main()
         "post_only alias parse mismatch");
     Require(TileXR::Demo::ParseP2PTransport("memory") == TileXR::Demo::P2PTransport::Memory,
         "memory transport parse mismatch");
+    Require(TileXR::Demo::ParseP2PTransport("memory_segmented") == TileXR::Demo::P2PTransport::MemorySegmented,
+        "memory_segmented transport parse mismatch");
+    Require(TileXR::Demo::ParseP2PTransport("memory-segmented") == TileXR::Demo::P2PTransport::MemorySegmented,
+        "memory-segmented alias parse mismatch");
+    Require(TileXR::Demo::ParseP2PTransport("memory_segmented_rotate") ==
+            TileXR::Demo::P2PTransport::MemorySegmentedRotate,
+        "memory_segmented_rotate transport parse mismatch");
+    Require(TileXR::Demo::ParseP2PTransport("memory-segmented-rotate") ==
+            TileXR::Demo::P2PTransport::MemorySegmentedRotate,
+        "memory-segmented-rotate alias parse mismatch");
     Require(TileXR::Demo::ParseP2PTransport("memory_consume") == TileXR::Demo::P2PTransport::MemoryConsume,
         "memory_consume transport parse mismatch");
     Require(TileXR::Demo::ParseP2PTransport("memory-consume") == TileXR::Demo::P2PTransport::MemoryConsume,
@@ -112,6 +127,18 @@ int main()
         "direct_urma window must equal payload bytes");
     Require(TileXR::Demo::P2PTransportWindowBytes(TileXR::Demo::P2PTransport::MemoryConsume, 4096, 4) == 4096,
         "memory_consume window must equal payload bytes");
+    Require(TileXR::Demo::P2PTransportWindowBytes(
+                TileXR::Demo::P2PTransport::MemorySegmented, 64ULL * 1024ULL * 1024ULL, 1) ==
+            64ULL * 1024ULL * 1024ULL,
+        "memory_segmented window must equal payload bytes");
+    Require(TileXR::Demo::P2PTransportWindowBytes(
+                TileXR::Demo::P2PTransport::MemorySegmentedRotate, 64ULL * 1024ULL * 1024ULL, 1) ==
+            64ULL * 1024ULL * 1024ULL,
+        "memory_segmented_rotate allocation window must preserve source payload bytes");
+    Require(TileXR::Demo::P2PTransportUsesIpc(TileXR::Demo::P2PTransport::MemorySegmented),
+        "memory_segmented must use IPC peer window");
+    Require(TileXR::Demo::P2PTransportUsesIpc(TileXR::Demo::P2PTransport::MemorySegmentedRotate),
+        "memory_segmented_rotate must use IPC peer window");
     Require(TileXR::Demo::P2PTransportUsesIpc(TileXR::Demo::P2PTransport::MemoryConsume),
         "memory_consume must use IPC peer window");
     Require(TileXR::Demo::P2PTransportUsesIpc(TileXR::Demo::P2PTransport::DataAsFlagEpochOrdered),
@@ -125,6 +152,14 @@ int main()
         "bidir active flow count mismatch");
     options.transport = TileXR::Demo::P2PTransport::Memory;
     Require(TileXR::Demo::ValidateP2PPerfOptions(options, 2, &error), "memory transport options rejected");
+    options.transport = TileXR::Demo::P2PTransport::MemorySegmented;
+    options.maxBytes = 64ULL * 1024ULL * 1024ULL;
+    Require(TileXR::Demo::ValidateP2PPerfOptions(options, 2, &error),
+        "valid memory_segmented options rejected");
+    options.transport = TileXR::Demo::P2PTransport::MemorySegmentedRotate;
+    Require(TileXR::Demo::ValidateP2PPerfOptions(options, 2, &error),
+        "valid memory_segmented_rotate options rejected");
+    options.maxBytes = 16384;
     options.transport = TileXR::Demo::P2PTransport::DirectUrma;
     options.traffic = TileXR::Demo::P2PTraffic::BiDir;
     options.blockDim = 8;

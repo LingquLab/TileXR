@@ -534,6 +534,77 @@ extern "C" __global__ __aicore__ void tilexr_memory_p2p_perf_kernel(
     }
 }
 
+extern "C" __global__ __aicore__ void tilexr_memory_segmented_p2p_perf_kernel(
+    GM_ADDR commArgsGM, GM_ADDR srcGM, GM_ADDR debugGM,
+    int32_t srcRank, int32_t dstRank, uint64_t dstByteOffset,
+    uint32_t bytes, uint32_t pattern, int32_t traffic, uint32_t segmentBytes, int32_t rotateWindow)
+{
+    if constexpr (g_coreType == AscendC::AIV) {
+        auto args = reinterpret_cast<__gm__ TileXR::CommArgs*>(commArgsGM);
+        auto debug = reinterpret_cast<__gm__ uint32_t*>(debugGM);
+
+        int32_t rank = args->rank;
+        uint32_t blockIdx = AscendC::GetBlockIdx();
+        uint32_t blockNum = AscendC::GetBlockNum();
+        if (debug != nullptr && blockIdx == 0) {
+            debug[0] = TILEXR_UDMA_DEMO_MAGIC;
+            debug[1] = rank;
+            debug[2] = 1;
+            debug[3] = bytes;
+            debug[4] = pattern;
+            debug[5] = 0xffffffffu;
+            debug[6] = segmentBytes;
+            debug[7] = static_cast<uint32_t>(rotateWindow != 0);
+        }
+
+        int32_t peer = -1;
+        if (blockNum == 0 || segmentBytes == 0U ||
+            !TileXRUdmaDemoResolvePeer(rank, srcRank, dstRank, traffic, peer) ||
+            peer < 0 || peer >= args->rankSize) {
+            return;
+        }
+
+        AscendC::GlobalTensor<GM_ADDR> peerMems;
+        peerMems.SetGlobalBuffer(&(args->peerMems[0]), TileXR::TILEXR_MAX_RANK_SIZE);
+        GM_ADDR dstBase = peerMems.GetValue(peer);
+        if (dstBase == nullptr) {
+            uint32_t status = TileXRUdmaDemoFoldDebugStatus(debug, blockIdx, 2);
+            if (debug != nullptr && blockIdx == 0) {
+                debug[5] = status;
+            }
+            return;
+        }
+
+        uint32_t offset = 0;
+        uint32_t sliceBytes = 0;
+        TileXRUdmaDemoBlockSlice(bytes, blockNum, blockIdx, offset, sliceBytes);
+        AscendC::TPipe pipe;
+        AscendC::TBuf<AscendC::QuePosition::VECCALC> tBuf;
+        pipe.InitBuffer(tBuf, TILEXR_UDMA_DEMO_P2P_UB_BYTES);
+
+        uint32_t copiedInSlice = 0;
+        while (copiedInSlice < sliceBytes) {
+            uint32_t chunkBytes = sliceBytes - copiedInSlice;
+            if (chunkBytes > segmentBytes) {
+                chunkBytes = segmentBytes;
+            }
+            const uint32_t srcOffset = offset + copiedInSlice;
+            uint32_t dstInWindow = srcOffset;
+            if (rotateWindow != 0) {
+                dstInWindow = srcOffset % segmentBytes;
+            }
+            TileXRUdmaDemoCopyBytesGmToGm(
+                dstBase + dstByteOffset + dstInWindow, srcGM + srcOffset, tBuf, chunkBytes);
+            copiedInSlice += chunkBytes;
+        }
+
+        TileXRUdmaDemoFoldDebugStatus(debug, blockIdx, 0);
+        if (debug != nullptr && blockIdx == 0) {
+            debug[5] = 0;
+        }
+    }
+}
+
 extern "C" __global__ __aicore__ void tilexr_memory_consume_p2p_perf_kernel(
     GM_ADDR commArgsGM, GM_ADDR srcGM, GM_ADDR dstGM, GM_ADDR debugGM,
     int32_t srcRank, int32_t dstRank, uint64_t dstByteOffset,
@@ -838,6 +909,16 @@ void launch_tilexr_memory_p2p_perf(
 {
     tilexr_memory_p2p_perf_kernel<<<blockDim, nullptr, stream>>>(
         commArgs, src, debug, srcRank, dstRank, dstByteOffset, bytes, pattern, traffic);
+}
+
+void launch_tilexr_memory_segmented_p2p_perf(
+    uint32_t blockDim, void* stream, GM_ADDR commArgs, GM_ADDR src, GM_ADDR debug,
+    int32_t srcRank, int32_t dstRank, uint64_t dstByteOffset, uint32_t bytes, uint32_t pattern,
+    int32_t traffic, uint32_t segmentBytes, int32_t rotateWindow)
+{
+    tilexr_memory_segmented_p2p_perf_kernel<<<blockDim, nullptr, stream>>>(
+        commArgs, src, debug, srcRank, dstRank, dstByteOffset, bytes, pattern, traffic,
+        segmentBytes, rotateWindow);
 }
 
 void launch_tilexr_memory_consume_p2p_perf(

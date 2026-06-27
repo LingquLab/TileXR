@@ -39,6 +39,10 @@ extern void launch_tilexr_udma_p2p_post_only_perf(
 extern void launch_tilexr_memory_p2p_perf(
     uint32_t blockDim, void* stream, GM_ADDR commArgs, GM_ADDR src, GM_ADDR debug,
     int32_t srcRank, int32_t dstRank, uint64_t dstByteOffset, uint32_t bytes, uint32_t pattern, int32_t traffic);
+extern void launch_tilexr_memory_segmented_p2p_perf(
+    uint32_t blockDim, void* stream, GM_ADDR commArgs, GM_ADDR src, GM_ADDR debug,
+    int32_t srcRank, int32_t dstRank, uint64_t dstByteOffset, uint32_t bytes, uint32_t pattern,
+    int32_t traffic, uint32_t segmentBytes, int32_t rotateWindow);
 extern void launch_tilexr_memory_consume_p2p_perf(
     uint32_t blockDim, void* stream, GM_ADDR commArgs, GM_ADDR src, GM_ADDR dst, GM_ADDR debug,
     int32_t srcRank, int32_t dstRank, uint64_t dstByteOffset,
@@ -552,6 +556,15 @@ void LaunchP2PKernel(
             options.srcRank, options.dstRank, dstOffset, transferBytes, pattern, traffic);
         return;
     }
+    if (options.transport == TileXR::Demo::P2PTransport::MemorySegmented ||
+        options.transport == TileXR::Demo::P2PTransport::MemorySegmentedRotate) {
+        const bool rotateWindow = options.transport == TileXR::Demo::P2PTransport::MemorySegmentedRotate;
+        launch_tilexr_memory_segmented_p2p_perf(
+            options.blockDim, stream, commArgsDev, srcDev, debugDev, options.srcRank, options.dstRank,
+            dstOffset, transferBytes, pattern, traffic,
+            static_cast<uint32_t>(TileXR::Demo::kP2PMemorySegmentBytes), rotateWindow ? 1 : 0);
+        return;
+    }
     if (options.transport == TileXR::Demo::P2PTransport::MemoryConsume) {
         launch_tilexr_memory_consume_p2p_perf(options.blockDim, stream, commArgsDev, srcDev, dstDev, debugDev,
             options.srcRank, options.dstRank, dstOffset, transferBytes, pattern, traffic, magic, step);
@@ -597,6 +610,10 @@ bool RunP2PPerfMode(
     aclrtEvent stopEvent = nullptr;
 
     const bool useMemoryTransport = options.transport == TileXR::Demo::P2PTransport::Memory;
+    const bool validatePeerWindow =
+        options.transport == TileXR::Demo::P2PTransport::Memory ||
+        options.transport == TileXR::Demo::P2PTransport::MemorySegmented ||
+        options.transport == TileXR::Demo::P2PTransport::MemorySegmentedRotate;
     const bool useLegacyDataAsFlagTransport = options.transport == TileXR::Demo::P2PTransport::DataAsFlag;
     const bool useIpcTransport = TileXR::Demo::P2PTransportUsesIpc(options.transport);
     const bool bothRanksActive = TileXR::Demo::P2PTransportBothRanksActive(options.transport, options.traffic);
@@ -768,8 +785,10 @@ bool RunP2PPerfMode(
         }
 
         uint64_t errors = 0;
-        if (IsP2PReceiveRank(rank, options) && options.check) {
-            const void* validateSrc = useMemoryTransport ?
+        const bool skipPayloadCheck =
+            options.transport == TileXR::Demo::P2PTransport::MemorySegmentedRotate;
+        if (IsP2PReceiveRank(rank, options) && options.check && !skipPayloadCheck) {
+            const void* validateSrc = validatePeerWindow ?
                 reinterpret_cast<void*>(commArgsHost.peerMems[rank] + TileXR::IPC_DATA_OFFSET) :
                 static_cast<const void*>(dstDev);
             if (!CopyDeviceToHost(rank, hostDst.data(), static_cast<size_t>(transferWindowBytes), validateSrc,

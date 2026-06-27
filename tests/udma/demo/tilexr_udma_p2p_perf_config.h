@@ -11,11 +11,14 @@ namespace TileXR {
 namespace Demo {
 
 constexpr uint64_t kP2PMemoryMaxBytes = 100ULL * 1024ULL * 1024ULL;
+constexpr uint64_t kP2PMemorySegmentBytes = 16ULL * 1024ULL * 1024ULL;
 
 enum class P2PTransport {
     DirectUrma,
     DirectUrmaPostOnly,
     Memory,
+    MemorySegmented,
+    MemorySegmentedRotate,
     MemoryConsume,
     DataAsFlag,
     DataAsFlagEpochOrdered,
@@ -37,6 +40,10 @@ inline const char* P2PTransportName(P2PTransport transport)
             return "direct_urma_post_only";
         case P2PTransport::Memory:
             return "memory";
+        case P2PTransport::MemorySegmented:
+            return "memory_segmented";
+        case P2PTransport::MemorySegmentedRotate:
+            return "memory_segmented_rotate";
         case P2PTransport::MemoryConsume:
             return "memory_consume";
         case P2PTransport::DataAsFlag:
@@ -70,6 +77,14 @@ inline P2PTransport ParseP2PTransport(const std::string& name)
     }
     if (name == "memory" || name == "ipc" || name == "datacopy") {
         return P2PTransport::Memory;
+    }
+    if (name == "memory_segmented" || name == "memory-segmented" || name == "ipc_segmented") {
+        return P2PTransport::MemorySegmented;
+    }
+    if (name == "memory_segmented_rotate" ||
+        name == "memory-segmented-rotate" ||
+        name == "ipc_segmented_rotate") {
+        return P2PTransport::MemorySegmentedRotate;
     }
     if (name == "memory_consume" || name == "memory-consume" || name == "mem_consume") {
         return P2PTransport::MemoryConsume;
@@ -170,6 +185,8 @@ inline uint64_t P2PTransportWindowBytes(P2PTransport transport, uint64_t payload
 inline bool P2PTransportUsesIpc(P2PTransport transport)
 {
     return transport == P2PTransport::Memory ||
+        transport == P2PTransport::MemorySegmented ||
+        transport == P2PTransport::MemorySegmentedRotate ||
         transport == P2PTransport::MemoryConsume ||
         transport == P2PTransport::DataAsFlag ||
         transport == P2PTransport::DataAsFlagEpochOrdered;
@@ -227,14 +244,14 @@ inline bool ValidateP2PPerfOptions(const P2PPerfOptions& options, int rankSize, 
     }
     if (options.transport == P2PTransport::Invalid) {
         return fail(
-            "transport must be direct_urma, direct_urma_post_only, memory, memory_consume, data_as_flag, or data_as_flag_epoch_ordered");
+            "transport must be direct_urma, direct_urma_post_only, memory, memory_segmented, memory_segmented_rotate, memory_consume, data_as_flag, or data_as_flag_epoch_ordered");
     }
     if (options.traffic == P2PTraffic::Invalid) {
         return fail("traffic must be unidir or bidir");
     }
     if (P2PTransportUsesIpc(options.transport) &&
         P2PTransportWindowBytes(options.transport, options.maxBytes, options.blockDim) > kP2PMemoryMaxBytes) {
-        return fail("memory/memory_consume/data_as_flag transport max_bytes must fit in the TileXR IPC data window");
+        return fail("memory/memory_segmented/memory_consume/data_as_flag transport max_bytes must fit in the TileXR IPC data window");
     }
     return true;
 }

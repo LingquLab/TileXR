@@ -59,6 +59,29 @@ void TestMemoryConsumeKernelUsesSyncCollectives()
     CheckContains(path, text, "sync.WaitOuterFlag(magic, step, peer, blockIdx);");
 }
 
+void TestMemorySegmentedDiagnosticTransport()
+{
+    const std::string kernelPath = "tests/udma/demo/tilexr_udma_demo_kernel.cpp";
+    const std::string kernelText = ReadFile(kernelPath);
+    CheckContains(kernelPath, kernelText, "tilexr_memory_segmented_p2p_perf_kernel");
+    CheckContains(kernelPath, kernelText, "launch_tilexr_memory_segmented_p2p_perf");
+    CheckContains(kernelPath, kernelText, "uint32_t segmentBytes, int32_t rotateWindow");
+    CheckContains(kernelPath, kernelText, "dstInWindow = srcOffset % segmentBytes");
+
+    const std::string configPath = "tests/udma/demo/tilexr_udma_p2p_perf_config.h";
+    const std::string configText = ReadFile(configPath);
+    CheckContains(configPath, configText, "kP2PMemorySegmentBytes = 16ULL * 1024ULL * 1024ULL");
+    CheckContains(configPath, configText, "MemorySegmented");
+    CheckContains(configPath, configText, "MemorySegmentedRotate");
+    CheckContains(configPath, configText, "memory_segmented_rotate");
+
+    const std::string hostPath = "tests/udma/demo/tilexr_udma_demo.cpp";
+    const std::string hostText = ReadFile(hostPath);
+    CheckContains(hostPath, hostText, "launch_tilexr_memory_segmented_p2p_perf");
+    CheckContains(hostPath, hostText, "P2PTransport::MemorySegmentedRotate");
+    CheckContains(hostPath, hostText, "skipPayloadCheck");
+}
+
 void TestMemoryConsumeHostWiring()
 {
     const std::string path = "tests/udma/demo/tilexr_udma_demo.cpp";
@@ -120,6 +143,7 @@ void TestDataAsFlagEpochOrderedSource()
 int main()
 {
     TestMemoryConsumeKernelUsesSyncCollectives();
+    TestMemorySegmentedDiagnosticTransport();
     TestMemoryConsumeHostWiring();
     TestMemoryConsumeSweepDefault();
     TestDataAsFlagEpochOrderedSource();

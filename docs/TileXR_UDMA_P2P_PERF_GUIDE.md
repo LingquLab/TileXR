@@ -30,15 +30,24 @@ The final output should include:
 
 Use `rank_size=2`. Each run launches two local ranks, one rank per NPU.
 
-The P2P perf mode supports three user-facing transport modes:
+The P2P perf mode supports these user-facing transport modes:
 
 - `direct_urma`: registered-memory UDMA transfer. Internally this path uses
   the parallel multi-jetty kernel; `block_dim=1` with one QP is the single-jetty
   baseline, while `block_dim=N` with `TILEXR_UDMA_QP_NUM=N` uses up to `N`
   QPs/jettys in parallel.
 - `memory`: peer-memory IPC comparison using Ascend C `DataCopyPad`.
+- `memory_consume`: peer-memory IPC comparison with a separate outer sync flag
+  and a receiver-side copy from the IPC window into the destination buffer.
 - `data_as_flag`: peer-memory IPC comparison where each 512B block carries
   480B payload plus a 32B ready flag.
+- `data_as_flag_epoch_ordered`: data-as-flag comparison with per-batch commit
+  epochs to avoid cross-iteration ready flag reuse.
+
+The diagnostic transports `memory_segmented` and `memory_segmented_rotate`
+are intended for large-message root-cause experiments. They keep `block_dim=1`
+but split the `memory` copy helper into 16 MiB segments; the rotate variant
+keeps writing inside one 16 MiB destination span and skips payload validation.
 
 For `direct_urma`, for a selected direction:
 
