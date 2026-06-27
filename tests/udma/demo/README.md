@@ -20,6 +20,7 @@ bash demo/run_tilexr_udma_demo.sh 1 2 16 2 0
 bash demo/run_tilexr_udma_p2p_perf.sh 0 1 4096 16777216 2 20 5 0
 bash demo/run_tilexr_udma_p2p_concurrency_sweep.sh 4096 16777216 2 20 5 0 1 direct_urma,memory,data_as_flag unidir,bidir 1,2,4,8
 bash demo/run_tilexr_udma_p2p_concurrency_sweep.sh 16777216 67108864 2 20 5 0 1 memory,memory_segmented,memory_segmented_rotate unidir 1
+TILEXR_P2P_DEBUG_SUMMARY=1 bash demo/run_tilexr_udma_p2p_concurrency_sweep.sh 16777216 67108864 2 20 5 0 1 memory_segmented_trace,memory_segmented_rotate_trace unidir 1,2
 ```
 
 Arguments:
@@ -58,6 +59,20 @@ throughput drops:
   writes inside one 16 MiB peer-window span. This is a performance diagnostic
   only; payload validation is skipped for this transport because later segments
   overwrite earlier destination bytes.
+- `memory_segmented_trace`: same as `memory_segmented`, but uses 8 MiB
+  segments and records per-segment copy cycles for block 0 in the debug
+  summary. Set `TILEXR_P2P_DEBUG_SUMMARY=1` to print `seg0Cycles` through
+  `seg7Cycles`.
+- `memory_segmented_rotate_trace`: same as `memory_segmented_rotate`, with the
+  same 8 MiB per-segment cycle trace. Compare it with
+  `memory_segmented_trace` to keep destination address span separate from
+  sustained single-stream write behavior.
+
+For the `memory` large-message knee, use the trace variants as a root-cause
+probe. If `block_dim=1` later segments cost more cycles while `block_dim=2`
+stays flat, that supports accumulated peer IPC write backpressure or remote
+write-queue drain limits. If all `block_dim=1` segments are uniformly slower
+than `block_dim=2`, the result points to a fixed single-stream bandwidth cap.
 
 Run this demo only on A5 / Ascend950 / 950 hardware. Builds or smoke tests on other Ascend chips are not valid UDMA runtime validation.
 

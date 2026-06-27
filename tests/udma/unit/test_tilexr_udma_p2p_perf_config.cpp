@@ -43,6 +43,12 @@ int main()
     Require(TileXR::Demo::P2PTransportName(TileXR::Demo::P2PTransport::MemorySegmentedRotate) ==
             "memory_segmented_rotate",
         "memory_segmented_rotate transport name mismatch");
+    Require(TileXR::Demo::P2PTransportName(TileXR::Demo::P2PTransport::MemorySegmentedTrace) ==
+            "memory_segmented_trace",
+        "memory_segmented_trace transport name mismatch");
+    Require(TileXR::Demo::P2PTransportName(TileXR::Demo::P2PTransport::MemorySegmentedRotateTrace) ==
+            "memory_segmented_rotate_trace",
+        "memory_segmented_rotate_trace transport name mismatch");
     Require(TileXR::Demo::P2PTransportName(TileXR::Demo::P2PTransport::MemoryConsume) == "memory_consume",
         "memory_consume transport name mismatch");
     Require(TileXR::Demo::P2PTransportName(TileXR::Demo::P2PTransport::DataAsFlag) == "data_as_flag",
@@ -75,6 +81,18 @@ int main()
     Require(TileXR::Demo::ParseP2PTransport("memory-segmented-rotate") ==
             TileXR::Demo::P2PTransport::MemorySegmentedRotate,
         "memory-segmented-rotate alias parse mismatch");
+    Require(TileXR::Demo::ParseP2PTransport("memory_segmented_trace") ==
+            TileXR::Demo::P2PTransport::MemorySegmentedTrace,
+        "memory_segmented_trace transport parse mismatch");
+    Require(TileXR::Demo::ParseP2PTransport("memory-segmented-trace") ==
+            TileXR::Demo::P2PTransport::MemorySegmentedTrace,
+        "memory-segmented-trace alias parse mismatch");
+    Require(TileXR::Demo::ParseP2PTransport("memory_segmented_rotate_trace") ==
+            TileXR::Demo::P2PTransport::MemorySegmentedRotateTrace,
+        "memory_segmented_rotate_trace transport parse mismatch");
+    Require(TileXR::Demo::ParseP2PTransport("memory-segmented-rotate-trace") ==
+            TileXR::Demo::P2PTransport::MemorySegmentedRotateTrace,
+        "memory-segmented-rotate-trace alias parse mismatch");
     Require(TileXR::Demo::ParseP2PTransport("memory_consume") == TileXR::Demo::P2PTransport::MemoryConsume,
         "memory_consume transport parse mismatch");
     Require(TileXR::Demo::ParseP2PTransport("memory-consume") == TileXR::Demo::P2PTransport::MemoryConsume,
@@ -139,6 +157,10 @@ int main()
         "memory_segmented must use IPC peer window");
     Require(TileXR::Demo::P2PTransportUsesIpc(TileXR::Demo::P2PTransport::MemorySegmentedRotate),
         "memory_segmented_rotate must use IPC peer window");
+    Require(TileXR::Demo::P2PTransportUsesIpc(TileXR::Demo::P2PTransport::MemorySegmentedTrace),
+        "memory_segmented_trace must use IPC peer window");
+    Require(TileXR::Demo::P2PTransportUsesIpc(TileXR::Demo::P2PTransport::MemorySegmentedRotateTrace),
+        "memory_segmented_rotate_trace must use IPC peer window");
     Require(TileXR::Demo::P2PTransportUsesIpc(TileXR::Demo::P2PTransport::MemoryConsume),
         "memory_consume must use IPC peer window");
     Require(TileXR::Demo::P2PTransportUsesIpc(TileXR::Demo::P2PTransport::DataAsFlagEpochOrdered),
@@ -159,6 +181,12 @@ int main()
     options.transport = TileXR::Demo::P2PTransport::MemorySegmentedRotate;
     Require(TileXR::Demo::ValidateP2PPerfOptions(options, 2, &error),
         "valid memory_segmented_rotate options rejected");
+    options.transport = TileXR::Demo::P2PTransport::MemorySegmentedTrace;
+    Require(TileXR::Demo::ValidateP2PPerfOptions(options, 2, &error),
+        "valid memory_segmented_trace options rejected");
+    options.transport = TileXR::Demo::P2PTransport::MemorySegmentedRotateTrace;
+    Require(TileXR::Demo::ValidateP2PPerfOptions(options, 2, &error),
+        "valid memory_segmented_rotate_trace options rejected");
     options.maxBytes = 16384;
     options.transport = TileXR::Demo::P2PTransport::DirectUrma;
     options.traffic = TileXR::Demo::P2PTraffic::BiDir;

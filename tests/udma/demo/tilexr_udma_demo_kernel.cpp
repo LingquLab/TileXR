@@ -537,7 +537,8 @@ extern "C" __global__ __aicore__ void tilexr_memory_p2p_perf_kernel(
 extern "C" __global__ __aicore__ void tilexr_memory_segmented_p2p_perf_kernel(
     GM_ADDR commArgsGM, GM_ADDR srcGM, GM_ADDR debugGM,
     int32_t srcRank, int32_t dstRank, uint64_t dstByteOffset,
-    uint32_t bytes, uint32_t pattern, int32_t traffic, uint32_t segmentBytes, int32_t rotateWindow)
+    uint32_t bytes, uint32_t pattern, int32_t traffic, uint32_t segmentBytes,
+    int32_t rotateWindow, uint32_t traceSegments)
 {
     if constexpr (g_coreType == AscendC::AIV) {
         auto args = reinterpret_cast<__gm__ TileXR::CommArgs*>(commArgsGM);
@@ -555,6 +556,7 @@ extern "C" __global__ __aicore__ void tilexr_memory_segmented_p2p_perf_kernel(
             debug[5] = 0xffffffffu;
             debug[6] = segmentBytes;
             debug[7] = static_cast<uint32_t>(rotateWindow != 0);
+            debug[46] = traceSegments;
         }
 
         int32_t peer = -1;
@@ -583,6 +585,7 @@ extern "C" __global__ __aicore__ void tilexr_memory_segmented_p2p_perf_kernel(
         pipe.InitBuffer(tBuf, TILEXR_UDMA_DEMO_P2P_UB_BYTES);
 
         uint32_t copiedInSlice = 0;
+        uint32_t traceIndex = 0;
         while (copiedInSlice < sliceBytes) {
             uint32_t chunkBytes = sliceBytes - copiedInSlice;
             if (chunkBytes > segmentBytes) {
@@ -593,9 +596,20 @@ extern "C" __global__ __aicore__ void tilexr_memory_segmented_p2p_perf_kernel(
             if (rotateWindow != 0) {
                 dstInWindow = srcOffset % segmentBytes;
             }
+            const bool recordTrace = debug != nullptr && blockIdx == 0 && traceIndex < traceSegments && traceIndex < 8U;
+            uint64_t startCycle = 0U;
+            if (recordTrace) {
+                startCycle = static_cast<uint64_t>(AscendC::GetSystemCycle());
+            }
             TileXRUdmaDemoCopyBytesGmToGm(
                 dstBase + dstByteOffset + dstInWindow, srcGM + srcOffset, tBuf, chunkBytes);
+            if (recordTrace) {
+                const uint64_t endCycle = static_cast<uint64_t>(AscendC::GetSystemCycle());
+                const uint32_t traceLowIdx = 48U + traceIndex * 2U;
+                TileXRUdmaDemoAddCycleSum(debug, traceLowIdx, endCycle - startCycle);
+            }
             copiedInSlice += chunkBytes;
+            ++traceIndex;
         }
 
         TileXRUdmaDemoFoldDebugStatus(debug, blockIdx, 0);
@@ -914,11 +928,11 @@ void launch_tilexr_memory_p2p_perf(
 void launch_tilexr_memory_segmented_p2p_perf(
     uint32_t blockDim, void* stream, GM_ADDR commArgs, GM_ADDR src, GM_ADDR debug,
     int32_t srcRank, int32_t dstRank, uint64_t dstByteOffset, uint32_t bytes, uint32_t pattern,
-    int32_t traffic, uint32_t segmentBytes, int32_t rotateWindow)
+    int32_t traffic, uint32_t segmentBytes, int32_t rotateWindow, uint32_t traceSegments)
 {
     tilexr_memory_segmented_p2p_perf_kernel<<<blockDim, nullptr, stream>>>(
         commArgs, src, debug, srcRank, dstRank, dstByteOffset, bytes, pattern, traffic,
-        segmentBytes, rotateWindow);
+        segmentBytes, rotateWindow, traceSegments);
 }
 
 void launch_tilexr_memory_consume_p2p_perf(

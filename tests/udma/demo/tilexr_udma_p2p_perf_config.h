@@ -12,6 +12,7 @@ namespace Demo {
 
 constexpr uint64_t kP2PMemoryMaxBytes = 100ULL * 1024ULL * 1024ULL;
 constexpr uint64_t kP2PMemorySegmentBytes = 16ULL * 1024ULL * 1024ULL;
+constexpr uint64_t kP2PMemoryTraceSegmentBytes = 8ULL * 1024ULL * 1024ULL;
 
 enum class P2PTransport {
     DirectUrma,
@@ -19,6 +20,8 @@ enum class P2PTransport {
     Memory,
     MemorySegmented,
     MemorySegmentedRotate,
+    MemorySegmentedTrace,
+    MemorySegmentedRotateTrace,
     MemoryConsume,
     DataAsFlag,
     DataAsFlagEpochOrdered,
@@ -44,6 +47,10 @@ inline const char* P2PTransportName(P2PTransport transport)
             return "memory_segmented";
         case P2PTransport::MemorySegmentedRotate:
             return "memory_segmented_rotate";
+        case P2PTransport::MemorySegmentedTrace:
+            return "memory_segmented_trace";
+        case P2PTransport::MemorySegmentedRotateTrace:
+            return "memory_segmented_rotate_trace";
         case P2PTransport::MemoryConsume:
             return "memory_consume";
         case P2PTransport::DataAsFlag:
@@ -85,6 +92,16 @@ inline P2PTransport ParseP2PTransport(const std::string& name)
         name == "memory-segmented-rotate" ||
         name == "ipc_segmented_rotate") {
         return P2PTransport::MemorySegmentedRotate;
+    }
+    if (name == "memory_segmented_trace" ||
+        name == "memory-segmented-trace" ||
+        name == "ipc_segmented_trace") {
+        return P2PTransport::MemorySegmentedTrace;
+    }
+    if (name == "memory_segmented_rotate_trace" ||
+        name == "memory-segmented-rotate-trace" ||
+        name == "ipc_segmented_rotate_trace") {
+        return P2PTransport::MemorySegmentedRotateTrace;
     }
     if (name == "memory_consume" || name == "memory-consume" || name == "mem_consume") {
         return P2PTransport::MemoryConsume;
@@ -187,6 +204,8 @@ inline bool P2PTransportUsesIpc(P2PTransport transport)
     return transport == P2PTransport::Memory ||
         transport == P2PTransport::MemorySegmented ||
         transport == P2PTransport::MemorySegmentedRotate ||
+        transport == P2PTransport::MemorySegmentedTrace ||
+        transport == P2PTransport::MemorySegmentedRotateTrace ||
         transport == P2PTransport::MemoryConsume ||
         transport == P2PTransport::DataAsFlag ||
         transport == P2PTransport::DataAsFlagEpochOrdered;
@@ -244,7 +263,7 @@ inline bool ValidateP2PPerfOptions(const P2PPerfOptions& options, int rankSize, 
     }
     if (options.transport == P2PTransport::Invalid) {
         return fail(
-            "transport must be direct_urma, direct_urma_post_only, memory, memory_segmented, memory_segmented_rotate, memory_consume, data_as_flag, or data_as_flag_epoch_ordered");
+            "transport must be direct_urma, direct_urma_post_only, memory, memory_segmented, memory_segmented_rotate, memory_segmented_trace, memory_segmented_rotate_trace, memory_consume, data_as_flag, or data_as_flag_epoch_ordered");
     }
     if (options.traffic == P2PTraffic::Invalid) {
         return fail("traffic must be unidir or bidir");

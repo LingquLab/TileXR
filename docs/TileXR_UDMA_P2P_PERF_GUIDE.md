@@ -48,6 +48,11 @@ The diagnostic transports `memory_segmented` and `memory_segmented_rotate`
 are intended for large-message root-cause experiments. They keep `block_dim=1`
 but split the `memory` copy helper into 16 MiB segments; the rotate variant
 keeps writing inside one 16 MiB destination span and skips payload validation.
+The trace variants `memory_segmented_trace` and
+`memory_segmented_rotate_trace` use 8 MiB segments and record block-0
+per-segment cycle sums in the debug buffer. Enable
+`TILEXR_P2P_DEBUG_SUMMARY=1` to print `traceSegments` and `seg0Cycles` through
+`seg7Cycles`.
 
 For `direct_urma`, for a selected direction:
 
@@ -554,6 +559,32 @@ Interpretation:
   current single-block DataCopyPad baseline settles near 39-40 GB/s for larger
   messages;
 - both paths passed payload validation with `status=0` and `errors=0`.
+
+For the specific `memory block_dim=1` drop after 16 MiB, first compare
+`memory`, `memory_segmented`, and `memory_segmented_rotate` at `block_dim=1`,
+then repeat the rotate run at `block_dim=2` or higher. If splitting into
+16 MiB helper calls and rotating inside a 16 MiB destination window still
+follows `memory`, then helper-call size, destination address span, and
+host-side sweep shape are unlikely to be the root cause. Then run:
+
+```bash
+TILEXR_P2P_DEBUG_SUMMARY=1 bash demo/run_tilexr_udma_p2p_concurrency_sweep.sh \
+  16777216 67108864 2 20 5 0 1 \
+  memory_segmented_trace,memory_segmented_rotate_trace \
+  unidir 1,2
+```
+
+Interpret the trace as follows:
+
+- `block_dim=1` later 8 MiB segments get progressively more expensive while
+  `block_dim=2` stays flat: sustained single-stream peer IPC writes are
+  accumulating credit/backpressure or remote write-queue drain delay.
+- every `block_dim=1` segment is similarly slower than `block_dim=2`: the
+  bottleneck is a fixed single-stream bandwidth limit rather than segment-local
+  accumulation.
+- rotate trace follows normal trace: destination window span is still excluded.
+- rotate trace diverges sharply: re-check address mapping, aliasing, or overwrite
+  effects before using the trace as a bandwidth conclusion.
 
 ## Minimal Acceptance Checklist
 
