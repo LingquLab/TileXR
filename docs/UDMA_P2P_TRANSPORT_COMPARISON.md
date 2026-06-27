@@ -1,45 +1,45 @@
-# UDMA P2P Transport Comparison
+# UDMA P2P 传输方式对比
 
-**Topic:** `memory_consume` vs `data_as_flag_epoch_ordered`
+**主题：** `memory_consume` 与 `data_as_flag_epoch_ordered`
 
-## Summary
+## 摘要
 
-`data_as_flag_epoch_ordered` has removed the worst per-block flag write bottleneck, but its payload path is still much heavier than `memory_consume`. Under the same effective-payload bandwidth accounting, a result such as `~10 GB/s` vs `~50 GB/s` is consistent with the current implementation.
+`data_as_flag_epoch_ordered` 已经消除了最严重的按块写 flag 瓶颈，但其 payload 路径仍比 `memory_consume` 重得多。在相同的有效 payload 带宽统计口径下，`~10 GB/s` 对 `~50 GB/s` 这样的结果与当前实现是相符的。
 
-At a high level:
+总体来说：
 
 ```text
 memory_consume:
-  continuous payload transfer + independent sync flag
+  连续 payload 传输 + 独立同步 flag
 
 data_as_flag_epoch_ordered:
-  data-as-flag protocol validation with embedded commit information
-  inside a 480B payload + 32B flag/gap block layout
+  data-as-flag 协议校验，提交信息内嵌
+  在 480B payload + 32B flag/gap 的块布局中
 ```
 
-`memory_consume` is closer to an efficient continuous payload transport. `data_as_flag_epoch_ordered` is closer to a protocol path that proves data readiness by embedding ready information in the data window.
+`memory_consume` 更接近高效的连续 payload 传输。`data_as_flag_epoch_ordered` 更接近一条协议路径——通过在数据窗口中内嵌就绪信息来证明数据已就绪。
 
-## `memory_consume` Data Path
+## `memory_consume` 数据路径
 
-The `memory_consume` kernel keeps the payload window continuous:
+`memory_consume` kernel 保持 payload 窗口连续：
 
 ```text
-sender:
-  continuous src payload
-    -> peer IPC data window
-  set independent outer sync flag
+发送端:
+  连续 src payload
+    -> 对端 IPC 数据窗口
+  设置独立的外部同步 flag
 
-receiver:
-  wait independent outer sync flag
-  continuous local peer IPC data window
-    -> continuous dst payload
+接收端:
+  等待独立的外部同步 flag
+  连续的本地对端 IPC 数据窗口
+    -> 连续的 dst payload
 ```
 
-In code, the sender copies from `srcGM + offset` to `peerBase + dstByteOffset + offset`, then calls `sync.SetOuterFlag(magic, step)`. The receiver waits with `sync.WaitOuterFlag(...)`, then copies from `localBase + dstByteOffset + offset` to `dst + offset`.
+在代码中，发送端从 `srcGM + offset` 拷贝到 `peerBase + dstByteOffset + offset`，然后调用 `sync.SetOuterFlag(magic, step)`。接收端用 `sync.WaitOuterFlag(...)` 等待，再从 `localBase + dstByteOffset + offset` 拷贝到 `dst + offset`。
 
-The payload layout remains continuous on both sides. Although the helper still stages through UB internally, the copied payload is a simple continuous GM-to-GM stream. For large messages, the independent sync flag is amortized across a large payload, so this path can reach much higher bandwidth.
+两端的 payload 布局都保持连续。虽然 helper 内部仍会经过 UB 中转，但拷贝的 payload 是简单的连续 GM 到 GM 流。对于大消息，独立同步 flag 的开销会被大 payload 摊薄，因此这条路径可以达到高得多的带宽。
 
-Relevant files:
+相关文件：
 
 ```text
 tests/udma/demo/tilexr_udma_demo_kernel.cpp
@@ -47,39 +47,39 @@ tests/udma/demo/tilexr_udma_demo_kernel.cpp
   TileXRUdmaDemoCopyBytesGmToGm
 ```
 
-## `data_as_flag_epoch_ordered` Data Path
+## `data_as_flag_epoch_ordered` 数据路径
 
-The `data_as_flag_epoch_ordered` kernel uses a data-as-flag block layout:
+`data_as_flag_epoch_ordered` kernel 使用 data-as-flag 块布局：
 
 ```text
-512B block:
+512B 块:
   480B payload
    32B flag/gap
 ```
 
-The sender path is:
+发送端路径：
 
 ```text
-continuous src payload
-  -> UB scratch
-  -> pack into 512B blocks:
+连续 src payload
+  -> UB 暂存
+  -> 打包成 512B 块:
        480B payload + 32B flag/gap
-  -> peer data-as-flag IPC window
-  -> write 32B batch commit flag in the last block of the batch
+  -> 对端 data-as-flag IPC 窗口
+  -> 在该 batch 最后一个块的 flag 区写入 32B batch commit flag
 ```
 
-The receiver path is:
+接收端路径：
 
 ```text
-poll batch commit flag
-  -> read from 512B data-as-flag window
-  -> unpack/extract 480B payload regions
-  -> write continuous dst payload
+轮询 batch commit flag
+  -> 从 512B data-as-flag 窗口读取
+  -> 解包/提取 480B payload 区域
+  -> 写入连续的 dst payload
 ```
 
-The epoch-ordered variant improves over the older per-block data-as-flag path by writing a commit flag once per batch instead of once per 480B payload block. This removes the most damaging small-write bottleneck, but the path still has extra layout conversion, polling, and a small commit write for each batch.
+epoch-ordered 变体相比旧的按块 data-as-flag 路径有所改进：每个 batch 只写一次 commit flag，而不是每个 480B payload 块写一次。这消除了破坏性最大的小写瓶颈，但该路径仍然存在额外的布局转换、轮询，以及每个 batch 一次的小 commit 写入。
 
-Relevant files:
+相关文件：
 
 ```text
 src/include/tilexr_data_as_flag.h
@@ -95,28 +95,28 @@ tests/udma/demo/tilexr_udma_demo_kernel.cpp
   tilexr_data_as_flag_epoch_ordered_p2p_perf_kernel
 ```
 
-## Main Sources Of The Gap
+## 差距的主要来源
 
-### 1. Layout Overhead
+### 1. 布局开销
 
-`data_as_flag_epoch_ordered` stores every `480B` payload in a `512B` block:
+`data_as_flag_epoch_ordered` 把每个 `480B` payload 存进一个 `512B` 块：
 
 ```text
 512 / 480 = 1.067x
 ```
 
-So the data window has at least about `6.7%` extra space and transfer overhead before considering any control or unpacking cost.
+因此在考虑任何控制或解包开销之前，数据窗口就至少有约 `6.7%` 的额外空间和传输开销。
 
-This overhead is visible in the host-side window calculation:
+该开销在 host 侧窗口计算中可见：
 
 ```text
 DataAsFlagWindowBytes(payloadBytes)
   = ceil(payloadBytes / 480) * 512
 ```
 
-The bandwidth report, however, uses effective payload bytes, not expanded data-as-flag window bytes. Therefore the extra block-layout bytes reduce the reported effective bandwidth.
+但带宽报告使用的是有效 payload 字节数，而不是展开后的 data-as-flag 窗口字节数。因此额外的块布局字节会拉低报告的有效带宽。
 
-Relevant file:
+相关文件：
 
 ```text
 tests/udma/demo/tilexr_udma_p2p_perf_config.h
@@ -125,95 +125,95 @@ tests/udma/demo/tilexr_udma_p2p_perf_config.h
   FormatP2PPerfCsvRow
 ```
 
-### 2. Pack And Unpack Through UB
+### 2. 经过 UB 的打包与解包
 
-`memory_consume` copies continuous payload to continuous payload.
+`memory_consume` 是从连续 payload 拷贝到连续 payload。
 
-`data_as_flag_epoch_ordered` has to reshape the payload:
+`data_as_flag_epoch_ordered` 必须对 payload 做重塑：
 
 ```text
-sender:
-  continuous src
+发送端:
+  连续 src
     -> UB
-    -> 480B payload chunks inside 512B blocks
-    -> peer GM
+    -> 512B 块中的 480B payload 分块
+    -> 对端 GM
 
-receiver:
-  512B block/gap window
+接收端:
+  512B 块/gap 窗口
     -> UB
-    -> extract 480B payload chunks
-    -> continuous dst
+    -> 提取 480B payload 分块
+    -> 连续 dst
 ```
 
-This adds extra MTE operations, barriers, and strided copy behavior that the continuous `memory_consume` path does not need.
+这增加了连续 `memory_consume` 路径所不需要的额外 MTE 操作、barrier 以及跨步拷贝行为。
 
-### 3. Batch Commit Small Write
+### 3. Batch Commit 小写入
 
-The epoch-ordered path no longer writes a flag for every `480B` payload block. Instead, after a batch payload write, it writes one `32B` commit flag into the flag area of the last block in that batch:
+epoch-ordered 路径不再为每个 `480B` payload 块写一次 flag。而是在一个 batch 的 payload 写完后，向该 batch 最后一个块的 flag 区写入一个 `32B` commit flag：
 
 ```text
-payload batch write:
+payload batch 写入:
   batchBlocks * 512B
 
-batch commit write:
+batch commit 写入:
   32B commit flag
 ```
 
-This is the "batch commit small write".
+这就是“batch commit 小写入”。
 
-It is much better than per-block flag writes, but it still has fixed overhead:
+它比按块写 flag 好得多，但仍存在固定开销：
 
 ```text
-prepare 32B epoch flag
-S -> MTE3 synchronization
-MTE3 writes 32B commit flag to GM/peer window
-MTE3 -> S synchronization
-receiver polls and reads the commit flag
+准备 32B epoch flag
+S -> MTE3 同步
+MTE3 向 GM/对端窗口写入 32B commit flag
+MTE3 -> S 同步
+接收端轮询并读取 commit flag
 ```
 
-For large batches this cost is amortized, but it is not free. Combined with pack/unpack and the 512B block layout, it still limits the final bandwidth.
+对于大 batch，该开销会被摊薄，但并非免费。结合打包/解包和 512B 块布局，它仍会限制最终带宽。
 
-## Why `0.7 GB/s` Can Recover To `~10 GB/s`
+## 为什么 `0.7 GB/s` 能恢复到 `~10 GB/s`
 
-The older data-as-flag path effectively paid a small flag-write/check cost at very high frequency, roughly once per `480B` payload block. That made small writes and polling dominate the payload transfer.
+旧的 data-as-flag 路径实际上以极高频率付出小 flag 写入/检查开销——大约每个 `480B` payload 块一次。这使小写入和轮询主导了 payload 传输。
 
-The epoch-ordered path reduces this to one commit write per batch:
+epoch-ordered 路径将其降为每个 batch 一次 commit 写入：
 
 ```text
-old:
-  every 480B payload block has ready/flag cost
+旧路径:
+  每个 480B payload 块都有 ready/flag 开销
 
 epoch-ordered:
-  each batch has one final 32B commit flag
+  每个 batch 只有一个最终的 32B commit flag
 ```
 
-This explains why performance can recover significantly, for example from around `0.7 GB/s` to around `10 GB/s`.
+这就解释了为什么性能可以显著恢复，例如从约 `0.7 GB/s` 恢复到约 `10 GB/s`。
 
-However, it does not turn the path into a continuous payload transport. The protocol still pays for the data-as-flag layout and the receiver still has to wait for, then unpack from, the embedded-layout window.
+但它并未把该路径变成连续 payload 传输。该协议仍要为 data-as-flag 布局付出代价，接收端仍需等待，再从内嵌布局窗口中解包。
 
-## Final Interpretation
+## 最终解读
 
-`memory_consume`:
+`memory_consume`：
 
 ```text
-Use an independent sync area to prove payload readiness.
-Keep the payload data window continuous.
-Optimize for large continuous payload movement.
+用独立的同步区来证明 payload 就绪。
+保持 payload 数据窗口连续。
+针对大块连续 payload 搬移做优化。
 ```
 
-`data_as_flag_epoch_ordered`:
+`data_as_flag_epoch_ordered`：
 
 ```text
-Use an embedded commit flag inside the data window to prove payload readiness.
-Store payload in 480B + 32B data-as-flag blocks.
-Pay pack/unpack, polling, and batch commit costs.
+用数据窗口内嵌的 commit flag 来证明 payload 就绪。
+以 480B + 32B 的 data-as-flag 块存放 payload。
+付出打包/解包、轮询和 batch commit 开销。
 ```
 
-Therefore, under the current implementation and the same effective-payload bandwidth accounting, a gap such as:
+因此在当前实现和相同有效 payload 带宽统计口径下，出现如下差距：
 
 ```text
 data_as_flag_epoch_ordered: ~10 GB/s
 memory_consume:            ~50 GB/s
 ```
 
-is expected. It does not necessarily indicate that the epoch-ordered fix failed; it indicates that the fix removed the worst per-block flag bottleneck while the remaining data-as-flag protocol path is still substantially heavier than continuous payload transfer with external synchronization.
+是符合预期的。这并不一定说明 epoch-ordered 的修复失败；它说明该修复消除了最严重的按块 flag 瓶颈，而剩余的 data-as-flag 协议路径仍比带外部同步的连续 payload 传输重得多。
