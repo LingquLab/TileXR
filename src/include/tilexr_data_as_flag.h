@@ -27,6 +27,7 @@ constexpr uint32_t DATA_AS_FLAG_ALIGN_BYTES = 32;
 constexpr uint32_t DATA_AS_FLAG_FLOAT_BYTES = sizeof(float);
 constexpr uint32_t DATA_AS_FLAG_FLAG_FLOATS = DATA_AS_FLAG_FLAG_BYTES / DATA_AS_FLAG_FLOAT_BYTES;
 constexpr uint32_t DATA_AS_FLAG_SUM_RESULT_BYTES = DATA_AS_FLAG_ALIGN_BYTES;
+constexpr uint64_t DATA_AS_FLAG_COMMIT_BIT = 0x80000000ULL;
 constexpr float DATA_AS_FLAG_READY_VALUE = 1.0f;
 
 static_assert(DATA_AS_FLAG_PAYLOAD_BYTES + DATA_AS_FLAG_FLAG_BYTES == DATA_AS_FLAG_BLOCK_BYTES,
@@ -62,6 +63,11 @@ TILEXR_DATA_AS_FLAG_INLINE bool DataAsFlagEpochReady(uint64_t observed, uint64_t
 {
     constexpr uint64_t kMagicMask = 0xffffffff00000000ULL;
     return (observed & kMagicMask) == (expected & kMagicMask) && observed >= expected;
+}
+
+TILEXR_DATA_AS_FLAG_INLINE uint64_t DataAsFlagCommitEpoch(uint64_t epoch)
+{
+    return epoch | DATA_AS_FLAG_COMMIT_BIT;
 }
 
 #if TILEXR_ASCENDC_AICORE_COMPILE
@@ -155,22 +161,12 @@ __aicore__ inline uint32_t DataAsFlagMaxRecvBlocks(uint32_t scratchBytes)
 
 __aicore__ inline uint32_t DataAsFlagMaxEpochOrderedSendBlocks(uint32_t scratchBytes)
 {
-    uint32_t blocks = scratchBytes / DATA_AS_FLAG_BLOCK_BYTES;
-    while (blocks > 0U) {
-        const uint64_t requiredBytes =
-            static_cast<uint64_t>(blocks) * DATA_AS_FLAG_BLOCK_BYTES +
-            static_cast<uint64_t>(blocks) * DATA_AS_FLAG_FLAG_BYTES;
-        if (static_cast<uint64_t>(scratchBytes) >= requiredBytes) {
-            return blocks;
-        }
-        --blocks;
-    }
-    return 0U;
+    return scratchBytes / DATA_AS_FLAG_BLOCK_BYTES;
 }
 
 __aicore__ inline uint32_t DataAsFlagMaxEpochOrderedRecvBlocks(uint32_t scratchBytes)
 {
-    return DataAsFlagMaxRecvBlocks(scratchBytes);
+    return DataAsFlagMaxEpochOrderedSendBlocks(scratchBytes);
 }
 
 __aicore__ inline uint32_t DataAsFlagInit(AscendC::LocalTensor<uint8_t>& sendScratch)
@@ -295,24 +291,26 @@ __aicore__ inline void DataAsFlagFillEpochFlags(
     AscendC::WaitFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID0);
 }
 
-__aicore__ inline void DataAsFlagCopyEpochFlagsToGM(
+__aicore__ inline void DataAsFlagWriteBatchCommitFlag(
     __gm__ uint8_t* dstDataAsFlagGM,
     uint32_t dstBlockOffset,
-    AscendC::LocalTensor<uint8_t>& flagScratch,
-    uint32_t batchBlocks)
+    AscendC::LocalTensor<uint8_t>& scratch,
+    uint32_t batchBlocks,
+    uint64_t commitEpoch)
 {
+    if (batchBlocks == 0U) {
+        return;
+    }
+    DataAsFlagFillEpochFlags(scratch, 1U, commitEpoch);
     AscendC::GlobalTensor<int64_t> flagGlobal;
+    const uint32_t lastBlock = dstBlockOffset + batchBlocks - 1U;
     flagGlobal.SetGlobalBuffer(
         reinterpret_cast<__gm__ int64_t*>(
-            dstDataAsFlagGM + static_cast<uint64_t>(dstBlockOffset) * DATA_AS_FLAG_BLOCK_BYTES +
+            dstDataAsFlagGM + static_cast<uint64_t>(lastBlock) * DATA_AS_FLAG_BLOCK_BYTES +
             DATA_AS_FLAG_FLAG_OFFSET_BYTES));
-    AscendC::LocalTensor<int64_t> flagWords = flagScratch.template ReinterpretCast<int64_t>();
+    AscendC::LocalTensor<int64_t> flagWords = scratch.template ReinterpretCast<int64_t>();
     constexpr uint32_t kFlagWords = DATA_AS_FLAG_FLAG_BYTES / sizeof(int64_t);
-    constexpr uint32_t kBlockWords = DATA_AS_FLAG_BLOCK_BYTES / sizeof(int64_t);
-    for (uint32_t i = 0; i < batchBlocks; ++i) {
-        AscendC::DataCopy(flagGlobal[static_cast<uint64_t>(i) * kBlockWords],
-            flagWords[static_cast<uint64_t>(i) * kFlagWords], kFlagWords);
-    }
+    AscendC::DataCopy(flagGlobal, flagWords, kFlagWords);
 }
 
 __aicore__ inline uint32_t DataAsFlagSendEpochOrdered(
@@ -345,8 +343,6 @@ __aicore__ inline uint32_t DataAsFlagSendEpochOrdered(
         const uint32_t tailBytes = batchPayloadBytes % DATA_AS_FLAG_PAYLOAD_BYTES;
 
         AscendC::LocalTensor<uint8_t> payloadScratch = scratch;
-        AscendC::LocalTensor<uint8_t> flagScratch =
-            scratch[static_cast<uint64_t>(batchBlocks) * DATA_AS_FLAG_BLOCK_BYTES];
 
         AscendC::Duplicate<uint8_t>(payloadScratch, 0U, batchBlocks * DATA_AS_FLAG_BLOCK_BYTES);
         AscendC::PipeBarrier<PIPE_ALL>();
@@ -357,8 +353,7 @@ __aicore__ inline uint32_t DataAsFlagSendEpochOrdered(
         AscendC::SetFlag<AscendC::HardEvent::MTE3_S>(EVENT_ID0);
         AscendC::WaitFlag<AscendC::HardEvent::MTE3_S>(EVENT_ID0);
 
-        DataAsFlagFillEpochFlags(flagScratch, batchBlocks, epoch);
-        DataAsFlagCopyEpochFlagsToGM(dstDataAsFlagGM, sentBlocks, flagScratch, batchBlocks);
+        DataAsFlagWriteBatchCommitFlag(dstDataAsFlagGM, sentBlocks, scratch, batchBlocks, DataAsFlagCommitEpoch(epoch));
         AscendC::SetFlag<AscendC::HardEvent::MTE3_S>(EVENT_ID0);
         AscendC::WaitFlag<AscendC::HardEvent::MTE3_S>(EVENT_ID0);
 
@@ -432,18 +427,14 @@ __aicore__ inline bool DataAsFlagCheckBatchEpochStrict(
     const __gm__ uint8_t* dataAsFlagGM,
     uint32_t blockOffset,
     uint32_t batchBlocks,
-    uint64_t epoch,
+    uint64_t commitEpoch,
     AscendC::LocalTensor<uint8_t>& scratch)
 {
     if (batchBlocks == 0U) {
         return false;
     }
-    if (!DataAsFlagEpochReady(DataAsFlagLoadEpochFlag(dataAsFlagGM, blockOffset, scratch), epoch)) {
-        return false;
-    }
     const uint32_t lastBlock = blockOffset + batchBlocks - 1U;
-    if (lastBlock != blockOffset &&
-        !DataAsFlagEpochReady(DataAsFlagLoadEpochFlag(dataAsFlagGM, lastBlock, scratch), epoch)) {
+    if (!DataAsFlagEpochReady(DataAsFlagLoadEpochFlag(dataAsFlagGM, lastBlock, scratch), commitEpoch)) {
         return false;
     }
     return true;
@@ -545,14 +536,15 @@ __aicore__ inline bool DataAsFlagCheckAndRecvEpochOrdered(
 
     uint32_t processedBlocks = 0U;
     uint64_t processedBytes = 0U;
+    const uint64_t commitEpoch = DataAsFlagCommitEpoch(epoch);
     while (processedBlocks < totalBlocks) {
         const uint32_t remainingBlocks = totalBlocks - processedBlocks;
         const uint32_t batchBlocks = remainingBlocks < batchCapacity ? remainingBlocks : batchCapacity;
         const uint32_t lastBlock = processedBlocks + batchBlocks - 1U;
-        while (!DataAsFlagEpochReady(DataAsFlagLoadEpochFlag(dataAsFlagGM, lastBlock, recvScratch), epoch)) {
+        while (!DataAsFlagEpochReady(DataAsFlagLoadEpochFlag(dataAsFlagGM, lastBlock, recvScratch), commitEpoch)) {
         }
         if (strict &&
-            !DataAsFlagCheckBatchEpochStrict(dataAsFlagGM, processedBlocks, batchBlocks, epoch, recvScratch)) {
+            !DataAsFlagCheckBatchEpochStrict(dataAsFlagGM, processedBlocks, batchBlocks, commitEpoch, recvScratch)) {
             return false;
         }
 

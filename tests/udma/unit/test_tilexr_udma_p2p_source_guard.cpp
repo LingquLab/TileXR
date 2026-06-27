@@ -38,6 +38,14 @@ void CheckContains(const std::string& path, const std::string& text, const std::
     }
 }
 
+void CheckNotContains(const std::string& path, const std::string& text, const std::string& needle)
+{
+    if (text.find(needle) != std::string::npos) {
+        std::cerr << path << " contains forbidden text: " << needle << std::endl;
+        ++g_failures;
+    }
+}
+
 void TestMemoryConsumeKernelUsesSyncCollectives()
 {
     const std::string path = "tests/udma/demo/tilexr_udma_demo_kernel.cpp";
@@ -90,7 +98,13 @@ void TestDataAsFlagEpochOrderedSource()
     const std::string headerPath = "src/include/tilexr_data_as_flag.h";
     const std::string headerText = ReadFile(headerPath);
     CheckContains(headerPath, headerText, "DataAsFlagEpochReady");
-    CheckContains(headerPath, headerText, "lastBlock != blockOffset");
+    CheckContains(headerPath, headerText, "DataAsFlagCommitEpoch");
+    CheckContains(headerPath, headerText, "DataAsFlagWriteBatchCommitFlag");
+    CheckContains(headerPath, headerText, "DATA_AS_FLAG_COMMIT_BIT");
+    CheckContains(headerPath, headerText, "const uint64_t commitEpoch = DataAsFlagCommitEpoch(epoch)");
+    CheckContains(headerPath, headerText, "DataAsFlagEpochReady(DataAsFlagLoadEpochFlag(dataAsFlagGM, lastBlock, recvScratch), commitEpoch)");
+    CheckNotContains(headerPath, headerText, "DataAsFlagCopyEpochFlagsToGM");
+    CheckNotContains(headerPath, headerText, "return DataAsFlagMaxRecvBlocks(scratchBytes);");
 
     const std::string hostPath = "tests/udma/demo/tilexr_udma_demo.cpp";
     const std::string hostText = ReadFile(hostPath);
