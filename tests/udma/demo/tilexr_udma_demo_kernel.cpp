@@ -805,3 +805,143 @@ void launch_tilexr_udma_registered_smoke(
     tilexr_udma_registered_smoke_kernel<<<blockDim, nullptr, stream>>>(
         commArgs, local, debug, bytes, signal);
 }
+
+// ---------------------------------------------------------------------------
+// Latency micro-kernels (testType 4 = P2P-only, testType 5 = DataCopy-only).
+// These mirror the two halves of tilexr_udma_all_to_all_kernel so the P2P
+// communication latency and the local DataCopy latency can be measured in
+// isolation. Each block handles exactly one peer (block b -> peer b); for
+// the P2P kernel the self-peer (peer == rank) is skipped so that block does
+// no network work, and for the DataCopy kernel every block performs a local
+// GM->UB->GM copy of the same payload size as one alltoall peer slice.
+// ---------------------------------------------------------------------------
+
+extern "C" __global__ __aicore__ void tilexr_udma_p2p_latency_kernel(
+    GM_ADDR commArgsGM, GM_ADDR inputGM, GM_ADDR outputGM, GM_ADDR debugGM,
+    int32_t elementsPerPeer, uint64_t outputByteOffset, int32_t inputElementOffset,
+    int32_t chunkElements)
+{
+    auto args = reinterpret_cast<__gm__ TileXR::CommArgs*>(commArgsGM);
+    auto input = reinterpret_cast<__gm__ int32_t*>(inputGM);
+    auto output = reinterpret_cast<__gm__ int32_t*>(outputGM);
+    auto debug = reinterpret_cast<__gm__ int32_t*>(debugGM);
+
+    int32_t rank = args->rank;
+    int32_t rankSize = args->rankSize;
+    bool enabled = TileXR::UDMARegistryEnabled(args);
+
+    const int32_t blockIdx = AscendC::GetBlockIdx();
+    const int32_t blockNum = AscendC::GetBlockNum();
+
+    if (blockIdx == 0 && debug != nullptr) {
+        debug[0] = TILEXR_UDMA_DEMO_MAGIC;
+        debug[1] = rank;
+        debug[2] = rankSize;
+        debug[3] = enabled ? 1 : 0;
+        debug[4] = elementsPerPeer;
+        debug[5] = static_cast<int32_t>(outputByteOffset);
+    }
+    if (!enabled) {
+        return;
+    }
+
+    const int32_t effectiveChunkElements = chunkElements > 0 ? chunkElements : elementsPerPeer;
+    const uint64_t payloadBytes = AllToAllPayloadBytes(effectiveChunkElements);
+    const uint32_t bytes = static_cast<uint32_t>(payloadBytes);
+
+    // One block per peer, skip self (peer == rank): no local copy here.
+    for (int32_t peer = blockIdx; peer < rankSize; peer += blockNum) {
+        if (peer == rank) {
+            continue;
+        }
+        auto localSrc = input + static_cast<uint64_t>(peer) * elementsPerPeer + inputElementOffset;
+        uint64_t remoteOffset = outputByteOffset +
+            static_cast<uint64_t>(rank) * payloadBytes;
+        TileXR::UDMAPutNbi<int32_t>(args, peer, localSrc, remoteOffset, bytes);
+        uint32_t status = TileXR::UDMAQuietStatus(args, peer);
+        if (debug != nullptr && peer < 16) {
+            debug[TILEXR_UDMA_DEMO_DEBUG_UDMA_STATUS_BASE + peer] = static_cast<int32_t>(status);
+        }
+    }
+}
+
+extern "C" __global__ __aicore__ void tilexr_datacopy_latency_kernel(
+    GM_ADDR commArgsGM, GM_ADDR inputGM, GM_ADDR outputGM, GM_ADDR debugGM,
+    int32_t elementsPerPeer, int32_t chunkElements)
+{
+    auto args = reinterpret_cast<__gm__ TileXR::CommArgs*>(commArgsGM);
+    auto input = reinterpret_cast<__gm__ int32_t*>(inputGM);
+    auto output = reinterpret_cast<__gm__ int32_t*>(outputGM);
+    auto debug = reinterpret_cast<__gm__ int32_t*>(debugGM);
+
+    int32_t rank = args->rank;
+    int32_t rankSize = args->rankSize;
+
+    const int32_t blockIdx = AscendC::GetBlockIdx();
+    const int32_t blockNum = AscendC::GetBlockNum();
+
+    if (blockIdx == 0 && debug != nullptr) {
+        debug[0] = TILEXR_UDMA_DEMO_MAGIC;
+        debug[1] = rank;
+        debug[2] = rankSize;
+        debug[3] = 1; // always "enabled" path for datacopy
+        debug[4] = elementsPerPeer;
+    }
+
+    const int32_t effectiveChunkElements = chunkElements > 0 ? chunkElements : elementsPerPeer;
+    const uint64_t payloadBytes = AllToAllPayloadBytes(effectiveChunkElements);
+    const uint32_t bytes = static_cast<uint32_t>(payloadBytes);
+
+    // Each block performs the same GM->UB->GM self-copy that the alltoall
+    // kernel uses for the self-peer slice. block b copies rank b's slice.
+    for (int32_t whichRank = blockIdx; whichRank < rankSize; whichRank += blockNum) {
+        auto selfSrc = input + static_cast<uint64_t>(whichRank) * elementsPerPeer;
+        auto selfDst = output + static_cast<uint64_t>(whichRank) * effectiveChunkElements;
+        constexpr uint32_t SELF_COPY_UB_BYTES = 64 * 1024;
+        AscendC::TPipe pipe;
+        AscendC::TBuf<AscendC::QuePosition::VECCALC> selfCopyTBuf;
+        pipe.InitBuffer(selfCopyTBuf, SELF_COPY_UB_BYTES);
+        AscendC::LocalTensor<uint8_t> selfCopyLocal = selfCopyTBuf.Get<uint8_t>();
+
+        auto selfSrcBytes = reinterpret_cast<__gm__ uint8_t*>(selfSrc);
+        auto selfDstBytes = reinterpret_cast<__gm__ uint8_t*>(selfDst);
+        for (uint32_t offset = 0; offset < bytes; offset += SELF_COPY_UB_BYTES) {
+            uint32_t copyBytes = (bytes - offset < SELF_COPY_UB_BYTES)
+                ? (bytes - offset) : SELF_COPY_UB_BYTES;
+
+            AscendC::GlobalTensor<uint8_t> srcGlobal;
+            srcGlobal.SetGlobalBuffer(selfSrcBytes + offset);
+            AscendC::DataCopyPadExtParams<uint8_t> padIn {false, 0U, 0U, 0};
+            AscendC::DataCopyExtParams copyIn {1U, copyBytes, 0U, 0U, 0U};
+            AscendC::DataCopyPad(selfCopyLocal, srcGlobal, copyIn, padIn);
+            AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE3>(EVENT_ID0);
+            AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE3>(EVENT_ID0);
+
+            AscendC::GlobalTensor<uint8_t> dstGlobal;
+            dstGlobal.SetGlobalBuffer(selfDstBytes + offset);
+            AscendC::DataCopyExtParams copyOut {1U, copyBytes, 0U, 0U, 0U};
+            AscendC::DataCopyPad(dstGlobal, selfCopyLocal, copyOut);
+            AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
+            AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
+        }
+        AscendC::PipeBarrier<PIPE_ALL>();
+    }
+}
+
+void launch_tilexr_udma_p2p_latency(
+    uint32_t blockDim, void* stream, GM_ADDR commArgs, GM_ADDR input, GM_ADDR output,
+    GM_ADDR debug, int32_t elementsPerPeer, uint64_t outputByteOffset, int32_t inputElementOffset,
+    int32_t chunkElements)
+{
+    tilexr_udma_p2p_latency_kernel<<<blockDim, nullptr, stream>>>(
+        commArgs, input, output, debug, elementsPerPeer, outputByteOffset, inputElementOffset, chunkElements);
+}
+
+void launch_tilexr_datacopy_latency(
+    uint32_t blockDim, void* stream, GM_ADDR commArgs, GM_ADDR input, GM_ADDR output,
+    GM_ADDR debug, int32_t elementsPerPeer, int32_t chunkElements)
+{
+    tilexr_datacopy_latency_kernel<<<blockDim, nullptr, stream>>>(
+        commArgs, input, output, debug, elementsPerPeer, chunkElements);
+}
+

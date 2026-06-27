@@ -34,6 +34,13 @@ extern void launch_tilexr_udma_all_to_all(
     uint32_t blockDim, void* stream, GM_ADDR commArgs, GM_ADDR input, GM_ADDR output,
     GM_ADDR debug, int32_t elementsPerPeer, uint64_t outputByteOffset, int32_t inputElementOffset,
     int32_t chunkElements);
+extern void launch_tilexr_udma_p2p_latency(
+    uint32_t blockDim, void* stream, GM_ADDR commArgs, GM_ADDR input, GM_ADDR output,
+    GM_ADDR debug, int32_t elementsPerPeer, uint64_t outputByteOffset, int32_t inputElementOffset,
+    int32_t chunkElements);
+extern void launch_tilexr_datacopy_latency(
+    uint32_t blockDim, void* stream, GM_ADDR commArgs, GM_ADDR input, GM_ADDR output,
+    GM_ADDR debug, int32_t elementsPerPeer, int32_t chunkElements);
 extern void launch_tilexr_all_to_all_ipc_scatter(
     uint32_t blockDim, void* stream, GM_ADDR commArgs, GM_ADDR input, GM_ADDR debug, int32_t elementsPerPeer);
 extern void launch_tilexr_all_to_all_ipc_gather(
@@ -616,9 +623,9 @@ int main(int argc, char** argv)
         return 1;
     }
 
-    bool isAllToAll = testType == 2;
+    bool isAllToAll = testType == 2 || testType == 4 || testType == 5;
     bool isAllReduce = testType == 3;
-    bool strictAllToAllUdma = isAllToAll && GetEnvInt("TILEXR_DEMO_ALLTOALL_USE_UDMA", 0) != 0;
+    bool strictAllToAllUdma = isAllToAll && (testType == 4 || GetEnvInt("TILEXR_DEMO_ALLTOALL_USE_UDMA", 0) != 0);
     int allToAllRepeat = isAllToAll ? std::max(1, GetEnvInt("TILEXR_DEMO_ALLTOALL_REPEAT", 1)) : 1;
     bool syncAllToAllAtEnd =
         isAllToAll && GetEnvInt("TILEXR_DEMO_ALLTOALL_SYNC_AT_END", 0) != 0;
@@ -775,7 +782,7 @@ int main(int argc, char** argv)
         return 1;
     }
 
-    if (testType == 2) {
+    if (isAllToAll) {
         if (forceAllToAllIpcFallback) {
             PrintStatus(rank, std::string("skip all-to-all UDMA kernel; use ") + allToAllIpcFallbackLabel);
         } else if (chunkedStrictAllToAll) {
@@ -804,10 +811,21 @@ int main(int argc, char** argv)
                     udmaRegistered = true;
                 }
                 PrintStatus(rank, "launch all-to-all kernel pass=" + std::to_string(pass));
-                launch_tilexr_udma_all_to_all(
-                    static_cast<uint32_t>(rankSize), stream, commArgsDev, reinterpret_cast<GM_ADDR>(input), reinterpret_cast<GM_ADDR>(output),
-                    reinterpret_cast<GM_ADDR>(debug), chunkElements, static_cast<uint64_t>(outputOffset),
-                    0, chunkElements);
+                if (testType == 4) {
+                    launch_tilexr_udma_p2p_latency(
+                        static_cast<uint32_t>(rankSize), stream, commArgsDev, reinterpret_cast<GM_ADDR>(input), reinterpret_cast<GM_ADDR>(output),
+                        reinterpret_cast<GM_ADDR>(debug), chunkElements, static_cast<uint64_t>(outputOffset),
+                        0, chunkElements);
+                } else if (testType == 5) {
+                    launch_tilexr_datacopy_latency(
+                        static_cast<uint32_t>(rankSize), stream, commArgsDev, reinterpret_cast<GM_ADDR>(input), reinterpret_cast<GM_ADDR>(output),
+                        reinterpret_cast<GM_ADDR>(debug), chunkElements, chunkElements);
+                } else {
+                    launch_tilexr_udma_all_to_all(
+                        static_cast<uint32_t>(rankSize), stream, commArgsDev, reinterpret_cast<GM_ADDR>(input), reinterpret_cast<GM_ADDR>(output),
+                        reinterpret_cast<GM_ADDR>(debug), chunkElements, static_cast<uint64_t>(outputOffset),
+                        0, chunkElements);
+                }
                 if (!CheckAcl(rank, "aclrtSynchronizeStream", aclrtSynchronizeStream(stream)) ||
                     !DemoBarrierAll(rank, rankSize, "all ranks completed demo kernels")) {
                     if (udmaRegistered) {
@@ -857,10 +875,21 @@ int main(int argc, char** argv)
                 if (iter == 0) {
                     PrintStatus(rank, "launch all-to-all kernel repeat=" + std::to_string(allToAllRepeat));
                 }
-                launch_tilexr_udma_all_to_all(
-                    static_cast<uint32_t>(rankSize), stream, commArgsDev, reinterpret_cast<GM_ADDR>(input), reinterpret_cast<GM_ADDR>(output),
-                    reinterpret_cast<GM_ADDR>(debug), elementsPerRank, static_cast<uint64_t>(outputOffset), 0,
-                    elementsPerRank);
+                if (testType == 4) {
+                    launch_tilexr_udma_p2p_latency(
+                        static_cast<uint32_t>(rankSize), stream, commArgsDev, reinterpret_cast<GM_ADDR>(input), reinterpret_cast<GM_ADDR>(output),
+                        reinterpret_cast<GM_ADDR>(debug), elementsPerRank, static_cast<uint64_t>(outputOffset), 0,
+                        elementsPerRank);
+                } else if (testType == 5) {
+                    launch_tilexr_datacopy_latency(
+                        static_cast<uint32_t>(rankSize), stream, commArgsDev, reinterpret_cast<GM_ADDR>(input), reinterpret_cast<GM_ADDR>(output),
+                        reinterpret_cast<GM_ADDR>(debug), elementsPerRank, elementsPerRank);
+                } else {
+                    launch_tilexr_udma_all_to_all(
+                        static_cast<uint32_t>(rankSize), stream, commArgsDev, reinterpret_cast<GM_ADDR>(input), reinterpret_cast<GM_ADDR>(output),
+                        reinterpret_cast<GM_ADDR>(debug), elementsPerRank, static_cast<uint64_t>(outputOffset), 0,
+                        elementsPerRank);
+                }
                 if (!syncAllToAllAtEnd &&
                     !CheckAcl(rank, "aclrtSynchronizeStream", aclrtSynchronizeStream(stream))) {
                     if (udmaRegistered) {
