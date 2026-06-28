@@ -41,6 +41,18 @@ extern void launch_tilexr_udma_p2p_latency(
 extern void launch_tilexr_datacopy_latency(
     uint32_t blockDim, void* stream, GM_ADDR commArgs, GM_ADDR input, GM_ADDR output,
     GM_ADDR debug, int32_t elementsPerPeer, int32_t chunkElements);
+extern void launch_tilexr_udma_all_to_all_fused(
+    uint32_t blockDim, void* stream, GM_ADDR commArgs, GM_ADDR input, GM_ADDR output,
+    GM_ADDR udmaMem, GM_ADDR signal, GM_ADDR debug, int32_t elementsPerPeer,
+    uint64_t udmaMemByteOffset, uint64_t signalByteOffsetBase,
+    int32_t chunkElements, uint32_t passCount, uint32_t loopCount);
+extern void launch_tilexr_udma_all_to_all_bigdata(
+    uint32_t blockDim, void* stream, GM_ADDR commArgs, GM_ADDR input, GM_ADDR output,
+    GM_ADDR udmaMem, GM_ADDR debug, int32_t elementsPerPeer,
+    uint64_t dataOffset, uint64_t readyPayloadOffset, uint64_t ackPayloadOffset,
+    uint64_t readySignalOffset, uint64_t ackSignalOffset,
+    int32_t chunkElements, uint32_t passCount, uint32_t loopCount, uint64_t tokenBase,
+    uint32_t profileStage);
 extern void launch_tilexr_all_to_all_ipc_scatter(
     uint32_t blockDim, void* stream, GM_ADDR commArgs, GM_ADDR input, GM_ADDR debug, int32_t elementsPerPeer);
 extern void launch_tilexr_all_to_all_ipc_gather(
@@ -69,12 +81,15 @@ constexpr int kDebugIpcScatter = kDebugUdmaStatusBase + TileXR::TILEXR_MAX_RANK_
 constexpr int kDebugIpcGather = kDebugIpcScatter + 1;
 constexpr int kDebugAllReduceScatter = kDebugIpcGather + 1;
 constexpr int kDebugAllReduceSum = kDebugAllReduceScatter + 1;
-constexpr size_t kDebugWords = kDebugAllReduceSum + 1;
+constexpr int kDebugRecvSlotSampleBase = kDebugUdmaStatusBase + 160;
+constexpr int kDebugReadySeenBase = kDebugUdmaStatusBase + 208;
+constexpr size_t kDebugWords = kDebugReadySeenBase + TileXR::TILEXR_MAX_RANK_SIZE;
 constexpr int kDefaultCommPort = 10067;
 constexpr int kDemoBarrierPortOffset = 97;
 constexpr size_t kUdmaRegistrationAlignment = 2 * 1024 * 1024;
 constexpr int kConnectRetryCount = 500;
 constexpr int kConnectRetrySleepMs = 10;
+constexpr int kBigDataProfileStageFull = 8;
 
 struct BarrierEndpoint {
     uint16_t port;
@@ -466,6 +481,12 @@ void PrintAllToAllUdmaDebug(int rank, int rankSize, const std::vector<int32_t>& 
     constexpr int remoteBaseLowBase = kDebugUdmaStatusBase + 80;
     constexpr int memAddrLowBase = kDebugUdmaStatusBase + 96;
     constexpr int tpnBase = kDebugUdmaStatusBase + 112;
+    constexpr int sendSampleBase = kDebugUdmaStatusBase + 128;
+    constexpr int recvSampleBase = kDebugUdmaStatusBase + 144;
+    constexpr int recvSlotSampleBase = kDebugUdmaStatusBase + 160;
+    constexpr int remoteDataOffsetBase = kDebugUdmaStatusBase + 176;
+    constexpr int remoteReadyOffsetBase = kDebugUdmaStatusBase + 192;
+    constexpr int readySeenBase = kDebugUdmaStatusBase + 208;
     std::cout << "[rank " << rank << "] alltoall udma peer debug:";
     for (int peer = 0; peer < rankSize && peer < 16; ++peer) {
         std::cout << " peer" << peer
@@ -476,6 +497,12 @@ void PrintAllToAllUdmaDebug(int rank, int rankSize, const std::vector<int32_t>& 
                   << ",regLo=" << debug[remoteBaseLowBase + peer]
                   << ",memLo=" << debug[memAddrLowBase + peer]
                   << ",tpn=" << debug[tpnBase + peer]
+                  << ",send0=" << debug[sendSampleBase + peer]
+                  << ",recv0=" << debug[recvSampleBase + peer]
+                  << ",slot0=" << debug[recvSlotSampleBase + peer]
+                  << ",rDataOff=" << debug[remoteDataOffsetBase + peer]
+                  << ",rReadyOff=" << debug[remoteReadyOffsetBase + peer]
+                  << ",ready=" << debug[readySeenBase + peer]
                   << "}";
     }
     std::cout << std::endl;
@@ -623,16 +650,27 @@ int main(int argc, char** argv)
         return 1;
     }
 
-    bool isAllToAll = testType == 2 || testType == 4 || testType == 5;
+    bool isAllToAll = testType == 2 || testType == 4 || testType == 5 || testType == 6 || testType == 7;
     bool isAllReduce = testType == 3;
-    bool strictAllToAllUdma = isAllToAll && (testType == 4 || GetEnvInt("TILEXR_DEMO_ALLTOALL_USE_UDMA", 0) != 0);
+    bool strictAllToAllUdma =
+        isAllToAll && (testType == 4 || testType == 7 || GetEnvInt("TILEXR_DEMO_ALLTOALL_USE_UDMA", 0) != 0);
     int allToAllRepeat = isAllToAll ? std::max(1, GetEnvInt("TILEXR_DEMO_ALLTOALL_REPEAT", 1)) : 1;
+    int allToAllWarmup = isAllToAll ? std::max(0, GetEnvInt("TILEXR_DEMO_ALLTOALL_WARMUP", 0)) : 0;
+    int bigDataProfileStage = testType == 7 ?
+        GetEnvInt("TILEXR_DEMO_BIGDATA_PROFILE_STAGE", kBigDataProfileStageFull) :
+        kBigDataProfileStageFull;
+    bigDataProfileStage = std::max(0, std::min(bigDataProfileStage, kBigDataProfileStageFull));
+    bool bigDataProfilePartial = testType == 7 && bigDataProfileStage < kBigDataProfileStageFull;
     bool syncAllToAllAtEnd =
         isAllToAll && GetEnvInt("TILEXR_DEMO_ALLTOALL_SYNC_AT_END", 0) != 0;
-    bool useAllToAllPlainIpc = isAllToAll && GetEnvInt("TILEXR_DEMO_ALLTOALL_PLAIN_IPC", 0) != 0;
-    bool useAllToAllFusedIpc = isAllToAll && GetEnvInt("TILEXR_DEMO_ALLTOALL_FUSED_IPC", 0) != 0;
+    bool useAllToAllPlainIpc =
+        isAllToAll && testType != 7 && GetEnvInt("TILEXR_DEMO_ALLTOALL_PLAIN_IPC", 0) != 0;
+    bool useAllToAllFusedIpc =
+        isAllToAll && testType != 7 && GetEnvInt("TILEXR_DEMO_ALLTOALL_FUSED_IPC", 0) != 0;
     bool dumpAllToAllOnStrictFail = isAllToAll && GetEnvInt("TILEXR_DEMO_ALLTOALL_DUMP_ON_STRICT_FAIL", 0) != 0;
-    bool useAllToAllDataAsFlagIpc = isAllToAll && !strictAllToAllUdma && !useAllToAllPlainIpc && !useAllToAllFusedIpc;
+    bool useAllToAllDataAsFlagIpc =
+        isAllToAll && testType != 6 && testType != 7 &&
+        !strictAllToAllUdma && !useAllToAllPlainIpc && !useAllToAllFusedIpc;
     const char* allToAllIpcFallbackLabel =
         useAllToAllFusedIpc ? "fused IPC" :
         (useAllToAllPlainIpc ? "plain IPC fallback" : "data-as-flag IPC fallback");
@@ -643,6 +681,9 @@ int main(int argc, char** argv)
     const TileXR::Demo::AllToAllChunkPlan chunkPlan =
         isAllToAll ? TileXR::Demo::PlanAllToAllUdmaChunks(rankSize, elementsPerRank) :
             TileXR::Demo::AllToAllChunkPlan {};
+    const TileXR::Demo::AllToAllBigDataPlan bigDataPlan =
+        isAllToAll ? TileXR::Demo::PlanAllToAllBigDataUdma(rankSize, elementsPerRank) :
+            TileXR::Demo::AllToAllBigDataPlan {};
     if (isAllToAll) {
         const size_t dataAsFlagStagingBytes = AllToAllDataAsFlagStagingBytes(rankSize, elementsPerRank);
         const size_t plainIpcStagingBytes = AllToAllPlainIpcStagingBytes(rankSize, elementsPerRank);
@@ -668,22 +709,46 @@ int main(int argc, char** argv)
         }
         PrintStatus(rank, "alltoall repeat=" + std::to_string(allToAllRepeat) +
             " syncAtEnd=" + std::string(syncAllToAllAtEnd ? "true" : "false"));
+        if (testType == 7) {
+            PrintStatus(rank, "bigdata profile stage=" + std::to_string(bigDataProfileStage) +
+                " fullStage=" + std::to_string(kBigDataProfileStageFull));
+        }
         PrintStatus(rank, "alltoall UDMA chunk plan: passCount=" + std::to_string(chunkPlan.passCount) +
             " chunkElements=" + std::to_string(chunkPlan.chunkElements) +
             " registeredBytes=" + std::to_string(chunkPlan.registeredBytes));
+        if (testType == 7) {
+            PrintStatus(rank, "alltoall bigdata UDMA plan: passCount=" + std::to_string(bigDataPlan.passCount) +
+                " chunkElements=" + std::to_string(bigDataPlan.chunkElements) +
+                " dataBytes=" + std::to_string(bigDataPlan.dataBytes) +
+                " readyPayloadOffset=" + std::to_string(bigDataPlan.readyPayloadOffset) +
+                " ackPayloadOffset=" + std::to_string(bigDataPlan.ackPayloadOffset) +
+                " readySignalOffset=" + std::to_string(bigDataPlan.readySignalOffset) +
+                " ackSignalOffset=" + std::to_string(bigDataPlan.ackSignalOffset) +
+                " registeredBytes=" + std::to_string(bigDataPlan.registeredBytes));
+        }
     }
     size_t inputOffset = 0;
-    const size_t activeBytesPerRank = isAllToAll && strictAllToAllUdma ? chunkPlan.chunkBytesPerRank : dataBytes;
+    const size_t activeBytesPerRank =
+        isAllToAll && testType == 7 ? 0 :
+        isAllToAll && (strictAllToAllUdma || testType == 6) ?
+            chunkPlan.chunkBytesPerRank : dataBytes;
     size_t outputOffset = hasOutput ? activeBytesPerRank : 0;
     size_t signalBytes = static_cast<size_t>(rankSize) * sizeof(uint64_t);
-    size_t signalOffset = hasOutput ? (outputOffset + activeBytesPerRank) : activeBytesPerRank;
-    size_t payloadBytes = signalOffset + signalBytes;
+    size_t signalOffset = testType == 7 ? bigDataPlan.readySignalOffset :
+        (hasOutput ? (outputOffset + activeBytesPerRank) : activeBytesPerRank);
+    size_t payloadBytes = testType == 7 ? bigDataPlan.registeredBytes : (signalOffset + signalBytes);
     size_t allocBytes = ((payloadBytes + kUdmaRegistrationAlignment - 1) / kUdmaRegistrationAlignment) *
         kUdmaRegistrationAlignment;
     size_t registeredBytes = allocBytes;
-    if (isAllToAll && strictAllToAllUdma) {
+    if (isAllToAll && testType == 7) {
+        registeredBytes = ((bigDataPlan.registeredBytes + kUdmaRegistrationAlignment - 1) /
+            kUdmaRegistrationAlignment) * kUdmaRegistrationAlignment;
+    } else if (isAllToAll && (strictAllToAllUdma || testType == 6)) {
         registeredBytes = ((chunkPlan.registeredBytes + kUdmaRegistrationAlignment - 1) /
             kUdmaRegistrationAlignment) * kUdmaRegistrationAlignment;
+    }
+    if (allocBytes < registeredBytes) {
+        allocBytes = registeredBytes;
     }
     if (!CheckAcl(rank, "aclrtMalloc debug", aclrtMalloc(reinterpret_cast<void**>(&debug),
             kDebugWords * sizeof(int32_t), ACL_MEM_MALLOC_HUGE_FIRST)) ||
@@ -696,7 +761,8 @@ int main(int argc, char** argv)
     auto input = reinterpret_cast<int32_t*>(static_cast<uint8_t*>(registeredMemory) + inputOffset);
     auto output = reinterpret_cast<int32_t*>(static_cast<uint8_t*>(registeredMemory) + outputOffset);
     auto signals = reinterpret_cast<uint64_t*>(static_cast<uint8_t*>(registeredMemory) + signalOffset);
-    const bool chunkedStrictAllToAll = isAllToAll && strictAllToAllUdma && chunkPlan.passCount > 1;
+    const bool chunkedStrictAllToAll =
+        isAllToAll && testType != 7 && strictAllToAllUdma && chunkPlan.passCount > 1;
     if (useAllToAllFusedIpc) {
         PrintStatus(rank, "skip TileXRUDMARegister for alltoall fused IPC path");
         forceAllToAllIpcFallback = true;
@@ -708,6 +774,10 @@ int main(int argc, char** argv)
         forceAllToAllIpcFallback = true;
     } else if (chunkedStrictAllToAll) {
         PrintStatus(rank, "defer TileXRUDMARegister to per-pass registered output chunk");
+    } else if (testType == 6) {
+        PrintStatus(rank, "defer TileXRUDMARegister to fused alltoall relay chunk");
+    } else if (testType == 7) {
+        PrintStatus(rank, "defer TileXRUDMARegister to bigdata alltoall relay buffer");
     } else {
         int registerRet =
             TileXRUDMARegister(comm, static_cast<GM_ADDR>(registeredMemory), registeredBytes, &udmaHandle);
@@ -752,7 +822,7 @@ int main(int argc, char** argv)
 
     const char* inputName = isAllToAll ? "alltoall input" : (isAllReduce ? "allreduce input" : "data");
     bool initOk = true;
-    if (!chunkedStrictAllToAll) {
+    if (!chunkedStrictAllToAll && testType != 7) {
         initOk = CopyHostToDevice(rank, input, dataCount * sizeof(int32_t),
             hostData.data(), dataCount * sizeof(int32_t), inputName);
         if (hasOutput) {
@@ -782,9 +852,223 @@ int main(int argc, char** argv)
         return 1;
     }
 
-    if (isAllToAll) {
-        if (forceAllToAllIpcFallback) {
-            PrintStatus(rank, std::string("skip all-to-all UDMA kernel; use ") + allToAllIpcFallbackLabel);
+    if (testType == 7) {
+        void* bigInput = nullptr;
+        void* bigOutput = nullptr;
+        const size_t bigDataBytes = dataBytes;
+        if (!CheckAcl(rank, "aclrtMalloc bigdata input",
+                aclrtMalloc(&bigInput, bigDataBytes, ACL_MEM_MALLOC_HUGE_FIRST)) ||
+            !CheckAcl(rank, "aclrtMalloc bigdata output",
+                aclrtMalloc(&bigOutput, bigDataBytes, ACL_MEM_MALLOC_HUGE_FIRST))) {
+            aclrtFree(bigInput);
+            aclrtFree(bigOutput);
+            Cleanup(comm, stream, registeredMemory, debug, rank, deviceId);
+            return 1;
+        }
+        if (!CopyHostToDevice(rank, bigInput, dataCount * sizeof(int32_t),
+                hostData.data(), dataCount * sizeof(int32_t), "bigdata alltoall input") ||
+            !CopyHostToDevice(rank, bigOutput, dataCount * sizeof(int32_t),
+                hostOutput.data(), dataCount * sizeof(int32_t), "bigdata alltoall output")) {
+            aclrtFree(bigInput);
+            aclrtFree(bigOutput);
+            Cleanup(comm, stream, registeredMemory, debug, rank, deviceId);
+            return 1;
+        }
+        std::vector<uint8_t> zeroBigControl(bigDataPlan.controlBytes + bigDataPlan.signalBytes, 0);
+        if (!CopyHostToDevice(rank, static_cast<uint8_t*>(registeredMemory) + bigDataPlan.readyPayloadOffset,
+                bigDataPlan.controlBytes + bigDataPlan.signalBytes,
+                zeroBigControl.data(), zeroBigControl.size(),
+                "bigdata ready/ack payload+signals zero")) {
+            aclrtFree(bigInput);
+            aclrtFree(bigOutput);
+            Cleanup(comm, stream, registeredMemory, debug, rank, deviceId);
+            return 1;
+        }
+        if (!udmaRegistered) {
+            int registerRet = TileXRUDMARegister(comm, static_cast<GM_ADDR>(registeredMemory),
+                registeredBytes, &udmaHandle);
+            if (registerRet != TileXR::TILEXR_SUCCESS) {
+                std::cerr << "[rank " << rank << "] ERROR: bigdata alltoall UDMA registration failed"
+                          << " ret=" << registerRet << " regBytes=" << registeredBytes << std::endl;
+                aclrtFree(bigInput);
+                aclrtFree(bigOutput);
+                Cleanup(comm, stream, registeredMemory, debug, rank, deviceId);
+                return 1;
+            }
+            udmaRegistered = true;
+        }
+        PrintStatus(rank, "bigdata alltoall registered dataBytes=" + std::to_string(bigDataPlan.dataBytes) +
+            " readyPayloadOffset=" + std::to_string(bigDataPlan.readyPayloadOffset) +
+            " ackPayloadOffset=" + std::to_string(bigDataPlan.ackPayloadOffset) +
+            " readySignalOffset=" + std::to_string(bigDataPlan.readySignalOffset) +
+            " ackSignalOffset=" + std::to_string(bigDataPlan.ackSignalOffset) +
+            " regBytes=" + std::to_string(registeredBytes) +
+            " passCount=" + std::to_string(bigDataPlan.passCount) +
+            " chunkElements=" + std::to_string(bigDataPlan.chunkElements) +
+            " repeat=" + std::to_string(allToAllRepeat) +
+            " profileStage=" + std::to_string(bigDataProfileStage));
+        if (!CheckAcl(rank, "aclrtSynchronizeStream bigdata prime", aclrtSynchronizeStream(stream)) ||
+            !DemoBarrierAll(rank, rankSize, "all ranks bigdata prime")) {
+            if (udmaRegistered) {
+                CheckTileXR(rank, "TileXRUDMAUnregister", TileXRUDMAUnregister(comm, udmaHandle));
+                udmaRegistered = false;
+            }
+            aclrtFree(bigInput);
+            aclrtFree(bigOutput);
+            Cleanup(comm, stream, registeredMemory, debug, rank, deviceId);
+            return 1;
+        }
+
+        auto a2aStart = std::chrono::steady_clock::now();
+        for (int iter = 0; iter < allToAllRepeat; ++iter) {
+            const uint64_t tokenBase =
+                static_cast<uint64_t>(iter) * static_cast<uint64_t>(bigDataPlan.passCount);
+            launch_tilexr_udma_all_to_all_bigdata(
+                TileXR::Demo::AllToAllBigDataBlockDim(rankSize), stream, commArgsDev,
+                reinterpret_cast<GM_ADDR>(bigInput), reinterpret_cast<GM_ADDR>(bigOutput),
+                reinterpret_cast<GM_ADDR>(registeredMemory), reinterpret_cast<GM_ADDR>(debug),
+                elementsPerRank, 0, bigDataPlan.readyPayloadOffset, bigDataPlan.ackPayloadOffset,
+                bigDataPlan.readySignalOffset, bigDataPlan.ackSignalOffset,
+                bigDataPlan.chunkElements, bigDataPlan.passCount, 1, tokenBase,
+                static_cast<uint32_t>(bigDataProfileStage));
+        }
+        if (!CheckAcl(rank, "aclrtSynchronizeStream post-alltoall", aclrtSynchronizeStream(stream))) {
+            if (udmaRegistered) {
+                CheckTileXR(rank, "TileXRUDMAUnregister", TileXRUDMAUnregister(comm, udmaHandle));
+                udmaRegistered = false;
+            }
+            aclrtFree(bigInput);
+            aclrtFree(bigOutput);
+            Cleanup(comm, stream, registeredMemory, debug, rank, deviceId);
+            return 1;
+        }
+        auto a2aEnd = std::chrono::steady_clock::now();
+        double a2aMs = std::chrono::duration<double, std::milli>(a2aEnd - a2aStart).count();
+        double a2aPerIterUs = (allToAllRepeat > 0) ?
+            (a2aMs * 1000.0 / static_cast<double>(allToAllRepeat)) : 0.0;
+        double payload = static_cast<double>(rankSize) * static_cast<double>(elementsPerRank) * sizeof(int32_t);
+        double bwGbs = (a2aPerIterUs > 0.0) ? (payload / (a2aPerIterUs * 1e3)) : 0.0;
+        std::cout << "[rank " << rank << "] alltoall udma-bigdata " << allToAllRepeat
+                  << " iters(total=" << bigDataPlan.passCount << " pass/iter) total=" << a2aMs
+                  << " ms perIter=" << a2aPerIterUs
+                  << " us payload=" << payload << " bytes bw=" << bwGbs << " GB/s" << std::endl;
+
+        bool bigDataCopyBackOk = true;
+        if (!bigDataProfilePartial) {
+            bigDataCopyBackOk = CopyDeviceToHost(rank, hostOutput.data(), dataCount * sizeof(int32_t),
+                bigOutput, dataCount * sizeof(int32_t), "bigdata alltoall output");
+        }
+        bigDataCopyBackOk = CopyDeviceToHost(rank, hostDebug.data(), hostDebug.size() * sizeof(int32_t),
+            debug, hostDebug.size() * sizeof(int32_t), "debug after bigdata alltoall") && bigDataCopyBackOk;
+        if (!bigDataCopyBackOk) {
+            if (udmaRegistered) {
+                CheckTileXR(rank, "TileXRUDMAUnregister", TileXRUDMAUnregister(comm, udmaHandle));
+                udmaRegistered = false;
+            }
+            aclrtFree(bigInput);
+            aclrtFree(bigOutput);
+            Cleanup(comm, stream, registeredMemory, debug, rank, deviceId);
+            return 1;
+        }
+        if (udmaRegistered) {
+            CheckTileXR(rank, "TileXRUDMAUnregister", TileXRUDMAUnregister(comm, udmaHandle));
+            udmaRegistered = false;
+        }
+        aclrtFree(bigInput);
+        aclrtFree(bigOutput);
+    } else if (testType == 6) {
+        // Forced UDMA alltoall (no IPC fallback). Single kernel launch loops
+        // REPEAT times internally; stream sync only after all loops.
+        // input/output: independent full-size GM, NOT registered.
+        // udmaMem+signals: registered chunk-sized relay, reused per pass.
+        void* fusedInput = nullptr;
+        void* fusedOutput = nullptr;
+        const size_t fusedDataBytes = dataBytes;
+        if (!CheckAcl(rank, "aclrtMalloc fused input", aclrtMalloc(&fusedInput, fusedDataBytes, ACL_MEM_MALLOC_HUGE_FIRST)) ||
+            !CheckAcl(rank, "aclrtMalloc fused output", aclrtMalloc(&fusedOutput, fusedDataBytes, ACL_MEM_MALLOC_HUGE_FIRST))) {
+            aclrtFree(fusedInput); aclrtFree(fusedOutput);
+            Cleanup(comm, stream, registeredMemory, debug, rank, deviceId);
+            return 1;
+        }
+        if (!CopyHostToDevice(rank, fusedInput, dataCount * sizeof(int32_t), hostData.data(), dataCount * sizeof(int32_t), "fused alltoall input")) {
+            aclrtFree(fusedInput); aclrtFree(fusedOutput);
+            Cleanup(comm, stream, registeredMemory, debug, rank, deviceId);
+            return 1;
+        }
+        // Registered relay region: [udmaMem chunk | signals].
+        const size_t fusedChunkBytes = chunkPlan.chunkBytesPerRank;
+        const size_t fusedSignalBytes = static_cast<size_t>(rankSize) * sizeof(uint64_t);
+        const size_t fusedRegBytes = ((fusedChunkBytes + fusedSignalBytes + kUdmaRegistrationAlignment - 1) /
+            kUdmaRegistrationAlignment) * kUdmaRegistrationAlignment;
+        if (!udmaRegistered) {
+            int registerRet = TileXRUDMARegister(comm, static_cast<GM_ADDR>(registeredMemory), fusedRegBytes, &udmaHandle);
+            if (registerRet != TileXR::TILEXR_SUCCESS) {
+                std::cerr << "[rank " << rank << "] ERROR: fused alltoall UDMA registration failed"
+                          << " ret=" << registerRet << " regBytes=" << fusedRegBytes << std::endl;
+                aclrtFree(fusedInput); aclrtFree(fusedOutput);
+                Cleanup(comm, stream, registeredMemory, debug, rank, deviceId);
+                return 1;
+            }
+            udmaRegistered = true;
+        }
+        auto fusedUdmaMem = reinterpret_cast<int32_t*>(registeredMemory);
+        auto fusedSignals = reinterpret_cast<uint64_t*>(static_cast<uint8_t*>(registeredMemory) + fusedChunkBytes);
+        const uint64_t fusedUdmaOffset = 0;
+        const uint64_t fusedSignalOffset = fusedChunkBytes;
+        std::vector<uint64_t> zeroSignals(static_cast<size_t>(rankSize), 0);
+        CopyHostToDevice(rank, fusedSignals, zeroSignals.size() * sizeof(uint64_t), zeroSignals.data(), zeroSignals.size() * sizeof(uint64_t), "fused signals zero");
+        PrintStatus(rank, "fused alltoall registered chunkBytes=" + std::to_string(fusedChunkBytes) +
+            " regBytes=" + std::to_string(fusedRegBytes) + " passCount=" + std::to_string(chunkPlan.passCount) +
+            " chunkElements=" + std::to_string(chunkPlan.chunkElements) + " repeat=" + std::to_string(allToAllRepeat));
+        if (!CheckAcl(rank, "aclrtSynchronizeStream fused prime", aclrtSynchronizeStream(stream)) ||
+            !DemoBarrierAll(rank, rankSize, "all ranks fused prime")) {
+            if (udmaRegistered) { CheckTileXR(rank, "TileXRUDMAUnregister", TileXRUDMAUnregister(comm, udmaHandle)); udmaRegistered = false; }
+            aclrtFree(fusedInput); aclrtFree(fusedOutput);
+            Cleanup(comm, stream, registeredMemory, debug, rank, deviceId);
+            return 1;
+        }
+        // Warmup: separate launches (loop=1 each) with per-iter sync+barrier.
+        for (int witer = 0; witer < allToAllWarmup; ++witer) {
+            if (witer == 0) PrintStatus(rank, "warmup fused all-to-all warmup=" + std::to_string(allToAllWarmup));
+            launch_tilexr_udma_all_to_all_fused(
+                static_cast<uint32_t>(rankSize), stream, commArgsDev, reinterpret_cast<GM_ADDR>(fusedInput), reinterpret_cast<GM_ADDR>(fusedOutput),
+                reinterpret_cast<GM_ADDR>(fusedUdmaMem), reinterpret_cast<GM_ADDR>(fusedSignals), reinterpret_cast<GM_ADDR>(debug),
+                elementsPerRank, fusedUdmaOffset, fusedSignalOffset, chunkPlan.chunkElements, chunkPlan.passCount, 1);
+            if (!CheckAcl(rank, "aclrtSynchronizeStream warmup", aclrtSynchronizeStream(stream)) ||
+                !DemoBarrierAll(rank, rankSize, "all ranks completed warmup")) {
+                if (udmaRegistered) { CheckTileXR(rank, "TileXRUDMAUnregister", TileXRUDMAUnregister(comm, udmaHandle)); udmaRegistered = false; }
+                aclrtFree(fusedInput); aclrtFree(fusedOutput);
+                Cleanup(comm, stream, registeredMemory, debug, rank, deviceId);
+                return 1;
+            }
+        }
+        // Timed run: single launch, loop=REPEAT inside kernel, sync only at end.
+        auto a2aStart = std::chrono::steady_clock::now();
+        launch_tilexr_udma_all_to_all_fused(
+            static_cast<uint32_t>(rankSize), stream, commArgsDev, reinterpret_cast<GM_ADDR>(fusedInput), reinterpret_cast<GM_ADDR>(fusedOutput),
+            reinterpret_cast<GM_ADDR>(fusedUdmaMem), reinterpret_cast<GM_ADDR>(fusedSignals), reinterpret_cast<GM_ADDR>(debug),
+            elementsPerRank, fusedUdmaOffset, fusedSignalOffset, chunkPlan.chunkElements, chunkPlan.passCount, static_cast<uint32_t>(allToAllRepeat));
+        if (!CheckAcl(rank, "aclrtSynchronizeStream post-alltoall", aclrtSynchronizeStream(stream))) {
+            if (udmaRegistered) { CheckTileXR(rank, "TileXRUDMAUnregister", TileXRUDMAUnregister(comm, udmaHandle)); udmaRegistered = false; }
+            aclrtFree(fusedInput); aclrtFree(fusedOutput);
+            Cleanup(comm, stream, registeredMemory, debug, rank, deviceId);
+            return 1;
+        }
+        auto a2aEnd = std::chrono::steady_clock::now();
+        {
+            double a2aMs = std::chrono::duration<double, std::milli>(a2aEnd - a2aStart).count();
+            double a2aPerIterUs = (allToAllRepeat > 0) ? (a2aMs * 1000.0 / static_cast<double>(allToAllRepeat)) : 0.0;
+            double payloadBytes = static_cast<double>(rankSize) * static_cast<double>(elementsPerRank) * sizeof(int32_t);
+            double bwGbs = (a2aPerIterUs > 0.0) ? (payloadBytes / (a2aPerIterUs * 1e3)) : 0.0;
+            std::cout << "[rank " << rank << "] alltoall udma-fused " << allToAllRepeat
+                      << " iters(total=" << chunkPlan.passCount << " pass/iter) total=" << a2aMs << " ms perIter=" << a2aPerIterUs
+                      << " us payload=" << payloadBytes << " bytes bw=" << bwGbs << " GB/s" << std::endl;
+        }
+        if (udmaRegistered) { CheckTileXR(rank, "TileXRUDMAUnregister", TileXRUDMAUnregister(comm, udmaHandle)); udmaRegistered = false; }
+        aclrtFree(fusedInput);
+        aclrtFree(fusedOutput);
+    } else if (isAllToAll) {
+        if (forceAllToAllIpcFallback) {            PrintStatus(rank, std::string("skip all-to-all UDMA kernel; use ") + allToAllIpcFallbackLabel);
         } else if (chunkedStrictAllToAll) {
             for (uint32_t pass = 0; pass < chunkPlan.passCount; ++pass) {
                 const int32_t chunkOffset = static_cast<int32_t>(pass) * chunkPlan.chunkElements;
@@ -962,7 +1246,7 @@ int main(int argc, char** argv)
         }
     }
 
-    if (isAllToAll &&
+    if (isAllToAll && testType != 7 &&
         !CopyDeviceToHost(rank, hostDebug.data(), hostDebug.size() * sizeof(int32_t),
             debug, hostDebug.size() * sizeof(int32_t), "debug after alltoall udma")) {
         if (udmaRegistered) {
@@ -973,7 +1257,7 @@ int main(int argc, char** argv)
     }
 
     bool usedIpcFallback = false;
-    bool allToAllUdmaComplete = !isAllToAll || AllToAllUdmaComplete(rankSize, hostDebug);
+    bool allToAllUdmaComplete = !isAllToAll || bigDataProfilePartial || AllToAllUdmaComplete(rankSize, hostDebug);
     if (isAllToAll && strictAllToAllUdma && !allToAllUdmaComplete) {
         std::cerr << "[rank " << rank << "] ERROR: strict alltoall UDMA CQ incomplete:";
         for (int peer = 0; peer < rankSize; ++peer) {
@@ -1131,20 +1415,23 @@ int main(int argc, char** argv)
     }
 
     bool copyBackOk = true;
-    if (!chunkedStrictAllToAll) {
+    if (!chunkedStrictAllToAll && testType != 7) {
         copyBackOk = CopyDeviceToHost(rank, hostData.data(), dataCount * sizeof(int32_t),
             data, dataCount * sizeof(int32_t), "data");
     }
-    if (hasOutput && !chunkedStrictAllToAll) {
+    if (hasOutput && !chunkedStrictAllToAll && testType != 7) {
         const char* outputName = isAllToAll ? "alltoall output" : "allreduce output";
         copyBackOk = CopyDeviceToHost(rank, hostOutput.data(), dataCount * sizeof(int32_t),
             output, dataCount * sizeof(int32_t), outputName) && copyBackOk;
     }
-    if (!copyBackOk ||
-        !CopyDeviceToHost(rank, hostSignals.data(), hostSignals.size() * sizeof(uint64_t),
-            signals, hostSignals.size() * sizeof(uint64_t), "signals") ||
-        !CopyDeviceToHost(rank, hostDebug.data(), hostDebug.size() * sizeof(int32_t),
-            debug, hostDebug.size() * sizeof(int32_t), "debug")) {
+    bool signalsCopyBackOk = true;
+    if (testType != 7) {
+        signalsCopyBackOk = CopyDeviceToHost(rank, hostSignals.data(), hostSignals.size() * sizeof(uint64_t),
+            signals, hostSignals.size() * sizeof(uint64_t), "signals");
+    }
+    bool debugCopyBackOk = CopyDeviceToHost(rank, hostDebug.data(), hostDebug.size() * sizeof(int32_t),
+        debug, hostDebug.size() * sizeof(int32_t), "debug");
+    if (!copyBackOk || !signalsCopyBackOk || !debugCopyBackOk) {
         if (udmaRegistered) {
             CheckTileXR(rank, "TileXRUDMAUnregister", TileXRUDMAUnregister(comm, udmaHandle));
         }
@@ -1172,7 +1459,11 @@ int main(int argc, char** argv)
     }
 
     bool ok = false;
-    if (isAllToAll) {
+    if (bigDataProfilePartial) {
+        PrintStatus(rank, "skip result validation for bigdata profile stage=" +
+            std::to_string(bigDataProfileStage));
+        ok = true;
+    } else if (isAllToAll) {
         ok = ValidateAllToAllData(rank, rankSize, hostOutput, elementsPerRank);
     } else if (isAllReduce) {
         ok = ValidateAllReduceData(rank, rankSize, hostOutput, elementsPerRank);

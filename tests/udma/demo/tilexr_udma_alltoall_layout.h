@@ -26,14 +26,19 @@ struct AllToAllChunkPlan {
 };
 
 constexpr size_t kAllToAllBigDataMaxRegisteredBytes = 64ULL * 1024ULL * 1024ULL;
+constexpr size_t kAllToAllBigDataControlSlotBytes = 64ULL;
+constexpr uint32_t kAllToAllBigDataCopyCoreCount = 32U;
 
 struct AllToAllBigDataPlan {
     uint32_t passCount = 1;
     int32_t chunkElements = 0;
     size_t chunkBytesPerPeer = 0;
     size_t dataBytes = 0;
+    size_t readyPayloadOffset = 0;
+    size_t ackPayloadOffset = 0;
     size_t readySignalOffset = 0;
     size_t ackSignalOffset = 0;
+    size_t controlBytes = 0;
     size_t signalBytes = 0;
     size_t registeredBytes = 0;
 };
@@ -81,14 +86,16 @@ inline AllToAllBigDataPlan PlanAllToAllBigDataUdma(int rankSize, int32_t element
     }
 
     plan.registeredBytes = kAllToAllBigDataMaxRegisteredBytes;
-    plan.signalBytes = 2ULL * static_cast<size_t>(rankSize) * sizeof(uint64_t);
-    if (plan.signalBytes >= plan.registeredBytes) {
+    plan.controlBytes = 2ULL * static_cast<size_t>(rankSize) * kAllToAllBigDataControlSlotBytes;
+    plan.signalBytes = 2ULL * static_cast<size_t>(rankSize) * kAllToAllBigDataControlSlotBytes;
+    if (plan.controlBytes + plan.signalBytes >= plan.registeredBytes) {
         return plan;
     }
 
-    plan.dataBytes = plan.registeredBytes - plan.signalBytes;
+    const size_t dataSlotCount = static_cast<size_t>(rankSize) * 2ULL;
+    plan.dataBytes = plan.registeredBytes - plan.controlBytes - plan.signalBytes;
     plan.chunkElements = static_cast<int32_t>(
-        plan.dataBytes / (static_cast<size_t>(rankSize) * sizeof(int32_t)));
+        plan.dataBytes / (dataSlotCount * sizeof(int32_t)));
     if (plan.chunkElements <= 0) {
         plan.chunkElements = 1;
     }
@@ -97,15 +104,29 @@ inline AllToAllBigDataPlan PlanAllToAllBigDataUdma(int rankSize, int32_t element
     }
 
     plan.chunkBytesPerPeer = static_cast<size_t>(plan.chunkElements) * sizeof(int32_t);
-    plan.dataBytes = static_cast<size_t>(rankSize) * plan.chunkBytesPerPeer;
-    plan.readySignalOffset = plan.dataBytes;
-    plan.ackSignalOffset = plan.readySignalOffset + static_cast<size_t>(rankSize) * sizeof(uint64_t);
-    plan.signalBytes = 2ULL * static_cast<size_t>(rankSize) * sizeof(uint64_t);
-    plan.registeredBytes = plan.dataBytes + plan.signalBytes;
+    plan.dataBytes = dataSlotCount * plan.chunkBytesPerPeer;
+    plan.readyPayloadOffset = plan.dataBytes;
+    plan.ackPayloadOffset =
+        plan.readyPayloadOffset + static_cast<size_t>(rankSize) * kAllToAllBigDataControlSlotBytes;
+    plan.readySignalOffset =
+        plan.ackPayloadOffset + static_cast<size_t>(rankSize) * kAllToAllBigDataControlSlotBytes;
+    plan.ackSignalOffset =
+        plan.readySignalOffset + static_cast<size_t>(rankSize) * kAllToAllBigDataControlSlotBytes;
+    plan.controlBytes = 2ULL * static_cast<size_t>(rankSize) * kAllToAllBigDataControlSlotBytes;
+    plan.signalBytes = 2ULL * static_cast<size_t>(rankSize) * kAllToAllBigDataControlSlotBytes;
+    plan.registeredBytes = plan.dataBytes + plan.controlBytes + plan.signalBytes;
     plan.passCount = static_cast<uint32_t>(
         (static_cast<size_t>(elementsPerPeer) + static_cast<size_t>(plan.chunkElements) - 1) /
         static_cast<size_t>(plan.chunkElements));
     return plan;
+}
+
+inline uint32_t AllToAllBigDataBlockDim(int rankSize)
+{
+    if (rankSize <= 0) {
+        return kAllToAllBigDataCopyCoreCount;
+    }
+    return std::max(static_cast<uint32_t>(rankSize), kAllToAllBigDataCopyCoreCount);
 }
 
 inline void FillAllToAllInput(
