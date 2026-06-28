@@ -1009,6 +1009,13 @@ TileXRComm::~TileXRComm()
         socketExchange_ = nullptr;
     }
     FreePeerMem(commArgs_.dumpAddr);
+    if (udmaRegisteredPtr_ != nullptr && udmaTransport_ != nullptr) {
+        int ret = udmaTransport_->UnregisterMemory(udmaRegisteredPtr_);
+        if (ret != TILEXR_SUCCESS) {
+            TILEXR_LOG(WARN) << "TileXR UDMA memory unregistration failed in destructor: " << ret;
+        }
+        udmaRegisteredPtr_ = nullptr;
+    }
     FreeUDMARegistry();
     FreePeerMem(peerMem_[rank_]);
     FreePeerMem(commArgsPtr_);
@@ -1017,7 +1024,6 @@ TileXRComm::~TileXRComm()
         udmaTransport_->Shutdown();
         udmaTransport_.reset();
     }
-    udmaRegisteredPtr_ = nullptr;
     udmaInfoDev_ = nullptr;
     ResetSDMAState();
 }

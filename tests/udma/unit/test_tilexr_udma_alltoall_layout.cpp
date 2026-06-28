@@ -35,6 +35,14 @@ int g_failures = 0;
         } \
     } while (0)
 
+#define CHECK_NOT_CONTAINS(text, needle) \
+    do { \
+        if ((text).find(needle) != std::string::npos) { \
+            std::cerr << "CHECK_NOT_CONTAINS failed at line " << __LINE__ << ": " << needle << std::endl; \
+            ++g_failures; \
+        } \
+    } while (0)
+
 std::string ReadFile(const std::string& path)
 {
     std::ifstream in(path.c_str());
@@ -133,14 +141,33 @@ void TestAllToAllBigDataPlan()
     const auto plan = TileXR::Demo::PlanAllToAllBigDataUdma(rankSize, elementsPerPeer);
 
     CHECK_EQ(TileXR::Demo::kAllToAllBigDataMaxRegisteredBytes, 64ULL * 1024ULL * 1024ULL);
-    CHECK_EQ(plan.registeredBytes, TileXR::Demo::kAllToAllBigDataMaxRegisteredBytes);
-    CHECK_EQ(plan.signalBytes, 2ULL * static_cast<size_t>(rankSize) * sizeof(uint64_t));
-    CHECK_EQ(plan.readySignalOffset, plan.dataBytes);
-    CHECK_EQ(plan.ackSignalOffset, plan.dataBytes + static_cast<size_t>(rankSize) * sizeof(uint64_t));
-    CHECK_EQ(plan.dataBytes + plan.signalBytes <= plan.registeredBytes, true);
+    CHECK_EQ(TileXR::Demo::kAllToAllBigDataControlSlotBytes, 64ULL);
+    CHECK_EQ(TileXR::Demo::kAllToAllBigDataCoresPerPeer, 3U);
+    CHECK_EQ(TileXR::Demo::kAllToAllBigDataPingPongSlots, 2U);
+    CHECK_EQ(plan.registeredBytes <= TileXR::Demo::kAllToAllBigDataMaxRegisteredBytes, true);
+    const size_t controlGroupBytes =
+        static_cast<size_t>(TileXR::Demo::kAllToAllBigDataPingPongSlots) *
+        static_cast<size_t>(rankSize) * TileXR::Demo::kAllToAllBigDataControlSlotBytes;
+    CHECK_EQ(plan.controlBytes, controlGroupBytes);
+    CHECK_EQ(plan.signalBytes, 2ULL * controlGroupBytes);
+    CHECK_EQ(plan.copyDoneOffset, plan.dataBytes);
+    CHECK_EQ(plan.readySignalOffset, plan.copyDoneOffset + controlGroupBytes);
+    CHECK_EQ(plan.ackSignalOffset, plan.readySignalOffset + controlGroupBytes);
+    CHECK_EQ(plan.registeredBytes, plan.dataBytes + plan.controlBytes + plan.signalBytes);
+    CHECK_EQ(plan.dataBytes,
+             static_cast<size_t>(rankSize - 1) * TileXR::Demo::kAllToAllBigDataPingPongSlots * 2ULL *
+             plan.chunkBytesPerPeer);
     CHECK_EQ(plan.chunkElements > 0, true);
     CHECK_EQ(plan.chunkBytesPerPeer, static_cast<size_t>(plan.chunkElements) * sizeof(int32_t));
     CHECK_EQ(plan.passCount > 1, true);
+}
+
+void TestAllToAllBigDataBlockDim()
+{
+    CHECK_EQ(TileXR::Demo::AllToAllBigDataBlockDim(0), 1U);
+    CHECK_EQ(TileXR::Demo::AllToAllBigDataBlockDim(1), 3U);
+    CHECK_EQ(TileXR::Demo::AllToAllBigDataBlockDim(8), 24U);
+    CHECK_EQ(TileXR::Demo::AllToAllBigDataBlockDim(64), 192U);
 }
 
 void TestDemoDebugLayoutSource()
@@ -152,6 +179,7 @@ void TestDemoDebugLayoutSource()
 
     CHECK_CONTAINS(demo, "kDebugUdmaStatusBase + TileXR::TILEXR_MAX_RANK_SIZE");
     CHECK_CONTAINS(demo, "kDebugIpcGather + 1");
+    CHECK_CONTAINS(demo, "kDebugReadySeenBase + TileXR::TILEXR_MAX_RANK_SIZE");
     CHECK_CONTAINS(kernel, "TILEXR_UDMA_DEMO_DEBUG_UDMA_STATUS_BASE + TileXR::TILEXR_MAX_RANK_SIZE");
     CHECK_CONTAINS(kernel, "TILEXR_UDMA_DEMO_DEBUG_UDMA_STATUS_BASE + peer");
 }
@@ -206,7 +234,7 @@ void TestAllToAllChunkedUdmaSource()
     CHECK_CONTAINS(demo, "alltoall fused IPC: single kernel send+flag+recv");
     CHECK_CONTAINS(demo, "alltoall use ");
     CHECK_CONTAINS(demo, "plain IPC fallback");
-    CHECK_CONTAINS(demo, "launch all-to-all kernel iter=");
+    CHECK_CONTAINS(demo, "launch all-to-all kernel repeat=");
     CHECK_CONTAINS(demo, "for (uint32_t pass = 0; pass < chunkPlan.passCount; ++pass)");
     CHECK_CONTAINS(demo, "registered output chunk");
     CHECK_CONTAINS(kernel, "tilexr_all_to_all_plain_ipc_scatter_kernel");
@@ -223,20 +251,75 @@ void TestAllToAllBigDataSource()
         ReadFile(std::string(TILEXR_SOURCE_ROOT) + "/tests/udma/demo/tilexr_udma_demo.cpp");
     const std::string kernel =
         ReadFile(std::string(TILEXR_SOURCE_ROOT) + "/tests/udma/demo/tilexr_udma_demo_kernel.cpp");
+    const std::string udma =
+        ReadFile(std::string(TILEXR_SOURCE_ROOT) + "/src/include/tilexr_udma.h");
 
     CHECK_CONTAINS(demo, "testType == 7");
     CHECK_CONTAINS(demo, "PlanAllToAllBigDataUdma");
     CHECK_CONTAINS(demo, "bigdata alltoall registered dataBytes=");
     CHECK_CONTAINS(demo, "launch_tilexr_udma_all_to_all_bigdata");
+    CHECK_CONTAINS(demo, "for (int iter = 0; iter < allToAllRepeat; ++iter)");
+    CHECK_CONTAINS(demo, "TILEXR_DEMO_BIGDATA_PROFILE_STAGE");
+    CHECK_CONTAINS(demo, "const uint64_t kernelLoopBase = static_cast<uint64_t>(iter)");
+    CHECK_CONTAINS(demo, "bigDataPlan.passCount, 1, kernelLoopBase");
+    CHECK_CONTAINS(demo, "bigDataPlan.copyDoneOffset");
+    CHECK_CONTAINS(demo, "static_cast<uint8_t*>(registeredMemory) + bigDataPlan.copyDoneOffset");
+    CHECK_CONTAINS(demo, "bigDataPlan.controlBytes + bigDataPlan.signalBytes");
+    CHECK_CONTAINS(demo, "static_cast<uint32_t>(bigDataProfileStage)");
     CHECK_CONTAINS(demo, "alltoall udma-bigdata");
     CHECK_CONTAINS(demo, "ERROR: bigdata alltoall UDMA registration failed");
     CHECK_CONTAINS(kernel, "tilexr_udma_all_to_all_bigdata_kernel");
     CHECK_CONTAINS(kernel, "launch_tilexr_udma_all_to_all_bigdata");
+    CHECK_CONTAINS(kernel, "uint64_t kernelLoopBase");
+    CHECK_CONTAINS(kernel, "uint32_t profileStage");
+    CHECK_CONTAINS(kernel, "if (profileStage <= TILEXR_BIGDATA_PROFILE_STAGE_PREPARE)");
+    CHECK_CONTAINS(kernel, "TILEXR_BIGDATA_PROFILE_STAGE_SEND_COPY");
+    CHECK_CONTAINS(kernel, "TILEXR_BIGDATA_PROFILE_STAGE_DATA_PUT");
+    CHECK_CONTAINS(kernel, "uint64_t copyDoneOffset");
+    CHECK_CONTAINS(kernel, "BigDataGlobalPassIndex");
+    CHECK_CONTAINS(kernel, "const uint64_t globalPass = BigDataGlobalPassIndex");
+    CHECK_CONTAINS(kernel, "BigDataPassToken(globalPass)");
+    CHECK_CONTAINS(kernel, "BigDataPingPongSlot(globalPass)");
+    CHECK_CONTAINS(kernel, "BigDataKernelExitBarrier");
+    CHECK_CONTAINS(kernel, "copyDoneOffset");
     CHECK_CONTAINS(kernel, "readySignalOffset");
     CHECK_CONTAINS(kernel, "ackSignalOffset");
+    CHECK_CONTAINS(kernel, "BigDataWaitTokenMte");
+    CHECK_CONTAINS(kernel, "BigDataLoadTokenMte");
+    CHECK_CONTAINS(kernel, "TILEXR_UDMA_DEMO_SIGNAL_MAX_POLLS");
+    CHECK_CONTAINS(kernel, "TILEXR_UDMA_DEMO_CONTROL_SLOT_BYTES");
+    CHECK_CONTAINS(kernel, "TILEXR_UDMA_DEMO_BIGDATA_CORES_PER_PEER = 3U");
+    CHECK_CONTAINS(kernel, "TILEXR_UDMA_DEMO_BIGDATA_PINGPONG_SLOTS = 2U");
+    CHECK_CONTAINS(kernel, "BigDataCopyPeerWorker");
+    CHECK_CONTAINS(kernel, "BigDataSendPeerWorker");
+    CHECK_CONTAINS(kernel, "BigDataRecvPeerWorker");
+    CHECK_CONTAINS(kernel, "const int32_t peer = blockIdx / static_cast<int32_t>(TILEXR_UDMA_DEMO_BIGDATA_CORES_PER_PEER)");
+    CHECK_CONTAINS(kernel, "const int32_t role = blockIdx % static_cast<int32_t>(TILEXR_UDMA_DEMO_BIGDATA_CORES_PER_PEER)");
+    CHECK_CONTAINS(kernel, "BigDataPingPongSlot");
+    CHECK_CONTAINS(kernel, "BigDataNetworkPeerIndex");
+    CHECK_CONTAINS(kernel, "BigDataStoreTokenMte");
+    CHECK_CONTAINS(kernel, "BigDataIpcAckOffset");
+    CHECK_CONTAINS(kernel, "BigDataLocalIpcAckSlot");
+    CHECK_CONTAINS(kernel, "BigDataRemoteIpcAckSlot");
+    CHECK_CONTAINS(kernel, "rankSize > 1 ? rankSize - 1 : 1");
+    CHECK_CONTAINS(kernel, "BigDataControlSlot(udmaMem, copyDoneOffset, slot, rankSize, peer)");
+    CHECK_CONTAINS(kernel, "BigDataControlSlot(udmaMem, readySignalOffset, slot, rankSize, peer)");
+    CHECK_CONTAINS(kernel, "remoteDataOffset =");
+    CHECK_CONTAINS(kernel, "BigDataNetworkPeerIndex(rank, peer)");
+    CHECK_CONTAINS(kernel, "BigDataSlot(udmaMem, recvDataOffset, slot, networkPeerCount");
     CHECK_CONTAINS(kernel, "UDMAPutSignalNbi<int32_t>");
-    CHECK_CONTAINS(kernel, "UDMAPutSignalNbi<uint64_t>");
+    CHECK_CONTAINS(kernel, "localSrc,");
+    CHECK_CONTAINS(kernel, "remoteDataOffset, chunkBytes, remoteReadyOffset, token");
+    CHECK_CONTAINS(kernel, "TILEXR_UDMA_DEMO_BIGDATA_RELAY_UB_PINGPONG_BYTES");
+    CHECK_CONTAINS(kernel, "relayLocal[bufferId * TILEXR_UDMA_DEMO_BIGDATA_RELAY_UB_BYTES]");
+    CHECK_CONTAINS(kernel, "globalPass - static_cast<uint64_t>(TILEXR_UDMA_DEMO_BIGDATA_PINGPONG_SLOTS)");
+    CHECK_CONTAINS(kernel, "recvSlotInt[0]");
+    CHECK_CONTAINS(kernel, "BigDataStoreTokenMte(remoteAck, token, relayLocal)");
+    CHECK_CONTAINS(kernel, "BigDataRemoteIpcAckSlot(args, peer, rank, slot, rankSize)");
     CHECK_CONTAINS(kernel, "ackSignal");
+    CHECK_NOT_CONTAINS(kernel, "UDMAPutNbi<uint64_t>");
+    CHECK_CONTAINS(udma, "if (length == 0)");
+    CHECK_CONTAINS(udma, "reinterpret_cast<uint64_t>(addr) + length - 1");
 }
 
 } // namespace
@@ -248,6 +331,7 @@ int main()
     TestBuildAllToAllOutput();
     TestAllToAllMaxRank256With64MiBPerRank();
     TestAllToAllBigDataPlan();
+    TestAllToAllBigDataBlockDim();
     TestDemoDebugLayoutSource();
     TestAllToAllDataAsFlagSource();
     TestAllToAllChunkedUdmaSource();

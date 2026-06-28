@@ -49,9 +49,9 @@ extern void launch_tilexr_udma_all_to_all_fused(
 extern void launch_tilexr_udma_all_to_all_bigdata(
     uint32_t blockDim, void* stream, GM_ADDR commArgs, GM_ADDR input, GM_ADDR output,
     GM_ADDR udmaMem, GM_ADDR debug, int32_t elementsPerPeer,
-    uint64_t dataOffset, uint64_t readyPayloadOffset, uint64_t ackPayloadOffset,
+    uint64_t dataOffset, uint64_t copyDoneOffset,
     uint64_t readySignalOffset, uint64_t ackSignalOffset,
-    int32_t chunkElements, uint32_t passCount, uint32_t loopCount, uint64_t tokenBase,
+    int32_t chunkElements, uint32_t passCount, uint32_t loopCount, uint64_t kernelLoopBase,
     uint32_t profileStage);
 extern void launch_tilexr_all_to_all_ipc_scatter(
     uint32_t blockDim, void* stream, GM_ADDR commArgs, GM_ADDR input, GM_ADDR debug, int32_t elementsPerPeer);
@@ -720,8 +720,7 @@ int main(int argc, char** argv)
             PrintStatus(rank, "alltoall bigdata UDMA plan: passCount=" + std::to_string(bigDataPlan.passCount) +
                 " chunkElements=" + std::to_string(bigDataPlan.chunkElements) +
                 " dataBytes=" + std::to_string(bigDataPlan.dataBytes) +
-                " readyPayloadOffset=" + std::to_string(bigDataPlan.readyPayloadOffset) +
-                " ackPayloadOffset=" + std::to_string(bigDataPlan.ackPayloadOffset) +
+                " copyDoneOffset=" + std::to_string(bigDataPlan.copyDoneOffset) +
                 " readySignalOffset=" + std::to_string(bigDataPlan.readySignalOffset) +
                 " ackSignalOffset=" + std::to_string(bigDataPlan.ackSignalOffset) +
                 " registeredBytes=" + std::to_string(bigDataPlan.registeredBytes));
@@ -875,10 +874,10 @@ int main(int argc, char** argv)
             return 1;
         }
         std::vector<uint8_t> zeroBigControl(bigDataPlan.controlBytes + bigDataPlan.signalBytes, 0);
-        if (!CopyHostToDevice(rank, static_cast<uint8_t*>(registeredMemory) + bigDataPlan.readyPayloadOffset,
+        if (!CopyHostToDevice(rank, static_cast<uint8_t*>(registeredMemory) + bigDataPlan.copyDoneOffset,
                 bigDataPlan.controlBytes + bigDataPlan.signalBytes,
                 zeroBigControl.data(), zeroBigControl.size(),
-                "bigdata ready/ack payload+signals zero")) {
+                "bigdata copy/ready/ack payload+signals zero")) {
             aclrtFree(bigInput);
             aclrtFree(bigOutput);
             Cleanup(comm, stream, registeredMemory, debug, rank, deviceId);
@@ -898,8 +897,7 @@ int main(int argc, char** argv)
             udmaRegistered = true;
         }
         PrintStatus(rank, "bigdata alltoall registered dataBytes=" + std::to_string(bigDataPlan.dataBytes) +
-            " readyPayloadOffset=" + std::to_string(bigDataPlan.readyPayloadOffset) +
-            " ackPayloadOffset=" + std::to_string(bigDataPlan.ackPayloadOffset) +
+            " copyDoneOffset=" + std::to_string(bigDataPlan.copyDoneOffset) +
             " readySignalOffset=" + std::to_string(bigDataPlan.readySignalOffset) +
             " ackSignalOffset=" + std::to_string(bigDataPlan.ackSignalOffset) +
             " regBytes=" + std::to_string(registeredBytes) +
@@ -921,15 +919,14 @@ int main(int argc, char** argv)
 
         auto a2aStart = std::chrono::steady_clock::now();
         for (int iter = 0; iter < allToAllRepeat; ++iter) {
-            const uint64_t tokenBase =
-                static_cast<uint64_t>(iter) * static_cast<uint64_t>(bigDataPlan.passCount);
+            const uint64_t kernelLoopBase = static_cast<uint64_t>(iter);
             launch_tilexr_udma_all_to_all_bigdata(
                 TileXR::Demo::AllToAllBigDataBlockDim(rankSize), stream, commArgsDev,
                 reinterpret_cast<GM_ADDR>(bigInput), reinterpret_cast<GM_ADDR>(bigOutput),
                 reinterpret_cast<GM_ADDR>(registeredMemory), reinterpret_cast<GM_ADDR>(debug),
-                elementsPerRank, 0, bigDataPlan.readyPayloadOffset, bigDataPlan.ackPayloadOffset,
+                elementsPerRank, 0, bigDataPlan.copyDoneOffset,
                 bigDataPlan.readySignalOffset, bigDataPlan.ackSignalOffset,
-                bigDataPlan.chunkElements, bigDataPlan.passCount, 1, tokenBase,
+                bigDataPlan.chunkElements, bigDataPlan.passCount, 1, kernelLoopBase,
                 static_cast<uint32_t>(bigDataProfileStage));
         }
         if (!CheckAcl(rank, "aclrtSynchronizeStream post-alltoall", aclrtSynchronizeStream(stream))) {
