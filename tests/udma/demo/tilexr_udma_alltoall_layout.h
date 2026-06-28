@@ -27,7 +27,8 @@ struct AllToAllChunkPlan {
 
 constexpr size_t kAllToAllBigDataMaxRegisteredBytes = 64ULL * 1024ULL * 1024ULL;
 constexpr size_t kAllToAllBigDataControlSlotBytes = 64ULL;
-constexpr uint32_t kAllToAllBigDataCoresPerPeer = 3U;
+constexpr uint32_t kAllToAllBigDataCoresPerPeer = 5U;
+constexpr uint32_t kAllToAllBigDataLocalCopyShards = 2U;
 constexpr uint32_t kAllToAllBigDataPingPongSlots = 2U;
 
 struct AllToAllBigDataPlan {
@@ -36,6 +37,7 @@ struct AllToAllBigDataPlan {
     size_t chunkBytesPerPeer = 0;
     size_t dataBytes = 0;
     size_t copyDoneOffset = 0;
+    size_t recvCopyDoneOffset = 0;
     size_t readySignalOffset = 0;
     size_t ackSignalOffset = 0;
     size_t controlBytes = 0;
@@ -88,9 +90,9 @@ inline AllToAllBigDataPlan PlanAllToAllBigDataUdma(int rankSize, int32_t element
     plan.registeredBytes = kAllToAllBigDataMaxRegisteredBytes;
     const size_t controlGroupBytes =
         static_cast<size_t>(kAllToAllBigDataPingPongSlots) * static_cast<size_t>(rankSize) *
-        kAllToAllBigDataControlSlotBytes;
+        static_cast<size_t>(kAllToAllBigDataLocalCopyShards) * kAllToAllBigDataControlSlotBytes;
     plan.controlBytes = controlGroupBytes;
-    plan.signalBytes = 2ULL * controlGroupBytes;
+    plan.signalBytes = 3ULL * controlGroupBytes;
     if (plan.controlBytes + plan.signalBytes >= plan.registeredBytes) {
         return plan;
     }
@@ -111,10 +113,11 @@ inline AllToAllBigDataPlan PlanAllToAllBigDataUdma(int rankSize, int32_t element
     plan.chunkBytesPerPeer = static_cast<size_t>(plan.chunkElements) * sizeof(int32_t);
     plan.dataBytes = dataSlotCount * plan.chunkBytesPerPeer;
     plan.copyDoneOffset = plan.dataBytes;
-    plan.readySignalOffset = plan.copyDoneOffset + controlGroupBytes;
+    plan.recvCopyDoneOffset = plan.copyDoneOffset + controlGroupBytes;
+    plan.readySignalOffset = plan.recvCopyDoneOffset + controlGroupBytes;
     plan.ackSignalOffset = plan.readySignalOffset + controlGroupBytes;
     plan.controlBytes = controlGroupBytes;
-    plan.signalBytes = 2ULL * controlGroupBytes;
+    plan.signalBytes = 3ULL * controlGroupBytes;
     plan.registeredBytes = plan.dataBytes + plan.controlBytes + plan.signalBytes;
     plan.passCount = static_cast<uint32_t>(
         (static_cast<size_t>(elementsPerPeer) + static_cast<size_t>(plan.chunkElements) - 1) /

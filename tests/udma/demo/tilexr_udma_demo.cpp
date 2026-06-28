@@ -50,7 +50,7 @@ extern void launch_tilexr_udma_all_to_all_bigdata(
     uint32_t blockDim, void* stream, GM_ADDR commArgs, GM_ADDR input, GM_ADDR output,
     GM_ADDR udmaMem, GM_ADDR debug, int32_t elementsPerPeer,
     uint64_t dataOffset, uint64_t copyDoneOffset,
-    uint64_t readySignalOffset, uint64_t ackSignalOffset,
+    uint64_t recvCopyDoneOffset, uint64_t readySignalOffset, uint64_t ackSignalOffset,
     int32_t chunkElements, uint32_t passCount, uint32_t loopCount, uint64_t kernelLoopBase,
     uint32_t profileStage);
 extern void launch_tilexr_all_to_all_ipc_scatter(
@@ -721,6 +721,7 @@ int main(int argc, char** argv)
                 " chunkElements=" + std::to_string(bigDataPlan.chunkElements) +
                 " dataBytes=" + std::to_string(bigDataPlan.dataBytes) +
                 " copyDoneOffset=" + std::to_string(bigDataPlan.copyDoneOffset) +
+                " recvCopyDoneOffset=" + std::to_string(bigDataPlan.recvCopyDoneOffset) +
                 " readySignalOffset=" + std::to_string(bigDataPlan.readySignalOffset) +
                 " ackSignalOffset=" + std::to_string(bigDataPlan.ackSignalOffset) +
                 " registeredBytes=" + std::to_string(bigDataPlan.registeredBytes));
@@ -898,6 +899,7 @@ int main(int argc, char** argv)
         }
         PrintStatus(rank, "bigdata alltoall registered dataBytes=" + std::to_string(bigDataPlan.dataBytes) +
             " copyDoneOffset=" + std::to_string(bigDataPlan.copyDoneOffset) +
+            " recvCopyDoneOffset=" + std::to_string(bigDataPlan.recvCopyDoneOffset) +
             " readySignalOffset=" + std::to_string(bigDataPlan.readySignalOffset) +
             " ackSignalOffset=" + std::to_string(bigDataPlan.ackSignalOffset) +
             " regBytes=" + std::to_string(registeredBytes) +
@@ -925,6 +927,7 @@ int main(int argc, char** argv)
                 reinterpret_cast<GM_ADDR>(bigInput), reinterpret_cast<GM_ADDR>(bigOutput),
                 reinterpret_cast<GM_ADDR>(registeredMemory), reinterpret_cast<GM_ADDR>(debug),
                 elementsPerRank, 0, bigDataPlan.copyDoneOffset,
+                bigDataPlan.recvCopyDoneOffset,
                 bigDataPlan.readySignalOffset, bigDataPlan.ackSignalOffset,
                 bigDataPlan.chunkElements, bigDataPlan.passCount, 1, kernelLoopBase,
                 static_cast<uint32_t>(bigDataProfileStage));

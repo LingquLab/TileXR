@@ -142,16 +142,20 @@ void TestAllToAllBigDataPlan()
 
     CHECK_EQ(TileXR::Demo::kAllToAllBigDataMaxRegisteredBytes, 64ULL * 1024ULL * 1024ULL);
     CHECK_EQ(TileXR::Demo::kAllToAllBigDataControlSlotBytes, 64ULL);
-    CHECK_EQ(TileXR::Demo::kAllToAllBigDataCoresPerPeer, 3U);
+    CHECK_EQ(TileXR::Demo::kAllToAllBigDataCoresPerPeer, 5U);
+    CHECK_EQ(TileXR::Demo::kAllToAllBigDataLocalCopyShards, 2U);
     CHECK_EQ(TileXR::Demo::kAllToAllBigDataPingPongSlots, 2U);
     CHECK_EQ(plan.registeredBytes <= TileXR::Demo::kAllToAllBigDataMaxRegisteredBytes, true);
     const size_t controlGroupBytes =
         static_cast<size_t>(TileXR::Demo::kAllToAllBigDataPingPongSlots) *
-        static_cast<size_t>(rankSize) * TileXR::Demo::kAllToAllBigDataControlSlotBytes;
+        static_cast<size_t>(rankSize) *
+        static_cast<size_t>(TileXR::Demo::kAllToAllBigDataLocalCopyShards) *
+        TileXR::Demo::kAllToAllBigDataControlSlotBytes;
     CHECK_EQ(plan.controlBytes, controlGroupBytes);
-    CHECK_EQ(plan.signalBytes, 2ULL * controlGroupBytes);
+    CHECK_EQ(plan.signalBytes, 3ULL * controlGroupBytes);
     CHECK_EQ(plan.copyDoneOffset, plan.dataBytes);
-    CHECK_EQ(plan.readySignalOffset, plan.copyDoneOffset + controlGroupBytes);
+    CHECK_EQ(plan.recvCopyDoneOffset, plan.copyDoneOffset + controlGroupBytes);
+    CHECK_EQ(plan.readySignalOffset, plan.recvCopyDoneOffset + controlGroupBytes);
     CHECK_EQ(plan.ackSignalOffset, plan.readySignalOffset + controlGroupBytes);
     CHECK_EQ(plan.registeredBytes, plan.dataBytes + plan.controlBytes + plan.signalBytes);
     CHECK_EQ(plan.dataBytes,
@@ -165,9 +169,9 @@ void TestAllToAllBigDataPlan()
 void TestAllToAllBigDataBlockDim()
 {
     CHECK_EQ(TileXR::Demo::AllToAllBigDataBlockDim(0), 1U);
-    CHECK_EQ(TileXR::Demo::AllToAllBigDataBlockDim(1), 3U);
-    CHECK_EQ(TileXR::Demo::AllToAllBigDataBlockDim(8), 24U);
-    CHECK_EQ(TileXR::Demo::AllToAllBigDataBlockDim(64), 192U);
+    CHECK_EQ(TileXR::Demo::AllToAllBigDataBlockDim(1), 5U);
+    CHECK_EQ(TileXR::Demo::AllToAllBigDataBlockDim(8), 40U);
+    CHECK_EQ(TileXR::Demo::AllToAllBigDataBlockDim(64), 320U);
 }
 
 void TestDemoDebugLayoutSource()
@@ -263,6 +267,7 @@ void TestAllToAllBigDataSource()
     CHECK_CONTAINS(demo, "const uint64_t kernelLoopBase = static_cast<uint64_t>(iter)");
     CHECK_CONTAINS(demo, "bigDataPlan.passCount, 1, kernelLoopBase");
     CHECK_CONTAINS(demo, "bigDataPlan.copyDoneOffset");
+    CHECK_CONTAINS(demo, "bigDataPlan.recvCopyDoneOffset");
     CHECK_CONTAINS(demo, "static_cast<uint8_t*>(registeredMemory) + bigDataPlan.copyDoneOffset");
     CHECK_CONTAINS(demo, "bigDataPlan.controlBytes + bigDataPlan.signalBytes");
     CHECK_CONTAINS(demo, "static_cast<uint32_t>(bigDataProfileStage)");
@@ -288,11 +293,16 @@ void TestAllToAllBigDataSource()
     CHECK_CONTAINS(kernel, "BigDataLoadTokenMte");
     CHECK_CONTAINS(kernel, "TILEXR_UDMA_DEMO_SIGNAL_MAX_POLLS");
     CHECK_CONTAINS(kernel, "TILEXR_UDMA_DEMO_CONTROL_SLOT_BYTES");
-    CHECK_CONTAINS(kernel, "TILEXR_UDMA_DEMO_BIGDATA_CORES_PER_PEER = 3U");
+    CHECK_CONTAINS(kernel, "TILEXR_UDMA_DEMO_BIGDATA_CORES_PER_PEER = 5U");
+    CHECK_CONTAINS(kernel, "TILEXR_UDMA_DEMO_BIGDATA_LOCAL_COPY_SHARDS = 2U");
     CHECK_CONTAINS(kernel, "TILEXR_UDMA_DEMO_BIGDATA_PINGPONG_SLOTS = 2U");
     CHECK_CONTAINS(kernel, "BigDataCopyPeerWorker");
     CHECK_CONTAINS(kernel, "BigDataSendPeerWorker");
     CHECK_CONTAINS(kernel, "BigDataRecvPeerWorker");
+    CHECK_CONTAINS(kernel, "BigDataCopyShardRange");
+    CHECK_CONTAINS(kernel, "copyShard");
+    CHECK_CONTAINS(kernel, "recvShard");
+    CHECK_CONTAINS(kernel, "recvCopyDoneOffset");
     CHECK_CONTAINS(kernel, "const int32_t peer = blockIdx / static_cast<int32_t>(TILEXR_UDMA_DEMO_BIGDATA_CORES_PER_PEER)");
     CHECK_CONTAINS(kernel, "const int32_t role = blockIdx % static_cast<int32_t>(TILEXR_UDMA_DEMO_BIGDATA_CORES_PER_PEER)");
     CHECK_CONTAINS(kernel, "BigDataPingPongSlot");
@@ -302,8 +312,9 @@ void TestAllToAllBigDataSource()
     CHECK_CONTAINS(kernel, "BigDataLocalIpcAckSlot");
     CHECK_CONTAINS(kernel, "BigDataRemoteIpcAckSlot");
     CHECK_CONTAINS(kernel, "rankSize > 1 ? rankSize - 1 : 1");
-    CHECK_CONTAINS(kernel, "BigDataControlSlot(udmaMem, copyDoneOffset, slot, rankSize, peer)");
-    CHECK_CONTAINS(kernel, "BigDataControlSlot(udmaMem, readySignalOffset, slot, rankSize, peer)");
+    CHECK_CONTAINS(kernel, "BigDataControlSlot(udmaMem, copyDoneOffset, slot, rankSize, peer, copyShard)");
+    CHECK_CONTAINS(kernel, "BigDataControlSlot(udmaMem, recvCopyDoneOffset, slot, rankSize, peer, recvShard)");
+    CHECK_CONTAINS(kernel, "BigDataControlSlot(udmaMem, readySignalOffset, slot, rankSize, peer, 0U)");
     CHECK_CONTAINS(kernel, "remoteDataOffset =");
     CHECK_CONTAINS(kernel, "BigDataNetworkPeerIndex(rank, peer)");
     CHECK_CONTAINS(kernel, "BigDataSlot(udmaMem, recvDataOffset, slot, networkPeerCount");
