@@ -28,8 +28,7 @@ struct AllToAllChunkPlan {
 constexpr size_t kAllToAllBigDataMaxRegisteredBytes = 128ULL * 1024ULL * 1024ULL;
 constexpr size_t kAllToAllBigDataMultiNodeRegisteredBytes = 1024ULL * 1024ULL * 1024ULL;
 constexpr size_t kAllToAllBigDataMultiNodePeerSlotBytes = 8ULL * 1024ULL * 1024ULL;
-constexpr size_t kAllToAllBigDataControlSlotBytes = 64ULL;
-constexpr size_t kAllToAllBigDataRegistrationAlignment = 2ULL * 1024ULL * 1024ULL;
+constexpr size_t kAllToAllBigDataControlSlotBytes = 128ULL;
 constexpr uint32_t kAllToAllBigDataCoresPerPeer = 5U;
 constexpr uint32_t kAllToAllBigDataSingleNodeShards = 2U;
 constexpr uint32_t kAllToAllBigDataLocalCopyShards = kAllToAllBigDataSingleNodeShards;
@@ -37,6 +36,7 @@ constexpr uint32_t kAllToAllBigDataPingPongSlots = 2U;
 constexpr int32_t kAllToAllBigDataRanksPerNode = 8;
 constexpr uint32_t kAllToAllBigDataMultiNodeCopyCores = 16U;
 constexpr uint32_t kAllToAllBigDataMultiNodeRecvCores = 16U;
+constexpr uint32_t kAllToAllBigDataMultiNodeControlShards = 32U;
 constexpr uint32_t kAllToAllBigDataMultiNodeRemoteSendPrimaryCore = 16U;
 constexpr uint32_t kAllToAllBigDataMultiNodeRemoteSendSecondaryCore = 17U;
 constexpr uint32_t kAllToAllBigDataMultiNodeLocalSendCore = 18U;
@@ -78,7 +78,7 @@ inline bool AllToAllBigDataUse35Core(int rankSize, bool force35Core = false)
 inline uint32_t AllToAllBigDataShardCount(int rankSize, bool force35Core = false)
 {
     return AllToAllBigDataUse35Core(rankSize, force35Core) ?
-        kAllToAllBigDataMultiNodeCopyCores : kAllToAllBigDataSingleNodeShards;
+        kAllToAllBigDataMultiNodeControlShards : kAllToAllBigDataSingleNodeShards;
 }
 
 inline AllToAllChunkPlan PlanAllToAllUdmaChunks(int rankSize, int32_t elementsPerPeer)
@@ -153,8 +153,7 @@ inline AllToAllBigDataPlan PlanAllToAllBigDataUdma(
     plan.dataBytes = plan.registeredBytes - plan.controlBytes - plan.signalBytes;
     if (use35Core) {
         plan.chunkElements = static_cast<int32_t>(chunkElements);
-        const size_t chunkBytes = chunkElements * sizeof(int32_t);
-        plan.chunkBytesPerPeer = std::min(chunkBytes, kAllToAllBigDataMultiNodePeerSlotBytes);
+        plan.chunkBytesPerPeer = kAllToAllBigDataMultiNodePeerSlotBytes;
     } else {
         plan.chunkElements = static_cast<int32_t>(
             plan.dataBytes / (dataSlotCount * sizeof(int32_t)));
@@ -184,12 +183,6 @@ inline AllToAllBigDataPlan PlanAllToAllBigDataUdma(
     }
     plan.ackSignalOffset = plan.readySignalOffset + controlGroupBytes;
     plan.controlBytes = controlGroupBytes;
-    if (use35Core) {
-        const size_t usedBytes = plan.dataBytes + plan.controlBytes + plan.signalBytes;
-        plan.registeredBytes =
-            ((usedBytes + kAllToAllBigDataRegistrationAlignment - 1) /
-             kAllToAllBigDataRegistrationAlignment) * kAllToAllBigDataRegistrationAlignment;
-    }
     return plan;
 }
 

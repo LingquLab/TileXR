@@ -38,13 +38,16 @@ constexpr int32_t TILEXR_UDMA_DEMO_DEBUG_REMOTE_READY_OFFSET_BASE =
     TILEXR_UDMA_DEMO_DEBUG_UDMA_STATUS_BASE + 192;
 constexpr int32_t TILEXR_UDMA_DEMO_DEBUG_READY_SEEN_BASE =
     TILEXR_UDMA_DEMO_DEBUG_UDMA_STATUS_BASE + 208;
+constexpr int32_t TILEXR_UDMA_DEMO_DEBUG_ACK_SEEN_BASE =
+    TILEXR_UDMA_DEMO_DEBUG_READY_SEEN_BASE + TileXR::TILEXR_MAX_RANK_SIZE;
 constexpr int32_t TILEXR_UDMA_DEMO_DEBUG_IPC_SCATTER =
-    TILEXR_UDMA_DEMO_DEBUG_UDMA_STATUS_BASE + TileXR::TILEXR_MAX_RANK_SIZE;
+    TILEXR_UDMA_DEMO_DEBUG_ACK_SEEN_BASE + TileXR::TILEXR_MAX_RANK_SIZE;
 constexpr int32_t TILEXR_UDMA_DEMO_DEBUG_IPC_GATHER = TILEXR_UDMA_DEMO_DEBUG_IPC_SCATTER + 1;
 constexpr int32_t TILEXR_UDMA_DEMO_DEBUG_ALLREDUCE_SCATTER = TILEXR_UDMA_DEMO_DEBUG_IPC_GATHER + 1;
 constexpr int32_t TILEXR_UDMA_DEMO_DEBUG_ALLREDUCE_SUM = TILEXR_UDMA_DEMO_DEBUG_ALLREDUCE_SCATTER + 1;
 constexpr uint64_t TILEXR_UDMA_DEMO_SIGNAL_MAX_POLLS = 100000000ULL;
 constexpr uint64_t TILEXR_UDMA_DEMO_CONTROL_SLOT_BYTES = TileXR::TILEXR_UDMA_CACHE_LINE_SIZE;
+constexpr uint64_t TILEXR_UDMA_DEMO_BIGDATA_CONTROL_SLOT_BYTES = 128ULL;
 constexpr int32_t TILEXR_UDMA_DEMO_READY_TIMEOUT_STATUS = -1001;
 constexpr int32_t TILEXR_UDMA_DEMO_ACK_TIMEOUT_STATUS = -1002;
 constexpr int32_t TILEXR_UDMA_DEMO_COPY_TIMEOUT_STATUS = -1003;
@@ -60,6 +63,7 @@ constexpr uint32_t TILEXR_UDMA_DEMO_BIGDATA_CORES_PER_PEER = 5U;
 constexpr int32_t TILEXR_UDMA_DEMO_BIGDATA_RANKS_PER_NODE = 8;
 constexpr uint32_t TILEXR_UDMA_DEMO_BIGDATA_MULTINODE_COPY_CORES = 16U;
 constexpr uint32_t TILEXR_UDMA_DEMO_BIGDATA_MULTINODE_RECV_CORES = 16U;
+constexpr uint32_t TILEXR_UDMA_DEMO_BIGDATA_MULTINODE_CONTROL_SHARDS = 32U;
 constexpr uint32_t TILEXR_UDMA_DEMO_BIGDATA_MULTINODE_REMOTE_SEND_PRIMARY_CORE = 16U;
 constexpr uint32_t TILEXR_UDMA_DEMO_BIGDATA_MULTINODE_REMOTE_SEND_SECONDARY_CORE = 17U;
 constexpr uint32_t TILEXR_UDMA_DEMO_BIGDATA_MULTINODE_LOCAL_SEND_CORE = 18U;
@@ -69,7 +73,17 @@ constexpr uint32_t TILEXR_UDMA_DEMO_BIGDATA_MULTINODE_BLOCK_DIM =
     TILEXR_UDMA_DEMO_BIGDATA_MULTINODE_RECV_CORES;
 constexpr uint32_t TILEXR_UDMA_DEMO_BIGDATA_REMOTE_SEND_PRIMARY_SEGMENT = 0U;
 constexpr uint32_t TILEXR_UDMA_DEMO_BIGDATA_REMOTE_SEND_SECONDARY_SEGMENT = 1U;
+constexpr uint32_t TILEXR_UDMA_DEMO_BIGDATA_REMOTE_COPY_READY_PRIMARY = 2U;
+constexpr uint32_t TILEXR_UDMA_DEMO_BIGDATA_REMOTE_COPY_READY_SECONDARY = 3U;
+constexpr uint32_t TILEXR_UDMA_DEMO_BIGDATA_LOCAL_COPY_READY = 4U;
 constexpr uint32_t TILEXR_UDMA_DEMO_BIGDATA_REMOTE_SEND_PRIMARY_SHARD_END = 12U;
+constexpr uint32_t TILEXR_UDMA_DEMO_BIGDATA_REMOTE_SEND_SECONDARY_AGGREGATOR = 11U;
+constexpr uint32_t TILEXR_UDMA_DEMO_BIGDATA_RECV_READY_WAIT_CORE = 20U;
+constexpr uint32_t TILEXR_UDMA_DEMO_BIGDATA_RECV_READY_WAIT_SHARD =
+    TILEXR_UDMA_DEMO_BIGDATA_RECV_READY_WAIT_CORE -
+    TILEXR_UDMA_DEMO_BIGDATA_MULTINODE_RECV_CORE_BASE;
+constexpr uint32_t TILEXR_UDMA_DEMO_BIGDATA_RECV_READY_SOURCE_SHARD = 0U;
+constexpr uint32_t TILEXR_UDMA_DEMO_BIGDATA_LOCAL_FANOUT_SHARD_BASE = 5U;
 constexpr uint32_t TILEXR_BIGDATA_PROFILE_STAGE_PREPARE = 0;
 constexpr uint32_t TILEXR_BIGDATA_PROFILE_STAGE_SEND_COPY = 1;
 constexpr uint32_t TILEXR_BIGDATA_PROFILE_STAGE_SEND_SYNC = 2;
@@ -155,7 +169,7 @@ __aicore__ inline __gm__ uint64_t* BigDataControlSlot(
         ((static_cast<uint64_t>(slot) * static_cast<uint64_t>(rankSize) +
         static_cast<uint64_t>(peer)) *
         static_cast<uint64_t>(shardCount) +
-        static_cast<uint64_t>(shard)) * TILEXR_UDMA_DEMO_CONTROL_SLOT_BYTES);
+        static_cast<uint64_t>(shard)) * TILEXR_UDMA_DEMO_BIGDATA_CONTROL_SLOT_BYTES);
 }
 
 __aicore__ inline void BigDataCopyInTile(
@@ -420,7 +434,7 @@ __aicore__ inline bool BigDataUse35Core(int32_t rankSize, bool force35Core)
 __aicore__ inline uint32_t BigDataShardCount(int32_t rankSize, bool force35Core = false)
 {
     return BigDataUse35Core(rankSize, force35Core) ?
-        TILEXR_UDMA_DEMO_BIGDATA_MULTINODE_COPY_CORES :
+        TILEXR_UDMA_DEMO_BIGDATA_MULTINODE_CONTROL_SHARDS :
         TILEXR_UDMA_DEMO_BIGDATA_SINGLE_NODE_SHARDS;
 }
 
@@ -544,7 +558,7 @@ __aicore__ inline void BigDataStoreTokenMte(
 {
     AscendC::LocalTensor<uint64_t> tokenLocal = relayLocal.ReinterpretCast<uint64_t>();
     constexpr uint32_t controlSlotU64 =
-        TILEXR_UDMA_DEMO_CONTROL_SLOT_BYTES / sizeof(uint64_t);
+        TILEXR_UDMA_DEMO_BIGDATA_CONTROL_SLOT_BYTES / sizeof(uint64_t);
     for (uint32_t i = 0; i < controlSlotU64; ++i) {
         tokenLocal.SetValue(i, token);
     }
@@ -554,7 +568,7 @@ __aicore__ inline void BigDataStoreTokenMte(
     AscendC::GlobalTensor<uint8_t> slotGlobal;
     slotGlobal.SetGlobalBuffer(reinterpret_cast<__gm__ uint8_t*>(slot));
     AscendC::DataCopyExtParams copyOut {
-        1U, static_cast<uint32_t>(TILEXR_UDMA_DEMO_CONTROL_SLOT_BYTES), 0U, 0U, 0U};
+        1U, static_cast<uint32_t>(TILEXR_UDMA_DEMO_BIGDATA_CONTROL_SLOT_BYTES), 0U, 0U, 0U};
     AscendC::DataCopyPad(slotGlobal, relayLocal, copyOut);
     AscendC::SetFlag<AscendC::HardEvent::MTE3_S>(EVENT_ID0);
     AscendC::WaitFlag<AscendC::HardEvent::MTE3_S>(EVENT_ID0);
@@ -586,23 +600,6 @@ __aicore__ inline uint64_t BigDataWaitTokenMte(
     return observed;
 }
 
-__aicore__ inline __gm__ uint64_t* BigDataRemoteControlSlot(
-    const __gm__ TileXR::CommArgs* args, int32_t targetRank, uint64_t offset, int32_t slotRank,
-    uint32_t slot, int32_t rankSize)
-{
-    auto registry = TileXR::GetUDMARegistry(args);
-    const uint64_t remoteOffset =
-        offset +
-        (static_cast<uint64_t>(slot) * static_cast<uint64_t>(rankSize) +
-        static_cast<uint64_t>(slotRank)) * TILEXR_UDMA_DEMO_CONTROL_SLOT_BYTES;
-    if (!TileXR::UDMARegisteredRangeValid(registry, targetRank,
-            remoteOffset, TILEXR_UDMA_DEMO_CONTROL_SLOT_BYTES)) {
-        return nullptr;
-    }
-    return reinterpret_cast<__gm__ uint64_t*>(
-        TileXR::UDMARegisteredRemoteAddr(registry, targetRank, remoteOffset));
-}
-
 __aicore__ inline __gm__ uint64_t* BigDataRemoteRegisteredControlSlot(
     const __gm__ TileXR::CommArgs* args, int32_t targetRank, uint64_t offset,
     uint32_t slot, int32_t rankSize, uint32_t shardCount, int32_t slotRank, uint32_t shard)
@@ -613,13 +610,38 @@ __aicore__ inline __gm__ uint64_t* BigDataRemoteRegisteredControlSlot(
         ((static_cast<uint64_t>(slot) * static_cast<uint64_t>(rankSize) +
         static_cast<uint64_t>(slotRank)) *
         static_cast<uint64_t>(shardCount) +
-        static_cast<uint64_t>(shard)) * TILEXR_UDMA_DEMO_CONTROL_SLOT_BYTES;
+        static_cast<uint64_t>(shard)) * TILEXR_UDMA_DEMO_BIGDATA_CONTROL_SLOT_BYTES;
     if (!TileXR::UDMARegisteredRangeValid(registry, targetRank,
-            remoteOffset, TILEXR_UDMA_DEMO_CONTROL_SLOT_BYTES)) {
+            remoteOffset, TILEXR_UDMA_DEMO_BIGDATA_CONTROL_SLOT_BYTES)) {
         return nullptr;
     }
     return reinterpret_cast<__gm__ uint64_t*>(
         TileXR::UDMARegisteredRemoteAddr(registry, targetRank, remoteOffset));
+}
+
+__aicore__ inline uint64_t BigDataRegisteredControlOffset(
+    uint64_t offset, uint32_t slot, int32_t rankSize, uint32_t shardCount,
+    int32_t slotRank, uint32_t shard)
+{
+    return offset +
+        ((static_cast<uint64_t>(slot) * static_cast<uint64_t>(rankSize) +
+        static_cast<uint64_t>(slotRank)) *
+        static_cast<uint64_t>(shardCount) +
+        static_cast<uint64_t>(shard)) * TILEXR_UDMA_DEMO_BIGDATA_CONTROL_SLOT_BYTES;
+}
+
+__aicore__ inline uint32_t BigDataPublishAckSignalUdma(
+    const __gm__ TileXR::CommArgs* args, int32_t peer, __gm__ uint8_t* udmaMem,
+    uint64_t ackSignalOffset, uint32_t slot, int32_t rankSize, uint32_t shardCount,
+    int32_t rank, uint64_t token, AscendC::LocalTensor<uint8_t> relayLocal)
+{
+    const uint64_t ackOffset =
+        BigDataRegisteredControlOffset(ackSignalOffset, slot, rankSize, shardCount, rank, 0U);
+    auto localAck = reinterpret_cast<__gm__ uint64_t*>(udmaMem + ackOffset);
+    BigDataStoreTokenMte(localAck, token, relayLocal);
+    TileXR::UDMAPutSignalNbi<uint64_t>(
+        args, peer, localAck, ackOffset, sizeof(uint64_t), ackOffset, token);
+    return TileXR::UDMAQuietStatus(args, peer);
 }
 
 __aicore__ inline uint64_t BigDataIpcAckOffset(uint32_t slot, int32_t rankSize, int32_t slotRank)
@@ -657,7 +679,9 @@ __aicore__ inline void BigDataCopyPeerWorker(
     uint64_t copyDoneOffset, uint64_t ackSignalOffset, uint64_t chunkBytesPerPeer,
     AscendC::LocalTensor<uint8_t> relayLocal)
 {
-    if (peer < 0 || peer >= rankSize || shardCount == 0U || copyShard >= shardCount) {
+    const uint32_t dataShardCount = use35Core ?
+        TILEXR_UDMA_DEMO_BIGDATA_MULTINODE_COPY_CORES : shardCount;
+    if (peer < 0 || peer >= rankSize || shardCount == 0U || copyShard >= dataShardCount) {
         return;
     }
     if (profileStage <= TILEXR_BIGDATA_PROFILE_STAGE_PREPARE) {
@@ -673,7 +697,7 @@ __aicore__ inline void BigDataCopyPeerWorker(
     uint32_t shardOffset = 0U;
     uint32_t shardBytes = 0U;
     const bool shardHasBytes =
-        BigDataCopyShardRange(copyShard, shardCount, chunkBytes / sizeof(int32_t), shardOffset, shardBytes);
+        BigDataCopyShardRange(copyShard, dataShardCount, chunkBytes / sizeof(int32_t), shardOffset, shardBytes);
     const uint64_t globalPass = BigDataGlobalPassIndex(kernelLoopBase, passCount, loop, pass);
     const uint64_t token = BigDataPassToken(globalPass);
     const uint32_t slot = BigDataDataSlot(globalPass, pass, use35Core);
@@ -704,6 +728,22 @@ __aicore__ inline void BigDataCopyPeerWorker(
             return;
         }
     }
+    if (use35Core && profileStage == TILEXR_BIGDATA_PROFILE_STAGE_ACK_PUT &&
+        passCount > 0U && globalPass >= static_cast<uint64_t>(passCount) &&
+        copyShard == 0U) {
+        const uint64_t reuseToken = BigDataPassToken(globalPass - static_cast<uint64_t>(passCount));
+        const uint64_t observed = BigDataLoadTokenMte(
+            BigDataControlSlot(udmaMem, ackSignalOffset, slot, rankSize, shardCount, peer, 0U),
+            relayLocal);
+        if (debug != nullptr && peer < 16) {
+            debug[TILEXR_UDMA_DEMO_DEBUG_ACK_SEEN_BASE + peer] =
+                static_cast<int32_t>(observed);
+            if (observed < reuseToken) {
+                debug[TILEXR_UDMA_DEMO_DEBUG_UDMA_STATUS_BASE + peer] =
+                    TILEXR_UDMA_DEMO_ACK_TIMEOUT_STATUS;
+            }
+        }
+    }
 
     auto src = reinterpret_cast<__gm__ uint8_t*>(
         input + static_cast<uint64_t>(peer) * elementsPerPeer + chunkOffset);
@@ -718,13 +758,20 @@ __aicore__ inline void BigDataCopyPeerWorker(
         token, relayLocal);
 }
 
+__aicore__ inline bool BigDataWaitCopyReady(
+    __gm__ uint8_t* udmaMem, __gm__ int32_t* debug, uint64_t copyReadyOffset,
+    uint32_t slot, int32_t rankSize, uint32_t shardCount, int32_t peer,
+    uint32_t readyShard, uint64_t token, uint32_t loop, uint32_t pass,
+    AscendC::LocalTensor<uint8_t> relayLocal);
+
 __aicore__ inline void BigDataSendPeerWorker(
     int32_t peer, int32_t rank, int32_t rankSize, __gm__ TileXR::CommArgs* args,
     __gm__ uint8_t* udmaMem, __gm__ int32_t* debug, int32_t elementsPerPeer,
     int32_t effectiveChunkElements, uint32_t passCount, uint32_t loop, uint32_t pass,
     uint64_t kernelLoopBase, uint32_t profileStage, uint32_t shardCount, uint64_t sendDataOffset,
     uint64_t recvDataOffset, uint64_t copyDoneOffset, uint64_t readySignalOffset,
-    uint64_t chunkBytesPerPeer, AscendC::LocalTensor<uint8_t> relayLocal)
+    uint64_t chunkBytesPerPeer, bool use35Core, uint64_t copyReadyOffset,
+    AscendC::LocalTensor<uint8_t> relayLocal)
 {
     if (peer < 0 || peer >= rankSize || peer == rank || shardCount == 0U ||
         profileStage <= TILEXR_BIGDATA_PROFILE_STAGE_SEND_COPY) {
@@ -740,18 +787,25 @@ __aicore__ inline void BigDataSendPeerWorker(
     }
     const uint64_t globalPass = BigDataGlobalPassIndex(kernelLoopBase, passCount, loop, pass);
     const uint64_t token = BigDataPassToken(globalPass);
-    const uint32_t slot = BigDataDataSlot(globalPass, pass, false);
+    const uint32_t slot = BigDataDataSlot(globalPass, pass, use35Core);
 
-    for (uint32_t copyShard = 0U; copyShard < shardCount; ++copyShard) {
-        const uint64_t observed = BigDataWaitTokenMte(
-            BigDataControlSlot(udmaMem, copyDoneOffset, slot, rankSize, shardCount, peer, copyShard),
-            token, relayLocal);
-        if (observed < token) {
-            if (debug != nullptr && loop == 0 && pass == 0 && peer < 16) {
-                debug[TILEXR_UDMA_DEMO_DEBUG_UDMA_STATUS_BASE + peer] =
-                    TILEXR_UDMA_DEMO_COPY_TIMEOUT_STATUS;
-            }
+    if (use35Core) {
+        if (!BigDataWaitCopyReady(udmaMem, debug, copyReadyOffset, slot, rankSize, shardCount,
+                peer, TILEXR_UDMA_DEMO_BIGDATA_LOCAL_COPY_READY, token, loop, pass, relayLocal)) {
             return;
+        }
+    } else {
+        for (uint32_t copyShard = 0U; copyShard < shardCount; ++copyShard) {
+            const uint64_t observed = BigDataWaitTokenMte(
+                BigDataControlSlot(udmaMem, copyDoneOffset, slot, rankSize, shardCount, peer, copyShard),
+                token, relayLocal);
+            if (observed < token) {
+                if (debug != nullptr && loop == 0 && pass == 0 && peer < 16) {
+                    debug[TILEXR_UDMA_DEMO_DEBUG_UDMA_STATUS_BASE + peer] =
+                        TILEXR_UDMA_DEMO_COPY_TIMEOUT_STATUS;
+                }
+                return;
+            }
         }
     }
     if (profileStage <= TILEXR_BIGDATA_PROFILE_STAGE_SEND_SYNC) {
@@ -773,7 +827,7 @@ __aicore__ inline void BigDataSendPeerWorker(
         ((static_cast<uint64_t>(slot) * static_cast<uint64_t>(rankSize) +
         static_cast<uint64_t>(rank)) *
         static_cast<uint64_t>(shardCount)) *
-        TILEXR_UDMA_DEMO_CONTROL_SLOT_BYTES;
+        TILEXR_UDMA_DEMO_BIGDATA_CONTROL_SLOT_BYTES;
     auto registry = TileXR::GetUDMARegistry(args);
     auto udmaInfo = TileXR::GetUDMAInfo(args);
     auto wqCtx = TileXR::UDMAGetWQCtx(udmaInfo, peer, 0);
@@ -817,8 +871,10 @@ __aicore__ inline void BigDataRecvPeerWorker(
     uint64_t recvCopyDoneOffset, uint64_t readySignalOffset, uint64_t ackSignalOffset,
     uint64_t chunkBytesPerPeer, AscendC::LocalTensor<uint8_t> relayLocal)
 {
+    const uint32_t dataShardCount = use35Core ?
+        TILEXR_UDMA_DEMO_BIGDATA_MULTINODE_RECV_CORES : shardCount;
     if (peer < 0 || peer >= rankSize || peer == rank ||
-        shardCount == 0U || recvShard >= shardCount ||
+        shardCount == 0U || recvShard >= dataShardCount ||
         profileStage <= TILEXR_BIGDATA_PROFILE_STAGE_DATA_PUT) {
         return;
     }
@@ -834,24 +890,62 @@ __aicore__ inline void BigDataRecvPeerWorker(
     uint32_t shardOffset = 0U;
     uint32_t shardBytes = 0U;
     const bool shardHasBytes =
-        BigDataCopyShardRange(recvShard, shardCount, chunkBytes / sizeof(int32_t), shardOffset, shardBytes);
+        BigDataCopyShardRange(recvShard, dataShardCount, chunkBytes / sizeof(int32_t), shardOffset, shardBytes);
     const uint64_t globalPass = BigDataGlobalPassIndex(kernelLoopBase, passCount, loop, pass);
     const uint64_t token = BigDataPassToken(globalPass);
     const uint32_t slot = BigDataDataSlot(globalPass, pass, use35Core);
 
-    uint64_t observed = BigDataWaitTokenMte(
-        BigDataControlSlot(udmaMem, readySignalOffset, slot, rankSize, shardCount, peer, 0U),
-        token, relayLocal);
-    if (debug != nullptr && recvShard == 0U && loop == 0 && pass == 0 && peer < 16) {
-        debug[TILEXR_UDMA_DEMO_DEBUG_READY_SEEN_BASE + peer] =
-            static_cast<int32_t>(observed);
-        if (observed < token) {
-            debug[TILEXR_UDMA_DEMO_DEBUG_UDMA_STATUS_BASE + peer] =
-                TILEXR_UDMA_DEMO_READY_TIMEOUT_STATUS;
+    uint64_t observed = 0ULL;
+    if (use35Core) {
+        if (recvShard == TILEXR_UDMA_DEMO_BIGDATA_RECV_READY_WAIT_SHARD) {
+            observed = BigDataWaitTokenMte(
+                BigDataControlSlot(udmaMem, readySignalOffset, slot, rankSize, shardCount,
+                    peer, TILEXR_UDMA_DEMO_BIGDATA_RECV_READY_SOURCE_SHARD),
+                token, relayLocal);
+            if (debug != nullptr && loop == 0 && pass == 0 && peer < 16) {
+                debug[TILEXR_UDMA_DEMO_DEBUG_READY_SEEN_BASE + peer] =
+                    static_cast<int32_t>(observed);
+                if (observed < token) {
+                    debug[TILEXR_UDMA_DEMO_DEBUG_UDMA_STATUS_BASE + peer] =
+                        TILEXR_UDMA_DEMO_READY_TIMEOUT_STATUS;
+                }
+            }
+            if (observed < token) {
+                return;
+            }
+            for (uint32_t fanoutShard = 0U; fanoutShard < dataShardCount; ++fanoutShard) {
+                BigDataStoreTokenMte(
+                    BigDataControlSlot(udmaMem, readySignalOffset, slot, rankSize, shardCount,
+                        peer, TILEXR_UDMA_DEMO_BIGDATA_LOCAL_FANOUT_SHARD_BASE + fanoutShard),
+                    token, relayLocal);
+            }
         }
-    }
-    if (observed < token) {
-        return;
+        observed = BigDataWaitTokenMte(
+            BigDataControlSlot(udmaMem, readySignalOffset, slot, rankSize, shardCount,
+                peer, TILEXR_UDMA_DEMO_BIGDATA_LOCAL_FANOUT_SHARD_BASE + recvShard),
+            token, relayLocal);
+        if (observed < token) {
+            if (debug != nullptr && loop == 0 && pass == 0 && peer < 16) {
+                debug[TILEXR_UDMA_DEMO_DEBUG_UDMA_STATUS_BASE + peer] =
+                    TILEXR_UDMA_DEMO_READY_TIMEOUT_STATUS;
+            }
+            return;
+        }
+    } else {
+        observed = BigDataWaitTokenMte(
+            BigDataControlSlot(udmaMem, readySignalOffset, slot, rankSize, shardCount, peer, 0U),
+            token, relayLocal);
+        if (debug != nullptr && recvShard == 0U && loop == 0 && pass == 0 && peer < 16) {
+            debug[TILEXR_UDMA_DEMO_DEBUG_READY_SEEN_BASE + peer] =
+                static_cast<int32_t>(observed);
+            if (observed < token) {
+                debug[TILEXR_UDMA_DEMO_DEBUG_UDMA_STATUS_BASE + peer] =
+                    TILEXR_UDMA_DEMO_READY_TIMEOUT_STATUS;
+            }
+        }
+        if (observed < token) {
+            return;
+        }
     }
     if (profileStage <= TILEXR_BIGDATA_PROFILE_STAGE_WAIT_READY) {
         return;
@@ -880,6 +974,28 @@ __aicore__ inline void BigDataRecvPeerWorker(
         BigDataControlSlot(udmaMem, recvCopyDoneOffset, slot, rankSize, shardCount, peer, recvShard),
         token, relayLocal);
     if (recvShard + 1U != shardCount) {
+        if (use35Core && recvShard + 1U == dataShardCount) {
+            for (uint32_t shard = 0U; shard < dataShardCount; ++shard) {
+                observed = BigDataWaitTokenMte(
+                    BigDataControlSlot(udmaMem, recvCopyDoneOffset, slot, rankSize, shardCount, peer, shard),
+                    token, relayLocal);
+                if (observed < token) {
+                    if (debug != nullptr && loop == 0 && pass == 0 && peer < 16) {
+                        debug[TILEXR_UDMA_DEMO_DEBUG_UDMA_STATUS_BASE + peer] =
+                            TILEXR_UDMA_DEMO_ACK_TIMEOUT_STATUS;
+                    }
+                    return;
+                }
+            }
+
+            const uint32_t ackStatus = BigDataPublishAckSignalUdma(
+                args, peer, udmaMem, ackSignalOffset, slot, rankSize, shardCount,
+                rank, token, relayLocal);
+            if (debug != nullptr && loop == 0 && pass == 0 && peer < 16) {
+                debug[TILEXR_UDMA_DEMO_DEBUG_UDMA_STATUS_BASE + peer] =
+                    static_cast<int32_t>(ackStatus);
+            }
+        }
         return;
     }
     for (uint32_t shard = 0U; shard < shardCount; ++shard) {
@@ -897,8 +1013,14 @@ __aicore__ inline void BigDataRecvPeerWorker(
 
     __gm__ uint64_t* remoteAck = nullptr;
     if (use35Core) {
-        remoteAck = BigDataRemoteRegisteredControlSlot(
-            args, peer, ackSignalOffset, slot, rankSize, shardCount, rank, 0U);
+        const uint32_t ackStatus = BigDataPublishAckSignalUdma(
+            args, peer, udmaMem, ackSignalOffset, slot, rankSize, shardCount,
+            rank, token, relayLocal);
+        if (debug != nullptr && loop == 0 && pass == 0 && peer < 16) {
+            debug[TILEXR_UDMA_DEMO_DEBUG_UDMA_STATUS_BASE + peer] =
+                static_cast<int32_t>(ackStatus);
+        }
+        return;
     } else {
         remoteAck = BigDataRemoteIpcAckSlot(args, peer, rank, slot, rankSize);
     }
@@ -936,17 +1058,52 @@ __aicore__ inline bool BigDataWaitCopyDoneRange(
     return true;
 }
 
+__aicore__ inline bool BigDataPublishCopyReadyRange(
+    __gm__ uint8_t* udmaMem, __gm__ int32_t* debug, uint64_t copyDoneOffset,
+    uint64_t copyReadyOffset, uint32_t slot, int32_t rankSize, uint32_t shardCount,
+    int32_t peer, uint32_t copyShardBegin, uint32_t copyShardEnd, uint32_t readyShard,
+    uint64_t token, uint32_t loop, uint32_t pass, AscendC::LocalTensor<uint8_t> relayLocal)
+{
+    if (!BigDataWaitCopyDoneRange(udmaMem, debug, copyDoneOffset, slot, rankSize,
+            shardCount, peer, copyShardBegin, copyShardEnd, token, loop, pass, relayLocal)) {
+        return false;
+    }
+    BigDataStoreTokenMte(
+        BigDataControlSlot(udmaMem, copyReadyOffset, slot, rankSize, shardCount, peer, readyShard),
+        token, relayLocal);
+    return true;
+}
+
+__aicore__ inline bool BigDataWaitCopyReady(
+    __gm__ uint8_t* udmaMem, __gm__ int32_t* debug, uint64_t copyReadyOffset,
+    uint32_t slot, int32_t rankSize, uint32_t shardCount, int32_t peer,
+    uint32_t readyShard, uint64_t token, uint32_t loop, uint32_t pass,
+    AscendC::LocalTensor<uint8_t> relayLocal)
+{
+    const uint64_t observed = BigDataWaitTokenMte(
+        BigDataControlSlot(udmaMem, copyReadyOffset, slot, rankSize, shardCount, peer, readyShard),
+        token, relayLocal);
+    if (observed < token) {
+        if (debug != nullptr && loop == 0 && pass == 0 && peer < 16) {
+            debug[TILEXR_UDMA_DEMO_DEBUG_UDMA_STATUS_BASE + peer] =
+                TILEXR_UDMA_DEMO_COPY_TIMEOUT_STATUS;
+        }
+        return false;
+    }
+    return true;
+}
+
 __aicore__ inline bool BigDataRemoteSendSegmentRange(
-    uint32_t segmentId, uint32_t shardCount, uint32_t chunkElements,
+    uint32_t segmentId, uint32_t dataShardCount, uint32_t chunkElements,
     uint32_t& copyShardBegin, uint32_t& copyShardEnd,
     uint32_t& segmentOffsetBytes, uint32_t& segmentBytes)
 {
-    if (shardCount == 0U) {
+    if (dataShardCount == 0U) {
         return false;
     }
     const uint32_t chunkBytes = chunkElements * static_cast<uint32_t>(sizeof(int32_t));
     const uint32_t splitOffset = BigDataCopyShardStartBytes(
-        TILEXR_UDMA_DEMO_BIGDATA_REMOTE_SEND_PRIMARY_SHARD_END, shardCount, chunkElements);
+        TILEXR_UDMA_DEMO_BIGDATA_REMOTE_SEND_PRIMARY_SHARD_END, dataShardCount, chunkElements);
     if (segmentId == TILEXR_UDMA_DEMO_BIGDATA_REMOTE_SEND_PRIMARY_SEGMENT) {
         copyShardBegin = 0U;
         copyShardEnd = TILEXR_UDMA_DEMO_BIGDATA_REMOTE_SEND_PRIMARY_SHARD_END;
@@ -954,13 +1111,13 @@ __aicore__ inline bool BigDataRemoteSendSegmentRange(
         segmentBytes = splitOffset;
     } else if (segmentId == TILEXR_UDMA_DEMO_BIGDATA_REMOTE_SEND_SECONDARY_SEGMENT) {
         copyShardBegin = TILEXR_UDMA_DEMO_BIGDATA_REMOTE_SEND_PRIMARY_SHARD_END;
-        copyShardEnd = shardCount;
+        copyShardEnd = dataShardCount;
         segmentOffsetBytes = splitOffset;
         segmentBytes = chunkBytes - splitOffset;
     } else {
         return false;
     }
-    if (copyShardEnd > shardCount || segmentOffsetBytes > chunkBytes) {
+    if (copyShardEnd > dataShardCount || segmentOffsetBytes > chunkBytes) {
         return false;
     }
     return true;
@@ -975,7 +1132,7 @@ __aicore__ inline void BigDataPublishReadySignal(
         readySignalOffset +
         ((static_cast<uint64_t>(slot) * static_cast<uint64_t>(rankSize) +
         static_cast<uint64_t>(rank)) * static_cast<uint64_t>(shardCount)) *
-        TILEXR_UDMA_DEMO_CONTROL_SLOT_BYTES;
+        TILEXR_UDMA_DEMO_BIGDATA_CONTROL_SLOT_BYTES;
     const uint64_t remoteReadyOffset = localReadyPayloadOffset;
     auto localSrc = reinterpret_cast<__gm__ uint64_t*>(udmaMem + localReadyPayloadOffset);
     TileXR::UDMAPutSignalNbi<uint64_t>(
@@ -1008,19 +1165,27 @@ __aicore__ inline void BigDataRemoteSendSegmentWorker(
     const uint64_t globalPass = BigDataGlobalPassIndex(kernelLoopBase, passCount, loop, pass);
     const uint64_t token = BigDataPassToken(globalPass);
     const uint32_t slot = BigDataDataSlot(globalPass, pass, true);
+    constexpr uint32_t dataShardCount = TILEXR_UDMA_DEMO_BIGDATA_MULTINODE_COPY_CORES;
+    (void)copyDoneOffset;
 
     uint32_t copyShardBegin = 0U;
     uint32_t copyShardEnd = 0U;
     uint32_t segmentOffsetBytes = 0U;
     uint32_t segmentBytes = 0U;
     if (!BigDataRemoteSendSegmentRange(
-            segmentId, shardCount, chunkBytes / sizeof(int32_t),
+            segmentId, dataShardCount, chunkBytes / sizeof(int32_t),
             copyShardBegin, copyShardEnd, segmentOffsetBytes, segmentBytes)) {
         return;
     }
+    (void)copyShardBegin;
+    (void)copyShardEnd;
 
-    if (!BigDataWaitCopyDoneRange(udmaMem, debug, copyDoneOffset, slot, rankSize, shardCount,
-            peer, copyShardBegin, copyShardEnd, token, loop, pass, relayLocal)) {
+    const uint32_t readyShard =
+        (segmentId == TILEXR_UDMA_DEMO_BIGDATA_REMOTE_SEND_PRIMARY_SEGMENT) ?
+        TILEXR_UDMA_DEMO_BIGDATA_REMOTE_COPY_READY_PRIMARY :
+        TILEXR_UDMA_DEMO_BIGDATA_REMOTE_COPY_READY_SECONDARY;
+    if (!BigDataWaitCopyReady(udmaMem, debug, remoteSendDoneOffset, slot, rankSize,
+            shardCount, peer, readyShard, token, loop, pass, relayLocal)) {
         return;
     }
     if (profileStage <= TILEXR_BIGDATA_PROFILE_STAGE_SEND_SYNC) {
@@ -1076,7 +1241,10 @@ __aicore__ inline void BigDataRunSelfCopyShard(
     int32_t elementsPerPeer, int32_t effectiveChunkElements, uint32_t pass,
     uint32_t copyShard, uint32_t shardCount, AscendC::LocalTensor<uint8_t> relayLocal)
 {
-    if (rank < 0 || rank >= rankSize || shardCount == 0U || copyShard >= shardCount) {
+    const uint32_t dataShardCount =
+        (shardCount == TILEXR_UDMA_DEMO_BIGDATA_MULTINODE_CONTROL_SHARDS) ?
+        TILEXR_UDMA_DEMO_BIGDATA_MULTINODE_COPY_CORES : shardCount;
+    if (rank < 0 || rank >= rankSize || shardCount == 0U || copyShard >= dataShardCount) {
         return;
     }
     int32_t chunkOffset = 0;
@@ -1086,7 +1254,7 @@ __aicore__ inline void BigDataRunSelfCopyShard(
     }
     uint32_t shardOffset = 0U;
     uint32_t shardBytes = 0U;
-    if (!BigDataCopyShardRange(copyShard, shardCount, chunkBytes / sizeof(int32_t), shardOffset, shardBytes)) {
+    if (!BigDataCopyShardRange(copyShard, dataShardCount, chunkBytes / sizeof(int32_t), shardOffset, shardBytes)) {
         return;
     }
     auto src = reinterpret_cast<__gm__ uint8_t*>(
@@ -1105,22 +1273,24 @@ __aicore__ inline void BigDataRunRoleForPeer(
     uint64_t recvDataOffset, uint64_t copyDoneOffset, uint64_t recvCopyDoneOffset, uint64_t readySignalOffset,
     uint64_t ackSignalOffset, uint64_t chunkBytesPerPeer, AscendC::LocalTensor<uint8_t> relayLocal)
 {
-    if (role < static_cast<int32_t>(shardCount)) {
+    const uint32_t dataShardCount = use35Core ?
+        TILEXR_UDMA_DEMO_BIGDATA_MULTINODE_COPY_CORES : shardCount;
+    if (role < static_cast<int32_t>(dataShardCount)) {
         BigDataCopyPeerWorker(peer, rank, rankSize, args, input, output, udmaMem, debug,
             elementsPerPeer, effectiveChunkElements, passCount, loop, pass, kernelLoopBase, profileStage,
             use35Core, static_cast<uint32_t>(role), shardCount, sendDataOffset, copyDoneOffset, ackSignalOffset,
             chunkBytesPerPeer, relayLocal);
         return;
     }
-    if (role == static_cast<int32_t>(shardCount)) {
+    if (role == static_cast<int32_t>(dataShardCount)) {
         BigDataSendPeerWorker(peer, rank, rankSize, args, udmaMem, debug,
             elementsPerPeer, effectiveChunkElements, passCount, loop, pass, kernelLoopBase, profileStage,
             shardCount, sendDataOffset, recvDataOffset, copyDoneOffset, readySignalOffset,
-            chunkBytesPerPeer, relayLocal);
+            chunkBytesPerPeer, use35Core, copyDoneOffset, relayLocal);
         return;
     }
     const uint32_t recvShard =
-        static_cast<uint32_t>(role) - shardCount - 1U;
+        static_cast<uint32_t>(role) - dataShardCount - 1U;
     BigDataRecvPeerWorker(peer, rank, rankSize, args, output, udmaMem, debug,
         elementsPerPeer, effectiveChunkElements, passCount, loop, pass, kernelLoopBase, profileStage,
         use35Core, recvShard, shardCount, recvDataOffset, recvCopyDoneOffset, readySignalOffset, ackSignalOffset,
@@ -2328,6 +2498,37 @@ extern "C" __global__ __aicore__ void tilexr_udma_all_to_all_bigdata_kernel(
                         passCount, loop, pass, kernelLoopBase, profileStage,
                         use35Core, copyShard, shardCount, sendDataOffset, copyDoneOffset, ackSignalOffset,
                         chunkBytesPerPeer, relayLocal);
+                    if (profileStage > TILEXR_BIGDATA_PROFILE_STAGE_SEND_COPY) {
+                        const uint64_t globalPass = BigDataGlobalPassIndex(kernelLoopBase, passCount, loop, pass);
+                        const uint64_t token = BigDataPassToken(globalPass);
+                        const uint32_t slot = BigDataDataSlot(globalPass, pass, true);
+                        if (!isLocalPeer && copyShard == 0U) {
+                            (void)BigDataPublishCopyReadyRange(
+                                udmaMem, debug, copyDoneOffset, remoteSendDoneOffset,
+                                slot, rankSize, shardCount, peer,
+                                0U, TILEXR_UDMA_DEMO_BIGDATA_REMOTE_SEND_PRIMARY_SHARD_END,
+                                TILEXR_UDMA_DEMO_BIGDATA_REMOTE_COPY_READY_PRIMARY,
+                                token, loop, pass, relayLocal);
+                        }
+                        if (!isLocalPeer &&
+                            copyShard == TILEXR_UDMA_DEMO_BIGDATA_REMOTE_SEND_SECONDARY_AGGREGATOR) {
+                            (void)BigDataPublishCopyReadyRange(
+                                udmaMem, debug, copyDoneOffset, remoteSendDoneOffset,
+                                slot, rankSize, shardCount, peer,
+                                TILEXR_UDMA_DEMO_BIGDATA_REMOTE_SEND_PRIMARY_SHARD_END,
+                                TILEXR_UDMA_DEMO_BIGDATA_MULTINODE_COPY_CORES,
+                                TILEXR_UDMA_DEMO_BIGDATA_REMOTE_COPY_READY_SECONDARY,
+                                token, loop, pass, relayLocal);
+                        }
+                        if (isLocalPeer && copyShard == 0U) {
+                            (void)BigDataPublishCopyReadyRange(
+                                udmaMem, debug, copyDoneOffset, remoteSendDoneOffset,
+                                slot, rankSize, shardCount, peer,
+                                0U, TILEXR_UDMA_DEMO_BIGDATA_MULTINODE_COPY_CORES,
+                                TILEXR_UDMA_DEMO_BIGDATA_LOCAL_COPY_READY,
+                                token, loop, pass, relayLocal);
+                        }
+                    }
                 }
                 if (!isLocalPeer && isRemoteSendPrimaryCore) {
                     BigDataRemoteSendSegmentWorker(peer,
@@ -2351,7 +2552,8 @@ extern "C" __global__ __aicore__ void tilexr_udma_all_to_all_bigdata_kernel(
                     BigDataSendPeerWorker(peer, rank, rankSize, args, udmaMem, debug,
                         elementsPerPeer, effectiveChunkElements, passCount, loop, pass,
                         kernelLoopBase, profileStage, shardCount, sendDataOffset, recvDataOffset,
-                        copyDoneOffset, readySignalOffset, chunkBytesPerPeer, relayLocal);
+                        copyDoneOffset, readySignalOffset, chunkBytesPerPeer, true,
+                        remoteSendDoneOffset, relayLocal);
                 }
                 if (isRecvCore) {
                     BigDataRecvPeerWorker(peer, rank, rankSize, args, output, udmaMem, debug,

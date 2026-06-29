@@ -84,7 +84,8 @@ constexpr int kDebugAllReduceScatter = kDebugIpcGather + 1;
 constexpr int kDebugAllReduceSum = kDebugAllReduceScatter + 1;
 constexpr int kDebugRecvSlotSampleBase = kDebugUdmaStatusBase + 160;
 constexpr int kDebugReadySeenBase = kDebugUdmaStatusBase + 208;
-constexpr size_t kDebugWords = kDebugReadySeenBase + TileXR::TILEXR_MAX_RANK_SIZE;
+constexpr int kDebugAckSeenBase = kDebugReadySeenBase + TileXR::TILEXR_MAX_RANK_SIZE;
+constexpr size_t kDebugWords = kDebugAckSeenBase + TileXR::TILEXR_MAX_RANK_SIZE;
 constexpr int kDefaultCommPort = 10067;
 constexpr int kDemoBarrierPortOffset = 97;
 constexpr size_t kUdmaRegistrationAlignment = 2 * 1024 * 1024;
@@ -499,7 +500,6 @@ void PrintAllToAllUdmaDebug(int rank, int rankSize, const std::vector<int32_t>& 
     constexpr int recvSlotSampleBase = kDebugUdmaStatusBase + 160;
     constexpr int remoteDataOffsetBase = kDebugUdmaStatusBase + 176;
     constexpr int remoteReadyOffsetBase = kDebugUdmaStatusBase + 192;
-    constexpr int readySeenBase = kDebugUdmaStatusBase + 208;
     std::cout << "[rank " << rank << "] alltoall udma peer debug:";
     for (int peer = 0; peer < rankSize && peer < 16; ++peer) {
         std::cout << " peer" << peer
@@ -515,7 +515,8 @@ void PrintAllToAllUdmaDebug(int rank, int rankSize, const std::vector<int32_t>& 
                   << ",slot0=" << debug[recvSlotSampleBase + peer]
                   << ",rDataOff=" << debug[remoteDataOffsetBase + peer]
                   << ",rReadyOff=" << debug[remoteReadyOffsetBase + peer]
-                  << ",ready=" << debug[readySeenBase + peer]
+                  << ",ready=" << debug[kDebugReadySeenBase + peer]
+                  << ",ack=" << debug[kDebugAckSeenBase + peer]
                   << "}";
     }
     std::cout << std::endl;

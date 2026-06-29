@@ -208,7 +208,7 @@ void TestMemoryRegistrationUsesOfficialUbFlags()
     const std::string transport =
         ReadFile(std::string(TILEXR_SOURCE_ROOT) + "/src/comm/udma/tilexr_udma_transport.cpp");
     CHECK_CONTAINS(transport, "mrInfo.in.ub.flags.bs.cacheable = 0");
-    CHECK_CONTAINS(transport, "mrInfo.in.ub.flags.bs.nonPin = 0");
+    CHECK_CONTAINS(transport, "mrInfo.in.ub.flags.bs.nonPin = 1");
     CHECK_CONTAINS(transport, "mrInfo.in.ub.flags.bs.userIova = 0");
     CHECK_CONTAINS(transport, "mrInfo.in.ub.flags.bs.tokenIdValid = 1");
 }

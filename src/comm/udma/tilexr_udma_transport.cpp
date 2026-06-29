@@ -1326,7 +1326,7 @@ int TileXRUDMATransport::RegisterMemoryOnContexts(GM_ADDR localPtr, size_t bytes
         mrInfo.in.ub.tokenIdHandle = tokenHandle;
         mrInfo.in.ub.flags.bs.cacheable = 0;
         mrInfo.in.ub.flags.bs.access = MEM_SEG_ACCESS_DEFAULT;
-        mrInfo.in.ub.flags.bs.nonPin = 0;
+        mrInfo.in.ub.flags.bs.nonPin = 1;
         mrInfo.in.ub.flags.bs.userIova = 0;
         mrInfo.in.ub.flags.bs.tokenIdValid = 1;
         mrInfo.in.ub.flags.bs.tokenPolicy = MEM_SEG_TOKEN_PLAIN_TEXT;
