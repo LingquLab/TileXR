@@ -121,6 +121,24 @@ void TestLargeTransfersUseSub256MiBChunks()
     CHECK_EQ(TileXR::UDMAWqeChunkCount(1024ULL * oneMiB), 8U);
 }
 
+void TestMultiRouteQpMappingRepeatsEachRoute()
+{
+    const std::vector<uint32_t> routeEids = {7, 8};
+    const std::vector<uint32_t> qpToEid = TileXR::BuildUDMAMultiRouteQpToEid(routeEids, 2);
+
+    CHECK_EQ(qpToEid.size(), static_cast<size_t>(4));
+    CHECK_EQ(qpToEid[0], 7U);
+    CHECK_EQ(qpToEid[1], 7U);
+    CHECK_EQ(qpToEid[2], 8U);
+    CHECK_EQ(qpToEid[3], 8U);
+}
+
+void TestMultiRouteQpMappingRejectsEmptyInputs()
+{
+    CHECK_TRUE(TileXR::BuildUDMAMultiRouteQpToEid({}, 1).empty());
+    CHECK_TRUE(TileXR::BuildUDMAMultiRouteQpToEid({7}, 0).empty());
+}
+
 } // namespace
 
 int main()
@@ -129,6 +147,8 @@ int main()
     TestRejectsMismatchedArrays();
     TestHostLayoutSupportsMultipleQps();
     TestLargeTransfersUseSub256MiBChunks();
+    TestMultiRouteQpMappingRepeatsEachRoute();
+    TestMultiRouteQpMappingRejectsEmptyInputs();
     if (g_failures != 0) {
         std::cerr << g_failures << " UDMA transport layout checks failed" << std::endl;
         return 1;

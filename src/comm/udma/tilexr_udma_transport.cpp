@@ -19,6 +19,7 @@
 
 #include "tilexr_log.h"
 #include "tools/socket/tilexr_sock_exchange.h"
+#include "udma/tilexr_udma_layout.h"
 
 namespace TileXR {
 namespace {
@@ -101,6 +102,7 @@ struct TileXRRootInfo {
     std::unordered_map<uint32_t, uint32_t> deviceToLocalId;
     std::unordered_map<uint32_t, std::unordered_map<std::string, uint32_t>> portToEidByLocalId;
     std::unordered_map<uint32_t, std::map<uint32_t, HccpEid>> eidByLocalId;
+    std::unordered_map<uint32_t, std::map<uint32_t, uint32_t>> portCountByEidByLocalId;
 };
 
 struct TileXRTopoEdge {
@@ -258,7 +260,9 @@ bool ParseRootInfo(TileXRRootInfo& root)
             if (!addr.empty() && ParseEidHex(addr, eid)) {
                 root.eidByLocalId[localId][eidIndex] = eid;
             }
-            for (const std::string& port : JsonStringArrayField(addrObj, "ports")) {
+            const std::vector<std::string> ports = JsonStringArrayField(addrObj, "ports");
+            root.portCountByEidByLocalId[localId][eidIndex] = static_cast<uint32_t>(ports.size());
+            for (const std::string& port : ports) {
                 root.portToEidByLocalId[localId][port] = eidIndex;
             }
             ++eidIndex;
@@ -331,6 +335,54 @@ bool ResolveLocalEidRoute(
     }
     eidIndex = portIt->second;
     return root.eidByLocalId.count(localId) != 0 && root.eidByLocalId.at(localId).count(eidIndex) != 0;
+}
+
+std::vector<uint32_t> ResolveLocalEidRoutes(
+    const TileXRRootInfo& root, const std::vector<TileXRTopoEdge>& edges, uint32_t localId, uint32_t peerLocalId)
+{
+    std::vector<uint32_t> routeEids;
+    const auto localIt = root.portToEidByLocalId.find(localId);
+    const auto eidIt = root.eidByLocalId.find(localId);
+    if (localIt == root.portToEidByLocalId.end() || eidIt == root.eidByLocalId.end()) {
+        return routeEids;
+    }
+
+    auto addPorts = [&](const std::vector<std::string>& ports) {
+        for (const std::string& port : ports) {
+            const auto portIt = localIt->second.find(port);
+            if (portIt == localIt->second.end() || eidIt->second.count(portIt->second) == 0) {
+                continue;
+            }
+            if (std::find(routeEids.begin(), routeEids.end(), portIt->second) == routeEids.end()) {
+                routeEids.push_back(portIt->second);
+            }
+        }
+    };
+
+    for (const auto& edge : edges) {
+        if (edge.localA == localId && edge.localB == peerLocalId) {
+            addPorts(edge.localAPorts);
+        } else if (edge.localB == localId && edge.localA == peerLocalId) {
+            addPorts(edge.localBPorts);
+        }
+    }
+    return routeEids;
+}
+
+std::vector<uint32_t> ResolveLocalAggregateEidRoutes(const TileXRRootInfo& root, uint32_t localId)
+{
+    std::vector<uint32_t> routeEids;
+    const auto countIt = root.portCountByEidByLocalId.find(localId);
+    const auto eidIt = root.eidByLocalId.find(localId);
+    if (countIt == root.portCountByEidByLocalId.end() || eidIt == root.eidByLocalId.end()) {
+        return routeEids;
+    }
+    for (const auto& entry : countIt->second) {
+        if (entry.second > 1 && eidIt->second.count(entry.first) != 0) {
+            routeEids.push_back(entry.first);
+        }
+    }
+    return routeEids;
 }
 
 } // namespace
@@ -456,6 +508,10 @@ int TileXRUDMATransport::OpenDevice()
 
 int TileXRUDMATransport::BuildRoutes()
 {
+    qpsPerRoute_ = qpNum_;
+    const bool useAllRoutes = std::getenv("TILEXR_UDMA_ROUTE_POLICY") != nullptr &&
+        std::strcmp(std::getenv("TILEXR_UDMA_ROUTE_POLICY"), "all") == 0;
+    const uint32_t maxEidsPerPeer = GetEnvUint("TILEXR_UDMA_MAX_EIDS_PER_PEER", UINT32_MAX, 1, UINT32_MAX);
     RaInfo info {};
     info.phyId = logicDevId_ + deviceIdOffset_;
     info.mode = NETWORK_OFFLINE;
@@ -505,23 +561,41 @@ int TileXRUDMATransport::BuildRoutes()
         return ret;
     }
 
-    std::vector<int32_t> localRouteByPeer(options_.rankSize, -1);
+    const uint32_t routeSlots = useAllRoutes ? std::max<uint32_t>(1, std::min<uint32_t>(eidCount_, maxEidsPerPeer)) : 1;
+    std::vector<int32_t> localRouteByPeer(options_.rankSize * routeSlots, -1);
     for (int peer = 0; peer < options_.rankSize; ++peer) {
         if (peer == options_.rank) {
             continue;
         }
         uint32_t localEid = devEids[0].eidIndex;
-        if (topoReady && !ResolveLocalEidRoute(rootInfo, topoEdges, localId, allLocalIds[peer], localEid)) {
-            topoReady = false;
+        std::vector<uint32_t> localEids;
+        if (topoReady && useAllRoutes) {
+            localEids = ResolveLocalEidRoutes(rootInfo, topoEdges, localId, allLocalIds[peer]);
+            if (localEids.empty()) {
+                localEids = ResolveLocalAggregateEidRoutes(rootInfo, localId);
+            }
+        }
+        if (topoReady && localEids.empty() && !ResolveLocalEidRoute(rootInfo, topoEdges, localId, allLocalIds[peer], localEid)) {
             TILEXR_LOG(WARN) << "TileXR UDMA topology route resolution failed, falling back to EID "
-                          << devEids[0].eidIndex;
+                             << devEids[0].eidIndex;
             localEid = devEids[0].eidIndex;
         }
-        peerLocalEid_[peer] = localEid;
-        localRouteByPeer[peer] = static_cast<int32_t>(localEid);
+        if (localEids.empty()) {
+            localEids.push_back(localEid);
+        }
+        if (localEids.size() > routeSlots) {
+            localEids.resize(routeSlots);
+        }
+        peerLocalEids_[peer] = localEids;
+        peerLocalEid_[peer] = localEids[0];
+        for (size_t routeIdx = 0; routeIdx < localEids.size(); ++routeIdx) {
+            localRouteByPeer[static_cast<size_t>(peer) * routeSlots + routeIdx] =
+                static_cast<int32_t>(localEids[routeIdx]);
+        }
+        TILEXR_LOG(INFO) << "TileXR UDMA peer " << peer << " local route count=" << localEids.size();
     }
 
-    std::vector<int32_t> allRouteByPeer(options_.rankSize * options_.rankSize, -1);
+    std::vector<int32_t> allRouteByPeer(options_.rankSize * options_.rankSize * routeSlots, -1);
     ret = options_.exchange->AllGather(localRouteByPeer.data(), localRouteByPeer.size(), allRouteByPeer.data());
     if (ret != TILEXR_SUCCESS) {
         return ret;
@@ -531,19 +605,70 @@ int TileXRUDMATransport::BuildRoutes()
         if (peer == options_.rank) {
             continue;
         }
-        int32_t remoteEid = allRouteByPeer[peer * options_.rankSize + options_.rank];
+        std::vector<uint32_t> remoteEids;
+        const size_t routeBase = (static_cast<size_t>(peer) * options_.rankSize + options_.rank) * routeSlots;
+        for (uint32_t routeIdx = 0; routeIdx < routeSlots; ++routeIdx) {
+            int32_t remoteEid = allRouteByPeer[routeBase + routeIdx];
+            if (remoteEid >= 0 && static_cast<uint32_t>(remoteEid) < eidCount_) {
+                remoteEids.push_back(static_cast<uint32_t>(remoteEid));
+            }
+        }
+        int32_t remoteEid = remoteEids.empty() ? -1 : static_cast<int32_t>(remoteEids[0]);
         if (remoteEid < 0 || static_cast<uint32_t>(remoteEid) >= eidCount_) {
             remoteEid = static_cast<int32_t>(devEids[0].eidIndex);
+            remoteEids.assign(1, static_cast<uint32_t>(remoteEid));
         }
         peerRemoteEid_[peer] = static_cast<uint32_t>(remoteEid);
+        peerRemoteEids_[peer] = remoteEids;
+        auto localRoutesIt = peerLocalEids_.find(peer);
+        if (localRoutesIt == peerLocalEids_.end()) {
+            peerLocalEids_[peer] = std::vector<uint32_t>(1, peerLocalEid_[peer]);
+            localRoutesIt = peerLocalEids_.find(peer);
+        }
+        std::vector<uint32_t>& localRoutes = localRoutesIt->second;
+        const size_t pairedRouteCount = std::min(localRoutes.size(), peerRemoteEids_[peer].size());
+        if (pairedRouteCount == 0) {
+            return TILEXR_ERROR_INTERNAL;
+        }
+        if (localRoutes.size() != pairedRouteCount) {
+            localRoutes.resize(pairedRouteCount);
+            peerLocalEid_[peer] = localRoutes[0];
+        }
+        if (peerRemoteEids_[peer].size() != pairedRouteCount) {
+            peerRemoteEids_[peer].resize(pairedRouteCount);
+            peerRemoteEid_[peer] = peerRemoteEids_[peer][0];
+        }
+        peerQpRouteEids_[peer] = BuildUDMAMultiRouteQpToEid(localRoutes, qpsPerRoute_);
+        TILEXR_LOG(INFO) << "TileXR UDMA peer " << peer << " paired route count=" << pairedRouteCount
+                         << ", qps per route=" << qpsPerRoute_;
     }
+    size_t maxRouteCount = 1;
+    for (const auto& entry : peerQpRouteEids_) {
+        maxRouteCount = std::max(maxRouteCount, entry.second.size());
+    }
+    qpNum_ = static_cast<uint32_t>(maxRouteCount);
     return TILEXR_SUCCESS;
 }
 
 int TileXRUDMATransport::CreateContexts()
 {
-    for (const auto& route : peerLocalEid_) {
-        const uint32_t eidIndex = route.second;
+    std::vector<uint32_t> contextEids;
+    for (const auto& route : peerLocalEids_) {
+        for (uint32_t eidIndex : route.second) {
+            if (std::find(contextEids.begin(), contextEids.end(), eidIndex) == contextEids.end()) {
+                contextEids.push_back(eidIndex);
+            }
+        }
+    }
+    if (contextEids.empty()) {
+        for (const auto& route : peerLocalEid_) {
+            if (std::find(contextEids.begin(), contextEids.end(), route.second) == contextEids.end()) {
+                contextEids.push_back(route.second);
+            }
+        }
+    }
+
+    for (uint32_t eidIndex : contextEids) {
         if (ctxHandleByEid_.count(eidIndex) != 0) {
             continue;
         }
@@ -634,20 +759,20 @@ int TileXRUDMATransport::CreateQueues()
         state.eidIndex = ctxEntry.first;
         state.ctxHandle = ctxEntry.second;
         state.tokenHandle = tokenHandleByEid_[ctxEntry.first];
-        state.qpHandles.assign(qpNum_, nullptr);
-        state.qpInfos.resize(qpNum_);
-        state.remoteQpHandlesByQp.assign(qpNum_, std::vector<void*>(options_.rankSize, nullptr));
-        state.tpnListByQp.assign(qpNum_, std::vector<uint32_t>(options_.rankSize, 0));
-        state.cqHandles.assign(qpNum_, nullptr);
-        state.cqInfos.resize(qpNum_);
-        state.cqPiAddrs.assign(qpNum_, nullptr);
-        state.cqCiAddrs.assign(qpNum_, nullptr);
-        state.sqPiAddrs.assign(qpNum_, nullptr);
-        state.sqCiAddrs.assign(qpNum_, nullptr);
-        state.wqeCntAddrs.assign(qpNum_, nullptr);
-        state.amoAddrs.assign(qpNum_, nullptr);
-        state.localWqs.resize(qpNum_);
-        state.localCqs.resize(qpNum_);
+        state.qpHandles.assign(qpsPerRoute_, nullptr);
+        state.qpInfos.resize(qpsPerRoute_);
+        state.remoteQpHandlesByQp.assign(qpsPerRoute_, std::vector<void*>(options_.rankSize, nullptr));
+        state.tpnListByQp.assign(qpsPerRoute_, std::vector<uint32_t>(options_.rankSize, 0));
+        state.cqHandles.assign(qpsPerRoute_, nullptr);
+        state.cqInfos.resize(qpsPerRoute_);
+        state.cqPiAddrs.assign(qpsPerRoute_, nullptr);
+        state.cqCiAddrs.assign(qpsPerRoute_, nullptr);
+        state.sqPiAddrs.assign(qpsPerRoute_, nullptr);
+        state.sqCiAddrs.assign(qpsPerRoute_, nullptr);
+        state.wqeCntAddrs.assign(qpsPerRoute_, nullptr);
+        state.amoAddrs.assign(qpsPerRoute_, nullptr);
+        state.localWqs.resize(qpsPerRoute_);
+        state.localCqs.resize(qpsPerRoute_);
 
         ChanInfoT chanInfo {};
         chanInfo.in.dataPlaneFlag.bs.poolCqCstm = 1;
@@ -656,7 +781,7 @@ int TileXRUDMATransport::CreateQueues()
             return TILEXR_ERROR_INTERNAL;
         }
 
-        for (uint32_t qpIdx = 0; qpIdx < qpNum_; ++qpIdx) {
+        for (uint32_t qpIdx = 0; qpIdx < qpsPerRoute_; ++qpIdx) {
             state.cqInfos[qpIdx].in.chanHandle = state.chanHandle;
             state.cqInfos[qpIdx].in.depth = TILEXR_UDMA_CQ_DEPTH;
             state.cqInfos[qpIdx].in.ub.mode = JFC_MODE_USER_CTL_NORMAL;
@@ -723,7 +848,7 @@ int TileXRUDMATransport::CreateQueues()
 
 int TileXRUDMATransport::ImportQueues()
 {
-    const size_t routeCount = static_cast<size_t>(eidCount_) * qpNum_;
+    const size_t routeCount = static_cast<size_t>(eidCount_) * qpsPerRoute_;
     std::vector<QpImportInfoT> localImports(routeCount);
     std::vector<QpKeyT> localKeys(routeCount);
     for (const auto& stateEntry : states_) {
@@ -731,8 +856,8 @@ int TileXRUDMATransport::ImportQueues()
         if (state.eidIndex >= eidCount_) {
             return TILEXR_ERROR_INTERNAL;
         }
-        for (uint32_t qpIdx = 0; qpIdx < qpNum_; ++qpIdx) {
-            const size_t localIndex = static_cast<size_t>(state.eidIndex) * qpNum_ + qpIdx;
+        for (uint32_t qpIdx = 0; qpIdx < qpsPerRoute_; ++qpIdx) {
+            const size_t localIndex = static_cast<size_t>(state.eidIndex) * qpsPerRoute_ + qpIdx;
             localImports[localIndex].in.ub.mode = JETTY_IMPORT_MODE_NORMAL;
             localImports[localIndex].in.ub.tokenValue = TILEXR_UDMA_TOKEN_VALUE;
             localImports[localIndex].in.ub.policy = JETTY_GRP_POLICY_RR;
@@ -760,16 +885,29 @@ int TileXRUDMATransport::ImportQueues()
             if (peer == options_.rank) {
                 continue;
             }
-            const auto localRoute = peerLocalEid_.find(peer);
-            if (localRoute == peerLocalEid_.end() || localRoute->second != state.eidIndex) {
+            const auto localRoutesIt = peerLocalEids_.find(peer);
+            if (localRoutesIt == peerLocalEids_.end() ||
+                std::find(localRoutesIt->second.begin(), localRoutesIt->second.end(), state.eidIndex) ==
+                    localRoutesIt->second.end()) {
                 continue;
             }
-            const uint32_t remoteEid = peerRemoteEid_[peer];
+            const auto& localRoutes = localRoutesIt->second;
+            const auto remoteRoutesIt = peerRemoteEids_.find(peer);
+            if (remoteRoutesIt == peerRemoteEids_.end()) {
+                return TILEXR_ERROR_INTERNAL;
+            }
+            const auto& remoteRoutes = remoteRoutesIt->second;
+            auto localRouteIt = std::find(localRoutes.begin(), localRoutes.end(), state.eidIndex);
+            const size_t routeOffset = static_cast<size_t>(std::distance(localRoutes.begin(), localRouteIt));
+            if (routeOffset >= remoteRoutes.size()) {
+                return TILEXR_ERROR_INTERNAL;
+            }
+            const uint32_t remoteEid = remoteRoutes[routeOffset];
             if (remoteEid >= eidCount_) {
                 return TILEXR_ERROR_INTERNAL;
             }
-            for (uint32_t qpIdx = 0; qpIdx < qpNum_; ++qpIdx) {
-                const size_t remoteIndex = (static_cast<size_t>(peer) * eidCount_ + remoteEid) * qpNum_ + qpIdx;
+            for (uint32_t qpIdx = 0; qpIdx < qpsPerRoute_; ++qpIdx) {
+                const size_t remoteIndex = (static_cast<size_t>(peer) * eidCount_ + remoteEid) * qpsPerRoute_ + qpIdx;
                 QpImportInfoT importInfo = allImports[remoteIndex];
                 importInfo.in.key = allKeys[remoteIndex];
                 ret = loader_.RaCtxQpImport(state.ctxHandle, &importInfo, &state.remoteQpHandlesByQp[qpIdx][peer]);
@@ -847,23 +985,46 @@ int TileXRUDMATransport::RefreshUDMAInfo()
     std::vector<UDMAMemInfo> mem(queueEntries);
 
     for (int rank = 0; rank < options_.rankSize; ++rank) {
-        uint32_t localEid = fallbackEid;
-        uint32_t remoteEid = fallbackEid;
-        if (rank != options_.rank) {
-            localEid = peerLocalEid_[rank];
-            remoteEid = peerRemoteEid_[rank];
-        }
-        auto stateIt = states_.find(localEid);
-        if (stateIt == states_.end()) {
-            stateIt = fallbackIt;
-        }
-        const auto& state = stateIt->second;
         for (uint32_t qpIdx = 0; qpIdx < qpNum_; ++qpIdx) {
+            uint32_t localEid = fallbackEid;
+            uint32_t remoteEid = fallbackEid;
+            uint32_t routeQpIdx = qpsPerRoute_ == 0 ? 0 : qpIdx % qpsPerRoute_;
+            if (rank != options_.rank) {
+                const auto qpRoutesIt = peerQpRouteEids_.find(rank);
+                if (qpRoutesIt != peerQpRouteEids_.end() && qpIdx < qpRoutesIt->second.size()) {
+                    localEid = qpRoutesIt->second[qpIdx];
+                    const auto localRoutesIt = peerLocalEids_.find(rank);
+                    const auto remoteRoutesIt = peerRemoteEids_.find(rank);
+                    if (localRoutesIt != peerLocalEids_.end() && remoteRoutesIt != peerRemoteEids_.end()) {
+                        const auto& localRoutes = localRoutesIt->second;
+                        const auto& remoteRoutes = remoteRoutesIt->second;
+                        auto routeIt = std::find(localRoutes.begin(), localRoutes.end(), localEid);
+                        if (routeIt != localRoutes.end()) {
+                            const size_t routeOffset = static_cast<size_t>(std::distance(localRoutes.begin(), routeIt));
+                            if (routeOffset < remoteRoutes.size()) {
+                                remoteEid = remoteRoutes[routeOffset];
+                            }
+                        }
+                    }
+                } else {
+                    localEid = peerLocalEid_[rank];
+                    remoteEid = peerRemoteEid_[rank];
+                }
+            }
+            auto stateIt = states_.find(localEid);
+            if (stateIt == states_.end()) {
+                stateIt = fallbackIt;
+                routeQpIdx = 0;
+            }
+            const auto& state = stateIt->second;
+            if (routeQpIdx >= state.localWqs.size()) {
+                routeQpIdx = 0;
+            }
             const size_t entryIndex = static_cast<size_t>(rank) * qpNum_ + qpIdx;
-            sq[entryIndex] = state.localWqs[qpIdx];
-            rq[entryIndex] = state.localWqs[qpIdx];
-            scq[entryIndex] = state.localCqs[qpIdx];
-            rcq[entryIndex] = state.localCqs[qpIdx];
+            sq[entryIndex] = state.localWqs[routeQpIdx];
+            rq[entryIndex] = state.localWqs[routeQpIdx];
+            scq[entryIndex] = state.localCqs[routeQpIdx];
+            rcq[entryIndex] = state.localCqs[routeQpIdx];
             if (rank == options_.rank) {
                 const auto localMemIt = localMemInfoByEid_.find(localEid);
                 if (localMemIt != localMemInfoByEid_.end()) {
@@ -871,7 +1032,7 @@ int TileXRUDMATransport::RefreshUDMAInfo()
                 }
             } else {
                 mem[entryIndex] = allMem[rank * eidCount_ + remoteEid];
-                mem[entryIndex].tpn = state.tpnListByQp[qpIdx][rank];
+                mem[entryIndex].tpn = state.tpnListByQp[routeQpIdx][rank];
             }
             mem[entryIndex].eidAddr = reinterpret_cast<uint64_t>(
                 eidTableDev_ + (rank * eidCount_ + remoteEid) * sizeof(HccpEid));
@@ -1027,35 +1188,53 @@ int TileXRUDMATransport::ExchangeAndImportMemory()
         return ret;
     }
 
-    remoteMemHandles_.assign(options_.rankSize, nullptr);
+    remoteMemHandlesByPeer_.clear();
     for (int peer = 0; peer < options_.rankSize; ++peer) {
         if (peer == options_.rank) {
             continue;
         }
-        const uint32_t remoteEid = peerRemoteEid_[peer];
-        const ExchangedMrInfo* remote = nullptr;
-        for (uint32_t i = 0; i < allCounts[peer]; ++i) {
-            const auto& candidate = all[peer * maxCount + i];
-            if (candidate.valid != 0 && candidate.eidIndex == remoteEid) {
-                remote = &candidate;
-                break;
+        auto localRoutesIt = peerLocalEids_.find(peer);
+        auto remoteRoutesIt = peerRemoteEids_.find(peer);
+        std::vector<uint32_t> localRoutes;
+        std::vector<uint32_t> remoteRoutes;
+        if (localRoutesIt != peerLocalEids_.end() && remoteRoutesIt != peerRemoteEids_.end()) {
+            localRoutes = localRoutesIt->second;
+            remoteRoutes = remoteRoutesIt->second;
+        } else {
+            localRoutes.push_back(peerLocalEid_[peer]);
+            remoteRoutes.push_back(peerRemoteEid_[peer]);
+        }
+        if (localRoutes.empty() || localRoutes.size() != remoteRoutes.size()) {
+            return TILEXR_ERROR_INTERNAL;
+        }
+        std::vector<void*> remoteHandles(localRoutes.size(), nullptr);
+        for (size_t routeIdx = 0; routeIdx < localRoutes.size(); ++routeIdx) {
+            const uint32_t localEid = localRoutes[routeIdx];
+            const uint32_t remoteEid = remoteRoutes[routeIdx];
+            const ExchangedMrInfo* remote = nullptr;
+            for (uint32_t i = 0; i < allCounts[peer]; ++i) {
+                const auto& candidate = all[peer * maxCount + i];
+                if (candidate.valid != 0 && candidate.eidIndex == remoteEid) {
+                    remote = &candidate;
+                    break;
+                }
             }
+            if (remote == nullptr || ctxHandleByEid_.count(localEid) == 0) {
+                return TILEXR_ERROR_INTERNAL;
+            }
+            MrImportInfoT importInfo {};
+            importInfo.in.key = remote->mr.key;
+            importInfo.in.ub.tokenValue = remote->mr.tokenValue;
+            importInfo.in.ub.flags.bs.cacheable = remote->mr.cacheable;
+            importInfo.in.ub.flags.bs.access = remote->mr.access;
+            void* remoteHandle = nullptr;
+            ret = loader_.RaCtxRmemImport(ctxHandleByEid_[localEid], &importInfo, &remoteHandle);
+            if (ret != 0 || remoteHandle == nullptr) {
+                return TILEXR_ERROR_INTERNAL;
+            }
+            remoteHandles[routeIdx] = remoteHandle;
         }
-        if (remote == nullptr) {
-            return TILEXR_ERROR_INTERNAL;
-        }
-        const uint32_t localEid = peerLocalEid_[peer];
-        MrImportInfoT importInfo {};
-        importInfo.in.key = remote->mr.key;
-        importInfo.in.ub.tokenValue = remote->mr.tokenValue;
-        importInfo.in.ub.flags.bs.cacheable = remote->mr.cacheable;
-        importInfo.in.ub.flags.bs.access = remote->mr.access;
-        void* remoteHandle = nullptr;
-        ret = loader_.RaCtxRmemImport(ctxHandleByEid_[localEid], &importInfo, &remoteHandle);
-        if (ret != 0 || remoteHandle == nullptr) {
-            return TILEXR_ERROR_INTERNAL;
-        }
-        remoteMemHandles_[peer] = remoteHandle;
+        remoteMemHandlesByPeer_[peer] = remoteHandles;
     }
     return TILEXR_SUCCESS;
 }
@@ -1076,14 +1255,28 @@ int TileXRUDMATransport::UnregisterMemory(GM_ADDR localPtr)
 
 void TileXRUDMATransport::CleanupMemory()
 {
-    for (int peer = 0; peer < static_cast<int>(remoteMemHandles_.size()); ++peer) {
-        if (peer == options_.rank || remoteMemHandles_[peer] == nullptr) {
+    for (auto& peerEntry : remoteMemHandlesByPeer_) {
+        const int peer = peerEntry.first;
+        if (peer == options_.rank) {
             continue;
         }
-        const uint32_t localEid = peerLocalEid_[peer];
-        loader_.RaCtxRmemUnimport(ctxHandleByEid_[localEid], remoteMemHandles_[peer]);
-        remoteMemHandles_[peer] = nullptr;
+        auto localRoutesIt = peerLocalEids_.find(peer);
+        for (size_t routeIdx = 0; routeIdx < peerEntry.second.size(); ++routeIdx) {
+            void* remoteHandle = peerEntry.second[routeIdx];
+            if (remoteHandle == nullptr) {
+                continue;
+            }
+            uint32_t localEid = peerLocalEid_[peer];
+            if (localRoutesIt != peerLocalEids_.end() && routeIdx < localRoutesIt->second.size()) {
+                localEid = localRoutesIt->second[routeIdx];
+            }
+            if (ctxHandleByEid_.count(localEid) != 0) {
+                loader_.RaCtxRmemUnimport(ctxHandleByEid_[localEid], remoteHandle);
+            }
+            peerEntry.second[routeIdx] = nullptr;
+        }
     }
+    remoteMemHandlesByPeer_.clear();
     for (const auto& mrEntry : registeredMem_) {
         for (const auto& eidMr : mrEntry.second) {
             const uint32_t eidIndex = eidMr.first;
@@ -1191,8 +1384,13 @@ void TileXRUDMATransport::Shutdown()
     localEidByEid_.clear();
     peerLocalEid_.clear();
     peerRemoteEid_.clear();
+    peerLocalEids_.clear();
+    peerRemoteEids_.clear();
+    peerQpRouteEids_.clear();
+    qpsPerRoute_ = 1;
+    qpNum_ = 1;
     localMemInfoByEid_.clear();
-    remoteMemHandles_.clear();
+    remoteMemHandlesByPeer_.clear();
     loader_.Unload();
 }
 

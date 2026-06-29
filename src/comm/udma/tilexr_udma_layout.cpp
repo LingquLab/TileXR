@@ -58,4 +58,21 @@ int BuildUDMAInfoImage(
     return TILEXR_UDMA_LAYOUT_SUCCESS;
 }
 
+std::vector<uint32_t> BuildUDMAMultiRouteQpToEid(
+    const std::vector<uint32_t>& routeEids,
+    uint32_t qpsPerRoute)
+{
+    std::vector<uint32_t> qpToEid;
+    if (routeEids.empty() || qpsPerRoute == 0) {
+        return qpToEid;
+    }
+    qpToEid.reserve(routeEids.size() * qpsPerRoute);
+    for (uint32_t eid : routeEids) {
+        for (uint32_t qp = 0; qp < qpsPerRoute; ++qp) {
+            qpToEid.push_back(eid);
+        }
+    }
+    return qpToEid;
+}
+
 } // namespace TileXR

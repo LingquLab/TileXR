@@ -27,6 +27,10 @@ int BuildUDMAInfoImage(
     UDMAInfo& info,
     std::vector<uint8_t>& bytes);
 
+std::vector<uint32_t> BuildUDMAMultiRouteQpToEid(
+    const std::vector<uint32_t>& routeEids,
+    uint32_t qpsPerRoute);
+
 } // namespace TileXR
 
 #endif // TILEXR_UDMA_LAYOUT_H
