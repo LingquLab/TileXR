@@ -114,6 +114,15 @@ void TestMemoryConsumeSweepDefault()
     CheckContains(path, text, "direct_urma,memory,memory_consume,data_as_flag");
 }
 
+void TestAscend950ChipAliases()
+{
+    const std::string path = "src/comm/tilexr_internal.cpp";
+    const std::string text = ReadFile(path);
+    CheckContains(path, text, "\"Ascend950DT_9581\", ChipName::CHIP_950");
+    CheckContains(path, text, "\"Ascend950DT_9582\", ChipName::CHIP_950");
+    CheckContains(path, text, "\"Ascend950DT_9584\", ChipName::CHIP_950");
+}
+
 void TestDataAsFlagEpochOrderedSource()
 {
     const std::string kernelPath = "tests/udma/demo/tilexr_udma_demo_kernel.cpp";
@@ -155,6 +164,7 @@ int main()
     TestMemorySegmentedDiagnosticTransport();
     TestMemoryConsumeHostWiring();
     TestMemoryConsumeSweepDefault();
+    TestAscend950ChipAliases();
     TestDataAsFlagEpochOrderedSource();
     if (g_failures != 0) {
         std::cerr << g_failures << " TileXR UDMA P2P source guard checks failed" << std::endl;
