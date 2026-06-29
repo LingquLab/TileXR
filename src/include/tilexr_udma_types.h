@@ -75,6 +75,7 @@ struct UDMAInfo {
     uint64_t scqPtr;
     uint64_t rcqPtr;
     uint64_t memPtr;
+    uint64_t qpWeightPtr;
 };
 
 struct UDMASqeCtx {

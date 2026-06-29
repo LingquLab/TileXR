@@ -5,6 +5,9 @@
 
 #include "udma/tilexr_udma_layout.h"
 
+#include <algorithm>
+#include <climits>
+#include <cstdlib>
 #include <cstring>
 
 namespace TileXR {
@@ -32,9 +35,26 @@ int BuildUDMAInfoImage(
     UDMAInfo& info,
     std::vector<uint8_t>& bytes)
 {
+    return BuildUDMAInfoImage(
+        deviceBase, TILEXR_UDMA_QP_NUM, sq, rq, scq, rcq, mem, std::vector<uint32_t>(mem.size(), 1), info, bytes);
+}
+
+int BuildUDMAInfoImage(
+    uintptr_t deviceBase,
+    uint32_t qpNum,
+    const std::vector<UDMAWQCtx>& sq,
+    const std::vector<UDMAWQCtx>& rq,
+    const std::vector<UDMACQCtx>& scq,
+    const std::vector<UDMACQCtx>& rcq,
+    const std::vector<UDMAMemInfo>& mem,
+    const std::vector<uint32_t>& qpWeights,
+    UDMAInfo& info,
+    std::vector<uint8_t>& bytes)
+{
     const size_t rankCount = sq.size();
-    if (rankCount == 0 || rq.size() != rankCount || scq.size() != rankCount ||
-        rcq.size() != rankCount || mem.size() != rankCount) {
+    if (qpNum == 0 || rankCount == 0 || rankCount % qpNum != 0 || rq.size() != rankCount ||
+        scq.size() != rankCount || rcq.size() != rankCount || mem.size() != rankCount ||
+        qpWeights.size() != rankCount) {
         return TILEXR_UDMA_LAYOUT_INVALID;
     }
 
@@ -43,15 +63,17 @@ int BuildUDMAInfoImage(
     const size_t scqOffset = rqOffset + rq.size() * sizeof(UDMAWQCtx);
     const size_t rcqOffset = scqOffset + scq.size() * sizeof(UDMACQCtx);
     const size_t memOffset = rcqOffset + rcq.size() * sizeof(UDMACQCtx);
-    const size_t totalBytes = memOffset + mem.size() * sizeof(UDMAMemInfo);
+    const size_t qpWeightOffset = memOffset + mem.size() * sizeof(UDMAMemInfo);
+    const size_t totalBytes = qpWeightOffset + qpWeights.size() * sizeof(uint32_t);
 
     info = {};
-    info.qpNum = TILEXR_UDMA_QP_NUM;
+    info.qpNum = qpNum;
     info.sqPtr = deviceBase + sqOffset;
     info.rqPtr = deviceBase + rqOffset;
     info.scqPtr = deviceBase + scqOffset;
     info.rcqPtr = deviceBase + rcqOffset;
     info.memPtr = deviceBase + memOffset;
+    info.qpWeightPtr = deviceBase + qpWeightOffset;
 
     bytes.assign(totalBytes, 0);
     std::memcpy(bytes.data(), &info, sizeof(info));
@@ -60,7 +82,79 @@ int BuildUDMAInfoImage(
     CopyVector(bytes, scqOffset, scq);
     CopyVector(bytes, rcqOffset, rcq);
     CopyVector(bytes, memOffset, mem);
+    CopyVector(bytes, qpWeightOffset, qpWeights);
     return TILEXR_UDMA_LAYOUT_SUCCESS;
+}
+
+std::vector<uint32_t> BuildUDMAMultiRouteQpToEid(
+    const std::vector<uint32_t>& routeEids,
+    uint32_t qpsPerRoute)
+{
+    std::vector<uint32_t> qpToEid;
+    if (routeEids.empty() || qpsPerRoute == 0) {
+        return qpToEid;
+    }
+    qpToEid.reserve(routeEids.size() * qpsPerRoute);
+    for (uint32_t eid : routeEids) {
+        for (uint32_t qp = 0; qp < qpsPerRoute; ++qp) {
+            qpToEid.push_back(eid);
+        }
+    }
+    return qpToEid;
+}
+
+std::vector<uint32_t> BuildUDMAMultiRouteQpWeights(
+    const std::vector<uint32_t>& routeEids,
+    const std::map<uint32_t, uint32_t>& routeWeights,
+    uint32_t qpsPerRoute)
+{
+    std::vector<uint32_t> qpWeights;
+    if (routeEids.empty() || qpsPerRoute == 0) {
+        return qpWeights;
+    }
+    qpWeights.reserve(routeEids.size() * qpsPerRoute);
+    for (uint32_t eid : routeEids) {
+        uint32_t weight = 1;
+        const auto weightIt = routeWeights.find(eid);
+        if (weightIt != routeWeights.end() && weightIt->second != 0) {
+            weight = weightIt->second;
+        }
+        for (uint32_t qp = 0; qp < qpsPerRoute; ++qp) {
+            qpWeights.push_back(weight);
+        }
+    }
+    return qpWeights;
+}
+
+std::vector<uint32_t> SelectExplicitUDMARouteEids(
+    const char* routeList,
+    const std::vector<uint32_t>& candidateEids)
+{
+    std::vector<uint32_t> selected;
+    if (routeList == nullptr || routeList[0] == '\0' || candidateEids.empty()) {
+        return selected;
+    }
+
+    const char* cursor = routeList;
+    while (*cursor != '\0') {
+        char* end = nullptr;
+        unsigned long parsed = std::strtoul(cursor, &end, 0);
+        if (end != cursor && parsed <= UINT32_MAX) {
+            const uint32_t eid = static_cast<uint32_t>(parsed);
+            if (std::find(candidateEids.begin(), candidateEids.end(), eid) != candidateEids.end() &&
+                std::find(selected.begin(), selected.end(), eid) == selected.end()) {
+                selected.push_back(eid);
+            }
+            cursor = end;
+        }
+        while (*cursor != '\0' && *cursor != ',') {
+            ++cursor;
+        }
+        if (*cursor == ',') {
+            ++cursor;
+        }
+    }
+    return selected;
 }
 
 } // namespace TileXR

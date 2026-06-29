@@ -109,9 +109,21 @@ __aicore__ inline __gm__ UDMACQCtx* UDMAGetSCQCtx(__gm__ UDMAInfo* udmaInfo, uin
     return reinterpret_cast<__gm__ UDMACQCtx*>(udmaInfo->scqPtr + (pe * qpNum + qpIdx) * sizeof(UDMACQCtx));
 }
 
-__aicore__ inline __gm__ UDMAMemInfo* UDMAGetRemoteMemInfo(__gm__ UDMAInfo* udmaInfo, uint32_t pe)
+__aicore__ inline __gm__ UDMAMemInfo* UDMAGetRemoteMemInfo(__gm__ UDMAInfo* udmaInfo, uint32_t pe, uint32_t qpIdx)
 {
-    return reinterpret_cast<__gm__ UDMAMemInfo*>(udmaInfo->memPtr + sizeof(UDMAMemInfo) * pe);
+    uint32_t qpNum = udmaInfo->qpNum;
+    return reinterpret_cast<__gm__ UDMAMemInfo*>(udmaInfo->memPtr + sizeof(UDMAMemInfo) * (pe * qpNum + qpIdx));
+}
+
+__aicore__ inline uint32_t UDMAGetQpWeight(__gm__ UDMAInfo* udmaInfo, uint32_t pe, uint32_t qpIdx)
+{
+    uint32_t qpNum = udmaInfo->qpNum;
+    if (udmaInfo->qpWeightPtr == 0) {
+        return 1;
+    }
+    auto weights = reinterpret_cast<__gm__ uint32_t*>(udmaInfo->qpWeightPtr);
+    uint32_t weight = weights[pe * qpNum + qpIdx];
+    return weight == 0 ? 1 : weight;
 }
 
 __aicore__ inline void UDMAPollCQUpdateInfo(
@@ -255,7 +267,7 @@ __aicore__ inline void UDMAPostSend(
     uint32_t wqeCnt = ld_dev(reinterpret_cast<__gm__ uint32_t*>(qpCtxEntry->wqeCntAddr), 0);
     UDMAPollCQWhenSQOverflow(udmaInfo, qpCtxEntry, wqeCnt, pe, qpIdx);
 
-    __gm__ UDMAMemInfo* remoteMemInfo = UDMAGetRemoteMemInfo(udmaInfo, pe);
+    __gm__ UDMAMemInfo* remoteMemInfo = UDMAGetRemoteMemInfo(udmaInfo, pe, qpIdx);
     __gm__ uint8_t* wqeAddr =
         reinterpret_cast<__gm__ uint8_t*>(qpCtxEntry->bufAddr + wqeSize * (curHead % depth));
     __gm__ UDMASqeCtx* sqeCtx = reinterpret_cast<__gm__ UDMASqeCtx*>(wqeAddr);
@@ -300,8 +312,9 @@ __aicore__ inline void UDMAWriteNotify(
 }
 
 template <typename T>
-__aicore__ inline void UDMAPutNbi(
-    const __gm__ CommArgs* args, int targetRank, const __gm__ T* localSrc, uint64_t byteOffset, uint32_t byteCount)
+__aicore__ inline void UDMAPutNbiOnQp(
+    const __gm__ CommArgs* args, int targetRank, uint32_t qpIdx,
+    const __gm__ T* localSrc, uint64_t byteOffset, uint32_t byteCount)
 {
     if (!UDMARegistryEnabled(args)) return;
 
@@ -310,7 +323,14 @@ __aicore__ inline void UDMAPutNbi(
 
     auto remoteAddr = UDMARegisteredRemoteAddr(registry, targetRank, byteOffset);
     UDMAWrite(args, remoteAddr, reinterpret_cast<__gm__ uint8_t*>(const_cast<__gm__ T*>(localSrc)),
-              targetRank, 0, byteCount);
+              targetRank, qpIdx, byteCount);
+}
+
+template <typename T>
+__aicore__ inline void UDMAPutNbi(
+    const __gm__ CommArgs* args, int targetRank, const __gm__ T* localSrc, uint64_t byteOffset, uint32_t byteCount)
+{
+    UDMAPutNbiOnQp<T>(args, targetRank, 0, localSrc, byteOffset, byteCount);
 }
 
 template <typename T>
@@ -321,8 +341,9 @@ __aicore__ inline void UDMAPutRegisteredNbi(
 }
 
 template <typename T>
-__aicore__ inline void UDMAGetNbi(
-    const __gm__ CommArgs* args, int sourceRank, __gm__ T* localDst, uint64_t byteOffset, uint32_t byteCount)
+__aicore__ inline void UDMAGetNbiOnQp(
+    const __gm__ CommArgs* args, int sourceRank, uint32_t qpIdx,
+    __gm__ T* localDst, uint64_t byteOffset, uint32_t byteCount)
 {
     if (!UDMARegistryEnabled(args)) return;
 
@@ -330,7 +351,14 @@ __aicore__ inline void UDMAGetNbi(
     if (!UDMARegisteredRangeValid(registry, sourceRank, byteOffset, byteCount)) return;
 
     auto remoteAddr = UDMARegisteredRemoteAddr(registry, sourceRank, byteOffset);
-    UDMARead(args, reinterpret_cast<__gm__ uint8_t*>(localDst), remoteAddr, sourceRank, 0, byteCount);
+    UDMARead(args, reinterpret_cast<__gm__ uint8_t*>(localDst), remoteAddr, sourceRank, qpIdx, byteCount);
+}
+
+template <typename T>
+__aicore__ inline void UDMAGetNbi(
+    const __gm__ CommArgs* args, int sourceRank, __gm__ T* localDst, uint64_t byteOffset, uint32_t byteCount)
+{
+    UDMAGetNbiOnQp<T>(args, sourceRank, 0, localDst, byteOffset, byteCount);
 }
 
 template <typename T>
@@ -341,9 +369,10 @@ __aicore__ inline void UDMAGetRegisteredNbi(
 }
 
 template <typename T>
-__aicore__ inline void UDMAPutSignalNbi(
-    const __gm__ CommArgs* args, int targetRank, const __gm__ T* localSrc, uint64_t byteOffset,
-    uint32_t byteCount, uint64_t signalByteOffset, uint64_t signal)
+__aicore__ inline void UDMAPutSignalNbiOnQp(
+    const __gm__ CommArgs* args, int targetRank, uint32_t qpIdx,
+    const __gm__ T* localSrc, uint64_t byteOffset, uint32_t byteCount,
+    uint64_t signalByteOffset, uint64_t signal)
 {
     if (!UDMARegistryEnabled(args)) return;
 
@@ -359,7 +388,15 @@ __aicore__ inline void UDMAPutSignalNbi(
     signalParams.signal = signal;
     auto remoteAddr = UDMARegisteredRemoteAddr(registry, targetRank, byteOffset);
     UDMAWriteNotify(args, remoteAddr, reinterpret_cast<__gm__ uint8_t*>(const_cast<__gm__ T*>(localSrc)),
-                    targetRank, 0, byteCount, &signalParams);
+                    targetRank, qpIdx, byteCount, &signalParams);
+}
+
+template <typename T>
+__aicore__ inline void UDMAPutSignalNbi(
+    const __gm__ CommArgs* args, int targetRank, const __gm__ T* localSrc, uint64_t byteOffset,
+    uint32_t byteCount, uint64_t signalByteOffset, uint64_t signal)
+{
+    UDMAPutSignalNbiOnQp<T>(args, targetRank, 0, localSrc, byteOffset, byteCount, signalByteOffset, signal);
 }
 
 template <typename T>
@@ -379,6 +416,15 @@ __aicore__ inline void UDMAQuiet(const __gm__ CommArgs* args, int targetRank)
     (void)UDMAPollCQ(udmaInfo, targetRank, 0, wqeCnt);
 }
 
+__aicore__ inline void UDMAQuietOnQp(const __gm__ CommArgs* args, int targetRank, uint32_t qpIdx)
+{
+    if (!UDMAEnabled(args)) return;
+    __gm__ UDMAInfo* udmaInfo = GetUDMAInfo(args);
+    __gm__ UDMAWQCtx* qpCtxEntry = UDMAGetWQCtx(udmaInfo, targetRank, qpIdx);
+    uint32_t wqeCnt = ld_dev(reinterpret_cast<__gm__ uint32_t*>(qpCtxEntry->wqeCntAddr), 0);
+    (void)UDMAPollCQ(udmaInfo, targetRank, qpIdx, wqeCnt);
+}
+
 __aicore__ inline uint32_t UDMAQuietStatus(const __gm__ CommArgs* args, int targetRank)
 {
     if (!UDMAEnabled(args)) return 0xFFFFFFFFU;
@@ -386,6 +432,15 @@ __aicore__ inline uint32_t UDMAQuietStatus(const __gm__ CommArgs* args, int targ
     __gm__ UDMAWQCtx* qpCtxEntry = UDMAGetWQCtx(udmaInfo, targetRank, 0);
     uint32_t wqeCnt = ld_dev(reinterpret_cast<__gm__ uint32_t*>(qpCtxEntry->wqeCntAddr), 0);
     return UDMAPollCQ(udmaInfo, targetRank, 0, wqeCnt);
+}
+
+__aicore__ inline uint32_t UDMAQuietStatusOnQp(const __gm__ CommArgs* args, int targetRank, uint32_t qpIdx)
+{
+    if (!UDMAEnabled(args)) return 0xFFFFFFFFU;
+    __gm__ UDMAInfo* udmaInfo = GetUDMAInfo(args);
+    __gm__ UDMAWQCtx* qpCtxEntry = UDMAGetWQCtx(udmaInfo, targetRank, qpIdx);
+    uint32_t wqeCnt = ld_dev(reinterpret_cast<__gm__ uint32_t*>(qpCtxEntry->wqeCntAddr), 0);
+    return UDMAPollCQ(udmaInfo, targetRank, qpIdx, wqeCnt);
 }
 
 } // namespace TileXR

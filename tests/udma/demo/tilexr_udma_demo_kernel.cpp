@@ -87,6 +87,53 @@ __aicore__ inline uint64_t AllToAllPayloadBytes(int32_t elementsPerPeer)
     return static_cast<uint64_t>(elementsPerPeer) * sizeof(int32_t);
 }
 
+__aicore__ inline uint64_t BigDataChunkBytesPerPeer(bool use35Core, int32_t effectiveChunkElements)
+{
+    const uint64_t chunkBytes = static_cast<uint64_t>(effectiveChunkElements) * sizeof(int32_t);
+    if (!use35Core || chunkBytes < TILEXR_UDMA_DEMO_BIGDATA_MULTINODE_PEER_SLOT_BYTES) {
+        return chunkBytes;
+    }
+    return TILEXR_UDMA_DEMO_BIGDATA_MULTINODE_PEER_SLOT_BYTES;
+}
+
+__aicore__ inline void TileXRUdmaDemoWeightedWqeSlice(
+    __gm__ TileXR::UDMAInfo* udmaInfo, int32_t peer, uint32_t total,
+    uint32_t wqeCount, uint32_t wqeIdx, uint32_t& offset, uint32_t& bytes)
+{
+    uint32_t weightSum = 0;
+    uint32_t prefixWeight = 0;
+    for (uint32_t i = 0; i < wqeCount; ++i) {
+        uint32_t weight = TileXR::UDMAGetQpWeight(udmaInfo, peer, i);
+        if (i < wqeIdx) {
+            prefixWeight += weight;
+        }
+        weightSum += weight;
+    }
+    if (wqeCount == 0 || weightSum == 0 || wqeIdx >= wqeCount) {
+        offset = total;
+        bytes = 0;
+        return;
+    }
+
+    uint64_t rawStart = static_cast<uint64_t>(total) * prefixWeight / weightSum;
+    uint64_t rawEnd = static_cast<uint64_t>(total) *
+        (prefixWeight + TileXR::UDMAGetQpWeight(udmaInfo, peer, wqeIdx)) / weightSum;
+    uint32_t alignedStart = static_cast<uint32_t>(
+        (rawStart / TileXR::BLOCK_UNIT_BYTE) * TileXR::BLOCK_UNIT_BYTE);
+    uint32_t alignedEnd = wqeIdx + 1 == wqeCount ? total : static_cast<uint32_t>(
+        ((rawEnd + TileXR::BLOCK_UNIT_BYTE - 1) / TileXR::BLOCK_UNIT_BYTE) * TileXR::BLOCK_UNIT_BYTE);
+    if (alignedEnd > total) {
+        alignedEnd = total;
+    }
+    if (alignedStart >= alignedEnd) {
+        offset = total;
+        bytes = 0;
+        return;
+    }
+    offset = alignedStart;
+    bytes = alignedEnd - alignedStart;
+}
+
 __aicore__ inline uint64_t AllToAllDataAsFlagSegmentBytes(uint64_t payloadBytes)
 {
     return static_cast<uint64_t>(TileXR::DataAsFlagBlockCountForPayloadBytes(payloadBytes)) *
@@ -730,7 +777,7 @@ __aicore__ inline void BigDataSendPeerWorker(
     auto registry = TileXR::GetUDMARegistry(args);
     auto udmaInfo = TileXR::GetUDMAInfo(args);
     auto wqCtx = TileXR::UDMAGetWQCtx(udmaInfo, peer, 0);
-    auto remoteMemInfo = TileXR::UDMAGetRemoteMemInfo(udmaInfo, peer);
+    auto remoteMemInfo = TileXR::UDMAGetRemoteMemInfo(udmaInfo, peer, 0);
     bool rangeValid = TileXR::UDMARegisteredRangeValid(registry, peer, remoteDataOffset, chunkBytes) &&
         TileXR::UDMARegisteredRangeValid(registry, peer, remoteReadyOffset, sizeof(uint64_t));
     uint32_t wqeBefore = ld_dev(reinterpret_cast<__gm__ uint32_t*>(wqCtx->wqeCntAddr), 0);
@@ -1238,7 +1285,7 @@ extern "C" __global__ __aicore__ void tilexr_udma_all_to_all_kernel(
         auto registry = TileXR::GetUDMARegistry(args);
         auto udmaInfo = TileXR::GetUDMAInfo(args);
         auto wqCtx = TileXR::UDMAGetWQCtx(udmaInfo, peer, 0);
-        auto remoteMemInfo = TileXR::UDMAGetRemoteMemInfo(udmaInfo, peer);
+        auto remoteMemInfo = TileXR::UDMAGetRemoteMemInfo(udmaInfo, peer, 0);
         bool rangeValid = TileXR::UDMARegisteredRangeValid(registry, peer, remoteOffset, bytes);
         uint32_t wqeBefore = ld_dev(reinterpret_cast<__gm__ uint32_t*>(wqCtx->wqeCntAddr), 0);
         if (debug != nullptr && peer < 16) {
@@ -1883,6 +1930,8 @@ extern "C" __global__ __aicore__ void tilexr_udma_p2p_latency_kernel(
     const int32_t effectiveChunkElements = chunkElements > 0 ? chunkElements : elementsPerPeer;
     const uint64_t payloadBytes = AllToAllPayloadBytes(effectiveChunkElements);
     const uint32_t bytes = static_cast<uint32_t>(payloadBytes);
+    auto udmaInfo = TileXR::GetUDMAInfo(args);
+    const uint32_t qpCount = udmaInfo->qpNum == 0 ? 1U : udmaInfo->qpNum;
 
     // One block per peer, skip self (peer == rank): no local copy here.
     for (int32_t peer = blockIdx; peer < rankSize; peer += blockNum) {
@@ -1892,8 +1941,25 @@ extern "C" __global__ __aicore__ void tilexr_udma_p2p_latency_kernel(
         auto localSrc = input + static_cast<uint64_t>(peer) * elementsPerPeer + inputElementOffset;
         uint64_t remoteOffset = outputByteOffset +
             static_cast<uint64_t>(rank) * payloadBytes;
-        TileXR::UDMAPutNbi<int32_t>(args, peer, localSrc, remoteOffset, bytes);
-        uint32_t status = TileXR::UDMAQuietStatus(args, peer);
+        uint32_t status = 0;
+        for (uint32_t qpIdx = 0; qpIdx < qpCount; ++qpIdx) {
+            uint32_t sliceOffset = 0;
+            uint32_t sliceBytes = 0;
+            TileXRUdmaDemoWeightedWqeSlice(udmaInfo, peer, bytes, qpCount, qpIdx, sliceOffset, sliceBytes);
+            if (sliceBytes == 0) {
+                continue;
+            }
+            auto sliceSrc = reinterpret_cast<__gm__ int32_t*>(
+                reinterpret_cast<__gm__ uint8_t*>(localSrc) + sliceOffset);
+            TileXR::UDMAPutNbiOnQp<int32_t>(
+                args, peer, qpIdx, sliceSrc, remoteOffset + sliceOffset, sliceBytes);
+        }
+        for (uint32_t qpIdx = 0; qpIdx < qpCount; ++qpIdx) {
+            uint32_t qpStatus = TileXR::UDMAQuietStatusOnQp(args, peer, qpIdx);
+            if (qpStatus != 0 && status == 0) {
+                status = qpStatus;
+            }
+        }
         if (debug != nullptr && peer < 16) {
             debug[TILEXR_UDMA_DEMO_DEBUG_UDMA_STATUS_BASE + peer] = static_cast<int32_t>(status);
         }
@@ -2186,9 +2252,7 @@ extern "C" __global__ __aicore__ void tilexr_udma_all_to_all_bigdata_kernel(
     const bool use35Core = BigDataUse35Core(rankSize, force35Core);
     const uint32_t shardCount = BigDataShardCount(rankSize, force35Core);
     const int32_t effectiveChunkElements = chunkElements > 0 ? chunkElements : elementsPerPeer;
-    const uint64_t chunkBytesPerPeer = use35Core ?
-        TILEXR_UDMA_DEMO_BIGDATA_MULTINODE_PEER_SLOT_BYTES :
-        static_cast<uint64_t>(effectiveChunkElements) * sizeof(int32_t);
+    const uint64_t chunkBytesPerPeer = BigDataChunkBytesPerPeer(use35Core, effectiveChunkElements);
     const uint64_t sendDataOffset = dataOffset;
     const uint64_t recvDataOffset =
         sendDataOffset +
