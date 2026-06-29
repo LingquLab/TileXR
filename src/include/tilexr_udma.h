@@ -289,6 +289,8 @@ __aicore__ inline void UDMAWriteNotify(
     }
 }
 
+__aicore__ inline uint32_t UDMAQuietStatusQp(const __gm__ CommArgs* args, int targetRank, uint32_t qpIdx);
+
 template <typename T>
 __aicore__ inline void UDMAPutNbiQp(
     const __gm__ CommArgs* args, int targetRank, uint32_t qpIdx,
@@ -301,9 +303,17 @@ __aicore__ inline void UDMAPutNbiQp(
     auto registry = GetUDMARegistry(args);
     if (!UDMARegisteredRangeValid(registry, targetRank, byteOffset, byteCount)) return;
 
-    auto remoteAddr = UDMARegisteredRemoteAddr(registry, targetRank, byteOffset);
-    UDMAWrite(args, remoteAddr, reinterpret_cast<__gm__ uint8_t*>(const_cast<__gm__ T*>(localSrc)),
-              targetRank, qpIdx, byteCount);
+    __gm__ uint8_t* localBytes = reinterpret_cast<__gm__ uint8_t*>(const_cast<__gm__ T*>(localSrc));
+    uint32_t remaining = byteCount;
+    uint64_t chunkOffset = 0;
+    while (remaining > 0) {
+        uint32_t chunkBytes = remaining > TILEXR_UDMA_MAX_WQE_BYTES ? TILEXR_UDMA_MAX_WQE_BYTES : remaining;
+        auto remoteAddr = UDMARegisteredRemoteAddr(registry, targetRank, byteOffset + chunkOffset);
+        UDMAWrite(args, remoteAddr, localBytes + chunkOffset, targetRank, qpIdx, chunkBytes);
+        (void)UDMAQuietStatusQp(args, targetRank, qpIdx);
+        remaining -= chunkBytes;
+        chunkOffset += chunkBytes;
+    }
 }
 
 template <typename T>
@@ -332,8 +342,17 @@ __aicore__ inline void UDMAGetNbiQp(
     auto registry = GetUDMARegistry(args);
     if (!UDMARegisteredRangeValid(registry, sourceRank, byteOffset, byteCount)) return;
 
-    auto remoteAddr = UDMARegisteredRemoteAddr(registry, sourceRank, byteOffset);
-    UDMARead(args, reinterpret_cast<__gm__ uint8_t*>(localDst), remoteAddr, sourceRank, qpIdx, byteCount);
+    __gm__ uint8_t* localBytes = reinterpret_cast<__gm__ uint8_t*>(localDst);
+    uint32_t remaining = byteCount;
+    uint64_t chunkOffset = 0;
+    while (remaining > 0) {
+        uint32_t chunkBytes = remaining > TILEXR_UDMA_MAX_WQE_BYTES ? TILEXR_UDMA_MAX_WQE_BYTES : remaining;
+        auto remoteAddr = UDMARegisteredRemoteAddr(registry, sourceRank, byteOffset + chunkOffset);
+        UDMARead(args, localBytes + chunkOffset, remoteAddr, sourceRank, qpIdx, chunkBytes);
+        (void)UDMAQuietStatusQp(args, sourceRank, qpIdx);
+        remaining -= chunkBytes;
+        chunkOffset += chunkBytes;
+    }
 }
 
 template <typename T>
@@ -367,9 +386,22 @@ __aicore__ inline void UDMAPutSignalNbi(
     signalParams.sigAddr = reinterpret_cast<__gm__ uint64_t*>(
         UDMARegisteredRemoteAddr(registry, targetRank, signalByteOffset));
     signalParams.signal = signal;
-    auto remoteAddr = UDMARegisteredRemoteAddr(registry, targetRank, byteOffset);
-    UDMAWriteNotify(args, remoteAddr, reinterpret_cast<__gm__ uint8_t*>(const_cast<__gm__ T*>(localSrc)),
-                    targetRank, 0, byteCount, &signalParams);
+    __gm__ uint8_t* localBytes = reinterpret_cast<__gm__ uint8_t*>(const_cast<__gm__ T*>(localSrc));
+    uint32_t remaining = byteCount;
+    uint64_t chunkOffset = 0;
+    while (remaining > 0) {
+        uint32_t chunkBytes = remaining > TILEXR_UDMA_MAX_WQE_BYTES ? TILEXR_UDMA_MAX_WQE_BYTES : remaining;
+        auto remoteAddr = UDMARegisteredRemoteAddr(registry, targetRank, byteOffset + chunkOffset);
+        remaining -= chunkBytes;
+        const bool lastChunk = remaining == 0;
+        if (lastChunk) {
+            UDMAWriteNotify(args, remoteAddr, localBytes + chunkOffset, targetRank, 0, chunkBytes, &signalParams);
+        } else {
+            UDMAWrite(args, remoteAddr, localBytes + chunkOffset, targetRank, 0, chunkBytes);
+            (void)UDMAQuietStatusQp(args, targetRank, 0);
+        }
+        chunkOffset += chunkBytes;
+    }
 }
 
 template <typename T>

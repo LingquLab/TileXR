@@ -47,6 +47,39 @@ uint32_t GetEnvUint(const char* name, uint32_t defaultValue, uint32_t minValue, 
     return static_cast<uint32_t>(parsed);
 }
 
+int32_t GetUdmaRegisterAccess()
+{
+    const char* value = std::getenv("TILEXR_UDMA_REG_ACCESS");
+    if (value == nullptr || value[0] == '\0') {
+        return MEM_SEG_ACCESS_DEFAULT;
+    }
+    if (std::strcmp(value, "write") == 0 || std::strcmp(value, "w") == 0) {
+        return MEM_SEG_ACCESS_WRITE;
+    }
+    if (std::strcmp(value, "rw") == 0 || std::strcmp(value, "read_write") == 0) {
+        return MEM_SEG_ACCESS_READ | MEM_SEG_ACCESS_WRITE;
+    }
+    if (std::strcmp(value, "default") == 0 || std::strcmp(value, "rwa") == 0) {
+        return MEM_SEG_ACCESS_DEFAULT;
+    }
+    char* end = nullptr;
+    long parsed = std::strtol(value, &end, 0);
+    if (end != value && *end == '\0' && parsed >= 0 && parsed <= 63) {
+        return static_cast<int32_t>(parsed);
+    }
+    return MEM_SEG_ACCESS_DEFAULT;
+}
+
+bool GetEnvBool(const char* name, bool defaultValue)
+{
+    const char* value = std::getenv(name);
+    if (value == nullptr || value[0] == '\0') {
+        return defaultValue;
+    }
+    return std::strcmp(value, "0") != 0 && std::strcmp(value, "false") != 0 &&
+        std::strcmp(value, "FALSE") != 0;
+}
+
 HccpEid SwapEidForDevice(const HccpEid& hccpEid)
 {
     HccpEid swapped {};
@@ -889,6 +922,11 @@ int TileXRUDMATransport::RegisterMemoryOnContexts(GM_ADDR localPtr, size_t bytes
     if (registeredPtr_ != nullptr) {
         UnregisterMemory(registeredPtr_);
     }
+    const int32_t registerAccess = GetUdmaRegisterAccess();
+    const bool registerNonPin = GetEnvBool("TILEXR_UDMA_REG_NONPIN", true);
+    const bool registerTokenIdValid = GetEnvBool("TILEXR_UDMA_REG_TOKEN_ID_VALID", true);
+    const bool registerTokenNone = GetEnvBool("TILEXR_UDMA_REG_TOKEN_NONE", false);
+    const bool registerDebug = GetEnvBool("TILEXR_UDMA_REG_DEBUG", false);
     std::map<uint32_t, RegMemResultInfo> byEid;
     localMemInfoByEid_.clear();
     for (const auto& ctxEntry : ctxHandleByEid_) {
@@ -899,11 +937,28 @@ int TileXRUDMATransport::RegisterMemoryOnContexts(GM_ADDR localPtr, size_t bytes
         mrInfo.in.mem.size = bytes;
         mrInfo.in.ub.tokenValue = TILEXR_UDMA_TOKEN_VALUE;
         mrInfo.in.ub.tokenIdHandle = tokenHandle;
-        mrInfo.in.ub.flags.bs.access = MEM_SEG_ACCESS_DEFAULT;
-        mrInfo.in.ub.flags.bs.tokenIdValid = 1;
-        mrInfo.in.ub.flags.bs.tokenPolicy = MEM_SEG_TOKEN_PLAIN_TEXT;
+        mrInfo.in.ub.flags.bs.access = registerAccess;
+        mrInfo.in.ub.flags.bs.nonPin = registerNonPin ? 1 : 0;
+        mrInfo.in.ub.flags.bs.tokenIdValid = registerTokenIdValid ? 1 : 0;
+        mrInfo.in.ub.flags.bs.tokenPolicy = registerTokenNone ? MEM_SEG_TOKEN_NONE : MEM_SEG_TOKEN_PLAIN_TEXT;
         void* lmemHandle = nullptr;
         int ret = loader_.RaCtxLmemRegister(ctxEntry.second, &mrInfo, &lmemHandle);
+        if (registerDebug || ret != 0 || lmemHandle == nullptr) {
+            TILEXR_LOG(WARN) << "TileXR UDMA RaCtxLmemRegister"
+                          << " eid=" << eidIndex
+                          << " addr=" << mrInfo.in.mem.addr
+                          << " bytes=" << mrInfo.in.mem.size
+                          << " flags=0x" << std::hex << mrInfo.in.ub.flags.value << std::dec
+                          << " access=" << static_cast<int32_t>(mrInfo.in.ub.flags.bs.access)
+                          << " nonPin=" << static_cast<uint32_t>(mrInfo.in.ub.flags.bs.nonPin)
+                          << " tokenPolicy=" << static_cast<uint32_t>(mrInfo.in.ub.flags.bs.tokenPolicy)
+                          << " tokenIdValid=" << static_cast<uint32_t>(mrInfo.in.ub.flags.bs.tokenIdValid)
+                          << " tokenHandle=" << tokenHandle
+                          << " ret=" << ret
+                          << " lmemHandle=" << lmemHandle
+                          << " outTokenId=" << mrInfo.out.ub.tokenId
+                          << " targetSegHandle=" << mrInfo.out.ub.targetSegHandle;
+        }
         if (ret != 0 || lmemHandle == nullptr) {
             return TILEXR_ERROR_INTERNAL;
         }
@@ -917,11 +972,11 @@ int TileXRUDMATransport::RegisterMemoryOnContexts(GM_ADDR localPtr, size_t bytes
         result.tokenValue = TILEXR_UDMA_TOKEN_VALUE;
         result.targetSegHandle = mrInfo.out.ub.targetSegHandle;
         result.tokenIdHandle = tokenHandle;
-        result.access = MEM_SEG_ACCESS_DEFAULT;
+        result.access = registerAccess;
         byEid[eidIndex] = result;
 
         UDMAMemInfo memInfo {};
-        memInfo.tokenValueValid = true;
+        memInfo.tokenValueValid = registerTokenIdValid;
         memInfo.rmtJettyType = 1;
         memInfo.targetHint = 0;
         memInfo.tpn = 0;

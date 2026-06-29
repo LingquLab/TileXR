@@ -17,6 +17,13 @@ constexpr uint32_t TILEXR_UDMA_SQ_BB_COUNT = TILEXR_UDMA_SQ_DEPTH * TILEXR_UDMA_
 constexpr uint32_t TILEXR_UDMA_NUM_CQE_PER_POLL = 100;
 constexpr uint32_t TILEXR_UDMA_CACHE_LINE_SIZE = 64;
 constexpr uint32_t TILEXR_UDMA_MAX_RETRY_TIMES = 1000000;
+constexpr uint32_t TILEXR_UDMA_MAX_WQE_BYTES = 128U * 1024U * 1024U;
+
+constexpr uint32_t UDMAWqeChunkCount(uint64_t byteCount)
+{
+    return byteCount == 0 ? 0 :
+        static_cast<uint32_t>((byteCount + TILEXR_UDMA_MAX_WQE_BYTES - 1U) / TILEXR_UDMA_MAX_WQE_BYTES);
+}
 
 enum class UDMAOpcode : uint32_t {
     WRITE = 3,

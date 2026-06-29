@@ -166,6 +166,43 @@ __aicore__ inline void TileXRUdmaDemoAddCycleSum(__gm__ uint32_t* debug, uint32_
     debug[lowIdx + 1] = static_cast<uint32_t>(sum >> 32);
 }
 
+__aicore__ inline uint32_t TileXRUdmaDemoUdmaPutChunked(
+    const __gm__ TileXR::CommArgs* args, int32_t peer, uint32_t qpIdx,
+    __gm__ uint8_t* src, uint64_t dstByteOffset, uint32_t bytes, __gm__ uint32_t* debug)
+{
+    auto registry = TileXR::GetUDMARegistry(args);
+    if (!TileXR::UDMARegisteredRangeValid(registry, peer, dstByteOffset, bytes)) {
+        return 0xfeU;
+    }
+    uint32_t remaining = bytes;
+    uint64_t chunkOffset = 0;
+    uint32_t chunkIndex = 0;
+    while (remaining > 0) {
+        const uint32_t chunkBytes = remaining > TileXR::TILEXR_UDMA_MAX_WQE_BYTES ?
+            TileXR::TILEXR_UDMA_MAX_WQE_BYTES : remaining;
+        if (debug != nullptr && qpIdx == 0) {
+            debug[52] = chunkIndex;
+            debug[53] = chunkBytes;
+            debug[54] = static_cast<uint32_t>((dstByteOffset + chunkOffset) & 0xffffffffu);
+            debug[55] = static_cast<uint32_t>((dstByteOffset + chunkOffset) >> 32);
+            debug[56] = remaining;
+        }
+        auto remoteAddr = TileXR::UDMARegisteredRemoteAddr(registry, peer, dstByteOffset + chunkOffset);
+        TileXR::UDMAWrite(args, remoteAddr, src + chunkOffset, peer, qpIdx, chunkBytes);
+        const uint32_t status = TileXR::UDMAQuietStatusQp(args, peer, qpIdx);
+        if (debug != nullptr && qpIdx == 0) {
+            debug[57] = status;
+        }
+        if (status != 0) {
+            return status;
+        }
+        remaining -= chunkBytes;
+        chunkOffset += chunkBytes;
+        ++chunkIndex;
+    }
+    return 0;
+}
+
 __aicore__ inline void TileXRUdmaDemoDataAsFlagSlice(
     uint32_t bytes, uint32_t blockNum, uint32_t blockIdx,
     uint32_t& payloadOffset, uint32_t& sliceBytes, uint32_t& dataAsFlagOffset)
@@ -371,8 +408,8 @@ extern "C" __global__ __aicore__ void tilexr_udma_p2p_perf_kernel(
         TileXRUdmaDemoFoldDebugStatus(debug, blockIdx, 0);
         return;
     }
-    TileXR::UDMAPutNbiQp<uint8_t>(args, peer, blockIdx, src + offset, dstByteOffset + offset, sliceBytes);
-    uint32_t status = TileXR::UDMAQuietStatusQp(args, peer, blockIdx);
+    uint32_t status = TileXRUdmaDemoUdmaPutChunked(
+        args, peer, blockIdx, src + offset, dstByteOffset + offset, sliceBytes, debug);
     TileXRUdmaDemoFoldDebugStatus(debug, blockIdx, status);
     if (debug != nullptr && blockIdx == 0) {
         debug[5] = status;

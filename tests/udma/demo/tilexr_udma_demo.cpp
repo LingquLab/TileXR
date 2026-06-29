@@ -521,7 +521,13 @@ void PrintP2PDebugSummary(int rank, const std::vector<uint32_t>& debug, uint32_t
         << " doorbellSum=" << (debug.size() > 43 ?
             ((static_cast<uint64_t>(debug[43]) << 32) | debug[42]) : 0)
         << " quietSum=" << (debug.size() > 45 ?
-            ((static_cast<uint64_t>(debug[45]) << 32) | debug[44]) : 0);
+            ((static_cast<uint64_t>(debug[45]) << 32) | debug[44]) : 0)
+        << " udmaChunkIndex=" << (debug.size() > 52 ? debug[52] : 0)
+        << " udmaChunkBytes=" << (debug.size() > 53 ? debug[53] : 0)
+        << " udmaChunkOffset=" << (debug.size() > 55 ?
+            ((static_cast<uint64_t>(debug[55]) << 32) | debug[54]) : 0)
+        << " udmaRemaining=" << (debug.size() > 56 ? debug[56] : 0)
+        << " udmaChunkStatus=" << (debug.size() > 57 ? debug[57] : 0);
     const uint32_t traceSegmentCount = debug.size() > 46 ? debug[46] : 0;
     if (traceSegmentCount != 0) {
         out << " traceSegments=" << traceSegmentCount;
@@ -623,6 +629,8 @@ bool RunP2PPerfMode(
     }
 
     void* registeredMemory = nullptr;
+    void* srcMemory = nullptr;
+    void* debugMemory = nullptr;
     uint32_t* debug = nullptr;
     TileXRUDMAMemHandle udmaHandle = 0;
     bool udmaRegistered = false;
@@ -638,16 +646,20 @@ bool RunP2PPerfMode(
         options.transport == TileXR::Demo::P2PTransport::MemorySegmentedRotateTrace;
     const bool useLegacyDataAsFlagTransport = options.transport == TileXR::Demo::P2PTransport::DataAsFlag;
     const bool useIpcTransport = TileXR::Demo::P2PTransportUsesIpc(options.transport);
+    const bool useDirectUdmaTransport = !useIpcTransport;
     const bool bothRanksActive = TileXR::Demo::P2PTransportBothRanksActive(options.transport, options.traffic);
     const uint64_t srcOffset = 0;
     const uint64_t dstWindowBytes =
         TileXR::Demo::P2PTransportWindowBytes(options.transport, options.maxBytes, options.blockDim);
-    const uint64_t dstOffset = useIpcTransport ? TileXR::IPC_DATA_OFFSET : dstWindowBytes;
+    const uint64_t dstOffset = useIpcTransport ? TileXR::IPC_DATA_OFFSET : 0;
     const uint64_t localDstOffset = dstWindowBytes;
     const uint64_t debugOffset = useIpcTransport ? localDstOffset + dstWindowBytes : dstOffset + dstWindowBytes;
     const uint64_t payloadBytes = debugOffset + kP2PDebugWords * sizeof(uint32_t);
-    const uint64_t registeredPayloadBytes = payloadBytes;
+    const uint64_t registeredPayloadBytes = useDirectUdmaTransport ? dstWindowBytes : payloadBytes;
     const uint64_t registeredBytes = RoundUpToAlignment(registeredPayloadBytes, kUdmaRegistrationAlignment);
+    const uint64_t srcBytes = useDirectUdmaTransport ? RoundUpToAlignment(dstWindowBytes, kUdmaRegistrationAlignment) : 0;
+    const uint64_t debugBytes = useDirectUdmaTransport ?
+        RoundUpToAlignment(kP2PDebugWords * sizeof(uint32_t), kUdmaRegistrationAlignment) : 0;
 
     auto cleanup = [&]() {
         if (startEvent != nullptr) {
@@ -663,6 +675,14 @@ bool RunP2PPerfMode(
             PrintStatus(rank, "aclrtFree p2p registered memory");
             aclrtFree(registeredMemory);
         }
+        if (srcMemory != nullptr) {
+            PrintStatus(rank, "aclrtFree p2p src memory");
+            aclrtFree(srcMemory);
+        }
+        if (debugMemory != nullptr) {
+            PrintStatus(rank, "aclrtFree p2p debug memory");
+            aclrtFree(debugMemory);
+        }
     };
 
     const std::string memoryName = useMemoryTransport ? "p2p memory local scratch" : "p2p registered memory";
@@ -671,12 +691,27 @@ bool RunP2PPerfMode(
         cleanup();
         return false;
     }
-    auto base = static_cast<uint8_t*>(registeredMemory);
-    auto srcDev = base + srcOffset;
-    auto dstDev = base + localDstOffset;
-    debug = reinterpret_cast<uint32_t*>(base + debugOffset);
+    uint8_t* srcDev = nullptr;
+    uint8_t* dstDev = nullptr;
+    if (useDirectUdmaTransport) {
+        if (!CheckAcl(rank, "aclrtMalloc p2p src memory",
+                aclrtMalloc(&srcMemory, srcBytes, ACL_MEM_MALLOC_HUGE_FIRST)) ||
+            !CheckAcl(rank, "aclrtMalloc p2p debug memory",
+                aclrtMalloc(&debugMemory, debugBytes, ACL_MEM_MALLOC_HUGE_FIRST))) {
+            cleanup();
+            return false;
+        }
+        srcDev = static_cast<uint8_t*>(srcMemory);
+        dstDev = static_cast<uint8_t*>(registeredMemory);
+        debug = static_cast<uint32_t*>(debugMemory);
+    } else {
+        auto base = static_cast<uint8_t*>(registeredMemory);
+        srcDev = base + srcOffset;
+        dstDev = base + localDstOffset;
+        debug = reinterpret_cast<uint32_t*>(base + debugOffset);
+    }
 
-    if (!useIpcTransport) {
+    if (useDirectUdmaTransport) {
         if (!CheckTileXR(rank, "TileXRUDMARegister p2p",
                 TileXRUDMARegister(comm, static_cast<GM_ADDR>(registeredMemory), registeredBytes, &udmaHandle))) {
             cleanup();
@@ -691,7 +726,9 @@ bool RunP2PPerfMode(
         " bytes=" + std::to_string(registeredBytes) +
         " srcOffset=" + std::to_string(srcOffset) +
         " dstOffset=" + std::to_string(dstOffset) +
-        " debugOffset=" + std::to_string(debugOffset));
+        " debugOffset=" + std::to_string(debugOffset) +
+        " srcMemory=" + std::to_string(reinterpret_cast<uintptr_t>(srcMemory)) +
+        " debugMemory=" + std::to_string(reinterpret_cast<uintptr_t>(debugMemory)));
 
     if (!CheckAcl(rank, "aclrtCreateEvent start", aclrtCreateEvent(&startEvent)) ||
         !CheckAcl(rank, "aclrtCreateEvent stop", aclrtCreateEvent(&stopEvent))) {
@@ -752,6 +789,11 @@ bool RunP2PPerfMode(
             LaunchP2PKernel(stream, commArgsDev, reinterpret_cast<GM_ADDR>(srcDev), reinterpret_cast<GM_ADDR>(dstDev),
                 reinterpret_cast<GM_ADDR>(debug), options, dstOffset, transferBytes, pattern, warmupMagic, i + 1);
             if (!CheckAcl(rank, "aclrtSynchronizeStream p2p warmup", aclrtSynchronizeStream(stream))) {
+                if (IsP2PSourceRank(rank, options) &&
+                    CopyDeviceToHost(rank, hostDebug.data(), hostDebug.size() * sizeof(uint32_t), debug,
+                        hostDebug.size() * sizeof(uint32_t), "p2p debug after warmup failure")) {
+                    PrintP2PDebugSummary(rank, hostDebug, options.blockDim);
+                }
                 ok = false;
                 break;
             }
@@ -796,6 +838,11 @@ bool RunP2PPerfMode(
         if (!ok ||
             !CheckAcl(rank, "aclrtRecordEvent stop", aclrtRecordEvent(stopEvent, stream)) ||
             !CheckAcl(rank, "aclrtSynchronizeStream p2p measured", aclrtSynchronizeStream(stream))) {
+            if (IsP2PSourceRank(rank, options) &&
+                CopyDeviceToHost(rank, hostDebug.data(), hostDebug.size() * sizeof(uint32_t), debug,
+                    hostDebug.size() * sizeof(uint32_t), "p2p debug after measured failure")) {
+                PrintP2PDebugSummary(rank, hostDebug, options.blockDim);
+            }
             ok = false;
             break;
         }

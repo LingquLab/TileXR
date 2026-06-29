@@ -111,6 +111,16 @@ void TestHostLayoutSupportsMultipleQps()
     CHECK_EQ(imageMem[3].tpn, 17U);
 }
 
+void TestLargeTransfersUseSub256MiBChunks()
+{
+    constexpr uint64_t oneMiB = 1024ULL * 1024ULL;
+    CHECK_EQ(TileXR::TILEXR_UDMA_MAX_WQE_BYTES, static_cast<uint32_t>(128ULL * oneMiB));
+    CHECK_EQ(TileXR::UDMAWqeChunkCount(128ULL * oneMiB), 1U);
+    CHECK_EQ(TileXR::UDMAWqeChunkCount(256ULL * oneMiB), 2U);
+    CHECK_EQ(TileXR::UDMAWqeChunkCount(512ULL * oneMiB), 4U);
+    CHECK_EQ(TileXR::UDMAWqeChunkCount(1024ULL * oneMiB), 8U);
+}
+
 } // namespace
 
 int main()
@@ -118,6 +128,7 @@ int main()
     TestHostLayoutUsesDeviceRelativePointers();
     TestRejectsMismatchedArrays();
     TestHostLayoutSupportsMultipleQps();
+    TestLargeTransfersUseSub256MiBChunks();
     if (g_failures != 0) {
         std::cerr << g_failures << " UDMA transport layout checks failed" << std::endl;
         return 1;
