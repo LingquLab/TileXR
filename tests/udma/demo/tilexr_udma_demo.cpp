@@ -69,6 +69,7 @@ constexpr uint32_t kA5CycleToUsDivisor = 1000;
 constexpr int32_t kP2PMagicBase = 0x5444554d; // "TDUM"
 
 struct BarrierEndpoint {
+    std::string host;
     uint16_t port;
 };
 
@@ -196,11 +197,15 @@ bool CopyDeviceToHost(int rank, void* dst, size_t dstSize, const void* src, size
 
 BarrierEndpoint GetBarrierEndpoint()
 {
+    std::string host = "127.0.0.1";
     int basePort = kDefaultCommPort;
     const char* commId = std::getenv("TILEXR_COMM_ID");
     if (commId != nullptr) {
         std::string value(commId);
         size_t colon = value.rfind(':');
+        if (colon != std::string::npos && colon > 0) {
+            host = value.substr(0, colon);
+        }
         if (colon != std::string::npos && colon + 1 < value.size()) {
             basePort = std::atoi(value.c_str() + colon + 1);
         }
@@ -209,7 +214,7 @@ BarrierEndpoint GetBarrierEndpoint()
     if (barrierPort <= 0 || barrierPort > 65535) {
         barrierPort = kDefaultCommPort + kDemoBarrierPortOffset;
     }
-    return BarrierEndpoint{static_cast<uint16_t>(barrierPort)};
+    return BarrierEndpoint{host, static_cast<uint16_t>(barrierPort)};
 }
 
 bool SendAll(int fd, const void* data, size_t bytes)
@@ -265,7 +270,7 @@ int CreateBarrierServer(uint16_t port)
     }
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_addr.s_addr = htonl(INADDR_ANY);
     addr.sin_port = htons(port);
     if (bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0 ||
         listen(fd, SOMAXCONN) != 0) {
@@ -275,11 +280,13 @@ int CreateBarrierServer(uint16_t port)
     return fd;
 }
 
-int ConnectBarrierServer(uint16_t port)
+int ConnectBarrierServer(const std::string& host, uint16_t port)
 {
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (inet_pton(AF_INET, host.c_str(), &addr.sin_addr) != 1) {
+        return -1;
+    }
     addr.sin_port = htons(port);
 
     for (int attempt = 0; attempt < kConnectRetryCount; ++attempt) {
@@ -303,14 +310,15 @@ bool DemoBarrierAll(int rank, int rankSize, const std::string& step)
     }
 
     BarrierEndpoint endpoint = GetBarrierEndpoint();
-    PrintStatus(rank, "demo tcp barrier begin: " + step + " port=" + std::to_string(endpoint.port));
+    PrintStatus(rank, "demo tcp barrier begin: " + step + " host=" + endpoint.host +
+        " port=" + std::to_string(endpoint.port));
     constexpr uint8_t kArrive = 1;
     constexpr uint8_t kRelease = 2;
 
     if (rank == 0) {
         int serverFd = CreateBarrierServer(endpoint.port);
         if (serverFd < 0) {
-            std::cerr << "[rank " << rank << "] ERROR: failed to create demo barrier server on 127.0.0.1:"
+            std::cerr << "[rank " << rank << "] ERROR: failed to create demo barrier server on 0.0.0.0:"
                       << endpoint.port << ", errno=" << errno << std::endl;
             return false;
         }
@@ -341,10 +349,10 @@ bool DemoBarrierAll(int rank, int rankSize, const std::string& step)
             return false;
         }
     } else {
-        int fd = ConnectBarrierServer(endpoint.port);
+        int fd = ConnectBarrierServer(endpoint.host, endpoint.port);
         if (fd < 0) {
-            std::cerr << "[rank " << rank << "] ERROR: failed to connect demo barrier on 127.0.0.1:"
-                      << endpoint.port << std::endl;
+            std::cerr << "[rank " << rank << "] ERROR: failed to connect demo barrier on "
+                      << endpoint.host << ":" << endpoint.port << std::endl;
             return false;
         }
         uint8_t release = 0;
@@ -919,7 +927,7 @@ bool RunP2PPerfMode(
         if (rank == 0) {
             TileXR::Demo::P2PRankStatus srcStatus = localStatus;
             TileXR::Demo::P2PRankStatus dstStatus = localStatus;
-            if (options.srcRank != 0) {
+            if (!options.logDir.empty() && options.srcRank != 0) {
                 std::string srcPath = options.logDir + "/p2p_rank_" + std::to_string(options.srcRank) +
                     "_" + std::to_string(bytes) + ".status";
                 if (!ReadP2PStatusFile(srcPath, &srcStatus)) {
@@ -928,7 +936,7 @@ bool RunP2PPerfMode(
                     break;
                 }
             }
-            if (options.dstRank != 0) {
+            if (!options.logDir.empty() && options.dstRank != 0) {
                 std::string dstPath = options.logDir + "/p2p_rank_" + std::to_string(options.dstRank) +
                     "_" + std::to_string(bytes) + ".status";
                 if (!ReadP2PStatusFile(dstPath, &dstStatus)) {
