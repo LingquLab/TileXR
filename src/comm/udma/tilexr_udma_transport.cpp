@@ -574,6 +574,11 @@ int TileXRUDMATransport::BuildRoutes()
             if (localEids.empty()) {
                 localEids = ResolveLocalAggregateEidRoutes(rootInfo, localId);
             }
+            const std::vector<uint32_t> explicitEids =
+                SelectExplicitUDMARouteEids(std::getenv("TILEXR_UDMA_ROUTE_EIDS"), localEids);
+            if (!explicitEids.empty()) {
+                localEids = explicitEids;
+            }
         }
         if (topoReady && localEids.empty() && !ResolveLocalEidRoute(rootInfo, topoEdges, localId, allLocalIds[peer], localEid)) {
             TILEXR_LOG(WARN) << "TileXR UDMA topology route resolution failed, falling back to EID "

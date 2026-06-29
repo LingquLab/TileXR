@@ -139,6 +139,24 @@ void TestMultiRouteQpMappingRejectsEmptyInputs()
     CHECK_TRUE(TileXR::BuildUDMAMultiRouteQpToEid({7}, 0).empty());
 }
 
+void TestExplicitRouteSelectionKeepsRequestedCandidateOrder()
+{
+    const std::vector<uint32_t> candidates = {7, 8};
+    const std::vector<uint32_t> selected = TileXR::SelectExplicitUDMARouteEids("8,7,9,bad", candidates);
+
+    CHECK_EQ(selected.size(), static_cast<size_t>(2));
+    CHECK_EQ(selected[0], 8U);
+    CHECK_EQ(selected[1], 7U);
+}
+
+void TestExplicitRouteSelectionRejectsMissingInputs()
+{
+    const std::vector<uint32_t> candidates = {7, 8};
+    CHECK_TRUE(TileXR::SelectExplicitUDMARouteEids("", candidates).empty());
+    CHECK_TRUE(TileXR::SelectExplicitUDMARouteEids("9", candidates).empty());
+    CHECK_TRUE(TileXR::SelectExplicitUDMARouteEids("8", {}).empty());
+}
+
 } // namespace
 
 int main()
@@ -149,6 +167,8 @@ int main()
     TestLargeTransfersUseSub256MiBChunks();
     TestMultiRouteQpMappingRepeatsEachRoute();
     TestMultiRouteQpMappingRejectsEmptyInputs();
+    TestExplicitRouteSelectionKeepsRequestedCandidateOrder();
+    TestExplicitRouteSelectionRejectsMissingInputs();
     if (g_failures != 0) {
         std::cerr << g_failures << " UDMA transport layout checks failed" << std::endl;
         return 1;

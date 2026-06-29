@@ -5,6 +5,9 @@
 
 #include "udma/tilexr_udma_layout.h"
 
+#include <algorithm>
+#include <climits>
+#include <cstdlib>
 #include <cstring>
 
 namespace TileXR {
@@ -73,6 +76,37 @@ std::vector<uint32_t> BuildUDMAMultiRouteQpToEid(
         }
     }
     return qpToEid;
+}
+
+std::vector<uint32_t> SelectExplicitUDMARouteEids(
+    const char* routeList,
+    const std::vector<uint32_t>& candidateEids)
+{
+    std::vector<uint32_t> selected;
+    if (routeList == nullptr || routeList[0] == '\0' || candidateEids.empty()) {
+        return selected;
+    }
+
+    const char* cursor = routeList;
+    while (*cursor != '\0') {
+        char* end = nullptr;
+        unsigned long parsed = std::strtoul(cursor, &end, 0);
+        if (end != cursor && parsed <= UINT32_MAX) {
+            const uint32_t eid = static_cast<uint32_t>(parsed);
+            if (std::find(candidateEids.begin(), candidateEids.end(), eid) != candidateEids.end() &&
+                std::find(selected.begin(), selected.end(), eid) == selected.end()) {
+                selected.push_back(eid);
+            }
+            cursor = end;
+        }
+        while (*cursor != '\0' && *cursor != ',') {
+            ++cursor;
+        }
+        if (*cursor == ',') {
+            ++cursor;
+        }
+    }
+    return selected;
 }
 
 } // namespace TileXR

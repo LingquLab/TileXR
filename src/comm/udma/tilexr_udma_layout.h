@@ -31,6 +31,10 @@ std::vector<uint32_t> BuildUDMAMultiRouteQpToEid(
     const std::vector<uint32_t>& routeEids,
     uint32_t qpsPerRoute);
 
+std::vector<uint32_t> SelectExplicitUDMARouteEids(
+    const char* routeList,
+    const std::vector<uint32_t>& candidateEids);
+
 } // namespace TileXR
 
 #endif // TILEXR_UDMA_LAYOUT_H
