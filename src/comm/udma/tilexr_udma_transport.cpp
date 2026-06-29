@@ -644,6 +644,11 @@ int TileXRUDMATransport::BuildRoutes()
             peerRemoteEid_[peer] = peerRemoteEids_[peer][0];
         }
         peerQpRouteEids_[peer] = BuildUDMAMultiRouteQpToEid(localRoutes, qpsPerRoute_);
+        auto weightByEidIt = rootInfo.portCountByEidByLocalId.find(localId);
+        const std::map<uint32_t, uint32_t> emptyWeights;
+        const std::map<uint32_t, uint32_t>& weightByEid =
+            weightByEidIt == rootInfo.portCountByEidByLocalId.end() ? emptyWeights : weightByEidIt->second;
+        peerQpRouteWeights_[peer] = BuildUDMAMultiRouteQpWeights(localRoutes, weightByEid, qpsPerRoute_);
         TILEXR_LOG(INFO) << "TileXR UDMA peer " << peer << " paired route count=" << pairedRouteCount
                          << ", qps per route=" << qpsPerRoute_;
     }
@@ -988,6 +993,7 @@ int TileXRUDMATransport::RefreshUDMAInfo()
     std::vector<UDMACQCtx> scq(queueEntries);
     std::vector<UDMACQCtx> rcq(queueEntries);
     std::vector<UDMAMemInfo> mem(queueEntries);
+    std::vector<uint32_t> qpWeights(queueEntries, 1);
 
     for (int rank = 0; rank < options_.rankSize; ++rank) {
         for (uint32_t qpIdx = 0; qpIdx < qpNum_; ++qpIdx) {
@@ -1041,11 +1047,18 @@ int TileXRUDMATransport::RefreshUDMAInfo()
             }
             mem[entryIndex].eidAddr = reinterpret_cast<uint64_t>(
                 eidTableDev_ + (rank * eidCount_ + remoteEid) * sizeof(HccpEid));
+            if (rank != options_.rank) {
+                const auto weightIt = peerQpRouteWeights_.find(rank);
+                if (weightIt != peerQpRouteWeights_.end() && qpIdx < weightIt->second.size()) {
+                    qpWeights[entryIndex] = weightIt->second[qpIdx] == 0 ? 1 : weightIt->second[qpIdx];
+                }
+            }
         }
     }
 
     if (udmaInfoDev_ == nullptr) {
-        const size_t oneRankSize = 2 * sizeof(UDMAWQCtx) + 2 * sizeof(UDMACQCtx) + sizeof(UDMAMemInfo);
+        const size_t oneRankSize =
+            2 * sizeof(UDMAWQCtx) + 2 * sizeof(UDMACQCtx) + sizeof(UDMAMemInfo) + sizeof(uint32_t);
         udmaInfoSize_ = static_cast<uint32_t>(sizeof(UDMAInfo) + oneRankSize * options_.rankSize * qpNum_);
         ret = aclrtMalloc(reinterpret_cast<void**>(&udmaInfoDev_), udmaInfoSize_, ACL_MEM_MALLOC_HUGE_FIRST);
         if (ret != ACL_SUCCESS) {
@@ -1055,7 +1068,8 @@ int TileXRUDMATransport::RefreshUDMAInfo()
 
     UDMAInfo info {};
     std::vector<uint8_t> image;
-    ret = BuildUDMAInfoImage(reinterpret_cast<uintptr_t>(udmaInfoDev_), qpNum_, sq, rq, scq, rcq, mem, info, image);
+    ret = BuildUDMAInfoImage(
+        reinterpret_cast<uintptr_t>(udmaInfoDev_), qpNum_, sq, rq, scq, rcq, mem, qpWeights, info, image);
     if (ret != TILEXR_UDMA_LAYOUT_SUCCESS) {
         return TILEXR_ERROR_PARA_CHECK_FAIL;
     }
@@ -1392,6 +1406,7 @@ void TileXRUDMATransport::Shutdown()
     peerLocalEids_.clear();
     peerRemoteEids_.clear();
     peerQpRouteEids_.clear();
+    peerQpRouteWeights_.clear();
     qpsPerRoute_ = 1;
     qpNum_ = 1;
     localMemInfoByEid_.clear();

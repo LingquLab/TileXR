@@ -54,6 +54,44 @@ __aicore__ inline void TileXRUdmaDemoWqeSlice(
     }
 }
 
+__aicore__ inline void TileXRUdmaDemoWeightedWqeSlice(
+    __gm__ TileXR::UDMAInfo* udmaInfo, int32_t peer, uint32_t total,
+    uint32_t wqeCount, uint32_t wqeIdx, uint32_t& offset, uint32_t& bytes)
+{
+    uint32_t weightSum = 0;
+    uint32_t prefixWeight = 0;
+    for (uint32_t i = 0; i < wqeCount; ++i) {
+        uint32_t weight = TileXR::UDMAGetQpWeight(udmaInfo, peer, i);
+        if (i < wqeIdx) {
+            prefixWeight += weight;
+        }
+        weightSum += weight;
+    }
+    if (wqeCount == 0 || weightSum == 0 || wqeIdx >= wqeCount) {
+        offset = total;
+        bytes = 0;
+        return;
+    }
+
+    uint64_t rawStart = static_cast<uint64_t>(total) * prefixWeight / weightSum;
+    uint64_t rawEnd = static_cast<uint64_t>(total) *
+        (prefixWeight + TileXR::UDMAGetQpWeight(udmaInfo, peer, wqeIdx)) / weightSum;
+    uint32_t alignedStart = static_cast<uint32_t>(
+        (rawStart / TileXR::BLOCK_UNIT_BYTE) * TileXR::BLOCK_UNIT_BYTE);
+    uint32_t alignedEnd = wqeIdx + 1 == wqeCount ? total : static_cast<uint32_t>(
+        ((rawEnd + TileXR::BLOCK_UNIT_BYTE - 1) / TileXR::BLOCK_UNIT_BYTE) * TileXR::BLOCK_UNIT_BYTE);
+    if (alignedEnd > total) {
+        alignedEnd = total;
+    }
+    if (alignedStart >= alignedEnd) {
+        offset = total;
+        bytes = 0;
+        return;
+    }
+    offset = alignedStart;
+    bytes = alignedEnd - alignedStart;
+}
+
 __aicore__ inline bool TileXRUdmaDemoResolvePeer(
     int32_t rank, int32_t srcRank, int32_t dstRank, int32_t traffic, int32_t& peer)
 {
@@ -399,7 +437,8 @@ extern "C" __global__ __aicore__ void tilexr_udma_p2p_perf_kernel(
 
     uint32_t offset = 0;
     uint32_t sliceBytes = 0;
-    TileXRUdmaDemoWqeSlice(bytes, jettyCount, blockIdx, offset, sliceBytes);
+    auto udmaInfo = TileXR::GetUDMAInfo(args);
+    TileXRUdmaDemoWeightedWqeSlice(udmaInfo, peer, bytes, jettyCount, blockIdx, offset, sliceBytes);
     if (debug != nullptr && blockIdx < 8) {
         debug[16 + blockIdx] = offset;
         debug[24 + blockIdx] = sliceBytes;
@@ -455,7 +494,8 @@ extern "C" __global__ __aicore__ void tilexr_udma_p2p_post_only_perf_kernel(
 
     uint32_t offset = 0;
     uint32_t sliceBytes = 0;
-    TileXRUdmaDemoWqeSlice(bytes, jettyCount, blockIdx, offset, sliceBytes);
+    auto udmaInfo = TileXR::GetUDMAInfo(args);
+    TileXRUdmaDemoWeightedWqeSlice(udmaInfo, peer, bytes, jettyCount, blockIdx, offset, sliceBytes);
     if (debug != nullptr && blockIdx < 8) {
         debug[16 + blockIdx] = offset;
         debug[24 + blockIdx] = sliceBytes;
@@ -466,7 +506,6 @@ extern "C" __global__ __aicore__ void tilexr_udma_p2p_post_only_perf_kernel(
     }
 
     uint64_t startCycle = static_cast<uint64_t>(AscendC::GetSystemCycle());
-    auto udmaInfo = TileXR::GetUDMAInfo(args);
     auto registry = TileXR::GetUDMARegistry(args);
     if (!TileXR::UDMARegisteredRangeValid(registry, peer, dstByteOffset + offset, sliceBytes)) {
         TileXRUdmaDemoFoldDebugStatus(debug, blockIdx, 0xffffffffu);

@@ -111,6 +111,17 @@ __aicore__ inline __gm__ UDMAMemInfo* UDMAGetRemoteMemInfo(__gm__ UDMAInfo* udma
     return reinterpret_cast<__gm__ UDMAMemInfo*>(udmaInfo->memPtr + sizeof(UDMAMemInfo) * (pe * qpNum + qpIdx));
 }
 
+__aicore__ inline uint32_t UDMAGetQpWeight(__gm__ UDMAInfo* udmaInfo, uint32_t pe, uint32_t qpIdx)
+{
+    uint32_t qpNum = udmaInfo->qpNum;
+    if (udmaInfo->qpWeightPtr == 0) {
+        return 1;
+    }
+    auto weights = reinterpret_cast<__gm__ uint32_t*>(udmaInfo->qpWeightPtr);
+    uint32_t weight = weights[pe * qpNum + qpIdx];
+    return weight == 0 ? 1 : weight;
+}
+
 __aicore__ inline void UDMAPollCQUpdateInfo(
     uint32_t curTail, __gm__ UDMACQCtx* cqCtxEntry, __gm__ UDMAWQCtx* wqCtxEntry)
 {

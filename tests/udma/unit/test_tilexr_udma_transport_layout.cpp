@@ -1,5 +1,6 @@
 #include <cstdint>
 #include <iostream>
+#include <map>
 #include <vector>
 
 #include "udma/tilexr_udma_layout.h"
@@ -41,11 +42,12 @@ void TestHostLayoutUsesDeviceRelativePointers()
     mem[1].addr = 0x4000;
     mem[1].tid = 7;
     mem[1].tpn = 9;
+    std::vector<uint32_t> weights = {3, 1};
 
     constexpr uintptr_t deviceBase = 0x100000000ULL;
     TileXR::UDMAInfo info = {};
     std::vector<uint8_t> bytes;
-    const int ret = TileXR::BuildUDMAInfoImage(deviceBase, 1, sq, rq, scq, rcq, mem, info, bytes);
+    const int ret = TileXR::BuildUDMAInfoImage(deviceBase, 1, sq, rq, scq, rcq, mem, weights, info, bytes);
 
     CHECK_EQ(ret, TileXR::TILEXR_UDMA_LAYOUT_SUCCESS);
     CHECK_EQ(info.qpNum, 1U);
@@ -54,10 +56,12 @@ void TestHostLayoutUsesDeviceRelativePointers()
     CHECK_TRUE(info.scqPtr > info.rqPtr);
     CHECK_TRUE(info.rcqPtr > info.scqPtr);
     CHECK_TRUE(info.memPtr > info.rcqPtr);
+    CHECK_TRUE(info.qpWeightPtr > info.memPtr);
     CHECK_EQ(bytes.size(),
              sizeof(TileXR::UDMAInfo) + 2 * sizeof(TileXR::UDMAWQCtx) +
                  2 * sizeof(TileXR::UDMAWQCtx) + 2 * sizeof(TileXR::UDMACQCtx) +
-                 2 * sizeof(TileXR::UDMACQCtx) + 2 * sizeof(TileXR::UDMAMemInfo));
+                 2 * sizeof(TileXR::UDMACQCtx) + 2 * sizeof(TileXR::UDMAMemInfo) +
+                 2 * sizeof(uint32_t));
 
     const auto* imageInfo = reinterpret_cast<const TileXR::UDMAInfo*>(bytes.data());
     CHECK_EQ(imageInfo->sqPtr, info.sqPtr);
@@ -65,10 +69,14 @@ void TestHostLayoutUsesDeviceRelativePointers()
         bytes.data() + (info.sqPtr - deviceBase));
     const auto* imageMem = reinterpret_cast<const TileXR::UDMAMemInfo*>(
         bytes.data() + (info.memPtr - deviceBase));
+    const auto* imageWeights = reinterpret_cast<const uint32_t*>(
+        bytes.data() + (info.qpWeightPtr - deviceBase));
     CHECK_EQ(imageSq[1].bufAddr, static_cast<uint64_t>(0x2000));
     CHECK_EQ(imageMem[1].addr, static_cast<uint64_t>(0x4000));
     CHECK_EQ(imageMem[1].tid, 7U);
     CHECK_EQ(imageMem[1].tpn, 9U);
+    CHECK_EQ(imageWeights[0], 3U);
+    CHECK_EQ(imageWeights[1], 1U);
 }
 
 void TestRejectsMismatchedArrays()
@@ -139,6 +147,17 @@ void TestMultiRouteQpMappingRejectsEmptyInputs()
     CHECK_TRUE(TileXR::BuildUDMAMultiRouteQpToEid({7}, 0).empty());
 }
 
+void TestMultiRouteQpWeightsUseRouteBandwidth()
+{
+    const std::vector<uint32_t> routeEids = {7, 8};
+    const std::map<uint32_t, uint32_t> routeWeights = {{7, 6}, {8, 2}};
+    const std::vector<uint32_t> qpWeights = TileXR::BuildUDMAMultiRouteQpWeights(routeEids, routeWeights, 1);
+
+    CHECK_EQ(qpWeights.size(), static_cast<size_t>(2));
+    CHECK_EQ(qpWeights[0], 6U);
+    CHECK_EQ(qpWeights[1], 2U);
+}
+
 void TestExplicitRouteSelectionKeepsRequestedCandidateOrder()
 {
     const std::vector<uint32_t> candidates = {7, 8};
@@ -167,6 +186,7 @@ int main()
     TestLargeTransfersUseSub256MiBChunks();
     TestMultiRouteQpMappingRepeatsEachRoute();
     TestMultiRouteQpMappingRejectsEmptyInputs();
+    TestMultiRouteQpWeightsUseRouteBandwidth();
     TestExplicitRouteSelectionKeepsRequestedCandidateOrder();
     TestExplicitRouteSelectionRejectsMissingInputs();
     if (g_failures != 0) {

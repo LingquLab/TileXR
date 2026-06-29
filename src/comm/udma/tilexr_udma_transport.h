@@ -82,6 +82,7 @@ private:
     std::map<int, std::vector<uint32_t>> peerLocalEids_;
     std::map<int, std::vector<uint32_t>> peerRemoteEids_;
     std::map<int, std::vector<uint32_t>> peerQpRouteEids_;
+    std::map<int, std::vector<uint32_t>> peerQpRouteWeights_;
     std::map<uint32_t, PerEidState> states_;
     std::map<uint32_t, HccpEid> localEidByEid_;
     MemoryRegionMap registeredMem_;

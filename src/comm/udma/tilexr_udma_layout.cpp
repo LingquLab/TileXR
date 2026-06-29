@@ -30,9 +30,26 @@ int BuildUDMAInfoImage(
     UDMAInfo& info,
     std::vector<uint8_t>& bytes)
 {
+    return BuildUDMAInfoImage(
+        deviceBase, qpNum, sq, rq, scq, rcq, mem, std::vector<uint32_t>(mem.size(), 1), info, bytes);
+}
+
+int BuildUDMAInfoImage(
+    uintptr_t deviceBase,
+    uint32_t qpNum,
+    const std::vector<UDMAWQCtx>& sq,
+    const std::vector<UDMAWQCtx>& rq,
+    const std::vector<UDMACQCtx>& scq,
+    const std::vector<UDMACQCtx>& rcq,
+    const std::vector<UDMAMemInfo>& mem,
+    const std::vector<uint32_t>& qpWeights,
+    UDMAInfo& info,
+    std::vector<uint8_t>& bytes)
+{
     if (qpNum == 0 || sq.empty() || sq.size() % qpNum != 0 ||
         rq.size() != sq.size() || scq.size() != sq.size() ||
-        rcq.size() != sq.size() || mem.size() != sq.size()) {
+        rcq.size() != sq.size() || mem.size() != sq.size() ||
+        qpWeights.size() != sq.size()) {
         return TILEXR_UDMA_LAYOUT_INVALID;
     }
 
@@ -41,7 +58,8 @@ int BuildUDMAInfoImage(
     const size_t scqOffset = rqOffset + rq.size() * sizeof(UDMAWQCtx);
     const size_t rcqOffset = scqOffset + scq.size() * sizeof(UDMACQCtx);
     const size_t memOffset = rcqOffset + rcq.size() * sizeof(UDMACQCtx);
-    const size_t totalBytes = memOffset + mem.size() * sizeof(UDMAMemInfo);
+    const size_t qpWeightOffset = memOffset + mem.size() * sizeof(UDMAMemInfo);
+    const size_t totalBytes = qpWeightOffset + qpWeights.size() * sizeof(uint32_t);
 
     info = {};
     info.qpNum = qpNum;
@@ -50,6 +68,7 @@ int BuildUDMAInfoImage(
     info.scqPtr = deviceBase + scqOffset;
     info.rcqPtr = deviceBase + rcqOffset;
     info.memPtr = deviceBase + memOffset;
+    info.qpWeightPtr = deviceBase + qpWeightOffset;
 
     bytes.assign(totalBytes, 0);
     std::memcpy(bytes.data(), &info, sizeof(info));
@@ -58,6 +77,7 @@ int BuildUDMAInfoImage(
     CopyVector(bytes, scqOffset, scq);
     CopyVector(bytes, rcqOffset, rcq);
     CopyVector(bytes, memOffset, mem);
+    CopyVector(bytes, qpWeightOffset, qpWeights);
     return TILEXR_UDMA_LAYOUT_SUCCESS;
 }
 
@@ -76,6 +96,29 @@ std::vector<uint32_t> BuildUDMAMultiRouteQpToEid(
         }
     }
     return qpToEid;
+}
+
+std::vector<uint32_t> BuildUDMAMultiRouteQpWeights(
+    const std::vector<uint32_t>& routeEids,
+    const std::map<uint32_t, uint32_t>& routeWeights,
+    uint32_t qpsPerRoute)
+{
+    std::vector<uint32_t> qpWeights;
+    if (routeEids.empty() || qpsPerRoute == 0) {
+        return qpWeights;
+    }
+    qpWeights.reserve(routeEids.size() * qpsPerRoute);
+    for (uint32_t eid : routeEids) {
+        uint32_t weight = 1;
+        const auto weightIt = routeWeights.find(eid);
+        if (weightIt != routeWeights.end() && weightIt->second != 0) {
+            weight = weightIt->second;
+        }
+        for (uint32_t qp = 0; qp < qpsPerRoute; ++qp) {
+            qpWeights.push_back(weight);
+        }
+    }
+    return qpWeights;
 }
 
 std::vector<uint32_t> SelectExplicitUDMARouteEids(
