@@ -309,7 +309,7 @@ void TestDemoDebugLayoutSource()
     CHECK_CONTAINS(demo, "kDebugUdmaStatusBase + TileXR::TILEXR_MAX_RANK_SIZE");
     CHECK_CONTAINS(demo, "kDebugIpcGather + 1");
     CHECK_CONTAINS(demo, "kDebugReadySeenBase + TileXR::TILEXR_MAX_RANK_SIZE");
-    CHECK_CONTAINS(kernel, "TILEXR_UDMA_DEMO_DEBUG_UDMA_STATUS_BASE + TileXR::TILEXR_MAX_RANK_SIZE");
+    CHECK_CONTAINS(kernel, "TILEXR_UDMA_DEMO_DEBUG_READY_SEEN_BASE + TileXR::TILEXR_MAX_RANK_SIZE");
     CHECK_CONTAINS(kernel, "TILEXR_UDMA_DEMO_DEBUG_UDMA_STATUS_BASE + peer");
 }
 
@@ -490,7 +490,7 @@ void TestAllToAllBigDataSource()
     CHECK_CONTAINS(kernel, "copyShardBegin = 0U");
     CHECK_CONTAINS(kernel, "copyShardEnd = TILEXR_UDMA_DEMO_BIGDATA_REMOTE_SEND_PRIMARY_SHARD_END");
     CHECK_CONTAINS(kernel, "copyShardBegin = TILEXR_UDMA_DEMO_BIGDATA_REMOTE_SEND_PRIMARY_SHARD_END");
-    CHECK_CONTAINS(kernel, "copyShardEnd = shardCount");
+    CHECK_CONTAINS(kernel, "copyShardEnd = dataShardCount");
     CHECK_CONTAINS(kernel, "copyShard == TILEXR_UDMA_DEMO_BIGDATA_REMOTE_SEND_SECONDARY_AGGREGATOR");
     CHECK_CONTAINS(kernel, "BigDataDataSlot(globalPass, pass, use35Core)");
     CHECK_CONTAINS(kernel, "BigDataNetworkPeerIndex");
@@ -517,7 +517,7 @@ void TestAllToAllBigDataSource()
     CHECK_CONTAINS(kernel, "TILEXR_UDMA_DEMO_BIGDATA_RELAY_UB_PINGPONG_BYTES");
     CHECK_CONTAINS(kernel, "relayLocal[bufferId * TILEXR_UDMA_DEMO_BIGDATA_RELAY_UB_BYTES]");
     CHECK_CONTAINS(kernel, "if (!use35Core && profileStage > TILEXR_BIGDATA_PROFILE_STAGE_ACK_PUT");
-    CHECK_CONTAINS(kernel, "if (use35Core && profileStage > TILEXR_BIGDATA_PROFILE_STAGE_ACK_PUT");
+    CHECK_CONTAINS(kernel, "if (use35Core && profileStage == TILEXR_BIGDATA_PROFILE_STAGE_ACK_PUT");
     CHECK_CONTAINS(kernel, "BigDataControlSlot(udmaMem, ackSignalOffset, slot, rankSize, shardCount, peer, 0U)");
     CHECK_CONTAINS(kernel, "use35Core ? passCount : TILEXR_UDMA_DEMO_BIGDATA_PINGPONG_SLOTS");
     CHECK_CONTAINS(kernel, "recvSlotInt[0]");
