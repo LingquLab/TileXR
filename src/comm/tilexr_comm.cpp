@@ -55,6 +55,11 @@ static bool g_udmaUnavailable = false;
 static std::mutex g_sdmaMtx;
 static bool g_sdmaUnavailable = false;
 
+bool TileXRIpcMemUsesP2PMalloc(ChipName chipName)
+{
+    return chipName == ChipName::CHIP_310P3 || chipName == ChipName::CHIP_950;
+}
+
 
 // 如果是互联的链路，返回false； 对910B2C那些不互联的链路，返回true
 bool SkipUnusedChannel910B2C(int curRank, int peerRank, ChipName chipName)
@@ -748,7 +753,7 @@ int TileXRComm::InitMem()
     TILEXR_LOG(DEBUG) << "tilexr buffer size " << tilexrBuffSize;
     aclError ret = aclrtMalloc(
         reinterpret_cast<void **>(&peerMem_[rank_]), tilexrBuffSize,
-        (GetChipName() == ChipName::CHIP_310P3) ? ACL_MEM_MALLOC_HUGE_FIRST_P2P : ACL_MEM_MALLOC_HUGE_FIRST);
+        TileXRIpcMemUsesP2PMalloc(GetChipName()) ? ACL_MEM_MALLOC_HUGE_FIRST_P2P : ACL_MEM_MALLOC_HUGE_FIRST);
     if (ret != ACL_SUCCESS) {
         TILEXR_LOG(ERROR) << "allocate device mem error " << __FILE__ << ":" << __LINE__ << " " << ret;
         return TILEXR_ERROR_INTERNAL;

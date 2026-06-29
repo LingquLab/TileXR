@@ -123,6 +123,15 @@ void TestAscend950ChipAliases()
     CheckContains(path, text, "\"Ascend950DT_9584\", ChipName::CHIP_950");
 }
 
+void TestAscend950IpcMemoryUsesP2PMalloc()
+{
+    const std::string path = "src/comm/tilexr_comm.cpp";
+    const std::string text = ReadFile(path);
+    CheckContains(path, text, "TileXRIpcMemUsesP2PMalloc(GetChipName())");
+    CheckContains(path, text, "chipName == ChipName::CHIP_950");
+    CheckContains(path, text, "ACL_MEM_MALLOC_HUGE_FIRST_P2P");
+}
+
 void TestDataAsFlagEpochOrderedSource()
 {
     const std::string kernelPath = "tests/udma/demo/tilexr_udma_demo_kernel.cpp";
@@ -165,6 +174,7 @@ int main()
     TestMemoryConsumeHostWiring();
     TestMemoryConsumeSweepDefault();
     TestAscend950ChipAliases();
+    TestAscend950IpcMemoryUsesP2PMalloc();
     TestDataAsFlagEpochOrderedSource();
     if (g_failures != 0) {
         std::cerr << g_failures << " TileXR UDMA P2P source guard checks failed" << std::endl;
