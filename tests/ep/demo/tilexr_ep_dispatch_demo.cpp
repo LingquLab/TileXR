@@ -30,7 +30,11 @@ constexpr int64_t kXElements = kBs * kH;
 constexpr int64_t kAssistInts = 4;
 constexpr uint16_t kFp16One = 0x3c00;
 constexpr uint16_t kFp16Two = 0x4000;
+constexpr std::size_t kUdmaCacheLineBytes = 64;
 constexpr std::size_t kUdmaRegistrationAlignment = 2 * 1024 * 1024;
+
+TileXRUDMAMemHandle g_workspaceHandle = 0;
+bool g_workspaceRegistered = false;
 
 struct DemoConfig {
     int64_t moeExpertNum = 8;
@@ -304,6 +308,37 @@ std::size_t AlignSize(std::size_t value, std::size_t alignment)
 {
     const std::size_t remainder = value % alignment;
     return remainder == 0 ? value : value + alignment - remainder;
+}
+
+std::size_t EpSlotBytes(const DemoConfig &config, std::size_t payloadRowBytes, bool usePerTokenDynamicQuant)
+{
+    const std::size_t payloadScaleBytes = usePerTokenDynamicQuant ?
+        static_cast<std::size_t>(config.maxRoutesPerRank()) * sizeof(float) : 0;
+    const std::size_t payloadBytes = AlignSize(
+        static_cast<std::size_t>(config.maxRoutesPerRank()) * payloadRowBytes + payloadScaleBytes, 32);
+    const std::size_t assistWindowBytes = AlignSize(
+        static_cast<std::size_t>(config.maxRoutesPerRank()) * kAssistInts * sizeof(int32_t), 32);
+    return AlignSize(64 + payloadBytes + assistWindowBytes, 32);
+}
+
+std::size_t EpWindowBytes(int rankSize, const DemoConfig &config, std::size_t payloadRowBytes,
+    bool usePerTokenDynamicQuant)
+{
+    return AlignSize(64 + static_cast<std::size_t>(rankSize) *
+        EpSlotBytes(config, payloadRowBytes, usePerTokenDynamicQuant), 32);
+}
+
+std::size_t EpOperationBytes(int rankSize, const DemoConfig &config, std::size_t payloadRowBytes,
+    bool usePerTokenDynamicQuant)
+{
+    const std::size_t windowBytes = EpWindowBytes(rankSize, config, payloadRowBytes, usePerTokenDynamicQuant);
+    const std::size_t readyOffset = windowBytes * 2 + static_cast<std::size_t>(rankSize) * sizeof(uint64_t);
+    const std::size_t relayOffset = AlignSize(readyOffset, kUdmaCacheLineBytes);
+    const std::size_t relayBytes = static_cast<std::size_t>(rankSize) * static_cast<std::size_t>(rankSize) *
+        EpSlotBytes(config, payloadRowBytes, usePerTokenDynamicQuant);
+    const std::size_t relayReadyOffset = AlignSize(relayOffset + relayBytes, kUdmaCacheLineBytes);
+    const std::size_t relayReadyBytes = static_cast<std::size_t>(rankSize) * sizeof(uint64_t);
+    return AlignSize(relayReadyOffset + relayReadyBytes, kUdmaCacheLineBytes);
 }
 
 uint16_t XValue(int rank, int64_t token, int64_t h)
@@ -636,6 +671,11 @@ bool ValidateTpRecvCounts(int rank, int rankSize, const DemoConfig &config, cons
 void Cleanup(TileXRCommPtr comm, aclrtStream stream, int deviceId, bool deviceSet, bool aclReady,
     std::vector<void *> &buffers)
 {
+    if (comm != nullptr && g_workspaceRegistered) {
+        (void)TileXRUDMAUnregister(comm, g_workspaceHandle);
+        g_workspaceRegistered = false;
+        g_workspaceHandle = 0;
+    }
     for (void *buffer : buffers) {
         if (buffer != nullptr) {
             (void)aclrtFree(buffer);
@@ -775,13 +815,11 @@ int main(int argc, char **argv)
     const std::size_t assistBytes = (expandedElements / kH) * kAssistInts * sizeof(int32_t);
     const std::size_t yOutBytes = kXElements * sizeof(uint16_t);
     const std::size_t payloadRowBytes = kH * expandElementBytes;
-    const std::size_t payloadScaleBytes = usePerTokenDynamicQuant ? maxRoutesPerRank * sizeof(float) : 0;
-    const std::size_t epWindowBytes = 64 + static_cast<std::size_t>(rankSize) *
-        ((64 + maxRoutesPerRank * payloadRowBytes + payloadScaleBytes + 31) / 32 * 32 +
-            (maxRoutesPerRank * kAssistInts * sizeof(int32_t) + 31) / 32 * 32 + 64);
-    const std::size_t workspacePayloadBytes = AlignSize(epWindowBytes, 32) *
-        static_cast<std::size_t>(config.effectiveTpWorldSize() + 2) +
-        static_cast<std::size_t>(rankSize) * sizeof(uint64_t);
+    const std::size_t dispatchWindowBytes = EpWindowBytes(rankSize, config, payloadRowBytes, usePerTokenDynamicQuant);
+    const std::size_t dispatchPayloadBytes = AlignSize(dispatchWindowBytes, 32) *
+        static_cast<std::size_t>(config.effectiveTpWorldSize() + 2);
+    const std::size_t operationBytes = EpOperationBytes(rankSize, config, payloadRowBytes, usePerTokenDynamicQuant);
+    const std::size_t workspacePayloadBytes = std::max(dispatchPayloadBytes, operationBytes * 2);
     const std::size_t workspaceBytes = ((workspacePayloadBytes + kUdmaRegistrationAlignment - 1) /
         kUdmaRegistrationAlignment) * kUdmaRegistrationAlignment;
 
@@ -848,6 +886,10 @@ int main(int argc, char **argv)
             &workspaceHandle), "TileXRUDMARegister workspace")) {
         Cleanup(comm, stream, deviceId, deviceSet, aclReady, buffers);
         return 1;
+    }
+    if (crossNode) {
+        g_workspaceHandle = workspaceHandle;
+        g_workspaceRegistered = true;
     }
 
     const std::vector<uint16_t> hostExpertOut(expandedElements, kFp16One);
@@ -968,9 +1010,14 @@ int main(int argc, char **argv)
         return dispatchOk ? 0 : 1;
     }
 
-    if (!CheckTileXR(TileXRMoeEpCombine(expertOutDev, static_cast<int32_t *>(assistDev),
+    const int combineRet = crossNode ?
+        TileXRMoeEpCombineV2(expertOutDev, static_cast<int32_t *>(assistDev),
+            static_cast<int32_t *>(recvCountsDev), comm, kBs, kH, kTopK, config.moeExpertNum, yOutDev, workspaceDev,
+            TileXR::TILEXR_DATA_TYPE_FP16, stream) :
+        TileXRMoeEpCombine(expertOutDev, static_cast<int32_t *>(assistDev),
             static_cast<int32_t *>(recvCountsDev), comm, kBs, kH, kTopK, config.moeExpertNum, yOutDev,
-            TileXR::TILEXR_DATA_TYPE_FP16, stream), "TileXRMoeEpCombine") ||
+            TileXR::TILEXR_DATA_TYPE_FP16, stream);
+    if (!CheckTileXR(combineRet, "TileXRMoeEpCombine") ||
         !CheckAcl(aclrtSynchronizeStream(stream), "aclrtSynchronizeStream combine")) {
         Cleanup(comm, stream, deviceId, deviceSet, aclReady, buffers);
         return 1;

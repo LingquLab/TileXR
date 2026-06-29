@@ -66,6 +66,7 @@ void TestPublicHeader()
     CheckContains("src/include/tilexr_ep.h", contents, "int TileXRMoeEpDispatch(");
     CheckContains("src/include/tilexr_ep.h", contents, "int TileXRMoeEpDispatchV2(");
     CheckContains("src/include/tilexr_ep.h", contents, "int TileXRMoeEpCombine(");
+    CheckContains("src/include/tilexr_ep.h", contents, "int TileXRMoeEpCombineV2(");
     CheckContains("src/include/tilexr_ep.h", contents, "TileXRCommPtr comm");
     CheckContains("src/include/tilexr_ep.h", contents, "TileXR::TileXRDataType dtype");
     CheckContains("src/include/tilexr_ep.h", contents, "aclrtStream stream");
@@ -92,6 +93,7 @@ void TestBuildPlacement()
     if (ReadFile("src/ep/CMakeLists.txt", &epCmake)) {
         CheckContains("src/ep/CMakeLists.txt", epCmake, "add_library(tilexr-ep SHARED");
         CheckContains("src/ep/CMakeLists.txt", epCmake, "tile-comm");
+        CheckContains("src/ep/CMakeLists.txt", epCmake, "libtilexr_ep_combine_kernel.so");
         CheckContains("src/ep/CMakeLists.txt", epCmake, "tilexr_ep.h");
         CheckContains("src/ep/CMakeLists.txt", epCmake, "install(TARGETS tilexr-ep");
     }
@@ -119,6 +121,9 @@ void TestChipMapRecognizesAscend950Dt9582()
     }
 
     CheckContains("src/comm/tilexr_internal.cpp", internal, "\"Ascend950DT_9582\", ChipName::CHIP_950");
+    CheckContains("src/comm/tilexr_internal.cpp", internal, "\"Ascend950PR_9599\", ChipName::CHIP_950PR");
+    CheckContains("src/comm/tilexr_internal.cpp", internal, "bool UseLegacyIpcPid(ChipName chipName)");
+    CheckContains("src/comm/tilexr_internal.cpp", internal, "chipName == ChipName::CHIP_950PR");
 }
 
 void TestEpKernelUsesCceArchFlags()

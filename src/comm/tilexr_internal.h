@@ -17,6 +17,8 @@ namespace TileXR {
 // Common functions
 ChipName GetChipName();
 
+bool UseLegacyIpcPid(ChipName chipName);
+
 uint32_t GetCoreNum(ChipName chipName);
 } // namespace TileXR
 #endif // TILEXR_INTERNAL_H

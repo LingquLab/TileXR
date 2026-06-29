@@ -79,10 +79,14 @@ __aicore__ inline __gm__ uint8_t* UDMARegisteredRemoteAddr(
 
 __aicore__ inline void UDMACleanCacheLines(__gm__ uint8_t* addr, uint64_t length)
 {
+    if (addr == nullptr || length == 0) {
+        return;
+    }
     __gm__ uint8_t* start = reinterpret_cast<__gm__ uint8_t*>(
         reinterpret_cast<uint64_t>(addr) / TILEXR_UDMA_CACHE_LINE_SIZE * TILEXR_UDMA_CACHE_LINE_SIZE);
     __gm__ uint8_t* end = reinterpret_cast<__gm__ uint8_t*>(
-        (reinterpret_cast<uint64_t>(addr) + length) / TILEXR_UDMA_CACHE_LINE_SIZE * TILEXR_UDMA_CACHE_LINE_SIZE);
+        (reinterpret_cast<uint64_t>(addr) + length - 1) / TILEXR_UDMA_CACHE_LINE_SIZE *
+        TILEXR_UDMA_CACHE_LINE_SIZE);
     AscendC::GlobalTensor<uint8_t> global;
     global.SetGlobalBuffer(start);
     for (uint64_t i = 0; i <= static_cast<uint64_t>(end - start); i += TILEXR_UDMA_CACHE_LINE_SIZE) {

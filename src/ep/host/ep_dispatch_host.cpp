@@ -169,8 +169,10 @@ int TileXREpValidateCombineConfig(const EpCombineParams &params, const TileXR::C
         commArgs.rank < 0 || commArgs.rank >= commArgs.rankSize) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
-    if (TileXREpUsesCrossNodeComm(commArgs)) {
-        return TileXR::TILEXR_ERROR_NOT_SUPPORT;
+    if (TileXREpUsesCrossNodeComm(commArgs) &&
+        (params.workspace == nullptr || (commArgs.extraFlag & TileXR::ExtraFlag::UDMA) == 0 ||
+            commArgs.udmaInfoPtr == nullptr || commArgs.udmaRegistryPtr == nullptr)) {
+        return TileXR::TILEXR_ERROR_NOT_INITIALIZED;
     }
 
     for (int rank = 0; rank < commArgs.rankSize; ++rank) {

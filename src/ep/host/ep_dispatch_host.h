@@ -55,6 +55,7 @@ struct EpCombineParams {
     int64_t topK = 0;
     int64_t moeExpertNum = 0;
     void *yOut = nullptr;
+    void *workspace = nullptr;
     TileXR::TileXRDataType dtype = TileXR::TILEXR_DATA_TYPE_RESERVED;
     aclrtStream stream = nullptr;
 };

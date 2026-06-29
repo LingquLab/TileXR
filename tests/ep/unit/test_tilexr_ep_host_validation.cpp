@@ -241,8 +241,16 @@ void TestCombineValidation()
         TileXR::TILEXR_ERROR_NOT_INITIALIZED);
 
     commArgs = CrossNodeCommArgs();
-    CheckInt("cross-node combine unsupported", TileXREp::TileXREpValidateCombineConfig(params, commArgs, &window),
-        TileXR::TILEXR_ERROR_NOT_SUPPORT);
+    CheckInt("cross-node combine needs udma registry", TileXREp::TileXREpValidateCombineConfig(params, commArgs,
+        &window), TileXR::TILEXR_ERROR_NOT_INITIALIZED);
+
+    commArgs = CrossNodeUdmaCommArgs();
+    CheckInt("cross-node combine needs workspace", TileXREp::TileXREpValidateCombineConfig(params, commArgs, &window),
+        TileXR::TILEXR_ERROR_NOT_INITIALIZED);
+
+    params.workspace = reinterpret_cast<void *>(0x50000000);
+    CheckInt("cross-node combine config", TileXREp::TileXREpValidateCombineConfig(params, commArgs, &window),
+        TileXR::TILEXR_SUCCESS);
 }
 
 void TestV2CapabilityValidation()

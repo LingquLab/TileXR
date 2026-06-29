@@ -38,7 +38,10 @@ set(TILEXR_EP_KERNEL_COMPILE_OPTIONS
 )
 set(TILEXR_EP_KERNEL_LINK_OPTIONS ${TILEXR_EP_AICORE_ARCH})
 
-set(TILEXR_EP_KERNEL_SO "${CMAKE_CURRENT_BINARY_DIR}/libtilexr_ep_dispatch_kernel.so")
+set(TILEXR_EP_DISPATCH_KERNEL_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_ep_dispatch_kernel.cpp")
+set(TILEXR_EP_COMBINE_KERNEL_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_ep_combine_kernel.cpp")
+set(TILEXR_EP_DISPATCH_KERNEL_SO "${CMAKE_CURRENT_BINARY_DIR}/libtilexr_ep_dispatch_kernel.so")
+set(TILEXR_EP_COMBINE_KERNEL_SO "${CMAKE_CURRENT_BINARY_DIR}/libtilexr_ep_combine_kernel.so")
 set(TILEXR_EP_KERNEL_INCLUDES
     -I${ASCEND_HOME_PATH}/compiler/tikcpp
     -I${ASCEND_HOME_PATH}/compiler/tikcpp/tikcfw
@@ -59,7 +62,7 @@ set(TILEXR_EP_KERNEL_INCLUDES
 )
 
 add_custom_command(
-    OUTPUT "${TILEXR_EP_KERNEL_SO}"
+    OUTPUT "${TILEXR_EP_DISPATCH_KERNEL_SO}"
     COMMAND ${BISHENG_EXECUTABLE}
         ${TILEXR_EP_KERNEL_COMPILE_OPTIONS}
         -std=gnu++17
@@ -68,7 +71,7 @@ add_custom_command(
         ${TILEXR_EP_KERNEL_LINK_OPTIONS}
         -DCATLASS_ARCH=${TILEXR_EP_CATLASS_ARCH}
         ${TILEXR_EP_KERNEL_INCLUDES}
-        "${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_ep_dispatch_kernel.cpp"
+        "${TILEXR_EP_DISPATCH_KERNEL_SOURCE}"
         -L${ASCEND_DRIVER_PATH}/lib64/driver
         -L${ASCEND_HOME_PATH}/${ARCH}-linux/lib64
         -L${ASCEND_HOME_PATH}/${ARCH}-linux/devlib
@@ -82,9 +85,9 @@ add_custom_command(
         -ldl
         -lnnopbase
         -lpthread
-        -o "${TILEXR_EP_KERNEL_SO}"
+        -o "${TILEXR_EP_DISPATCH_KERNEL_SO}"
     DEPENDS
-        "${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_ep_dispatch_kernel.cpp"
+        "${TILEXR_EP_DISPATCH_KERNEL_SOURCE}"
         "${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_ep_dispatch_helpers.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_ep_combine_helpers.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/common/ep_window.h"
@@ -93,7 +96,44 @@ add_custom_command(
     VERBATIM
     COMMENT "Building TileXR EP dispatch kernel with bisheng"
 )
-add_custom_target(tilexr_ep_dispatch_kernel ALL DEPENDS "${TILEXR_EP_KERNEL_SO}")
+add_custom_target(tilexr_ep_dispatch_kernel ALL DEPENDS "${TILEXR_EP_DISPATCH_KERNEL_SO}")
+
+add_custom_command(
+    OUTPUT "${TILEXR_EP_COMBINE_KERNEL_SO}"
+    COMMAND ${BISHENG_EXECUTABLE}
+        ${TILEXR_EP_KERNEL_COMPILE_OPTIONS}
+        -std=gnu++17
+        -fPIC
+        -shared
+        ${TILEXR_EP_KERNEL_LINK_OPTIONS}
+        -DCATLASS_ARCH=${TILEXR_EP_CATLASS_ARCH}
+        ${TILEXR_EP_KERNEL_INCLUDES}
+        "${TILEXR_EP_COMBINE_KERNEL_SOURCE}"
+        -L${ASCEND_DRIVER_PATH}/lib64/driver
+        -L${ASCEND_HOME_PATH}/${ARCH}-linux/lib64
+        -L${ASCEND_HOME_PATH}/${ARCH}-linux/devlib
+        -lruntime
+        -lascendcl
+        -lstdc++
+        -lm
+        -ltiling_api
+        -lplatform
+        -lc_sec
+        -ldl
+        -lnnopbase
+        -lpthread
+        -o "${TILEXR_EP_COMBINE_KERNEL_SO}"
+    DEPENDS
+        "${TILEXR_EP_COMBINE_KERNEL_SOURCE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_ep_kernel_common.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/common/ep_window.h"
+        "${CMAKE_SOURCE_DIR}/src/include/comm_args.h"
+        "${CMAKE_SOURCE_DIR}/src/include/tilexr_sync.h"
+        "${CMAKE_SOURCE_DIR}/src/include/tilexr_udma.h"
+    VERBATIM
+    COMMENT "Building TileXR EP combine kernel with bisheng"
+)
+add_custom_target(tilexr_ep_combine_kernel ALL DEPENDS "${TILEXR_EP_COMBINE_KERNEL_SO}")
 
 add_library(tilexr-ep SHARED
     host/ep_layout.cpp
@@ -103,7 +143,7 @@ add_library(tilexr-ep SHARED
     host/tilexr_ep_dispatch.cpp
 )
 
-add_dependencies(tilexr-ep tilexr_ep_dispatch_kernel)
+add_dependencies(tilexr-ep tilexr_ep_dispatch_kernel tilexr_ep_combine_kernel)
 
 target_include_directories(tilexr-ep
     PUBLIC
@@ -124,6 +164,7 @@ target_link_directories(tilexr-ep
 target_link_libraries(tilexr-ep
     PRIVATE
         -l:libtilexr_ep_dispatch_kernel.so
+        -l:libtilexr_ep_combine_kernel.so
         tile-comm
         ascendcl
         runtime
@@ -136,5 +177,9 @@ set_target_properties(tilexr-ep PROPERTIES
 )
 
 install(TARGETS tilexr-ep LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR})
-install(FILES "${TILEXR_EP_KERNEL_SO}" DESTINATION ${CMAKE_INSTALL_LIBDIR})
+install(FILES
+    "${TILEXR_EP_DISPATCH_KERNEL_SO}"
+    "${TILEXR_EP_COMBINE_KERNEL_SO}"
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}
+)
 install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/../include/tilexr_ep.h DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
