@@ -140,30 +140,95 @@ void TestAllToAllBigDataPlan()
     constexpr int32_t elementsPerPeer = 16 * 1024 * 1024; // 64 MiB per peer for int32_t.
     const auto plan = TileXR::Demo::PlanAllToAllBigDataUdma(rankSize, elementsPerPeer);
 
-    CHECK_EQ(TileXR::Demo::kAllToAllBigDataMaxRegisteredBytes, 64ULL * 1024ULL * 1024ULL);
+    CHECK_EQ(TileXR::Demo::kAllToAllBigDataMaxRegisteredBytes, 128ULL * 1024ULL * 1024ULL);
+    CHECK_EQ(TileXR::Demo::kAllToAllBigDataMultiNodeRegisteredBytes, 1024ULL * 1024ULL * 1024ULL);
+    CHECK_EQ(TileXR::Demo::kAllToAllBigDataMultiNodePeerSlotBytes, 8ULL * 1024ULL * 1024ULL);
     CHECK_EQ(TileXR::Demo::kAllToAllBigDataControlSlotBytes, 64ULL);
     CHECK_EQ(TileXR::Demo::kAllToAllBigDataCoresPerPeer, 5U);
+    CHECK_EQ(TileXR::Demo::kAllToAllBigDataSingleNodeShards, 2U);
     CHECK_EQ(TileXR::Demo::kAllToAllBigDataLocalCopyShards, 2U);
+    CHECK_EQ(TileXR::Demo::kAllToAllBigDataMultiNodeCopyCores, 16U);
+    CHECK_EQ(TileXR::Demo::kAllToAllBigDataMultiNodeRecvCores, 16U);
+    CHECK_EQ(TileXR::Demo::kAllToAllBigDataMultiNodeRemoteSendPrimaryCore, 16U);
+    CHECK_EQ(TileXR::Demo::kAllToAllBigDataMultiNodeRemoteSendSecondaryCore, 17U);
+    CHECK_EQ(TileXR::Demo::kAllToAllBigDataMultiNodeLocalSendCore, 18U);
+    CHECK_EQ(TileXR::Demo::kAllToAllBigDataMultiNodeRecvCoreBase, 19U);
+    CHECK_EQ(TileXR::Demo::kAllToAllBigDataMultiNodeBlockDim, 35U);
     CHECK_EQ(TileXR::Demo::kAllToAllBigDataPingPongSlots, 2U);
     CHECK_EQ(plan.registeredBytes <= TileXR::Demo::kAllToAllBigDataMaxRegisteredBytes, true);
     const size_t controlGroupBytes =
         static_cast<size_t>(TileXR::Demo::kAllToAllBigDataPingPongSlots) *
         static_cast<size_t>(rankSize) *
-        static_cast<size_t>(TileXR::Demo::kAllToAllBigDataLocalCopyShards) *
+        static_cast<size_t>(TileXR::Demo::AllToAllBigDataShardCount(rankSize)) *
         TileXR::Demo::kAllToAllBigDataControlSlotBytes;
     CHECK_EQ(plan.controlBytes, controlGroupBytes);
     CHECK_EQ(plan.signalBytes, 3ULL * controlGroupBytes);
     CHECK_EQ(plan.copyDoneOffset, plan.dataBytes);
     CHECK_EQ(plan.recvCopyDoneOffset, plan.copyDoneOffset + controlGroupBytes);
+    CHECK_EQ(plan.remoteSendDoneOffset, 0ULL);
     CHECK_EQ(plan.readySignalOffset, plan.recvCopyDoneOffset + controlGroupBytes);
     CHECK_EQ(plan.ackSignalOffset, plan.readySignalOffset + controlGroupBytes);
-    CHECK_EQ(plan.registeredBytes, plan.dataBytes + plan.controlBytes + plan.signalBytes);
+    CHECK_EQ(plan.registeredBytes, TileXR::Demo::kAllToAllBigDataMaxRegisteredBytes);
+    CHECK_EQ(plan.dataBytes + plan.controlBytes + plan.signalBytes <= plan.registeredBytes, true);
     CHECK_EQ(plan.dataBytes,
              static_cast<size_t>(rankSize - 1) * TileXR::Demo::kAllToAllBigDataPingPongSlots * 2ULL *
              plan.chunkBytesPerPeer);
     CHECK_EQ(plan.chunkElements > 0, true);
     CHECK_EQ(plan.chunkBytesPerPeer, static_cast<size_t>(plan.chunkElements) * sizeof(int32_t));
-    CHECK_EQ(plan.passCount > 1, true);
+    CHECK_EQ(plan.passCount >= 1, true);
+}
+
+void TestAllToAllBigDataMultiNodePlanUses16ShardsAndRemoteSendDone()
+{
+    constexpr int rankSize = 16;
+    constexpr int32_t elementsPerPeer = 2 * 1024 * 1024;
+    const auto plan = TileXR::Demo::PlanAllToAllBigDataUdma(rankSize, elementsPerPeer);
+    const size_t controlGroupBytes =
+        static_cast<size_t>(plan.passCount) *
+        static_cast<size_t>(rankSize) *
+        static_cast<size_t>(TileXR::Demo::kAllToAllBigDataMultiNodeCopyCores) *
+        TileXR::Demo::kAllToAllBigDataControlSlotBytes;
+
+    CHECK_EQ(TileXR::Demo::AllToAllBigDataShardCount(rankSize), 16U);
+    CHECK_EQ(plan.registeredBytes, TileXR::Demo::kAllToAllBigDataMultiNodeRegisteredBytes);
+    CHECK_EQ(plan.passCount, 1U);
+    CHECK_EQ(plan.chunkBytesPerPeer, TileXR::Demo::kAllToAllBigDataMultiNodePeerSlotBytes);
+    CHECK_EQ(plan.controlBytes, controlGroupBytes);
+    CHECK_EQ(plan.signalBytes, 4ULL * controlGroupBytes);
+    CHECK_EQ(plan.copyDoneOffset, plan.dataBytes);
+    CHECK_EQ(plan.recvCopyDoneOffset, plan.copyDoneOffset + controlGroupBytes);
+    CHECK_EQ(plan.remoteSendDoneOffset, plan.recvCopyDoneOffset + controlGroupBytes);
+    CHECK_EQ(plan.readySignalOffset, plan.remoteSendDoneOffset + controlGroupBytes);
+    CHECK_EQ(plan.ackSignalOffset, plan.readySignalOffset + controlGroupBytes);
+    CHECK_EQ(plan.dataBytes + plan.controlBytes + plan.signalBytes <= plan.registeredBytes, true);
+    CHECK_EQ(plan.dataBytes,
+             static_cast<size_t>(rankSize - 1) * static_cast<size_t>(plan.passCount) * 2ULL *
+             TileXR::Demo::kAllToAllBigDataMultiNodePeerSlotBytes);
+}
+
+void TestAllToAllBigDataForce35CorePlanFor8P()
+{
+    constexpr int rankSize = 8;
+    constexpr int32_t elementsPerPeer = 2 * 1024 * 1024;
+    const auto plan = TileXR::Demo::PlanAllToAllBigDataUdma(rankSize, elementsPerPeer, true);
+    const size_t controlGroupBytes =
+        static_cast<size_t>(plan.passCount) *
+        static_cast<size_t>(rankSize) *
+        static_cast<size_t>(TileXR::Demo::kAllToAllBigDataMultiNodeCopyCores) *
+        TileXR::Demo::kAllToAllBigDataControlSlotBytes;
+
+    CHECK_EQ(TileXR::Demo::AllToAllBigDataIsMultiNode(rankSize), false);
+    CHECK_EQ(TileXR::Demo::AllToAllBigDataUse35Core(rankSize, true), true);
+    CHECK_EQ(TileXR::Demo::AllToAllBigDataShardCount(rankSize, true), 16U);
+    CHECK_EQ(TileXR::Demo::AllToAllBigDataBlockDim(rankSize, true), 35U);
+    CHECK_EQ(plan.registeredBytes, TileXR::Demo::kAllToAllBigDataMultiNodeRegisteredBytes);
+    CHECK_EQ(plan.chunkBytesPerPeer, TileXR::Demo::kAllToAllBigDataMultiNodePeerSlotBytes);
+    CHECK_EQ(plan.controlBytes, controlGroupBytes);
+    CHECK_EQ(plan.signalBytes, 4ULL * controlGroupBytes);
+    CHECK_EQ(plan.remoteSendDoneOffset, plan.recvCopyDoneOffset + controlGroupBytes);
+    CHECK_EQ(plan.readySignalOffset, plan.remoteSendDoneOffset + controlGroupBytes);
+    CHECK_EQ(plan.ackSignalOffset, plan.readySignalOffset + controlGroupBytes);
+    CHECK_EQ(plan.dataBytes + plan.controlBytes + plan.signalBytes <= plan.registeredBytes, true);
 }
 
 void TestAllToAllBigDataBlockDim()
@@ -171,7 +236,66 @@ void TestAllToAllBigDataBlockDim()
     CHECK_EQ(TileXR::Demo::AllToAllBigDataBlockDim(0), 1U);
     CHECK_EQ(TileXR::Demo::AllToAllBigDataBlockDim(1), 5U);
     CHECK_EQ(TileXR::Demo::AllToAllBigDataBlockDim(8), 40U);
-    CHECK_EQ(TileXR::Demo::AllToAllBigDataBlockDim(64), 320U);
+    CHECK_EQ(TileXR::Demo::AllToAllBigDataBlockDim(8, true), 35U);
+    CHECK_EQ(TileXR::Demo::AllToAllBigDataBlockDim(16), 35U);
+    CHECK_EQ(TileXR::Demo::AllToAllBigDataBlockDim(32), 35U);
+    CHECK_EQ(TileXR::Demo::AllToAllBigDataBlockDim(64), 35U);
+}
+
+void TestAllToAllBigDataMultiNodeTopology()
+{
+    CHECK_EQ(TileXR::Demo::AllToAllBigDataIsMultiNode(8), false);
+    CHECK_EQ(TileXR::Demo::AllToAllBigDataIsMultiNode(16), true);
+    CHECK_EQ(TileXR::Demo::AllToAllBigDataValidTopology(8), true);
+    CHECK_EQ(TileXR::Demo::AllToAllBigDataValidTopology(16), true);
+    CHECK_EQ(TileXR::Demo::AllToAllBigDataValidTopology(24), true);
+    CHECK_EQ(TileXR::Demo::AllToAllBigDataValidTopology(10), false);
+
+    CHECK_EQ(TileXR::Demo::AllToAllBigDataLocalNodeBegin(0), 0);
+    CHECK_EQ(TileXR::Demo::AllToAllBigDataLocalNodeEnd(0), 8);
+    CHECK_EQ(TileXR::Demo::AllToAllBigDataLocalNodeBegin(10), 8);
+    CHECK_EQ(TileXR::Demo::AllToAllBigDataLocalNodeEnd(10), 16);
+    CHECK_EQ(TileXR::Demo::AllToAllBigDataIsLocalPeer(10, 8), true);
+    CHECK_EQ(TileXR::Demo::AllToAllBigDataIsLocalPeer(10, 15), true);
+    CHECK_EQ(TileXR::Demo::AllToAllBigDataIsLocalPeer(10, 7), false);
+}
+
+void TestAllToAllBigDataRemotePeerQueue()
+{
+    std::vector<int32_t> peers = TileXR::Demo::AllToAllBigDataRemotePeers(3, 16);
+    std::vector<int32_t> expected {11, 12, 13, 14, 15, 8, 9, 10};
+    CHECK_EQ(peers == expected, true);
+
+    peers = TileXR::Demo::AllToAllBigDataRemotePeers(10, 16);
+    expected = {2, 3, 4, 5, 6, 7, 0, 1};
+    CHECK_EQ(peers == expected, true);
+
+    peers = TileXR::Demo::AllToAllBigDataRemotePeers(5, 24);
+    expected = {13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 8, 9, 10, 11, 12};
+    CHECK_EQ(peers == expected, true);
+
+    peers = TileXR::Demo::AllToAllBigDataRemotePeers(5, 8);
+    CHECK_EQ(peers.empty(), true);
+}
+
+void TestAllToAllBigDataMergedPeerQueue()
+{
+    std::vector<int32_t> peers = TileXR::Demo::AllToAllBigDataLocalPeers(3);
+    std::vector<int32_t> expected {4, 5, 6, 7, 0, 1, 2};
+    CHECK_EQ(peers == expected, true);
+
+    peers = TileXR::Demo::AllToAllBigDataMergedPeerTasks(3, 16);
+    expected = {11, 4, 12, 5, 13, 6, 14, 7, 15, 0, 8, 1, 9, 2, 10};
+    CHECK_EQ(peers == expected, true);
+
+    peers = TileXR::Demo::AllToAllBigDataMergedPeerTasks(5, 32);
+    expected = {13, 14, 15, 6, 16, 17, 18, 7, 19, 20, 21, 0,
+                22, 23, 24, 1, 25, 26, 27, 2, 28, 29, 30,
+                3, 31, 8, 9, 4, 10, 11, 12};
+    CHECK_EQ(peers == expected, true);
+
+    peers = TileXR::Demo::AllToAllBigDataMergedPeerTasks(5, 8);
+    CHECK_EQ(peers.empty(), true);
 }
 
 void TestDemoDebugLayoutSource()
@@ -264,10 +388,25 @@ void TestAllToAllBigDataSource()
     CHECK_CONTAINS(demo, "launch_tilexr_udma_all_to_all_bigdata");
     CHECK_CONTAINS(demo, "for (int iter = 0; iter < allToAllRepeat; ++iter)");
     CHECK_CONTAINS(demo, "TILEXR_DEMO_BIGDATA_PROFILE_STAGE");
+    CHECK_CONTAINS(demo, "TILEXR_DEMO_BIGDATA_FORCE_35CORE");
+    CHECK_CONTAINS(demo, "TILEXR_DEMO_BARRIER_HOST");
+    CHECK_CONTAINS(demo, "host = value.substr(0, colon)");
+    CHECK_CONTAINS(demo, "addr.sin_addr.s_addr = htonl(INADDR_ANY)");
+    CHECK_CONTAINS(demo, "ConnectBarrierServer(endpoint.host, endpoint.port)");
     CHECK_CONTAINS(demo, "const uint64_t kernelLoopBase = static_cast<uint64_t>(iter)");
     CHECK_CONTAINS(demo, "bigDataPlan.passCount, 1, kernelLoopBase");
     CHECK_CONTAINS(demo, "bigDataPlan.copyDoneOffset");
     CHECK_CONTAINS(demo, "bigDataPlan.recvCopyDoneOffset");
+    CHECK_CONTAINS(demo, "bigDataPlan.remoteSendDoneOffset");
+    CHECK_CONTAINS(demo, "AllToAllBigDataValidTopology(rankSize)");
+    CHECK_CONTAINS(demo, "ERROR: bigdata alltoall multi-node requires rankSize multiple of 8");
+    CHECK_CONTAINS(demo, "bigdata multinode mode=");
+    CHECK_CONTAINS(demo, "shards=");
+    CHECK_CONTAINS(demo, "remoteSendDoneOffset=");
+    CHECK_CONTAINS(demo, "force35Core=");
+    CHECK_CONTAINS(demo, "TileXR::Demo::AllToAllBigDataShardCount(");
+    CHECK_CONTAINS(demo, "const uint32_t bigDataBlockDim = TileXR::Demo::AllToAllBigDataBlockDim(");
+    CHECK_CONTAINS(demo, "bigDataBlockDim, stream, commArgsDev");
     CHECK_CONTAINS(demo, "static_cast<uint8_t*>(registeredMemory) + bigDataPlan.copyDoneOffset");
     CHECK_CONTAINS(demo, "bigDataPlan.controlBytes + bigDataPlan.signalBytes");
     CHECK_CONTAINS(demo, "static_cast<uint32_t>(bigDataProfileStage)");
@@ -294,8 +433,43 @@ void TestAllToAllBigDataSource()
     CHECK_CONTAINS(kernel, "TILEXR_UDMA_DEMO_SIGNAL_MAX_POLLS");
     CHECK_CONTAINS(kernel, "TILEXR_UDMA_DEMO_CONTROL_SLOT_BYTES");
     CHECK_CONTAINS(kernel, "TILEXR_UDMA_DEMO_BIGDATA_CORES_PER_PEER = 5U");
-    CHECK_CONTAINS(kernel, "TILEXR_UDMA_DEMO_BIGDATA_LOCAL_COPY_SHARDS = 2U");
+    CHECK_CONTAINS(kernel, "TILEXR_UDMA_DEMO_BIGDATA_SINGLE_NODE_SHARDS = 2U");
+    CHECK_CONTAINS(kernel, "TILEXR_UDMA_DEMO_BIGDATA_LOCAL_COPY_SHARDS");
     CHECK_CONTAINS(kernel, "TILEXR_UDMA_DEMO_BIGDATA_PINGPONG_SLOTS = 2U");
+    CHECK_CONTAINS(kernel, "TILEXR_UDMA_DEMO_BIGDATA_MULTINODE_PEER_SLOT_BYTES = 8ULL * 1024ULL * 1024ULL");
+    CHECK_CONTAINS(kernel, "TILEXR_UDMA_DEMO_BIGDATA_RANKS_PER_NODE = 8");
+    CHECK_CONTAINS(kernel, "TILEXR_UDMA_DEMO_BIGDATA_MULTINODE_BLOCK_DIM =");
+    CHECK_CONTAINS(kernel, "TILEXR_UDMA_DEMO_BIGDATA_MULTINODE_REMOTE_SEND_PRIMARY_CORE = 16U");
+    CHECK_CONTAINS(kernel, "TILEXR_UDMA_DEMO_BIGDATA_MULTINODE_REMOTE_SEND_SECONDARY_CORE = 17U");
+    CHECK_CONTAINS(kernel, "TILEXR_UDMA_DEMO_BIGDATA_MULTINODE_LOCAL_SEND_CORE = 18U");
+    CHECK_CONTAINS(kernel, "TILEXR_UDMA_DEMO_BIGDATA_MULTINODE_RECV_CORE_BASE = 19U");
+    CHECK_CONTAINS(kernel, "BigDataIsMultiNode(rankSize)");
+    CHECK_CONTAINS(kernel, "BigDataValidTopology(rankSize)");
+    CHECK_CONTAINS(kernel, "BigDataUse35Core(rankSize, force35Core)");
+    CHECK_CONTAINS(kernel, "BigDataShardCount(rankSize, force35Core)");
+    CHECK_CONTAINS(kernel, "BigDataTaskCount(rankSize, force35Core)");
+    CHECK_CONTAINS(kernel, "BigDataNodeCount(rankSize)");
+    CHECK_CONTAINS(kernel, "BigDataRemotePeerAt(rank, rankSize, remoteIndex)");
+    CHECK_CONTAINS(kernel, "BigDataLocalPeerAt");
+    CHECK_CONTAINS(kernel, "BigDataMergedPeerTaskAt(rank, rankSize, taskIndex, force35Core, peer, isLocalPeer)");
+    CHECK_CONTAINS(kernel, "BigDataRunSelfCopyShard(rank, rankSize");
+    CHECK_CONTAINS(kernel, "BigDataRemoteSendSegmentWorker");
+    CHECK_CONTAINS(kernel, "BigDataRemoteSendSegmentRange");
+    CHECK_CONTAINS(kernel, "BigDataWaitCopyDoneRange");
+    CHECK_CONTAINS(kernel, "BigDataPublishReadySignal");
+    CHECK_CONTAINS(kernel, "remoteSendDoneOffset");
+    CHECK_CONTAINS(kernel, "if (!BigDataIsMultiNode(rankSize))");
+    CHECK_CONTAINS(kernel, "if (blockIdx >= static_cast<int32_t>(TILEXR_UDMA_DEMO_BIGDATA_MULTINODE_BLOCK_DIM))");
+    CHECK_CONTAINS(kernel, "const bool isCopyCore =");
+    CHECK_CONTAINS(kernel, "const bool isRemoteSendPrimaryCore =");
+    CHECK_CONTAINS(kernel, "const bool isRemoteSendSecondaryCore =");
+    CHECK_CONTAINS(kernel, "const bool isLocalSendCore =");
+    CHECK_CONTAINS(kernel, "const bool isRecvCore =");
+    CHECK_CONTAINS(kernel, "if (isCopyCore)");
+    CHECK_CONTAINS(kernel, "if (!isLocalPeer && isRemoteSendPrimaryCore)");
+    CHECK_CONTAINS(kernel, "if (!isLocalPeer && isRemoteSendSecondaryCore)");
+    CHECK_CONTAINS(kernel, "if (isLocalPeer && isLocalSendCore)");
+    CHECK_CONTAINS(kernel, "if (isRecvCore)");
     CHECK_CONTAINS(kernel, "BigDataCopyPeerWorker");
     CHECK_CONTAINS(kernel, "BigDataSendPeerWorker");
     CHECK_CONTAINS(kernel, "BigDataRecvPeerWorker");
@@ -303,27 +477,33 @@ void TestAllToAllBigDataSource()
     CHECK_CONTAINS(kernel, "copyShard");
     CHECK_CONTAINS(kernel, "recvShard");
     CHECK_CONTAINS(kernel, "recvCopyDoneOffset");
-    CHECK_CONTAINS(kernel, "const int32_t peer = blockIdx / static_cast<int32_t>(TILEXR_UDMA_DEMO_BIGDATA_CORES_PER_PEER)");
-    CHECK_CONTAINS(kernel, "const int32_t role = blockIdx % static_cast<int32_t>(TILEXR_UDMA_DEMO_BIGDATA_CORES_PER_PEER)");
-    CHECK_CONTAINS(kernel, "BigDataPingPongSlot");
+    CHECK_CONTAINS(kernel, "copyShardBegin = 0U");
+    CHECK_CONTAINS(kernel, "copyShardEnd = TILEXR_UDMA_DEMO_BIGDATA_REMOTE_SEND_PRIMARY_SHARD_END");
+    CHECK_CONTAINS(kernel, "copyShardBegin = TILEXR_UDMA_DEMO_BIGDATA_REMOTE_SEND_PRIMARY_SHARD_END");
+    CHECK_CONTAINS(kernel, "copyShardEnd = shardCount");
+    CHECK_CONTAINS(kernel, "BigDataDataSlot(globalPass, pass, use35Core)");
     CHECK_CONTAINS(kernel, "BigDataNetworkPeerIndex");
     CHECK_CONTAINS(kernel, "BigDataStoreTokenMte");
     CHECK_CONTAINS(kernel, "BigDataIpcAckOffset");
     CHECK_CONTAINS(kernel, "BigDataLocalIpcAckSlot");
     CHECK_CONTAINS(kernel, "BigDataRemoteIpcAckSlot");
+    CHECK_CONTAINS(kernel, "BigDataRemoteRegisteredControlSlot");
     CHECK_CONTAINS(kernel, "rankSize > 1 ? rankSize - 1 : 1");
-    CHECK_CONTAINS(kernel, "BigDataControlSlot(udmaMem, copyDoneOffset, slot, rankSize, peer, copyShard)");
-    CHECK_CONTAINS(kernel, "BigDataControlSlot(udmaMem, recvCopyDoneOffset, slot, rankSize, peer, recvShard)");
-    CHECK_CONTAINS(kernel, "BigDataControlSlot(udmaMem, readySignalOffset, slot, rankSize, peer, 0U)");
+    CHECK_CONTAINS(kernel, "BigDataControlSlot(udmaMem, copyDoneOffset, slot, rankSize, shardCount, peer, copyShard)");
+    CHECK_CONTAINS(kernel, "BigDataControlSlot(udmaMem, recvCopyDoneOffset, slot, rankSize, shardCount, peer, recvShard)");
+    CHECK_CONTAINS(kernel, "BigDataControlSlot(udmaMem, readySignalOffset, slot, rankSize, shardCount, peer, 0U)");
     CHECK_CONTAINS(kernel, "remoteDataOffset =");
     CHECK_CONTAINS(kernel, "BigDataNetworkPeerIndex(rank, peer)");
     CHECK_CONTAINS(kernel, "BigDataSlot(udmaMem, recvDataOffset, slot, networkPeerCount");
     CHECK_CONTAINS(kernel, "UDMAPutSignalNbi<int32_t>");
+    CHECK_CONTAINS(kernel, "UDMAPutSignalNbi<uint64_t>");
+    CHECK_CONTAINS(kernel, "UDMAPutNbi<int32_t>");
     CHECK_CONTAINS(kernel, "localSrc,");
     CHECK_CONTAINS(kernel, "remoteDataOffset, chunkBytes, remoteReadyOffset, token");
     CHECK_CONTAINS(kernel, "TILEXR_UDMA_DEMO_BIGDATA_RELAY_UB_PINGPONG_BYTES");
     CHECK_CONTAINS(kernel, "relayLocal[bufferId * TILEXR_UDMA_DEMO_BIGDATA_RELAY_UB_BYTES]");
-    CHECK_CONTAINS(kernel, "globalPass - static_cast<uint64_t>(TILEXR_UDMA_DEMO_BIGDATA_PINGPONG_SLOTS)");
+    CHECK_CONTAINS(kernel, "if (!use35Core && profileStage > TILEXR_BIGDATA_PROFILE_STAGE_ACK_PUT");
+    CHECK_CONTAINS(kernel, "use35Core ? passCount : TILEXR_UDMA_DEMO_BIGDATA_PINGPONG_SLOTS");
     CHECK_CONTAINS(kernel, "recvSlotInt[0]");
     CHECK_CONTAINS(kernel, "BigDataStoreTokenMte(remoteAck, token, relayLocal)");
     CHECK_CONTAINS(kernel, "BigDataRemoteIpcAckSlot(args, peer, rank, slot, rankSize)");
@@ -342,7 +522,12 @@ int main()
     TestBuildAllToAllOutput();
     TestAllToAllMaxRank256With64MiBPerRank();
     TestAllToAllBigDataPlan();
+    TestAllToAllBigDataMultiNodePlanUses16ShardsAndRemoteSendDone();
+    TestAllToAllBigDataForce35CorePlanFor8P();
     TestAllToAllBigDataBlockDim();
+    TestAllToAllBigDataMultiNodeTopology();
+    TestAllToAllBigDataRemotePeerQueue();
+    TestAllToAllBigDataMergedPeerQueue();
     TestDemoDebugLayoutSource();
     TestAllToAllDataAsFlagSource();
     TestAllToAllChunkedUdmaSource();

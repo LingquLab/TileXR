@@ -50,9 +50,10 @@ extern void launch_tilexr_udma_all_to_all_bigdata(
     uint32_t blockDim, void* stream, GM_ADDR commArgs, GM_ADDR input, GM_ADDR output,
     GM_ADDR udmaMem, GM_ADDR debug, int32_t elementsPerPeer,
     uint64_t dataOffset, uint64_t copyDoneOffset,
-    uint64_t recvCopyDoneOffset, uint64_t readySignalOffset, uint64_t ackSignalOffset,
+    uint64_t recvCopyDoneOffset, uint64_t remoteSendDoneOffset,
+    uint64_t readySignalOffset, uint64_t ackSignalOffset,
     int32_t chunkElements, uint32_t passCount, uint32_t loopCount, uint64_t kernelLoopBase,
-    uint32_t profileStage);
+    uint32_t profileStage, uint32_t force35Core);
 extern void launch_tilexr_all_to_all_ipc_scatter(
     uint32_t blockDim, void* stream, GM_ADDR commArgs, GM_ADDR input, GM_ADDR debug, int32_t elementsPerPeer);
 extern void launch_tilexr_all_to_all_ipc_gather(
@@ -92,6 +93,7 @@ constexpr int kConnectRetrySleepMs = 10;
 constexpr int kBigDataProfileStageFull = 8;
 
 struct BarrierEndpoint {
+    std::string host;
     uint16_t port;
 };
 
@@ -204,11 +206,19 @@ bool CopyDeviceToHost(int rank, void* dst, size_t dstSize, const void* src, size
 
 BarrierEndpoint GetBarrierEndpoint()
 {
+    std::string host = "127.0.0.1";
     int basePort = kDefaultCommPort;
+    const char* barrierHost = std::getenv("TILEXR_DEMO_BARRIER_HOST");
+    if (barrierHost != nullptr && barrierHost[0] != '\0') {
+        host = barrierHost;
+    }
     const char* commId = std::getenv("TILEXR_COMM_ID");
     if (commId != nullptr) {
         std::string value(commId);
         size_t colon = value.rfind(':');
+        if ((barrierHost == nullptr || barrierHost[0] == '\0') && colon != std::string::npos && colon > 0) {
+            host = value.substr(0, colon);
+        }
         if (colon != std::string::npos && colon + 1 < value.size()) {
             basePort = std::atoi(value.c_str() + colon + 1);
         }
@@ -217,7 +227,7 @@ BarrierEndpoint GetBarrierEndpoint()
     if (barrierPort <= 0 || barrierPort > 65535) {
         barrierPort = kDefaultCommPort + kDemoBarrierPortOffset;
     }
-    return BarrierEndpoint{static_cast<uint16_t>(barrierPort)};
+    return BarrierEndpoint{host, static_cast<uint16_t>(barrierPort)};
 }
 
 bool SendAll(int fd, const void* data, size_t bytes)
@@ -273,7 +283,7 @@ int CreateBarrierServer(uint16_t port)
     }
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_addr.s_addr = htonl(INADDR_ANY);
     addr.sin_port = htons(port);
     if (bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0 ||
         listen(fd, SOMAXCONN) != 0) {
@@ -283,11 +293,13 @@ int CreateBarrierServer(uint16_t port)
     return fd;
 }
 
-int ConnectBarrierServer(uint16_t port)
+int ConnectBarrierServer(const std::string& host, uint16_t port)
 {
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (inet_pton(AF_INET, host.c_str(), &addr.sin_addr) != 1) {
+        return -1;
+    }
     addr.sin_port = htons(port);
 
     for (int attempt = 0; attempt < kConnectRetryCount; ++attempt) {
@@ -311,14 +323,15 @@ bool DemoBarrierAll(int rank, int rankSize, const std::string& step)
     }
 
     BarrierEndpoint endpoint = GetBarrierEndpoint();
-    PrintStatus(rank, "demo tcp barrier begin: " + step + " port=" + std::to_string(endpoint.port));
+    PrintStatus(rank, "demo tcp barrier begin: " + step +
+        " host=" + endpoint.host + " port=" + std::to_string(endpoint.port));
     constexpr uint8_t kArrive = 1;
     constexpr uint8_t kRelease = 2;
 
     if (rank == 0) {
         int serverFd = CreateBarrierServer(endpoint.port);
         if (serverFd < 0) {
-            std::cerr << "[rank " << rank << "] ERROR: failed to create demo barrier server on 127.0.0.1:"
+            std::cerr << "[rank " << rank << "] ERROR: failed to create demo barrier server on 0.0.0.0:"
                       << endpoint.port << ", errno=" << errno << std::endl;
             return false;
         }
@@ -349,10 +362,10 @@ bool DemoBarrierAll(int rank, int rankSize, const std::string& step)
             return false;
         }
     } else {
-        int fd = ConnectBarrierServer(endpoint.port);
+        int fd = ConnectBarrierServer(endpoint.host, endpoint.port);
         if (fd < 0) {
-            std::cerr << "[rank " << rank << "] ERROR: failed to connect demo barrier on 127.0.0.1:"
-                      << endpoint.port << std::endl;
+            std::cerr << "[rank " << rank << "] ERROR: failed to connect demo barrier on "
+                      << endpoint.host << ":" << endpoint.port << std::endl;
             return false;
         }
         uint8_t release = 0;
@@ -660,6 +673,8 @@ int main(int argc, char** argv)
         GetEnvInt("TILEXR_DEMO_BIGDATA_PROFILE_STAGE", kBigDataProfileStageFull) :
         kBigDataProfileStageFull;
     bigDataProfileStage = std::max(0, std::min(bigDataProfileStage, kBigDataProfileStageFull));
+    const bool forceBigData35Core =
+        testType == 7 && GetEnvInt("TILEXR_DEMO_BIGDATA_FORCE_35CORE", 0) != 0;
     bool bigDataProfilePartial = testType == 7 && bigDataProfileStage < kBigDataProfileStageFull;
     bool syncAllToAllAtEnd =
         isAllToAll && GetEnvInt("TILEXR_DEMO_ALLTOALL_SYNC_AT_END", 0) != 0;
@@ -682,8 +697,17 @@ int main(int argc, char** argv)
         isAllToAll ? TileXR::Demo::PlanAllToAllUdmaChunks(rankSize, elementsPerRank) :
             TileXR::Demo::AllToAllChunkPlan {};
     const TileXR::Demo::AllToAllBigDataPlan bigDataPlan =
-        isAllToAll ? TileXR::Demo::PlanAllToAllBigDataUdma(rankSize, elementsPerRank) :
+        isAllToAll ? TileXR::Demo::PlanAllToAllBigDataUdma(
+            rankSize, elementsPerRank, forceBigData35Core) :
             TileXR::Demo::AllToAllBigDataPlan {};
+    if (testType == 7 && !TileXR::Demo::AllToAllBigDataValidTopology(rankSize)) {
+        std::cerr << "[rank " << rank
+                  << "] ERROR: bigdata alltoall multi-node requires rankSize multiple of 8"
+                  << " when rankSize > " << TileXR::Demo::kAllToAllBigDataRanksPerNode
+                  << ", rankSize=" << rankSize << std::endl;
+        Cleanup(comm, stream, registeredMemory, debug, rank, deviceId);
+        return 1;
+    }
     if (isAllToAll) {
         const size_t dataAsFlagStagingBytes = AllToAllDataAsFlagStagingBytes(rankSize, elementsPerRank);
         const size_t plainIpcStagingBytes = AllToAllPlainIpcStagingBytes(rankSize, elementsPerRank);
@@ -712,6 +736,13 @@ int main(int argc, char** argv)
         if (testType == 7) {
             PrintStatus(rank, "bigdata profile stage=" + std::to_string(bigDataProfileStage) +
                 " fullStage=" + std::to_string(kBigDataProfileStageFull));
+            PrintStatus(rank, "bigdata multinode mode=" +
+                std::string(TileXR::Demo::AllToAllBigDataIsMultiNode(rankSize) ? "true" : "false") +
+                " force35Core=" + std::string(forceBigData35Core ? "true" : "false") +
+                " blockDim=" + std::to_string(TileXR::Demo::AllToAllBigDataBlockDim(
+                    rankSize, forceBigData35Core)) +
+                " shards=" + std::to_string(TileXR::Demo::AllToAllBigDataShardCount(
+                    rankSize, forceBigData35Core)));
         }
         PrintStatus(rank, "alltoall UDMA chunk plan: passCount=" + std::to_string(chunkPlan.passCount) +
             " chunkElements=" + std::to_string(chunkPlan.chunkElements) +
@@ -722,6 +753,7 @@ int main(int argc, char** argv)
                 " dataBytes=" + std::to_string(bigDataPlan.dataBytes) +
                 " copyDoneOffset=" + std::to_string(bigDataPlan.copyDoneOffset) +
                 " recvCopyDoneOffset=" + std::to_string(bigDataPlan.recvCopyDoneOffset) +
+                " remoteSendDoneOffset=" + std::to_string(bigDataPlan.remoteSendDoneOffset) +
                 " readySignalOffset=" + std::to_string(bigDataPlan.readySignalOffset) +
                 " ackSignalOffset=" + std::to_string(bigDataPlan.ackSignalOffset) +
                 " registeredBytes=" + std::to_string(bigDataPlan.registeredBytes));
@@ -900,6 +932,7 @@ int main(int argc, char** argv)
         PrintStatus(rank, "bigdata alltoall registered dataBytes=" + std::to_string(bigDataPlan.dataBytes) +
             " copyDoneOffset=" + std::to_string(bigDataPlan.copyDoneOffset) +
             " recvCopyDoneOffset=" + std::to_string(bigDataPlan.recvCopyDoneOffset) +
+            " remoteSendDoneOffset=" + std::to_string(bigDataPlan.remoteSendDoneOffset) +
             " readySignalOffset=" + std::to_string(bigDataPlan.readySignalOffset) +
             " ackSignalOffset=" + std::to_string(bigDataPlan.ackSignalOffset) +
             " regBytes=" + std::to_string(registeredBytes) +
@@ -919,18 +952,22 @@ int main(int argc, char** argv)
             return 1;
         }
 
+        const uint32_t bigDataBlockDim = TileXR::Demo::AllToAllBigDataBlockDim(
+            rankSize, forceBigData35Core);
         auto a2aStart = std::chrono::steady_clock::now();
         for (int iter = 0; iter < allToAllRepeat; ++iter) {
             const uint64_t kernelLoopBase = static_cast<uint64_t>(iter);
             launch_tilexr_udma_all_to_all_bigdata(
-                TileXR::Demo::AllToAllBigDataBlockDim(rankSize), stream, commArgsDev,
+                bigDataBlockDim, stream, commArgsDev,
                 reinterpret_cast<GM_ADDR>(bigInput), reinterpret_cast<GM_ADDR>(bigOutput),
                 reinterpret_cast<GM_ADDR>(registeredMemory), reinterpret_cast<GM_ADDR>(debug),
                 elementsPerRank, 0, bigDataPlan.copyDoneOffset,
                 bigDataPlan.recvCopyDoneOffset,
+                bigDataPlan.remoteSendDoneOffset,
                 bigDataPlan.readySignalOffset, bigDataPlan.ackSignalOffset,
                 bigDataPlan.chunkElements, bigDataPlan.passCount, 1, kernelLoopBase,
-                static_cast<uint32_t>(bigDataProfileStage));
+                static_cast<uint32_t>(bigDataProfileStage),
+                forceBigData35Core ? 1U : 0U);
         }
         if (!CheckAcl(rank, "aclrtSynchronizeStream post-alltoall", aclrtSynchronizeStream(stream))) {
             if (udmaRegistered) {
@@ -998,7 +1035,7 @@ int main(int argc, char** argv)
         // Registered relay region: [udmaMem chunk | signals].
         const size_t fusedChunkBytes = chunkPlan.chunkBytesPerRank;
         const size_t fusedSignalBytes = static_cast<size_t>(rankSize) * sizeof(uint64_t);
-        const size_t fusedRegBytes = ((fusedChunkBytes + fusedSignalBytes + kUdmaRegistrationAlignment - 1) /
+        const size_t fusedRegBytes = ((chunkPlan.registeredBytes + kUdmaRegistrationAlignment - 1) /
             kUdmaRegistrationAlignment) * kUdmaRegistrationAlignment;
         if (!udmaRegistered) {
             int registerRet = TileXRUDMARegister(comm, static_cast<GM_ADDR>(registeredMemory), fusedRegBytes, &udmaHandle);
@@ -1063,6 +1100,14 @@ int main(int argc, char** argv)
             std::cout << "[rank " << rank << "] alltoall udma-fused " << allToAllRepeat
                       << " iters(total=" << chunkPlan.passCount << " pass/iter) total=" << a2aMs << " ms perIter=" << a2aPerIterUs
                       << " us payload=" << payloadBytes << " bytes bw=" << bwGbs << " GB/s" << std::endl;
+        }
+        if (!CopyDeviceToHost(rank, hostOutput.data(), dataCount * sizeof(int32_t),
+                fusedOutput, dataCount * sizeof(int32_t), "fused alltoall output")) {
+            if (udmaRegistered) { CheckTileXR(rank, "TileXRUDMAUnregister", TileXRUDMAUnregister(comm, udmaHandle)); udmaRegistered = false; }
+            aclrtFree(fusedInput);
+            aclrtFree(fusedOutput);
+            Cleanup(comm, stream, registeredMemory, debug, rank, deviceId);
+            return 1;
         }
         if (udmaRegistered) { CheckTileXR(rank, "TileXRUDMAUnregister", TileXRUDMAUnregister(comm, udmaHandle)); udmaRegistered = false; }
         aclrtFree(fusedInput);
@@ -1419,7 +1464,7 @@ int main(int argc, char** argv)
         copyBackOk = CopyDeviceToHost(rank, hostData.data(), dataCount * sizeof(int32_t),
             data, dataCount * sizeof(int32_t), "data");
     }
-    if (hasOutput && !chunkedStrictAllToAll && testType != 7) {
+    if (hasOutput && !chunkedStrictAllToAll && testType != 6 && testType != 7) {
         const char* outputName = isAllToAll ? "alltoall output" : "allreduce output";
         copyBackOk = CopyDeviceToHost(rank, hostOutput.data(), dataCount * sizeof(int32_t),
             output, dataCount * sizeof(int32_t), outputName) && copyBackOk;
