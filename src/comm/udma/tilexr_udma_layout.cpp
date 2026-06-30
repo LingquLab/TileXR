@@ -157,4 +157,18 @@ std::vector<uint32_t> SelectExplicitUDMARouteEids(
     return selected;
 }
 
+std::vector<uint32_t> SelectUDMARoutesForPeer(
+    bool peerIsRemoteNode,
+    const std::vector<uint32_t>& topoRoutes,
+    const std::vector<uint32_t>& aggregateRoutes)
+{
+    if (peerIsRemoteNode && !aggregateRoutes.empty()) {
+        return aggregateRoutes;
+    }
+    if (!topoRoutes.empty()) {
+        return topoRoutes;
+    }
+    return aggregateRoutes;
+}
+
 } // namespace TileXR

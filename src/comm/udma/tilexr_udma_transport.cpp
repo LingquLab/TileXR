@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <climits>
 #include <cctype>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
@@ -18,12 +19,15 @@
 #include <sstream>
 #include <string>
 #include <unordered_map>
+#include <unistd.h>
 
 #include "tilexr_log.h"
 #include "tools/socket/tilexr_sock_exchange.h"
 
 namespace TileXR {
 namespace {
+
+constexpr size_t kUDMANodeIdBytes = 256;
 
 uint32_t Log2Uint64(uint64_t value)
 {
@@ -75,6 +79,20 @@ std::string EidToHex(const HccpEid& eid)
 int QueueKey(int peer, uint32_t qpIdx, uint32_t qpNum)
 {
     return qpNum <= 1 ? peer : static_cast<int>(static_cast<uint32_t>(peer) * qpNum + qpIdx);
+}
+
+struct UDMANodeId {
+    char value[kUDMANodeIdBytes];
+};
+
+UDMANodeId GetLocalNodeId()
+{
+    UDMANodeId node {};
+    if (gethostname(node.value, sizeof(node.value) - 1) != 0 || node.value[0] == '\0') {
+        std::snprintf(node.value, sizeof(node.value), "pid-%ld", static_cast<long>(getpid()));
+    }
+    node.value[sizeof(node.value) - 1] = '\0';
+    return node;
 }
 
 HccpEid SwapEidForDevice(const HccpEid& hccpEid)
@@ -570,6 +588,12 @@ int TileXRUDMATransport::BuildRoutes()
     if (ret != TILEXR_SUCCESS) {
         return ret;
     }
+    const UDMANodeId localNode = GetLocalNodeId();
+    std::vector<UDMANodeId> allNodes(options_.rankSize);
+    ret = options_.exchange->AllGather(&localNode, 1, allNodes.data());
+    if (ret != TILEXR_SUCCESS) {
+        return ret;
+    }
     if (diag) {
         std::ostringstream ids;
         for (int rank = 0; rank < options_.rankSize; ++rank) {
@@ -589,11 +613,13 @@ int TileXRUDMATransport::BuildRoutes()
         }
         uint32_t localEid = devEids[0].eidIndex;
         std::vector<uint32_t> localEids;
+        const bool peerIsRemoteNode =
+            std::strncmp(localNode.value, allNodes[peer].value, sizeof(localNode.value)) != 0;
         if (topoReady && useAllRoutes) {
-            localEids = ResolveLocalEidRoutes(rootInfo, topoEdges, localId, allLocalIds[peer]);
-            if (localEids.empty()) {
-                localEids = ResolveLocalAggregateEidRoutes(rootInfo, localId);
-            }
+            const std::vector<uint32_t> topoRoutes =
+                ResolveLocalEidRoutes(rootInfo, topoEdges, localId, allLocalIds[peer]);
+            const std::vector<uint32_t> aggregateRoutes = ResolveLocalAggregateEidRoutes(rootInfo, localId);
+            localEids = SelectUDMARoutesForPeer(peerIsRemoteNode, topoRoutes, aggregateRoutes);
             const std::vector<uint32_t> explicitEids =
                 SelectExplicitUDMARouteEids(std::getenv("TILEXR_UDMA_ROUTE_EIDS"), localEids);
             if (!explicitEids.empty()) {
@@ -624,6 +650,13 @@ int TileXRUDMATransport::BuildRoutes()
                              << " peerLocalId=" << allLocalIds[peer]
                              << " localEid=" << peerLocalEid_[peer]
                              << " routeCount=" << localEids.size();
+            if (topoReady && useAllRoutes) {
+                TILEXR_LOG(INFO) << "UDMA diag route node rank " << options_.rank
+                                 << " peer=" << peer
+                                 << " remoteNode=" << (peerIsRemoteNode ? 1 : 0)
+                                 << " localNodeId=" << localNode.value
+                                 << " peerNodeId=" << allNodes[peer].value;
+            }
         }
     }
 

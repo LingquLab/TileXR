@@ -207,9 +207,13 @@ def run_ssh(host: str, user: str, password: str, command: str, timeout_s: int) -
         out = stdout.read().decode("utf-8", "replace")
         err = stderr.read().decode("utf-8", "replace")
         rc = stdout.channel.recv_exit_status()
-        stdin.close()
         stdout.close()
         stderr.close()
+        try:
+            stdin.channel.shutdown_write()
+        except Exception:
+            pass
+        stdin.close()
         return rc, out, err
     finally:
         client.close()
