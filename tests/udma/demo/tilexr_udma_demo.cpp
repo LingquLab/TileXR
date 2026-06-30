@@ -1009,6 +1009,22 @@ int main(int argc, char** argv)
             Cleanup(comm, stream, registeredMemory, debug, rank, deviceId);
             return 1;
         }
+        if (bigDataRemotePutOnly && !AllToAllUdmaComplete(rankSize, hostDebug)) {
+            std::cerr << "[rank " << rank << "] ERROR: bigdata remote-put-only incomplete:";
+            for (int peer = 0; peer < rankSize; ++peer) {
+                std::cerr << " peer" << peer << "=" << hostDebug[kDebugUdmaStatusBase + peer];
+            }
+            std::cerr << std::endl;
+            PrintAllToAllUdmaDebug(rank, rankSize, hostDebug);
+            if (udmaRegistered) {
+                CheckTileXR(rank, "TileXRUDMAUnregister", TileXRUDMAUnregister(comm, udmaHandle));
+                udmaRegistered = false;
+            }
+            aclrtFree(bigInput);
+            aclrtFree(bigOutput);
+            Cleanup(comm, stream, registeredMemory, debug, rank, deviceId);
+            return 1;
+        }
         if (udmaRegistered) {
             CheckTileXR(rank, "TileXRUDMAUnregister", TileXRUDMAUnregister(comm, udmaHandle));
             udmaRegistered = false;

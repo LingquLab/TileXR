@@ -506,6 +506,7 @@ void TestAllToAllBigDataSource()
     CHECK_CONTAINS(kernel, "BigDataRemoteIpcAckSlot");
     CHECK_CONTAINS(kernel, "BigDataLocalIpcAckSlot");
     CHECK_CONTAINS(kernel, "BigDataRemotePutOnlyPublishAck");
+    CHECK_CONTAINS(kernel, "BigDataRemotePutOnlyPublishReady");
     CHECK_CONTAINS(kernel, "BigDataRemotePutOnlyWaitPeerAck");
     CHECK_CONTAINS(kernel, "BigDataStoreInt32Mte");
     CHECK_CONTAINS(kernel, "BigDataRemoteSendSegmentRange");
@@ -537,6 +538,7 @@ void TestAllToAllBigDataSource()
     CHECK_CONTAINS(kernel, "const bool isRecvCore =");
     CHECK_CONTAINS(kernel, "if (isCopyCore)");
     CHECK_CONTAINS(kernel, "if (remotePutOnly)");
+    CHECK_CONTAINS(kernel, "BigDataRemotePutOnlyCheckWorker(");
     CHECK_CONTAINS(kernel, "const int32_t sendTaskCount = BigDataRemotePutOnlySendTaskCount(remoteTaskCount)");
     CHECK_CONTAINS(kernel, "sendTask += static_cast<int32_t>(activeBlockDim)");
     CHECK_CONTAINS(kernel, "const int32_t remoteIndex = BigDataRemotePutOnlySendTaskRemoteIndex(sendTask, remoteTaskCount)");
@@ -608,23 +610,26 @@ void TestAllToAllBigDataSource()
     const std::string remotePutOnlyCheck = SliceBetween(
         kernel, "BigDataRemotePutOnlyCheckWorker", "BigDataRunSelfCopyShard");
     CHECK_CONTAINS(remotePutOnlySend, "UDMAPutNbiOnQp<int32_t>");
-    CHECK_NOT_CONTAINS(remotePutOnlySend, "BigDataStoreInt32Mte");
-    CHECK_NOT_CONTAINS(remotePutOnlySend, "UDMAQuietStatusOnQp");
+    CHECK_CONTAINS(remotePutOnlySend, "BigDataRemoteIpcReadySlot");
+    CHECK_CONTAINS(remotePutOnlySend, "BigDataRemotePutOnlyPublishReady");
+    CHECK_CONTAINS(remotePutOnlySend, "UDMAQuietStatusOnQp");
     CHECK_NOT_CONTAINS(remotePutOnlySend, "UDMAPutNbiOnQp<uint64_t>");
+    CHECK_NOT_CONTAINS(remotePutOnlySend, "BigDataStoreInt32Mte");
     const std::string remotePutOnlyCheckIndex = SliceBetween(
         kernel, "BigDataRemotePutOnlyCheckIndex", "BigDataRemotePutOnlyCheckWorker");
     CHECK_CONTAINS(remotePutOnlyCheckIndex, "return blockIdx");
     CHECK_NOT_CONTAINS(remotePutOnlyCheckIndex, "TILEXR_UDMA_DEMO_BIGDATA_MULTINODE_REMOTE_SEND_PRIMARY_CORE");
     CHECK_NOT_CONTAINS(remotePutOnlyCheckIndex, "TILEXR_UDMA_DEMO_BIGDATA_MULTINODE_REMOTE_SEND_SECONDARY_CORE");
     CHECK_CONTAINS(remotePutOnlyCheck, "observed");
-    CHECK_CONTAINS(remotePutOnlyCheck, "BigDataNetworkPeerIndex(peer, rank)");
+    CHECK_CONTAINS(remotePutOnlyCheck, "BigDataLocalIpcReadySlot");
+    CHECK_CONTAINS(remotePutOnlyCheck, "TILEXR_UDMA_DEMO_BIGDATA_REMOTE_SEND_PRIMARY_SEGMENT");
+    CHECK_CONTAINS(remotePutOnlyCheck, "TILEXR_UDMA_DEMO_BIGDATA_REMOTE_SEND_SECONDARY_SEGMENT");
     CHECK_CONTAINS(remotePutOnlyCheck, "TILEXR_UDMA_DEMO_READY_TIMEOUT_STATUS");
     CHECK_CONTAINS(remotePutOnlyCheck, "BigDataRemotePutOnlyPublishAck");
     CHECK_CONTAINS(remotePutOnlyCheck, "BigDataRemotePutOnlyWaitPeerAck");
     CHECK_CONTAINS(remotePutOnlyCheck, "BigDataRemoteIpcAckSlot");
     CHECK_CONTAINS(remotePutOnlyCheck, "BigDataLocalIpcAckSlot");
     CHECK_NOT_CONTAINS(remotePutOnlyCheck, "UDMAQuietStatusOnQp");
-    CHECK_NOT_CONTAINS(remotePutOnlyCheck, "UDMAPutSignalNbi");
 }
 
 } // namespace
