@@ -698,15 +698,17 @@ int main(int argc, char** argv)
     const TileXR::Demo::AllToAllChunkPlan chunkPlan =
         isAllToAll ? TileXR::Demo::PlanAllToAllUdmaChunks(rankSize, elementsPerRank) :
             TileXR::Demo::AllToAllChunkPlan {};
+    const int32_t bigDataRanksPerNode = std::max(1, npuCount);
     const TileXR::Demo::AllToAllBigDataPlan bigDataPlan =
         isAllToAll ? TileXR::Demo::PlanAllToAllBigDataUdma(
-            rankSize, elementsPerRank, forceBigData35Core) :
+            rankSize, elementsPerRank, forceBigData35Core, bigDataRanksPerNode) :
             TileXR::Demo::AllToAllBigDataPlan {};
-    if (testType == 7 && !TileXR::Demo::AllToAllBigDataValidTopology(rankSize)) {
+    if (testType == 7 && !TileXR::Demo::AllToAllBigDataValidTopology(rankSize, bigDataRanksPerNode)) {
         std::cerr << "[rank " << rank
-                  << "] ERROR: bigdata alltoall multi-node requires rankSize multiple of 8"
-                  << " when rankSize > " << TileXR::Demo::kAllToAllBigDataRanksPerNode
-                  << ", rankSize=" << rankSize << std::endl;
+                  << "] ERROR: bigdata alltoall multi-node requires rankSize multiple of ranksPerNode"
+                  << " when rankSize > ranksPerNode"
+                  << ", rankSize=" << rankSize
+                  << " ranksPerNode=" << bigDataRanksPerNode << std::endl;
         Cleanup(comm, stream, registeredMemory, debug, rank, deviceId);
         return 1;
     }
@@ -739,13 +741,15 @@ int main(int argc, char** argv)
             PrintStatus(rank, "bigdata profile stage=" + std::to_string(bigDataProfileStage) +
                 " fullStage=" + std::to_string(kBigDataProfileStageFull));
             PrintStatus(rank, "bigdata multinode mode=" +
-                std::string(TileXR::Demo::AllToAllBigDataIsMultiNode(rankSize) ? "true" : "false") +
+                std::string(TileXR::Demo::AllToAllBigDataIsMultiNode(
+                    rankSize, bigDataRanksPerNode) ? "true" : "false") +
                 " force35Core=" + std::string(forceBigData35Core ? "true" : "false") +
                 " remotePutOnly=" + std::string(bigDataRemotePutOnly ? "true" : "false") +
+                " ranksPerNode=" + std::to_string(bigDataRanksPerNode) +
                 " blockDim=" + std::to_string(TileXR::Demo::AllToAllBigDataBlockDim(
-                    rankSize, forceBigData35Core, bigDataRemotePutOnly)) +
+                    rankSize, forceBigData35Core, bigDataRemotePutOnly, bigDataRanksPerNode)) +
                 " shards=" + std::to_string(TileXR::Demo::AllToAllBigDataShardCount(
-                    rankSize, forceBigData35Core)));
+                    rankSize, forceBigData35Core, bigDataRanksPerNode)));
         }
         PrintStatus(rank, "alltoall UDMA chunk plan: passCount=" + std::to_string(chunkPlan.passCount) +
             " chunkElements=" + std::to_string(chunkPlan.chunkElements) +
@@ -953,9 +957,10 @@ int main(int argc, char** argv)
         }
 
         const uint32_t bigDataBlockDim = TileXR::Demo::AllToAllBigDataBlockDim(
-            rankSize, forceBigData35Core, bigDataRemotePutOnly);
+            rankSize, forceBigData35Core, bigDataRemotePutOnly, bigDataRanksPerNode);
         const uint32_t bigDataModeFlags =
-            (forceBigData35Core ? 1U : 0U) | (bigDataRemotePutOnly ? 2U : 0U);
+            (forceBigData35Core ? 1U : 0U) | (bigDataRemotePutOnly ? 2U : 0U) |
+            (static_cast<uint32_t>(bigDataRanksPerNode) << 8U);
         auto a2aStart = std::chrono::steady_clock::now();
         for (int iter = 0; iter < allToAllRepeat; ++iter) {
             const uint64_t kernelLoopBase = static_cast<uint64_t>(iter);

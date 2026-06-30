@@ -445,76 +445,93 @@ __aicore__ inline void BigDataKernelExitBarrier()
     AscendC::SyncAll();
 }
 
-__aicore__ inline bool BigDataIsMultiNode(int32_t rankSize)
+__aicore__ inline int32_t BigDataNormalizeRanksPerNode(int32_t ranksPerNode)
 {
-    return rankSize > TILEXR_UDMA_DEMO_BIGDATA_RANKS_PER_NODE;
+    return ranksPerNode > 0 ? ranksPerNode : TILEXR_UDMA_DEMO_BIGDATA_RANKS_PER_NODE;
 }
 
-__aicore__ inline bool BigDataUse35Core(int32_t rankSize, bool force35Core)
+__aicore__ inline bool BigDataIsMultiNode(int32_t rankSize, int32_t ranksPerNode)
 {
-    return BigDataIsMultiNode(rankSize) ||
-        (force35Core && rankSize == TILEXR_UDMA_DEMO_BIGDATA_RANKS_PER_NODE);
+    return rankSize > BigDataNormalizeRanksPerNode(ranksPerNode);
 }
 
-__aicore__ inline uint32_t BigDataShardCount(int32_t rankSize, bool force35Core = false)
+__aicore__ inline bool BigDataUse35Core(int32_t rankSize, bool force35Core, int32_t ranksPerNode)
 {
-    return BigDataUse35Core(rankSize, force35Core) ?
+    const int32_t localRanks = BigDataNormalizeRanksPerNode(ranksPerNode);
+    return BigDataIsMultiNode(rankSize, localRanks) ||
+        (force35Core && rankSize == localRanks);
+}
+
+__aicore__ inline uint32_t BigDataShardCount(
+    int32_t rankSize, bool force35Core = false, int32_t ranksPerNode = TILEXR_UDMA_DEMO_BIGDATA_RANKS_PER_NODE)
+{
+    return BigDataUse35Core(rankSize, force35Core, ranksPerNode) ?
         TILEXR_UDMA_DEMO_BIGDATA_MULTINODE_CONTROL_SHARDS :
         TILEXR_UDMA_DEMO_BIGDATA_SINGLE_NODE_SHARDS;
 }
 
-__aicore__ inline bool BigDataValidTopology(int32_t rankSize)
+__aicore__ inline bool BigDataValidTopology(int32_t rankSize, int32_t ranksPerNode)
 {
     if (rankSize <= 0) {
         return false;
     }
-    if (!BigDataIsMultiNode(rankSize)) {
+    const int32_t localRanks = BigDataNormalizeRanksPerNode(ranksPerNode);
+    if (localRanks <= 0) {
+        return false;
+    }
+    if (!BigDataIsMultiNode(rankSize, localRanks)) {
         return true;
     }
-    return rankSize % TILEXR_UDMA_DEMO_BIGDATA_RANKS_PER_NODE == 0;
+    return rankSize % localRanks == 0;
 }
 
-__aicore__ inline int32_t BigDataLocalNodeBegin(int32_t rank)
+__aicore__ inline int32_t BigDataLocalNodeBegin(int32_t rank, int32_t ranksPerNode)
 {
-    return (rank / TILEXR_UDMA_DEMO_BIGDATA_RANKS_PER_NODE) *
-        TILEXR_UDMA_DEMO_BIGDATA_RANKS_PER_NODE;
+    const int32_t localRanks = BigDataNormalizeRanksPerNode(ranksPerNode);
+    return (rank / localRanks) * localRanks;
 }
 
-__aicore__ inline int32_t BigDataNodeCount(int32_t rankSize)
+__aicore__ inline int32_t BigDataNodeCount(int32_t rankSize, int32_t ranksPerNode)
 {
-    if (!BigDataValidTopology(rankSize)) {
+    if (!BigDataValidTopology(rankSize, ranksPerNode)) {
         return 0;
     }
-    if (!BigDataIsMultiNode(rankSize)) {
+    const int32_t localRanks = BigDataNormalizeRanksPerNode(ranksPerNode);
+    if (!BigDataIsMultiNode(rankSize, localRanks)) {
         return 1;
     }
-    return rankSize / TILEXR_UDMA_DEMO_BIGDATA_RANKS_PER_NODE;
+    return rankSize / localRanks;
 }
 
-__aicore__ inline int32_t BigDataTaskCount(int32_t rankSize, bool force35Core)
+__aicore__ inline int32_t BigDataTaskCount(int32_t rankSize, bool force35Core, int32_t ranksPerNode)
 {
-    if (force35Core && rankSize == TILEXR_UDMA_DEMO_BIGDATA_RANKS_PER_NODE) {
-        return TILEXR_UDMA_DEMO_BIGDATA_RANKS_PER_NODE - 1;
+    const int32_t localRanks = BigDataNormalizeRanksPerNode(ranksPerNode);
+    if (force35Core && rankSize == localRanks) {
+        return localRanks - 1;
     }
     return rankSize - 1;
 }
 
-__aicore__ inline bool BigDataIsLocalPeer(int32_t rank, int32_t peer)
+__aicore__ inline bool BigDataIsLocalPeer(int32_t rank, int32_t peer, int32_t ranksPerNode)
 {
-    const int32_t begin = BigDataLocalNodeBegin(rank);
-    return peer >= begin && peer < begin + TILEXR_UDMA_DEMO_BIGDATA_RANKS_PER_NODE;
+    const int32_t localRanks = BigDataNormalizeRanksPerNode(ranksPerNode);
+    const int32_t begin = BigDataLocalNodeBegin(rank, localRanks);
+    return peer >= begin && peer < begin + localRanks;
 }
 
-__aicore__ inline int32_t BigDataRemotePeerAt(int32_t rank, int32_t rankSize, int32_t remoteIndex)
+__aicore__ inline int32_t BigDataRemotePeerAt(
+    int32_t rank, int32_t rankSize, int32_t remoteIndex, int32_t ranksPerNode)
 {
-    if (!BigDataIsMultiNode(rankSize) || !BigDataValidTopology(rankSize) || remoteIndex < 0) {
+    const int32_t localRanks = BigDataNormalizeRanksPerNode(ranksPerNode);
+    if (!BigDataIsMultiNode(rankSize, localRanks) || !BigDataValidTopology(rankSize, localRanks) ||
+        remoteIndex < 0) {
         return -1;
     }
     int32_t remoteCount = 0;
     for (int32_t step = 0; step < rankSize; ++step) {
         const int32_t peer =
-            (rank + TILEXR_UDMA_DEMO_BIGDATA_RANKS_PER_NODE + step) % rankSize;
-        if (!BigDataIsLocalPeer(rank, peer)) {
+            (rank + localRanks + step) % rankSize;
+        if (!BigDataIsLocalPeer(rank, peer, localRanks)) {
             if (remoteCount == remoteIndex) {
                 return peer;
             }
@@ -524,16 +541,19 @@ __aicore__ inline int32_t BigDataRemotePeerAt(int32_t rank, int32_t rankSize, in
     return -1;
 }
 
-__aicore__ inline int32_t BigDataRemotePeerForwardAt(int32_t rank, int32_t rankSize, int32_t remoteIndex)
+__aicore__ inline int32_t BigDataRemotePeerForwardAt(
+    int32_t rank, int32_t rankSize, int32_t remoteIndex, int32_t ranksPerNode)
 {
-    if (!BigDataIsMultiNode(rankSize) || !BigDataValidTopology(rankSize) || remoteIndex < 0) {
+    const int32_t localRanks = BigDataNormalizeRanksPerNode(ranksPerNode);
+    if (!BigDataIsMultiNode(rankSize, localRanks) || !BigDataValidTopology(rankSize, localRanks) ||
+        remoteIndex < 0) {
         return -1;
     }
     int32_t remoteCount = 0;
     for (int32_t step = 0; step < rankSize; ++step) {
         const int32_t peer =
-            (rank + TILEXR_UDMA_DEMO_BIGDATA_RANKS_PER_NODE + step) % rankSize;
-        if (!BigDataIsLocalPeer(rank, peer)) {
+            (rank + localRanks + step) % rankSize;
+        if (!BigDataIsLocalPeer(rank, peer, localRanks)) {
             if (remoteCount == remoteIndex) {
                 return peer;
             }
@@ -543,16 +563,19 @@ __aicore__ inline int32_t BigDataRemotePeerForwardAt(int32_t rank, int32_t rankS
     return -1;
 }
 
-__aicore__ inline int32_t BigDataRemotePeerReverseAt(int32_t rank, int32_t rankSize, int32_t remoteIndex)
+__aicore__ inline int32_t BigDataRemotePeerReverseAt(
+    int32_t rank, int32_t rankSize, int32_t remoteIndex, int32_t ranksPerNode)
 {
-    if (!BigDataIsMultiNode(rankSize) || !BigDataValidTopology(rankSize) || remoteIndex < 0) {
+    const int32_t localRanks = BigDataNormalizeRanksPerNode(ranksPerNode);
+    if (!BigDataIsMultiNode(rankSize, localRanks) || !BigDataValidTopology(rankSize, localRanks) ||
+        remoteIndex < 0) {
         return -1;
     }
     int32_t remoteCount = 0;
     for (int32_t step = 0; step < rankSize; ++step) {
         const int32_t peer =
-            (rank - TILEXR_UDMA_DEMO_BIGDATA_RANKS_PER_NODE - step + rankSize * 2) % rankSize;
-        if (!BigDataIsLocalPeer(rank, peer)) {
+            (rank - localRanks - step + rankSize * 2) % rankSize;
+        if (!BigDataIsLocalPeer(rank, peer, localRanks)) {
             if (remoteCount == remoteIndex) {
                 return peer;
             }
@@ -602,28 +625,41 @@ __aicore__ inline uint32_t BigDataSelectDistinctWeightedQp(
     return selected;
 }
 
-__aicore__ inline int32_t BigDataLocalPeerAt(int32_t rank, int32_t localIndex)
+__aicore__ inline uint32_t BigDataRemotePutOnlySegmentQp(
+    const __gm__ TileXR::CommArgs* args, uint32_t segmentId)
 {
-    if (localIndex < 0 || localIndex >= TILEXR_UDMA_DEMO_BIGDATA_RANKS_PER_NODE - 1) {
+    auto udmaInfo = TileXR::GetUDMAInfo(args);
+    const uint32_t qpCount = udmaInfo->qpNum == 0 ? 1U : udmaInfo->qpNum;
+    if (qpCount <= 1U) {
+        return 0U;
+    }
+    return segmentId == TILEXR_UDMA_DEMO_BIGDATA_REMOTE_SEND_PRIMARY_SEGMENT ? 0U : 1U;
+}
+
+__aicore__ inline int32_t BigDataLocalPeerAt(int32_t rank, int32_t localIndex, int32_t ranksPerNode)
+{
+    const int32_t localRanks = BigDataNormalizeRanksPerNode(ranksPerNode);
+    if (localIndex < 0 || localIndex >= localRanks - 1) {
         return -1;
     }
-    const int32_t begin = BigDataLocalNodeBegin(rank);
+    const int32_t begin = BigDataLocalNodeBegin(rank, localRanks);
     const int32_t local = rank - begin;
-    return begin + ((local + localIndex + 1) % TILEXR_UDMA_DEMO_BIGDATA_RANKS_PER_NODE);
+    return begin + ((local + localIndex + 1) % localRanks);
 }
 
 __aicore__ inline bool BigDataMergedPeerTaskAt(
     int32_t rank, int32_t rankSize, int32_t taskIndex, bool force35Core,
-    int32_t& peer, bool& isLocalPeer)
+    int32_t ranksPerNode, int32_t& peer, bool& isLocalPeer)
 {
     peer = -1;
     isLocalPeer = false;
-    if (force35Core && rankSize == TILEXR_UDMA_DEMO_BIGDATA_RANKS_PER_NODE) {
-        peer = BigDataLocalPeerAt(rank, taskIndex);
+    const int32_t localRanks = BigDataNormalizeRanksPerNode(ranksPerNode);
+    if (force35Core && rankSize == localRanks) {
+        peer = BigDataLocalPeerAt(rank, taskIndex, localRanks);
         isLocalPeer = true;
         return peer >= 0;
     }
-    const int32_t nodeCount = BigDataNodeCount(rankSize);
+    const int32_t nodeCount = BigDataNodeCount(rankSize, localRanks);
     if (nodeCount <= 1 || taskIndex < 0) {
         return false;
     }
@@ -633,11 +669,11 @@ __aicore__ inline bool BigDataMergedPeerTaskAt(
     const int32_t indexInGroup = taskIndex % groupSize;
     if (indexInGroup < remoteBurst) {
         const int32_t remoteIndex = group * remoteBurst + indexInGroup;
-        peer = BigDataRemotePeerAt(rank, rankSize, remoteIndex);
+        peer = BigDataRemotePeerAt(rank, rankSize, remoteIndex, localRanks);
         isLocalPeer = false;
         return peer >= 0;
     }
-    peer = BigDataLocalPeerAt(rank, group);
+    peer = BigDataLocalPeerAt(rank, group, localRanks);
     isLocalPeer = true;
     return peer >= 0;
 }
@@ -1282,9 +1318,9 @@ __aicore__ inline void BigDataRemoteSendSegmentWorker(
     uint64_t kernelLoopBase, uint32_t profileStage, uint32_t shardCount,
     uint64_t sendDataOffset, uint64_t recvDataOffset, uint64_t copyDoneOffset,
     uint64_t remoteSendDoneOffset, uint64_t readySignalOffset, uint64_t chunkBytesPerPeer,
-    AscendC::LocalTensor<uint8_t> relayLocal)
+    int32_t ranksPerNode, AscendC::LocalTensor<uint8_t> relayLocal)
 {
-    if (peer < 0 || peer >= rankSize || peer == rank || !BigDataIsMultiNode(rankSize) ||
+    if (peer < 0 || peer >= rankSize || peer == rank || !BigDataIsMultiNode(rankSize, ranksPerNode) ||
         shardCount == 0U || profileStage <= TILEXR_BIGDATA_PROFILE_STAGE_SEND_COPY) {
         return;
     }
@@ -1378,10 +1414,10 @@ __aicore__ inline void BigDataRemotePutOnlySendWorker(
     __gm__ int32_t* debug, int32_t elementsPerPeer, int32_t effectiveChunkElements,
     uint32_t passCount, uint32_t loop, uint32_t pass, uint64_t kernelLoopBase,
     uint32_t profileStage, uint32_t shardCount, uint64_t recvDataOffset,
-    uint64_t chunkBytesPerPeer, AscendC::LocalTensor<uint8_t> relayLocal)
+    uint64_t chunkBytesPerPeer, int32_t ranksPerNode, AscendC::LocalTensor<uint8_t> relayLocal)
 {
-    if (peer < 0 || peer >= rankSize || peer == rank || BigDataIsLocalPeer(rank, peer) ||
-        !BigDataIsMultiNode(rankSize) || shardCount == 0U ||
+    if (peer < 0 || peer >= rankSize || peer == rank || BigDataIsLocalPeer(rank, peer, ranksPerNode) ||
+        !BigDataIsMultiNode(rankSize, ranksPerNode) || shardCount == 0U ||
         profileStage <= TILEXR_BIGDATA_REMOTE_PUT_STAGE_LOOP) {
         return;
     }
@@ -1472,10 +1508,11 @@ __aicore__ inline void BigDataRemotePutOnlyCheckWorker(
     __gm__ uint8_t* udmaMem, __gm__ int32_t* debug, int32_t elementsPerPeer,
     int32_t effectiveChunkElements, uint32_t passCount, uint32_t loop, uint32_t pass,
     uint64_t kernelLoopBase, uint64_t recvDataOffset, uint64_t ackSignalOffset,
-    uint64_t chunkBytesPerPeer, uint32_t shardCount, AscendC::LocalTensor<uint8_t> relayLocal)
+    uint64_t chunkBytesPerPeer, uint32_t shardCount, int32_t ranksPerNode,
+    AscendC::LocalTensor<uint8_t> relayLocal)
 {
-    const int32_t peer = BigDataRemotePeerForwardAt(rank, rankSize, remoteIndex);
-    if (peer < 0 || peer >= rankSize || peer == rank || BigDataIsLocalPeer(rank, peer) ||
+    const int32_t peer = BigDataRemotePeerForwardAt(rank, rankSize, remoteIndex, ranksPerNode);
+    if (peer < 0 || peer >= rankSize || peer == rank || BigDataIsLocalPeer(rank, peer, ranksPerNode) ||
         shardCount == 0U) {
         return;
     }
@@ -2702,6 +2739,7 @@ extern "C" __global__ __aicore__ void tilexr_udma_all_to_all_bigdata_kernel(
     const int32_t blockIdx = AscendC::GetBlockIdx();
     const bool force35Core = (force35CoreFlag & 0x1U) != 0U;
     const bool remotePutOnly = (force35CoreFlag & 0x2U) != 0U;
+    const int32_t ranksPerNode = BigDataNormalizeRanksPerNode(static_cast<int32_t>(force35CoreFlag >> 8U));
 
     if (blockIdx == 0 && debug != nullptr) {
         debug[0] = TILEXR_UDMA_DEMO_MAGIC;
@@ -2715,15 +2753,15 @@ extern "C" __global__ __aicore__ void tilexr_udma_all_to_all_bigdata_kernel(
         return;
     }
 
-    if (!BigDataValidTopology(rankSize)) {
+    if (!BigDataValidTopology(rankSize, ranksPerNode)) {
         if (blockIdx == 0 && debug != nullptr) {
             debug[TILEXR_UDMA_DEMO_DEBUG_UDMA_STATUS_BASE] =
                 TILEXR_UDMA_DEMO_READY_TIMEOUT_STATUS;
         }
         return;
     }
-    const bool use35Core = BigDataUse35Core(rankSize, force35Core);
-    const uint32_t shardCount = BigDataShardCount(rankSize, force35Core);
+    const bool use35Core = BigDataUse35Core(rankSize, force35Core, ranksPerNode);
+    const uint32_t shardCount = BigDataShardCount(rankSize, force35Core, ranksPerNode);
     const int32_t effectiveChunkElements = chunkElements > 0 ? chunkElements : elementsPerPeer;
     const uint64_t chunkBytesPerPeer = BigDataChunkBytesPerPeer(use35Core, effectiveChunkElements);
     const uint64_t sendDataOffset = dataOffset;
@@ -2781,8 +2819,8 @@ extern "C" __global__ __aicore__ void tilexr_udma_all_to_all_bigdata_kernel(
     const uint32_t copyShard = static_cast<uint32_t>(blockIdx);
     const uint32_t recvShard =
         static_cast<uint32_t>(blockIdx) - TILEXR_UDMA_DEMO_BIGDATA_MULTINODE_RECV_CORE_BASE;
-    const int32_t taskCount = BigDataTaskCount(rankSize, force35Core);
-    const int32_t remoteTaskCount = rankSize - TILEXR_UDMA_DEMO_BIGDATA_RANKS_PER_NODE;
+    const int32_t taskCount = BigDataTaskCount(rankSize, force35Core, ranksPerNode);
+    const int32_t remoteTaskCount = rankSize - ranksPerNode;
     const int32_t sendTaskCount = BigDataRemotePutOnlySendTaskCount(remoteTaskCount);
 
     if (remotePutOnly && profileStage <= TILEXR_BIGDATA_REMOTE_PUT_STAGE_FRAMEWORK) {
@@ -2799,15 +2837,12 @@ extern "C" __global__ __aicore__ void tilexr_udma_all_to_all_bigdata_kernel(
                         continue;
                     }
                     const int32_t remoteIndex = BigDataRemotePutOnlySendTaskRemoteIndex(sendTask, remoteTaskCount);
-                    const int32_t peer = BigDataRemotePeerForwardAt(rank, rankSize, remoteIndex);
+                    const int32_t peer = BigDataRemotePeerForwardAt(rank, rankSize, remoteIndex, ranksPerNode);
                     if (profileStage <= TILEXR_BIGDATA_REMOTE_PUT_STAGE_PEER) {
                         continue;
                     }
                     const uint32_t segmentId = BigDataRemotePutOnlySendTaskSegment(sendTask, remoteTaskCount);
-                    const uint32_t primaryQp = BigDataSelectWeightedQp(args, peer, true);
-                    const uint32_t qpIdx =
-                        segmentId == TILEXR_UDMA_DEMO_BIGDATA_REMOTE_SEND_PRIMARY_SEGMENT ?
-                        primaryQp : BigDataSelectDistinctWeightedQp(args, peer, primaryQp, false);
+                    const uint32_t qpIdx = BigDataRemotePutOnlySegmentQp(args, segmentId);
                     if (profileStage <= TILEXR_BIGDATA_REMOTE_PUT_STAGE_QP) {
                         continue;
                     }
@@ -2815,7 +2850,7 @@ extern "C" __global__ __aicore__ void tilexr_udma_all_to_all_bigdata_kernel(
                         rank, rankSize, args, input, debug,
                         elementsPerPeer, effectiveChunkElements, passCount, loop, pass,
                         kernelLoopBase, profileStage, shardCount, recvDataOffset,
-                        chunkBytesPerPeer, relayLocal);
+                        chunkBytesPerPeer, ranksPerNode, relayLocal);
                 }
                 BigDataKernelExitBarrier();
                 if (profileStage > TILEXR_BIGDATA_REMOTE_PUT_STAGE_POST) {
@@ -2825,7 +2860,7 @@ extern "C" __global__ __aicore__ void tilexr_udma_all_to_all_bigdata_kernel(
                             remotePutOnlyCheckIndex, rank, rankSize, args, udmaMem, debug,
                             elementsPerPeer, effectiveChunkElements, passCount, loop, pass,
                             kernelLoopBase, recvDataOffset, ackSignalOffset, chunkBytesPerPeer,
-                            shardCount, relayLocal);
+                            shardCount, ranksPerNode, relayLocal);
                     }
                 }
                 BigDataKernelExitBarrier();
@@ -2840,7 +2875,8 @@ extern "C" __global__ __aicore__ void tilexr_udma_all_to_all_bigdata_kernel(
             for (int32_t taskIndex = 0; taskIndex < taskCount; ++taskIndex) {
                 int32_t peer = -1;
                 bool isLocalPeer = false;
-                if (!BigDataMergedPeerTaskAt(rank, rankSize, taskIndex, force35Core, peer, isLocalPeer)) {
+                if (!BigDataMergedPeerTaskAt(
+                        rank, rankSize, taskIndex, force35Core, ranksPerNode, peer, isLocalPeer)) {
                     continue;
                 }
 
@@ -2889,7 +2925,7 @@ extern "C" __global__ __aicore__ void tilexr_udma_all_to_all_bigdata_kernel(
                         elementsPerPeer, effectiveChunkElements, passCount, loop, pass,
                         kernelLoopBase, profileStage, shardCount, sendDataOffset, recvDataOffset,
                         copyDoneOffset, remoteSendDoneOffset, readySignalOffset,
-                        chunkBytesPerPeer, relayLocal);
+                        chunkBytesPerPeer, ranksPerNode, relayLocal);
                 }
                 if (!isLocalPeer && isRemoteSendSecondaryCore) {
                     BigDataRemoteSendSegmentWorker(peer,
@@ -2898,7 +2934,7 @@ extern "C" __global__ __aicore__ void tilexr_udma_all_to_all_bigdata_kernel(
                         elementsPerPeer, effectiveChunkElements, passCount, loop, pass,
                         kernelLoopBase, profileStage, shardCount, sendDataOffset, recvDataOffset,
                         copyDoneOffset, remoteSendDoneOffset, readySignalOffset,
-                        chunkBytesPerPeer, relayLocal);
+                        chunkBytesPerPeer, ranksPerNode, relayLocal);
                 }
                 if (isLocalPeer && isLocalSendCore) {
                     BigDataSendPeerWorker(peer, rank, rankSize, args, udmaMem, debug,

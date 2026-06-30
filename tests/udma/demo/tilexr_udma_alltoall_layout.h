@@ -65,20 +65,33 @@ inline int32_t AllToAllValue(int srcRank, int dstRank)
     return kAllToAllBaseValue + srcRank * 1000 + dstRank;
 }
 
-inline bool AllToAllBigDataIsMultiNode(int rankSize)
+inline int32_t AllToAllBigDataNormalizeRanksPerNode(int rankSize, int32_t ranksPerNode)
 {
-    return rankSize > kAllToAllBigDataRanksPerNode;
+    (void)rankSize;
+    if (ranksPerNode <= 0) {
+        return kAllToAllBigDataRanksPerNode;
+    }
+    return ranksPerNode;
 }
 
-inline bool AllToAllBigDataUse35Core(int rankSize, bool force35Core = false)
+inline bool AllToAllBigDataIsMultiNode(
+    int rankSize, int32_t ranksPerNode = kAllToAllBigDataRanksPerNode)
 {
-    return AllToAllBigDataIsMultiNode(rankSize) ||
-        (force35Core && rankSize == kAllToAllBigDataRanksPerNode);
+    return rankSize > AllToAllBigDataNormalizeRanksPerNode(rankSize, ranksPerNode);
 }
 
-inline uint32_t AllToAllBigDataShardCount(int rankSize, bool force35Core = false)
+inline bool AllToAllBigDataUse35Core(
+    int rankSize, bool force35Core = false, int32_t ranksPerNode = kAllToAllBigDataRanksPerNode)
 {
-    return AllToAllBigDataUse35Core(rankSize, force35Core) ?
+    const int32_t localRanks = AllToAllBigDataNormalizeRanksPerNode(rankSize, ranksPerNode);
+    return AllToAllBigDataIsMultiNode(rankSize, localRanks) ||
+        (force35Core && rankSize == localRanks);
+}
+
+inline uint32_t AllToAllBigDataShardCount(
+    int rankSize, bool force35Core = false, int32_t ranksPerNode = kAllToAllBigDataRanksPerNode)
+{
+    return AllToAllBigDataUse35Core(rankSize, force35Core, ranksPerNode) ?
         kAllToAllBigDataMultiNodeControlShards : kAllToAllBigDataSingleNodeShards;
 }
 
@@ -113,17 +126,18 @@ inline AllToAllChunkPlan PlanAllToAllUdmaChunks(int rankSize, int32_t elementsPe
 }
 
 inline AllToAllBigDataPlan PlanAllToAllBigDataUdma(
-    int rankSize, int32_t elementsPerPeer, bool force35Core = false)
+    int rankSize, int32_t elementsPerPeer, bool force35Core = false,
+    int32_t ranksPerNode = kAllToAllBigDataRanksPerNode)
 {
     AllToAllBigDataPlan plan {};
     if (rankSize <= 0 || elementsPerPeer <= 0) {
         return plan;
     }
 
-    const bool use35Core = AllToAllBigDataUse35Core(rankSize, force35Core);
+    const bool use35Core = AllToAllBigDataUse35Core(rankSize, force35Core, ranksPerNode);
     plan.registeredBytes = use35Core ? kAllToAllBigDataMultiNodeRegisteredBytes :
         kAllToAllBigDataMaxRegisteredBytes;
-    const uint32_t shardCount = AllToAllBigDataShardCount(rankSize, force35Core);
+    const uint32_t shardCount = AllToAllBigDataShardCount(rankSize, force35Core, ranksPerNode);
     const size_t maxChunkElements = use35Core ?
         kAllToAllBigDataMultiNodePeerSlotBytes / sizeof(int32_t) :
         static_cast<size_t>(elementsPerPeer);
@@ -187,90 +201,113 @@ inline AllToAllBigDataPlan PlanAllToAllBigDataUdma(
     return plan;
 }
 
-inline bool AllToAllBigDataValidTopology(int rankSize)
+inline bool AllToAllBigDataValidTopology(
+    int rankSize, int32_t ranksPerNode = kAllToAllBigDataRanksPerNode)
 {
     if (rankSize <= 0) {
         return false;
     }
-    if (!AllToAllBigDataIsMultiNode(rankSize)) {
+    const int32_t localRanks = AllToAllBigDataNormalizeRanksPerNode(rankSize, ranksPerNode);
+    if (localRanks <= 0) {
+        return false;
+    }
+    if (!AllToAllBigDataIsMultiNode(rankSize, localRanks)) {
         return true;
     }
-    return rankSize % kAllToAllBigDataRanksPerNode == 0;
+    return rankSize % localRanks == 0;
 }
 
-inline int32_t AllToAllBigDataLocalNodeBegin(int rank)
+inline int32_t AllToAllBigDataLocalNodeBegin(
+    int rank, int32_t ranksPerNode = kAllToAllBigDataRanksPerNode)
 {
-    return (rank / kAllToAllBigDataRanksPerNode) * kAllToAllBigDataRanksPerNode;
+    const int32_t localRanks = AllToAllBigDataNormalizeRanksPerNode(rank + 1, ranksPerNode);
+    return (rank / localRanks) * localRanks;
 }
 
-inline int32_t AllToAllBigDataLocalNodeEnd(int rank)
+inline int32_t AllToAllBigDataLocalNodeEnd(
+    int rank, int32_t ranksPerNode = kAllToAllBigDataRanksPerNode)
 {
-    return AllToAllBigDataLocalNodeBegin(rank) + kAllToAllBigDataRanksPerNode;
+    return AllToAllBigDataLocalNodeBegin(rank, ranksPerNode) +
+        AllToAllBigDataNormalizeRanksPerNode(rank + 1, ranksPerNode);
 }
 
-inline int32_t AllToAllBigDataNodeCount(int rankSize)
+inline int32_t AllToAllBigDataNodeCount(
+    int rankSize, int32_t ranksPerNode = kAllToAllBigDataRanksPerNode)
 {
-    if (!AllToAllBigDataValidTopology(rankSize)) {
+    if (!AllToAllBigDataValidTopology(rankSize, ranksPerNode)) {
         return 0;
     }
-    if (!AllToAllBigDataIsMultiNode(rankSize)) {
+    const int32_t localRanks = AllToAllBigDataNormalizeRanksPerNode(rankSize, ranksPerNode);
+    if (!AllToAllBigDataIsMultiNode(rankSize, localRanks)) {
         return 1;
     }
-    return rankSize / kAllToAllBigDataRanksPerNode;
+    return rankSize / localRanks;
 }
 
-inline bool AllToAllBigDataIsLocalPeer(int rank, int peer)
+inline bool AllToAllBigDataIsLocalPeer(
+    int rank, int peer, int32_t ranksPerNode = kAllToAllBigDataRanksPerNode)
 {
-    const int32_t begin = AllToAllBigDataLocalNodeBegin(rank);
-    return peer >= begin && peer < begin + kAllToAllBigDataRanksPerNode;
+    const int32_t localRanks = AllToAllBigDataNormalizeRanksPerNode(std::max(rank, peer) + 1, ranksPerNode);
+    const int32_t begin = AllToAllBigDataLocalNodeBegin(rank, localRanks);
+    return peer >= begin && peer < begin + localRanks;
 }
 
-inline int32_t AllToAllBigDataLocalPeerForWorker(int rank, uint32_t workerGroup)
+inline int32_t AllToAllBigDataLocalPeerForWorker(
+    int rank, uint32_t workerGroup, int32_t ranksPerNode = kAllToAllBigDataRanksPerNode)
 {
-    if (workerGroup >= static_cast<uint32_t>(kAllToAllBigDataRanksPerNode)) {
+    const int32_t localRanks = AllToAllBigDataNormalizeRanksPerNode(rank + 1, ranksPerNode);
+    if (workerGroup >= static_cast<uint32_t>(localRanks)) {
         return -1;
     }
-    return AllToAllBigDataLocalNodeBegin(rank) + static_cast<int32_t>(workerGroup);
+    return AllToAllBigDataLocalNodeBegin(rank, localRanks) + static_cast<int32_t>(workerGroup);
 }
 
-inline std::vector<int32_t> AllToAllBigDataRemotePeers(int rank, int rankSize)
+inline std::vector<int32_t> AllToAllBigDataRemotePeers(
+    int rank, int rankSize, int32_t ranksPerNode = kAllToAllBigDataRanksPerNode)
 {
     std::vector<int32_t> peers;
-    if (!AllToAllBigDataIsMultiNode(rankSize) || !AllToAllBigDataValidTopology(rankSize)) {
+    const int32_t localRanks = AllToAllBigDataNormalizeRanksPerNode(rankSize, ranksPerNode);
+    if (!AllToAllBigDataIsMultiNode(rankSize, localRanks) ||
+        !AllToAllBigDataValidTopology(rankSize, localRanks)) {
         return peers;
     }
-    peers.reserve(static_cast<size_t>(rankSize - kAllToAllBigDataRanksPerNode));
+    peers.reserve(static_cast<size_t>(rankSize - localRanks));
     for (int32_t step = 0; step < rankSize &&
-         peers.size() < static_cast<size_t>(rankSize - kAllToAllBigDataRanksPerNode); ++step) {
-        const int32_t peer = (rank + kAllToAllBigDataRanksPerNode + step) % rankSize;
-        if (!AllToAllBigDataIsLocalPeer(rank, peer)) {
+         peers.size() < static_cast<size_t>(rankSize - localRanks); ++step) {
+        const int32_t peer = (rank + localRanks + step) % rankSize;
+        if (!AllToAllBigDataIsLocalPeer(rank, peer, localRanks)) {
             peers.push_back(peer);
         }
     }
     return peers;
 }
 
-inline std::vector<int32_t> AllToAllBigDataLocalPeers(int rank)
+inline std::vector<int32_t> AllToAllBigDataLocalPeers(
+    int rank, int32_t ranksPerNode = kAllToAllBigDataRanksPerNode)
 {
     std::vector<int32_t> peers;
-    peers.reserve(static_cast<size_t>(kAllToAllBigDataRanksPerNode - 1));
-    const int32_t begin = AllToAllBigDataLocalNodeBegin(rank);
+    const int32_t localRanks = AllToAllBigDataNormalizeRanksPerNode(rank + 1, ranksPerNode);
+    peers.reserve(static_cast<size_t>(std::max<int32_t>(localRanks - 1, 0)));
+    const int32_t begin = AllToAllBigDataLocalNodeBegin(rank, localRanks);
     const int32_t local = rank - begin;
-    for (int32_t step = 1; step < kAllToAllBigDataRanksPerNode; ++step) {
-        peers.push_back(begin + ((local + step) % kAllToAllBigDataRanksPerNode));
+    for (int32_t step = 1; step < localRanks; ++step) {
+        peers.push_back(begin + ((local + step) % localRanks));
     }
     return peers;
 }
 
-inline std::vector<int32_t> AllToAllBigDataMergedPeerTasks(int rank, int rankSize)
+inline std::vector<int32_t> AllToAllBigDataMergedPeerTasks(
+    int rank, int rankSize, int32_t ranksPerNode = kAllToAllBigDataRanksPerNode)
 {
     std::vector<int32_t> tasks;
-    if (!AllToAllBigDataIsMultiNode(rankSize) || !AllToAllBigDataValidTopology(rankSize)) {
+    const int32_t localRanks = AllToAllBigDataNormalizeRanksPerNode(rankSize, ranksPerNode);
+    if (!AllToAllBigDataIsMultiNode(rankSize, localRanks) ||
+        !AllToAllBigDataValidTopology(rankSize, localRanks)) {
         return tasks;
     }
-    const std::vector<int32_t> remotePeers = AllToAllBigDataRemotePeers(rank, rankSize);
-    const std::vector<int32_t> localPeers = AllToAllBigDataLocalPeers(rank);
-    const int32_t remoteBurst = AllToAllBigDataNodeCount(rankSize) - 1;
+    const std::vector<int32_t> remotePeers = AllToAllBigDataRemotePeers(rank, rankSize, localRanks);
+    const std::vector<int32_t> localPeers = AllToAllBigDataLocalPeers(rank, localRanks);
+    const int32_t remoteBurst = AllToAllBigDataNodeCount(rankSize, localRanks) - 1;
     size_t remoteIndex = 0;
     size_t localIndex = 0;
     tasks.reserve(remotePeers.size() + localPeers.size());
@@ -286,12 +323,13 @@ inline std::vector<int32_t> AllToAllBigDataMergedPeerTasks(int rank, int rankSiz
 }
 
 inline uint32_t AllToAllBigDataBlockDim(
-    int rankSize, bool force35Core = false, bool remotePutOnly = false)
+    int rankSize, bool force35Core = false, bool remotePutOnly = false,
+    int32_t ranksPerNode = kAllToAllBigDataRanksPerNode)
 {
     if (rankSize <= 0) {
         return 1U;
     }
-    if (AllToAllBigDataUse35Core(rankSize, force35Core)) {
+    if (AllToAllBigDataUse35Core(rankSize, force35Core, ranksPerNode)) {
         if (remotePutOnly) {
             return kAllToAllBigDataRemotePutOnlyBlockDim;
         }
