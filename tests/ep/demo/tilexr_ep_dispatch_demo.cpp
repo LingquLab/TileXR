@@ -341,6 +341,13 @@ std::size_t EpOperationBytes(int rankSize, const DemoConfig &config, std::size_t
     return AlignSize(relayReadyOffset + relayReadyBytes, kUdmaCacheLineBytes);
 }
 
+std::size_t EpRequiredWorkspaceBytes(int rankSize, const DemoConfig &config, std::size_t payloadRowBytes,
+    bool usePerTokenDynamicQuant)
+{
+    const std::size_t operationBytes = EpOperationBytes(rankSize, config, payloadRowBytes, usePerTokenDynamicQuant);
+    return AlignSize(operationBytes * 2 + sizeof(uint64_t), kUdmaCacheLineBytes);
+}
+
 uint16_t XValue(int rank, int64_t token, int64_t h)
 {
     return static_cast<uint16_t>(0x3c00 + rank * 0x0400 + token * 0x0100 + h * 0x0010);
@@ -818,8 +825,8 @@ int main(int argc, char **argv)
     const std::size_t dispatchWindowBytes = EpWindowBytes(rankSize, config, payloadRowBytes, usePerTokenDynamicQuant);
     const std::size_t dispatchPayloadBytes = AlignSize(dispatchWindowBytes, 32) *
         static_cast<std::size_t>(config.effectiveTpWorldSize() + 2);
-    const std::size_t operationBytes = EpOperationBytes(rankSize, config, payloadRowBytes, usePerTokenDynamicQuant);
-    const std::size_t workspacePayloadBytes = std::max(dispatchPayloadBytes, operationBytes * 2);
+    const std::size_t workspacePayloadBytes = std::max(dispatchPayloadBytes,
+        EpRequiredWorkspaceBytes(rankSize, config, payloadRowBytes, usePerTokenDynamicQuant));
     const std::size_t workspaceBytes = ((workspacePayloadBytes + kUdmaRegistrationAlignment - 1) /
         kUdmaRegistrationAlignment) * kUdmaRegistrationAlignment;
 

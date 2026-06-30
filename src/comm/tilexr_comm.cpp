@@ -427,6 +427,11 @@ GM_ADDR TileXRComm::GetUDMARegistryPtr() const
     return udmaRegistryDev_;
 }
 
+const TileXRUDMARegistry* TileXRComm::GetUDMARegistryHost() const
+{
+    return UDMARegistryValid(&udmaRegistry_, rankSize_) ? &udmaRegistry_ : nullptr;
+}
+
 int TileXRComm::InitCommon()
 {
     // enable peer device

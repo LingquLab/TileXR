@@ -13,6 +13,7 @@
 #include <cstddef>
 #include <string>
 #include "comm_args.h"
+#include "tilexr_udma_reg.h"
 #ifdef __cplusplus
 extern "C" {
 #endif // __cplusplus
@@ -43,6 +44,8 @@ int TileXRUDMARegister(TileXRCommPtr comm, GM_ADDR localPtr, size_t bytes, TileX
 int TileXRUDMAUnregister(TileXRCommPtr comm, TileXRUDMAMemHandle handle);
 
 int TileXRGetUDMARegistryDev(TileXRCommPtr comm, GM_ADDR &registryPtr);
+
+int TileXRGetUDMARegistryHost(TileXRCommPtr comm, const TileXR::TileXRUDMARegistry **registry);
 
 int TileXRSDMAAvailable(TileXRCommPtr comm, bool *available);
 

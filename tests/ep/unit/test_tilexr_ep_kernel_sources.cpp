@@ -217,6 +217,8 @@ void TestCombineKernelUsesTileXRPeerMemory()
         CheckContains("src/ep/host/ep_kernel_launch.cpp", hostLaunch, "launch_tilexr_ep_combine_kernel");
         CheckContains("src/ep/host/ep_kernel_launch.cpp", hostLaunch,
             "launch_tilexr_ep_combine_cross_node_kernel");
+        CheckContains("src/ep/host/ep_kernel_launch.cpp", hostLaunch, "aclrtSynchronizeStream");
+        CheckContains("src/ep/host/ep_kernel_launch.cpp", hostLaunch, "TILEXR_ERROR_TIMEOUT");
     }
 }
 
@@ -231,8 +233,14 @@ void TestKernelCommonHasCombineHelpers()
     CheckContains(path, contents, "UDMASecondOperationOffset");
     CheckContains(path, contents, "TileXREpNotifyRemoteUdmaReadySeparate");
     CheckContains(path, contents, "TileXREpWaitRemoteUdmaReady");
+    CheckContains(path, contents, "TileXREpStoreStatusValue");
     CheckContains(path, contents, "TileXREpFlushUdmaSourceWindow");
     CheckContains(path, contents, "IsValidShape");
+
+    std::string combine;
+    if (ReadFile("src/ep/kernels/tilexr_ep_combine_kernel.cpp", &combine)) {
+        CheckContains("src/ep/kernels/tilexr_ep_combine_kernel.cpp", combine, "kEpStatusRemoteReadyTimeout");
+    }
 }
 
 void TestDispatchDemoRunsCombine()

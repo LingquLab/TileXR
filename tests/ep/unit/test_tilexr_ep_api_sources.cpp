@@ -78,6 +78,11 @@ void TestPublicHeader()
     CheckContains("src/include/tilexr_ep.h", contents, "quantMode");
     CheckContains("src/include/tilexr_ep.h", contents, "tpWorldSize");
     CheckContains("src/include/tilexr_ep.h", contents, "sharedExpertNum");
+
+    std::string apiContents;
+    if (ReadFile("src/include/tilexr_api.h", &apiContents)) {
+        CheckContains("src/include/tilexr_api.h", apiContents, "TileXRGetUDMARegistryHost");
+    }
 }
 
 void TestBuildPlacement()
@@ -97,6 +102,19 @@ void TestBuildPlacement()
         CheckContains("src/ep/CMakeLists.txt", epCmake, "tilexr_ep.h");
         CheckContains("src/ep/CMakeLists.txt", epCmake, "install(TARGETS tilexr-ep");
     }
+}
+
+void TestEpHostChecksRegisteredWorkspace()
+{
+    std::string launchContext;
+    if (!ReadFile("src/ep/host/ep_launch_context.cpp", &launchContext)) {
+        return;
+    }
+
+    CheckContains("src/ep/host/ep_launch_context.cpp", launchContext, "ValidateRegisteredWorkspace");
+    CheckContains("src/ep/host/ep_launch_context.cpp", launchContext, "TileXRGetUDMARegistryHost");
+    CheckContains("src/ep/host/ep_launch_context.cpp", launchContext, "UDMARegionContains");
+    CheckContains("src/ep/host/ep_launch_context.cpp", launchContext, "TileXREpUdmaRequiredWorkspaceBytes");
 }
 
 void TestEpSocDefaultFollowsEnvironment()
@@ -224,6 +242,7 @@ void TestDispatchDemoRegistersAlignedUdmaWorkspace()
         "workspaceDev = reinterpret_cast<void *>(AlignAddress(");
     CheckContains("tests/ep/demo/tilexr_ep_dispatch_demo.cpp", demo,
         "TileXRUDMARegister(comm, static_cast<GM_ADDR>(workspaceDev), workspaceBytes");
+    CheckContains("tests/ep/demo/tilexr_ep_dispatch_demo.cpp", demo, "EpRequiredWorkspaceBytes");
 }
 
 void TestDispatchDemoUsesHostBarrierBeforeValidation()
@@ -272,6 +291,7 @@ int main()
 {
     TestPublicHeader();
     TestBuildPlacement();
+    TestEpHostChecksRegisteredWorkspace();
     TestEpSocDefaultFollowsEnvironment();
     TestChipMapRecognizesAscend950Dt9582();
     TestEpKernelUsesCceArchFlags();

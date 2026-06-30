@@ -88,6 +88,18 @@ __aicore__ inline int64_t UDMASecondOperationOffset(int64_t totalBytes, int32_t 
     return UDMAOperationBytes(totalBytes, rankSize, slotBytes);
 }
 
+__aicore__ inline int64_t UDMAStatusOffset(int64_t totalBytes, int32_t rankSize, int64_t slotBytes)
+{
+    return UDMASecondOperationOffset(totalBytes, rankSize, slotBytes) +
+        UDMAOperationBytes(totalBytes, rankSize, slotBytes);
+}
+
+__aicore__ inline int64_t UDMARequiredWorkspaceBytes(int64_t totalBytes, int32_t rankSize, int64_t slotBytes)
+{
+    return AlignUp(UDMAStatusOffset(totalBytes, rankSize, slotBytes) + static_cast<int64_t>(sizeof(uint64_t)),
+        TileXR::TILEXR_UDMA_CACHE_LINE_SIZE);
+}
+
 __aicore__ inline void CopyBytesGmToGm(
     GM_ADDR dstGM, GM_ADDR srcGM, AscendC::TBuf<AscendC::QuePosition::VECCALC> &tBuf, int64_t bytes)
 {
@@ -209,6 +221,17 @@ __aicore__ inline void StoreWindowHeader(GM_ADDR headerGM, int32_t rankSize, int
     local.SetValue(6, 0);
     local.SetValue(7, 0);
     StoreInt64WordsToGm(headerGM, local, tBuf, TileXREp::kEpWindowHeaderBytes);
+}
+
+__aicore__ inline void TileXREpStoreStatusValue(GM_ADDR workspaceGM, int64_t totalBytes, int32_t rankSize,
+    int64_t slotBytes, uint64_t status)
+{
+    GM_ADDR statusAddr = workspaceGM + UDMAStatusOffset(totalBytes, rankSize, slotBytes);
+    auto statusGM = reinterpret_cast<__gm__ uint64_t *>(statusAddr);
+    statusGM[0] = status;
+    AscendC::PipeBarrier<PIPE_ALL>();
+    TileXR::UDMACleanCacheLines(reinterpret_cast<__gm__ uint8_t *>(statusAddr), sizeof(uint64_t));
+    AscendC::PipeBarrier<PIPE_ALL>();
 }
 
 __aicore__ inline void ClearLocalWindow(
@@ -388,7 +411,7 @@ __aicore__ inline void TileXREpNotifyRemoteUdmaReadySeparate(
     }
 }
 
-__aicore__ inline void TileXREpWaitRemoteUdmaReady(GM_ADDR localWindow, int32_t rank, int32_t rankSize,
+__aicore__ inline bool TileXREpWaitRemoteUdmaReady(GM_ADDR localWindow, int32_t rank, int32_t rankSize,
     int32_t localRankSize, int64_t totalBytes, int64_t magic, int32_t step,
     AscendC::TBuf<AscendC::QuePosition::VECCALC> &tBuf)
 {
@@ -407,10 +430,11 @@ __aicore__ inline void TileXREpWaitRemoteUdmaReady(GM_ADDR localWindow, int32_t 
             ++retries;
             if (retries >= static_cast<int64_t>(TileXR::TILEXR_UDMA_MAX_RETRY_TIMES)) {
                 AscendC::printf("tilexr_ep_remote_ready timeout rank %d peer %d step %d\n", rank, peer, step);
-                break;
+                return false;
             }
         }
     }
+    return true;
 }
 
 __aicore__ inline void TileXREpFlushDispatchSlotHeaders(

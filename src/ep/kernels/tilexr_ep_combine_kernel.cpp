@@ -211,6 +211,7 @@ extern "C" __global__ __aicore__ void tilexr_ep_combine_cross_node_kernel(GM_ADD
         const int64_t combineWindowOffset = UDMASecondOperationOffset(totalBytes, rankSize, slotBytes);
         GM_ADDR sendWindow = workspaceGM + combineWindowOffset;
         GM_ADDR recvWindow = sendWindow + UDMARecvWindowOffset(totalBytes);
+        TileXREpStoreStatusValue(workspaceGM, totalBytes, rankSize, slotBytes, TileXREp::kEpStatusOk);
         TileXREpInvalidateLocalCacheLines(localIpcWindow, totalBytes);
         ClearLocalWindow(localIpcWindow, rankSize, maxRoutesPerSrc, rowBytes, slotBytes, totalBytes, tBuf);
         ClearLocalWindow(sendWindow, rankSize, maxRoutesPerSrc, rowBytes, slotBytes, totalBytes, tBuf);
@@ -246,8 +247,12 @@ extern "C" __global__ __aicore__ void tilexr_ep_combine_cross_node_kernel(GM_ADD
         for (int32_t peer = localNodeStart; peer < localNodeEnd; ++peer) {
             sync.WaitRankInnerFlag(static_cast<int32_t>(magic), TileXREp::kEpStepCombineGatewayReady, peer);
         }
-        TileXREpWaitRemoteUdmaReady(sendWindow, rank, rankSize, localRankSize, totalBytes, magic,
-            TileXREp::kEpStepCombineReady, tBuf);
+        const bool remoteReady = TileXREpWaitRemoteUdmaReady(sendWindow, rank, rankSize, localRankSize, totalBytes,
+            magic, TileXREp::kEpStepCombineReady, tBuf);
+        if (!remoteReady) {
+            TileXREpStoreStatusValue(workspaceGM, totalBytes, rankSize, slotBytes,
+                TileXREp::kEpStatusRemoteReadyTimeout);
+        }
         sync.SetInnerFlag(static_cast<int32_t>(magic), TileXREp::kEpStepCombineRelayReady);
         for (int32_t peer = localNodeStart; peer < localNodeEnd; ++peer) {
             sync.WaitRankInnerFlag(static_cast<int32_t>(magic), TileXREp::kEpStepCombineRelayReady, peer);
@@ -286,6 +291,12 @@ extern "C" __global__ __aicore__ void tilexr_ep_combine_cross_node_drain_kernel(
         const int64_t combineWindowOffset = UDMASecondOperationOffset(totalBytes, rankSize, slotBytes);
         GM_ADDR sendWindow = workspaceGM + combineWindowOffset;
         GM_ADDR recvWindow = sendWindow + UDMARecvWindowOffset(totalBytes);
+        GM_ADDR statusAddr = workspaceGM + UDMAStatusOffset(totalBytes, rankSize, slotBytes);
+        TileXREpInvalidateLocalCacheLines(statusAddr, static_cast<int64_t>(sizeof(uint64_t)));
+        if (LoadUint64FromGm(statusAddr, tBuf) != TileXREp::kEpStatusOk) {
+            AscendC::printf("tilexr_ep_combine drain skipped because status is non-zero\n");
+            return;
+        }
         ZeroRows<float16_t>(yOutGM, bs, h);
         for (int32_t expertRank = 0; expertRank < rankSize; ++expertRank) {
             GM_ADDR sourceWindow = recvWindow;

@@ -16,6 +16,8 @@ constexpr int32_t kEpStepCombineReady = 74;
 constexpr int32_t kEpStepDispatchDrained = 75;
 constexpr int32_t kEpStepCombineGatewayReady = 76;
 constexpr int32_t kEpStepCombineRelayReady = 77;
+constexpr int64_t kEpStatusOk = 0;
+constexpr int64_t kEpStatusRemoteReadyTimeout = 1;
 constexpr uint32_t kEpWindowMagic = 0x54584550U;
 
 struct EpWindowHeader {
