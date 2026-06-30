@@ -537,7 +537,6 @@ void TestAllToAllBigDataSource()
     CHECK_CONTAINS(kernel, "const bool isRecvCore =");
     CHECK_CONTAINS(kernel, "if (isCopyCore)");
     CHECK_CONTAINS(kernel, "if (remotePutOnly)");
-    CHECK_CONTAINS(kernel, "isRemotePutOnlyCheckCore");
     CHECK_CONTAINS(kernel, "const int32_t sendTaskCount = BigDataRemotePutOnlySendTaskCount(remoteTaskCount)");
     CHECK_CONTAINS(kernel, "sendTask += static_cast<int32_t>(activeBlockDim)");
     CHECK_CONTAINS(kernel, "const int32_t remoteIndex = BigDataRemotePutOnlySendTaskRemoteIndex(sendTask, remoteTaskCount)");
@@ -548,8 +547,6 @@ void TestAllToAllBigDataSource()
     CHECK_CONTAINS(kernel, "profileStage <= TILEXR_BIGDATA_REMOTE_PUT_STAGE_QP");
     CHECK_CONTAINS(kernel, "profileStage <= TILEXR_BIGDATA_REMOTE_PUT_STAGE_SEGMENT");
     CHECK_CONTAINS(kernel, "profileStage <= TILEXR_BIGDATA_REMOTE_PUT_STAGE_ADDRESS");
-    CHECK_CONTAINS(kernel, "BigDataRemotePutOnlyCheckWorker(");
-    CHECK_CONTAINS(kernel, "BigDataRemotePutOnlyCheckIndex(blockIdx)");
     CHECK_CONTAINS(kernel, "BigDataKernelExitBarrier()");
     CHECK_CONTAINS(kernel, "if (!isLocalPeer && isRemoteSendPrimaryCore)");
     CHECK_CONTAINS(kernel, "if (!isLocalPeer && isRemoteSendSecondaryCore)");
@@ -611,8 +608,7 @@ void TestAllToAllBigDataSource()
     const std::string remotePutOnlyCheck = SliceBetween(
         kernel, "BigDataRemotePutOnlyCheckWorker", "BigDataRunSelfCopyShard");
     CHECK_CONTAINS(remotePutOnlySend, "UDMAPutNbiOnQp<int32_t>");
-    CHECK_CONTAINS(remotePutOnlySend, "BigDataStoreInt32Mte");
-    CHECK_CONTAINS(remotePutOnlySend, "TILEXR_UDMA_DEMO_BIGDATA_REMOTE_SEND_SECONDARY_SEGMENT");
+    CHECK_NOT_CONTAINS(remotePutOnlySend, "BigDataStoreInt32Mte");
     CHECK_NOT_CONTAINS(remotePutOnlySend, "UDMAQuietStatusOnQp");
     CHECK_NOT_CONTAINS(remotePutOnlySend, "UDMAPutNbiOnQp<uint64_t>");
     const std::string remotePutOnlyCheckIndex = SliceBetween(

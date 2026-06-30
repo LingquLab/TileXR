@@ -1405,14 +1405,6 @@ __aicore__ inline void BigDataRemotePutOnlySendWorker(
 
     uint32_t status = 0U;
     if (segmentBytes > 0U) {
-        if (segmentId == TILEXR_UDMA_DEMO_BIGDATA_REMOTE_SEND_SECONDARY_SEGMENT) {
-            const int32_t tokenValue =
-                static_cast<int32_t>(BigDataPassToken(globalPass));
-            auto localTail = reinterpret_cast<__gm__ int32_t*>(
-                reinterpret_cast<__gm__ uint8_t*>(localSrc) +
-                static_cast<uint64_t>(segmentBytes) - sizeof(int32_t));
-            BigDataStoreInt32Mte(localTail, tokenValue, relayLocal);
-        }
         TileXR::UDMAPutNbiOnQp<int32_t>(args, peer, qpIdx, localSrc, remoteDataOffset, segmentBytes);
     }
     if (debug != nullptr && loop == 0 && pass == 0 && peer < 16) {
@@ -2761,9 +2753,6 @@ extern "C" __global__ __aicore__ void tilexr_udma_all_to_all_bigdata_kernel(
     const int32_t taskCount = BigDataTaskCount(rankSize, force35Core);
     const int32_t remoteTaskCount = rankSize - TILEXR_UDMA_DEMO_BIGDATA_RANKS_PER_NODE;
     const int32_t sendTaskCount = BigDataRemotePutOnlySendTaskCount(remoteTaskCount);
-    const int32_t remotePutOnlyCheckIndex = BigDataRemotePutOnlyCheckIndex(blockIdx);
-    const bool isRemotePutOnlyCheckCore =
-        remotePutOnlyCheckIndex >= 0 && remotePutOnlyCheckIndex < remoteTaskCount;
 
     if (remotePutOnly && profileStage <= TILEXR_BIGDATA_REMOTE_PUT_STAGE_FRAMEWORK) {
         BigDataKernelExitBarrier();
@@ -2796,15 +2785,6 @@ extern "C" __global__ __aicore__ void tilexr_udma_all_to_all_bigdata_kernel(
                         elementsPerPeer, effectiveChunkElements, passCount, loop, pass,
                         kernelLoopBase, profileStage, shardCount, recvDataOffset,
                         chunkBytesPerPeer, relayLocal);
-                }
-                BigDataKernelExitBarrier();
-                if (profileStage > TILEXR_BIGDATA_REMOTE_PUT_STAGE_POST &&
-                    isRemotePutOnlyCheckCore) {
-                    BigDataRemotePutOnlyCheckWorker(
-                        remotePutOnlyCheckIndex, rank, rankSize, args, udmaMem, debug,
-                        elementsPerPeer, effectiveChunkElements, passCount, loop, pass,
-                        kernelLoopBase, recvDataOffset, ackSignalOffset, chunkBytesPerPeer,
-                        shardCount, relayLocal);
                 }
                 BigDataKernelExitBarrier();
                 continue;
