@@ -1161,6 +1161,18 @@ std::string EnvOrEmpty(const char *name)
     return value == nullptr ? std::string() : std::string(value);
 }
 
+std::string HostEpochNs()
+{
+    struct timespec ts {};
+    if (clock_gettime(CLOCK_REALTIME, &ts) != 0) {
+        return "";
+    }
+    std::ostringstream out;
+    out << static_cast<long long>(ts.tv_sec) << std::setw(9) << std::setfill('0')
+        << static_cast<long long>(ts.tv_nsec);
+    return out.str();
+}
+
 std::string DefaultHostName()
 {
     char hostname[256] = {};
@@ -1189,6 +1201,9 @@ bool WriteProfileHostInfo(const Options &options)
     if (hostIp.empty()) {
         hostIp = EnvOrEmpty("TILEXR_NODE_IP");
     }
+    const std::string clockOffsetNs = EnvOrEmpty("TILEXR_PROFILE_CLOCK_OFFSET_NS");
+    const std::string clockReference = EnvOrEmpty("TILEXR_PROFILE_CLOCK_SYNC_REFERENCE");
+    const std::string epochNs = HostEpochNs();
 
     const std::string path = JoinPath(rankDir, "host_info.json");
     std::ofstream out(path.c_str());
@@ -1202,7 +1217,10 @@ bool WriteProfileHostInfo(const Options &options)
         << "  \"rank_size\": " << options.rankSize << ",\n"
         << "  \"host\": \"" << JsonEscape(host) << "\",\n"
         << "  \"ip\": \"" << JsonEscape(hostIp) << "\",\n"
-        << "  \"comm_mode\": \"" << CommModeName(options.commMode) << "\"\n"
+        << "  \"comm_mode\": \"" << CommModeName(options.commMode) << "\",\n"
+        << "  \"clock_offset_ns\": \"" << JsonEscape(clockOffsetNs) << "\",\n"
+        << "  \"clock_reference\": \"" << JsonEscape(clockReference) << "\",\n"
+        << "  \"epoch_ns\": \"" << JsonEscape(epochNs) << "\"\n"
         << "}\n";
     return true;
 }

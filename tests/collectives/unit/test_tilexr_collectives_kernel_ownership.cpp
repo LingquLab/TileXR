@@ -141,6 +141,8 @@ void TestCollectivesOwnsCceBuild()
     CheckContains(collectivesCmakePath, collectivesCmake, "add_subdirectory(kernels)");
     CheckContains(collectivesCmakePath, collectivesCmake, "tilexr_collectives_kernel_embed");
     CheckContains(collectivesCmakePath, collectivesCmake, "tilexr_collectives_op");
+    CheckContains(collectivesCmakePath, collectivesCmake, "OBJECT_DEPENDS");
+    CheckContains(collectivesCmakePath, collectivesCmake, "${TILEXR_COLLECTIVES_OP}");
 
     const std::string kernelsCmakePath = "src/collectives/kernels/CMakeLists.txt";
     const auto kernelsCmake = ReadFile(kernelsCmakePath);
@@ -311,7 +313,7 @@ void TestBigDataAllGatherPerfStages()
 {
     const std::string path = "src/collectives/kernels/kernels/lcal_allgather_big_data.cce";
     const auto text = ReadFile(path);
-    CheckContains(path, text, "PerfStageId::KERNEL_TOTAL");
+    CheckDoesNotContain(path, text, "PerfStageId::KERNEL_TOTAL");
     CheckContains(path, text, "PerfStageId::CHUNK_TOTAL");
     CheckContains(path, text, "PerfStageId::POST_SYNC");
     CheckContains(path, text, "PerfStageId::LOCAL_INPUT_TO_IPC");
@@ -329,7 +331,7 @@ void TestTwoNpuBigDataAllGatherPerfStages()
     const std::string path = "src/collectives/kernels/kernels/lcal_allgather_2npu_big_data_write.cce";
     const auto text = ReadFile(path);
     CheckContains(path, text, "GM_ADDR perfTrace");
-    CheckContains(path, text, "PerfStageId::KERNEL_TOTAL");
+    CheckDoesNotContain(path, text, "PerfStageId::KERNEL_TOTAL");
     CheckContains(path, text, "PerfStageId::CHUNK_TOTAL");
     CheckContains(path, text, "PerfStageId::POST_SYNC");
     CheckContains(path, text, "PerfStageId::LOCAL_INPUT_TO_IPC");
@@ -340,6 +342,28 @@ void TestTwoNpuBigDataAllGatherPerfStages()
     CheckContains(path, text, "TileXRPerfStageEnd");
     CheckContains(path, text, "TileXRPerfAccumulateDuration");
     CheckContains(path, text, "TileXRPerfTraceEnabled");
+}
+
+void TestStandaloneCollectiveWrappersHaveCoarsePerfTrace()
+{
+    const std::string path = "src/collectives/kernels/lccl_op.h";
+    const auto text = ReadFile(path);
+    CheckContains(path, text, "TileXRCoarsePerfToken");
+    CheckContains(path, text, "TILEXR_COARSE_PERF_BEGIN");
+    CheckContains(path, text, "TILEXR_COARSE_PERF_END");
+
+    const char *wrappers[] = {
+        "LCCL_ALLGATHER_FUNC_AUTO_DEF",
+        "LCCL_BROADCAST_FUNC_AUTO_DEF",
+        "LCCL_ALL_REDUCE_FUNC_AUTO_DEF",
+        "LCCL_ALL2ALL_FUNC_AUTO_DEF",
+        "LCCL_REDUCE_SCATTER_FUNC_AUTO_DEF",
+    };
+    for (const char *wrapper : wrappers) {
+        const auto body = ExtractInitializer(path, text, wrapper);
+        CheckContains(std::string(path) + " " + wrapper, body, "TILEXR_COARSE_PERF_BEGIN");
+        CheckContains(std::string(path) + " " + wrapper, body, "TILEXR_COARSE_PERF_END");
+    }
 }
 
 void TestCommDoesNotOwnCollectiveRuntime()
@@ -380,6 +404,7 @@ int main()
     TestDeviceKernelArgsMatchHostLaunchAbi();
     TestBigDataAllGatherPerfStages();
     TestTwoNpuBigDataAllGatherPerfStages();
+    TestStandaloneCollectiveWrappersHaveCoarsePerfTrace();
     TestCommDoesNotOwnCollectiveRuntime();
     return g_failures == 0 ? 0 : 1;
 }

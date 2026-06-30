@@ -64,6 +64,9 @@ def load_host_infos(root, diagnostics):
             "host": str(info.get("host") or f"rank{rank}"),
             "ip": str(info.get("ip") or ""),
             "comm_mode": str(info.get("comm_mode") or ""),
+            "clock_offset_ns": str(info.get("clock_offset_ns") or ""),
+            "clock_reference": str(info.get("clock_reference") or ""),
+            "epoch_ns": str(info.get("epoch_ns") or ""),
             "source": source,
         }
     return hosts
@@ -762,8 +765,21 @@ def render_html(index):
     data = json_for_script(index)
     summary_items = []
     rank_summary_rows = []
+    clock_rows = []
     trace_status_rows = []
     fallback_rows = []
+
+    for rank, host_info in sorted(index.get("hosts", {}).items()):
+        clock_rows.append(
+            "<tr>"
+            f"<td>rank{rank}</td>"
+            f"<td>{html.escape(str(host_info.get('host', '')))}</td>"
+            f"<td>{html.escape(str(host_info.get('ip', '')))}</td>"
+            f"<td>{html.escape(str(host_info.get('clock_offset_ns', '')))}</td>"
+            f"<td>{html.escape(str(host_info.get('clock_reference', '')))}</td>"
+            f"<td>{html.escape(str(host_info.get('epoch_ns', '')))}</td>"
+            "</tr>"
+        )
 
     for group in index["groups"]:
         summary = group["summary"]
@@ -833,6 +849,7 @@ def render_html(index):
 
     diagnostics = "".join(f"<li>{html.escape(item)}</li>" for item in index["diagnostics"])
     summary_html = "".join(summary_items) + diagnostics
+    clock_html = "".join(clock_rows) or "<tr><td colspan=\"6\">No host clock metadata available.</td></tr>"
     rank_summary_html = "".join(rank_summary_rows) or "<tr><td colspan=\"9\">No rank kernel totals available.</td></tr>"
     trace_status_html = "".join(trace_status_rows) or "<tr><td colspan=\"7\">No incomplete or synthetic traces.</td></tr>"
     fallback_html = "".join(fallback_rows) or "<tr><td colspan=\"8\">No trace bars available.</td></tr>"
@@ -865,6 +882,11 @@ table{{border-collapse:collapse;background:#fff;width:100%}} td,th{{border:1px s
 <h2>Bottleneck First</h2>
 <p>Warmup iterations: {index['warmup_iters']}; measured iterations: {index['measured_iters']}; sample every: {index['profile_sample_every']}.</p>
 <ul>{summary_html}</ul>
+</section>
+<section class="panel">
+<h2>Clock Sync</h2>
+<p>Offsets are sampled by the multi-host runner before launch. Positive offset means that rank host clock is ahead of the rank0 reference clock.</p>
+<table><thead><tr><th>Rank</th><th>Host</th><th>Host IP</th><th>Offset ns vs rank0</th><th>Reference</th><th>Rank epoch ns</th></tr></thead><tbody>{clock_html}</tbody></table>
 </section>
 <section class="panel">
 <h2>Rank-Level Summary</h2>

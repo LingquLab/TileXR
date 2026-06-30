@@ -4,18 +4,20 @@ set -euo pipefail
 usage() {
   cat >&2 <<'EOF'
 Usage:
+  TILEXR_MULTIHOST_REMOTE_REPO_DIR=/path/to/TileXR \
   TILEXR_MULTIHOST_PEERS="rank,host,ip,device;rank,host,ip,device" \
   run_collective_perf_multihost.sh profile_dir bin_dir [extra tilexr_collective_perf args...]
 
 Example:
-  TILEXR_MULTIHOST_PEERS="0,root@141.62.24.62,141.62.24.62,0;1,root@141.62.24.70,141.62.24.70,0" \
-  TILEXR_COMM_ID=141.62.24.62:10067 \
-  bash run_collective_perf_multihost.sh /home/l00929943/TileXR/run/prof/collectives-2host \
-    /home/l00929943/TileXR/build-profile-950/tests/collectives \
+  TILEXR_MULTIHOST_REMOTE_REPO_DIR=/path/to/TileXR \
+  TILEXR_MULTIHOST_PEERS="0,user@host-a,10.0.0.1,0;1,user@host-b,10.0.0.2,0" \
+  bash run_collective_perf_multihost.sh /path/to/TileXR/run/prof/collectives-2host \
+    /path/to/TileXR/build-profile-950/tests/collectives \
     --op allgather --min-bytes 4096 --max-bytes 4096 --iters 2 --warmup-iters 1 \
     --datatype int32 --check 0 --profile 1 --profile-sample-every 1 --profile-ai-prompt 1
 
 Each peer entry is rank,ssh_target,host_ip,device_id. The first entry is used as rank0/server.
+TILEXR_COMM_ID defaults to rank0 host_ip with port 10067.
 EOF
 }
 
@@ -29,10 +31,10 @@ bin_dir="${2:?bin_dir required}"
 shift 2
 
 peers_spec="${TILEXR_MULTIHOST_PEERS:?TILEXR_MULTIHOST_PEERS is required}"
-comm_id="${TILEXR_COMM_ID:-141.62.24.62:10067}"
 timeout_sec="${TILEXR_COLLECTIVES_RUN_TIMEOUT_SEC:-600}"
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 helper="${script_dir}/tilexr_collective_profile_report.py"
+repo_dir="${TILEXR_MULTIHOST_REMOTE_REPO_DIR:-$(cd "${script_dir}/../.." && pwd)}"
 rank_size=0
 warmup_iters=5
 measured_iters=20
@@ -94,6 +96,10 @@ copy_rank_profile() {
   local dest="${profile_dir}/rank${rank}"
   mkdir -p "${dest}"
 
+  if ! ssh -o BatchMode=yes "${target}" "test -d '${profile_dir}/rank${rank}'"; then
+    return
+  fi
+
   if command -v rsync >/dev/null 2>&1 &&
      ssh -o BatchMode=yes "${target}" "command -v rsync >/dev/null 2>&1"; then
     rsync -a -e "ssh -o BatchMode=yes" "${target}:${profile_dir}/rank${rank}/" "${dest}/"
@@ -114,8 +120,10 @@ launch_rank() {
   local target="$2"
   local host_ip="$3"
   local device_id="$4"
+  local repo_dir="$5"
+  local clock_offset_ns="$6"
   local host_label="${target#*@}"
-  shift 4
+  shift 6
   local log="${profile_dir}/multihost_rank${rank}.log"
   logs+=("${log}")
   targets+=("${target}")
@@ -125,7 +133,7 @@ launch_rank() {
   fi
 
   ssh -o BatchMode=yes "${target}" bash -s -- \
-    "${rank_size}" "${rank}" "${device_id}" "${comm_id}" "${profile_dir}" "${bin_dir}" "${host_ip}" "${host_label}" "$@" >"${log}" 2>&1 <<'REMOTE' &
+    "${rank_size}" "${rank}" "${device_id}" "${comm_id}" "${profile_dir}" "${bin_dir}" "${host_ip}" "${host_label}" "${repo_dir}" "${clock_offset_ns}" "$@" >"${log}" 2>&1 <<'REMOTE' &
 set -euo pipefail
 rank_size="$1"
 rank="$2"
@@ -135,21 +143,26 @@ profile_dir="$5"
 bin_dir="$6"
 host_ip="$7"
 host_label="$8"
-shift 8
+repo_dir="$9"
+clock_offset_ns="${10}"
+shift 10
 
-cd /home/l00929943/TileXR
+cd "${repo_dir}"
+build_dir="$(cd "${bin_dir}/../.." && pwd)"
 set +u
 source /root/anaconda3/etc/profile.d/conda.sh 2>/dev/null || true
 conda activate pt311 2>/dev/null || true
 source /usr/local/Ascend/cann/set_env.sh
 set -u
-export LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64/driver:$(pwd)/build-profile-950/src/collectives:$(pwd)/build-profile-950/src/comm:${LD_LIBRARY_PATH:-}
+export LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64/driver:${build_dir}/src/collectives:${build_dir}/src/comm:${LD_LIBRARY_PATH:-}
 export ASCEND_PROCESS_LOG_PATH="${profile_dir}/plog/rank${rank}"
 export ASCEND_GLOBAL_LOG_LEVEL="${ASCEND_GLOBAL_LOG_LEVEL:-3}"
 mkdir -p "${ASCEND_PROCESS_LOG_PATH}"
 export TILEXR_COMM_ID="${comm_id}"
 export TILEXR_PROFILE_HOST="${host_label}"
 export TILEXR_PROFILE_HOST_IP="${host_ip}"
+export TILEXR_PROFILE_CLOCK_OFFSET_NS="${clock_offset_ns}"
+export TILEXR_PROFILE_CLOCK_SYNC_REFERENCE="${comm_id%%:*}"
 
 "${bin_dir}/tilexr_collective_perf" \
   --rank-size "${rank_size}" \
@@ -162,13 +175,49 @@ REMOTE
   ssh_pids+=("$!")
 }
 
+remote_epoch_ns() {
+  local target="$1"
+  ssh -o BatchMode=yes "${target}" "date +%s%N"
+}
+
+reference_target=""
+reference_epoch_ns=""
+rank0_host_ip=""
 for peer in "${peers[@]}"; do
   IFS=',' read -r rank target host_ip device_id <<< "${peer}"
   if [[ -z "${rank:-}" || -z "${target:-}" || -z "${host_ip:-}" || -z "${device_id:-}" ]]; then
     echo "ERROR: invalid peer entry '${peer}', expected rank,target,ip,device" >&2
     exit 1
   fi
-  launch_rank "${rank}" "${target}" "${host_ip}" "${device_id}" "$@"
+  if [[ "${rank}" == "0" ]]; then
+    reference_target="${target}"
+    rank0_host_ip="${host_ip}"
+    reference_epoch_ns="$(remote_epoch_ns "${target}")"
+    break
+  fi
+done
+if [[ -z "${reference_target}" || -z "${reference_epoch_ns}" ]]; then
+  echo "ERROR: TILEXR_MULTIHOST_PEERS must contain rank 0" >&2
+  exit 1
+fi
+comm_id="${TILEXR_COMM_ID:-${rank0_host_ip}:10067}"
+
+for peer in "${peers[@]}"; do
+  IFS=',' read -r rank target host_ip device_id <<< "${peer}"
+  if [[ -z "${rank:-}" || -z "${target:-}" || -z "${host_ip:-}" || -z "${device_id:-}" ]]; then
+    echo "ERROR: invalid peer entry '${peer}', expected rank,target,ip,device" >&2
+    exit 1
+  fi
+  if [[ "${rank}" == "0" ]]; then
+    clock_offset_ns=0
+  else
+    reference_before_ns="$(remote_epoch_ns "${reference_target}")"
+    rank_epoch_ns="$(remote_epoch_ns "${target}")"
+    reference_after_ns="$(remote_epoch_ns "${reference_target}")"
+    reference_midpoint_ns="$(((reference_before_ns + reference_after_ns) / 2))"
+    clock_offset_ns="$((rank_epoch_ns - reference_midpoint_ns))"
+  fi
+  launch_rank "${rank}" "${target}" "${host_ip}" "${device_id}" "${repo_dir}" "${clock_offset_ns}" "$@"
 done
 
 sleep "${timeout_sec}" >/dev/null 2>&1 &

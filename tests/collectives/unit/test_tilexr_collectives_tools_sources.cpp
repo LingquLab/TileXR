@@ -126,6 +126,10 @@ void TestPerfToolSource()
     CheckContains(path, text, "TileXRCommInitRank(");
     CheckContains(path, text, "TileXRGetUniqueId(");
     CheckContains(path, text, "WriteProfileHostInfo");
+    CheckContains(path, text, "TILEXR_PROFILE_CLOCK_OFFSET_NS");
+    CheckContains(path, text, "clock_offset_ns");
+    CheckContains(path, text, "clock_reference");
+    CheckContains(path, text, "epoch_ns");
     CheckContains(path, text, "--op allgather|alltoall|allreduce|reducescatter|broadcast|profile-probe");
     CheckContains(path, text, "CollectiveOp::NOOP");
     CheckContains(path, text, "CollectiveOp::PROFILE_PROBE");
@@ -295,17 +299,38 @@ void TestLauncherScripts()
     CheckContains(multiHostPerfPath, multiHostPerf, "--comm-mode socket");
     CheckContains(multiHostPerfPath, multiHostPerf, "tilexr_collective_profile_report.py");
     CheckContains(multiHostPerfPath, multiHostPerf, "copy_rank_profile");
+    CheckContains(multiHostPerfPath, multiHostPerf, "test -d '${profile_dir}/rank${rank}'");
+    CheckContains(multiHostPerfPath, multiHostPerf, "remote_epoch_ns");
+    CheckContains(multiHostPerfPath, multiHostPerf, "TILEXR_MULTIHOST_REMOTE_REPO_DIR");
+    CheckContains(multiHostPerfPath, multiHostPerf, "rank0_host_ip");
+    CheckContains(multiHostPerfPath, multiHostPerf, "comm_id=\"${TILEXR_COMM_ID:-${rank0_host_ip}:10067}\"");
+    CheckContains(multiHostPerfPath, multiHostPerf, "TILEXR_PROFILE_CLOCK_OFFSET_NS");
+    CheckContains(multiHostPerfPath, multiHostPerf, "TILEXR_PROFILE_CLOCK_SYNC_REFERENCE");
     CheckContains(multiHostPerfPath, multiHostPerf, "command -v rsync");
     CheckContains(multiHostPerfPath, multiHostPerf, "tar -cf - .");
     CheckContains(multiHostPerfPath, multiHostPerf, "tar -xf - -C");
     CheckContains(multiHostPerfPath, multiHostPerf, "rank${rank}");
     CheckContains(multiHostPerfPath, multiHostPerf, "host_label=\"${target#*@}\"");
-    CheckContains(multiHostPerfPath, multiHostPerf, "shift 4");
+    CheckContains(multiHostPerfPath, multiHostPerf, "local repo_dir=\"$5\"");
+    CheckContains(multiHostPerfPath, multiHostPerf, "local clock_offset_ns=\"$6\"");
+    CheckContains(multiHostPerfPath, multiHostPerf,
+        "\"${rank_size}\" \"${rank}\" \"${device_id}\" \"${comm_id}\" \"${profile_dir}\" \"${bin_dir}\" \"${host_ip}\" \"${host_label}\" \"${repo_dir}\" \"${clock_offset_ns}\"");
+    CheckContains(multiHostPerfPath, multiHostPerf, "repo_dir=\"$9\"");
+    CheckContains(multiHostPerfPath, multiHostPerf, "clock_offset_ns=\"${10}\"");
+    CheckContains(multiHostPerfPath, multiHostPerf, "cd \"${repo_dir}\"");
+    CheckContains(multiHostPerfPath, multiHostPerf, "build_dir=\"$(cd \"${bin_dir}/../..\" && pwd)\"");
+    CheckContains(multiHostPerfPath, multiHostPerf, "${build_dir}/src/collectives");
+    CheckContains(multiHostPerfPath, multiHostPerf, "clock_offset_ns=0");
+    CheckContains(multiHostPerfPath, multiHostPerf, "reference_midpoint_ns");
+    CheckContains(multiHostPerfPath, multiHostPerf, "shift 6");
+    CheckContains(multiHostPerfPath, multiHostPerf, "shift 10");
+    CheckDoesNotContain(multiHostPerfPath, multiHostPerf, "cd /home/l00929943/TileXR");
+    CheckDoesNotContain(multiHostPerfPath, multiHostPerf, "comm_id=\"${TILEXR_COMM_ID:-141.62.24.62:10067}\"");
     CheckContains(multiHostPerfPath, multiHostPerf, "set +u");
     CheckContains(multiHostPerfPath, multiHostPerf, "ASCEND_PROCESS_LOG_PATH");
     CheckContains(multiHostPerfPath, multiHostPerf, "plog/rank${rank}");
     CheckContains(multiHostPerfPath, multiHostPerf,
-        "LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64/driver:$(pwd)/build-profile-950/src/collectives");
+        "LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64/driver:${build_dir}/src/collectives:${build_dir}/src/comm");
 }
 
 void TestCMakeWiring()
@@ -393,6 +418,8 @@ void TestProfileReportHelperDocumentsSlowRankAndPerfettoEvents()
     CheckContains(path, text, "launch_offset_us");
     CheckContains(path, text, "normalized_ts");
     CheckContains(path, text, "host_info.json");
+    CheckContains(path, text, "Clock Sync");
+    CheckContains(path, text, "clock_offset_ns");
     CheckContains(path, text, "rank_label(index.get(\"hosts\", {}), bar[\"rank\"])");
     CheckContains(path, text, "launch{bar['launch_id']}/{bar_rank_label}/{bar['stage']}");
 }
