@@ -88,7 +88,6 @@ constexpr int kDebugAckSeenBase = kDebugReadySeenBase + TileXR::TILEXR_MAX_RANK_
 constexpr size_t kDebugWords = kDebugAckSeenBase + TileXR::TILEXR_MAX_RANK_SIZE;
 constexpr int kDefaultCommPort = 10067;
 constexpr int kDemoBarrierPortOffset = 97;
-constexpr size_t kUdmaRegistrationAlignment = 2 * 1024 * 1024;
 constexpr int kConnectRetryCount = 500;
 constexpr int kConnectRetrySleepMs = 10;
 constexpr int kBigDataProfileStageFull = 8;
@@ -676,6 +675,8 @@ int main(int argc, char** argv)
     bigDataProfileStage = std::max(0, std::min(bigDataProfileStage, kBigDataProfileStageFull));
     const bool forceBigData35Core =
         testType == 7 && GetEnvInt("TILEXR_DEMO_BIGDATA_FORCE_35CORE", 0) != 0;
+    const bool bigDataRemotePutOnly =
+        testType == 7 && GetEnvInt("TILEXR_DEMO_BIGDATA_REMOTE_PUT_ONLY", 0) != 0;
     bool bigDataProfilePartial = testType == 7 && bigDataProfileStage < kBigDataProfileStageFull;
     bool syncAllToAllAtEnd =
         isAllToAll && GetEnvInt("TILEXR_DEMO_ALLTOALL_SYNC_AT_END", 0) != 0;
@@ -740,8 +741,9 @@ int main(int argc, char** argv)
             PrintStatus(rank, "bigdata multinode mode=" +
                 std::string(TileXR::Demo::AllToAllBigDataIsMultiNode(rankSize) ? "true" : "false") +
                 " force35Core=" + std::string(forceBigData35Core ? "true" : "false") +
+                " remotePutOnly=" + std::string(bigDataRemotePutOnly ? "true" : "false") +
                 " blockDim=" + std::to_string(TileXR::Demo::AllToAllBigDataBlockDim(
-                    rankSize, forceBigData35Core)) +
+                    rankSize, forceBigData35Core, bigDataRemotePutOnly)) +
                 " shards=" + std::to_string(TileXR::Demo::AllToAllBigDataShardCount(
                     rankSize, forceBigData35Core)));
         }
@@ -770,15 +772,12 @@ int main(int argc, char** argv)
     size_t signalOffset = testType == 7 ? bigDataPlan.readySignalOffset :
         (hasOutput ? (outputOffset + activeBytesPerRank) : activeBytesPerRank);
     size_t payloadBytes = testType == 7 ? bigDataPlan.registeredBytes : (signalOffset + signalBytes);
-    size_t allocBytes = ((payloadBytes + kUdmaRegistrationAlignment - 1) / kUdmaRegistrationAlignment) *
-        kUdmaRegistrationAlignment;
+    size_t allocBytes = payloadBytes;
     size_t registeredBytes = allocBytes;
     if (isAllToAll && testType == 7) {
-        registeredBytes = ((bigDataPlan.registeredBytes + kUdmaRegistrationAlignment - 1) /
-            kUdmaRegistrationAlignment) * kUdmaRegistrationAlignment;
+        registeredBytes = bigDataPlan.registeredBytes;
     } else if (isAllToAll && (strictAllToAllUdma || testType == 6)) {
-        registeredBytes = ((chunkPlan.registeredBytes + kUdmaRegistrationAlignment - 1) /
-            kUdmaRegistrationAlignment) * kUdmaRegistrationAlignment;
+        registeredBytes = chunkPlan.registeredBytes;
     }
     if (allocBytes < registeredBytes) {
         allocBytes = registeredBytes;
@@ -954,7 +953,9 @@ int main(int argc, char** argv)
         }
 
         const uint32_t bigDataBlockDim = TileXR::Demo::AllToAllBigDataBlockDim(
-            rankSize, forceBigData35Core);
+            rankSize, forceBigData35Core, bigDataRemotePutOnly);
+        const uint32_t bigDataModeFlags =
+            (forceBigData35Core ? 1U : 0U) | (bigDataRemotePutOnly ? 2U : 0U);
         auto a2aStart = std::chrono::steady_clock::now();
         for (int iter = 0; iter < allToAllRepeat; ++iter) {
             const uint64_t kernelLoopBase = static_cast<uint64_t>(iter);
@@ -968,7 +969,7 @@ int main(int argc, char** argv)
                 bigDataPlan.readySignalOffset, bigDataPlan.ackSignalOffset,
                 bigDataPlan.chunkElements, bigDataPlan.passCount, 1, kernelLoopBase,
                 static_cast<uint32_t>(bigDataProfileStage),
-                forceBigData35Core ? 1U : 0U);
+                bigDataModeFlags);
         }
         if (!CheckAcl(rank, "aclrtSynchronizeStream post-alltoall", aclrtSynchronizeStream(stream))) {
             if (udmaRegistered) {
@@ -992,7 +993,7 @@ int main(int argc, char** argv)
                   << " us payload=" << payload << " bytes bw=" << bwGbs << " GB/s" << std::endl;
 
         bool bigDataCopyBackOk = true;
-        if (!bigDataProfilePartial) {
+        if (!bigDataProfilePartial && !bigDataRemotePutOnly) {
             bigDataCopyBackOk = CopyDeviceToHost(rank, hostOutput.data(), dataCount * sizeof(int32_t),
                 bigOutput, dataCount * sizeof(int32_t), "bigdata alltoall output");
         }
@@ -1036,8 +1037,7 @@ int main(int argc, char** argv)
         // Registered relay region: [udmaMem chunk | signals].
         const size_t fusedChunkBytes = chunkPlan.chunkBytesPerRank;
         const size_t fusedSignalBytes = static_cast<size_t>(rankSize) * sizeof(uint64_t);
-        const size_t fusedRegBytes = ((chunkPlan.registeredBytes + kUdmaRegistrationAlignment - 1) /
-            kUdmaRegistrationAlignment) * kUdmaRegistrationAlignment;
+        const size_t fusedRegBytes = chunkPlan.registeredBytes;
         if (!udmaRegistered) {
             int registerRet = TileXRUDMARegister(comm, static_cast<GM_ADDR>(registeredMemory), fusedRegBytes, &udmaHandle);
             if (registerRet != TileXR::TILEXR_SUCCESS) {
@@ -1303,7 +1303,8 @@ int main(int argc, char** argv)
     }
 
     bool usedIpcFallback = false;
-    bool allToAllUdmaComplete = !isAllToAll || bigDataProfilePartial || AllToAllUdmaComplete(rankSize, hostDebug);
+    bool allToAllUdmaComplete =
+        !isAllToAll || bigDataRemotePutOnly || bigDataProfilePartial || AllToAllUdmaComplete(rankSize, hostDebug);
     if (isAllToAll && strictAllToAllUdma && !allToAllUdmaComplete) {
         std::cerr << "[rank " << rank << "] ERROR: strict alltoall UDMA CQ incomplete:";
         for (int peer = 0; peer < rankSize; ++peer) {
@@ -1505,7 +1506,10 @@ int main(int argc, char** argv)
     }
 
     bool ok = false;
-    if (bigDataProfilePartial) {
+    if (bigDataRemotePutOnly) {
+        PrintStatus(rank, "skip result validation for bigdata remote-put-only profile");
+        ok = true;
+    } else if (bigDataProfilePartial) {
         PrintStatus(rank, "skip result validation for bigdata profile stage=" +
             std::to_string(bigDataProfileStage));
         ok = true;

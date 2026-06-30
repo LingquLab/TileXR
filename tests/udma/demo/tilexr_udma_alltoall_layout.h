@@ -27,7 +27,7 @@ struct AllToAllChunkPlan {
 
 constexpr size_t kAllToAllBigDataMaxRegisteredBytes = 128ULL * 1024ULL * 1024ULL;
 constexpr size_t kAllToAllBigDataMultiNodeRegisteredBytes = 1024ULL * 1024ULL * 1024ULL;
-constexpr size_t kAllToAllBigDataMultiNodePeerSlotBytes = 8ULL * 1024ULL * 1024ULL;
+constexpr size_t kAllToAllBigDataMultiNodePeerSlotBytes = 16ULL * 1024ULL * 1024ULL;
 constexpr size_t kAllToAllBigDataControlSlotBytes = 128ULL;
 constexpr uint32_t kAllToAllBigDataCoresPerPeer = 5U;
 constexpr uint32_t kAllToAllBigDataSingleNodeShards = 2U;
@@ -43,6 +43,7 @@ constexpr uint32_t kAllToAllBigDataMultiNodeLocalSendCore = 18U;
 constexpr uint32_t kAllToAllBigDataMultiNodeRecvCoreBase = 19U;
 constexpr uint32_t kAllToAllBigDataMultiNodeBlockDim =
     kAllToAllBigDataMultiNodeRecvCoreBase + kAllToAllBigDataMultiNodeRecvCores;
+constexpr uint32_t kAllToAllBigDataRemotePutOnlyBlockDim = 64U;
 
 struct AllToAllBigDataPlan {
     uint32_t passCount = 1;
@@ -153,7 +154,7 @@ inline AllToAllBigDataPlan PlanAllToAllBigDataUdma(
     plan.dataBytes = plan.registeredBytes - plan.controlBytes - plan.signalBytes;
     if (use35Core) {
         plan.chunkElements = static_cast<int32_t>(chunkElements);
-        plan.chunkBytesPerPeer = kAllToAllBigDataMultiNodePeerSlotBytes;
+        plan.chunkBytesPerPeer = static_cast<size_t>(plan.chunkElements) * sizeof(int32_t);
     } else {
         plan.chunkElements = static_cast<int32_t>(
             plan.dataBytes / (dataSlotCount * sizeof(int32_t)));
@@ -284,12 +285,16 @@ inline std::vector<int32_t> AllToAllBigDataMergedPeerTasks(int rank, int rankSiz
     return tasks;
 }
 
-inline uint32_t AllToAllBigDataBlockDim(int rankSize, bool force35Core = false)
+inline uint32_t AllToAllBigDataBlockDim(
+    int rankSize, bool force35Core = false, bool remotePutOnly = false)
 {
     if (rankSize <= 0) {
         return 1U;
     }
     if (AllToAllBigDataUse35Core(rankSize, force35Core)) {
+        if (remotePutOnly) {
+            return kAllToAllBigDataRemotePutOnlyBlockDim;
+        }
         return kAllToAllBigDataMultiNodeBlockDim;
     }
     return static_cast<uint32_t>(rankSize) * kAllToAllBigDataCoresPerPeer;
