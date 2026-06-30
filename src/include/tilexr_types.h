@@ -102,6 +102,7 @@ enum class TileXRType {
     LOCAL_REDUCE = 8,
     SEND = 9,
     RECV = 10,
+    PROFILE_PROBE = 11,
     PURE_MATMUL = 101,
     MATMUL_ALL_REDUCE = 102,
     MATMUL_REDUCE_SCATTER = 103,
@@ -144,6 +145,7 @@ const std::map<TileXRType, std::string> TILEXR_TYPE2NAME = {
     { TileXRType::GATHER, "TileXRGather" },
     { TileXRType::SEND, "TileXRSend" },
     { TileXRType::RECV, "TileXRRecv" },
+    { TileXRType::PROFILE_PROBE, "TileXRProfileProbe" },
     { TileXRType::ALLTOALLV_ALLGATHER_MATMUL, "TileXRAllToAllVAllGatherMatmul" },
     { TileXRType::MATMUL_REDUCESCATTER_ALLTOALLV, "TileXRMatmulReduceScatterAllToAllV" },
 

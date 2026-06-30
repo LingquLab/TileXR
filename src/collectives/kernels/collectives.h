@@ -441,7 +441,7 @@ protected:
     {
         PipeBarrier<PIPE_ALL>();
         if (op != -1) {
-#ifdef __DAV_C220_VEC__
+#if defined(__DAV_C220_VEC__) || defined(__DAV_C310_VEC__)
             SetAtomicOpType<T>(op);
 #endif
         }

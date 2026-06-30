@@ -1,5 +1,6 @@
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <vector>
@@ -208,6 +209,8 @@ void CheckPerfTraceLaunchMetadata()
     CheckMagic("trace cycleToUsDivisor", session.header.cycleToUsDivisor, 1000);
     CheckMagic("trace stats size", static_cast<int64_t>(session.hostStats.size()),
                static_cast<int64_t>(commArgs.rankSize) * 4 * TileXR::TILEXR_PERF_STAGE_COUNT);
+    CheckMagic("trace stats offset", static_cast<int64_t>(session.header.statsOffset),
+               TileXR::TILEXR_PERF_TRACE_STATS_OFFSET);
 
     deviceTrace = reinterpret_cast<const void *>(0x1);
     CheckStatus("PreparePerfTraceLaunch reducescatter message bytes",
@@ -367,6 +370,58 @@ void CheckPerfTraceRuntimeHooks()
     TileXRCollectives::Host::SetPerfTraceRuntimeHooksForTest(nullptr);
 }
 
+void CheckKernelProfilingCanBeDisabledWithoutLosingHostMetadata()
+{
+#if defined(_WIN32)
+    _putenv("TILEXR_COLLECTIVES_DISABLE_KERNEL_PROFILING=1");
+#else
+    setenv("TILEXR_COLLECTIVES_DISABLE_KERNEL_PROFILING", "1", 1);
+#endif
+    ResetFakeRuntime();
+    TileXRCollectives::Host::SetPerfTraceRuntimeHooksForTest(&kFakeRuntimeHooks);
+
+    TileXRCollectivePerfConfig config {};
+    config.enabled = 1;
+    config.outputDir = "/tmp/tilexr_perf_prepare_disabled_kernel";
+    config.sampleEveryN = 1;
+    TileXRCollectivePerfSession opaqueSession = nullptr;
+    CheckStatus("create perf session for disabled kernel profiling",
+                TileXRCollectivePerfSessionCreate(&config, &opaqueSession), TileXR::TILEXR_SUCCESS);
+    TileXRCollectives::Host::PerfTraceSession *session =
+        static_cast<TileXRCollectives::Host::PerfTraceSession *>(opaqueSession);
+
+    TileXR::CommArgs commArgs {};
+    commArgs.rank = 1;
+    commArgs.rankSize = 2;
+
+    const void *deviceTrace = reinterpret_cast<const void *>(0x1);
+    CheckStatus("PreparePerfTraceLaunch disabled kernel profiling",
+                TileXRCollectives::Host::PreparePerfTraceLaunch(
+                    session, commArgs, TileXR::TileXRType::ALL_GATHER,
+                    TileXR::TILEXR_DATA_TYPE_INT32, 4, 1024, nullptr, &deviceTrace),
+                TileXR::TILEXR_SUCCESS);
+    CheckPointer("disabled kernel profiling deviceTrace", deviceTrace, nullptr);
+    CheckTrue("disabled kernel profiling not ready", !session->deviceTraceReady);
+    CheckMagic("disabled kernel profiling malloc calls", g_mallocCalls, 0);
+    CheckMagic("disabled kernel profiling rank", session->header.rank, 1);
+    CheckMagic("disabled kernel profiling rankSize", session->header.rankSize, 2);
+    CheckMagic("disabled kernel profiling stats size", static_cast<int64_t>(session->hostStats.size()),
+               static_cast<int64_t>(commArgs.rankSize) * 4 * TileXR::TILEXR_PERF_STAGE_COUNT);
+    CheckMagic("disabled kernel profiling stats offset", static_cast<int64_t>(session->header.statsOffset),
+               TileXR::TILEXR_PERF_TRACE_STATS_OFFSET);
+
+    CheckStatus("write disabled kernel profiling report",
+                TileXRCollectivePerfWriteReport(opaqueSession), TileXR::TILEXR_SUCCESS);
+    CheckStatus("destroy disabled kernel profiling session",
+                TileXRCollectivePerfSessionDestroy(opaqueSession), TileXR::TILEXR_SUCCESS);
+    TileXRCollectives::Host::SetPerfTraceRuntimeHooksForTest(nullptr);
+#if defined(_WIN32)
+    _putenv("TILEXR_COLLECTIVES_DISABLE_KERNEL_PROFILING=");
+#else
+    unsetenv("TILEXR_COLLECTIVES_DISABLE_KERNEL_PROFILING");
+#endif
+}
+
 } // namespace
 
 int main()
@@ -374,6 +429,7 @@ int main()
     CheckKernelArgsHasPerfTrace();
     CheckPerfTraceLaunchMetadata();
     CheckPerfTraceRuntimeHooks();
+    CheckKernelProfilingCanBeDisabledWithoutLosingHostMetadata();
 
     TileXRCollectives::Host::HostLaunchContext context;
 

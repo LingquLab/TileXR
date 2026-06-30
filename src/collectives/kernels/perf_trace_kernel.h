@@ -3,6 +3,7 @@
 
 #include "comm_args.h"
 #include "kernel_operator.h"
+#include "datacopy_gm2gm.h"
 #include "tilexr_perf_trace.h"
 
 namespace TileXR {
@@ -10,6 +11,8 @@ namespace TileXR {
 struct TileXRPerfStageToken {
     uint64_t startCycle = 0;
 };
+
+constexpr int64_t TILEXR_PERF_TRACE_STATS_UB_OFFSET = 195616;
 
 #if defined(TILEXR_COLLECTIVES_ENABLE_PROFILING)
 
@@ -25,15 +28,13 @@ __attribute__((always_inline)) inline __aicore__ __gm__ TileXRPerfCoreStageStats
         return nullptr;
     }
 
-    __gm__ TileXRPerfTraceHeader *header = reinterpret_cast<__gm__ TileXRPerfTraceHeader *>(trace);
-    const size_t slot = PerfTraceStatsOffset(rank, core, stage, header->maxCoreCount, header->stageCount);
-    return reinterpret_cast<__gm__ TileXRPerfCoreStageStats *>(trace + header->statsOffset) + slot;
+    const size_t slot = PerfTraceStatsOffset(rank, core, stage, GetBlockNum(), TILEXR_PERF_STAGE_COUNT);
+    return reinterpret_cast<__gm__ TileXRPerfCoreStageStats *>(trace + TILEXR_PERF_TRACE_STATS_OFFSET) + slot;
 }
 
 __attribute__((always_inline)) inline __aicore__ TileXRPerfStageToken TileXRPerfStageBegin(
     GM_ADDR trace, PerfStageId stage, PerfBarrierPolicy policy)
 {
-    (void)stage;
     TileXRPerfStageToken token {};
     if (trace == nullptr) {
         return token;
@@ -41,12 +42,14 @@ __attribute__((always_inline)) inline __aicore__ TileXRPerfStageToken TileXRPerf
     if (policy == PerfBarrierPolicy::BARRIERED) {
         AscendC::PipeBarrier<PIPE_ALL>();
     }
+    (void)stage;
     token.startCycle = static_cast<uint64_t>(AscendC::GetSystemCycle());
     return token;
 }
 
 __attribute__((always_inline)) inline __aicore__ void TileXRPerfAccumulateDuration(
-    GM_ADDR trace, uint32_t rank, uint32_t core, PerfStageId stage, uint64_t startCycle, uint64_t endCycle)
+    GM_ADDR trace, uint32_t rank, uint32_t core, PerfStageId stage, uint64_t startCycle, uint64_t endCycle,
+    __ubuf__ TileXRPerfCoreStageStats *statsUB)
 {
     if (endCycle < startCycle) {
         return;
@@ -58,35 +61,55 @@ __attribute__((always_inline)) inline __aicore__ void TileXRPerfAccumulateDurati
         return;
     }
 
+    CpGM2UB(reinterpret_cast<__ubuf__ uint8_t *>(statsUB),
+        reinterpret_cast<__gm__ uint8_t *>(slot), sizeof(TileXRPerfCoreStageStats));
+    AscendC::SetFlag<AscendC::HardEvent::MTE2_S>(EVENT_ID0);
+    AscendC::WaitFlag<AscendC::HardEvent::MTE2_S>(EVENT_ID0);
+
     const uint64_t duration = endCycle - startCycle;
-    slot->rank = rank;
-    slot->core = core;
-    slot->stageId = stageId;
-    if (slot->count == 0) {
-        slot->minCycles = duration;
-        slot->maxCycles = duration;
-        slot->firstStartCycle = startCycle;
+    statsUB->rank = rank;
+    statsUB->core = core;
+    statsUB->stageId = stageId;
+    statsUB->reserved = 0;
+    if (statsUB->count == 0) {
+        statsUB->minCycles = duration;
+        statsUB->maxCycles = duration;
+        statsUB->firstStartCycle = startCycle;
     } else {
-        if (duration < slot->minCycles) {
-            slot->minCycles = duration;
+        if (duration < statsUB->minCycles) {
+            statsUB->minCycles = duration;
         }
-        if (duration > slot->maxCycles) {
-            slot->maxCycles = duration;
+        if (duration > statsUB->maxCycles) {
+            statsUB->maxCycles = duration;
         }
-        if (startCycle < slot->firstStartCycle) {
-            slot->firstStartCycle = startCycle;
+        if (startCycle < statsUB->firstStartCycle) {
+            statsUB->firstStartCycle = startCycle;
         }
     }
-    slot->count += 1;
-    slot->sumCycles += duration;
-    if (endCycle > slot->lastEndCycle) {
-        slot->lastEndCycle = endCycle;
+    statsUB->count += 1;
+    statsUB->sumCycles += duration;
+    if (endCycle > statsUB->lastEndCycle) {
+        statsUB->lastEndCycle = endCycle;
     }
+    AscendC::SetFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID0);
+    AscendC::WaitFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID0);
+    CpUB2GM(reinterpret_cast<__gm__ uint8_t *>(slot),
+        reinterpret_cast<__ubuf__ uint8_t *>(statsUB), sizeof(TileXRPerfCoreStageStats));
+    AscendC::SetFlag<AscendC::HardEvent::MTE3_S>(EVENT_ID0);
+    AscendC::WaitFlag<AscendC::HardEvent::MTE3_S>(EVENT_ID0);
+}
+
+__attribute__((always_inline)) inline __aicore__ void TileXRPerfAccumulateDuration(
+    GM_ADDR trace, uint32_t rank, uint32_t core, PerfStageId stage, uint64_t startCycle, uint64_t endCycle)
+{
+    TileXRPerfAccumulateDuration(
+        trace, rank, core, stage, startCycle, endCycle,
+        reinterpret_cast<__ubuf__ TileXRPerfCoreStageStats *>(TILEXR_PERF_TRACE_STATS_UB_OFFSET));
 }
 
 __attribute__((always_inline)) inline __aicore__ void TileXRPerfStageEnd(
     GM_ADDR trace, uint32_t rank, uint32_t core, PerfStageId stage, TileXRPerfStageToken token,
-    PerfBarrierPolicy policy)
+    PerfBarrierPolicy policy, __ubuf__ TileXRPerfCoreStageStats *statsUB)
 {
     if (trace == nullptr) {
         return;
@@ -95,7 +118,16 @@ __attribute__((always_inline)) inline __aicore__ void TileXRPerfStageEnd(
         AscendC::PipeBarrier<PIPE_ALL>();
     }
     const uint64_t endCycle = static_cast<uint64_t>(AscendC::GetSystemCycle());
-    TileXRPerfAccumulateDuration(trace, rank, core, stage, token.startCycle, endCycle);
+    TileXRPerfAccumulateDuration(trace, rank, core, stage, token.startCycle, endCycle, statsUB);
+}
+
+__attribute__((always_inline)) inline __aicore__ void TileXRPerfStageEnd(
+    GM_ADDR trace, uint32_t rank, uint32_t core, PerfStageId stage, TileXRPerfStageToken token,
+    PerfBarrierPolicy policy)
+{
+    TileXRPerfStageEnd(
+        trace, rank, core, stage, token, policy,
+        reinterpret_cast<__ubuf__ TileXRPerfCoreStageStats *>(TILEXR_PERF_TRACE_STATS_UB_OFFSET));
 }
 
 #else
@@ -136,6 +168,14 @@ __attribute__((always_inline)) inline __aicore__ void TileXRPerfAccumulateDurati
     (void)endCycle;
 }
 
+__attribute__((always_inline)) inline __aicore__ void TileXRPerfAccumulateDuration(
+    GM_ADDR trace, uint32_t rank, uint32_t core, PerfStageId stage, uint64_t startCycle, uint64_t endCycle,
+    __ubuf__ TileXRPerfCoreStageStats *statsUB)
+{
+    (void)statsUB;
+    TileXRPerfAccumulateDuration(trace, rank, core, stage, startCycle, endCycle);
+}
+
 __attribute__((always_inline)) inline __aicore__ void TileXRPerfStageEnd(
     GM_ADDR trace, uint32_t rank, uint32_t core, PerfStageId stage, TileXRPerfStageToken token,
     PerfBarrierPolicy policy)
@@ -146,6 +186,14 @@ __attribute__((always_inline)) inline __aicore__ void TileXRPerfStageEnd(
     (void)stage;
     (void)token;
     (void)policy;
+}
+
+__attribute__((always_inline)) inline __aicore__ void TileXRPerfStageEnd(
+    GM_ADDR trace, uint32_t rank, uint32_t core, PerfStageId stage, TileXRPerfStageToken token,
+    PerfBarrierPolicy policy, __ubuf__ TileXRPerfCoreStageStats *statsUB)
+{
+    (void)statsUB;
+    TileXRPerfStageEnd(trace, rank, core, stage, token, policy);
 }
 
 #endif

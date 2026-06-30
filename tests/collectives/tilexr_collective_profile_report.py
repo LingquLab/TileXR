@@ -10,7 +10,10 @@ from pathlib import Path
 
 TRACE_SCHEMA = "tilexr_perf_trace_report.v1"
 RUN_SCHEMA = "tilexr_perf_trace_run.v1"
+HOST_SCHEMA = "tilexr_collective_profile_host.v1"
 RANK_LAUNCH_RE = re.compile(r"rank([0-9]+)[/\\]launch([0-9]+)[/\\]trace\.json$")
+PERFETTO_LAUNCH_GAP_US = 50.0
+PERFETTO_LAUNCH_WINDOW_TID = 1000000
 
 
 def parse_args():
@@ -32,6 +35,41 @@ def parse_rank_launch(path, root):
     if match is None:
         return None
     return int(match.group(1)), int(match.group(2))
+
+
+def load_host_infos(root, diagnostics):
+    hosts = {}
+    for path in sorted(root.glob("rank*/host_info.json")):
+        source = relpath(path, root)
+        try:
+            info = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            diagnostics.append(f"invalid json in {source}: {exc}")
+            continue
+        if not isinstance(info, dict):
+            diagnostics.append(f"invalid top-level host info type in {source}: expected object")
+            continue
+        if info.get("schema") != HOST_SCHEMA:
+            diagnostics.append(f"invalid schema in {source}")
+            continue
+        rank = as_int(info.get("rank"), None)
+        if rank is None:
+            parsed = re.search(r"rank([0-9]+)[/\\]host_info\.json$", source)
+            rank = int(parsed.group(1)) if parsed else None
+        if rank is None:
+            diagnostics.append(f"invalid rank in {source}")
+            continue
+        hosts[rank] = {
+            "rank": rank,
+            "host": str(info.get("host") or f"rank{rank}"),
+            "ip": str(info.get("ip") or ""),
+            "comm_mode": str(info.get("comm_mode") or ""),
+            "clock_offset_ns": str(info.get("clock_offset_ns") or ""),
+            "clock_reference": str(info.get("clock_reference") or ""),
+            "epoch_ns": str(info.get("epoch_ns") or ""),
+            "source": source,
+        }
+    return hosts
 
 
 def load_traces(root):
@@ -68,6 +106,10 @@ def load_traces(root):
 
 def sanitize_trace(trace, source, diagnostics):
     trace = dict(trace)
+    if trace.get("incomplete"):
+        reason = str(trace.get("incomplete_reason") or "unknown")
+        diagnostics.append(f"incomplete trace in {source}: {reason}")
+
     stats = trace.get("stats", [])
     if not isinstance(stats, list):
         diagnostics.append(f"invalid stats in {source}: expected list")
@@ -78,6 +120,13 @@ def sanitize_trace(trace, source, diagnostics):
     for index, stat in enumerate(stats):
         if not isinstance(stat, dict):
             diagnostics.append(f"invalid stat entry in {source} stats[{index}]: expected object")
+            continue
+        if as_int(stat.get("count")) <= 0:
+            raw_cycles = as_int(stat.get("raw_cycles"))
+            max_cycles = as_int(stat.get("max_cycles"))
+            last_end = as_int(stat.get("last_end_cycle"))
+            if raw_cycles != 0 or max_cycles != 0 or last_end != 0:
+                diagnostics.append(f"ignored count=0 stat in {source} stats[{index}]")
             continue
         valid_stats.append(stat)
     trace["stats"] = valid_stats
@@ -90,6 +139,8 @@ def group_key(entry):
         trace.get("op_type"),
         trace.get("op_name", "Unknown"),
         trace.get("rank_size"),
+        trace.get("max_core_count"),
+        trace.get("block_dim"),
         trace.get("message_bytes"),
         trace.get("stage_count"),
         trace.get("cycle_to_us_divisor"),
@@ -135,7 +186,29 @@ def cycles_to_us(cycles, divisor):
     return float(cycles) / float(divisor)
 
 
-def normalized_bars(entries, root):
+def rank_host_info(hosts, rank):
+    return hosts.get(rank, {"rank": rank, "host": f"rank{rank}", "ip": "", "comm_mode": "", "source": ""})
+
+
+def rank_label(hosts, rank):
+    info = rank_host_info(hosts, rank)
+    host = info.get("host") or f"rank{rank}"
+    if host == f"rank{rank}":
+        return f"rank{rank}"
+    return f"rank{rank}@{host}"
+
+
+def format_hosts(hosts, rank_ids):
+    parts = []
+    for rank in rank_ids:
+        info = rank_host_info(hosts, rank)
+        label = rank_label(hosts, rank)
+        ip = info.get("ip") or "unknown-ip"
+        parts.append(f"{label}({ip})")
+    return ", ".join(parts) if parts else "unknown"
+
+
+def normalized_bars(entries, root, hosts):
     bars = []
     entries_by_rank_launch = defaultdict(list)
     for entry in entries:
@@ -169,6 +242,7 @@ def normalized_bars(entries, root):
                 duration_cycles = max(0, last - first)
                 core = as_int(stat.get("core"))
                 stat_rank = as_int(stat.get("rank"), rank)
+                host_info = rank_host_info(hosts, stat_rank)
                 raw_cycles = as_int(stat.get("raw_cycles"))
 
                 bars.append({
@@ -187,9 +261,11 @@ def normalized_bars(entries, root):
                     "raw_cycles": raw_cycles,
                     "count": count,
                     "max_cycles": as_int(stat.get("max_cycles")),
+                    "host": host_info["host"],
+                    "host_ip": host_info["ip"],
                     "source": source,
                     "drilldown": drilldown,
-                    "lane": f"rank{stat_rank}/core{core}",
+                    "lane": f"{rank_label(hosts, stat_rank)}/core{core}",
                 })
 
     return sorted(bars, key=lambda bar: (
@@ -206,11 +282,16 @@ def summarize_group(group):
     stage_totals = defaultdict(float)
     launch_kernel = defaultdict(float)
     rank_core_max = {"rank": 0, "core": 0, "stage": "", "duration_us": 0.0, "max_cycles": 0, "max_us": 0.0}
+    rank_launch_kernel = defaultdict(dict)
 
     for bar in group["bars"]:
         stage_totals[bar["stage"]] += bar["sum_us"]
         if bar["stage"] == "kernel_total":
             launch_kernel[bar["launch_id"]] = max(launch_kernel[bar["launch_id"]], bar["duration_us"])
+            rank_launch_kernel[bar["rank"]][bar["launch_id"]] = max(
+                rank_launch_kernel[bar["rank"]].get(bar["launch_id"], 0.0),
+                bar["duration_us"],
+            )
         max_us = cycles_to_us(bar["max_cycles"], group["cycle_to_us_divisor"])
         if max_us > rank_core_max["max_us"]:
             rank_core_max = {
@@ -224,16 +305,50 @@ def summarize_group(group):
 
     top_stage = max(stage_totals.items(), key=lambda item: item[1]) if stage_totals else ("none", 0.0)
     slowest_launch = max(launch_kernel.items(), key=lambda item: item[1]) if launch_kernel else (None, 0.0)
+    rank_kernel = summarize_rank_kernel(rank_launch_kernel)
+    slowest_rank = rank_kernel[0] if rank_kernel else {
+        "rank": None,
+        "launch_count": 0,
+        "avg_kernel_us": 0.0,
+        "max_kernel_us": 0.0,
+        "slowest_launch_id": None,
+    }
 
     return {
         "top_stage": {"stage": top_stage[0], "sum_us": top_stage[1]},
         "slowest_launch": {"launch_id": slowest_launch[0], "kernel_us": slowest_launch[1]},
         "rank_core_max": rank_core_max,
+        "rank_kernel": rank_kernel,
+        "slowest_rank": slowest_rank,
     }
+
+
+def summarize_rank_kernel(rank_launch_kernel):
+    summaries = []
+    for rank, launch_values in sorted(rank_launch_kernel.items()):
+        if not launch_values:
+            continue
+        values = list(launch_values.values())
+        slowest_launch_id, max_kernel_us = max(
+            launch_values.items(),
+            key=lambda item: (item[1], -item[0]),
+        )
+        summaries.append({
+            "rank": rank,
+            "launch_count": len(values),
+            "avg_kernel_us": sum(values) / len(values),
+            "max_kernel_us": max_kernel_us,
+            "slowest_launch_id": slowest_launch_id,
+        })
+    return sorted(
+        summaries,
+        key=lambda item: (-item["avg_kernel_us"], -item["max_kernel_us"], item["rank"]),
+    )
 
 
 def build_index(root, args):
     traces, diagnostics = load_traces(root)
+    hosts = load_host_infos(root, diagnostics)
     grouped = defaultdict(list)
     for entry in traces:
         grouped[group_key(entry)].append(entry)
@@ -249,11 +364,13 @@ def build_index(root, args):
             as_int(key[3]),
             as_int(key[4]),
             as_int(key[5]),
+            as_int(key[6]),
+            as_int(key[7]),
             as_int(key[0]),
         )
 
     for key, entries in sorted(grouped.items(), key=sort_key):
-        op_type, op_name, rank_size, message_bytes, stage_count, divisor = key
+        op_type, op_name, rank_size, max_core_count, block_dim, message_bytes, stage_count, divisor = key
         rank_ids = sorted({entry["rank"] for entry in entries})
         launch_ids = sorted({entry["launch_id"] for entry in entries})
         effective_rank_size = as_int(rank_size, len(rank_ids))
@@ -269,16 +386,19 @@ def build_index(root, args):
             "op_type": op_type,
             "op_name": op_name,
             "rank_size": effective_rank_size,
+            "max_core_count": as_int(max_core_count),
+            "block_dim": as_int(block_dim),
             "message_bytes": as_int(message_bytes),
             "stage_count": as_int(stage_count),
             "cycle_to_us_divisor": as_int(divisor),
             "rank_ids": rank_ids,
             "launch_ids": launch_ids,
+            "trace_statuses": trace_statuses(entries, root),
             "sources": [
                 relpath(entry["path"], root)
                 for entry in sorted(entries, key=lambda item: (item["launch_id"], item["rank"], relpath(item["path"], root)))
             ],
-            "bars": normalized_bars(entries, root),
+            "bars": normalized_bars(entries, root, hosts),
         }
         group["summary"] = summarize_group(group)
         groups.append(group)
@@ -289,6 +409,7 @@ def build_index(root, args):
         "warmup_iters": args.warmup_iters,
         "measured_iters": args.iters,
         "profile_sample_every": args.profile_sample_every,
+        "hosts": public_hosts(hosts),
         "groups": groups,
         "diagnostics": diagnostics,
     }
@@ -311,6 +432,8 @@ def add_incompatible_group_diagnostics(grouped, root, diagnostics):
                 as_int(item[3]),
                 as_int(item[4]),
                 as_int(item[5]),
+                as_int(item[6]),
+                as_int(item[7]),
                 as_int(item[0]),
             ))
         ]
@@ -320,16 +443,32 @@ def add_incompatible_group_diagnostics(grouped, root, diagnostics):
 
 
 def describe_group(key, entries, root):
-    op_type, op_name, rank_size, message_bytes, stage_count, divisor = key
+    op_type, op_name, rank_size, max_core_count, block_dim, message_bytes, stage_count, divisor = key
     sources = ", ".join(
         relpath(entry["path"], root)
         for entry in sorted(entries, key=lambda item: (item["launch_id"], item["rank"], relpath(item["path"], root)))
     )
     return (
         f"op_type={op_type} op_name={op_name} rank_size={rank_size} "
+        f"max_core_count={max_core_count} block_dim={block_dim} "
         f"message_bytes={message_bytes} stage_count={stage_count} "
         f"cycle_to_us_divisor={divisor} sources=[{sources}]"
     )
+
+
+def trace_statuses(entries, root):
+    statuses = []
+    for entry in sorted(entries, key=lambda item: (item["launch_id"], item["rank"], relpath(item["path"], root))):
+        trace = entry["trace"]
+        statuses.append({
+            "rank": entry["rank"],
+            "launch_id": entry["launch_id"],
+            "source": relpath(entry["path"], root),
+            "incomplete": bool(trace.get("incomplete")),
+            "reason": str(trace.get("incomplete_reason") or ""),
+            "synthetic": bool(trace.get("synthetic")),
+        })
+    return statuses
 
 
 def format_launches(launch_ids):
@@ -342,6 +481,10 @@ def format_slowest_launch(slowest):
     if slowest["launch_id"] is None:
         return "unavailable"
     return f"launch{slowest['launch_id']} at {slowest['kernel_us']:.3f} us"
+
+
+def public_hosts(hosts):
+    return {rank: dict(info) for rank, info in sorted(hosts.items())}
 
 
 def render_analysis(index):
@@ -378,9 +521,12 @@ def render_analysis(index):
         )
         lines.append(f"## Group {group_index}: {group['op_name']} message_bytes={group['message_bytes']}")
         lines.append(f"- Launches: {format_launches(group['launch_ids'])}")
+        lines.append(f"- Hosts: {format_hosts(index.get('hosts', {}), group['rank_ids'])}")
         lines.append(f"- Slowest launch: {format_slowest_launch(slowest)}")
         lines.append(f"- Top stage: {summary['top_stage']['stage']} at {summary['top_stage']['sum_us']:.3f} us")
         lines.append(f"- Stage totals: {stage_summary}")
+        lines.append(f"- Slowest rank: {format_slowest_rank(summary['slowest_rank'], index.get('hosts', {}))}")
+        lines.append(f"- Rank kernel totals: {format_rank_kernel(summary['rank_kernel'], index.get('hosts', {}))}")
         lines.append(
             f"- Rank/core max: rank{rank_core['rank']} core{rank_core['core']} "
             f"{rank_core['stage']} max {rank_core['max_us']:.3f} us"
@@ -388,6 +534,28 @@ def render_analysis(index):
         lines.append("")
 
     return "\n".join(lines)
+
+
+def format_slowest_rank(slowest_rank, hosts=None):
+    rank = slowest_rank.get("rank")
+    if rank is None:
+        return "unavailable"
+    launch_id = slowest_rank.get("slowest_launch_id")
+    launch_text = "unknown launch" if launch_id is None else f"launch{launch_id}"
+    label = rank_label(hosts or {}, rank)
+    return (
+        f"{label} avg {slowest_rank.get('avg_kernel_us', 0.0):.3f} us "
+        f"max {slowest_rank.get('max_kernel_us', 0.0):.3f} us at {launch_text}"
+    )
+
+
+def format_rank_kernel(rank_kernel, hosts=None):
+    if not rank_kernel:
+        return "unavailable"
+    return "; ".join(
+        f"{rank_label(hosts or {}, item['rank'])} avg={item['avg_kernel_us']:.3f} us max={item['max_kernel_us']:.3f} us"
+        for item in rank_kernel
+    )
 
 
 def render_ai_prompt(index):
@@ -412,6 +580,9 @@ def render_ai_prompt(index):
         else:
             lines.append(f"  slowest_launch=launch{slowest['launch_id']} kernel_us={slowest['kernel_us']:.3f}")
         lines.append(f"  top_stage={summary['top_stage']['stage']} sum_us={summary['top_stage']['sum_us']:.3f}")
+        lines.append(f"  hosts={format_hosts(index.get('hosts', {}), group['rank_ids'])}")
+        lines.append(f"  slowest_rank={format_slowest_rank(summary['slowest_rank'], index.get('hosts', {}))}")
+        lines.append(f"  rank_kernel_totals={format_rank_kernel(summary['rank_kernel'], index.get('hosts', {}))}")
 
     if index["diagnostics"]:
         lines.append("")
@@ -419,6 +590,164 @@ def render_ai_prompt(index):
         lines.extend(f"- {item}" for item in index["diagnostics"])
 
     return "\n".join(lines) + "\n"
+
+
+def render_perfetto_trace(index):
+    events = []
+    seen_ranks = set()
+    seen_threads = set()
+    seen_launch_threads = set()
+    launch_offsets = compute_perfetto_launch_offsets(index)
+
+    for group in index["groups"]:
+        for rank in group["rank_ids"]:
+            if rank not in seen_ranks:
+                seen_ranks.add(rank)
+                events.append({
+                    "name": "process_name",
+                    "ph": "M",
+                    "pid": rank,
+                    "args": {"name": rank_label(index.get("hosts", {}), rank)},
+                })
+
+        for launch_id in group["launch_ids"]:
+            launch_rank_bars = defaultdict(list)
+            for bar in group["bars"]:
+                if bar["launch_id"] == launch_id:
+                    launch_rank_bars[bar["rank"]].append(bar)
+            for rank, rank_bars in sorted(launch_rank_bars.items()):
+                if rank not in seen_launch_threads:
+                    seen_launch_threads.add(rank)
+                    events.append({
+                        "name": "thread_name",
+                        "ph": "M",
+                        "pid": rank,
+                        "tid": PERFETTO_LAUNCH_WINDOW_TID,
+                        "args": {"name": f"{rank_label(index.get('hosts', {}), rank)}/launch_windows"},
+                    })
+                max_end_us = max((bar["end_us"] for bar in rank_bars), default=0.0)
+                if max_end_us <= 0:
+                    continue
+                launch_offset_us = launch_offsets.get(launch_id, 0.0)
+                events.append({
+                    "name": f"launch{launch_id}/{rank_label(index.get('hosts', {}), rank)}/window",
+                    "cat": "launch_window",
+                    "ph": "X",
+                    "pid": rank,
+                    "tid": PERFETTO_LAUNCH_WINDOW_TID,
+                    "ts": launch_offset_us,
+                    "dur": max_end_us,
+                    "args": {
+                        "launch_id": launch_id,
+                        "rank": rank,
+                        "host": rank_host_info(index.get("hosts", {}), rank).get("host", ""),
+                        "host_ip": rank_host_info(index.get("hosts", {}), rank).get("ip", ""),
+                        "launch_offset_us": launch_offset_us,
+                    },
+                })
+
+        for status in group.get("trace_statuses", []):
+            if not status.get("incomplete"):
+                continue
+            rank = as_int(status.get("rank"))
+            launch_id = as_int(status.get("launch_id"))
+            if rank not in seen_launch_threads:
+                seen_launch_threads.add(rank)
+                events.append({
+                    "name": "thread_name",
+                    "ph": "M",
+                    "pid": rank,
+                    "tid": PERFETTO_LAUNCH_WINDOW_TID,
+                    "args": {"name": f"{rank_label(index.get('hosts', {}), rank)}/launch_windows"},
+                })
+            rank_status_label = rank_label(index.get("hosts", {}), rank)
+            events.append({
+                "name": f"launch{launch_id}/{rank_status_label}/incomplete_trace",
+                "cat": "trace_status",
+                "ph": "X",
+                "pid": rank,
+                "tid": PERFETTO_LAUNCH_WINDOW_TID,
+                "ts": launch_offsets.get(launch_id, 0.0),
+                "dur": 1.0,
+                "args": {
+                    "launch_id": launch_id,
+                    "rank": rank,
+                    "rank_label": rank_status_label,
+                    "reason": str(status.get("reason") or ""),
+                    "source": status.get("source", ""),
+                    "op_name": group["op_name"],
+                    "message_bytes": group["message_bytes"],
+                    "rank_size": group["rank_size"],
+                    "block_dim": group.get("block_dim", 0),
+                    "max_core_count": group.get("max_core_count", 0),
+                },
+            })
+
+        for bar in group["bars"]:
+            thread_key = (bar["rank"], bar["core"])
+            if thread_key not in seen_threads:
+                seen_threads.add(thread_key)
+                events.append({
+                    "name": "thread_name",
+                    "ph": "M",
+                    "pid": bar["rank"],
+                    "tid": bar["core"],
+                    "args": {"name": f"{rank_label(index.get('hosts', {}), bar['rank'])}/core{bar['core']}"},
+                })
+
+            if bar["duration_us"] <= 0:
+                continue
+
+            launch_offset_us = launch_offsets.get(bar["launch_id"], 0.0)
+            bar_rank_label = rank_label(index.get("hosts", {}), bar["rank"])
+            events.append({
+                "name": f"launch{bar['launch_id']}/{bar_rank_label}/{bar['stage']}",
+                "cat": group["op_name"],
+                "ph": "X",
+                "pid": bar["rank"],
+                "tid": bar["core"],
+                "ts": launch_offset_us + bar["start_us"],
+                "dur": bar["duration_us"],
+                "args": {
+                    "launch_id": bar["launch_id"],
+                    "launch_offset_us": launch_offset_us,
+                    "normalized_ts": bar["start_us"],
+                    "rank": bar["rank"],
+                    "rank_label": bar_rank_label,
+                    "host": bar.get("host", ""),
+                    "host_ip": bar.get("host_ip", ""),
+                    "core": bar["core"],
+                    "stage": bar["stage"],
+                    "stage_id": bar["stage_id"],
+                    "sum_us": bar["sum_us"],
+                    "raw_cycles": bar["raw_cycles"],
+                    "max_cycles": bar["max_cycles"],
+                    "count": bar["count"],
+                    "source": bar["source"],
+                    "op_name": group["op_name"],
+                    "message_bytes": group["message_bytes"],
+                    "rank_size": group["rank_size"],
+                },
+            })
+
+    return {
+        "displayTimeUnit": "us",
+        "traceEvents": events,
+    }
+
+
+def compute_perfetto_launch_offsets(index):
+    max_end_by_launch = defaultdict(float)
+    for group in index["groups"]:
+        for bar in group["bars"]:
+            max_end_by_launch[bar["launch_id"]] = max(max_end_by_launch[bar["launch_id"]], bar["end_us"])
+
+    offsets = {}
+    cursor = 0.0
+    for launch_id in sorted(max_end_by_launch):
+        offsets[launch_id] = cursor
+        cursor += max_end_by_launch[launch_id] + PERFETTO_LAUNCH_GAP_US
+    return offsets
 
 
 def json_for_script(value):
@@ -435,7 +764,22 @@ def json_for_script(value):
 def render_html(index):
     data = json_for_script(index)
     summary_items = []
+    rank_summary_rows = []
+    clock_rows = []
+    trace_status_rows = []
     fallback_rows = []
+
+    for rank, host_info in sorted(index.get("hosts", {}).items()):
+        clock_rows.append(
+            "<tr>"
+            f"<td>rank{rank}</td>"
+            f"<td>{html.escape(str(host_info.get('host', '')))}</td>"
+            f"<td>{html.escape(str(host_info.get('ip', '')))}</td>"
+            f"<td>{html.escape(str(host_info.get('clock_offset_ns', '')))}</td>"
+            f"<td>{html.escape(str(host_info.get('clock_reference', '')))}</td>"
+            f"<td>{html.escape(str(host_info.get('epoch_ns', '')))}</td>"
+            "</tr>"
+        )
 
     for group in index["groups"]:
         summary = group["summary"]
@@ -445,17 +789,54 @@ def render_html(index):
             "<li>"
             f"{html.escape(str(group['op_name']))} bytes={group['message_bytes']}: "
             f"Slowest launch {html.escape(format_slowest_launch(slowest))}; "
+            f"Hosts {html.escape(format_hosts(index.get('hosts', {}), group['rank_ids']))}; "
+            f"Slowest rank {html.escape(format_slowest_rank(summary['slowest_rank'], index.get('hosts', {})))}; "
             f"Top stage {html.escape(str(summary['top_stage']['stage']))} {summary['top_stage']['sum_us']:.3f} us; "
             f"Rank/core max rank{rank_core['rank']} core{rank_core['core']} "
             f"{html.escape(str(rank_core['stage']))} max {rank_core['max_us']:.3f} us"
             "</li>"
         )
 
+        for rank_item in summary["rank_kernel"]:
+            launch_id = rank_item["slowest_launch_id"]
+            drilldown = find_rank_launch_drilldown(group["bars"], rank_item["rank"], launch_id)
+            rank_summary_rows.append(
+                "<tr>"
+                f"<td>{html.escape(str(group['op_name']))}</td>"
+                f"<td>{group['message_bytes']}</td>"
+                f"<td>{html.escape(rank_label(index.get('hosts', {}), rank_item['rank']))}</td>"
+                f"<td>{html.escape(rank_host_info(index.get('hosts', {}), rank_item['rank']).get('ip', ''))}</td>"
+                f"<td>{rank_item['launch_count']}</td>"
+                f"<td>{rank_item['avg_kernel_us']:.3f}</td>"
+                f"<td>{rank_item['max_kernel_us']:.3f}</td>"
+                f"<td>launch{launch_id}</td>"
+                f"<td><a href=\"{html.escape(drilldown)}\">open launch report</a></td>"
+                "</tr>"
+            )
+
+        for status in group.get("trace_statuses", []):
+            if not status.get("incomplete") and not status.get("synthetic"):
+                continue
+            status_text = "incomplete" if status.get("incomplete") else "synthetic"
+            trace_status_rows.append(
+                "<tr>"
+                f"<td>{html.escape(str(group['op_name']))}</td>"
+                f"<td>{group['message_bytes']}</td>"
+                f"<td>launch{status.get('launch_id')}</td>"
+                f"<td>{html.escape(rank_label(index.get('hosts', {}), as_int(status.get('rank'))))}</td>"
+                f"<td>{html.escape(status_text)}</td>"
+                f"<td>{html.escape(str(status.get('reason') or ''))}</td>"
+                f"<td>{html.escape(str(status.get('source') or ''))}</td>"
+                "</tr>"
+            )
+
         for bar in group["bars"]:
             fallback_rows.append(
                 "<tr>"
                 f"<td>launch{bar['launch_id']}</td>"
-                f"<td>rank{bar['rank']}/core{bar['core']}</td>"
+                f"<td>{html.escape(rank_label(index.get('hosts', {}), bar['rank']))}</td>"
+                f"<td>{html.escape(str(bar.get('host_ip', '')))}</td>"
+                f"<td>core{bar['core']}</td>"
                 f"<td>{html.escape(str(bar['stage']))}</td>"
                 f"<td>{bar['duration_us']:.3f}</td>"
                 f"<td>{bar['sum_us']:.3f}</td>"
@@ -468,7 +849,10 @@ def render_html(index):
 
     diagnostics = "".join(f"<li>{html.escape(item)}</li>" for item in index["diagnostics"])
     summary_html = "".join(summary_items) + diagnostics
-    fallback_html = "".join(fallback_rows) or "<tr><td colspan=\"6\">No trace bars available.</td></tr>"
+    clock_html = "".join(clock_rows) or "<tr><td colspan=\"6\">No host clock metadata available.</td></tr>"
+    rank_summary_html = "".join(rank_summary_rows) or "<tr><td colspan=\"9\">No rank kernel totals available.</td></tr>"
+    trace_status_html = "".join(trace_status_rows) or "<tr><td colspan=\"7\">No incomplete or synthetic traces.</td></tr>"
+    fallback_html = "".join(fallback_rows) or "<tr><td colspan=\"8\">No trace bars available.</td></tr>"
 
     stage_filter_html = "\n".join(
         f"<label><input type=\"checkbox\" checked onchange=\"toggleStage('{name}', this.checked)\"> {name}</label>"
@@ -500,6 +884,21 @@ table{{border-collapse:collapse;background:#fff;width:100%}} td,th{{border:1px s
 <ul>{summary_html}</ul>
 </section>
 <section class="panel">
+<h2>Clock Sync</h2>
+<p>Offsets are sampled by the multi-host runner before launch. Positive offset means that rank host clock is ahead of the rank0 reference clock.</p>
+<table><thead><tr><th>Rank</th><th>Host</th><th>Host IP</th><th>Offset ns vs rank0</th><th>Reference</th><th>Rank epoch ns</th></tr></thead><tbody>{clock_html}</tbody></table>
+</section>
+<section class="panel">
+<h2>Rank-Level Summary</h2>
+<p>Kernel totals are grouped by rank using the slowest core per rank/launch. This is the fastest view for spotting a slow rank before drilling into core-level stages.</p>
+<table><thead><tr><th>Op</th><th>Bytes</th><th>Rank@Host</th><th>Host IP</th><th>Launches</th><th>Avg kernel us</th><th>Max kernel us</th><th>Slowest launch</th><th>Drilldown</th></tr></thead><tbody>{rank_summary_html}</tbody></table>
+</section>
+<section class="panel">
+<h2>Trace Status</h2>
+<p>Incomplete traces keep the same single-launch report schema but indicate that kernel execution failed before device stats could be copied back.</p>
+<table><thead><tr><th>Op</th><th>Bytes</th><th>Launch</th><th>Rank@Host</th><th>Status</th><th>Reason</th><th>Source</th></tr></thead><tbody>{trace_status_html}</tbody></table>
+</section>
+<section class="panel">
 <h2>Chronological Timeline</h2>
 <p>Each rank/launch lane is normalized independently; cross-NPU raw cycle offsets are not assumed to be synchronized.</p>
 <div>
@@ -514,7 +913,7 @@ table{{border-collapse:collapse;background:#fff;width:100%}} td,th{{border:1px s
 </section>
 <section class="panel">
 <h2>Fallback Table</h2>
-<table><thead><tr><th>Launch</th><th>Lane</th><th>Stage</th><th>Duration us</th><th>Sum us</th><th>Drilldown</th></tr></thead><tbody>{fallback_html}</tbody></table>
+<table><thead><tr><th>Launch</th><th>Rank@Host</th><th>Host IP</th><th>Core</th><th>Stage</th><th>Duration us</th><th>Sum us</th><th>Drilldown</th></tr></thead><tbody>{fallback_html}</tbody></table>
 </section>
 <script>
 const traceIndex = {data};
@@ -578,7 +977,8 @@ function renderTimeline() {{
     line.textContent = `launch${{launchId}}`;
     root.appendChild(line);
     for (const bar of launchBars) {{
-      const lane = foldCores ? `rank${{bar.rank}}` : `rank${{bar.rank}}/core${{bar.core}}`;
+      const rankLabel = bar.host && bar.host !== `rank${{bar.rank}}` ? `rank${{bar.rank}}@${{bar.host}}` : `rank${{bar.rank}}`;
+      const lane = foldCores ? rankLabel : `${{rankLabel}}/core${{bar.core}}`;
       if (!lanes.has(lane)) lanes.set(lane, laneCount++);
       const cat = category(bar.stage);
       const item = document.createElement('a');
@@ -638,8 +1038,21 @@ renderTimeline();
 """
 
 
+def find_rank_launch_drilldown(bars, rank, launch_id):
+    for bar in bars:
+        if bar["rank"] == rank and bar["launch_id"] == launch_id and bar["stage"] == "kernel_total":
+            return bar["drilldown"]
+    for bar in bars:
+        if bar["rank"] == rank and bar["launch_id"] == launch_id:
+            return bar["drilldown"]
+    return "#"
+
+
 def write_outputs(root, index, emit_ai_prompt):
     (root / "trace_index.json").write_text(json.dumps(index, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    (root / "perfetto_trace.json").write_text(
+        json.dumps(render_perfetto_trace(index), indent=2, sort_keys=True) + "\n",
+        encoding="utf-8")
     (root / "analysis.md").write_text(render_analysis(index), encoding="utf-8")
     (root / "report.html").write_text(render_html(index), encoding="utf-8")
 

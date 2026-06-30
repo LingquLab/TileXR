@@ -53,6 +53,9 @@ MANIFEST.in
 .claude/scheduled_tasks.json
 .claude/settings.local.json
 
+# local transfer bundles for remote Ascend profiling/debug sync
+/.tilexr_*
+
 # custom
 .worktrees/
 op-simulator/build
