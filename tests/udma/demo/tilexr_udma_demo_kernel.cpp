@@ -1556,20 +1556,6 @@ __aicore__ inline void BigDataRemotePutOnlyCheckWorker(
             break;
         }
     }
-    if (status == 0U) {
-        auto remoteAck = BigDataRemoteIpcAckSlot(args, peer, rank, slot, rankSize);
-        auto localAck = BigDataLocalIpcAckSlot(args, rank, slot, rankSize, peer);
-        BigDataRemotePutOnlyPublishAck(remoteAck, token, relayLocal);
-        const uint64_t ackObserved = BigDataRemotePutOnlyWaitPeerAck(
-            localAck, token, relayLocal);
-        if (debug != nullptr && loop == 0 && pass == 0 && peer < 16) {
-            debug[TILEXR_UDMA_DEMO_DEBUG_ACK_SEEN_BASE + peer] =
-                static_cast<int32_t>(ackObserved);
-        }
-        if (ackObserved < token) {
-            status = static_cast<uint32_t>(TILEXR_UDMA_DEMO_ACK_TIMEOUT_STATUS);
-        }
-    }
     if (debug != nullptr && loop == 0 && pass == 0 && peer < 16) {
         debug[TILEXR_UDMA_DEMO_DEBUG_UDMA_STATUS_BASE + peer] = static_cast<int32_t>(status);
     }

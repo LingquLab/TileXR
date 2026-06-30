@@ -655,10 +655,10 @@ void TestAllToAllBigDataSource()
     CHECK_CONTAINS(remotePutOnlyCheck, "TILEXR_UDMA_DEMO_BIGDATA_REMOTE_SEND_PRIMARY_SEGMENT");
     CHECK_CONTAINS(remotePutOnlyCheck, "TILEXR_UDMA_DEMO_BIGDATA_REMOTE_SEND_SECONDARY_SEGMENT");
     CHECK_CONTAINS(remotePutOnlyCheck, "TILEXR_UDMA_DEMO_READY_TIMEOUT_STATUS");
-    CHECK_CONTAINS(remotePutOnlyCheck, "BigDataRemotePutOnlyPublishAck");
-    CHECK_CONTAINS(remotePutOnlyCheck, "BigDataRemotePutOnlyWaitPeerAck");
-    CHECK_CONTAINS(remotePutOnlyCheck, "BigDataRemoteIpcAckSlot");
-    CHECK_CONTAINS(remotePutOnlyCheck, "BigDataLocalIpcAckSlot");
+    CHECK_NOT_CONTAINS(remotePutOnlyCheck, "BigDataRemotePutOnlyPublishAck");
+    CHECK_NOT_CONTAINS(remotePutOnlyCheck, "BigDataRemotePutOnlyWaitPeerAck");
+    CHECK_NOT_CONTAINS(remotePutOnlyCheck, "BigDataRemoteIpcAckSlot");
+    CHECK_NOT_CONTAINS(remotePutOnlyCheck, "BigDataLocalIpcAckSlot");
     CHECK_NOT_CONTAINS(remotePutOnlyCheck, "UDMAQuietStatusOnQp");
 }
 
