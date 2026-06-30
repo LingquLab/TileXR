@@ -1472,35 +1472,33 @@ __aicore__ inline void BigDataRemotePutOnlySendWorker(
     }
 }
 
+__aicore__ inline int32_t BigDataRemotePutOnlyLinkForSendCore(int32_t blockIdx)
+{
+    if (blockIdx == static_cast<int32_t>(TILEXR_UDMA_DEMO_BIGDATA_MULTINODE_REMOTE_SEND_PRIMARY_CORE)) {
+        return static_cast<int32_t>(TILEXR_UDMA_DEMO_BIGDATA_REMOTE_SEND_PRIMARY_SEGMENT);
+    }
+    if (blockIdx == static_cast<int32_t>(TILEXR_UDMA_DEMO_BIGDATA_MULTINODE_REMOTE_SEND_SECONDARY_CORE)) {
+        return static_cast<int32_t>(TILEXR_UDMA_DEMO_BIGDATA_REMOTE_SEND_SECONDARY_SEGMENT);
+    }
+    return -1;
+}
+
+__aicore__ inline int32_t BigDataRemotePutOnlyStaggeredRemoteIndex(
+    int32_t rank, int32_t remoteTaskCount, int32_t remoteOrder)
+{
+    if (remoteTaskCount <= 0 || remoteOrder < 0 || remoteOrder >= remoteTaskCount) {
+        return -1;
+    }
+    const int32_t start = rank % remoteTaskCount;
+    return (start + remoteOrder) % remoteTaskCount;
+}
+
 __aicore__ inline int32_t BigDataRemotePutOnlyCheckIndex(int32_t blockIdx)
 {
     if (blockIdx < 0) {
         return -1;
     }
     return blockIdx;
-}
-
-__aicore__ inline int32_t BigDataRemotePutOnlySendTaskCount(int32_t remoteTaskCount)
-{
-    return remoteTaskCount > 0 ? remoteTaskCount * 2 : 0;
-}
-
-__aicore__ inline int32_t BigDataRemotePutOnlySendTaskRemoteIndex(
-    int32_t sendTask, int32_t remoteTaskCount)
-{
-    if (sendTask < 0 || remoteTaskCount <= 0 ||
-        sendTask >= BigDataRemotePutOnlySendTaskCount(remoteTaskCount)) {
-        return -1;
-    }
-    return sendTask < remoteTaskCount ? sendTask : sendTask - remoteTaskCount;
-}
-
-__aicore__ inline uint32_t BigDataRemotePutOnlySendTaskSegment(
-    int32_t sendTask, int32_t remoteTaskCount)
-{
-    return sendTask < remoteTaskCount ?
-        TILEXR_UDMA_DEMO_BIGDATA_REMOTE_SEND_PRIMARY_SEGMENT :
-        TILEXR_UDMA_DEMO_BIGDATA_REMOTE_SEND_SECONDARY_SEGMENT;
 }
 
 __aicore__ inline void BigDataRemotePutOnlyCheckWorker(
@@ -2821,7 +2819,7 @@ extern "C" __global__ __aicore__ void tilexr_udma_all_to_all_bigdata_kernel(
         static_cast<uint32_t>(blockIdx) - TILEXR_UDMA_DEMO_BIGDATA_MULTINODE_RECV_CORE_BASE;
     const int32_t taskCount = BigDataTaskCount(rankSize, force35Core, ranksPerNode);
     const int32_t remoteTaskCount = rankSize - ranksPerNode;
-    const int32_t sendTaskCount = BigDataRemotePutOnlySendTaskCount(remoteTaskCount);
+    const int32_t sendLink = BigDataRemotePutOnlyLinkForSendCore(blockIdx);
 
     if (remotePutOnly && profileStage <= TILEXR_BIGDATA_REMOTE_PUT_STAGE_FRAMEWORK) {
         BigDataKernelExitBarrier();
@@ -2831,26 +2829,28 @@ extern "C" __global__ __aicore__ void tilexr_udma_all_to_all_bigdata_kernel(
     for (uint32_t loop = 0; loop < loopCount; ++loop) {
         for (uint32_t pass = 0; pass < passCount; ++pass) {
             if (remotePutOnly) {
-                for (int32_t sendTask = blockIdx; sendTask < sendTaskCount;
-                     sendTask += static_cast<int32_t>(activeBlockDim)) {
-                    if (profileStage <= TILEXR_BIGDATA_REMOTE_PUT_STAGE_LOOP) {
-                        continue;
-                    }
-                    const int32_t remoteIndex = BigDataRemotePutOnlySendTaskRemoteIndex(sendTask, remoteTaskCount);
-                    const int32_t peer = BigDataRemotePeerForwardAt(rank, rankSize, remoteIndex, ranksPerNode);
-                    if (profileStage <= TILEXR_BIGDATA_REMOTE_PUT_STAGE_PEER) {
-                        continue;
-                    }
-                    const uint32_t segmentId = BigDataRemotePutOnlySendTaskSegment(sendTask, remoteTaskCount);
+                if (sendLink >= 0) {
+                    const uint32_t segmentId = static_cast<uint32_t>(sendLink);
                     const uint32_t qpIdx = BigDataRemotePutOnlySegmentQp(args, segmentId);
-                    if (profileStage <= TILEXR_BIGDATA_REMOTE_PUT_STAGE_QP) {
-                        continue;
+                    for (int32_t remoteOrder = 0; remoteOrder < remoteTaskCount; ++remoteOrder) {
+                        if (profileStage <= TILEXR_BIGDATA_REMOTE_PUT_STAGE_LOOP) {
+                            continue;
+                        }
+                        const int32_t remoteIndex =
+                            BigDataRemotePutOnlyStaggeredRemoteIndex(rank, remoteTaskCount, remoteOrder);
+                        const int32_t peer = BigDataRemotePeerForwardAt(rank, rankSize, remoteIndex, ranksPerNode);
+                        if (profileStage <= TILEXR_BIGDATA_REMOTE_PUT_STAGE_PEER) {
+                            continue;
+                        }
+                        if (profileStage <= TILEXR_BIGDATA_REMOTE_PUT_STAGE_QP) {
+                            continue;
+                        }
+                        BigDataRemotePutOnlySendWorker(peer, segmentId, qpIdx,
+                            rank, rankSize, args, input, debug,
+                            elementsPerPeer, effectiveChunkElements, passCount, loop, pass,
+                            kernelLoopBase, profileStage, shardCount, recvDataOffset,
+                            chunkBytesPerPeer, ranksPerNode, relayLocal);
                     }
-                    BigDataRemotePutOnlySendWorker(peer, segmentId, qpIdx,
-                        rank, rankSize, args, input, debug,
-                        elementsPerPeer, effectiveChunkElements, passCount, loop, pass,
-                        kernelLoopBase, profileStage, shardCount, recvDataOffset,
-                        chunkBytesPerPeer, ranksPerNode, relayLocal);
                 }
                 BigDataKernelExitBarrier();
                 if (profileStage > TILEXR_BIGDATA_REMOTE_PUT_STAGE_POST) {
