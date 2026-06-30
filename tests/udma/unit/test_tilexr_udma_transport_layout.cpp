@@ -176,6 +176,29 @@ void TestExplicitRouteSelectionRejectsMissingInputs()
     CHECK_TRUE(TileXR::SelectExplicitUDMARouteEids("8", {}).empty());
 }
 
+void TestCrossNodeRouteSelectionUsesAggregateRoutes()
+{
+    const std::vector<uint32_t> topoRoutes = {1};
+    const std::vector<uint32_t> aggregateRoutes = {7, 8};
+    const std::vector<uint32_t> selected =
+        TileXR::SelectUDMARoutesForPeer(true, topoRoutes, aggregateRoutes);
+
+    CHECK_EQ(selected.size(), static_cast<size_t>(2));
+    CHECK_EQ(selected[0], 7U);
+    CHECK_EQ(selected[1], 8U);
+}
+
+void TestSameNodeRouteSelectionUsesTopoRoutes()
+{
+    const std::vector<uint32_t> topoRoutes = {1};
+    const std::vector<uint32_t> aggregateRoutes = {7, 8};
+    const std::vector<uint32_t> selected =
+        TileXR::SelectUDMARoutesForPeer(false, topoRoutes, aggregateRoutes);
+
+    CHECK_EQ(selected.size(), static_cast<size_t>(1));
+    CHECK_EQ(selected[0], 1U);
+}
+
 } // namespace
 
 int main()
@@ -189,6 +212,8 @@ int main()
     TestMultiRouteQpWeightsUseRouteBandwidth();
     TestExplicitRouteSelectionKeepsRequestedCandidateOrder();
     TestExplicitRouteSelectionRejectsMissingInputs();
+    TestCrossNodeRouteSelectionUsesAggregateRoutes();
+    TestSameNodeRouteSelectionUsesTopoRoutes();
     if (g_failures != 0) {
         std::cerr << g_failures << " UDMA transport layout checks failed" << std::endl;
         return 1;

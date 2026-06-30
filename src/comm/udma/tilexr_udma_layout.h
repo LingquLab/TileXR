@@ -53,6 +53,11 @@ std::vector<uint32_t> SelectExplicitUDMARouteEids(
     const char* routeList,
     const std::vector<uint32_t>& candidateEids);
 
+std::vector<uint32_t> SelectUDMARoutesForPeer(
+    bool peerIsRemoteNode,
+    const std::vector<uint32_t>& topoRoutes,
+    const std::vector<uint32_t>& aggregateRoutes);
+
 } // namespace TileXR
 
 #endif // TILEXR_UDMA_LAYOUT_H
