@@ -72,7 +72,6 @@ constexpr uint32_t TILEXR_UDMA_DEMO_BIGDATA_MULTINODE_BLOCK_DIM =
     TILEXR_UDMA_DEMO_BIGDATA_MULTINODE_RECV_CORE_BASE +
     TILEXR_UDMA_DEMO_BIGDATA_MULTINODE_RECV_CORES;
 constexpr uint32_t TILEXR_UDMA_DEMO_BIGDATA_REMOTE_PUT_ONLY_BLOCK_DIM = 64U;
-constexpr uint32_t TILEXR_UDMA_DEMO_BIGDATA_REMOTE_PUT_ONLY_SEND_GROUP_CORES = 32U;
 constexpr uint32_t TILEXR_UDMA_DEMO_BIGDATA_REMOTE_SEND_PRIMARY_SEGMENT = 0U;
 constexpr uint32_t TILEXR_UDMA_DEMO_BIGDATA_REMOTE_SEND_SECONDARY_SEGMENT = 1U;
 constexpr uint32_t TILEXR_UDMA_DEMO_BIGDATA_REMOTE_COPY_READY_PRIMARY = 2U;
@@ -1406,12 +1405,14 @@ __aicore__ inline void BigDataRemotePutOnlySendWorker(
 
     uint32_t status = 0U;
     if (segmentBytes > 0U) {
-        const int32_t tokenValue =
-            static_cast<int32_t>(BigDataPassToken(globalPass));
-        auto localTail = reinterpret_cast<__gm__ int32_t*>(
-            reinterpret_cast<__gm__ uint8_t*>(localSrc) +
-            static_cast<uint64_t>(segmentBytes) - sizeof(int32_t));
-        BigDataStoreInt32Mte(localTail, tokenValue, relayLocal);
+        if (segmentId == TILEXR_UDMA_DEMO_BIGDATA_REMOTE_SEND_SECONDARY_SEGMENT) {
+            const int32_t tokenValue =
+                static_cast<int32_t>(BigDataPassToken(globalPass));
+            auto localTail = reinterpret_cast<__gm__ int32_t*>(
+                reinterpret_cast<__gm__ uint8_t*>(localSrc) +
+                static_cast<uint64_t>(segmentBytes) - sizeof(int32_t));
+            BigDataStoreInt32Mte(localTail, tokenValue, relayLocal);
+        }
         TileXR::UDMAPutNbiOnQp<int32_t>(args, peer, qpIdx, localSrc, remoteDataOffset, segmentBytes);
     }
     if (debug != nullptr && loop == 0 && pass == 0 && peer < 16) {
@@ -2759,6 +2760,7 @@ extern "C" __global__ __aicore__ void tilexr_udma_all_to_all_bigdata_kernel(
         static_cast<uint32_t>(blockIdx) - TILEXR_UDMA_DEMO_BIGDATA_MULTINODE_RECV_CORE_BASE;
     const int32_t taskCount = BigDataTaskCount(rankSize, force35Core);
     const int32_t remoteTaskCount = rankSize - TILEXR_UDMA_DEMO_BIGDATA_RANKS_PER_NODE;
+    const int32_t sendTaskCount = BigDataRemotePutOnlySendTaskCount(remoteTaskCount);
     const int32_t remotePutOnlyCheckIndex = BigDataRemotePutOnlyCheckIndex(blockIdx);
     const bool isRemotePutOnlyCheckCore =
         remotePutOnlyCheckIndex >= 0 && remotePutOnlyCheckIndex < remoteTaskCount;
@@ -2771,23 +2773,17 @@ extern "C" __global__ __aicore__ void tilexr_udma_all_to_all_bigdata_kernel(
     for (uint32_t loop = 0; loop < loopCount; ++loop) {
         for (uint32_t pass = 0; pass < passCount; ++pass) {
             if (remotePutOnly) {
-                const uint32_t sendGroupCore =
-                    static_cast<uint32_t>(blockIdx) %
-                    TILEXR_UDMA_DEMO_BIGDATA_REMOTE_PUT_ONLY_SEND_GROUP_CORES;
-                const uint32_t segmentId = blockIdx < static_cast<int32_t>(
-                    TILEXR_UDMA_DEMO_BIGDATA_REMOTE_PUT_ONLY_SEND_GROUP_CORES) ?
-                    TILEXR_UDMA_DEMO_BIGDATA_REMOTE_SEND_PRIMARY_SEGMENT :
-                    TILEXR_UDMA_DEMO_BIGDATA_REMOTE_SEND_SECONDARY_SEGMENT;
-                for (int32_t remoteIndex = static_cast<int32_t>(sendGroupCore);
-                     remoteIndex < remoteTaskCount;
-                     remoteIndex += static_cast<int32_t>(TILEXR_UDMA_DEMO_BIGDATA_REMOTE_PUT_ONLY_SEND_GROUP_CORES)) {
+                for (int32_t sendTask = blockIdx; sendTask < sendTaskCount;
+                     sendTask += static_cast<int32_t>(activeBlockDim)) {
                     if (profileStage <= TILEXR_BIGDATA_REMOTE_PUT_STAGE_LOOP) {
                         continue;
                     }
+                    const int32_t remoteIndex = BigDataRemotePutOnlySendTaskRemoteIndex(sendTask, remoteTaskCount);
                     const int32_t peer = BigDataRemotePeerForwardAt(rank, rankSize, remoteIndex);
                     if (profileStage <= TILEXR_BIGDATA_REMOTE_PUT_STAGE_PEER) {
                         continue;
                     }
+                    const uint32_t segmentId = BigDataRemotePutOnlySendTaskSegment(sendTask, remoteTaskCount);
                     const uint32_t primaryQp = BigDataSelectWeightedQp(args, peer, true);
                     const uint32_t qpIdx =
                         segmentId == TILEXR_UDMA_DEMO_BIGDATA_REMOTE_SEND_PRIMARY_SEGMENT ?

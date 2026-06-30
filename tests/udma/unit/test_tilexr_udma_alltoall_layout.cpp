@@ -538,6 +538,10 @@ void TestAllToAllBigDataSource()
     CHECK_CONTAINS(kernel, "if (isCopyCore)");
     CHECK_CONTAINS(kernel, "if (remotePutOnly)");
     CHECK_CONTAINS(kernel, "isRemotePutOnlyCheckCore");
+    CHECK_CONTAINS(kernel, "const int32_t sendTaskCount = BigDataRemotePutOnlySendTaskCount(remoteTaskCount)");
+    CHECK_CONTAINS(kernel, "sendTask += static_cast<int32_t>(activeBlockDim)");
+    CHECK_CONTAINS(kernel, "const int32_t remoteIndex = BigDataRemotePutOnlySendTaskRemoteIndex(sendTask, remoteTaskCount)");
+    CHECK_CONTAINS(kernel, "const uint32_t segmentId = BigDataRemotePutOnlySendTaskSegment(sendTask, remoteTaskCount)");
     CHECK_CONTAINS(kernel, "remotePutOnly && profileStage <= TILEXR_BIGDATA_REMOTE_PUT_STAGE_FRAMEWORK");
     CHECK_CONTAINS(kernel, "profileStage <= TILEXR_BIGDATA_REMOTE_PUT_STAGE_LOOP");
     CHECK_CONTAINS(kernel, "profileStage <= TILEXR_BIGDATA_REMOTE_PUT_STAGE_PEER");
@@ -608,15 +612,9 @@ void TestAllToAllBigDataSource()
         kernel, "BigDataRemotePutOnlyCheckWorker", "BigDataRunSelfCopyShard");
     CHECK_CONTAINS(remotePutOnlySend, "UDMAPutNbiOnQp<int32_t>");
     CHECK_CONTAINS(remotePutOnlySend, "BigDataStoreInt32Mte");
-    CHECK_NOT_CONTAINS(remotePutOnlySend,
-        "if (segmentId == TILEXR_UDMA_DEMO_BIGDATA_REMOTE_SEND_SECONDARY_SEGMENT)");
+    CHECK_CONTAINS(remotePutOnlySend, "TILEXR_UDMA_DEMO_BIGDATA_REMOTE_SEND_SECONDARY_SEGMENT");
     CHECK_NOT_CONTAINS(remotePutOnlySend, "UDMAQuietStatusOnQp");
     CHECK_NOT_CONTAINS(remotePutOnlySend, "UDMAPutNbiOnQp<uint64_t>");
-    CHECK_CONTAINS(kernel, "TILEXR_UDMA_DEMO_BIGDATA_REMOTE_PUT_ONLY_SEND_GROUP_CORES = 32U");
-    CHECK_CONTAINS(kernel, "const uint32_t sendGroupCore =");
-    CHECK_CONTAINS(kernel, "const uint32_t segmentId = blockIdx < static_cast<int32_t>(");
-    CHECK_CONTAINS(kernel, "for (int32_t remoteIndex = static_cast<int32_t>(sendGroupCore);");
-    CHECK_CONTAINS(kernel, "remoteIndex += static_cast<int32_t>(TILEXR_UDMA_DEMO_BIGDATA_REMOTE_PUT_ONLY_SEND_GROUP_CORES)");
     const std::string remotePutOnlyCheckIndex = SliceBetween(
         kernel, "BigDataRemotePutOnlyCheckIndex", "BigDataRemotePutOnlyCheckWorker");
     CHECK_CONTAINS(remotePutOnlyCheckIndex, "return blockIdx");
