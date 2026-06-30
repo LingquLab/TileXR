@@ -312,6 +312,7 @@ def make_rank_command(
     barrier_host: str,
     result_dir: str,
     route_policy: str,
+    udma_qp_num: int,
     profile_stage: int,
     udma_debug: bool,
     timeout_s: int,
@@ -326,6 +327,7 @@ def make_rank_command(
         f"export TILEXR_COMM_ID={shlex.quote(comm_id)}",
         f"export TILEXR_DEMO_BARRIER_HOST={shlex.quote(barrier_host)}",
         f"export TILEXR_UDMA_ROUTE_POLICY={shlex.quote(route_policy)}",
+        f"export TILEXR_UDMA_QP_NUM={int(udma_qp_num)}",
         f"export TILEXR_UDMA_DEBUG={1 if udma_debug else 0}",
         "export TILEXR_DEMO_BIGDATA_REMOTE_PUT_ONLY=1",
         f"export TILEXR_DEMO_BIGDATA_PROFILE_STAGE={profile_stage}",
@@ -382,6 +384,7 @@ def run_all_ranks(args, hosts: Sequence[str], repeat: int, label: str) -> Tuple[
             barrier_host=hosts[0],
             result_dir=result_dir,
             route_policy=args.route_policy,
+            udma_qp_num=args.udma_qp_num,
             profile_stage=args.profile_stage,
             udma_debug=args.udma_debug,
             timeout_s=args.timeout,
@@ -457,6 +460,7 @@ def parse_args(argv: Optional[Sequence[str]] = None):
     )
     parser.add_argument("--demo-bin", default=DEFAULT_DEMO_BIN, help="Demo binary path relative to remote-dir.")
     parser.add_argument("--route-policy", default="all", help="TILEXR_UDMA_ROUTE_POLICY value.")
+    parser.add_argument("--udma-qp-num", type=int, default=1, help="TILEXR_UDMA_QP_NUM value.")
     parser.add_argument("--profile-stage", type=int, default=7, help="TILEXR_DEMO_BIGDATA_PROFILE_STAGE value.")
     parser.add_argument("--udma-debug", action="store_true", help="Enable TILEXR_UDMA_DEBUG on remote ranks.")
     parser.add_argument("--timeout", type=int, default=180, help="Kernel/demo timeout seconds.")

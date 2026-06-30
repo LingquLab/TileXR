@@ -626,14 +626,10 @@ __aicore__ inline uint32_t BigDataSelectDistinctWeightedQp(
 }
 
 __aicore__ inline uint32_t BigDataRemotePutOnlySegmentQp(
-    const __gm__ TileXR::CommArgs* args, uint32_t segmentId)
+    const __gm__ TileXR::CommArgs* args, int32_t peer, uint32_t segmentId)
 {
-    auto udmaInfo = TileXR::GetUDMAInfo(args);
-    const uint32_t qpCount = udmaInfo->qpNum == 0 ? 1U : udmaInfo->qpNum;
-    if (qpCount <= 1U) {
-        return 0U;
-    }
-    return segmentId == TILEXR_UDMA_DEMO_BIGDATA_REMOTE_SEND_PRIMARY_SEGMENT ? 0U : 1U;
+    (void)segmentId;
+    return BigDataSelectWeightedQp(args, peer, true);
 }
 
 __aicore__ inline int32_t BigDataLocalPeerAt(int32_t rank, int32_t localIndex, int32_t ranksPerNode)
@@ -2828,7 +2824,7 @@ extern "C" __global__ __aicore__ void tilexr_udma_all_to_all_bigdata_kernel(
                         continue;
                     }
                     const uint32_t segmentId = BigDataRemotePutOnlySendTaskSegment(sendTask, remoteTaskCount);
-                    const uint32_t qpIdx = BigDataRemotePutOnlySegmentQp(args, segmentId);
+                    const uint32_t qpIdx = BigDataRemotePutOnlySegmentQp(args, peer, segmentId);
                     if (profileStage <= TILEXR_BIGDATA_REMOTE_PUT_STAGE_QP) {
                         continue;
                     }

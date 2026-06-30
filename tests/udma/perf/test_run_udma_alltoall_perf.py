@@ -64,6 +64,28 @@ class UDMAAllToAllPerfScriptTest(unittest.TestCase):
         self.assertIn("/home/user/tilexr/env/util/cmake/bin", prelude)
         self.assertIn("source /home/user/tilexr/env/cann/cann/set_env.sh", prelude)
 
+    def test_rank_command_exports_udma_qp_num(self):
+        command = perf.make_rank_command(
+            rank=0,
+            world_size=2,
+            repeat=1,
+            elements_per_peer=1024,
+            devices_per_host=1,
+            remote_dir="/home/tileXR",
+            cann_env="/opt/cann/set_env.sh",
+            demo_bin="tests/udma/install/bin/tilexr_udma_demo",
+            comm_id="127.0.0.1:12345",
+            barrier_host="127.0.0.1",
+            result_dir="/tmp/result",
+            route_policy="all",
+            udma_qp_num=2,
+            profile_stage=7,
+            udma_debug=False,
+            timeout_s=90,
+            tool_env="/opt/tilexr/env",
+        )
+        self.assertIn("export TILEXR_UDMA_QP_NUM=2", command)
+
 
 if __name__ == "__main__":
     unittest.main()

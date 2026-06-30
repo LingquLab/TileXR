@@ -550,8 +550,10 @@ void TestAllToAllBigDataSource()
     CHECK_CONTAINS(kernel, "BigDataSelectWeightedQp(");
     CHECK_CONTAINS(kernel, "BigDataSelectDistinctWeightedQp(");
     CHECK_CONTAINS(kernel, "BigDataRemotePutOnlySegmentQp(");
-    CHECK_CONTAINS(kernel, "segmentId == TILEXR_UDMA_DEMO_BIGDATA_REMOTE_SEND_PRIMARY_SEGMENT");
-    CHECK_CONTAINS(kernel, "return segmentId == TILEXR_UDMA_DEMO_BIGDATA_REMOTE_SEND_PRIMARY_SEGMENT ? 0U : 1U");
+    CHECK_CONTAINS(kernel, "(void)segmentId");
+    CHECK_CONTAINS(kernel, "return BigDataSelectWeightedQp(args, peer, true)");
+    CHECK_NOT_CONTAINS(kernel, "return 1U;");
+    CHECK_NOT_CONTAINS(kernel, "return segmentId == TILEXR_UDMA_DEMO_BIGDATA_REMOTE_SEND_PRIMARY_SEGMENT ? 0U : 1U");
     CHECK_CONTAINS(kernel, "BigDataWaitCopyDoneRange");
     CHECK_CONTAINS(kernel, "BigDataPublishCopyReadyRange");
     CHECK_CONTAINS(kernel, "BigDataWaitCopyReady");
