@@ -527,8 +527,9 @@ void TestAllToAllBigDataSource()
     CHECK_CONTAINS(kernel, "BigDataRunSelfCopyShard(rank, rankSize");
     CHECK_CONTAINS(kernel, "BigDataRemoteSendSegmentWorker");
     CHECK_CONTAINS(kernel, "BigDataRemotePutOnlySendWorker");
-    CHECK_CONTAINS(kernel, "BigDataRemotePutOnlyLinkForSendCore");
-    CHECK_CONTAINS(kernel, "BigDataRemotePutOnlyStaggeredRemoteIndex");
+    CHECK_CONTAINS(kernel, "BigDataRemotePutOnlySendTaskCount");
+    CHECK_CONTAINS(kernel, "BigDataRemotePutOnlySendTaskRemoteIndex");
+    CHECK_CONTAINS(kernel, "BigDataRemotePutOnlySendTaskSegment");
     CHECK_CONTAINS(kernel, "BigDataRemotePutOnlyCheckIndex");
     CHECK_CONTAINS(kernel, "BigDataRemotePutOnlyCheckWorker");
     CHECK_CONTAINS(kernel, "BigDataRemoteIpcAckSlot");
@@ -568,11 +569,10 @@ void TestAllToAllBigDataSource()
     CHECK_CONTAINS(kernel, "if (isCopyCore)");
     CHECK_CONTAINS(kernel, "if (remotePutOnly)");
     CHECK_CONTAINS(kernel, "BigDataRemotePutOnlyCheckWorker(");
-    CHECK_CONTAINS(kernel, "const int32_t sendLink = BigDataRemotePutOnlyLinkForSendCore(blockIdx)");
-    CHECK_CONTAINS(kernel, "BigDataRemotePutOnlyStaggeredRemoteIndex(rank, remoteTaskCount, remoteOrder)");
-    CHECK_NOT_CONTAINS(kernel, "sendTask += static_cast<int32_t>(activeBlockDim)");
-    CHECK_NOT_CONTAINS(kernel, "BigDataRemotePutOnlySendTaskCount(remoteTaskCount)");
-    CHECK_NOT_CONTAINS(kernel, "BigDataRemotePutOnlySendTaskRemoteIndex(sendTask, remoteTaskCount)");
+    CHECK_CONTAINS(kernel, "const int32_t sendTaskCount = BigDataRemotePutOnlySendTaskCount(remoteTaskCount)");
+    CHECK_CONTAINS(kernel, "sendTask += static_cast<int32_t>(activeBlockDim)");
+    CHECK_CONTAINS(kernel, "const int32_t remoteIndex = BigDataRemotePutOnlySendTaskRemoteIndex(sendTask, remoteTaskCount)");
+    CHECK_CONTAINS(kernel, "const uint32_t segmentId = BigDataRemotePutOnlySendTaskSegment(sendTask, remoteTaskCount)");
     CHECK_CONTAINS(kernel, "remotePutOnly && profileStage <= TILEXR_BIGDATA_REMOTE_PUT_STAGE_FRAMEWORK");
     CHECK_CONTAINS(kernel, "profileStage <= TILEXR_BIGDATA_REMOTE_PUT_STAGE_LOOP");
     CHECK_CONTAINS(kernel, "profileStage <= TILEXR_BIGDATA_REMOTE_PUT_STAGE_PEER");
