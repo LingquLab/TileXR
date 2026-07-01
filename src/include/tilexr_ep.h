@@ -21,6 +21,10 @@ int TileXRMoeEpCombine(void *expertOut, int32_t *assistInfoForCombine, int32_t *
     TileXRCommPtr comm, int64_t bs, int64_t h, int64_t topK, int64_t moeExpertNum,
     void *yOut, TileXR::TileXRDataType dtype, aclrtStream stream);
 
+int TileXRMoeEpCombineV2(void *expertOut, int32_t *assistInfoForCombine, int32_t *epRecvCounts,
+    TileXRCommPtr comm, int64_t bs, int64_t h, int64_t topK, int64_t moeExpertNum,
+    void *yOut, void *workspace, TileXR::TileXRDataType dtype, aclrtStream stream);
+
 int TileXRMoeEpDispatchV2(void *x, int32_t *expertIds, void *scales, bool *xActiveMask, void *expertScales,
     TileXRCommPtr comm, int64_t bs, int64_t h, int64_t topK, int64_t moeExpertNum, int64_t epWorldSize,
     int64_t epRankId, int64_t tpWorldSize, int64_t tpRankId, int64_t expertShardType, int64_t sharedExpertNum,

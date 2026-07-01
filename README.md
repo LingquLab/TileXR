@@ -24,7 +24,7 @@ Instead of stalling every rank at coarse barriers, TileXR splits a phase into ti
 
 - **Core communication runtime**: `libtile-comm.so` initializes ranks, shared buffers, peer memory mappings, socket exchange, device `CommArgs`, and DFX state. It builds only against CANN runtime/ACL/driver APIs and TileXR-owned types — it does not include or link hcomm, HCCL, shmem, or ops-transformer.
 - **Optional TileXR collectives**: `libtilexr-collectives.so`, built only when `TILEXR_BUILD_COLLECTIVES=ON`, layers standalone `TileXRAllGather` and equal-size `TileXRAllToAll` APIs on top of `libtile-comm.so`.
-- **Standalone EP dispatch MVP**: `libtilexr-ep.so` and `libtilexr_ep_dispatch_kernel.so` provide a first TileXR-native MoE EP dispatch route under `src/ep`, independent from `examples/mc2`, shmem, and UDMA.
+- **Standalone EP dispatch/combine MVP**: `libtilexr-ep.so`, `libtilexr_ep_dispatch_kernel.so`, and `libtilexr_ep_combine_kernel.so` provide TileXR-native MoE EP dispatch/combine routes under `src/ep`, independent from `examples/mc2` and shmem. Same-node paths use IPC peer-memory windows; cross-node dispatch/combine use TileXR-registered UDMA workspaces.
 - **Tile-level synchronization**: device-side flag regions and magic values support reusable fine-grained synchronization rounds.
 - **MC2 fused-operator examples**: AllGather+Add and AllGather+MatMul examples under `examples/mc2/`, built through the ops-transformer flow (not part of the core runtime libraries).
 - **Registered-memory UDMA path**: host code registers ordinary `aclrtMalloc` device memory with `TileXRUDMARegister`; device kernels use `tilexr_udma.h` wrappers for put/get/signal.
@@ -219,13 +219,15 @@ Initial collectives APIs:
 
 `src/ep/` builds the first TileXR-native Expert Parallelism dispatch path:
 
-- `libtilexr-ep.so` exposes `TileXRMoeEpDispatch` through `src/include/tilexr_ep.h`.
-- `libtilexr_ep_dispatch_kernel.so` contains the Ascend C dispatch/combine kernel.
+- `libtilexr-ep.so` exposes `TileXRMoeEpDispatch`, `TileXRMoeEpDispatchV2`, `TileXRMoeEpCombine`, and `TileXRMoeEpCombineV2` through `src/include/tilexr_ep.h`.
+- `libtilexr_ep_dispatch_kernel.so` contains the Ascend C dispatch kernels.
+- `libtilexr_ep_combine_kernel.so` contains the Ascend C combine kernels, including the cross-node UDMA combine path.
 - Host code validates MoE shape, dtype, communicator state, and IPC window size before launch.
-- The MVP route uses `CommArgs::peerMems[]`, `TileXR::IPC_DATA_OFFSET`, and `SyncCollectives` for peer-memory communication. Each rank writes its own IPC window, peers read from that window after synchronization.
+- The same-node route uses `CommArgs::peerMems[]`, `TileXR::IPC_DATA_OFFSET`, and `SyncCollectives` for peer-memory communication. Each rank writes its own IPC window, peers read from that window after synchronization.
+- The cross-node route requires a workspace registered with `TileXRUDMARegister`; remote ranks exchange window slots and ready values through the UDMA registry.
 - Shared EP window metadata is written through MTE/UB copies so peer ranks observe slot headers and assist tuples consistently.
 
-This EP path is intentionally independent from `examples/mc2`, ops-transformer runtime helpers, shmem, and UDMA. A future route can add a UDMA backend with TileXR-registered receive windows while keeping the peer-memory path as fallback.
+This EP path is intentionally independent from `examples/mc2`, ops-transformer runtime helpers, and shmem while reusing TileXR core IPC/UDMA runtime state.
 
 ### Transports Overview
 
@@ -439,7 +441,7 @@ bash scripts/driver_fix.sh
 - [reference/README.md](reference/README.md): ignored reference-only source checkouts
 - [docs/CANN_VERSION_MIGRATION.md](docs/CANN_VERSION_MIGRATION.md): CANN 9.1.0 migration notes
 - [tests/collectives/README.md](tests/collectives/README.md): optional collectives correctness and performance tools
-- [tests/ep/README.md](tests/ep/README.md): standalone EP dispatch build, demo, and future UDMA backend notes
+- [tests/ep/README.md](tests/ep/README.md): standalone EP dispatch/combine build, demo, and cross-node UDMA notes
 - [CLAUDE.md](CLAUDE.md): repository guidance for AI coding agents
 - [docs/diagrams/](docs/diagrams/): editable draw.io sources for the README architecture diagrams (SVGs embed the diagram XML, so they reopen in draw.io)
 

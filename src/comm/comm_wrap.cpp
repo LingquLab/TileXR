@@ -179,6 +179,17 @@ int TileXRGetUDMARegistryDev(TileXRCommPtr comm, GM_ADDR &registryPtr)
     return TILEXR_SUCCESS;
 }
 
+int TileXRGetUDMARegistryHost(TileXRCommPtr comm, const TileXR::TileXRUDMARegistry **registry)
+{
+    if (comm == nullptr || registry == nullptr) {
+        TILEXR_LOG(ERROR) << "TileXRGetUDMARegistryHost invalid input";
+        return TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    auto* c = static_cast<TileXRComm *>(comm);
+    *registry = c->GetUDMARegistryHost();
+    return *registry == nullptr ? TILEXR_ERROR_NOT_INITIALIZED : TILEXR_SUCCESS;
+}
+
 int TileXRSDMAAvailable(TileXRCommPtr comm, bool *available)
 {
     if (comm == nullptr || available == nullptr) {

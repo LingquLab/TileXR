@@ -1,5 +1,9 @@
 #include "ep_kernel_launch.h"
 
+#include <cstdint>
+
+#include "acl/acl_rt.h"
+#include "ep_window.h"
 #include "tilexr_api.h"
 #include "tilexr_types.h"
 
@@ -28,6 +32,17 @@ extern void launch_tilexr_ep_combine_kernel(uint32_t blockDim, void *stream, GM_
     int64_t moeExpertNum, int64_t dtype, int64_t dtypeBytes, int64_t maxRoutesPerSrc, int64_t rowBytes,
     int64_t payloadBytesPerSlot, int64_t assistBytesPerSlot, int64_t slotBytes, int64_t totalBytes, int64_t magic);
 
+extern void launch_tilexr_ep_combine_cross_node_kernel(uint32_t blockDim, void *stream, GM_ADDR commArgs,
+    GM_ADDR expertOut, GM_ADDR assistInfoForCombine, GM_ADDR epRecvCounts, GM_ADDR yOut, GM_ADDR workspace,
+    int64_t bs, int64_t h, int64_t topK, int64_t moeExpertNum, int64_t dtype, int64_t dtypeBytes,
+    int64_t maxRoutesPerSrc, int64_t rowBytes, int64_t payloadBytesPerSlot, int64_t assistBytesPerSlot,
+    int64_t slotBytes, int64_t totalBytes, int64_t magic);
+
+extern void launch_tilexr_ep_combine_cross_node_drain_kernel(uint32_t blockDim, void *stream, GM_ADDR commArgs,
+    GM_ADDR yOut, GM_ADDR workspace, int64_t bs, int64_t h, int64_t topK, int64_t moeExpertNum, int64_t dtype,
+    int64_t dtypeBytes, int64_t maxRoutesPerSrc, int64_t rowBytes, int64_t payloadBytesPerSlot,
+    int64_t assistBytesPerSlot, int64_t slotBytes, int64_t totalBytes);
+
 namespace TileXREp {
 
 namespace {
@@ -36,6 +51,15 @@ bool TileXREpUsesCrossNodeKernel(const EpHostLaunchContext &context)
 {
     return context.hostArgs != nullptr && context.hostArgs->localRankSize > 0 &&
         context.hostArgs->localRankSize < context.hostArgs->rankSize;
+}
+
+int64_t TileXREpUdmaStatusOffset(int64_t totalBytes, int64_t rankSize, int64_t slotBytes)
+{
+    const int64_t operationBytes = TileXREpUdmaOperationBytes(totalBytes, rankSize, slotBytes);
+    if (operationBytes == TileXR::TILEXR_INVALID_VALUE || operationBytes > INT64_MAX / 2) {
+        return TileXR::TILEXR_INVALID_VALUE;
+    }
+    return operationBytes * 2;
 }
 
 } // namespace
@@ -88,12 +112,46 @@ int TileXREpLaunchCombineKernel(const EpCombineParams &params, const EpHostLaunc
     }
 
     constexpr uint32_t kMvpBlockDim = 1;
-    launch_tilexr_ep_combine_kernel(kMvpBlockDim, params.stream, context.devArgs, static_cast<GM_ADDR>(params.expertOut),
-        reinterpret_cast<GM_ADDR>(params.assistInfoForCombine), reinterpret_cast<GM_ADDR>(params.epRecvCounts),
-        static_cast<GM_ADDR>(params.yOut), params.bs, params.h, params.topK, params.moeExpertNum,
-        static_cast<int64_t>(params.dtype), context.window.dtypeBytes, context.window.maxRoutesPerSrc,
-        context.window.rowBytes, context.window.payloadBytesPerSlot, context.window.assistBytesPerSlot,
-        context.window.slotBytes, context.window.totalBytes, magic);
+    if (TileXREpUsesCrossNodeKernel(context)) {
+        launch_tilexr_ep_combine_cross_node_kernel(kMvpBlockDim, params.stream, context.devArgs,
+            static_cast<GM_ADDR>(params.expertOut), reinterpret_cast<GM_ADDR>(params.assistInfoForCombine),
+            reinterpret_cast<GM_ADDR>(params.epRecvCounts), static_cast<GM_ADDR>(params.yOut),
+            static_cast<GM_ADDR>(params.workspace), params.bs, params.h, params.topK, params.moeExpertNum,
+            static_cast<int64_t>(params.dtype), context.window.dtypeBytes, context.window.maxRoutesPerSrc,
+            context.window.rowBytes, context.window.payloadBytesPerSlot, context.window.assistBytesPerSlot,
+            context.window.slotBytes, context.window.totalBytes, magic);
+        aclError aclRet = aclrtSynchronizeStream(params.stream);
+        if (aclRet != ACL_SUCCESS) {
+            return TileXR::TILEXR_ERROR_INTERNAL;
+        }
+        uint64_t status = TileXREp::kEpStatusOk;
+        const int64_t statusOffset = TileXREpUdmaStatusOffset(
+            context.window.totalBytes, context.window.rankSize, context.window.slotBytes);
+        if (statusOffset == TileXR::TILEXR_INVALID_VALUE) {
+            return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
+        }
+        aclRet = aclrtMemcpy(&status, sizeof(status), static_cast<GM_ADDR>(params.workspace) + statusOffset,
+            sizeof(status), ACL_MEMCPY_DEVICE_TO_HOST);
+        if (aclRet != ACL_SUCCESS) {
+            return TileXR::TILEXR_ERROR_INTERNAL;
+        }
+        if (status != TileXREp::kEpStatusOk) {
+            return TileXR::TILEXR_ERROR_TIMEOUT;
+        }
+        launch_tilexr_ep_combine_cross_node_drain_kernel(kMvpBlockDim, params.stream, context.devArgs,
+            static_cast<GM_ADDR>(params.yOut), static_cast<GM_ADDR>(params.workspace), params.bs, params.h,
+            params.topK, params.moeExpertNum, static_cast<int64_t>(params.dtype), context.window.dtypeBytes,
+            context.window.maxRoutesPerSrc, context.window.rowBytes, context.window.payloadBytesPerSlot,
+            context.window.assistBytesPerSlot, context.window.slotBytes, context.window.totalBytes);
+    } else {
+        launch_tilexr_ep_combine_kernel(kMvpBlockDim, params.stream, context.devArgs,
+            static_cast<GM_ADDR>(params.expertOut), reinterpret_cast<GM_ADDR>(params.assistInfoForCombine),
+            reinterpret_cast<GM_ADDR>(params.epRecvCounts), static_cast<GM_ADDR>(params.yOut),
+            params.bs, params.h, params.topK, params.moeExpertNum, static_cast<int64_t>(params.dtype),
+            context.window.dtypeBytes, context.window.maxRoutesPerSrc, context.window.rowBytes,
+            context.window.payloadBytesPerSlot, context.window.assistBytesPerSlot, context.window.slotBytes,
+            context.window.totalBytes, magic);
+    }
     return TileXR::TILEXR_SUCCESS;
 }
 

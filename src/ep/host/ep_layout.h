@@ -27,6 +27,8 @@ struct EpWindowConfig {
 int64_t TileXREpAlignUp(int64_t value, int64_t alignment);
 int64_t TileXREpDataTypeSize(TileXR::TileXRDataType dtype);
 bool TileXREpIsSupportedDataType(TileXR::TileXRDataType dtype);
+int64_t TileXREpUdmaOperationBytes(int64_t totalBytes, int64_t rankSize, int64_t slotBytes);
+int64_t TileXREpUdmaRequiredWorkspaceBytes(int64_t totalBytes, int64_t rankSize, int64_t slotBytes);
 
 int TileXREpBuildWindowConfig(int64_t rankSize, int64_t bs, int64_t h, int64_t topK,
     int64_t moeExpertNum, TileXR::TileXRDataType dtype, EpWindowConfig *out);

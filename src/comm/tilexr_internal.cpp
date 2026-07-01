@@ -38,8 +38,11 @@ const std::unordered_map<std::string, ChipName> CHIP_MAP = {
     {"Ascend950", ChipName::CHIP_950},
     {"Ascend950DT", ChipName::CHIP_950},
     {"Ascend950DT_9581", ChipName::CHIP_950},
+    {"Ascend950DT_9582", ChipName::CHIP_950},
     {"Ascend950DT_9584", ChipName::CHIP_950},
-    {"Ascend950PR", ChipName::CHIP_950}
+    {"Ascend950PR", ChipName::CHIP_950PR},
+    {"Ascend950PR_9589", ChipName::CHIP_950PR},
+    {"Ascend950PR_9599", ChipName::CHIP_950PR}
 };
 
 /**
@@ -65,11 +68,18 @@ ChipName GetChipName()
     auto it = CHIP_MAP.find(chipName);
     if (it != CHIP_MAP.end()) {
         curChipName = it->second;
+    } else if (chipName.find("Ascend950PR_") == 0) {
+        curChipName = ChipName::CHIP_950PR;
     } else {
         TILEXR_LOG(WARN) << "There is no commitment to the supported chip types yet," <<
                       " and it is not certain whether the functions will work properly.";
     }
     return curChipName;
+}
+
+bool UseLegacyIpcPid(ChipName chipName)
+{
+    return chipName < ChipName::CHIP_910_9391 || chipName == ChipName::CHIP_950PR;
 }
 
 uint32_t GetCoreNum(ChipName chipName)
@@ -82,6 +92,7 @@ uint32_t GetCoreNum(ChipName chipName)
         case ChipName::CHIP_910_9392:
         case ChipName::CHIP_910_9382:
         case ChipName::CHIP_910B2C:
+        case ChipName::CHIP_950PR:
         case ChipName::CHIP_950:
             return AI_CORE_NUM_24;
         case ChipName::CHIP_910B3:

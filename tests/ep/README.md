@@ -1,6 +1,6 @@
-# TileXR EP Dispatch Tests
+# TileXR EP Dispatch/Combine Tests
 
-This tree tests the standalone TileXR EP module under `src/ep`. It is independent from `examples/mc2`; the MVP route does not use HCCL window helpers, shmem, or UDMA.
+This tree tests the standalone TileXR EP module under `src/ep`. It is independent from `examples/mc2`; the same-node route uses TileXR IPC peer-memory windows and `SyncCollectives`, while cross-node dispatch/combine use TileXR-registered UDMA workspaces.
 
 ## Source-Only Tests
 
@@ -27,7 +27,7 @@ bash build.sh full
 bash demo/run_tilexr_ep_dispatch_demo.sh 2
 ```
 
-`full` mode builds and installs `tile-comm`, `tilexr-ep`, and `libtilexr_ep_dispatch_kernel.so` under the repository `install` directory, then builds the EP demo.
+`full` mode builds and installs `tile-comm`, `tilexr-ep`, `libtilexr_ep_dispatch_kernel.so`, and `libtilexr_ep_combine_kernel.so` under the repository `install` directory, then builds the EP demo.
 
 ## Remote Verification
 
@@ -39,6 +39,6 @@ bash demo/deploy_and_run_remote.sh
 
 The remote verification script syncs the complete repository into `${TILEXR_EP_REMOTE_BASE}/TileXR` on `${TILEXR_EP_REMOTE}`, initializes submodules, sources `scripts/common_env.sh`, builds the full EP artifacts, and runs the two-rank dispatch demo.
 
-## Future UDMA Backend
+## Cross-Node UDMA
 
-Route 2 is intentionally deferred. The MVP route uses peer memory and `SyncCollectives` only.
+Cross-node dispatch/combine require a workspace allocated by the caller and registered with `TileXRUDMARegister`. The demo allocates a cache-line-aligned workspace, registers it before dispatch/combine, and validates both dispatch and combine outputs after all ranks synchronize.

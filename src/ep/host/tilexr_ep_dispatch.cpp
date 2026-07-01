@@ -97,6 +97,14 @@ int TileXRMoeEpCombine(void *expertOut, int32_t *assistInfoForCombine, int32_t *
     TileXRCommPtr comm, int64_t bs, int64_t h, int64_t topK, int64_t moeExpertNum,
     void *yOut, TileXR::TileXRDataType dtype, aclrtStream stream)
 {
+    return TileXRMoeEpCombineV2(expertOut, assistInfoForCombine, epRecvCounts, comm, bs, h, topK, moeExpertNum,
+        yOut, nullptr, dtype, stream);
+}
+
+int TileXRMoeEpCombineV2(void *expertOut, int32_t *assistInfoForCombine, int32_t *epRecvCounts,
+    TileXRCommPtr comm, int64_t bs, int64_t h, int64_t topK, int64_t moeExpertNum,
+    void *yOut, void *workspace, TileXR::TileXRDataType dtype, aclrtStream stream)
+{
     TileXREp::EpCombineParams params {};
     params.expertOut = expertOut;
     params.assistInfoForCombine = assistInfoForCombine;
@@ -107,6 +115,7 @@ int TileXRMoeEpCombine(void *expertOut, int32_t *assistInfoForCombine, int32_t *
     params.topK = topK;
     params.moeExpertNum = moeExpertNum;
     params.yOut = yOut;
+    params.workspace = workspace;
     params.dtype = dtype;
     params.stream = stream;
 

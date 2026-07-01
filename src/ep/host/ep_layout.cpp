@@ -4,6 +4,7 @@
 
 #include "comm_args.h"
 #include "ep_window.h"
+#include "tilexr_udma_types.h"
 
 namespace TileXREp {
 namespace {
@@ -69,6 +70,61 @@ int64_t TileXREpDataTypeSize(TileXR::TileXRDataType dtype)
 bool TileXREpIsSupportedDataType(TileXR::TileXRDataType dtype)
 {
     return TileXREpDataTypeSize(dtype) > 0;
+}
+
+int64_t TileXREpUdmaOperationBytes(int64_t totalBytes, int64_t rankSize, int64_t slotBytes)
+{
+    if (totalBytes <= 0 || rankSize <= 0 || rankSize > TileXR::TILEXR_MAX_RANK_SIZE || slotBytes <= 0) {
+        return TileXR::TILEXR_INVALID_VALUE;
+    }
+    int64_t alignedTotal = TileXREpAlignUp(totalBytes, kEpWindowAlignmentBytes);
+    if (alignedTotal == TileXR::TILEXR_INVALID_VALUE) {
+        return TileXR::TILEXR_INVALID_VALUE;
+    }
+    int64_t readyBytes = 0;
+    int64_t doubleTotal = 0;
+    int64_t readyOffset = 0;
+    if (!MulInt64(static_cast<int64_t>(rankSize), static_cast<int64_t>(sizeof(uint64_t)), &readyBytes) ||
+        !MulInt64(alignedTotal, 2, &doubleTotal) ||
+        !AddInt64(doubleTotal, readyBytes, &readyOffset)) {
+        return TileXR::TILEXR_INVALID_VALUE;
+    }
+    int64_t relaySlotsOffset = TileXREpAlignUp(readyOffset, TileXR::TILEXR_UDMA_CACHE_LINE_SIZE);
+    if (relaySlotsOffset == TileXR::TILEXR_INVALID_VALUE) {
+        return TileXR::TILEXR_INVALID_VALUE;
+    }
+    int64_t rankSquare = 0;
+    int64_t relayBytes = 0;
+    int64_t relayReadyBase = 0;
+    if (!MulInt64(rankSize, rankSize, &rankSquare) ||
+        !MulInt64(rankSquare, slotBytes, &relayBytes) ||
+        !AddInt64(relaySlotsOffset, relayBytes, &relayReadyBase)) {
+        return TileXR::TILEXR_INVALID_VALUE;
+    }
+    relayReadyBase = TileXREpAlignUp(relayReadyBase, TileXR::TILEXR_UDMA_CACHE_LINE_SIZE);
+    if (relayReadyBase == TileXR::TILEXR_INVALID_VALUE) {
+        return TileXR::TILEXR_INVALID_VALUE;
+    }
+    int64_t relayReadyEnd = 0;
+    if (!AddInt64(relayReadyBase, readyBytes, &relayReadyEnd)) {
+        return TileXR::TILEXR_INVALID_VALUE;
+    }
+    return TileXREpAlignUp(relayReadyEnd, TileXR::TILEXR_UDMA_CACHE_LINE_SIZE);
+}
+
+int64_t TileXREpUdmaRequiredWorkspaceBytes(int64_t totalBytes, int64_t rankSize, int64_t slotBytes)
+{
+    int64_t operationBytes = TileXREpUdmaOperationBytes(totalBytes, rankSize, slotBytes);
+    if (operationBytes == TileXR::TILEXR_INVALID_VALUE) {
+        return TileXR::TILEXR_INVALID_VALUE;
+    }
+    int64_t twoOperations = 0;
+    int64_t withStatus = 0;
+    if (!MulInt64(operationBytes, 2, &twoOperations) ||
+        !AddInt64(twoOperations, static_cast<int64_t>(sizeof(uint64_t)), &withStatus)) {
+        return TileXR::TILEXR_INVALID_VALUE;
+    }
+    return TileXREpAlignUp(withStatus, TileXR::TILEXR_UDMA_CACHE_LINE_SIZE);
 }
 
 int TileXREpBuildWindowConfig(int64_t rankSize, int64_t bs, int64_t h, int64_t topK,

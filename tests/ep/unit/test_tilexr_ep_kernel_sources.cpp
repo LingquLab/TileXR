@@ -192,7 +192,7 @@ void TestCombineHelpersLiveInCombineHelperFile()
 
 void TestCombineKernelUsesTileXRPeerMemory()
 {
-    const std::string path = "src/ep/kernels/tilexr_ep_dispatch_kernel.cpp";
+    const std::string path = "src/ep/kernels/tilexr_ep_combine_kernel.cpp";
     std::string contents;
     if (!ReadFile(path, &contents)) {
         return;
@@ -205,11 +205,41 @@ void TestCombineKernelUsesTileXRPeerMemory()
     CheckContains(path, contents, "ScatterCombineRows");
     CheckContains(path, contents, "DrainCombineRows");
     CheckContains(path, contents, "AccumulateRow");
+    CheckContains(path, contents, "tilexr_ep_combine_cross_node_kernel");
+    CheckContains(path, contents, "tilexr_ep_combine_cross_node_drain_kernel");
+    CheckContains(path, contents, "TileXREpNotifyRemoteUdmaReadySeparate");
+    CheckContains(path, contents, "TileXREpWaitRemoteUdmaReady");
+    CheckNotContains(path, contents, "tilexr_ep_dispatch_kernel");
 
     std::string hostLaunch;
     if (ReadFile("src/ep/host/ep_kernel_launch.cpp", &hostLaunch)) {
         CheckContains("src/ep/host/ep_kernel_launch.cpp", hostLaunch, "TileXREpLaunchCombineKernel");
         CheckContains("src/ep/host/ep_kernel_launch.cpp", hostLaunch, "launch_tilexr_ep_combine_kernel");
+        CheckContains("src/ep/host/ep_kernel_launch.cpp", hostLaunch,
+            "launch_tilexr_ep_combine_cross_node_kernel");
+        CheckContains("src/ep/host/ep_kernel_launch.cpp", hostLaunch, "aclrtSynchronizeStream");
+        CheckContains("src/ep/host/ep_kernel_launch.cpp", hostLaunch, "TILEXR_ERROR_TIMEOUT");
+    }
+}
+
+void TestKernelCommonHasCombineHelpers()
+{
+    const std::string path = "src/ep/kernels/tilexr_ep_kernel_common.h";
+    std::string contents;
+    if (!ReadFile(path, &contents)) {
+        return;
+    }
+
+    CheckContains(path, contents, "UDMASecondOperationOffset");
+    CheckContains(path, contents, "TileXREpNotifyRemoteUdmaReadySeparate");
+    CheckContains(path, contents, "TileXREpWaitRemoteUdmaReady");
+    CheckContains(path, contents, "TileXREpStoreStatusValue");
+    CheckContains(path, contents, "TileXREpFlushUdmaSourceWindow");
+    CheckContains(path, contents, "IsValidShape");
+
+    std::string combine;
+    if (ReadFile("src/ep/kernels/tilexr_ep_combine_kernel.cpp", &combine)) {
+        CheckContains("src/ep/kernels/tilexr_ep_combine_kernel.cpp", combine, "kEpStatusRemoteReadyTimeout");
     }
 }
 
@@ -391,6 +421,8 @@ void TestNoForbiddenDependencies()
 {
     const std::vector<std::string> paths = {
         "src/ep/kernels/tilexr_ep_dispatch_kernel.cpp",
+        "src/ep/kernels/tilexr_ep_combine_kernel.cpp",
+        "src/ep/kernels/tilexr_ep_kernel_common.h",
         "src/ep/kernels/tilexr_ep_dispatch_helpers.h",
         "src/ep/kernels/tilexr_ep_combine_helpers.h",
         "src/ep/host/ep_kernel_launch.cpp",
@@ -427,6 +459,7 @@ int main()
     TestDispatchHelpersLiveInDispatchHelperFile();
     TestCombineHelpersLiveInCombineHelperFile();
     TestCombineKernelUsesTileXRPeerMemory();
+    TestKernelCommonHasCombineHelpers();
     TestDispatchDemoRunsCombine();
     TestKernelForwardsActiveMask();
     TestKernelForwardsExpertTokenNumsType();
