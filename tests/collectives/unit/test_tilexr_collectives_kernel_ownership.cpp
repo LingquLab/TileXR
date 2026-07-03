@@ -202,6 +202,7 @@ void TestCollectivesKernelSourcesAreScoped()
     CheckContains(profileProbePath, profileProbe, "TileXRPerfStageEnd");
     CheckContains(profileProbePath, profileProbe, "TileXRPerfAccumulateDuration");
     CheckContains(profileProbePath, profileProbe, "TILEXR_PROFILE_PROBE_COPY_UB_BYTES");
+    CheckContains(profileProbePath, profileProbe, "while (copied < remain)");
     CheckContains(profileProbePath, profileProbe, "TileXR::TILEXR_PERF_TRACE_STATS_UB_OFFSET");
     CheckDoesNotContain(profileProbePath, profileProbe, "peerMems");
     CheckDoesNotContain(profileProbePath, profileProbe, "GET_IPC_MEM_ARGS");

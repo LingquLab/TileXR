@@ -422,6 +422,7 @@ void TestProfileReportHelperDocumentsSlowRankAndPerfettoEvents()
     CheckContains(path, text, "clock_offset_ns");
     CheckContains(path, text, "rank_label(index.get(\"hosts\", {}), bar[\"rank\"])");
     CheckContains(path, text, "launch{bar['launch_id']}/{bar_rank_label}/{bar['stage']}");
+    CheckContains(path, text, "for status in group.get(\"trace_statuses\", [])");
 }
 
 } // namespace

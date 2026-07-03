@@ -33,16 +33,22 @@ __attribute__((always_inline)) inline __aicore__ void TileXRProfileProbeCopy(
     if (remain > perCore) {
         remain = perCore;
     }
-    if (remain > TILEXR_PROFILE_PROBE_COPY_UB_BYTES) {
-        remain = TILEXR_PROFILE_PROBE_COPY_UB_BYTES;
-    }
 
-    CpGM2UB(inputUB, reinterpret_cast<__gm__ uint8_t *>(input) + start, static_cast<uint32_t>(remain));
-    AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE3>(EVENT_ID0);
-    AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE3>(EVENT_ID0);
-    CpUB2GM(reinterpret_cast<__gm__ uint8_t *>(output) + start, inputUB, static_cast<uint32_t>(remain));
-    AscendC::SetFlag<AscendC::HardEvent::MTE3_S>(EVENT_ID0);
-    AscendC::WaitFlag<AscendC::HardEvent::MTE3_S>(EVENT_ID0);
+    int64_t copied = 0;
+    while (copied < remain) {
+        int64_t chunk = remain - copied;
+        if (chunk > TILEXR_PROFILE_PROBE_COPY_UB_BYTES) {
+            chunk = TILEXR_PROFILE_PROBE_COPY_UB_BYTES;
+        }
+
+        CpGM2UB(inputUB, reinterpret_cast<__gm__ uint8_t *>(input) + start + copied, static_cast<uint32_t>(chunk));
+        AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE3>(EVENT_ID0);
+        AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE3>(EVENT_ID0);
+        CpUB2GM(reinterpret_cast<__gm__ uint8_t *>(output) + start + copied, inputUB, static_cast<uint32_t>(chunk));
+        AscendC::SetFlag<AscendC::HardEvent::MTE3_S>(EVENT_ID0);
+        AscendC::WaitFlag<AscendC::HardEvent::MTE3_S>(EVENT_ID0);
+        copied += chunk;
+    }
 }
 
 __attribute__((always_inline)) inline __aicore__ void TileXRProfileProbeKernel(

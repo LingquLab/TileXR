@@ -132,6 +132,7 @@ void TestCollectivesHostOwnsCollectiveLaunchHelpers()
     const std::string utilsHeaderPath = "src/collectives/host/collective_utils.h";
     const auto utilsHeader = ReadFile(utilsHeaderPath);
     CheckContains(utilsHeaderPath, utilsHeader, "bool IsSupportedDataType(TileXR::TileXRDataType dataType);");
+    CheckContains(utilsHeaderPath, utilsHeader, "bool IsSupportedReductionDataType(TileXR::TileXRDataType dataType);");
     CheckContains(utilsHeaderPath, utilsHeader, "int64_t CountToBytes(int64_t count, TileXR::TileXRDataType dataType);");
     CheckContains(utilsHeaderPath, utilsHeader, "uint32_t GetAllGatherBlockNum(const TileXR::CommArgs &commArgs, int64_t dataSize);");
     CheckContains(utilsHeaderPath, utilsHeader, "uint32_t GetAllToAllBlockNum(const TileXR::CommArgs &commArgs, int64_t dataSize);");
@@ -244,10 +245,25 @@ void TestCollectivesKernelBuildSupportsAscend950Arch()
     const auto text = ReadFile(path);
 
     CheckContains(path, text, "TILEXR_COLLECTIVES_SOC_TYPE");
+    CheckContains(path, text, "TILEXR_SOC_NAME");
     CheckContains(path, text, "Ascend950");
+    CheckContains(path, text, "MATCHES \"^Ascend950\"");
     CheckContains(path, text, "dav-c310-vec");
     CheckContains(path, text, "dav-c220-vec");
     CheckContains(path, text, "--cce-aicore-arch=${TILEXR_COLLECTIVES_AICORE_ARCH}");
+
+    const std::string collectivesPath = "src/collectives/CMakeLists.txt";
+    const auto collectivesText = ReadFile(collectivesPath);
+    CheckContains(collectivesPath, collectivesText, "TILEXR_COLLECTIVES_C310_ATOMIC_LIMITS");
+
+    const std::string utilsPath = "src/collectives/host/collective_utils.cpp";
+    const auto utilsText = ReadFile(utilsPath);
+    CheckContains(utilsPath, utilsText, "TILEXR_COLLECTIVES_C310_ATOMIC_LIMITS");
+    CheckContains(utilsPath, utilsText, "TILEXR_DATA_TYPE_INT64");
+
+    const std::string apiPath = "src/collectives/host/tilexr_collectives.cpp";
+    const auto apiText = ReadFile(apiPath);
+    CheckContains(apiPath, apiText, "IsSupportedReductionDataType(dataType)");
 }
 
 void TestCollectivesKernelSourcesAllowAscend950Macros()

@@ -503,6 +503,38 @@ class CollectiveProfileReportTest(unittest.TestCase):
             self.assertEqual(event["cat"], "trace_status")
             self.assertEqual(event["args"]["reason"], "aclrtSynchronizeEvent stop failed ret=507035")
 
+    def test_incomplete_only_launches_get_distinct_perfetto_offsets(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for launch in (0, 1):
+                trace = {
+                    "schema": "tilexr_perf_trace_report.v1",
+                    "incomplete": True,
+                    "incomplete_reason": f"launch{launch} failed before stats",
+                    "op_type": 3,
+                    "op_name": "TileXRAllGather",
+                    "rank_size": 1,
+                    "max_core_count": 4,
+                    "block_dim": 4,
+                    "stage_count": 7,
+                    "cycle_to_us_divisor": 50,
+                    "message_bytes": 4096,
+                    "stats": [],
+                }
+                write_custom_trace(root, 0, launch, trace)
+
+            result = run_helper(root, "--warmup-iters", "0", "--iters", "2", "--profile-sample-every", "1")
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+            perfetto = json.loads((root / "perfetto_trace.json").read_text(encoding="utf-8"))
+            incomplete_events = {
+                event["args"]["launch_id"]: event
+                for event in perfetto["traceEvents"]
+                if event.get("ph") == "X" and event.get("cat") == "trace_status"
+            }
+            self.assertEqual(sorted(incomplete_events), [0, 1])
+            self.assertLess(incomplete_events[0]["ts"], incomplete_events[1]["ts"])
+
     def test_rank_core_max_uses_stage_max_cycles(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

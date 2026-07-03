@@ -137,6 +137,10 @@ void TestSocketExchangeUsesDirectConnectionsOnly()
     CheckNotContains(headerPath, headerText, "FILE* pipe_");
     CheckNotContains(headerPath, headerText, "lockFileDescriptor_");
     CheckContains(cppPath, cppText, "return Connect();");
+    CheckContains(cppPath, cppText, "bool envProvided = false;");
+    CheckContains(cppPath, cppText, "if (!envProvided) {");
+    CheckNotContains(cppPath, cppText,
+                     "handle->addr.sin.sin_port = htons(TILEXR_DEFAULT_SOCK_PORT + dev + commDomain);");
 }
 
 void TestRuntimeEnvDoesNotPrependCannDevlib()

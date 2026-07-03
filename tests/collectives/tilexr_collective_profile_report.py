@@ -739,6 +739,14 @@ def render_perfetto_trace(index):
 def compute_perfetto_launch_offsets(index):
     max_end_by_launch = defaultdict(float)
     for group in index["groups"]:
+        for launch_id in group.get("launch_ids", []):
+            parsed_launch_id = as_int(launch_id, None)
+            if parsed_launch_id is not None:
+                max_end_by_launch[parsed_launch_id] = max(max_end_by_launch[parsed_launch_id], 0.0)
+        for status in group.get("trace_statuses", []):
+            parsed_launch_id = as_int(status.get("launch_id"), None)
+            if parsed_launch_id is not None:
+                max_end_by_launch[parsed_launch_id] = max(max_end_by_launch[parsed_launch_id], 0.0)
         for bar in group["bars"]:
             max_end_by_launch[bar["launch_id"]] = max(max_end_by_launch[bar["launch_id"]], bar["end_us"])
 

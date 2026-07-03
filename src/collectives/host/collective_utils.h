@@ -20,6 +20,8 @@ namespace Host {
 
 bool IsSupportedDataType(TileXR::TileXRDataType dataType);
 
+bool IsSupportedReductionDataType(TileXR::TileXRDataType dataType);
+
 bool IsSupportedReduceOp(TileXR::TileXRReduceOp reduceOp);
 
 int64_t CountToBytes(int64_t count, TileXR::TileXRDataType dataType);

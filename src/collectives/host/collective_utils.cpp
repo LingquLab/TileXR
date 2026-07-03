@@ -75,6 +75,28 @@ bool IsSupportedDataType(TileXR::TileXRDataType dataType)
     return DataTypeSize(dataType) > 0;
 }
 
+bool IsSupportedReductionDataType(TileXR::TileXRDataType dataType)
+{
+    if (!IsSupportedDataType(dataType)) {
+        return false;
+    }
+#if defined(TILEXR_COLLECTIVES_C310_ATOMIC_LIMITS)
+    switch (dataType) {
+        case TileXR::TILEXR_DATA_TYPE_INT8:
+        case TileXR::TILEXR_DATA_TYPE_INT16:
+        case TileXR::TILEXR_DATA_TYPE_INT32:
+        case TileXR::TILEXR_DATA_TYPE_FP16:
+        case TileXR::TILEXR_DATA_TYPE_FP32:
+        case TileXR::TILEXR_DATA_TYPE_BFP16:
+            return true;
+        default:
+            return false;
+    }
+#else
+    return true;
+#endif
+}
+
 bool IsSupportedReduceOp(TileXR::TileXRReduceOp reduceOp)
 {
     // The first standalone reduction API surface is SUM-only until other ops pass hardware validation.

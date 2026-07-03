@@ -38,7 +38,8 @@ int ValidateReduce(void *sendBuf, void *recvBuf, int64_t count,
     if (ret != TileXR::TILEXR_SUCCESS) {
         return ret;
     }
-    return TileXRCollectives::Host::IsSupportedReduceOp(op) ?
+    return TileXRCollectives::Host::IsSupportedReductionDataType(dataType) &&
+            TileXRCollectives::Host::IsSupportedReduceOp(op) ?
         TileXR::TILEXR_SUCCESS : TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
 }
 

@@ -8,7 +8,15 @@ enable_language(CCE)
 
 set(TILEXR_COLLECTIVES_1OP_BIN_SIZE 10485760 CACHE STRING "Padded size for TileXR collectives CCE binary")
 option(TILEXR_COLLECTIVES_ENABLE_PROFILING "Enable TileXR collectives kernel profiling helpers" OFF)
+set(_tilexr_collectives_default_soc_type "$ENV{TILEXR_COLLECTIVES_SOC_TYPE}")
+if(NOT _tilexr_collectives_default_soc_type)
+    set(_tilexr_collectives_default_soc_type "$ENV{TILEXR_SOC_NAME}")
+endif()
 set(TILEXR_COLLECTIVES_SOC_TYPE "" CACHE STRING "SOC type used for TileXR collectives CCE kernels")
+if(NOT TILEXR_COLLECTIVES_SOC_TYPE AND _tilexr_collectives_default_soc_type)
+    set(TILEXR_COLLECTIVES_SOC_TYPE "${_tilexr_collectives_default_soc_type}" CACHE STRING
+        "SOC type used for TileXR collectives CCE kernels" FORCE)
+endif()
 
 file(GLOB_RECURSE TILEXR_COLLECTIVES_KERNEL_DEPENDS CONFIGURE_DEPENDS
         "${CMAKE_CURRENT_SOURCE_DIR}/*.h"
@@ -27,7 +35,7 @@ set(CCE_COMPILE_OPTION
         "SHELL:-mllvm --cce-aicore-jump-expand=true"
 )
 
-if(TILEXR_COLLECTIVES_SOC_TYPE STREQUAL "Ascend950")
+if(TILEXR_COLLECTIVES_SOC_TYPE MATCHES "^Ascend950")
     set(TILEXR_COLLECTIVES_AICORE_ARCH dav-c310-vec)
 else()
     set(TILEXR_COLLECTIVES_AICORE_ARCH dav-c220-vec)
@@ -80,3 +88,4 @@ add_custom_command(
 add_custom_target(tilexr_collectives_op DEPENDS "${TILEXR_COLLECTIVES_OP}")
 set(TILEXR_COLLECTIVES_OP "${TILEXR_COLLECTIVES_OP}" PARENT_SCOPE)
 set(TILEXR_COLLECTIVES_1OP_BIN_SIZE "${TILEXR_COLLECTIVES_1OP_BIN_SIZE}" PARENT_SCOPE)
+set(TILEXR_COLLECTIVES_AICORE_ARCH "${TILEXR_COLLECTIVES_AICORE_ARCH}" PARENT_SCOPE)
