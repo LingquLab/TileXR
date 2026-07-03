@@ -163,7 +163,7 @@ std::vector<TileXR::TileXRPerfCoreStageStats> NonEmptyStats(
 {
     std::vector<TileXR::TileXRPerfCoreStageStats> result;
     for (const auto &stat : stats) {
-        if (stat.count != 0 || stat.sumCycles != 0 || stat.maxCycles != 0) {
+        if (stat.count != 0) {
             result.push_back(stat);
         }
     }
@@ -185,12 +185,17 @@ bool IsValidTraceHeader(const TileXR::TileXRPerfTraceHeader &header)
 }
 
 std::string BuildTraceJson(const TileXR::TileXRPerfTraceHeader &header,
-                           const std::vector<TileXR::TileXRPerfCoreStageStats> &stats)
+                           const std::vector<TileXR::TileXRPerfCoreStageStats> &stats,
+                           const PerfReportOptions &options)
 {
     const auto nonEmptyStats = NonEmptyStats(stats);
     std::ostringstream out;
     out << "{\n";
     out << "  \"schema\": \"tilexr_perf_trace_report.v1\",\n";
+    if (options.incomplete) {
+        out << "  \"incomplete\": true,\n";
+        out << "  \"incomplete_reason\": \"" << EscapeJson(options.incompleteReason) << "\",\n";
+    }
     out << "  \"op_type\": " << header.opType << ",\n";
     out << "  \"op_name\": \"" << EscapeJson(OpName(header.opType)) << "\",\n";
     out << "  \"rank_size\": " << header.rankSize << ",\n";
@@ -214,6 +219,8 @@ std::string BuildTraceJson(const TileXR::TileXRPerfTraceHeader &header,
             << ", \"last_end_cycle\": " << stat.lastEndCycle
             << ", \"aux0\": " << stat.aux0
             << ", \"aux1\": " << stat.aux1
+            << ", \"aux2\": " << stat.aux2
+            << ", \"aux3\": " << stat.aux3
             << ", \"sum_us\": " << StatSumUs(header, stat)
             << "}";
         if (i + 1 != nonEmptyStats.size()) {
@@ -245,7 +252,8 @@ std::string BuildSummaryCsv(const std::vector<PerfStageSummary> &summaries)
 
 std::string BuildAnalysisMarkdown(const TileXR::TileXRPerfTraceHeader &header,
                                   const std::vector<PerfStageSummary> &summaries,
-                                  const std::vector<std::string> &findings)
+                                  const std::vector<std::string> &findings,
+                                  const PerfReportOptions &options)
 {
     std::ostringstream out;
     out << "# TileXR Collective Perf Analysis\n\n";
@@ -253,6 +261,11 @@ std::string BuildAnalysisMarkdown(const TileXR::TileXRPerfTraceHeader &header,
     out << "- Message bytes: " << header.messageBytes << "\n";
     out << "- Rank size: " << header.rankSize << "\n";
     out << "- Block dim: " << header.blockDim << "\n\n";
+    if (options.incomplete) {
+        out << "## Trace Status\n\n";
+        out << "- Incomplete trace: " << options.incompleteReason << "\n";
+        out << "- Device-side stats were not copied back; metadata is preserved for run-level diagnostics.\n\n";
+    }
     out << "## Findings\n\n";
     for (const auto &finding : findings) {
         out << "- " << finding << "\n";
@@ -275,7 +288,8 @@ std::string BuildAnalysisMarkdown(const TileXR::TileXRPerfTraceHeader &header,
 std::string BuildHtmlReport(const TileXR::TileXRPerfTraceHeader &header,
                             const std::vector<PerfStageSummary> &summaries,
                             const std::vector<std::string> &findings,
-                            const std::vector<TileXR::TileXRPerfCoreStageStats> &stats)
+                            const std::vector<TileXR::TileXRPerfCoreStageStats> &stats,
+                            const PerfReportOptions &options)
 {
     const auto nonEmptyStats = NonEmptyStats(stats);
     std::ostringstream out;
@@ -288,6 +302,11 @@ std::string BuildHtmlReport(const TileXR::TileXRPerfTraceHeader &header,
     out << "<h2>Bottleneck First</h2>\n";
     out << "<p>Operation: " << EscapeHtml(OpName(header.opType)) << ", message bytes: "
         << header.messageBytes << "</p>\n";
+    if (options.incomplete) {
+        out << "<p><strong>Incomplete trace:</strong> "
+            << EscapeHtml(options.incompleteReason)
+            << ". Device-side stats were not copied back.</p>\n";
+    }
     out << "<ul>\n";
     for (const auto &finding : findings) {
         out << "<li>" << EscapeHtml(finding) << "</li>\n";
@@ -330,7 +349,8 @@ std::string BuildHtmlReport(const TileXR::TileXRPerfTraceHeader &header,
 
 std::string BuildAiPrompt(const TileXR::TileXRPerfTraceHeader &header,
                           const std::vector<PerfStageSummary> &summaries,
-                          const std::vector<std::string> &findings)
+                          const std::vector<std::string> &findings,
+                          const PerfReportOptions &options)
 {
     std::ostringstream out;
     out << "# TileXR collective profiling\n\n";
@@ -338,6 +358,10 @@ std::string BuildAiPrompt(const TileXR::TileXRPerfTraceHeader &header,
     out << "Operation: " << OpName(header.opType) << "\n";
     out << "Message bytes: " << header.messageBytes << "\n";
     out << "Cycle-to-us divisor: " << header.cycleToUsDivisor << "\n\n";
+    if (options.incomplete) {
+        out << "Trace status: incomplete\n";
+        out << "Incomplete reason: " << options.incompleteReason << "\n\n";
+    }
     out << "Findings:\n";
     for (const auto &finding : findings) {
         out << "- " << finding << "\n";
@@ -471,15 +495,18 @@ int WritePerfTraceReports(
     const auto summaries = SummarizePerfTrace(header, stats);
     const auto findings = AnalyzePerfTrace(header, summaries);
 
-    if (!WriteTextFile(JoinPath(options.outputDir, "trace.json"), BuildTraceJson(header, stats)) ||
+    if (!WriteTextFile(JoinPath(options.outputDir, "trace.json"), BuildTraceJson(header, stats, options)) ||
         !WriteTextFile(JoinPath(options.outputDir, "summary.csv"), BuildSummaryCsv(summaries)) ||
-        !WriteTextFile(JoinPath(options.outputDir, "analysis.md"), BuildAnalysisMarkdown(header, summaries, findings)) ||
-        !WriteTextFile(JoinPath(options.outputDir, "report.html"), BuildHtmlReport(header, summaries, findings, stats))) {
+        !WriteTextFile(JoinPath(options.outputDir, "analysis.md"),
+            BuildAnalysisMarkdown(header, summaries, findings, options)) ||
+        !WriteTextFile(JoinPath(options.outputDir, "report.html"),
+            BuildHtmlReport(header, summaries, findings, stats, options))) {
         return TileXR::TILEXR_ERROR_INTERNAL;
     }
 
     if (options.emitAiPrompt &&
-        !WriteTextFile(JoinPath(options.outputDir, "ai_prompt.md"), BuildAiPrompt(header, summaries, findings))) {
+        !WriteTextFile(JoinPath(options.outputDir, "ai_prompt.md"),
+            BuildAiPrompt(header, summaries, findings, options))) {
         return TileXR::TILEXR_ERROR_INTERNAL;
     }
     if (!options.emitAiPrompt && !RemoveIfExists(JoinPath(options.outputDir, "ai_prompt.md"))) {

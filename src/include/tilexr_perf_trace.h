@@ -16,6 +16,7 @@ constexpr uint32_t TILEXR_PERF_TRACE_MAGIC = 0x54585054u; // TXPT
 constexpr uint32_t TILEXR_PERF_TRACE_VERSION = 1u;
 constexpr uint32_t TILEXR_PERF_MAX_STAGE_NAME = 32u;
 constexpr uint32_t TILEXR_PERF_STAGE_COUNT = 7u;
+constexpr uint32_t TILEXR_PERF_TRACE_STATS_OFFSET = 128u;
 
 enum class PerfChipClass : uint32_t {
     GENERIC = 0,
@@ -52,7 +53,7 @@ struct TileXRPerfTraceHeader {
     uint32_t headerSize = sizeof(TileXRPerfTraceHeader);
     // Stage descriptions are static schema metadata; this records their ABI size.
     uint32_t stageDescSize = sizeof(uint32_t) * 4 + TILEXR_PERF_MAX_STAGE_NAME;
-    uint32_t coreStageStatsSize = sizeof(uint32_t) * 4 + sizeof(uint64_t) * 8;
+    uint32_t coreStageStatsSize = sizeof(uint32_t) * 4 + sizeof(uint64_t) * 10;
     uint32_t flags = 0;
     uint32_t rank = 0;
     uint32_t rankSize = 0;
@@ -89,6 +90,8 @@ struct TileXRPerfCoreStageStats {
     uint64_t lastEndCycle = 0;
     uint64_t aux0 = 0;
     uint64_t aux1 = 0;
+    uint64_t aux2 = 0;
+    uint64_t aux3 = 0;
 };
 
 TILEXR_PERF_TRACE_INLINE size_t PerfTraceStatsOffset(uint32_t rank, uint32_t core, uint32_t stage,

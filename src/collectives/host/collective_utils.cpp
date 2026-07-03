@@ -201,5 +201,14 @@ uint32_t GetBroadcastBlockNum(const TileXR::CommArgs &commArgs, int64_t dataSize
     return rankSize;
 }
 
+uint32_t GetProfileProbeBlockNum(const TileXR::CommArgs &commArgs, int64_t dataSize)
+{
+    if (commArgs.rankSize <= 0 || dataSize < 0) {
+        return 0;
+    }
+    constexpr uint32_t kDefaultProbeBlocks = 4;
+    return kDefaultProbeBlocks;
+}
+
 } // namespace Host
 } // namespace TileXRCollectives

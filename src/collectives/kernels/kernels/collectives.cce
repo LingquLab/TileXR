@@ -10,7 +10,7 @@
 #ifndef TILEXR_KERNEL_COLLECTIVES_CCE
 #define TILEXR_KERNEL_COLLECTIVES_CCE
 
-#if !defined(__DAV_C220_VEC__) && !defined(__DAV_M200_VEC__) && !defined(__DAV_C220_CUBE__)
+#if !defined(__DAV_C220_VEC__) && !defined(__DAV_C310_VEC__) && !defined(__DAV_M200_VEC__) && !defined(__DAV_C220_CUBE__)
 #define __aicore__
 #define __ubuf__
 #define __gm__
@@ -574,7 +574,7 @@ __attribute__((always_inline)) inline __aicore__ void ProcessData(int64_t dataSi
         return;
     }
     AscendC::PipeBarrier<PIPE_ALL>();
-    #ifdef __DAV_C220_VEC__
+    #if defined(__DAV_C220_VEC__) || defined(__DAV_C310_VEC__)
     SetAtomicOpType<T>(op);
     #endif
     AscendC::PipeBarrier<PIPE_ALL>();
@@ -617,7 +617,7 @@ __attribute__((always_inline)) inline __aicore__ void ProcessDataNew(int64_t dat
     }
 
     AscendC::PipeBarrier<PIPE_ALL>();
-#ifdef __DAV_C220_VEC__
+#if defined(__DAV_C220_VEC__) || defined(__DAV_C310_VEC__)
     SetAtomicOpType<T>(op);
 #endif
     AscendC::PipeBarrier<PIPE_ALL>();
@@ -659,7 +659,7 @@ __attribute__((always_inline)) inline __aicore__ void ProcessDataNewNonBarrier(i
 
     AscendC::SetFlag<AscendC::HardEvent::MTE3_S>(EVENT_ID0);
     AscendC::WaitFlag<AscendC::HardEvent::MTE3_S>(EVENT_ID0);
-#ifdef __DAV_C220_VEC__
+#if defined(__DAV_C220_VEC__) || defined(__DAV_C310_VEC__)
     SetAtomicOpType<T>(op);
 #endif
     AscendC::SetFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID0);

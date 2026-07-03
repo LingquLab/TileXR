@@ -122,7 +122,18 @@ void TestPerfToolSource()
     CheckContains(path, text, "--profile-dir");
     CheckContains(path, text, "--profile-ai-prompt");
     CheckContains(path, text, "--profile-sample-every");
-    CheckContains(path, text, "--op allgather|alltoall|allreduce|reducescatter|broadcast");
+    CheckContains(path, text, "--comm-mode");
+    CheckContains(path, text, "TileXRCommInitRank(");
+    CheckContains(path, text, "TileXRGetUniqueId(");
+    CheckContains(path, text, "WriteProfileHostInfo");
+    CheckContains(path, text, "TILEXR_PROFILE_CLOCK_OFFSET_NS");
+    CheckContains(path, text, "clock_offset_ns");
+    CheckContains(path, text, "clock_reference");
+    CheckContains(path, text, "epoch_ns");
+    CheckContains(path, text, "--op allgather|alltoall|allreduce|reducescatter|broadcast|profile-probe");
+    CheckContains(path, text, "CollectiveOp::NOOP");
+    CheckContains(path, text, "CollectiveOp::PROFILE_PROBE");
+    CheckContains(path, text, "TileXRProfileProbe");
     CheckContains(path, text, "TileXRAllReduce");
     CheckContains(path, text, "TileXRReduceScatter");
     CheckContains(path, text, "TileXRBroadcast");
@@ -279,6 +290,47 @@ void TestLauncherScripts()
     CheckContains(perfPath, perf, "--profile-sample-every");
     CheckContains(perfPath, perf, "is_true_bool");
     CheckContains(perfPath, perf, "yes");
+
+    const std::string multiHostPerfPath = "tests/collectives/run_collective_perf_multihost.sh";
+    CheckFileExists(multiHostPerfPath);
+    const auto multiHostPerf = ReadFile(multiHostPerfPath);
+    CheckContains(multiHostPerfPath, multiHostPerf, "TILEXR_MULTIHOST_PEERS");
+    CheckContains(multiHostPerfPath, multiHostPerf, "TILEXR_COMM_ID");
+    CheckContains(multiHostPerfPath, multiHostPerf, "--comm-mode socket");
+    CheckContains(multiHostPerfPath, multiHostPerf, "tilexr_collective_profile_report.py");
+    CheckContains(multiHostPerfPath, multiHostPerf, "copy_rank_profile");
+    CheckContains(multiHostPerfPath, multiHostPerf, "test -d '${profile_dir}/rank${rank}'");
+    CheckContains(multiHostPerfPath, multiHostPerf, "remote_epoch_ns");
+    CheckContains(multiHostPerfPath, multiHostPerf, "TILEXR_MULTIHOST_REMOTE_REPO_DIR");
+    CheckContains(multiHostPerfPath, multiHostPerf, "rank0_host_ip");
+    CheckContains(multiHostPerfPath, multiHostPerf, "comm_id=\"${TILEXR_COMM_ID:-${rank0_host_ip}:10067}\"");
+    CheckContains(multiHostPerfPath, multiHostPerf, "TILEXR_PROFILE_CLOCK_OFFSET_NS");
+    CheckContains(multiHostPerfPath, multiHostPerf, "TILEXR_PROFILE_CLOCK_SYNC_REFERENCE");
+    CheckContains(multiHostPerfPath, multiHostPerf, "command -v rsync");
+    CheckContains(multiHostPerfPath, multiHostPerf, "tar -cf - .");
+    CheckContains(multiHostPerfPath, multiHostPerf, "tar -xf - -C");
+    CheckContains(multiHostPerfPath, multiHostPerf, "rank${rank}");
+    CheckContains(multiHostPerfPath, multiHostPerf, "host_label=\"${target#*@}\"");
+    CheckContains(multiHostPerfPath, multiHostPerf, "local repo_dir=\"$5\"");
+    CheckContains(multiHostPerfPath, multiHostPerf, "local clock_offset_ns=\"$6\"");
+    CheckContains(multiHostPerfPath, multiHostPerf,
+        "\"${rank_size}\" \"${rank}\" \"${device_id}\" \"${comm_id}\" \"${profile_dir}\" \"${bin_dir}\" \"${host_ip}\" \"${host_label}\" \"${repo_dir}\" \"${clock_offset_ns}\"");
+    CheckContains(multiHostPerfPath, multiHostPerf, "repo_dir=\"$9\"");
+    CheckContains(multiHostPerfPath, multiHostPerf, "clock_offset_ns=\"${10}\"");
+    CheckContains(multiHostPerfPath, multiHostPerf, "cd \"${repo_dir}\"");
+    CheckContains(multiHostPerfPath, multiHostPerf, "build_dir=\"$(cd \"${bin_dir}/../..\" && pwd)\"");
+    CheckContains(multiHostPerfPath, multiHostPerf, "${build_dir}/src/collectives");
+    CheckContains(multiHostPerfPath, multiHostPerf, "clock_offset_ns=0");
+    CheckContains(multiHostPerfPath, multiHostPerf, "reference_midpoint_ns");
+    CheckContains(multiHostPerfPath, multiHostPerf, "shift 6");
+    CheckContains(multiHostPerfPath, multiHostPerf, "shift 10");
+    CheckDoesNotContain(multiHostPerfPath, multiHostPerf, "cd /home/l00929943/TileXR");
+    CheckDoesNotContain(multiHostPerfPath, multiHostPerf, "comm_id=\"${TILEXR_COMM_ID:-141.62.24.62:10067}\"");
+    CheckContains(multiHostPerfPath, multiHostPerf, "set +u");
+    CheckContains(multiHostPerfPath, multiHostPerf, "ASCEND_PROCESS_LOG_PATH");
+    CheckContains(multiHostPerfPath, multiHostPerf, "plog/rank${rank}");
+    CheckContains(multiHostPerfPath, multiHostPerf,
+        "LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64/driver:${build_dir}/src/collectives:${build_dir}/src/comm");
 }
 
 void TestCMakeWiring()
@@ -291,9 +343,13 @@ void TestCMakeWiring()
     CheckContains(path, text, "add_executable(tilexr_collective_perf");
     CheckContains(path, text, "target_link_libraries(test_tilexr_collectives_correctness");
     CheckContains(path, text, "target_link_libraries(tilexr_collective_perf");
+    CheckContains(path, text, "TileXRAddAscendRpathLink");
+    CheckContains(path, text, "LINKER:-rpath-link,${ASCEND_HOME_PATH}/${ARCH}-linux/lib64");
+    CheckContains(path, text, "LINKER:-rpath-link,${ASCEND_DRIVER_PATH}/lib64/driver");
     CheckContains(path, text, "test_tilexr_collectives_tools_sources");
     CheckContains(path, text, "run_collectives_correctness.sh");
     CheckContains(path, text, "run_collective_perf.sh");
+    CheckContains(path, text, "run_collective_perf_multihost.sh");
     CheckContains(path, text, "find_package(Python3 COMPONENTS Interpreter)");
     CheckContains(path, text, "test_collective_profile_report");
     CheckContains(path, text, "tilexr_collective_profile_report.py");
@@ -324,14 +380,22 @@ void TestReadmeDocumentsManualRuns()
     CheckContains(path, text, "algbw(GB/s)");
     CheckContains(path, text, "busbw(GB/s)");
     CheckContains(path, text, "actual send bytes per rank");
-    CheckContains(path, text, "--op allgather|alltoall|allreduce|reducescatter|broadcast");
+    CheckContains(path, text, "--op allgather|alltoall|allreduce|reducescatter|broadcast|profile-probe");
     CheckContains(path, text,
         "Message-size semantics: allgather/allreduce/broadcast: count * dtype_size; alltoall/reducescatter: count * rank_size * dtype_size.");
     CheckContains(path, text, "Checked");
     CheckContains(path, text, "allreduce/reducescatter runs require `--datatype int32`");
     CheckContains(path, text, "rank_size - 1");
     CheckContains(path, text, "trace_index.json");
+    CheckContains(path, text, "perfetto_trace.json");
     CheckContains(path, text, "root-level report.html");
+    CheckContains(path, text, "rank-level summary");
+    CheckContains(path, text, "launch/rank/stage event names");
+    CheckContains(path, text, "Multi-Host Profiling");
+    CheckContains(path, text, "TILEXR_MULTIHOST_PEERS");
+    CheckContains(path, text, "--comm-mode socket");
+    CheckContains(path, text, "--op profile-probe");
+    CheckContains(path, text, "launch0/rank1@141.62.24.70/kernel_total");
     CheckContains(path, text, "tilexr_collective_profile_report.py");
     CheckContains(path, text, "zoomable chronological timeline");
     CheckContains(path, text, "warmup launches are not profiled");
@@ -339,6 +403,25 @@ void TestReadmeDocumentsManualRuns()
     CheckContains(path, text, "TILEXR_SKIP_IF_INSUFFICIENT_NPUS");
     CheckContains(path, text, "CTest");
     CheckContains(path, text, "manual");
+}
+
+void TestProfileReportHelperDocumentsSlowRankAndPerfettoEvents()
+{
+    const std::string path = "tests/collectives/tilexr_collective_profile_report.py";
+    CheckFileExists(path);
+    const auto text = ReadFile(path);
+    CheckContains(path, text, "rank_kernel");
+    CheckContains(path, text, "slowest_rank");
+    CheckContains(path, text, "Rank-Level Summary");
+    CheckContains(path, text, "PERFETTO_LAUNCH_WINDOW_TID");
+    CheckContains(path, text, "launch_window");
+    CheckContains(path, text, "launch_offset_us");
+    CheckContains(path, text, "normalized_ts");
+    CheckContains(path, text, "host_info.json");
+    CheckContains(path, text, "Clock Sync");
+    CheckContains(path, text, "clock_offset_ns");
+    CheckContains(path, text, "rank_label(index.get(\"hosts\", {}), bar[\"rank\"])");
+    CheckContains(path, text, "launch{bar['launch_id']}/{bar_rank_label}/{bar['stage']}");
 }
 
 } // namespace
@@ -350,6 +433,7 @@ int main()
     TestLauncherScripts();
     TestCMakeWiring();
     TestReadmeDocumentsManualRuns();
+    TestProfileReportHelperDocumentsSlowRankAndPerfettoEvents();
     TestInt32PatternHasNoKnownCollisions();
     if (g_failures != 0) {
         std::cerr << g_failures << " collectives tools source checks failed" << std::endl;
