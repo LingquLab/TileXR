@@ -60,7 +60,16 @@ void TestDataTypeSupport()
 
 void TestReduceOpSupport()
 {
+    using TileXRCollectives::Host::IsSupportedReductionDataType;
     using TileXRCollectives::Host::IsSupportedReduceOp;
+
+    CheckBool("INT8 reduction datatype supported", IsSupportedReductionDataType(TileXR::TILEXR_DATA_TYPE_INT8), true);
+    CheckBool("INT16 reduction datatype supported", IsSupportedReductionDataType(TileXR::TILEXR_DATA_TYPE_INT16), true);
+    CheckBool("INT32 reduction datatype supported", IsSupportedReductionDataType(TileXR::TILEXR_DATA_TYPE_INT32), true);
+    CheckBool("FP16 reduction datatype supported", IsSupportedReductionDataType(TileXR::TILEXR_DATA_TYPE_FP16), true);
+    CheckBool("FP32 reduction datatype supported", IsSupportedReductionDataType(TileXR::TILEXR_DATA_TYPE_FP32), true);
+    CheckBool("BFP16 reduction datatype supported", IsSupportedReductionDataType(TileXR::TILEXR_DATA_TYPE_BFP16), true);
+    CheckBool("UINT8 reduction datatype unsupported", IsSupportedReductionDataType(TileXR::TILEXR_DATA_TYPE_UINT8), false);
 
     CheckBool("SUM reduce op supported", IsSupportedReduceOp(TileXR::TILEXR_REDUCE_SUM), true);
     CheckBool("MAX reduce op unsupported", IsSupportedReduceOp(TileXR::TILEXR_REDUCE_MAX), false);

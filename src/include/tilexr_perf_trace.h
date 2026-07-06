@@ -16,6 +16,10 @@ constexpr uint32_t TILEXR_PERF_TRACE_MAGIC = 0x54585054u; // TXPT
 constexpr uint32_t TILEXR_PERF_TRACE_VERSION = 1u;
 constexpr uint32_t TILEXR_PERF_MAX_STAGE_NAME = 32u;
 constexpr uint32_t TILEXR_PERF_STAGE_COUNT = 7u;
+constexpr uint32_t TILEXR_PERF_TRACE_STATS_OFFSET = 128u;
+constexpr uint32_t TILEXR_PERF_STAGE_DESC_U32_FIELDS = 4u; // stageId, category, barrierPolicy, displayOrder
+constexpr uint32_t TILEXR_PERF_CORE_STAGE_STATS_U32_FIELDS = 4u; // rank, core, stageId, reserved
+constexpr uint32_t TILEXR_PERF_CORE_STAGE_STATS_U64_FIELDS = 10u; // counters, cycle bounds, aux slots
 
 enum class PerfChipClass : uint32_t {
     GENERIC = 0,
@@ -36,6 +40,8 @@ enum class PerfBarrierPolicy : uint32_t {
     BARRIERED = 2,
 };
 
+// Shared standalone-collectives profiling schema. These ids are common across
+// collective kernels so reports can compare the same stage names across ops.
 enum class PerfStageId : uint32_t {
     KERNEL_TOTAL = 0,
     CHUNK_TOTAL = 1,
@@ -51,8 +57,9 @@ struct TileXRPerfTraceHeader {
     uint32_t version = TILEXR_PERF_TRACE_VERSION;
     uint32_t headerSize = sizeof(TileXRPerfTraceHeader);
     // Stage descriptions are static schema metadata; this records their ABI size.
-    uint32_t stageDescSize = sizeof(uint32_t) * 4 + TILEXR_PERF_MAX_STAGE_NAME;
-    uint32_t coreStageStatsSize = sizeof(uint32_t) * 4 + sizeof(uint64_t) * 8;
+    uint32_t stageDescSize = sizeof(uint32_t) * TILEXR_PERF_STAGE_DESC_U32_FIELDS + TILEXR_PERF_MAX_STAGE_NAME;
+    uint32_t coreStageStatsSize = sizeof(uint32_t) * TILEXR_PERF_CORE_STAGE_STATS_U32_FIELDS +
+        sizeof(uint64_t) * TILEXR_PERF_CORE_STAGE_STATS_U64_FIELDS;
     uint32_t flags = 0;
     uint32_t rank = 0;
     uint32_t rankSize = 0;
@@ -89,6 +96,8 @@ struct TileXRPerfCoreStageStats {
     uint64_t lastEndCycle = 0;
     uint64_t aux0 = 0;
     uint64_t aux1 = 0;
+    uint64_t aux2 = 0;
+    uint64_t aux3 = 0;
 };
 
 TILEXR_PERF_TRACE_INLINE size_t PerfTraceStatsOffset(uint32_t rank, uint32_t core, uint32_t stage,

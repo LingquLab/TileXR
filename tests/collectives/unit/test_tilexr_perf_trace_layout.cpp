@@ -34,6 +34,7 @@ int main()
     CheckEq("trace version", TileXR::TILEXR_PERF_TRACE_VERSION, 1u);
     CheckEq("max stage name", TileXR::TILEXR_PERF_MAX_STAGE_NAME, 32u);
     CheckEq("stage count", TileXR::TILEXR_PERF_STAGE_COUNT, 7u);
+    CheckEq("stats offset", TileXR::TILEXR_PERF_TRACE_STATS_OFFSET, 128u);
     CheckEq("a5 divisor", TileXR::PerfTraceCycleDivisor(TileXR::PerfChipClass::A5), 1000u);
     CheckEq("generic divisor", TileXR::PerfTraceCycleDivisor(TileXR::PerfChipClass::GENERIC), 50u);
     CheckEq("cycles to us", TileXR::PerfTraceCyclesToUs(2500, 50), 50.0);
@@ -51,7 +52,9 @@ int main()
               std::is_trivially_copyable<TileXR::TileXRPerfCoreStageStats>::value);
     CheckEq("header sizeof", sizeof(TileXR::TileXRPerfTraceHeader), static_cast<size_t>(88));
     CheckEq("stage desc sizeof", sizeof(TileXR::TileXRPerfStageDesc), static_cast<size_t>(48));
-    CheckEq("core stage stats sizeof", sizeof(TileXR::TileXRPerfCoreStageStats), static_cast<size_t>(80));
+    CheckEq("core stage stats sizeof", sizeof(TileXR::TileXRPerfCoreStageStats), static_cast<size_t>(96));
+    CheckEq("stats offset alignment", TileXR::TILEXR_PERF_TRACE_STATS_OFFSET % 32u, 0u);
+    CheckEq("core stage stats alignment", sizeof(TileXR::TileXRPerfCoreStageStats) % 32u, static_cast<size_t>(0));
 
     CheckEq("header magic offset", offsetof(TileXR::TileXRPerfTraceHeader, magic), static_cast<size_t>(0));
     CheckEq("header version offset", offsetof(TileXR::TileXRPerfTraceHeader, version), static_cast<size_t>(4));
@@ -109,6 +112,10 @@ int main()
             static_cast<size_t>(64));
     CheckEq("core stage stats aux1 offset", offsetof(TileXR::TileXRPerfCoreStageStats, aux1),
             static_cast<size_t>(72));
+    CheckEq("core stage stats aux2 offset", offsetof(TileXR::TileXRPerfCoreStageStats, aux2),
+            static_cast<size_t>(80));
+    CheckEq("core stage stats aux3 offset", offsetof(TileXR::TileXRPerfCoreStageStats, aux3),
+            static_cast<size_t>(88));
 
     TileXR::TileXRPerfTraceHeader header {};
     CheckEq("default header magic", header.magic, TileXR::TILEXR_PERF_TRACE_MAGIC);

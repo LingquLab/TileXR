@@ -92,6 +92,8 @@ TileXR::TileXRPerfCoreStageStats MakeStat(uint32_t rank, uint32_t core, TileXR::
     stat.lastEndCycle = stat.firstStartCycle + sumCycles;
     stat.aux0 = 0x1000 + rank;
     stat.aux1 = 0x2000 + core;
+    stat.aux2 = 0x3000 + static_cast<uint32_t>(stage);
+    stat.aux3 = 0x4000 + count;
     return stat;
 }
 
@@ -126,6 +128,12 @@ void TestPerfReportSummariesAndFiles()
         header.maxCoreCount, header.stageCount);
     stats[peerOffset] = MakeStat(1, 1, TileXR::PerfStageId::PEER_IPC_TO_OUTPUT, 2, 4000, 2500);
 
+    const size_t staleOffset = TileXR::PerfTraceStatsOffset(
+        0, 1, static_cast<uint32_t>(TileXR::PerfStageId::KERNEL_TOTAL),
+        header.maxCoreCount, header.stageCount);
+    stats[staleOffset] = MakeStat(0, 1, TileXR::PerfStageId::KERNEL_TOTAL, 1, 9000, 9000);
+    stats[staleOffset].count = 0;
+
     const auto summaries = TileXRCollectives::Host::SummarizePerfTrace(header, stats);
     CHECK_TRUE(!summaries.empty());
     if (!summaries.empty()) {
@@ -155,13 +163,15 @@ void TestPerfReportSummariesAndFiles()
     CheckTextContains("trace.json", traceJson,
                       "\"min_cycles\": 1000, \"max_cycles\": 1000, \"first_start_cycle\": 100004");
     CheckTextContains("trace.json", traceJson,
-                      "\"last_end_cycle\": 101004, \"aux0\": 4096, \"aux1\": 8192, \"sum_us\": 20");
+                      "\"last_end_cycle\": 101004, \"aux0\": 4096, \"aux1\": 8192, \"aux2\": 12292, \"aux3\": 16385, \"sum_us\": 20");
     CheckTextContains("trace.json", traceJson,
                       "\"stage\": \"peer_ipc_to_output\", \"stage_id\": 5, \"count\": 2, \"raw_cycles\": 4000");
     CheckTextContains("trace.json", traceJson,
                       "\"min_cycles\": 2000, \"max_cycles\": 2500, \"first_start_cycle\": 101105");
     CheckTextContains("trace.json", traceJson,
-                      "\"last_end_cycle\": 105105, \"aux0\": 4097, \"aux1\": 8193, \"sum_us\": 80");
+                      "\"last_end_cycle\": 105105, \"aux0\": 4097, \"aux1\": 8193, \"aux2\": 12293, \"aux3\": 16386, \"sum_us\": 80");
+    CheckFileMissingOrDoesNotContain(options.outputDir + "/trace.json", "\"count\": 0");
+    CheckFileMissingOrDoesNotContain(options.outputDir + "/trace.json", "\"raw_cycles\": 9000");
     CheckContains(options.outputDir + "/summary.csv", "stage,rank,core");
     CheckContains(options.outputDir + "/analysis.md", "bottleneck");
     CheckContains(options.outputDir + "/report.html", "Bottleneck First");

@@ -132,6 +132,7 @@ void TestCollectivesHostOwnsCollectiveLaunchHelpers()
     const std::string utilsHeaderPath = "src/collectives/host/collective_utils.h";
     const auto utilsHeader = ReadFile(utilsHeaderPath);
     CheckContains(utilsHeaderPath, utilsHeader, "bool IsSupportedDataType(TileXR::TileXRDataType dataType);");
+    CheckContains(utilsHeaderPath, utilsHeader, "bool IsSupportedReductionDataType(TileXR::TileXRDataType dataType);");
     CheckContains(utilsHeaderPath, utilsHeader, "int64_t CountToBytes(int64_t count, TileXR::TileXRDataType dataType);");
     CheckContains(utilsHeaderPath, utilsHeader, "uint32_t GetAllGatherBlockNum(const TileXR::CommArgs &commArgs, int64_t dataSize);");
     CheckContains(utilsHeaderPath, utilsHeader, "uint32_t GetAllToAllBlockNum(const TileXR::CommArgs &commArgs, int64_t dataSize);");
@@ -236,6 +237,66 @@ void TestCollectivesBuildDefinesSeparateSharedLibrary()
     CheckDoesNotContain(path, text, "comm_args.h");
     CheckDoesNotContain(path, text, "${CMAKE_INSTALL_PREFIX}/lib");
     CheckDoesNotContain(path, text, "${CMAKE_INSTALL_PREFIX}/include");
+}
+
+void TestCollectivesKernelBuildSupportsAscend950Arch()
+{
+    const std::string path = "src/collectives/kernels/CMakeLists.txt";
+    const auto text = ReadFile(path);
+
+    CheckContains(path, text, "TILEXR_COLLECTIVES_SOC_TYPE");
+    CheckContains(path, text, "TILEXR_SOC_NAME");
+    CheckContains(path, text, "Ascend950");
+    CheckContains(path, text, "MATCHES \"^Ascend950\"");
+    CheckContains(path, text, "dav-c310-vec");
+    CheckContains(path, text, "dav-c220-vec");
+    CheckContains(path, text, "--cce-aicore-arch=${TILEXR_COLLECTIVES_AICORE_ARCH}");
+
+    const std::string collectivesPath = "src/collectives/CMakeLists.txt";
+    const auto collectivesText = ReadFile(collectivesPath);
+    CheckContains(collectivesPath, collectivesText, "TILEXR_COLLECTIVES_C310_ATOMIC_LIMITS");
+
+    const std::string utilsPath = "src/collectives/host/collective_utils.cpp";
+    const auto utilsText = ReadFile(utilsPath);
+    CheckContains(utilsPath, utilsText, "TILEXR_COLLECTIVES_C310_ATOMIC_LIMITS");
+    CheckContains(utilsPath, utilsText, "TILEXR_DATA_TYPE_INT64");
+
+    const std::string apiPath = "src/collectives/host/tilexr_collectives.cpp";
+    const auto apiText = ReadFile(apiPath);
+    CheckContains(apiPath, apiText, "IsSupportedReductionDataType(dataType)");
+}
+
+void TestCollectivesKernelSourcesAllowAscend950Macros()
+{
+    const std::string kernelTuPath = "src/collectives/kernels/tilexr_lccl_op.cpp";
+    const auto kernelTu = ReadFile(kernelTuPath);
+    CheckContains(kernelTuPath, kernelTu, "__DAV_C220_VEC__");
+    CheckContains(kernelTuPath, kernelTu, "__DAV_C310_VEC__");
+    CheckContains(kernelTuPath, kernelTu, "LCCL_TYPE_AIV_FUNC(LCCL_ALLGATHER_FUNC_AUTO_DEF)");
+
+    const std::string lcclOpPath = "src/collectives/kernels/lccl_op.h";
+    const auto lcclOp = ReadFile(lcclOpPath);
+    CheckContains(lcclOpPath, lcclOp, "__DAV_C220_VEC__");
+    CheckContains(lcclOpPath, lcclOp, "__DAV_C310_VEC__");
+    CheckContains(lcclOpPath, lcclOp, "TileXRAllGather_##type##suffix");
+
+    const std::string collectivesCcePath = "src/collectives/kernels/kernels/collectives.cce";
+    const auto collectivesCce = ReadFile(collectivesCcePath);
+    CheckContains(collectivesCcePath, collectivesCce, "__DAV_C220_VEC__");
+    CheckContains(collectivesCcePath, collectivesCce, "__DAV_C310_VEC__");
+    CheckContains(collectivesCcePath, collectivesCce, "#define __aicore__");
+    CheckContains(collectivesCcePath, collectivesCce, "#if defined(__DAV_C220_VEC__) || defined(__DAV_C310_VEC__)");
+
+    const std::string collectivesHeaderPath = "src/collectives/kernels/collectives.h";
+    const auto collectivesHeader = ReadFile(collectivesHeaderPath);
+    CheckContains(collectivesHeaderPath, collectivesHeader, "#if defined(__DAV_C220_VEC__) || defined(__DAV_C310_VEC__)");
+
+    const std::string dataCopyPath = "src/collectives/kernels/datacopy_gm2gm.h";
+    const auto dataCopy = ReadFile(dataCopyPath);
+    CheckContains(dataCopyPath, dataCopy, "#if defined(__DAV_C220_VEC__) || defined(__DAV_C310_VEC__)");
+    CheckContains(dataCopyPath, dataCopy, "TileXRAtomicTypeSupported");
+    CheckContains(dataCopyPath, dataCopy, "std::is_same_v<T, int32_t>");
+    CheckContains(dataCopyPath, dataCopy, "if constexpr (TileXRAtomicTypeSupported<T>::value)");
 }
 
 void TestRootBuildRegistersCollectivesTests()
@@ -359,6 +420,8 @@ int main()
     TestCommInternalDoesNotContainCollectiveRegistration();
     TestCommBuildInstallsPublicHeadersAndKeepsLinksPrivate();
     TestCollectivesBuildDefinesSeparateSharedLibrary();
+    TestCollectivesKernelBuildSupportsAscend950Arch();
+    TestCollectivesKernelSourcesAllowAscend950Macros();
     TestRootBuildRegistersCollectivesTests();
     TestCollectivesTestBuildSupportsInTreeAndInstallPrefixModes();
     TestCollectivesInstallSmokeUsesStandaloneInstallPrefixMode();

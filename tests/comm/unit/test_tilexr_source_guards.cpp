@@ -137,6 +137,10 @@ void TestSocketExchangeUsesDirectConnectionsOnly()
     CheckNotContains(headerPath, headerText, "FILE* pipe_");
     CheckNotContains(headerPath, headerText, "lockFileDescriptor_");
     CheckContains(cppPath, cppText, "return Connect();");
+    CheckContains(cppPath, cppText, "bool envProvided = false;");
+    CheckContains(cppPath, cppText, "if (!envProvided) {");
+    CheckNotContains(cppPath, cppText,
+                     "handle->addr.sin.sin_port = htons(TILEXR_DEFAULT_SOCK_PORT + dev + commDomain);");
 }
 
 void TestRuntimeEnvDoesNotPrependCannDevlib()
@@ -179,6 +183,16 @@ void TestCommBuildIncludesProfilingHeaders()
     CheckContains(commPath, commText, "${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc/profiling/");
 }
 
+void TestChipMapCoversObservedAscend950Variants()
+{
+    const std::string path = "src/comm/tilexr_internal.cpp";
+    const auto text = ReadFile(path);
+
+    CheckContains(path, text, "{\"Ascend950PR\", ChipName::CHIP_950}");
+    CheckContains(path, text, "{\"Ascend950PR_9589\", ChipName::CHIP_950}");
+    CheckContains(path, text, "{\"Ascend950PR_9599\", ChipName::CHIP_950}");
+}
+
 } // namespace
 
 int main()
@@ -191,6 +205,7 @@ int main()
     TestRuntimeEnvDoesNotPrependCannDevlib();
     TestRootCMakeRespectsAscendDriverOverride();
     TestCommBuildIncludesProfilingHeaders();
+    TestChipMapCoversObservedAscend950Variants();
 
     if (g_failures != 0) {
         std::cerr << g_failures << " TileXR source guard checks failed" << std::endl;

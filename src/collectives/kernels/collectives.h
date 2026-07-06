@@ -67,6 +67,7 @@ public:
         this->root = root;
         this->len = len;
         this->magic = magic;
+        this->perfTrace_ = perfTrace;
         this->localRank = reinterpret_cast<__gm__ CommArgs *>(commArgs)->localRank;
         this->localRankSize = reinterpret_cast<__gm__ CommArgs *>(commArgs)->localRankSize;
         this->xRankSize = localRankSize;
@@ -414,6 +415,7 @@ protected:
     GlobalTensor<int64_t> dfx;
     SyncCollectives sync;
     GM_ADDR dumpAddr_ = nullptr;
+    GM_ADDR perfTrace_ = nullptr;
 
     template <typename T>
     FORCE_INLINE_AICORE void SetAscendCAtomic(int op)
@@ -441,7 +443,7 @@ protected:
     {
         PipeBarrier<PIPE_ALL>();
         if (op != -1) {
-#ifdef __DAV_C220_VEC__
+#if defined(__DAV_C220_VEC__) || defined(__DAV_C310_VEC__)
             SetAtomicOpType<T>(op);
 #endif
         }

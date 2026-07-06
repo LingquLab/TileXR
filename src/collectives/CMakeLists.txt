@@ -34,6 +34,12 @@ set(TILEXR_COLLECTIVES_SOURCE_FILE
 
 add_library(tilexr-collectives SHARED ${TILEXR_COLLECTIVES_SOURCE_FILE})
 add_dependencies(tilexr-collectives tilexr_collectives_op)
+set_source_files_properties(${TILEXR_COLLECTIVES_KERNEL_EMBED_CPP}
+        PROPERTIES OBJECT_DEPENDS "${TILEXR_COLLECTIVES_OP}"
+)
+if(TILEXR_COLLECTIVES_AICORE_ARCH STREQUAL "dav-c310-vec")
+    target_compile_definitions(tilexr-collectives PUBLIC TILEXR_COLLECTIVES_C310_ATOMIC_LIMITS=1)
+endif()
 
 target_include_directories(tilexr-collectives
         PUBLIC
