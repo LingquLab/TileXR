@@ -45,6 +45,25 @@ const std::unordered_map<std::string, ChipName> CHIP_MAP = {
     {"Ascend950PR_9599", ChipName::CHIP_950PR}
 };
 
+const std::unordered_map<std::string, ChipName> CHIP_PREFIX_MAP = {
+    {"Ascend950DT_", ChipName::CHIP_950},
+    {"Ascend950PR_", ChipName::CHIP_950PR}
+};
+
+ChipName ResolveChipNameFromSocVersion(const std::string& chipName)
+{
+    auto it = CHIP_MAP.find(chipName);
+    if (it != CHIP_MAP.end()) {
+        return it->second;
+    }
+    for (const auto& item : CHIP_PREFIX_MAP) {
+        if (chipName.find(item.first) == 0) {
+            return item.second;
+        }
+    }
+    return ChipName::RESERVED;
+}
+
 /**
  * @brief 用于获取芯片名称
  */
@@ -65,12 +84,8 @@ ChipName GetChipName()
     string chipName(ver);
     TILEXR_LOG(DEBUG) << "rtGetSocVersion -- The result after converting ver to string is:" << chipName;
 
-    auto it = CHIP_MAP.find(chipName);
-    if (it != CHIP_MAP.end()) {
-        curChipName = it->second;
-    } else if (chipName.find("Ascend950PR_") == 0) {
-        curChipName = ChipName::CHIP_950PR;
-    } else {
+    curChipName = ResolveChipNameFromSocVersion(chipName);
+    if (curChipName == ChipName::RESERVED) {
         TILEXR_LOG(WARN) << "There is no commitment to the supported chip types yet," <<
                       " and it is not certain whether the functions will work properly.";
     }
