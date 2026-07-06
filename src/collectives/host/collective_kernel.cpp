@@ -11,6 +11,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <iostream>
 #include <mutex>
 #include <string>
 
@@ -57,6 +58,7 @@ const TileXR::TileXRType kRegisteredCollectiveTypes[] = {
     TileXR::TileXRType::ALL_REDUCE,
     TileXR::TileXRType::REDUCE_SCATTER,
     TileXR::TileXRType::BROADCAST,
+    TileXR::TileXRType::PROFILE_PROBE,
 };
 
 bool IsStandaloneCollectiveType(TileXR::TileXRType type)
@@ -65,11 +67,17 @@ bool IsStandaloneCollectiveType(TileXR::TileXRType type)
         type == TileXR::TileXRType::ALL2ALL ||
         type == TileXR::TileXRType::ALL_REDUCE ||
         type == TileXR::TileXRType::REDUCE_SCATTER ||
-        type == TileXR::TileXRType::BROADCAST;
+        type == TileXR::TileXRType::BROADCAST ||
+        type == TileXR::TileXRType::PROFILE_PROBE;
 }
 
 int8_t *GetFunSig(TileXR::TileXRType type, TileXR::TileXRDataType dataType)
 {
+    if (type == TileXR::TileXRType::PROFILE_PROBE) {
+        const uint64_t sig = (static_cast<uint64_t>(type) << FUNSIG_OFFSET_BITS << FUNSIG_OFFSET_BITS) +
+            FUNSIG_SKEW;
+        return reinterpret_cast<int8_t *>(sig);
+    }
     const uint64_t sig = (static_cast<uint64_t>(type) << FUNSIG_OFFSET_BITS << FUNSIG_OFFSET_BITS) +
         (static_cast<uint64_t>(dataType) << FUNSIG_OFFSET_BITS) + FUNSIG_SKEW;
     return reinterpret_cast<int8_t *>(sig);
@@ -77,6 +85,9 @@ int8_t *GetFunSig(TileXR::TileXRType type, TileXR::TileXRDataType dataType)
 
 std::string KernelName(TileXR::TileXRType type, const DataTypeRegistration &dataType)
 {
+    if (type == TileXR::TileXRType::PROFILE_PROBE) {
+        return TileXR::TILEXR_TYPE2NAME.at(type);
+    }
     if (type == TileXR::TileXRType::BROADCAST) {
         return TileXR::TILEXR_TYPE2NAME.at(type);
     }
@@ -102,16 +113,35 @@ int RegisterCollectivesKernelsLocked()
     void *binHandle = nullptr;
     rtError_t rtRet = rtDevBinaryRegister(&binary, &binHandle);
     if (rtRet != RT_ERROR_NONE) {
+        std::cerr << "TileXR collectives rtDevBinaryRegister failed, ret=" << rtRet
+                  << ", binarySize=" << TileXRCollectivesKernelBinarySize << std::endl;
         g_registrationStatus = TileXR::TILEXR_ERROR_MKIRT;
         return g_registrationStatus;
     }
 
     for (const auto type : kRegisteredCollectiveTypes) {
+        if (type == TileXR::TileXRType::PROFILE_PROBE) {
+            const std::string name = KernelName(type, kDataTypes[0]);
+            rtRet = rtFunctionRegister(binHandle, GetFunSig(type, TileXR::TILEXR_DATA_TYPE_INT8),
+                name.c_str(), name.c_str(), 0);
+            if (rtRet != RT_ERROR_NONE) {
+                std::cerr << "TileXR collectives rtFunctionRegister failed, ret=" << rtRet
+                          << ", kernel=" << name
+                          << ", type=" << static_cast<int>(type) << std::endl;
+                g_registrationStatus = TileXR::TILEXR_ERROR_MKIRT;
+                return g_registrationStatus;
+            }
+            continue;
+        }
         for (const auto &dataType : kDataTypes) {
             const std::string name = KernelName(type, dataType);
             rtRet = rtFunctionRegister(binHandle, GetFunSig(type, dataType.dataType),
                 name.c_str(), name.c_str(), 0);
             if (rtRet != RT_ERROR_NONE) {
+                std::cerr << "TileXR collectives rtFunctionRegister failed, ret=" << rtRet
+                          << ", kernel=" << name
+                          << ", type=" << static_cast<int>(type)
+                          << ", dataType=" << static_cast<int>(dataType.dataType) << std::endl;
                 g_registrationStatus = TileXR::TILEXR_ERROR_MKIRT;
                 return g_registrationStatus;
             }
@@ -181,6 +211,14 @@ int LaunchCollectiveKernel(TileXRCommPtr comm, TileXR::TileXRType type, const Ho
 
     const rtError_t ret = rtKernelLaunchWithFlagV2(GetFunSig(type, dataType), blockDim, &argsInfo, nullptr,
         static_cast<rtStream_t>(stream), 0, &cfgInfo);
+    if (ret != RT_ERROR_NONE) {
+        std::cerr << "TileXR collectives rtKernelLaunchWithFlagV2 failed, ret=" << ret
+                  << ", type=" << static_cast<int>(type)
+                  << ", dataType=" << static_cast<int>(dataType)
+                  << ", blockDim=" << blockDim
+                  << ", kernelCount=" << kernelCount
+                  << ", stream=" << stream << std::endl;
+    }
     return ret == RT_ERROR_NONE ? TileXR::TILEXR_SUCCESS : TileXR::TILEXR_ERROR_MKIRT;
 }
 

@@ -232,6 +232,13 @@ set(TILEXR_COLLECTIVES_TEST_LINK_DIRS
     ${ASCEND_DRIVER_PATH}/lib64/driver
 )
 
+function(TileXRAddAscendRpathLink target_name)
+    target_link_options(${target_name} PRIVATE
+        "LINKER:-rpath-link,${ASCEND_HOME_PATH}/${ARCH}-linux/lib64"
+        "LINKER:-rpath-link,${ASCEND_DRIVER_PATH}/lib64/driver"
+    )
+endfunction()
+
 target_link_libraries(test_tilexr_collectives_header_compile
     ${TILEXR_COLLECTIVES_TEST_TARGET}
 )
@@ -286,6 +293,21 @@ target_link_libraries(test_prepare_host_launch_context
     ${TILEXR_COLLECTIVES_TEST_TARGET}
 )
 
+foreach(_tilexr_collectives_link_target
+        test_tilexr_collectives_header_compile
+        test_tilexr_perf_trace_layout
+        test_collective_perf_report
+        test_collective_perf_session
+        test_tilexr_collectives_correctness
+        tilexr_collective_perf
+        test_tilexr_collectives_stub_behavior
+        test_tilexr_collectives_uninitialized_comm
+        test_collective_host_utils
+        test_tilexr_comm_next_magic
+        test_prepare_host_launch_context)
+    TileXRAddAscendRpathLink(${_tilexr_collectives_link_target})
+endforeach()
+
 add_test(NAME test_tilexr_collectives_api COMMAND test_tilexr_collectives_api)
 add_test(NAME test_tilexr_collectives_kernel_ownership COMMAND test_tilexr_collectives_kernel_ownership)
 add_test(NAME test_tilexr_collectives_tools_sources COMMAND test_tilexr_collectives_tools_sources)
@@ -332,6 +354,8 @@ install(TARGETS
 install(PROGRAMS
     run_collectives_correctness.sh
     run_collective_perf.sh
+    run_collective_perf_multihost.sh
+    run_collective_perf_multihost_suite.sh
     tilexr_collective_profile_report.py
     DESTINATION ${CMAKE_INSTALL_BINDIR}
 )

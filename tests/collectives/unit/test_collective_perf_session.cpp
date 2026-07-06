@@ -106,6 +106,19 @@ void TestCollectivePerfSessionLifecycle()
     CheckEq("write report succeeds", TileXRCollectivePerfWriteReport(session), TileXR::TILEXR_SUCCESS);
     CheckContains("report.html", ReadFile(outputDir + "/report.html"), "Bottleneck First");
     CheckContains("trace.json", ReadFile(outputDir + "/trace.json"), "tilexr_perf_trace_report.v1");
+    impl->header.rankSize = 2;
+    impl->header.maxCoreCount = 4;
+    impl->header.blockDim = 4;
+    impl->header.opType = static_cast<uint32_t>(TileXR::TileXRType::ALL_GATHER);
+    impl->header.messageBytes = 4096;
+    CheckEq("write incomplete report succeeds",
+            TileXRCollectivePerfWriteIncompleteReport(session, "aclrtSynchronizeEvent stop failed ret=507035"),
+            TileXR::TILEXR_SUCCESS);
+    CheckContains("incomplete trace.json", ReadFile(outputDir + "/trace.json"), "\"incomplete\": true");
+    CheckContains("incomplete trace reason", ReadFile(outputDir + "/trace.json"),
+                  "aclrtSynchronizeEvent stop failed ret=507035");
+    CheckContains("incomplete analysis", ReadFile(outputDir + "/analysis.md"), "Incomplete trace");
+    CheckContains("incomplete report", ReadFile(outputDir + "/report.html"), "Incomplete trace");
     CheckEq("set active again succeeds", TileXRCollectivePerfSetActiveSession(session), TileXR::TILEXR_SUCCESS);
     CheckEq("destroy succeeds", TileXRCollectivePerfSessionDestroy(session), TileXR::TILEXR_SUCCESS);
     CheckTrue("destroy clears active session", TileXRCollectives::Host::GetActivePerfTraceSession() == nullptr);

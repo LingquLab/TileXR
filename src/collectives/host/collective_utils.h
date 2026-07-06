@@ -20,6 +20,8 @@ namespace Host {
 
 bool IsSupportedDataType(TileXR::TileXRDataType dataType);
 
+bool IsSupportedReductionDataType(TileXR::TileXRDataType dataType);
+
 bool IsSupportedReduceOp(TileXR::TileXRReduceOp reduceOp);
 
 int64_t CountToBytes(int64_t count, TileXR::TileXRDataType dataType);
@@ -33,6 +35,8 @@ uint32_t GetAllReduceBlockNum(const TileXR::CommArgs &commArgs, int64_t dataSize
 uint32_t GetReduceScatterBlockNum(const TileXR::CommArgs &commArgs, int64_t dataSize);
 
 uint32_t GetBroadcastBlockNum(const TileXR::CommArgs &commArgs, int64_t dataSize);
+
+uint32_t GetProfileProbeBlockNum(const TileXR::CommArgs &commArgs, int64_t dataSize);
 
 } // namespace Host
 } // namespace TileXRCollectives

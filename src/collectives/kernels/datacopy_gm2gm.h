@@ -22,24 +22,37 @@ constexpr int32_t TILE_NUM = 2;
 constexpr int32_t BLOCK_SIZE = UB_SINGLE_DMA_SIZE_MAX / TILE_NUM / BUFFER_NUM;
 
 template <typename T>
+struct TileXRAtomicTypeSupported {
+#if defined(__DAV_C310_VEC__)
+    static constexpr bool value = std::is_same_v<T, float> || std::is_same_v<T, float16_t> ||
+        std::is_same_v<T, bfloat16_t> || std::is_same_v<T, int32_t> ||
+        std::is_same_v<T, int16_t> || std::is_same_v<T, int8_t>;
+#else
+    static constexpr bool value = true;
+#endif
+};
+
+template <typename T>
 FORCE_INLINE_AICORE void SetAtomicOpType(int op)
 {
-    switch (op) {
-        case ADD:
-            AscendC::SetAtomicAdd<T>();
-            break;
+    if constexpr (TileXRAtomicTypeSupported<T>::value) {
+        switch (op) {
+            case ADD:
+                AscendC::SetAtomicAdd<T>();
+                break;
 
-        case MUL:
-            break;
-        case MAX:
-            AscendC::SetAtomicMax<T>();
-            break;
-        case MIN:
-            AscendC::SetAtomicMin<T>();
-            break;
-        default:
-            AscendC::SetAtomicNone();
-            ;
+            case MUL:
+                break;
+            case MAX:
+                AscendC::SetAtomicMax<T>();
+                break;
+            case MIN:
+                AscendC::SetAtomicMin<T>();
+                break;
+            default:
+                AscendC::SetAtomicNone();
+                ;
+        }
     }
 }
 
@@ -222,7 +235,7 @@ private:
     {
         PipeBarrier<PIPE_ALL>();
         if (op != -1) {
-#ifdef __DAV_C220_VEC__
+#if defined(__DAV_C220_VEC__) || defined(__DAV_C310_VEC__)
             SetAtomicOpType<T>(op);
 #endif
         }

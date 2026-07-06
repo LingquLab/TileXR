@@ -247,6 +247,10 @@ void TestSocketExchangeUsesDirectConnectionsOnly()
     CheckNotContains(headerPath, headerText, "FILE* pipe_");
     CheckNotContains(headerPath, headerText, "lockFileDescriptor_");
     CheckContains(cppPath, cppText, "return Connect();");
+    CheckContains(cppPath, cppText, "bool envProvided = false;");
+    CheckContains(cppPath, cppText, "if (!envProvided) {");
+    CheckNotContains(cppPath, cppText,
+                     "handle->addr.sin.sin_port = htons(TILEXR_DEFAULT_SOCK_PORT + dev + commDomain);");
 }
 
 void TestRuntimeEnvDoesNotPrependCannDevlib()
@@ -296,6 +300,8 @@ void TestChipNameResolverRecognizesAscend950PrVariants()
 
     CheckContains(path, text, "ChipName ResolveChipNameFromSocVersion");
     CheckContains(path, text, "{\"Ascend950PR\", ChipName::CHIP_950PR}");
+    CheckContains(path, text, "{\"Ascend950PR_9589\", ChipName::CHIP_950PR}");
+    CheckContains(path, text, "{\"Ascend950PR_9599\", ChipName::CHIP_950PR}");
     CheckContains(path, text, "{\"Ascend950PR_\", ChipName::CHIP_950PR}");
     CheckContains(path, text, "{\"Ascend950DT_\", ChipName::CHIP_950}");
     CheckContains(path, text, "ResolveChipNameFromSocVersion(chipName)");
@@ -412,7 +418,7 @@ void TestCommDirectCcuInstallAttemptDoesNotSubmit()
     CheckContains(commSourcePath, commSourceText, "int TileXRComm::InitDirectCcuRuntime");
     CheckContains(commSourcePath, commSourceText, "int TileXRComm::PrepareDirectCcuInstallAttempt");
     CheckContains(commSourcePath, commSourceText, "ccuDirectRuntime_->CreateDriverAdapter");
-    CheckContains(commSourcePath, commSourceText, "TileXRCcuMakeAclDeviceMemoryOps()");
+    CheckContains(commSourcePath, commSourceText, "TileXRCcuMakeRepositoryDeviceMemoryOps(next.repositoryMemoryAllocMode)");
     CheckContains(commSourcePath, commSourceText, "next.lowerLayerPlan = nullptr");
     CheckContains(
         commSourcePath,

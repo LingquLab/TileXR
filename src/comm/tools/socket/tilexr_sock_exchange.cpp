@@ -427,6 +427,7 @@ int BootstrapGetUniqueId(TileXRBootstrapHandle *handle, int commDomain)
     }
     int ret = 0; // EOK
 
+    bool envProvided = false;
     const char* env = std::getenv("TILEXR_COMM_ID");
     if (env) {
         TILEXR_LOG(INFO) << "TILEXR_COMM_ID set by environment to " << env;
@@ -434,6 +435,7 @@ int BootstrapGetUniqueId(TileXRBootstrapHandle *handle, int commDomain)
             TILEXR_LOG(WARN) << ("Invalid TILEXR_COMM_ID, please use format: <ipv4>:<port>");
             return TILEXR_INVALID_VALUE;
         }
+        envProvided = true;
     } else {
         int bootRet = BootstrapGetServerIp(handle->addr);
         if (bootRet != TILEXR_SUCCESS) {
@@ -441,13 +443,17 @@ int BootstrapGetUniqueId(TileXRBootstrapHandle *handle, int commDomain)
             return TILEXR_ERROR_INTERNAL;
         }
     }
-    int dev;
-    int aclRet = aclrtGetDevice(&dev);
-    if (aclRet != ACL_SUCCESS) {
-        TILEXR_LOG(ERROR) << "ERROR: GetDevice.";
-        return TILEXR_ERROR_INTERNAL;
+    uint16_t port = ntohs(handle->addr.sin.sin_port);
+    if (!envProvided) {
+        int dev;
+        int aclRet = aclrtGetDevice(&dev);
+        if (aclRet != ACL_SUCCESS) {
+            TILEXR_LOG(ERROR) << "ERROR: GetDevice.";
+            return TILEXR_ERROR_INTERNAL;
+        }
+        port = TILEXR_DEFAULT_SOCK_PORT + dev;
     }
-    handle->addr.sin.sin_port = htons(TILEXR_DEFAULT_SOCK_PORT + dev + commDomain);
+    handle->addr.sin.sin_port = htons(port + commDomain);
     handle->magic = TILEXR_MAGIC;
     return TILEXR_SUCCESS;
 }

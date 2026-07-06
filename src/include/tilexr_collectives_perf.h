@@ -20,6 +20,7 @@ int TileXRCollectivePerfSessionCreate(const TileXRCollectivePerfConfig *config,
 int TileXRCollectivePerfSessionDestroy(TileXRCollectivePerfSession session);
 int TileXRCollectivePerfSetActiveSession(TileXRCollectivePerfSession session);
 int TileXRCollectivePerfWriteReport(TileXRCollectivePerfSession session);
+int TileXRCollectivePerfWriteIncompleteReport(TileXRCollectivePerfSession session, const char *reason);
 
 #ifdef __cplusplus
 }

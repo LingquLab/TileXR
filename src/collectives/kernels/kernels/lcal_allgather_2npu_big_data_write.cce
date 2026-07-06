@@ -111,8 +111,6 @@ inline __aicore__ void TileXRAllGather2npuBigDataWrite(ALLREDUCE_ARGS_FUN_16P(T)
 {
     const uint32_t perfCore = static_cast<uint32_t>(GetBlockIdx());
     const uint32_t perfRank = static_cast<uint32_t>(rank);
-    auto kernelTotal = TileXR::TileXRPerfStageBegin(
-        perfTrace, TileXR::PerfStageId::KERNEL_TOTAL, TileXR::PerfBarrierPolicy::NO_BARRIER);
     DumpLcclLogInfo(dumpAddr, LogId::INIT, Op::COPYONLY);
     magic *= 1024;
     const int64_t dataOffsetNum = GetTileXRBlockNum() * 2 * MEM_DMA_UNIT_INT_NUM;
@@ -167,7 +165,4 @@ inline __aicore__ void TileXRAllGather2npuBigDataWrite(ALLREDUCE_ARGS_FUN_16P(T)
             chunkTotal, TileXR::PerfBarrierPolicy::NO_BARRIER);
     }
     DumpLcclLogInfo(dumpAddr, LogId::PROCESS, Op::COPYONLY);
-    TileXR::TileXRPerfStageEnd(
-        perfTrace, perfRank, perfCore, TileXR::PerfStageId::KERNEL_TOTAL,
-        kernelTotal, TileXR::PerfBarrierPolicy::NO_BARRIER);
 }

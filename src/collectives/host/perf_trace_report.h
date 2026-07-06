@@ -25,6 +25,8 @@ struct PerfStageSummary {
 struct PerfReportOptions {
     std::string outputDir;
     bool emitAiPrompt = false;
+    bool incomplete = false;
+    std::string incompleteReason;
 };
 
 const char *PerfStageName(uint32_t stageId);

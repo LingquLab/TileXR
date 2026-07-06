@@ -6,8 +6,22 @@
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 enable_language(CCE)
 
-set(TILEXR_COLLECTIVES_1OP_BIN_SIZE 5242880 CACHE STRING "Padded size for TileXR collectives CCE binary")
+set(TILEXR_COLLECTIVES_1OP_BIN_SIZE 10485760 CACHE STRING "Padded size for TileXR collectives CCE binary")
 option(TILEXR_COLLECTIVES_ENABLE_PROFILING "Enable TileXR collectives kernel profiling helpers" OFF)
+set(_tilexr_collectives_default_soc_type "$ENV{TILEXR_COLLECTIVES_SOC_TYPE}")
+if(NOT _tilexr_collectives_default_soc_type)
+    set(_tilexr_collectives_default_soc_type "$ENV{TILEXR_SOC_NAME}")
+endif()
+set(TILEXR_COLLECTIVES_SOC_TYPE "" CACHE STRING "SOC type used for TileXR collectives CCE kernels")
+if(NOT TILEXR_COLLECTIVES_SOC_TYPE AND _tilexr_collectives_default_soc_type)
+    set(TILEXR_COLLECTIVES_SOC_TYPE "${_tilexr_collectives_default_soc_type}" CACHE STRING
+        "SOC type used for TileXR collectives CCE kernels" FORCE)
+endif()
+
+file(GLOB_RECURSE TILEXR_COLLECTIVES_KERNEL_DEPENDS CONFIGURE_DEPENDS
+        "${CMAKE_CURRENT_SOURCE_DIR}/*.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/kernels/*.cce"
+)
 
 set(CCE_COMPILE_OPTION
         -O2
@@ -21,8 +35,15 @@ set(CCE_COMPILE_OPTION
         "SHELL:-mllvm --cce-aicore-jump-expand=true"
 )
 
-set(AIV_ARCH dav-c220-vec)
+if(TILEXR_COLLECTIVES_SOC_TYPE MATCHES "^Ascend950")
+    set(TILEXR_COLLECTIVES_AICORE_ARCH dav-c310-vec)
+else()
+    set(TILEXR_COLLECTIVES_AICORE_ARCH dav-c220-vec)
+endif()
 set_source_files_properties(tilexr_lccl_op.cpp PROPERTIES LANGUAGE CCE)
+set_source_files_properties(tilexr_lccl_op.cpp PROPERTIES
+        OBJECT_DEPENDS "${TILEXR_COLLECTIVES_KERNEL_DEPENDS}"
+)
 
 include_directories(
         ${CMAKE_CURRENT_SOURCE_DIR}
@@ -46,7 +67,7 @@ add_library(tilexr_collectives_op_tmp OBJECT
 
 target_compile_options(tilexr_collectives_op_tmp PRIVATE
         ${CCE_COMPILE_OPTION}
-        --cce-aicore-arch=${AIV_ARCH}
+        --cce-aicore-arch=${TILEXR_COLLECTIVES_AICORE_ARCH}
 )
 
 if(TILEXR_COLLECTIVES_ENABLE_PROFILING)
@@ -67,3 +88,4 @@ add_custom_command(
 add_custom_target(tilexr_collectives_op DEPENDS "${TILEXR_COLLECTIVES_OP}")
 set(TILEXR_COLLECTIVES_OP "${TILEXR_COLLECTIVES_OP}" PARENT_SCOPE)
 set(TILEXR_COLLECTIVES_1OP_BIN_SIZE "${TILEXR_COLLECTIVES_1OP_BIN_SIZE}" PARENT_SCOPE)
+set(TILEXR_COLLECTIVES_AICORE_ARCH "${TILEXR_COLLECTIVES_AICORE_ARCH}" PARENT_SCOPE)

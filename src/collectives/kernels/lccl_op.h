@@ -10,7 +10,7 @@
 #ifndef TILEXR_LCCL_OP_H
 #define TILEXR_LCCL_OP_H
 
-#if defined(__DAV_C220_VEC__) || defined(__DAV_C220_CUBE__)
+#if defined(__DAV_C220_VEC__) || defined(__DAV_C220_CUBE__) || defined(__DAV_C310_VEC__)
 
 #include "op_def.h"
 #include "allgather.h"
@@ -49,8 +49,27 @@
 #include "kernels/lcal_broadcast_write.cce"
 #include "kernels/lcal_broadcast_big_data.cce"
 #include "kernels/lcal_all2all_transpose.cce"
+#include "kernels/lcal_profile_probe.cce"
 
 extern "C" __global__ __aicore__ __attribute__((section("Attr_Section_TileXR"))) void TileXRDescriptor() {}
+
+struct TileXRCoarsePerfToken {
+    TileXR::TileXRPerfStageToken kernelTotal;
+    uint32_t perfRank = 0;
+    uint32_t perfCore = 0;
+};
+
+#define TILEXR_COARSE_PERF_BEGIN(tokenName) \
+    TileXRCoarsePerfToken tokenName {}; \
+    tokenName.perfRank = static_cast<uint32_t>(rank); \
+    tokenName.perfCore = static_cast<uint32_t>(GetBlockIdx()); \
+    tokenName.kernelTotal = TileXR::TileXRPerfStageBegin( \
+        perfTrace, TileXR::PerfStageId::KERNEL_TOTAL, TileXR::PerfBarrierPolicy::NO_BARRIER)
+
+#define TILEXR_COARSE_PERF_END(tokenName) \
+    TileXR::TileXRPerfStageEnd( \
+        perfTrace, tokenName.perfRank, tokenName.perfCore, TileXR::PerfStageId::KERNEL_TOTAL, \
+        tokenName.kernelTotal, TileXR::PerfBarrierPolicy::NO_BARRIER)
 
 #define CLASS_OP_QUANT_LAUNCH(name, outputType, inputType) \
 do { \
@@ -64,6 +83,7 @@ extern "C" __global__ __aicore__ void TileXRBroadcast##suffix(KERNELS_ARGS_FUN()
 { \
     if ASCEND_IS_AIV { \
     GET_COMM_ARGS; \
+    TILEXR_COARSE_PERF_BEGIN(coarsePerf); \
     __gm__ char * shareAddrs[TILEXR_MAX_RANK_SIZE]; \
     GET_IPC_MEM_ARGS(char); \
     if ((extraFlag & ExtraFlag::TOPO_PCIE) != 0) { \
@@ -71,6 +91,16 @@ extern "C" __global__ __aicore__ void TileXRBroadcast##suffix(KERNELS_ARGS_FUN()
     } else { \
         TileXRBroadcastBigData(ALLREDUCE_ARGS_CALL(char)); \
     } \
+    TILEXR_COARSE_PERF_END(coarsePerf); \
+    } \
+}
+
+#define LCCL_PROFILE_PROBE_FUNC_AUTO_DEF() \
+extern "C" __global__ __aicore__ void TileXRProfileProbe(KERNELS_ARGS_FUN()) \
+{ \
+    if ASCEND_IS_AIV { \
+        GET_COMM_ARGS; \
+        TileXRProfileProbeKernel(KERNELS_ARGS_CALL(), rank, rankSize, extraFlag); \
     } \
 }
 
@@ -78,6 +108,7 @@ extern "C" __global__ __aicore__ void TileXRBroadcast##suffix(KERNELS_ARGS_FUN()
 extern "C" __global__ __aicore__ void TileXRAllGather_##type##suffix(KERNELS_ARGS_FUN()) { \
     if ASCEND_IS_AIV { \
     GET_COMM_ARGS; \
+    TILEXR_COARSE_PERF_BEGIN(coarsePerf); \
     constexpr int32_t quickOneshotRankSize = 2; \
     constexpr int32_t cceSmallDataSize = 2 * 1024 * 1024; \
     constexpr int32_t smallRankSize = 8; \
@@ -108,6 +139,7 @@ extern "C" __global__ __aicore__ void TileXRAllGather_##type##suffix(KERNELS_ARG
             TileXRAllGatherBigData<type>(ALLREDUCE_ARGS_CALL_16P(type)); \
         } \
     } \
+    TILEXR_COARSE_PERF_END(coarsePerf); \
     } \
 }
 
@@ -115,6 +147,7 @@ extern "C" __global__ __aicore__ void TileXRAllGather_##type##suffix(KERNELS_ARG
 extern "C" __global__ __aicore__ void TileXRAllReduce_##type##suffix(KERNELS_ARGS_FUN()) { \
     if ASCEND_IS_AIV { \
     GET_COMM_ARGS; \
+    TILEXR_COARSE_PERF_BEGIN(coarsePerf); \
     constexpr int32_t quickOneshotRankSize = 2; \
     constexpr int32_t threeStepNum = 3; \
     constexpr int32_t smallRankSize = 8; \
@@ -188,6 +221,7 @@ extern "C" __global__ __aicore__ void TileXRAllReduce_##type##suffix(KERNELS_ARG
             TileXRAllReduceBigData<type>(ALLREDUCE_ARGS_CALL_16P(type)); \
         } \
     } \
+    TILEXR_COARSE_PERF_END(coarsePerf); \
     } \
 }
 
@@ -195,6 +229,7 @@ extern "C" __global__ __aicore__ void TileXRAllReduce_##type##suffix(KERNELS_ARG
 extern "C" __global__ __aicore__ void TileXRAll2All_##type##suffix(KERNELS_ARGS_FUN()) { \
     if ASCEND_IS_AIV { \
     GET_COMM_ARGS; \
+    TILEXR_COARSE_PERF_BEGIN(coarsePerf); \
     __gm__ type * shareAddrs[TILEXR_MAX_RANK_SIZE]; \
     GET_IPC_MEM_ARGS(type); \
     constexpr int32_t smallRankSize = 8; \
@@ -208,6 +243,7 @@ extern "C" __global__ __aicore__ void TileXRAll2All_##type##suffix(KERNELS_ARGS_
             CLASS_OP_LAUNCH(All2AllHierarchy, type); \
         } \
     } \
+    TILEXR_COARSE_PERF_END(coarsePerf); \
     } \
 }
 
@@ -215,6 +251,7 @@ extern "C" __global__ __aicore__ void TileXRAll2All_##type##suffix(KERNELS_ARGS_
 extern "C" __global__ __aicore__ void TileXRReduceScatter_##type##suffix(KERNELS_ARGS_FUN()) { \
     if ASCEND_IS_AIV { \
     GET_COMM_ARGS; \
+    TILEXR_COARSE_PERF_BEGIN(coarsePerf); \
     constexpr int32_t quickOneshotRankSize = 2; \
     constexpr int32_t cceSmallDataSize = 2 * 1024 * 1024; \
     constexpr int32_t a3BigDataSize = 32 * 1024 * 1024; \
@@ -245,6 +282,7 @@ extern "C" __global__ __aicore__ void TileXRReduceScatter_##type##suffix(KERNELS
             TileXRReduceScatterBigData<type>(ALLREDUCE_ARGS_CALL_16P(type)); \
         } \
     } \
+    TILEXR_COARSE_PERF_END(coarsePerf); \
     } \
 }
 
