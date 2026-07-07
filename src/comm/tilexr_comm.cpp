@@ -175,6 +175,7 @@ int TileXRComm::ApplyUDMACommArgsState(const TileXRUDMACommArgsState &state)
         commArgs_.extraFlag = oldExtraFlag;
         commArgs_.udmaInfoPtr = oldInfoPtr;
         commArgs_.udmaRegistryPtr = oldRegistryPtr;
+        TILEXR_LOG(ERROR) << "TileXR UDMA update comm args failed: " << ret;
         return ret;
     }
     return TILEXR_SUCCESS;
@@ -183,6 +184,7 @@ int TileXRComm::ApplyUDMACommArgsState(const TileXRUDMACommArgsState &state)
 int TileXRComm::ApplyUDMACommArgsStateCallback(const TileXRUDMACommArgsState &state, void *userData)
 {
     if (userData == nullptr) {
+        TILEXR_LOG(ERROR) << "ApplyUDMACommArgsStateCallback missing user data";
         return TILEXR_ERROR_PARA_CHECK_FAIL;
     }
     return static_cast<TileXRComm *>(userData)->ApplyUDMACommArgsState(state);
@@ -330,7 +332,7 @@ int TileXRComm::RegisterUDMAMemory(GM_ADDR localPtr, size_t bytes, TileXRUDMAMem
         return TILEXR_ERROR_PARA_CHECK_FAIL;
     }
     if (udmaContext_ == nullptr) {
-        TILEXR_LOG(WARN) << "TileXRUDMARegister called while UDMA is unavailable";
+        TILEXR_LOG(ERROR) << "TileXRUDMARegister called while UDMA is unavailable";
         return TILEXR_ERROR_NOT_FOUND;
     }
     return udmaContext_->RegisterMemory(localPtr, bytes, handle);

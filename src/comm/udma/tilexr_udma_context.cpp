@@ -124,11 +124,11 @@ int TileXRUDMAContext::RegisterMemory(GM_ADDR localPtr, size_t bytes, TileXRUDMA
         return TILEXR_ERROR_PARA_CHECK_FAIL;
     }
     if (!IsAvailable()) {
-        TILEXR_LOG(WARN) << "TileXRUDMARegister called while UDMA is unavailable";
+        TILEXR_LOG(ERROR) << "TileXRUDMARegister called while UDMA is unavailable";
         return TILEXR_ERROR_NOT_FOUND;
     }
     if (options_.threadMode) {
-        TILEXR_LOG(WARN) << "TileXRUDMARegister is not supported in InitThread mode";
+        TILEXR_LOG(ERROR) << "TileXRUDMARegister is not supported in InitThread mode";
         return TILEXR_ERROR_INTERNAL;
     }
     if (options_.exchange == nullptr) {
@@ -157,11 +157,7 @@ int TileXRUDMAContext::RegisterMemory(GM_ADDR localPtr, size_t bytes, TileXRUDMA
     ret = options_.exchange->AllGather(&localRegion, 1, allRegions.data());
     if (ret != TILEXR_SUCCESS) {
         TILEXR_LOG(ERROR) << "TileXRUDMARegister allgather failed: " << ret;
-        if (previousRegisteredPtr != nullptr) {
-            (void)RestoreTransportRegistration(previousRegisteredPtr, previousRegisteredBytes);
-        } else {
-            (void)transport_->UnregisterMemory(localPtr);
-        }
+        (void)RollbackTransportRegistration(localPtr, previousRegisteredPtr, previousRegisteredBytes);
         return ret;
     }
 
@@ -171,11 +167,7 @@ int TileXRUDMAContext::RegisterMemory(GM_ADDR localPtr, size_t bytes, TileXRUDMA
     for (int i = 0; i < options_.rankSize; ++i) {
         if (allRegions[i].base == nullptr || allRegions[i].bytes == 0) {
             TILEXR_LOG(ERROR) << "TileXRUDMARegister received invalid region from rank " << i;
-            if (previousRegisteredPtr != nullptr) {
-                (void)RestoreTransportRegistration(previousRegisteredPtr, previousRegisteredBytes);
-            } else {
-                (void)transport_->UnregisterMemory(localPtr);
-            }
+            (void)RollbackTransportRegistration(localPtr, previousRegisteredPtr, previousRegisteredBytes);
             return TILEXR_ERROR_PARA_CHECK_FAIL;
         }
         nextRegistry.regions[i] = allRegions[i];
@@ -185,11 +177,7 @@ int TileXRUDMAContext::RegisterMemory(GM_ADDR localPtr, size_t bytes, TileXRUDMA
     ret = aclrtMalloc(reinterpret_cast<void**>(&nextRegistryDev), sizeof(nextRegistry), ACL_MEM_MALLOC_HUGE_FIRST);
     if (ret != ACL_SUCCESS) {
         TILEXR_LOG(ERROR) << "aclrtMalloc UDMA registry failed: " << ret;
-        if (previousRegisteredPtr != nullptr) {
-            (void)RestoreTransportRegistration(previousRegisteredPtr, previousRegisteredBytes);
-        } else {
-            (void)transport_->UnregisterMemory(localPtr);
-        }
+        (void)RollbackTransportRegistration(localPtr, previousRegisteredPtr, previousRegisteredBytes);
         return TILEXR_ERROR_INTERNAL;
     }
 
@@ -198,11 +186,7 @@ int TileXRUDMAContext::RegisterMemory(GM_ADDR localPtr, size_t bytes, TileXRUDMA
     if (ret != ACL_SUCCESS) {
         TILEXR_LOG(ERROR) << "aclrtMemcpy UDMA registry failed: " << ret;
         FreeDeviceRegistry(nextRegistryDev);
-        if (previousRegisteredPtr != nullptr) {
-            (void)RestoreTransportRegistration(previousRegisteredPtr, previousRegisteredBytes);
-        } else {
-            (void)transport_->UnregisterMemory(localPtr);
-        }
+        (void)RollbackTransportRegistration(localPtr, previousRegisteredPtr, previousRegisteredBytes);
         return TILEXR_ERROR_INTERNAL;
     }
 
@@ -213,11 +197,7 @@ int TileXRUDMAContext::RegisterMemory(GM_ADDR localPtr, size_t bytes, TileXRUDMA
     ret = ApplyCommArgsState(nextState);
     if (ret != TILEXR_SUCCESS) {
         FreeDeviceRegistry(nextRegistryDev);
-        if (previousRegisteredPtr != nullptr) {
-            (void)RestoreTransportRegistration(previousRegisteredPtr, previousRegisteredBytes);
-        } else {
-            (void)transport_->UnregisterMemory(localPtr);
-        }
+        (void)RollbackTransportRegistration(localPtr, previousRegisteredPtr, previousRegisteredBytes);
         return ret;
     }
 
@@ -245,13 +225,14 @@ int TileXRUDMAContext::UnregisterMemory(TileXRUDMAMemHandle handle)
     nextState.registryDev = nullptr;
     int ret = ApplyCommArgsState(nextState);
     if (ret != TILEXR_SUCCESS) {
+        TILEXR_LOG(ERROR) << "TileXRUDMAUnregister failed to clear comm args: " << ret;
         return ret;
     }
 
     if (registeredPtr_ != nullptr && transport_ != nullptr) {
         ret = transport_->UnregisterMemory(registeredPtr_);
         if (ret != TILEXR_SUCCESS) {
-            TILEXR_LOG(WARN) << "TileXR UDMA memory unregistration failed: " << ret;
+            TILEXR_LOG(ERROR) << "TileXR UDMA memory unregistration failed: " << ret;
         }
     }
     registeredPtr_ = nullptr;
@@ -278,14 +259,32 @@ int TileXRUDMAContext::ApplyCommArgsState(const TileXRUDMACommArgsState& state) 
     return options_.updateCommArgs(state, options_.updateCommArgsUserData);
 }
 
+int TileXRUDMAContext::RollbackTransportRegistration(
+    GM_ADDR localPtr, GM_ADDR previousRegisteredPtr, size_t previousRegisteredBytes) const
+{
+    if (previousRegisteredPtr != nullptr) {
+        return RestoreTransportRegistration(previousRegisteredPtr, previousRegisteredBytes);
+    }
+    if (transport_ == nullptr || localPtr == nullptr) {
+        TILEXR_LOG(ERROR) << "TileXR UDMA rollback registration called with invalid state";
+        return TILEXR_ERROR_NOT_FOUND;
+    }
+    const int ret = transport_->UnregisterMemory(localPtr);
+    if (ret != TILEXR_SUCCESS) {
+        TILEXR_LOG(ERROR) << "TileXR UDMA failed to roll back local registration: " << ret;
+    }
+    return ret;
+}
+
 int TileXRUDMAContext::RestoreTransportRegistration(GM_ADDR localPtr, size_t bytes) const
 {
     if (transport_ == nullptr || localPtr == nullptr || bytes == 0) {
+        TILEXR_LOG(ERROR) << "TileXR UDMA restore registration called with invalid state";
         return TILEXR_ERROR_NOT_FOUND;
     }
     const int ret = transport_->RegisterMemory(localPtr, bytes);
     if (ret != TILEXR_SUCCESS) {
-        TILEXR_LOG(WARN) << "TileXR UDMA failed to restore previous registration: " << ret;
+        TILEXR_LOG(ERROR) << "TileXR UDMA failed to restore previous registration: " << ret;
     }
     return ret;
 }
@@ -303,7 +302,7 @@ void TileXRUDMAContext::FreeDeviceRegistry(GM_ADDR& registryDev) const
     }
     aclError ret = aclrtFree(registryDev);
     if (ret != ACL_SUCCESS) {
-        TILEXR_LOG(WARN) << "Free UDMA registry failed: " << ret;
+        TILEXR_LOG(ERROR) << "Free UDMA registry failed: " << ret;
     }
     registryDev = nullptr;
 }

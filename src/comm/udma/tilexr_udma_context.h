@@ -58,6 +58,7 @@ public:
 
 private:
     int ApplyCommArgsState(const TileXRUDMACommArgsState& state) const;
+    int RollbackTransportRegistration(GM_ADDR localPtr, GM_ADDR previousRegisteredPtr, size_t previousRegisteredBytes) const;
     int RestoreTransportRegistration(GM_ADDR localPtr, size_t bytes) const;
     void FreeRegistry();
     void FreeDeviceRegistry(GM_ADDR& registryDev) const;

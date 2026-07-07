@@ -111,6 +111,34 @@ void TestUDMAContextShutdownIsLocalOnly()
     CheckContains(path, shutdownBody, "transport_->Shutdown();");
 }
 
+void TestUDMAReviewFeedbackGuards()
+{
+    const std::string contextPath = "src/comm/udma/tilexr_udma_context.cpp";
+    const auto context = ReadFile(contextPath);
+    CheckContains(contextPath, context,
+                  "TILEXR_LOG(ERROR) << \"TileXRUDMARegister called while UDMA is unavailable\"");
+    CheckContains(contextPath, context,
+                  "TILEXR_LOG(ERROR) << \"TileXRUDMARegister is not supported in InitThread mode\"");
+    CheckContains(contextPath, context, "RollbackTransportRegistration(");
+    CheckContains(contextPath, context,
+                  "TILEXR_LOG(ERROR) << \"TileXRUDMAUnregister failed to clear comm args: \"");
+    CheckContains(contextPath, context,
+                  "TILEXR_LOG(ERROR) << \"TileXR UDMA memory unregistration failed: \"");
+    CheckContains(contextPath, context,
+                  "TILEXR_LOG(ERROR) << \"TileXR UDMA restore registration called with invalid state\"");
+    CheckContains(contextPath, context,
+                  "TILEXR_LOG(ERROR) << \"TileXR UDMA failed to restore previous registration: \"");
+    CheckContains(contextPath, context, "TILEXR_LOG(ERROR) << \"Free UDMA registry failed: \"");
+
+    const std::string commPath = "src/comm/tilexr_comm.cpp";
+    const auto comm = ReadFile(commPath);
+    CheckContains(commPath, comm, "TILEXR_LOG(ERROR) << \"TileXR UDMA update comm args failed: \"");
+    CheckContains(commPath, comm,
+                  "TILEXR_LOG(ERROR) << \"ApplyUDMACommArgsStateCallback missing user data\"");
+    CheckContains(commPath, comm,
+                  "TILEXR_LOG(ERROR) << \"TileXRUDMARegister called while UDMA is unavailable\"");
+}
+
 void TestPublicHeadersDoNotExposeUDMAContext()
 {
     const std::vector<std::string> publicHeaders = {
@@ -158,6 +186,7 @@ int main()
     TestTileXRCommUsesUDMAContextBoundary();
     TestUDMATransportStaysBehindContext();
     TestUDMAContextShutdownIsLocalOnly();
+    TestUDMAReviewFeedbackGuards();
     TestPublicHeadersDoNotExposeUDMAContext();
     TestCommSourcesDoNotUseShmem();
     if (g_failures != 0) {
