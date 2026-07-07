@@ -27,6 +27,12 @@ COMM_HEADER_FILE = REPO_ROOT / "src" / "comm" / "tilexr_comm.h"
 COMM_SOURCE_FILE = REPO_ROOT / "src" / "comm" / "tilexr_comm.cpp"
 CCU_BACKEND_HEADER = REPO_ROOT / "src" / "comm" / "ccu" / "tilexr_ccu_backend.h"
 CCU_BACKEND_SOURCE = REPO_ROOT / "src" / "comm" / "ccu" / "tilexr_ccu_backend.cpp"
+CCU_RUNTIME_SESSION_HEADER = REPO_ROOT / "src" / "comm" / "ccu" / "tilexr_ccu_runtime_session.h"
+CCU_RUNTIME_SESSION_SOURCE = REPO_ROOT / "src" / "comm" / "ccu" / "tilexr_ccu_runtime_session.cpp"
+CCU_PLANNER_HEADER = REPO_ROOT / "src" / "comm" / "ccu" / "tilexr_ccu_collective_planner.h"
+CCU_PLANNER_SOURCE = REPO_ROOT / "src" / "comm" / "ccu" / "tilexr_ccu_collective_planner.cpp"
+CCU_EXECUTOR_HEADER = REPO_ROOT / "src" / "comm" / "ccu" / "tilexr_ccu_executor.h"
+CCU_EXECUTOR_SOURCE = REPO_ROOT / "src" / "comm" / "ccu" / "tilexr_ccu_executor.cpp"
 COMM_CMAKE = REPO_ROOT / "src" / "comm" / "CMakeLists.txt"
 INCLUDE_DIR = REPO_ROOT / "src" / "include"
 COMM_DIR = REPO_ROOT / "src" / "comm"
@@ -1823,6 +1829,9 @@ class TileXRCcuLowerLayerPlanBuilderTest(unittest.TestCase):
         comm_header = COMM_HEADER_FILE.read_text(encoding="utf-8")
         comm_source = COMM_SOURCE_FILE.read_text(encoding="utf-8")
         backend_source = CCU_BACKEND_SOURCE.read_text(encoding="utf-8")
+        planner_header = CCU_PLANNER_HEADER.read_text(encoding="utf-8")
+        runtime_session_source = CCU_RUNTIME_SESSION_SOURCE.read_text(encoding="utf-8")
+        planner_source = CCU_PLANNER_SOURCE.read_text(encoding="utf-8")
 
         for leaked in [
             'ccu/tilexr_ccu_lower_layer_plan_builder.h',
@@ -1839,22 +1848,22 @@ class TileXRCcuLowerLayerPlanBuilderTest(unittest.TestCase):
             with self.subTest(leaked=leaked):
                 self.assertNotIn(leaked, comm_header)
 
-        self.assertIn('ccu/tilexr_ccu_direct_orchestrator.h', backend_source)
-        self.assertIn('ccu/tilexr_ccu_direct_runtime.h', backend_source)
-        self.assertIn('ccu/tilexr_ccu_repository.h', backend_source)
-        self.assertIn("int TileXRCcuBackend::Impl::ConfigureDirectCcuLowerLayerTemplate", backend_source)
-        self.assertIn("int TileXRCcuBackend::Impl::ConfigureDirectCcuLowerLayerTemplateFromAllocation", backend_source)
-        self.assertIn("int TileXRCcuBackend::Impl::PrepareDirectCcuLowerLayerTemplateFromAllocation", backend_source)
-        self.assertIn("int TileXRCcuBackend::Impl::RefreshDirectCcuLowerLayerPlan", backend_source)
-        self.assertIn("TileXRCcuBuildLowerLayerTransportTemplate", backend_source)
-        self.assertIn("const std::vector<TileXRCcuRemoteCcuBufferInfo> &remoteCcuBuffers", backend_source)
-        self.assertIn("TileXRCcuBuildLowerLayerInstallPlanFromTransportSnapshot", backend_source)
-        self.assertIn("ccuDirectRuntime_->RegisterCcuResourceRmaBuffer(directCcuBasicInfo_.resourceAddr)", backend_source)
-        self.assertIn("ccuDirectRuntime_->ExportRemoteCcuRmaBuffers", backend_source)
-        self.assertIn("ccuDirectRuntime_->ExportLowerLayerTransportSnapshot", backend_source)
-        self.assertIn("RefreshDirectCcuLowerLayerPlan();", backend_source)
-        self.assertIn("direct CCU lower-layer template is not configured", backend_source)
-        self.assertIn("direct CCU lower-layer install plan cached", backend_source)
+        self.assertIn('ccu/tilexr_ccu_direct_orchestrator.h', planner_header + "\n" + planner_source)
+        self.assertIn('ccu/tilexr_ccu_direct_runtime.h', CCU_RUNTIME_SESSION_HEADER.read_text(encoding="utf-8"))
+        self.assertIn('ccu/tilexr_ccu_repository.h', planner_source)
+        self.assertIn("int TileXRCcuCollectivePlanner::ConfigureDirectCcuLowerLayerTemplate", planner_source)
+        self.assertIn("int TileXRCcuCollectivePlanner::ConfigureDirectCcuLowerLayerTemplateFromAllocation", planner_source)
+        self.assertIn("int TileXRCcuCollectivePlanner::PrepareDirectCcuLowerLayerTemplateFromAllocation", planner_source)
+        self.assertIn("int TileXRCcuCollectivePlanner::RefreshDirectCcuLowerLayerPlan", planner_source)
+        self.assertIn("TileXRCcuBuildLowerLayerTransportTemplate", planner_source)
+        self.assertIn("const std::vector<TileXRCcuRemoteCcuBufferInfo> &remoteCcuBuffers", planner_source)
+        self.assertIn("TileXRCcuBuildLowerLayerInstallPlanFromTransportSnapshot", planner_source)
+        self.assertIn("session.RegisterCcuResourceRmaBuffer(basicInfo->resourceAddr)", planner_source)
+        self.assertIn("session.ExportRemoteCcuRmaBuffers", planner_source)
+        self.assertIn("ccuDirectRuntime_->ExportLowerLayerTransportSnapshot", runtime_session_source)
+        self.assertIn("RefreshDirectCcuLowerLayerPlan(session);", planner_source)
+        self.assertIn("direct CCU lower-layer template is not configured", planner_source)
+        self.assertIn("direct CCU lower-layer install plan cached", planner_source)
 
         register_body = comm_source[
             comm_source.index("int TileXRComm::RegisterUDMAMemory"):
@@ -1903,6 +1912,10 @@ class TileXRCcuLowerLayerPlanBuilderTest(unittest.TestCase):
         comm_source = COMM_SOURCE_FILE.read_text(encoding="utf-8")
         backend_header = CCU_BACKEND_HEADER.read_text(encoding="utf-8")
         backend_source = CCU_BACKEND_SOURCE.read_text(encoding="utf-8")
+        runtime_session_source = CCU_RUNTIME_SESSION_SOURCE.read_text(encoding="utf-8")
+        runtime_session_source = CCU_RUNTIME_SESSION_SOURCE.read_text(encoding="utf-8")
+        runtime_session_source = CCU_RUNTIME_SESSION_SOURCE.read_text(encoding="utf-8")
+        planner_source = CCU_PLANNER_SOURCE.read_text(encoding="utf-8")
         builder_header = BUILDER_HEADER.read_text(encoding="utf-8")
 
         self.assertIn("TileXRCcuLocalResourceWindowInfo", runtime_header)
@@ -1941,53 +1954,53 @@ class TileXRCcuLowerLayerPlanBuilderTest(unittest.TestCase):
                 self.assertNotIn(leaked, comm_header)
                 self.assertNotIn(leaked, backend_header)
 
-        self.assertIn("const std::vector<TileXRCcuRemoteCcuBufferInfo> &remoteCcuBuffers", backend_source)
-        self.assertIn("ccuDirectRuntime_->RegisterCcuResourceRmaBuffer", backend_source)
-        self.assertIn("ccuDirectRuntime_->ExportLocalCcuRmaBuffer", backend_source)
-        self.assertIn("ccuDirectRuntime_->ExportRemoteCcuRmaBuffers", backend_source)
-        self.assertIn("runtimeOptions.allGather = &TileXRCcuBackend::Impl::DirectCcuAllGatherCallback", backend_source)
-        self.assertIn("runtimeOptions.allGatherUserData = this", backend_source)
-        self.assertIn("int TileXRCcuBackend::Impl::ExchangeDirectCcuRemoteNotifyCke", backend_source)
-        self.assertIn("int TileXRCcuBackend::Impl::DirectCcuThreadAllGather", backend_source)
-        self.assertIn("DirectCcuAllGatherCallback(&local, sizeof(local), all.data(), this)", backend_source)
-        self.assertIn("backend->DirectCcuThreadAllGather(sendBuf, sendBytes, recvBuf)", backend_source)
+        self.assertIn("const std::vector<TileXRCcuRemoteCcuBufferInfo> &remoteCcuBuffers", planner_source)
+        self.assertIn("ccuDirectRuntime_->RegisterCcuResourceRmaBuffer", runtime_session_source)
+        self.assertIn("ccuDirectRuntime_->ExportLocalCcuRmaBuffer", runtime_session_source)
+        self.assertIn("ccuDirectRuntime_->ExportRemoteCcuRmaBuffers", runtime_session_source)
+        self.assertIn("runtimeOptions.allGather = &TileXRCcuRuntimeSession::DirectCcuAllGatherCallback", runtime_session_source)
+        self.assertIn("runtimeOptions.allGatherUserData = this", runtime_session_source)
+        self.assertIn("int TileXRCcuCollectivePlanner::ExchangeDirectCcuRemoteNotifyCke", planner_source)
+        self.assertIn("int TileXRCcuRuntimeSession::DirectCcuThreadAllGather", runtime_session_source)
+        self.assertIn("session.AllGather(&local, sizeof(local), all.data())", planner_source)
+        self.assertIn("session->DirectCcuThreadAllGather(sendBuf, sendBytes, recvBuf)", runtime_session_source)
         self.assertIn("TileXRComm::InitCcuBackend", comm_source)
         self.assertIn("return ccuBackend_->Init(options);", comm_source)
-        exchange_body = backend_source[
-            backend_source.index("int TileXRCcuBackend::Impl::ExchangeDirectCcuRemoteNotifyCke"):
-            backend_source.index("int TileXRCcuBackend::Impl::DirectCcuAllGatherCallback")
+        exchange_body = planner_source[
+            planner_source.index("int TileXRCcuCollectivePlanner::ExchangeDirectCcuRemoteNotifyCke"):
+            planner_source.index("int TileXRCcuCollectivePlanner::PrepareDirectCcuLowerLayerPlanCallback")
         ]
         self.assertNotIn("SelectDirectCcuRemoteBindingOverride", exchange_body)
         self.assertIn("peerLocalWaitCkeOffset", exchange_body)
         self.assertIn("peerResources.localWaitCkeStartId", exchange_body)
         self.assertIn("peerResources.localWaitCkeCount", exchange_body)
         self.assertNotIn("allocation.remoteNotifyCke.startId,\n            routeIndex", exchange_body)
-        self.assertIn("allocation.localXn.startId", backend_source)
+        self.assertIn("allocation.localXn.startId", planner_source)
         self.assertIn("remoteXnStartId", exchange_body)
         self.assertIn("remoteXnCount", exchange_body)
         self.assertNotIn("TILEXR_CCU_V1_XN_RESOURCE_OFFSET", exchange_body)
         self.assertNotIn("TILEXR_CCU_XN_SLOT_BYTES", exchange_body)
-        self.assertIn("remoteXnId", backend_source)
-        self.assertIn("remoteNotifyCke", backend_source)
-        self.assertIn("templateSnapshot.msidToken.tokenId = localCcuResourceWindow.tokenId", backend_source)
-        self.assertIn("templateSnapshot.msidToken.tokenValue = localCcuResourceWindow.tokenValue", backend_source)
-        self.assertIn("templateSnapshot.msidToken.valid = true", backend_source)
-        self.assertIn("directCcuVerifiedEndpointRoutes_", backend_source)
-        self.assertIn("TileXRCcuBackend::Impl::ConfigureDirectCcuVerifiedEndpointRoutes", backend_source)
-        self.assertIn("directCcuLocalVerifiedEndpointRoute_", backend_source)
-        self.assertIn("TileXRCcuBackend::Impl::ConfigureDirectCcuLocalVerifiedEndpointRoute", backend_source)
-        self.assertIn("ccuDirectRuntime_->ConfigureLocalVerifiedEndpointRoute", backend_source)
-        self.assertIn("ccuDirectRuntime_->RefreshLocalVerifiedEndpointRoute", backend_source)
+        self.assertIn("remoteXnId", planner_source)
+        self.assertIn("remoteNotifyCke", planner_source)
+        self.assertIn("templateSnapshot.msidToken.tokenId = localCcuResourceWindow.tokenId", planner_source)
+        self.assertIn("templateSnapshot.msidToken.tokenValue = localCcuResourceWindow.tokenValue", planner_source)
+        self.assertIn("templateSnapshot.msidToken.valid = true", planner_source)
+        self.assertIn("directCcuVerifiedEndpointRoutes_", planner_source)
+        self.assertIn("TileXRCcuCollectivePlanner::ConfigureDirectCcuVerifiedEndpointRoutes", planner_source)
+        self.assertIn("directCcuLocalVerifiedEndpointRoute_", planner_source)
+        self.assertIn("TileXRCcuCollectivePlanner::ConfigureDirectCcuLocalVerifiedEndpointRoute", planner_source)
+        self.assertIn("ccuDirectRuntime_->ConfigureLocalVerifiedEndpointRoute", runtime_session_source)
+        self.assertIn("ccuDirectRuntime_->RefreshLocalVerifiedEndpointRoute", runtime_session_source)
         self.assertIn("TileXRCcuLocalEndpointRouteCollectorFn", runtime_header)
         self.assertIn("localEndpointRouteCollector", runtime_header)
         self.assertIn("TILEXR_CCU_DIRECT_LOCAL_ENDPOINT_EID", runtime_source)
         self.assertIn("TILEXR_CCU_DIRECT_LOCAL_ENDPOINT_DOORBELL_VA", runtime_source)
         self.assertIn("direct CCU local endpoint route collected", runtime_source)
         self.assertIn("TileXRCcuOverlayVerifiedEndpointRoutes", builder_header)
-        self.assertGreaterEqual(backend_source.count("TileXRCcuOverlayVerifiedEndpointRoutes("), 3)
-        init_runtime_body = backend_source[
-            backend_source.index("int TileXRCcuBackend::Impl::Init("):
-            backend_source.index("void TileXRCcuBackend::Impl::ResetDirectCcuBasicInfo")
+        self.assertGreaterEqual(planner_source.count("TileXRCcuOverlayVerifiedEndpointRoutes("), 3)
+        init_runtime_body = runtime_session_source[
+            runtime_session_source.index("int TileXRCcuRuntimeSession::Init("):
+            runtime_session_source.index("void TileXRCcuRuntimeSession::ResetDirectCcuBasicInfo")
         ]
         self.assertIn("logicDevId", init_runtime_body)
         self.assertIn("devicePhyId", init_runtime_body)
@@ -2007,9 +2020,9 @@ class TileXRCcuLowerLayerPlanBuilderTest(unittest.TestCase):
             runtime_source.index("int TileXRCcuDirectRuntime::ExportRemoteCcuRmaBuffers"):
             runtime_source.index("int TileXRCcuDirectRuntime::ExportLowerLayerTransportSnapshot")
         ]
-        prepare_from_allocation_body = backend_source[
-            backend_source.index("int TileXRCcuBackend::Impl::PrepareDirectCcuLowerLayerTemplateFromAllocation"):
-            backend_source.index("int TileXRCcuBackend::Impl::FillDirectCcuLowerLayerPlanFromAllocation")
+        prepare_from_allocation_body = planner_source[
+            planner_source.index("int TileXRCcuCollectivePlanner::PrepareDirectCcuLowerLayerTemplateFromAllocation"):
+            planner_source.index("int TileXRCcuCollectivePlanner::FillDirectCcuLowerLayerPlanFromAllocation")
         ]
         export_snapshot_body = runtime_source[
             runtime_source.index("int TileXRCcuDirectRuntime::ExportLowerLayerTransportSnapshot"):
@@ -2019,8 +2032,8 @@ class TileXRCcuLowerLayerPlanBuilderTest(unittest.TestCase):
         self.assertNotIn("buffers->clear();\n    return TILEXR_ERROR_NOT_FOUND;", export_remote_body)
         self.assertNotIn("*snapshot = TileXRCcuLowerLayerTransportSnapshot{};\n    return TILEXR_ERROR_NOT_FOUND;", export_snapshot_body)
         self.assertLess(
-            prepare_from_allocation_body.index("ccuDirectRuntime_->ConfigureLocalVerifiedEndpointRoute"),
-            prepare_from_allocation_body.index("ccuDirectRuntime_->ExportRemoteCcuRmaBuffers"),
+            prepare_from_allocation_body.index("session.ConfigureLocalVerifiedEndpointRoute"),
+            prepare_from_allocation_body.index("session.ExportRemoteCcuRmaBuffers"),
         )
 
         register_memory_body = comm_source[
@@ -2031,10 +2044,10 @@ class TileXRCcuLowerLayerPlanBuilderTest(unittest.TestCase):
         self.assertNotIn("ResetDirectCcuLowerLayerPlan();", register_memory_body)
 
     def test_remote_xn_exchange_uses_peer_channel_local_xn_operand(self):
-        backend_source = CCU_BACKEND_SOURCE.read_text(encoding="utf-8")
-        exchange_body = backend_source[
-            backend_source.index("int TileXRCcuBackend::Impl::ExchangeDirectCcuRemoteNotifyCke"):
-            backend_source.index("int TileXRCcuBackend::Impl::DirectCcuAllGatherCallback")
+        planner_source = CCU_PLANNER_SOURCE.read_text(encoding="utf-8")
+        exchange_body = planner_source[
+            planner_source.index("int TileXRCcuCollectivePlanner::ExchangeDirectCcuRemoteNotifyCke"):
+            planner_source.index("int TileXRCcuCollectivePlanner::PrepareDirectCcuLowerLayerPlanCallback")
         ]
         compact_body = " ".join(exchange_body.split())
 
@@ -2061,10 +2074,10 @@ class TileXRCcuLowerLayerPlanBuilderTest(unittest.TestCase):
             compact_body)
 
     def test_remote_notify_cke_comes_from_peer_exported_local_wait_cke(self):
-        backend_source = CCU_BACKEND_SOURCE.read_text(encoding="utf-8")
-        exchange_body = backend_source[
-            backend_source.index("int TileXRCcuBackend::Impl::ExchangeDirectCcuRemoteNotifyCke"):
-            backend_source.index("int TileXRCcuBackend::Impl::DirectCcuAllGatherCallback")
+        planner_source = CCU_PLANNER_SOURCE.read_text(encoding="utf-8")
+        exchange_body = planner_source[
+            planner_source.index("int TileXRCcuCollectivePlanner::ExchangeDirectCcuRemoteNotifyCke"):
+            planner_source.index("int TileXRCcuCollectivePlanner::PrepareDirectCcuLowerLayerPlanCallback")
         ]
         compact_body = " ".join(exchange_body.split())
 
@@ -2080,17 +2093,17 @@ class TileXRCcuLowerLayerPlanBuilderTest(unittest.TestCase):
         self.assertIn("notifyCkeOwnerVerified &&", compact_body)
 
     def test_peer_xn_exchange_expands_one_peer_window_to_multiple_sync_routes(self):
-        backend_source = CCU_BACKEND_SOURCE.read_text(encoding="utf-8")
-        exchange_body = backend_source[
-            backend_source.index("int TileXRCcuBackend::Impl::ExchangeDirectCcuRemoteNotifyCke"):
-            backend_source.index("int TileXRCcuBackend::Impl::DirectCcuAllGatherCallback")
+        planner_source = CCU_PLANNER_SOURCE.read_text(encoding="utf-8")
+        exchange_body = planner_source[
+            planner_source.index("int TileXRCcuCollectivePlanner::ExchangeDirectCcuRemoteNotifyCke"):
+            planner_source.index("int TileXRCcuCollectivePlanner::PrepareDirectCcuLowerLayerPlanCallback")
         ]
         compact_body = " ".join(exchange_body.split())
 
-        self.assertIn("const size_t peerRouteCount = static_cast<size_t>(rankSize_ - 1)", compact_body)
+        self.assertIn("const size_t peerRouteCount = static_cast<size_t>(rankSize - 1)", compact_body)
         self.assertIn("const size_t syncRouteCount = allocation.remoteXn.num", compact_body)
-        self.assertIn("allocation.remoteXn.num < static_cast<uint16_t>(rankSize_ - 1)", compact_body)
-        self.assertNotIn("allocation.remoteXn.num != static_cast<uint16_t>(rankSize_ - 1)", compact_body)
+        self.assertIn("allocation.remoteXn.num < static_cast<uint16_t>(rankSize - 1)", compact_body)
+        self.assertNotIn("allocation.remoteXn.num != static_cast<uint16_t>(rankSize - 1)", compact_body)
         self.assertIn("std::vector<TileXRCcuRemoteCcuBufferInfo> peerCcuBuffers = *remoteCcuBuffers", compact_body)
         self.assertIn("remoteCcuBuffers->assign(syncRouteCount, TileXRCcuRemoteCcuBufferInfo{})", compact_body)
         self.assertIn("for (uint32_t syncIndex = 0; syncIndex < allocation.remoteXn.num; ++syncIndex)", compact_body)
@@ -3576,6 +3589,7 @@ class TileXRCcuLowerLayerPlanBuilderTest(unittest.TestCase):
         comm_source = COMM_SOURCE_FILE.read_text(encoding="utf-8")
         backend_header = CCU_BACKEND_HEADER.read_text(encoding="utf-8")
         backend_source = CCU_BACKEND_SOURCE.read_text(encoding="utf-8")
+        runtime_session_source = CCU_RUNTIME_SESSION_SOURCE.read_text(encoding="utf-8")
 
         for leaked in [
             "RefreshDirectCcuBasicInfo",
@@ -3590,13 +3604,13 @@ class TileXRCcuLowerLayerPlanBuilderTest(unittest.TestCase):
                 self.assertNotIn(leaked, comm_header)
                 self.assertNotIn(leaked, backend_header)
 
-        self.assertIn("int TileXRCcuBackend::Impl::RefreshDirectCcuBasicInfo", backend_source)
-        self.assertIn("bool TileXRCcuBackend::Impl::HasDirectCcuBasicInfo", backend_source)
-        self.assertIn("ccuDirectRuntime_->QueryBasicInfo", backend_source)
-        self.assertIn("direct CCU basic info cached", backend_source)
-        self.assertIn("ResetDirectCcuBasicInfo", backend_source)
-        self.assertIn("ResetDirectCcuBasicInfo();", backend_source)
-        self.assertNotIn("udmaTransport_->" + "QueryCcuBasicInfo", comm_source + "\n" + backend_source)
+        self.assertIn("int TileXRCcuRuntimeSession::RefreshDirectCcuBasicInfo", runtime_session_source)
+        self.assertIn("bool TileXRCcuRuntimeSession::HasDirectCcuBasicInfo", runtime_session_source)
+        self.assertIn("ccuDirectRuntime_->QueryBasicInfo", runtime_session_source)
+        self.assertIn("direct CCU basic info cached", runtime_session_source)
+        self.assertIn("ResetDirectCcuBasicInfo", runtime_session_source)
+        self.assertIn("ResetDirectCcuBasicInfo();", runtime_session_source)
+        self.assertNotIn("udmaTransport_->" + "QueryCcuBasicInfo", comm_source + "\n" + backend_source + "\n" + runtime_session_source)
 
         for forbidden in [
             "TileXRCcuPrepareSubmitTasks",
@@ -3614,11 +3628,14 @@ class TileXRCcuLowerLayerPlanBuilderTest(unittest.TestCase):
         comm_source = COMM_SOURCE_FILE.read_text(encoding="utf-8")
         backend_header = CCU_BACKEND_HEADER.read_text(encoding="utf-8")
         backend_source = CCU_BACKEND_SOURCE.read_text(encoding="utf-8")
+        planner_header = CCU_PLANNER_HEADER.read_text(encoding="utf-8")
+        planner_source = CCU_PLANNER_SOURCE.read_text(encoding="utf-8")
+        runtime_session_source = CCU_RUNTIME_SESSION_SOURCE.read_text(encoding="utf-8")
         runtime_header = DIRECT_RUNTIME_HEADER.read_text(encoding="utf-8")
         runtime_source = DIRECT_RUNTIME_SOURCE.read_text(encoding="utf-8")
 
-        self.assertIn('ccu/tilexr_ccu_direct_orchestrator.h', backend_source)
-        self.assertIn('ccu/tilexr_ccu_direct_runtime.h', backend_source)
+        self.assertIn('ccu/tilexr_ccu_direct_orchestrator.h', planner_header + "\n" + planner_source)
+        self.assertIn('ccu/tilexr_ccu_direct_runtime.h', CCU_RUNTIME_SESSION_HEADER.read_text(encoding="utf-8"))
         for leaked in [
             "PrepareDirectCcuInstallAttempt",
             "FillDirectCcuLowerLayerPlanFromAllocation",
@@ -3629,22 +3646,25 @@ class TileXRCcuLowerLayerPlanBuilderTest(unittest.TestCase):
                 self.assertNotIn(leaked, backend_header)
         self.assertIn("int CreateDriverAdapter(", runtime_header)
 
-        self.assertIn("int TileXRCcuBackend::Impl::PrepareDirectCcuInstallAttempt", backend_source)
-        self.assertIn("int TileXRCcuBackend::Impl::FillDirectCcuLowerLayerPlanFromAllocation", backend_source)
-        self.assertIn("int TileXRCcuBackend::Impl::PrepareDirectCcuLowerLayerPlanCallback", backend_source)
-        self.assertIn("ccuDirectRuntime_->CreateDriverAdapter", backend_source)
-        self.assertIn("TileXRCcuMakeRepositoryDeviceMemoryOps(next.repositoryMemoryAllocMode)", backend_source)
-        self.assertIn("next.lowerLayerPlan = nullptr", backend_source)
+        self.assertIn("int TileXRCcuCollectivePlanner::PrepareDirectCcuInstallAttempt", planner_source)
+        self.assertIn("int TileXRCcuCollectivePlanner::FillDirectCcuLowerLayerPlanFromAllocation", planner_source)
+        self.assertIn("int TileXRCcuCollectivePlanner::PrepareDirectCcuLowerLayerPlanCallback", planner_source)
+        self.assertIn("ccuDirectRuntime_->CreateDriverAdapter", runtime_session_source)
+        self.assertIn("TileXRCcuMakeRepositoryDeviceMemoryOps(next.repositoryMemoryAllocMode)", planner_source)
+        self.assertIn("next.lowerLayerPlan = nullptr", planner_source)
         self.assertIn(
-            "next.prepareLowerLayerPlan = &TileXRCcuBackend::Impl::PrepareDirectCcuLowerLayerPlanCallback",
-            backend_source,
+            "next.prepareLowerLayerPlan = &TileXRCcuCollectivePlanner::PrepareDirectCcuLowerLayerPlanCallback",
+            planner_source,
         )
-        self.assertIn("next.lowerLayerPlanUserData = this", backend_source)
-        self.assertIn("TileXRCcuRunDirectInstallAttempt(next, attempt, report)", backend_source)
+        self.assertIn("next.lowerLayerPlanUserData = &callbackContext", planner_source)
+        self.assertIn("TileXRCcuRunDirectInstallAttempt(next, attempt, report)", planner_source)
         self.assertIn("int TileXRCcuDirectRuntime::CreateDriverAdapter", runtime_source)
-        self.assertNotIn("udmaTransport_->" + "CreateCcuDriverAdapter", comm_source + "\n" + backend_source)
+        self.assertNotIn("udmaTransport_->" + "CreateCcuDriverAdapter", comm_source + "\n" + backend_source + "\n" + runtime_session_source)
 
-        combined = comm_header + "\n" + comm_source + "\n" + backend_source + "\n" + runtime_header + "\n" + runtime_source
+        combined = (
+            comm_header + "\n" + comm_source + "\n" + backend_source + "\n" +
+            planner_source + "\n" + runtime_session_source + "\n" + runtime_header + "\n" + runtime_source
+        )
         for forbidden in [
             "TileXRCcuPrepareSubmitTasks",
             "TileXRCcuSubmitTask",
@@ -3657,20 +3677,21 @@ class TileXRCcuLowerLayerPlanBuilderTest(unittest.TestCase):
             self.assertNotIn(forbidden, combined)
 
     def test_tilexr_comm_direct_ccu_prepare_fails_fast_after_process_init_failure(self):
-        backend_source = CCU_BACKEND_SOURCE.read_text(encoding="utf-8")
+        runtime_session_source = CCU_RUNTIME_SESSION_SOURCE.read_text(encoding="utf-8")
+        planner_source = CCU_PLANNER_SOURCE.read_text(encoding="utf-8")
 
-        self.assertIn("g_ccuDirectRuntimeUnavailableMessage", backend_source)
-        init_body = backend_source[
-            backend_source.index("int TileXRCcuBackend::Impl::Init("):
-            backend_source.index("void TileXRCcuBackend::Impl::ResetDirectCcuBasicInfo")
+        self.assertIn("g_ccuDirectRuntimeUnavailableMessage", runtime_session_source)
+        init_body = runtime_session_source[
+            runtime_session_source.index("int TileXRCcuRuntimeSession::Init("):
+            runtime_session_source.index("void TileXRCcuRuntimeSession::ResetDirectCcuBasicInfo")
         ]
-        prepare_body = backend_source[
-            backend_source.index("int TileXRCcuBackend::Impl::PrepareDirectCcuInstallAttempt"):
-            backend_source.index("int TileXRCcuBackend::Impl::PrepareDirectCcuMemoryCopyInstallAttempt")
+        prepare_body = planner_source[
+            planner_source.index("int TileXRCcuCollectivePlanner::PrepareDirectCcuInstallAttempt"):
+            planner_source.index("int TileXRCcuCollectivePlanner::PrepareDirectCcuMemoryCopyInstallAttempt")
         ]
 
         self.assertIn("g_ccuDirectRuntimeUnavailableMessage = runtimeReport.message", init_body)
-        self.assertIn("direct CCU runtime unavailable after process-level init failure", backend_source)
+        self.assertIn("direct CCU runtime unavailable after process-level init failure", runtime_session_source)
         self.assertIn("ProcessDirectCcuRuntimeUnavailableMessage()", prepare_body)
         self.assertLess(
             prepare_body.index("ProcessDirectCcuRuntimeUnavailableMessage()"),
@@ -3678,10 +3699,10 @@ class TileXRCcuLowerLayerPlanBuilderTest(unittest.TestCase):
         )
 
     def test_tilexr_comm_direct_ccu_runtime_init_serializes_ra_initialization(self):
-        backend_source = CCU_BACKEND_SOURCE.read_text(encoding="utf-8")
-        init_body = backend_source[
-            backend_source.index("int TileXRCcuBackend::Impl::Init("):
-            backend_source.index("void TileXRCcuBackend::Impl::ResetDirectCcuBasicInfo")
+        runtime_session_source = CCU_RUNTIME_SESSION_SOURCE.read_text(encoding="utf-8")
+        init_body = runtime_session_source[
+            runtime_session_source.index("int TileXRCcuRuntimeSession::Init("):
+            runtime_session_source.index("void TileXRCcuRuntimeSession::ResetDirectCcuBasicInfo")
         ]
 
         lock_pos = init_body.index("lock_guard<mutex> lock(g_ccuDirectRuntimeMtx);")
@@ -3695,23 +3716,23 @@ class TileXRCcuLowerLayerPlanBuilderTest(unittest.TestCase):
         self.assertEqual(1, init_body.count("lock_guard<mutex> lock(g_ccuDirectRuntimeMtx);"))
 
     def test_tilexr_comm_direct_ccu_prepare_can_select_install_die_for_diagnostics(self):
-        backend_source = CCU_BACKEND_SOURCE.read_text(encoding="utf-8")
-        prepare_body = backend_source[
-            backend_source.index("int TileXRCcuBackend::Impl::PrepareDirectCcuInstallAttempt"):
-            backend_source.index("int TileXRCcuBackend::Impl::PrepareDirectCcuMemoryCopyInstallAttempt")
+        planner_source = CCU_PLANNER_SOURCE.read_text(encoding="utf-8")
+        prepare_body = planner_source[
+            planner_source.index("int TileXRCcuCollectivePlanner::PrepareDirectCcuInstallAttempt"):
+            planner_source.index("int TileXRCcuCollectivePlanner::PrepareDirectCcuMemoryCopyInstallAttempt")
         ]
 
-        self.assertIn("TILEXR_CCU_DIRECT_INSTALL_DIE_ID", backend_source)
-        self.assertIn("SelectDirectCcuInstallDieId", backend_source)
+        self.assertIn("TILEXR_CCU_DIRECT_INSTALL_DIE_ID", planner_source)
+        self.assertIn("SelectDirectCcuInstallDieId", planner_source)
         self.assertIn("RefreshDirectCcuBasicInfo(installDieId)", prepare_body)
-        self.assertIn("directCcuBasicInfo_.dieId != installDieId", prepare_body)
+        self.assertIn("basicInfo->dieId != installDieId", prepare_body)
         self.assertNotIn("RefreshDirectCcuBasicInfo(0)", prepare_body)
 
     def test_tilexr_comm_direct_ccu_thread_allgather_aborts_after_process_init_failure(self):
-        backend_source = CCU_BACKEND_SOURCE.read_text(encoding="utf-8")
-        thread_allgather_body = backend_source[
-            backend_source.index("int TileXRCcuBackend::Impl::DirectCcuThreadAllGather"):
-            backend_source.index("int TileXRCcuBackend::Impl::PrepareDirectCcuLowerLayerPlanCallback")
+        runtime_session_source = CCU_RUNTIME_SESSION_SOURCE.read_text(encoding="utf-8")
+        thread_allgather_body = runtime_session_source[
+            runtime_session_source.index("int TileXRCcuRuntimeSession::DirectCcuThreadAllGather"):
+            runtime_session_source.index("} // namespace TileXR")
         ]
 
         self.assertIn("ProcessDirectCcuRuntimeUnavailableMessage()", thread_allgather_body)
