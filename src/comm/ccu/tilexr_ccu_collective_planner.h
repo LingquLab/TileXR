@@ -9,7 +9,9 @@
 
 #include "ccu/tilexr_ccu_backend.h"
 #include "ccu/tilexr_ccu_direct_orchestrator.h"
+#ifdef TILEXR_CCU_TESTING
 #include "ccu/tilexr_ccu_memory_program.h"
+#endif
 
 namespace TileXR {
 
@@ -45,6 +47,7 @@ public:
         const TileXRCcuDirectInstallOptions &options,
         TileXRCcuDirectInstallAttempt *attempt,
         TileXRCcuDirectInstallReport *report);
+#ifdef TILEXR_CCU_TESTING
     int PrepareDirectCcuMemoryCopyInstallAttempt(
         TileXRCcuRuntimeSession &session,
         const TileXRCcuDirectInstallOptions &options,
@@ -55,6 +58,7 @@ public:
         TileXRCcuMemoryCopyDirection direction,
         TileXRCcuDirectInstallAttempt *attempt,
         TileXRCcuDirectInstallReport *report);
+#endif
     int RefreshDirectCcuLowerLayerPlan(TileXRCcuRuntimeSession &session);
     bool HasDirectCcuLowerLayerPlan() const;
     int GetDirectCcuLowerLayerPlanStatus() const;

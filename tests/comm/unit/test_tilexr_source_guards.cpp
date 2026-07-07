@@ -409,6 +409,7 @@ void TestCommDirectCcuInstallAttemptDoesNotSubmit()
     const std::string ccuRuntimeSessionSourcePath = "src/comm/ccu/tilexr_ccu_runtime_session.cpp";
     const std::string ccuPlannerHeaderPath = "src/comm/ccu/tilexr_ccu_collective_planner.h";
     const std::string ccuPlannerSourcePath = "src/comm/ccu/tilexr_ccu_collective_planner.cpp";
+    const std::string ccuExecutorHeaderPath = "src/comm/ccu/tilexr_ccu_executor.h";
     const std::string ccuExecutorSourcePath = "src/comm/ccu/tilexr_ccu_executor.cpp";
     const std::string ccuRuntimeHeaderPath = "src/comm/ccu/tilexr_ccu_direct_runtime.h";
     const std::string ccuRuntimeSourcePath = "src/comm/ccu/tilexr_ccu_direct_runtime.cpp";
@@ -420,6 +421,7 @@ void TestCommDirectCcuInstallAttemptDoesNotSubmit()
     const auto ccuRuntimeSessionSourceText = ReadFile(ccuRuntimeSessionSourcePath);
     const auto ccuPlannerHeaderText = ReadFile(ccuPlannerHeaderPath);
     const auto ccuPlannerSourceText = ReadFile(ccuPlannerSourcePath);
+    const auto ccuExecutorHeaderText = ReadFile(ccuExecutorHeaderPath);
     const auto ccuExecutorSourceText = ReadFile(ccuExecutorSourcePath);
     const auto ccuRuntimeHeaderText = ReadFile(ccuRuntimeHeaderPath);
     const auto ccuRuntimeSourceText = ReadFile(ccuRuntimeSourcePath);
@@ -452,8 +454,15 @@ void TestCommDirectCcuInstallAttemptDoesNotSubmit()
     CheckContains(ccuRuntimeSessionHeaderPath, ccuRuntimeSessionHeaderText, "TileXRCcuDirectRuntime");
     CheckContains(ccuRuntimeSessionSourcePath, ccuRuntimeSessionSourceText, "ccuDirectRuntime_->CreateDriverAdapter");
     CheckContains(ccuPlannerHeaderPath, ccuPlannerHeaderText, "class TileXRCcuRuntimeSession");
+    CheckContains(ccuPlannerHeaderPath, ccuPlannerHeaderText, "#ifdef TILEXR_CCU_TESTING");
+    CheckContains(ccuPlannerHeaderPath, ccuPlannerHeaderText, "PrepareDirectCcuMemoryCopyInstallAttempt");
     CheckContains(ccuPlannerSourcePath, ccuPlannerSourceText, "#include \"ccu/tilexr_ccu_repository.h\"");
+    CheckContains(ccuPlannerSourcePath, ccuPlannerSourceText, "#ifdef TILEXR_CCU_TESTING");
     CheckContains(ccuPlannerSourcePath, ccuPlannerSourceText, "TileXRCcuCollectivePlanner::PrepareDirectCcuInstallAttempt");
+    CheckContains(
+        ccuPlannerSourcePath,
+        ccuPlannerSourceText,
+        "TileXRCcuCollectivePlanner::PrepareDirectCcuMemoryCopyInstallAttempt");
     CheckContains(ccuPlannerSourcePath, ccuPlannerSourceText, "TileXRCcuCollectivePlanner::PrepareDirectCcuLowerLayerPlanCallback");
     CheckContains(
         ccuPlannerSourcePath,
@@ -467,6 +476,9 @@ void TestCommDirectCcuInstallAttemptDoesNotSubmit()
     CheckContains(ccuPlannerSourcePath, ccuPlannerSourceText, "LowerLayerPlanCallbackContext callbackContext");
     CheckContains(ccuPlannerSourcePath, ccuPlannerSourceText, "next.lowerLayerPlanUserData = &callbackContext");
     CheckContains(ccuPlannerSourcePath, ccuPlannerSourceText, "TileXRCcuRunDirectInstallAttempt(next, attempt, report)");
+    CheckContains(ccuExecutorHeaderPath, ccuExecutorHeaderText, "#ifdef TILEXR_CCU_TESTING");
+    CheckContains(ccuExecutorHeaderPath, ccuExecutorHeaderText, "ReadDirectCcuInstructionsForDebug");
+    CheckContains(ccuExecutorSourcePath, ccuExecutorSourceText, "#ifdef TILEXR_CCU_TESTING");
     CheckContains(ccuExecutorSourcePath, ccuExecutorSourceText, "ReadDirectCcuInstructionsForDebug");
     CheckContains(ccuRuntimeHeaderPath, ccuRuntimeHeaderText, "int CreateDriverAdapter(");
     CheckContains(ccuRuntimeSourcePath, ccuRuntimeSourceText, "int TileXRCcuDirectRuntime::CreateDriverAdapter");
@@ -528,6 +540,7 @@ void TestCommDirectCcuInstallAttemptDoesNotSubmit()
         CheckNotContains(ccuRuntimeSessionSourcePath, ccuRuntimeSessionSourceText, forbidden);
         CheckNotContains(ccuPlannerHeaderPath, ccuPlannerHeaderText, forbidden);
         CheckNotContains(ccuPlannerSourcePath, ccuPlannerSourceText, forbidden);
+        CheckNotContains(ccuExecutorHeaderPath, ccuExecutorHeaderText, forbidden);
         CheckNotContains(ccuExecutorSourcePath, ccuExecutorSourceText, forbidden);
         CheckNotContains(ccuRuntimeHeaderPath, ccuRuntimeHeaderText, forbidden);
         CheckNotContains(ccuRuntimeSourcePath, ccuRuntimeSourceText, forbidden);

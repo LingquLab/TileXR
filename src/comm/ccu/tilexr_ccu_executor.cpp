@@ -18,6 +18,7 @@ int TileXRCcuExecutor::Submit(
     return plan.ready ? TILEXR_ERROR_NOT_SUPPORT : TILEXR_ERROR_PARA_CHECK_FAIL;
 }
 
+#ifdef TILEXR_CCU_TESTING
 int TileXRCcuExecutor::ReadDirectCcuInstructionsForDebug(
     TileXRCcuRuntimeSession &session,
     uint8_t dieId,
@@ -47,5 +48,6 @@ int TileXRCcuExecutor::ReadDirectCcuInstructionsForDebug(
     }
     return adapter.ReadInstructions(dieId, instructionStartId, instructions, instructionCount, instructionBytes, report);
 }
+#endif
 
 } // namespace TileXR

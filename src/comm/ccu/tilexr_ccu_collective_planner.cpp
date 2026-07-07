@@ -3,22 +3,28 @@
  */
 #include "ccu/tilexr_ccu_collective_planner.h"
 
+#ifdef TILEXR_CCU_TESTING
+#include "ccu/tilexr_ccu_memory_program.h"
+#endif
 #include "ccu/tilexr_ccu_repository.h"
 #include "ccu/tilexr_ccu_runtime_session.h"
 #include "tilexr_log.h"
 
-#include <acl/acl_rt.h>
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
 
+#ifdef TILEXR_CCU_TESTING
 #include "runtime/dev.h"
 #include "runtime/mem.h"
 #include "runtime/rts/rts_device.h"
+#endif
 
 namespace TileXR {
 
+#ifdef TILEXR_CCU_TESTING
 constexpr uint32_t TILEXR_CCU_DIRECT_MEMORY_COPY_INSTRUCTION_COUNT = 7U;
+#endif
 
 uint8_t SelectDirectCcuInstallDieId()
 {
@@ -67,6 +73,7 @@ uint16_t SelectDirectCcuChannelBoundRemoteXnId(
         SelectDirectCcuChannelBoundRemoteXnOffset(peerLocalIndex, syncIndex, peerRouteCount));
 }
 
+#ifdef TILEXR_CCU_TESTING
 struct DirectCcuMemoryCopyEndpoint {
     uint64_t sourceAddr = 0;
     uint64_t sourceToken = 0;
@@ -122,6 +129,7 @@ int BuildDirectCcuLocalMemoryCopyEndpoint(
     endpoint->valid = 1;
     return TILEXR_SUCCESS;
 }
+#endif
 
 void TileXRCcuCollectivePlanner::Reset()
 {
@@ -619,6 +627,7 @@ int TileXRCcuCollectivePlanner::PrepareDirectCcuInstallAttempt(
     return TileXRCcuRunDirectInstallAttempt(next, attempt, report);
 }
 
+#ifdef TILEXR_CCU_TESTING
 int TileXRCcuCollectivePlanner::PrepareDirectCcuMemoryCopyInstallAttempt(
     TileXRCcuRuntimeSession &session,
     const TileXRCcuDirectInstallOptions &options,
@@ -761,6 +770,7 @@ int TileXRCcuCollectivePlanner::PrepareDirectCcuMemoryCopyInstallAttempt(
 
     return TileXRCcuRunDirectMemoryCopyInstallAttempt(next, memoryCopy, attempt, report);
 }
+#endif
 
 int TileXRCcuCollectivePlanner::RefreshDirectCcuLowerLayerPlan(TileXRCcuRuntimeSession &session)
 {

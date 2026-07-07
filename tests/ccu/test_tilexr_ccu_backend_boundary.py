@@ -95,12 +95,28 @@ class TileXRCcuBackendBoundaryTest(unittest.TestCase):
             "PrepareDirectCcuLowerLayerPlanCallback",
             "TileXRCcuRunDirectInstallAttempt",
             "TileXRCcuMakeRepositoryDeviceMemoryOps",
-            "PrepareDirectCcuMemoryCopyInstallAttempt",
         ]:
             with self.subTest(needle=needle):
                 self.assertIn(needle, planner)
 
-        self.assertIn("ReadDirectCcuInstructionsForDebug", executor)
+        planner_header = PLANNER_HEADER.read_text(encoding="utf-8")
+        executor_header = EXECUTOR_HEADER.read_text(encoding="utf-8")
+        self.assertRegex(
+            planner_header,
+            r"(?s)#ifdef TILEXR_CCU_TESTING.*PrepareDirectCcuMemoryCopyInstallAttempt.*#endif",
+        )
+        self.assertRegex(
+            planner,
+            r"(?s)#ifdef TILEXR_CCU_TESTING.*PrepareDirectCcuMemoryCopyInstallAttempt.*#endif",
+        )
+        self.assertRegex(
+            executor_header,
+            r"(?s)#ifdef TILEXR_CCU_TESTING.*ReadDirectCcuInstructionsForDebug.*#endif",
+        )
+        self.assertRegex(
+            executor,
+            r"(?s)#ifdef TILEXR_CCU_TESTING.*ReadDirectCcuInstructionsForDebug.*#endif",
+        )
         for fake_ready in [
             "options_ = options;\n    initialized_ = true;\n    return TILEXR_SUCCESS;",
             "plan->ready = true;\n    return TILEXR_SUCCESS;",

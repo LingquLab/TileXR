@@ -3658,6 +3658,14 @@ class TileXRCcuLowerLayerPlanBuilderTest(unittest.TestCase):
         )
         self.assertIn("next.lowerLayerPlanUserData = &callbackContext", planner_source)
         self.assertIn("TileXRCcuRunDirectInstallAttempt(next, attempt, report)", planner_source)
+        self.assertRegex(
+            planner_header,
+            r"(?s)#ifdef TILEXR_CCU_TESTING.*PrepareDirectCcuMemoryCopyInstallAttempt.*#endif",
+        )
+        self.assertRegex(
+            planner_source,
+            r"(?s)#ifdef TILEXR_CCU_TESTING.*PrepareDirectCcuMemoryCopyInstallAttempt.*#endif",
+        )
         self.assertIn("int TileXRCcuDirectRuntime::CreateDriverAdapter", runtime_source)
         self.assertNotIn("udmaTransport_->" + "CreateCcuDriverAdapter", comm_source + "\n" + backend_source + "\n" + runtime_session_source)
 
