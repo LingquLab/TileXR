@@ -14,7 +14,7 @@
 
 namespace TileXR {
 
-class TileXRComm;
+class TileXRSockExchange;
 class TileXRCcuRuntimeSession;
 class TileXRCcuCollectivePlanner;
 class TileXRCcuExecutor;
@@ -24,7 +24,7 @@ struct TileXRCcuBackendOptions {
     int rankSize = 0;
     int devId = 0;
     std::string uid;
-    TileXRComm *comm = nullptr;
+    TileXRSockExchange *exchange = nullptr;
 };
 
 struct TileXRCcuCollectiveRequest {
@@ -56,10 +56,13 @@ public:
     bool Supports(const TileXRCcuCollectiveRequest &request) const;
     int PrepareCollective(const TileXRCcuCollectiveRequest &request, TileXRCcuCollectivePlan *plan);
     int SubmitCollective(const TileXRCcuCollectivePlan &plan, aclrtStream stream);
+#ifdef TILEXR_CCU_TESTING
+    bool RuntimeInitializedForTest() const;
+#endif
 
 private:
-    TileXRCcuBackendOptions options_;
-    bool initialized_ = false;
+    class Impl;
+    std::unique_ptr<Impl> impl_;
 };
 
 } // namespace TileXR

@@ -38,6 +38,7 @@ class TileXRCcuBackendBoundaryTest(unittest.TestCase):
         header = BACKEND_HEADER.read_text(encoding="utf-8")
         self.assertIn("class TileXRCcuBackend", header)
         self.assertIn("struct TileXRCcuBackendOptions", header)
+        self.assertIn("TileXRSockExchange *exchange", header)
         self.assertIn("PrepareCollective", header)
         self.assertIn("SubmitCollective", header)
         for needle in [
@@ -47,6 +48,29 @@ class TileXRCcuBackendBoundaryTest(unittest.TestCase):
         ]:
             with self.subTest(needle=needle):
                 self.assertNotIn(needle, header)
+
+    def test_backend_source_owns_restored_direct_ccu_runtime_glue(self):
+        source = BACKEND_SOURCE.read_text(encoding="utf-8")
+        for needle in [
+            "#include \"ccu/tilexr_ccu_direct_runtime.h\"",
+            "#include \"ccu/tilexr_ccu_repository.h\"",
+            "TileXRCcuDirectRuntime",
+            "PrepareDirectCcuInstallAttempt",
+            "PrepareDirectCcuLowerLayerPlanCallback",
+            "TileXRCcuRunDirectInstallAttempt",
+            "TileXRCcuMakeRepositoryDeviceMemoryOps",
+            "DirectCcuThreadAllGather",
+            "g_directCcuAllGatherStates",
+        ]:
+            with self.subTest(needle=needle):
+                self.assertIn(needle, source)
+        for fake_ready in [
+            "options_ = options;\n    initialized_ = true;\n    return TILEXR_SUCCESS;",
+            "plan->ready = true;\n    return TILEXR_SUCCESS;",
+            "return plan.ready ? TILEXR_SUCCESS",
+        ]:
+            with self.subTest(fake_ready=fake_ready):
+                self.assertNotIn(fake_ready, source)
 
 
 if __name__ == "__main__":

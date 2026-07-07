@@ -186,7 +186,7 @@ int TileXRComm::InitCcuBackend()
     options.rankSize = rankSize_;
     options.devId = devId_;
     options.uid = uid_;
-    options.comm = this;
+    options.exchange = socketExchange_;
     return ccuBackend_->Init(options);
 }
 

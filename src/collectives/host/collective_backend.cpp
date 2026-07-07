@@ -9,6 +9,9 @@
  */
 #include "collective_backend.h"
 
+#include "../../comm/ccu/tilexr_ccu_backend.h"
+#include "../../comm/tilexr_comm.h"
+
 namespace TileXRCollectives {
 namespace Host {
 namespace {
@@ -32,11 +35,33 @@ int DispatchUdma(const CollectiveRequest &request)
 
 int DispatchCcu(const CollectiveRequest &request)
 {
-    (void)request;
-    if (!g_testState.enabled || !g_testState.ccuInitialized) {
+    if (g_testState.enabled) {
+        if (!g_testState.ccuInitialized) {
+            return TileXR::TILEXR_ERROR_NOT_INITIALIZED;
+        }
+        return g_testState.ccuSupported ? g_testState.ccuReturn : TileXR::TILEXR_ERROR_NOT_SUPPORT;
+    }
+
+    auto *comm = static_cast<TileXR::TileXRComm *>(request.comm);
+    TileXR::TileXRCcuBackend *backend = comm->GetCcuBackendForCollectives();
+    if (backend == nullptr || !backend->Available()) {
         return TileXR::TILEXR_ERROR_NOT_INITIALIZED;
     }
-    return g_testState.ccuSupported ? g_testState.ccuReturn : TileXR::TILEXR_ERROR_NOT_SUPPORT;
+    TileXR::TileXRCcuCollectiveRequest ccuRequest {};
+    ccuRequest.type = request.type;
+    ccuRequest.sendBuf = request.sendBuf;
+    ccuRequest.recvBuf = request.recvBuf;
+    ccuRequest.count = request.count;
+    ccuRequest.dataType = request.dataType;
+    ccuRequest.reduceOp = request.reduceOp;
+    ccuRequest.root = request.root;
+    ccuRequest.stream = request.stream;
+    TileXR::TileXRCcuCollectivePlan plan {};
+    const int ret = backend->PrepareCollective(ccuRequest, &plan);
+    if (ret != TileXR::TILEXR_SUCCESS) {
+        return ret;
+    }
+    return backend->SubmitCollective(plan, request.stream);
 }
 
 } // namespace
