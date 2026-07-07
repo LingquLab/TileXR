@@ -112,6 +112,8 @@ set(TILEXR_SOURCE_FILE tilexr_comm.cpp
         udma/tilexr_hccp_loader.cpp
         udma/tilexr_udma_layout.h
         udma/tilexr_udma_layout.cpp
+        udma/tilexr_udma_context.h
+        udma/tilexr_udma_context.cpp
         udma/tilexr_udma_transport.h
         udma/tilexr_udma_transport.cpp
         sdma/tilexr_sdma_transport.h

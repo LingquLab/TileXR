@@ -91,6 +91,14 @@ target_compile_definitions(test_tilexr_udma_demo_sources PRIVATE
     TILEXR_SOURCE_ROOT="${TILEXR_ROOT}"
 )
 
+add_executable(test_tilexr_udma_source_guard
+    unit/test_tilexr_udma_source_guard.cpp
+)
+
+target_compile_definitions(test_tilexr_udma_source_guard PRIVATE
+    TILEXR_SOURCE_ROOT="${TILEXR_ROOT}"
+)
+
 # 集成测试：TileXR UDMA
 add_executable(test_tilexr_udma
     integration/test_tilexr_udma.cpp
@@ -108,6 +116,7 @@ set(INSTALL_TARGETS
     test_tilexr_udma_registry
     test_tilexr_udma_transport_layout
     test_tilexr_udma_demo_sources
+    test_tilexr_udma_source_guard
 )
 
 if(BUILD_TILEXR_UDMA_DEMO)

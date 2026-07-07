@@ -28,12 +28,22 @@ mkdir -p "${INSTALL_DIR}"
 cd "${BUILD_DIR}"
 
 # 配置
-if command -v bisheng >/dev/null 2>&1; then
-    DEMO_OPTION="-DBUILD_TILEXR_UDMA_DEMO=ON"
-else
-    echo "WARN: bisheng not found; TileXR UDMA communication demo target will be skipped."
-    DEMO_OPTION="-DBUILD_TILEXR_UDMA_DEMO=OFF"
-fi
+case "${BUILD_TILEXR_UDMA_DEMO:-AUTO}" in
+    0|OFF|off|false|FALSE)
+        DEMO_OPTION="-DBUILD_TILEXR_UDMA_DEMO=OFF"
+        ;;
+    1|ON|on|true|TRUE)
+        DEMO_OPTION="-DBUILD_TILEXR_UDMA_DEMO=ON"
+        ;;
+    *)
+        if command -v bisheng >/dev/null 2>&1; then
+            DEMO_OPTION="-DBUILD_TILEXR_UDMA_DEMO=ON"
+        else
+            echo "WARN: bisheng not found; TileXR UDMA communication demo target will be skipped."
+            DEMO_OPTION="-DBUILD_TILEXR_UDMA_DEMO=OFF"
+        fi
+        ;;
+esac
 
 cmake -DCMAKE_INSTALL_PREFIX="${INSTALL_DIR}" ${DEMO_OPTION} ..
 
@@ -52,6 +62,7 @@ echo ""
 echo "Available tests:"
 echo "  - test_tilexr_udma_transport_layout : UDMA info layout unit tests"
 echo "  - test_tilexr_udma_registry : registered-memory metadata unit tests"
+echo "  - test_tilexr_udma_source_guard : UDMA ownership/source boundary checks"
 echo "  - test_tilexr_udma     : TileXR integration tests"
 if [ -f "${INSTALL_DIR}/bin/tilexr_udma_demo" ]; then
     echo "  - tilexr_udma_demo     : TileXR UDMA communication demo"
