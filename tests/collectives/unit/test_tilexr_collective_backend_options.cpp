@@ -106,13 +106,20 @@ int CheckBackendDispatch()
         return 7;
     }
 
+    state.ccuSupported = true;
+    state.ccuReturn = TileXR::TILEXR_SUCCESS;
+    SetBackendTestState(state);
+    if (DispatchCollective(request, TILEXR_COLLECTIVE_BACKEND_CCU) != TileXR::TILEXR_SUCCESS) {
+        return 8;
+    }
+
     options.backend = TILEXR_COLLECTIVE_BACKEND_UDMA;
     state.udmaInitialized = false;
     state.udmaSupported = false;
     SetBackendTestState(state);
     if (TileXRAllGatherEx(&sendValue, &recvValue, 1, TileXR::TILEXR_DATA_TYPE_INT32, request.comm, nullptr, &options) !=
         TileXR::TILEXR_ERROR_NOT_INITIALIZED) {
-        return 8;
+        return 9;
     }
 
     options.backend = TILEXR_COLLECTIVE_BACKEND_CCU;
@@ -121,7 +128,7 @@ int CheckBackendDispatch()
     SetBackendTestState(state);
     if (TileXRAllGatherEx(&sendValue, &recvValue, 1, TileXR::TILEXR_DATA_TYPE_INT32, request.comm, nullptr, &options) !=
         TileXR::TILEXR_ERROR_NOT_SUPPORT) {
-        return 9;
+        return 10;
     }
 
     ResetBackendTestState();

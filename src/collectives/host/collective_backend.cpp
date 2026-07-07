@@ -26,11 +26,18 @@ int DispatchAiv(const CollectiveRequest &request)
 
 int DispatchUdma(const CollectiveRequest &request)
 {
-    (void)request;
-    if (!g_testState.enabled || !g_testState.udmaInitialized) {
+    if (g_testState.enabled) {
+        if (!g_testState.udmaInitialized) {
+            return TileXR::TILEXR_ERROR_NOT_INITIALIZED;
+        }
+        return g_testState.udmaSupported ? g_testState.udmaReturn : TileXR::TILEXR_ERROR_NOT_SUPPORT;
+    }
+
+    auto *comm = static_cast<TileXR::TileXRComm *>(request.comm);
+    if (comm == nullptr || !comm->IsUdmaAvailableForCollectives()) {
         return TileXR::TILEXR_ERROR_NOT_INITIALIZED;
     }
-    return g_testState.udmaSupported ? g_testState.udmaReturn : TileXR::TILEXR_ERROR_NOT_SUPPORT;
+    return TileXR::TILEXR_ERROR_NOT_SUPPORT;
 }
 
 int DispatchCcu(const CollectiveRequest &request)

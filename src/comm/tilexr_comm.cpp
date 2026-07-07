@@ -469,6 +469,11 @@ const TileXRUDMARegistry* TileXRComm::GetUDMARegistryHost() const
     return UDMARegistryValid(&udmaRegistry_, rankSize_) ? &udmaRegistry_ : nullptr;
 }
 
+bool TileXRComm::IsUdmaAvailableForCollectives() const
+{
+    return udmaTransport_ != nullptr && udmaTransport_->IsAvailable();
+}
+
 int TileXRComm::InitCommon()
 {
     // enable peer device

@@ -49,6 +49,7 @@ public:
     int UnregisterUDMAMemory(TileXRUDMAMemHandle handle);
     GM_ADDR GetUDMARegistryPtr() const;
     const TileXRUDMARegistry* GetUDMARegistryHost() const;
+    bool IsUdmaAvailableForCollectives() const;
     int InitCcuBackend();
     TileXRCcuBackend *GetCcuBackendForCollectives();
     const TileXRCcuBackend *GetCcuBackendForCollectives() const;
