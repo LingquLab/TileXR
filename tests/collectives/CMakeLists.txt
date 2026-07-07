@@ -94,6 +94,10 @@ add_executable(test_tilexr_collective_backend_options
     unit/test_tilexr_collective_backend_options.cpp
 )
 
+target_include_directories(test_tilexr_collective_backend_options PRIVATE
+    ${TILEXR_ROOT}/src/collectives/host
+)
+
 add_executable(test_tilexr_perf_trace_layout
     unit/test_tilexr_perf_trace_layout.cpp
 )

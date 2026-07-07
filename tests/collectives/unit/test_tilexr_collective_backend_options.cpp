@@ -8,6 +8,7 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 #include "tilexr_collectives.h"
+#include "collective_backend.h"
 
 #include <cstdint>
 
@@ -41,9 +42,63 @@ int CheckFunctionPointers()
     return 0;
 }
 
+int CheckBackendDispatch()
+{
+    using TileXRCollectives::Host::BackendTestState;
+    using TileXRCollectives::Host::CollectiveRequest;
+    using TileXRCollectives::Host::DispatchCollective;
+    using TileXRCollectives::Host::ResetBackendTestState;
+    using TileXRCollectives::Host::SetBackendTestState;
+
+    CollectiveRequest request {};
+    request.type = TileXR::TileXRType::ALL_GATHER;
+    request.sendBuf = reinterpret_cast<void*>(0x1000);
+    request.recvBuf = reinterpret_cast<void*>(0x2000);
+    request.count = 1;
+    request.dataType = TileXR::TILEXR_DATA_TYPE_INT32;
+    request.comm = reinterpret_cast<TileXRCommPtr>(0x3000);
+    request.stream = nullptr;
+
+    BackendTestState state {};
+    state.aivReturn = TileXR::TILEXR_SUCCESS;
+    state.udmaInitialized = false;
+    state.ccuInitialized = false;
+    SetBackendTestState(state);
+    if (DispatchCollective(request, TILEXR_COLLECTIVE_BACKEND_AUTO) != TileXR::TILEXR_SUCCESS) {
+        return 2;
+    }
+
+    state.udmaInitialized = true;
+    state.udmaSupported = true;
+    state.udmaReturn = TileXR::TILEXR_SUCCESS;
+    SetBackendTestState(state);
+    if (DispatchCollective(request, TILEXR_COLLECTIVE_BACKEND_UDMA) != TileXR::TILEXR_SUCCESS) {
+        return 3;
+    }
+
+    state.udmaInitialized = false;
+    SetBackendTestState(state);
+    if (DispatchCollective(request, TILEXR_COLLECTIVE_BACKEND_UDMA) != TileXR::TILEXR_ERROR_NOT_INITIALIZED) {
+        return 4;
+    }
+
+    state.ccuInitialized = false;
+    SetBackendTestState(state);
+    if (DispatchCollective(request, TILEXR_COLLECTIVE_BACKEND_CCU) != TileXR::TILEXR_ERROR_NOT_INITIALIZED) {
+        return 5;
+    }
+
+    ResetBackendTestState();
+    return 0;
+}
+
 } // namespace
 
 int main()
 {
-    return CheckFunctionPointers();
+    const int pointerRet = CheckFunctionPointers();
+    if (pointerRet != 0) {
+        return pointerRet;
+    }
+    return CheckBackendDispatch();
 }
