@@ -108,6 +108,8 @@ set(TILEXR_SOURCE_FILE tilexr_comm.cpp
         ccu/tilexr_ccu_abi_constants.h
         ccu/tilexr_ccu_barrier_program.h
         ccu/tilexr_ccu_barrier_program.cpp
+        ccu/tilexr_ccu_backend.h
+        ccu/tilexr_ccu_backend.cpp
         ccu/tilexr_ccu_direct_orchestrator.h
         ccu/tilexr_ccu_direct_orchestrator.cpp
         ccu/tilexr_ccu_direct_runtime.h
