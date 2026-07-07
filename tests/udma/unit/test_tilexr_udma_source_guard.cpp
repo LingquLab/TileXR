@@ -94,6 +94,23 @@ void TestUDMATransportStaysBehindContext()
                   "#include \"udma/tilexr_udma_transport.h\"");
 }
 
+void TestUDMAContextShutdownIsLocalOnly()
+{
+    const std::string path = "src/comm/udma/tilexr_udma_context.cpp";
+    const auto text = ReadFile(path);
+    const auto shutdownPos = text.find("void TileXRUDMAContext::Shutdown()");
+    const auto registerPos = text.find("int TileXRUDMAContext::RegisterMemory", shutdownPos);
+    if (shutdownPos == std::string::npos || registerPos == std::string::npos) {
+        std::cerr << "failed to locate TileXRUDMAContext::Shutdown body" << std::endl;
+        ++g_failures;
+        return;
+    }
+
+    const auto shutdownBody = text.substr(shutdownPos, registerPos - shutdownPos);
+    CheckNotContains(path, shutdownBody, "UnregisterMemory(");
+    CheckContains(path, shutdownBody, "transport_->Shutdown();");
+}
+
 void TestPublicHeadersDoNotExposeUDMAContext()
 {
     const std::vector<std::string> publicHeaders = {
@@ -140,6 +157,7 @@ int main()
 {
     TestTileXRCommUsesUDMAContextBoundary();
     TestUDMATransportStaysBehindContext();
+    TestUDMAContextShutdownIsLocalOnly();
     TestPublicHeadersDoNotExposeUDMAContext();
     TestCommSourcesDoNotUseShmem();
     if (g_failures != 0) {

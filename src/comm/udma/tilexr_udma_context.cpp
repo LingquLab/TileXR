@@ -92,12 +92,6 @@ int TileXRUDMAContext::Init(const TileXRUDMAContextOptions& options)
 
 void TileXRUDMAContext::Shutdown()
 {
-    if (registeredPtr_ != nullptr && transport_ != nullptr) {
-        const int ret = transport_->UnregisterMemory(registeredPtr_);
-        if (ret != TILEXR_SUCCESS) {
-            TILEXR_LOG(WARN) << "TileXR UDMA memory unregistration during shutdown failed: " << ret;
-        }
-    }
     registeredPtr_ = nullptr;
     registeredBytes_ = 0;
     FreeRegistry();
