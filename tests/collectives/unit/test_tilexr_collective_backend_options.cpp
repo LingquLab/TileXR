@@ -1,0 +1,49 @@
+/*
+ * Copyright (c) 2024-2026 TileXR Project
+ * This file is a part of the CANN Open Software.
+ * Licensed under CANN Open Software License Agreement Version 1.0 (the "License").
+ * Please refer to the License for details. You may not use this file except in compliance with the License.
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+ * See LICENSE in the root of the software repository for the full text of the License.
+ */
+#include "tilexr_collectives.h"
+
+#include <cstdint>
+
+namespace {
+
+static_assert(TILEXR_COLLECTIVE_BACKEND_AUTO == 0, "AUTO must be zero for zero-initialized options");
+static_assert(TILEXR_COLLECTIVE_BACKEND_AIV == 1, "AIV enum value changed");
+static_assert(TILEXR_COLLECTIVE_BACKEND_UDMA == 2, "UDMA enum value changed");
+static_assert(TILEXR_COLLECTIVE_BACKEND_CCU == 3, "CCU enum value changed");
+
+int CheckFunctionPointers()
+{
+    TileXRCollectiveOptions options {};
+    if (options.backend != TILEXR_COLLECTIVE_BACKEND_AUTO) {
+        return 1;
+    }
+
+    auto allGather = &TileXRAllGatherEx;
+    auto allToAll = &TileXRAllToAllEx;
+    auto allReduce = &TileXRAllReduceEx;
+    auto reduceScatter = &TileXRReduceScatterEx;
+    auto broadcast = &TileXRBroadcastEx;
+    auto profileProbe = &TileXRProfileProbeEx;
+
+    (void)allGather;
+    (void)allToAll;
+    (void)allReduce;
+    (void)reduceScatter;
+    (void)broadcast;
+    (void)profileProbe;
+    return 0;
+}
+
+} // namespace
+
+int main()
+{
+    return CheckFunctionPointers();
+}

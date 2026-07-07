@@ -66,16 +66,23 @@ int LoopbackCopy(void *sendBuf, void *recvBuf, int64_t bytes, aclrtStream stream
     return ret == ACL_SUCCESS ? TileXR::TILEXR_SUCCESS : TileXR::TILEXR_ERROR_INTERNAL;
 }
 
+TileXRCollectiveBackend SelectedBackend(const TileXRCollectiveOptions *options)
+{
+    return options == nullptr ? TILEXR_COLLECTIVE_BACKEND_AUTO : options->backend;
+}
+
 } // namespace
 
-int TileXRAllGather(void *sendBuf, void *recvBuf, int64_t sendCount,
-                    TileXR::TileXRDataType dataType, TileXRCommPtr comm,
-                    aclrtStream stream)
+int TileXRAllGatherEx(void *sendBuf, void *recvBuf, int64_t sendCount,
+                      TileXR::TileXRDataType dataType, TileXRCommPtr comm,
+                      aclrtStream stream, const TileXRCollectiveOptions *options)
 {
     int ret = ValidateCommon(sendBuf, recvBuf, sendCount, dataType, comm);
     if (ret != TileXR::TILEXR_SUCCESS) {
         return ret;
     }
+    const TileXRCollectiveBackend backend = SelectedBackend(options);
+    (void)backend;
 
     TileXRCollectives::Host::HostLaunchContext context;
     ret = TileXRCollectives::Host::PrepareHostLaunchContext(comm, context);
@@ -93,14 +100,23 @@ int TileXRAllGather(void *sendBuf, void *recvBuf, int64_t sendCount,
         sendBuf, recvBuf, sendCount, dataType, blockDim, stream);
 }
 
-int TileXRAllToAll(void *sendBuf, void *recvBuf, int64_t sendCount,
-                   TileXR::TileXRDataType dataType, TileXRCommPtr comm,
-                   aclrtStream stream)
+int TileXRAllGather(void *sendBuf, void *recvBuf, int64_t sendCount,
+                    TileXR::TileXRDataType dataType, TileXRCommPtr comm,
+                    aclrtStream stream)
+{
+    return TileXRAllGatherEx(sendBuf, recvBuf, sendCount, dataType, comm, stream, nullptr);
+}
+
+int TileXRAllToAllEx(void *sendBuf, void *recvBuf, int64_t sendCount,
+                     TileXR::TileXRDataType dataType, TileXRCommPtr comm,
+                     aclrtStream stream, const TileXRCollectiveOptions *options)
 {
     int ret = ValidateCommon(sendBuf, recvBuf, sendCount, dataType, comm);
     if (ret != TileXR::TILEXR_SUCCESS) {
         return ret;
     }
+    const TileXRCollectiveBackend backend = SelectedBackend(options);
+    (void)backend;
 
     TileXRCollectives::Host::HostLaunchContext context;
     ret = TileXRCollectives::Host::PrepareHostLaunchContext(comm, context);
@@ -133,14 +149,23 @@ int TileXRAllToAll(void *sendBuf, void *recvBuf, int64_t sendCount,
         sendBuf, recvBuf, kernelCount, dataType, blockDim, stream);
 }
 
-int TileXRAllReduce(void *sendBuf, void *recvBuf, int64_t count,
-                    TileXR::TileXRDataType dataType, TileXR::TileXRReduceOp op,
-                    TileXRCommPtr comm, aclrtStream stream)
+int TileXRAllToAll(void *sendBuf, void *recvBuf, int64_t sendCount,
+                   TileXR::TileXRDataType dataType, TileXRCommPtr comm,
+                   aclrtStream stream)
+{
+    return TileXRAllToAllEx(sendBuf, recvBuf, sendCount, dataType, comm, stream, nullptr);
+}
+
+int TileXRAllReduceEx(void *sendBuf, void *recvBuf, int64_t count,
+                      TileXR::TileXRDataType dataType, TileXR::TileXRReduceOp op,
+                      TileXRCommPtr comm, aclrtStream stream, const TileXRCollectiveOptions *options)
 {
     int ret = ValidateReduce(sendBuf, recvBuf, count, dataType, op, comm);
     if (ret != TileXR::TILEXR_SUCCESS) {
         return ret;
     }
+    const TileXRCollectiveBackend backend = SelectedBackend(options);
+    (void)backend;
 
     TileXRCollectives::Host::HostLaunchContext context;
     ret = TileXRCollectives::Host::PrepareHostLaunchContext(comm, context);
@@ -159,14 +184,24 @@ int TileXRAllReduce(void *sendBuf, void *recvBuf, int64_t count,
         TileXRCollectives::Host::CollectiveLaunchAttrs { static_cast<int>(op), 0 });
 }
 
-int TileXRReduceScatter(void *sendBuf, void *recvBuf, int64_t recvCount,
-                        TileXR::TileXRDataType dataType, TileXR::TileXRReduceOp op,
-                        TileXRCommPtr comm, aclrtStream stream)
+int TileXRAllReduce(void *sendBuf, void *recvBuf, int64_t count,
+                    TileXR::TileXRDataType dataType, TileXR::TileXRReduceOp op,
+                    TileXRCommPtr comm, aclrtStream stream)
+{
+    return TileXRAllReduceEx(sendBuf, recvBuf, count, dataType, op, comm, stream, nullptr);
+}
+
+int TileXRReduceScatterEx(void *sendBuf, void *recvBuf, int64_t recvCount,
+                          TileXR::TileXRDataType dataType, TileXR::TileXRReduceOp op,
+                          TileXRCommPtr comm, aclrtStream stream,
+                          const TileXRCollectiveOptions *options)
 {
     int ret = ValidateReduce(sendBuf, recvBuf, recvCount, dataType, op, comm);
     if (ret != TileXR::TILEXR_SUCCESS) {
         return ret;
     }
+    const TileXRCollectiveBackend backend = SelectedBackend(options);
+    (void)backend;
 
     TileXRCollectives::Host::HostLaunchContext context;
     ret = TileXRCollectives::Host::PrepareHostLaunchContext(comm, context);
@@ -195,14 +230,23 @@ int TileXRReduceScatter(void *sendBuf, void *recvBuf, int64_t recvCount,
         TileXRCollectives::Host::CollectiveLaunchAttrs { static_cast<int>(op), 0 });
 }
 
-int TileXRBroadcast(void *buf, int64_t count,
-                    TileXR::TileXRDataType dataType, int root,
-                    TileXRCommPtr comm, aclrtStream stream)
+int TileXRReduceScatter(void *sendBuf, void *recvBuf, int64_t recvCount,
+                        TileXR::TileXRDataType dataType, TileXR::TileXRReduceOp op,
+                        TileXRCommPtr comm, aclrtStream stream)
+{
+    return TileXRReduceScatterEx(sendBuf, recvBuf, recvCount, dataType, op, comm, stream, nullptr);
+}
+
+int TileXRBroadcastEx(void *buf, int64_t count,
+                      TileXR::TileXRDataType dataType, int root,
+                      TileXRCommPtr comm, aclrtStream stream, const TileXRCollectiveOptions *options)
 {
     int ret = ValidateBroadcastLocal(buf, count, dataType, root, comm);
     if (ret != TileXR::TILEXR_SUCCESS) {
         return ret;
     }
+    const TileXRCollectiveBackend backend = SelectedBackend(options);
+    (void)backend;
 
     TileXRCollectives::Host::HostLaunchContext context;
     ret = TileXRCollectives::Host::PrepareHostLaunchContext(comm, context);
@@ -227,14 +271,23 @@ int TileXRBroadcast(void *buf, int64_t count,
         TileXRCollectives::Host::CollectiveLaunchAttrs { 0, root });
 }
 
-int TileXRProfileProbe(void *sendBuf, void *recvBuf, int64_t count,
-                       TileXR::TileXRDataType dataType, TileXRCommPtr comm,
-                       aclrtStream stream)
+int TileXRBroadcast(void *buf, int64_t count,
+                    TileXR::TileXRDataType dataType, int root,
+                    TileXRCommPtr comm, aclrtStream stream)
+{
+    return TileXRBroadcastEx(buf, count, dataType, root, comm, stream, nullptr);
+}
+
+int TileXRProfileProbeEx(void *sendBuf, void *recvBuf, int64_t count,
+                         TileXR::TileXRDataType dataType, TileXRCommPtr comm,
+                         aclrtStream stream, const TileXRCollectiveOptions *options)
 {
     int ret = ValidateCommon(sendBuf, recvBuf, count, dataType, comm);
     if (ret != TileXR::TILEXR_SUCCESS) {
         return ret;
     }
+    const TileXRCollectiveBackend backend = SelectedBackend(options);
+    (void)backend;
 
     TileXRCollectives::Host::HostLaunchContext context;
     ret = TileXRCollectives::Host::PrepareHostLaunchContext(comm, context);
@@ -249,4 +302,11 @@ int TileXRProfileProbe(void *sendBuf, void *recvBuf, int64_t count,
     }
     return TileXRCollectives::Host::LaunchCollectiveKernel(comm, TileXR::TileXRType::PROFILE_PROBE, context,
         sendBuf, recvBuf, bytes, TileXR::TILEXR_DATA_TYPE_INT8, blockDim, stream);
+}
+
+int TileXRProfileProbe(void *sendBuf, void *recvBuf, int64_t count,
+                       TileXR::TileXRDataType dataType, TileXRCommPtr comm,
+                       aclrtStream stream)
+{
+    return TileXRProfileProbeEx(sendBuf, recvBuf, count, dataType, comm, stream, nullptr);
 }
