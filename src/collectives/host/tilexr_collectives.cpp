@@ -88,18 +88,6 @@ int TileXRAllGatherEx(void *sendBuf, void *recvBuf, int64_t sendCount,
         return ret;
     }
     const TileXRCollectiveBackend backend = SelectedBackend(options);
-    (void)backend;
-
-    TileXRCollectives::Host::HostLaunchContext context;
-    ret = TileXRCollectives::Host::PrepareHostLaunchContext(comm, context);
-    if (ret != TileXR::TILEXR_SUCCESS) {
-        return ret;
-    }
-
-    const int64_t bytes = TileXRCollectives::Host::CountToBytes(sendCount, dataType);
-    if (context.hostArgs->rankSize <= 1) {
-        return LoopbackCopy(sendBuf, recvBuf, bytes, stream);
-    }
     if (UsesForcedNonAivBackend(backend)) {
         TileXRCollectives::Host::CollectiveRequest request {};
         request.type = TileXR::TileXRType::ALL_GATHER;
@@ -110,6 +98,17 @@ int TileXRAllGatherEx(void *sendBuf, void *recvBuf, int64_t sendCount,
         request.comm = comm;
         request.stream = stream;
         return TileXRCollectives::Host::DispatchCollective(request, backend);
+    }
+
+    TileXRCollectives::Host::HostLaunchContext context;
+    ret = TileXRCollectives::Host::PrepareHostLaunchContext(comm, context);
+    if (ret != TileXR::TILEXR_SUCCESS) {
+        return ret;
+    }
+
+    const int64_t bytes = TileXRCollectives::Host::CountToBytes(sendCount, dataType);
+    if (context.hostArgs->rankSize <= 1) {
+        return LoopbackCopy(sendBuf, recvBuf, bytes, stream);
     }
 
     const uint32_t blockDim = TileXRCollectives::Host::GetAllGatherBlockNum(*context.hostArgs, bytes);
@@ -133,7 +132,17 @@ int TileXRAllToAllEx(void *sendBuf, void *recvBuf, int64_t sendCount,
         return ret;
     }
     const TileXRCollectiveBackend backend = SelectedBackend(options);
-    (void)backend;
+    if (UsesForcedNonAivBackend(backend)) {
+        TileXRCollectives::Host::CollectiveRequest request {};
+        request.type = TileXR::TileXRType::ALL2ALL;
+        request.sendBuf = sendBuf;
+        request.recvBuf = recvBuf;
+        request.count = sendCount;
+        request.dataType = dataType;
+        request.comm = comm;
+        request.stream = stream;
+        return TileXRCollectives::Host::DispatchCollective(request, backend);
+    }
 
     TileXRCollectives::Host::HostLaunchContext context;
     ret = TileXRCollectives::Host::PrepareHostLaunchContext(comm, context);
@@ -151,17 +160,6 @@ int TileXRAllToAllEx(void *sendBuf, void *recvBuf, int64_t sendCount,
     }
     if (sendCount > std::numeric_limits<int64_t>::max() / static_cast<int64_t>(rankSize)) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
-    }
-    if (UsesForcedNonAivBackend(backend)) {
-        TileXRCollectives::Host::CollectiveRequest request {};
-        request.type = TileXR::TileXRType::ALL2ALL;
-        request.sendBuf = sendBuf;
-        request.recvBuf = recvBuf;
-        request.count = sendCount;
-        request.dataType = dataType;
-        request.comm = comm;
-        request.stream = stream;
-        return TileXRCollectives::Host::DispatchCollective(request, backend);
     }
 
     const int64_t kernelCount = sendCount * static_cast<int64_t>(rankSize);
@@ -193,18 +191,6 @@ int TileXRAllReduceEx(void *sendBuf, void *recvBuf, int64_t count,
         return ret;
     }
     const TileXRCollectiveBackend backend = SelectedBackend(options);
-    (void)backend;
-
-    TileXRCollectives::Host::HostLaunchContext context;
-    ret = TileXRCollectives::Host::PrepareHostLaunchContext(comm, context);
-    if (ret != TileXR::TILEXR_SUCCESS) {
-        return ret;
-    }
-
-    const int64_t bytes = TileXRCollectives::Host::CountToBytes(count, dataType);
-    if (context.hostArgs->rankSize <= 1) {
-        return LoopbackCopy(sendBuf, recvBuf, bytes, stream);
-    }
     if (UsesForcedNonAivBackend(backend)) {
         TileXRCollectives::Host::CollectiveRequest request {};
         request.type = TileXR::TileXRType::ALL_REDUCE;
@@ -216,6 +202,17 @@ int TileXRAllReduceEx(void *sendBuf, void *recvBuf, int64_t count,
         request.comm = comm;
         request.stream = stream;
         return TileXRCollectives::Host::DispatchCollective(request, backend);
+    }
+
+    TileXRCollectives::Host::HostLaunchContext context;
+    ret = TileXRCollectives::Host::PrepareHostLaunchContext(comm, context);
+    if (ret != TileXR::TILEXR_SUCCESS) {
+        return ret;
+    }
+
+    const int64_t bytes = TileXRCollectives::Host::CountToBytes(count, dataType);
+    if (context.hostArgs->rankSize <= 1) {
+        return LoopbackCopy(sendBuf, recvBuf, bytes, stream);
     }
 
     const uint32_t blockDim = TileXRCollectives::Host::GetAllReduceBlockNum(*context.hostArgs, bytes);
@@ -241,7 +238,18 @@ int TileXRReduceScatterEx(void *sendBuf, void *recvBuf, int64_t recvCount,
         return ret;
     }
     const TileXRCollectiveBackend backend = SelectedBackend(options);
-    (void)backend;
+    if (UsesForcedNonAivBackend(backend)) {
+        TileXRCollectives::Host::CollectiveRequest request {};
+        request.type = TileXR::TileXRType::REDUCE_SCATTER;
+        request.sendBuf = sendBuf;
+        request.recvBuf = recvBuf;
+        request.count = recvCount;
+        request.dataType = dataType;
+        request.reduceOp = op;
+        request.comm = comm;
+        request.stream = stream;
+        return TileXRCollectives::Host::DispatchCollective(request, backend);
+    }
 
     TileXRCollectives::Host::HostLaunchContext context;
     ret = TileXRCollectives::Host::PrepareHostLaunchContext(comm, context);
@@ -256,18 +264,6 @@ int TileXRReduceScatterEx(void *sendBuf, void *recvBuf, int64_t recvCount,
     }
     if (recvCount > std::numeric_limits<int64_t>::max() / static_cast<int64_t>(rankSize)) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
-    }
-    if (UsesForcedNonAivBackend(backend)) {
-        TileXRCollectives::Host::CollectiveRequest request {};
-        request.type = TileXR::TileXRType::REDUCE_SCATTER;
-        request.sendBuf = sendBuf;
-        request.recvBuf = recvBuf;
-        request.count = recvCount;
-        request.dataType = dataType;
-        request.reduceOp = op;
-        request.comm = comm;
-        request.stream = stream;
-        return TileXRCollectives::Host::DispatchCollective(request, backend);
     }
 
     const int64_t inputCount = recvCount * static_cast<int64_t>(rankSize);
@@ -298,7 +294,18 @@ int TileXRBroadcastEx(void *buf, int64_t count,
         return ret;
     }
     const TileXRCollectiveBackend backend = SelectedBackend(options);
-    (void)backend;
+    if (UsesForcedNonAivBackend(backend)) {
+        TileXRCollectives::Host::CollectiveRequest request {};
+        request.type = TileXR::TileXRType::BROADCAST;
+        request.sendBuf = buf;
+        request.recvBuf = buf;
+        request.count = count;
+        request.dataType = dataType;
+        request.root = root;
+        request.comm = comm;
+        request.stream = stream;
+        return TileXRCollectives::Host::DispatchCollective(request, backend);
+    }
 
     TileXRCollectives::Host::HostLaunchContext context;
     ret = TileXRCollectives::Host::PrepareHostLaunchContext(comm, context);
@@ -312,18 +319,6 @@ int TileXRBroadcastEx(void *buf, int64_t count,
     const int64_t bytes = TileXRCollectives::Host::CountToBytes(count, dataType);
     if (context.hostArgs->rankSize <= 1) {
         return TileXR::TILEXR_SUCCESS;
-    }
-    if (UsesForcedNonAivBackend(backend)) {
-        TileXRCollectives::Host::CollectiveRequest request {};
-        request.type = TileXR::TileXRType::BROADCAST;
-        request.sendBuf = buf;
-        request.recvBuf = buf;
-        request.count = count;
-        request.dataType = dataType;
-        request.root = root;
-        request.comm = comm;
-        request.stream = stream;
-        return TileXRCollectives::Host::DispatchCollective(request, backend);
     }
 
     const uint32_t blockDim = TileXRCollectives::Host::GetBroadcastBlockNum(*context.hostArgs, bytes);
@@ -351,13 +346,6 @@ int TileXRProfileProbeEx(void *sendBuf, void *recvBuf, int64_t count,
         return ret;
     }
     const TileXRCollectiveBackend backend = SelectedBackend(options);
-    (void)backend;
-
-    TileXRCollectives::Host::HostLaunchContext context;
-    ret = TileXRCollectives::Host::PrepareHostLaunchContext(comm, context);
-    if (ret != TileXR::TILEXR_SUCCESS) {
-        return ret;
-    }
     if (UsesForcedNonAivBackend(backend)) {
         TileXRCollectives::Host::CollectiveRequest request {};
         request.type = TileXR::TileXRType::PROFILE_PROBE;
@@ -368,6 +356,12 @@ int TileXRProfileProbeEx(void *sendBuf, void *recvBuf, int64_t count,
         request.comm = comm;
         request.stream = stream;
         return TileXRCollectives::Host::DispatchCollective(request, backend);
+    }
+
+    TileXRCollectives::Host::HostLaunchContext context;
+    ret = TileXRCollectives::Host::PrepareHostLaunchContext(comm, context);
+    if (ret != TileXR::TILEXR_SUCCESS) {
+        return ret;
     }
 
     const int64_t bytes = TileXRCollectives::Host::CountToBytes(count, dataType);
