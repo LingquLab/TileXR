@@ -108,6 +108,10 @@ set(TILEXR_SOURCE_FILE tilexr_comm.cpp
         ccu/tilexr_ccu_abi_constants.h
         ccu/tilexr_ccu_barrier_program.h
         ccu/tilexr_ccu_barrier_program.cpp
+        ccu/tilexr_ccu_backend.h
+        ccu/tilexr_ccu_backend.cpp
+        ccu/tilexr_ccu_collective_planner.h
+        ccu/tilexr_ccu_collective_planner.cpp
         ccu/tilexr_ccu_direct_orchestrator.h
         ccu/tilexr_ccu_direct_orchestrator.cpp
         ccu/tilexr_ccu_direct_runtime.h
@@ -141,6 +145,10 @@ set(TILEXR_SOURCE_FILE tilexr_comm.cpp
         ccu/tilexr_ccu_resource_allocator.cpp
         ccu/tilexr_ccu_runtime.h
         ccu/tilexr_ccu_runtime.cpp
+        ccu/tilexr_ccu_runtime_session.h
+        ccu/tilexr_ccu_runtime_session.cpp
+        ccu/tilexr_ccu_executor.h
+        ccu/tilexr_ccu_executor.cpp
         ccu/tilexr_ccu_specs.h
         ccu/tilexr_ccu_specs.cpp
         tools/socket/tilexr_sock_exchange.h

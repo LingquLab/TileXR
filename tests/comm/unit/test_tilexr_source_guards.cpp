@@ -403,29 +403,83 @@ void TestCommDirectCcuInstallAttemptDoesNotSubmit()
 {
     const std::string commHeaderPath = "src/comm/tilexr_comm.h";
     const std::string commSourcePath = "src/comm/tilexr_comm.cpp";
+    const std::string ccuBackendHeaderPath = "src/comm/ccu/tilexr_ccu_backend.h";
+    const std::string ccuBackendSourcePath = "src/comm/ccu/tilexr_ccu_backend.cpp";
+    const std::string ccuRuntimeSessionHeaderPath = "src/comm/ccu/tilexr_ccu_runtime_session.h";
+    const std::string ccuRuntimeSessionSourcePath = "src/comm/ccu/tilexr_ccu_runtime_session.cpp";
+    const std::string ccuPlannerHeaderPath = "src/comm/ccu/tilexr_ccu_collective_planner.h";
+    const std::string ccuPlannerSourcePath = "src/comm/ccu/tilexr_ccu_collective_planner.cpp";
+    const std::string ccuExecutorHeaderPath = "src/comm/ccu/tilexr_ccu_executor.h";
+    const std::string ccuExecutorSourcePath = "src/comm/ccu/tilexr_ccu_executor.cpp";
     const std::string ccuRuntimeHeaderPath = "src/comm/ccu/tilexr_ccu_direct_runtime.h";
     const std::string ccuRuntimeSourcePath = "src/comm/ccu/tilexr_ccu_direct_runtime.cpp";
     const auto commHeaderText = ReadFile(commHeaderPath);
     const auto commSourceText = ReadFile(commSourcePath);
+    const auto ccuBackendHeaderText = ReadFile(ccuBackendHeaderPath);
+    const auto ccuBackendSourceText = ReadFile(ccuBackendSourcePath);
+    const auto ccuRuntimeSessionHeaderText = ReadFile(ccuRuntimeSessionHeaderPath);
+    const auto ccuRuntimeSessionSourceText = ReadFile(ccuRuntimeSessionSourcePath);
+    const auto ccuPlannerHeaderText = ReadFile(ccuPlannerHeaderPath);
+    const auto ccuPlannerSourceText = ReadFile(ccuPlannerSourcePath);
+    const auto ccuExecutorHeaderText = ReadFile(ccuExecutorHeaderPath);
+    const auto ccuExecutorSourceText = ReadFile(ccuExecutorSourcePath);
     const auto ccuRuntimeHeaderText = ReadFile(ccuRuntimeHeaderPath);
     const auto ccuRuntimeSourceText = ReadFile(ccuRuntimeSourcePath);
 
-    CheckContains(commHeaderPath, commHeaderText, "PrepareDirectCcuInstallAttempt");
-    CheckContains(commHeaderPath, commHeaderText, "FillDirectCcuLowerLayerPlanFromAllocation");
-    CheckContains(commHeaderPath, commHeaderText, "PrepareDirectCcuLowerLayerPlanCallback");
-    CheckContains(commHeaderPath, commHeaderText, "std::unique_ptr<TileXRCcuDirectRuntime> ccuDirectRuntime_");
-    CheckContains(commSourcePath, commSourceText, "#include \"ccu/tilexr_ccu_repository.h\"");
-    CheckContains(commSourcePath, commSourceText, "int TileXRComm::InitDirectCcuRuntime");
-    CheckContains(commSourcePath, commSourceText, "int TileXRComm::PrepareDirectCcuInstallAttempt");
-    CheckContains(commSourcePath, commSourceText, "ccuDirectRuntime_->CreateDriverAdapter");
-    CheckContains(commSourcePath, commSourceText, "TileXRCcuMakeRepositoryDeviceMemoryOps(next.repositoryMemoryAllocMode)");
-    CheckContains(commSourcePath, commSourceText, "next.lowerLayerPlan = nullptr");
+    CheckContains(commHeaderPath, commHeaderText, "class TileXRCcuBackend;");
+    CheckContains(commHeaderPath, commHeaderText, "std::unique_ptr<TileXRCcuBackend> ccuBackend_");
+    for (const auto& forbiddenCommDetail : {
+        "tilexr_ccu_direct_runtime.h",
+        "tilexr_ccu_lower_layer_plan_builder.h",
+        "TileXRCcuDirectRuntime",
+        "directCcuBasicInfo_",
+        "directCcuLowerLayerPlan_",
+        "directCcuVerifiedEndpointRoutes_",
+        "PrepareDirectCcuInstallAttempt",
+        "PrepareDirectCcuLowerLayerPlanCallback",
+    }) {
+        CheckNotContains(commHeaderPath, commHeaderText, forbiddenCommDetail);
+    }
+
+    CheckContains(ccuBackendHeaderPath, ccuBackendHeaderText, "class TileXRCcuBackend");
+    CheckContains(ccuBackendHeaderPath, ccuBackendHeaderText, "TileXRSockExchange *exchange");
+    CheckContains(ccuBackendHeaderPath, ccuBackendHeaderText, "std::unique_ptr<Impl> impl_");
+    CheckContains(ccuBackendSourcePath, ccuBackendSourceText, "#include \"ccu/tilexr_ccu_runtime_session.h\"");
+    CheckContains(ccuBackendSourcePath, ccuBackendSourceText, "#include \"ccu/tilexr_ccu_collective_planner.h\"");
+    CheckContains(ccuBackendSourcePath, ccuBackendSourceText, "#include \"ccu/tilexr_ccu_executor.h\"");
+    CheckNotContains(ccuBackendSourcePath, ccuBackendSourceText, "#include \"ccu/tilexr_ccu_direct_runtime.h\"");
+    CheckNotContains(ccuBackendSourcePath, ccuBackendSourceText, "#include \"ccu/tilexr_ccu_repository.h\"");
+    CheckNotContains(ccuBackendSourcePath, ccuBackendSourceText, "TileXRCcuDirectRuntime");
+    CheckContains(ccuBackendSourcePath, ccuBackendSourceText, "TileXRCcuBackend::Impl::Init");
+    CheckContains(ccuRuntimeSessionHeaderPath, ccuRuntimeSessionHeaderText, "TileXRCcuDirectRuntime");
+    CheckContains(ccuRuntimeSessionSourcePath, ccuRuntimeSessionSourceText, "ccuDirectRuntime_->CreateDriverAdapter");
+    CheckContains(ccuPlannerHeaderPath, ccuPlannerHeaderText, "class TileXRCcuRuntimeSession");
+    CheckContains(ccuPlannerHeaderPath, ccuPlannerHeaderText, "#ifdef TILEXR_CCU_TESTING");
+    CheckContains(ccuPlannerHeaderPath, ccuPlannerHeaderText, "PrepareDirectCcuMemoryCopyInstallAttempt");
+    CheckContains(ccuPlannerSourcePath, ccuPlannerSourceText, "#include \"ccu/tilexr_ccu_repository.h\"");
+    CheckContains(ccuPlannerSourcePath, ccuPlannerSourceText, "#ifdef TILEXR_CCU_TESTING");
+    CheckContains(ccuPlannerSourcePath, ccuPlannerSourceText, "TileXRCcuCollectivePlanner::PrepareDirectCcuInstallAttempt");
     CheckContains(
-        commSourcePath,
-        commSourceText,
-        "next.prepareLowerLayerPlan = &TileXRComm::PrepareDirectCcuLowerLayerPlanCallback");
-    CheckContains(commSourcePath, commSourceText, "next.lowerLayerPlanUserData = this");
-    CheckContains(commSourcePath, commSourceText, "TileXRCcuRunDirectInstallAttempt(next, attempt, report)");
+        ccuPlannerSourcePath,
+        ccuPlannerSourceText,
+        "TileXRCcuCollectivePlanner::PrepareDirectCcuMemoryCopyInstallAttempt");
+    CheckContains(ccuPlannerSourcePath, ccuPlannerSourceText, "TileXRCcuCollectivePlanner::PrepareDirectCcuLowerLayerPlanCallback");
+    CheckContains(
+        ccuPlannerSourcePath,
+        ccuPlannerSourceText,
+        "TileXRCcuMakeRepositoryDeviceMemoryOps(next.repositoryMemoryAllocMode)");
+    CheckContains(ccuPlannerSourcePath, ccuPlannerSourceText, "next.lowerLayerPlan = nullptr");
+    CheckContains(
+        ccuPlannerSourcePath,
+        ccuPlannerSourceText,
+        "next.prepareLowerLayerPlan = &TileXRCcuCollectivePlanner::PrepareDirectCcuLowerLayerPlanCallback");
+    CheckContains(ccuPlannerSourcePath, ccuPlannerSourceText, "LowerLayerPlanCallbackContext callbackContext");
+    CheckContains(ccuPlannerSourcePath, ccuPlannerSourceText, "next.lowerLayerPlanUserData = &callbackContext");
+    CheckContains(ccuPlannerSourcePath, ccuPlannerSourceText, "TileXRCcuRunDirectInstallAttempt(next, attempt, report)");
+    CheckContains(ccuExecutorHeaderPath, ccuExecutorHeaderText, "#ifdef TILEXR_CCU_TESTING");
+    CheckContains(ccuExecutorHeaderPath, ccuExecutorHeaderText, "ReadDirectCcuInstructionsForDebug");
+    CheckContains(ccuExecutorSourcePath, ccuExecutorSourceText, "#ifdef TILEXR_CCU_TESTING");
+    CheckContains(ccuExecutorSourcePath, ccuExecutorSourceText, "ReadDirectCcuInstructionsForDebug");
     CheckContains(ccuRuntimeHeaderPath, ccuRuntimeHeaderText, "int CreateDriverAdapter(");
     CheckContains(ccuRuntimeSourcePath, ccuRuntimeSourceText, "int TileXRCcuDirectRuntime::CreateDriverAdapter");
     CheckContains(ccuRuntimeHeaderPath, ccuRuntimeHeaderText, "TileXRCcuHccpLoader");
@@ -441,13 +495,13 @@ void TestCommDirectCcuInstallAttemptDoesNotSubmit()
     }
 
     const auto initUdmaBegin = commSourceText.find("int TileXRComm::InitUDMA");
-    const auto initDirectCcuBegin = commSourceText.find("int TileXRComm::InitDirectCcuRuntime");
-    if (initUdmaBegin == std::string::npos || initDirectCcuBegin == std::string::npos ||
-        initUdmaBegin >= initDirectCcuBegin) {
+    const auto initCcuBackendBegin = commSourceText.find("int TileXRComm::InitCcuBackend");
+    if (initUdmaBegin == std::string::npos || initCcuBackendBegin == std::string::npos ||
+        initUdmaBegin >= initCcuBackendBegin) {
         std::cerr << commSourcePath << ": cannot isolate InitUDMA body" << std::endl;
         ++g_failures;
     } else {
-        const auto initUdmaBody = commSourceText.substr(initUdmaBegin, initDirectCcuBegin - initUdmaBegin);
+        const auto initUdmaBody = commSourceText.substr(initUdmaBegin, initCcuBackendBegin - initUdmaBegin);
         CheckNotContains(commSourcePath, initUdmaBody, "RefreshDirectCcuBasicInfo");
         CheckNotContains(commSourcePath, initUdmaBody, "ResetDirectCcuBasicInfo");
     }
@@ -480,6 +534,14 @@ void TestCommDirectCcuInstallAttemptDoesNotSubmit()
     }) {
         CheckNotContains(commHeaderPath, commHeaderText, forbidden);
         CheckNotContains(commSourcePath, commSourceText, forbidden);
+        CheckNotContains(ccuBackendHeaderPath, ccuBackendHeaderText, forbidden);
+        CheckNotContains(ccuBackendSourcePath, ccuBackendSourceText, forbidden);
+        CheckNotContains(ccuRuntimeSessionHeaderPath, ccuRuntimeSessionHeaderText, forbidden);
+        CheckNotContains(ccuRuntimeSessionSourcePath, ccuRuntimeSessionSourceText, forbidden);
+        CheckNotContains(ccuPlannerHeaderPath, ccuPlannerHeaderText, forbidden);
+        CheckNotContains(ccuPlannerSourcePath, ccuPlannerSourceText, forbidden);
+        CheckNotContains(ccuExecutorHeaderPath, ccuExecutorHeaderText, forbidden);
+        CheckNotContains(ccuExecutorSourcePath, ccuExecutorSourceText, forbidden);
         CheckNotContains(ccuRuntimeHeaderPath, ccuRuntimeHeaderText, forbidden);
         CheckNotContains(ccuRuntimeSourcePath, ccuRuntimeSourceText, forbidden);
     }

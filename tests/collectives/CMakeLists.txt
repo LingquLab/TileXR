@@ -90,6 +90,14 @@ add_executable(test_tilexr_collectives_header_compile
     unit/test_tilexr_collectives_header_compile.cpp
 )
 
+add_executable(test_tilexr_collective_backend_options
+    unit/test_tilexr_collective_backend_options.cpp
+)
+
+target_include_directories(test_tilexr_collective_backend_options PRIVATE
+    ${TILEXR_ROOT}/src/collectives/host
+)
+
 add_executable(test_tilexr_perf_trace_layout
     unit/test_tilexr_perf_trace_layout.cpp
 )
@@ -243,6 +251,10 @@ target_link_libraries(test_tilexr_collectives_header_compile
     ${TILEXR_COLLECTIVES_TEST_TARGET}
 )
 
+target_link_libraries(test_tilexr_collective_backend_options
+    ${TILEXR_COLLECTIVES_TEST_TARGET}
+)
+
 target_link_libraries(test_tilexr_perf_trace_layout
     ${TILEXR_COMM_TEST_TARGET}
 )
@@ -295,6 +307,7 @@ target_link_libraries(test_prepare_host_launch_context
 
 foreach(_tilexr_collectives_link_target
         test_tilexr_collectives_header_compile
+        test_tilexr_collective_backend_options
         test_tilexr_perf_trace_layout
         test_collective_perf_report
         test_collective_perf_session
@@ -312,6 +325,7 @@ add_test(NAME test_tilexr_collectives_api COMMAND test_tilexr_collectives_api)
 add_test(NAME test_tilexr_collectives_kernel_ownership COMMAND test_tilexr_collectives_kernel_ownership)
 add_test(NAME test_tilexr_collectives_tools_sources COMMAND test_tilexr_collectives_tools_sources)
 add_test(NAME test_tilexr_collectives_header_compile COMMAND test_tilexr_collectives_header_compile)
+add_test(NAME test_tilexr_collective_backend_options COMMAND test_tilexr_collective_backend_options)
 add_test(NAME test_tilexr_perf_trace_layout COMMAND test_tilexr_perf_trace_layout)
 add_test(NAME test_collective_perf_report COMMAND test_collective_perf_report)
 add_test(NAME test_collective_perf_session COMMAND test_collective_perf_session)
@@ -338,6 +352,7 @@ install(TARGETS
     test_tilexr_collectives_kernel_ownership
     test_tilexr_collectives_tools_sources
     test_tilexr_collectives_header_compile
+    test_tilexr_collective_backend_options
     test_tilexr_perf_trace_layout
     test_collective_perf_report
     test_collective_perf_session
