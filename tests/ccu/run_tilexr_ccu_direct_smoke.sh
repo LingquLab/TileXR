@@ -231,6 +231,7 @@ driver_lib_dir="${ASCEND_DRIVER_PATH}/lib64/driver"
 probe_bin="${work_dir}/ccu_tilexr_direct_smoke_probe"
 
 c++ -std=c++14 \
+    -DTILEXR_CCU_TESTING=1 \
     -I "${repo_root}/src/include" \
     -I "${repo_root}/src/comm" \
     -I "${cann_root}/pkg_inc" \

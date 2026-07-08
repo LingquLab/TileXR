@@ -118,6 +118,7 @@ class TileXRCcuDirectSmokeProbeTest(unittest.TestCase):
         compile_cmd = [
             compiler,
             "-std=c++14",
+            "-DTILEXR_CCU_TESTING=1",
             "-I",
             str(INCLUDE_DIR),
             "-I",
@@ -180,7 +181,7 @@ class TileXRCcuDirectSmokeProbeTest(unittest.TestCase):
         self.assertIn("TILEXR_CCU_DIRECT_REPOSITORY_INSTALL_WINDOW", source)
         self.assertIn("TILEXR_CCU_DIRECT_REPOSITORY_DATA_LEN_MODE", source)
         self.assertIn("TILEXR_CCU_DIRECT_REPOSITORY_MEMORY_ALLOC_MODE", source)
-        self.assertIn("TILEXR_DIRECT_CCU_REPOSITORY_MEMORY_ALLOC_RT_HBM", source)
+        self.assertIn("TileXRCcuRepositoryMemoryAllocMode::RtHbm", source)
         self.assertIn('text == "rt_hbm"', source)
         self.assertIn("TILEXR_CCU_DIRECT_INSTALL_ORDER", source)
         self.assertIn("TILEXR_CCU_DIRECT_RESOURCE_WINDOW_TOKEN_ID", source)
@@ -189,6 +190,9 @@ class TileXRCcuDirectSmokeProbeTest(unittest.TestCase):
         self.assertIn("TILEXR_CCU_DIRECT_SMOKE_THREAD_MODE", source)
         self.assertIn("InitCommForDirectCcuSmoke", source)
         self.assertIn("RunThreadModeSmoke", source)
+        self.assertIn("DirectCcuSmokeContext", source)
+        self.assertIn("TileXRCcuRuntimeSession", source)
+        self.assertIn("TileXRSockExchange", source)
         self.assertIn("ShouldFastExitAfterPrepareFailure", source)
         self.assertIn("ShouldFastExitAfterRun", source)
         self.assertIn("TraceLifecycle", source)
@@ -205,10 +209,9 @@ class TileXRCcuDirectSmokeProbeTest(unittest.TestCase):
         self.assertIn('std::string(value) == "local_cke_post_only"', source)
         self.assertIn('std::string(value) == "sync_xn_post_only"', source)
         self.assertIn('std::string(value) == "sync_xn_load_post_only"', source)
-        self.assertIn("TileXRCommInitRankWithDomain", source)
-        self.assertIn("TileXRCommInitRankDirectCcuWithDomain", source)
-        self.assertIn("TileXRCommPrepareDirectCcu", source)
-        self.assertIn("TileXRCommPrepareDirectCcuMemoryCopy", source)
+        self.assertIn("PrepareDirectCcuInstallAttempt", source)
+        self.assertIn("PrepareDirectCcuMemoryCopyInstallAttempt", source)
+        self.assertIn("ReadDirectCcuInstructionsForDebug", source)
         self.assertIn("TileXRDirectCcuSubmitPrepared", source)
         self.assertIn("TileXRDirectCcuDestroyPrepared", source)
         self.assertIn("tilexr_ccu_direct_smoke config", source)
@@ -237,8 +240,8 @@ class TileXRCcuDirectSmokeProbeTest(unittest.TestCase):
 
         self.assertIn("kP2pCcuCopyEnv", source)
         self.assertIn("RunP2pCcuCopy", source)
-        self.assertIn("TileXRDirectCcuMemoryCopyPrepareOptions", source)
-        self.assertIn("TileXRCommPrepareDirectCcuMemoryCopy", source)
+        self.assertIn("PrepareDirectCcuMemoryCopyInstallAttempt", source)
+        self.assertIn("TileXRCcuMemoryCopyDirection::RemoteToLocal", source)
         self.assertIn("ACL_MEMCPY_HOST_TO_DEVICE", source)
         self.assertIn("ACL_MEMCPY_DEVICE_TO_HOST", source)
         self.assertIn("p2pCcuCopy", source)
@@ -251,7 +254,7 @@ class TileXRCcuDirectSmokeProbeTest(unittest.TestCase):
         prepared_body = source[source.index("RunPreparedSmokeForRank"): thread_mode_pos]
         self.assertIn("TileXRCommInitAll", thread_mode_body)
         self.assertIn("RunPreparedSmokeForRank", thread_mode_body)
-        self.assertIn("TileXRCommPrepareDirectCcu", prepared_body)
+        self.assertIn("PrepareDirectCcuInstallAttempt", prepared_body)
         self.assertIn("TileXRDirectCcuSubmitPrepared", prepared_body)
         self.assertNotIn("TileXRCommInitRankWithDomain", thread_mode_body)
         self.assertNotIn("TILEXR_COMM_ID", thread_mode_body)
@@ -279,8 +282,9 @@ class TileXRCcuDirectSmokeProbeTest(unittest.TestCase):
         main_source = source[source.index("int main()"):]
 
         self.assertIn("TILEXR_CCU_DIRECT_SMOKE_DIRECT_CCU_ONLY_INIT", source)
-        self.assertIn("TileXRCommInitRankDirectCcuWithDomain", init_helper_body)
-        self.assertIn("TileXRCommInitRankWithDomain", init_helper_body)
+        self.assertIn("TileXRSockExchange", init_helper_body)
+        self.assertIn("TileXRCcuBackendOptions", init_helper_body)
+        self.assertIn("context->session.Init(options)", init_helper_body)
         self.assertIn("EnvFlag(kDirectCcuOnlyInitEnv)", init_helper_body)
         self.assertIn("InitCommForDirectCcuSmoke", main_source)
 
@@ -290,12 +294,12 @@ class TileXRCcuDirectSmokeProbeTest(unittest.TestCase):
 
         final_ret_pos = main_source.index("int finalRet = RunPreparedSmokeForRank")
         fast_exit_pos = main_source.index("ShouldFastExitAfterPrepareFailure(finalRet)")
-        destroy_pos = main_source.index("TileXRCommDestroy(raw)", final_ret_pos)
+        shutdown_pos = main_source.index("context.session.Shutdown()", final_ret_pos)
         reset_pos = main_source.index("aclrtResetDevice(device)", final_ret_pos)
         finalize_pos = main_source.index("aclFinalize()", final_ret_pos)
 
         self.assertLess(final_ret_pos, fast_exit_pos)
-        self.assertLess(fast_exit_pos, destroy_pos)
+        self.assertLess(fast_exit_pos, shutdown_pos)
         self.assertLess(fast_exit_pos, reset_pos)
         self.assertLess(fast_exit_pos, finalize_pos)
         self.assertIn("std::fflush(stdout)", main_source)
@@ -322,10 +326,10 @@ class TileXRCcuDirectSmokeProbeTest(unittest.TestCase):
 
         final_ret_pos = main_source.index("int finalRet = RunPreparedSmokeForRank")
         fast_exit_pos = main_source.index("ShouldFastExitAfterRun()")
-        destroy_pos = main_source.index("TileXRCommDestroy(raw)", final_ret_pos)
+        shutdown_pos = main_source.index("context.session.Shutdown()", final_ret_pos)
 
         self.assertLess(final_ret_pos, fast_exit_pos)
-        self.assertLess(fast_exit_pos, destroy_pos)
+        self.assertLess(fast_exit_pos, shutdown_pos)
         self.assertIn("tilexr_ccu_direct_smoke fastExitAfterRun=1", source)
         self.assertIn("TraceLifecycle(\"before TileXRDirectCcuDestroyPrepared\")", source)
         self.assertIn("TraceLifecycle(\"after TileXRDirectCcuDestroyPrepared\")", source)
@@ -406,8 +410,8 @@ class TileXRCcuDirectSmokeProbeTest(unittest.TestCase):
             "options.localWaitCkeCount",
             "options.remoteNotifyCkeStartId",
             "options.remoteNotifyCkeCount",
-            "options.repositoryInstallWindow",
-            "options.repositoryInstallDataLenMode",
+            "options.repositoryInstallOptions.window",
+            "options.repositoryInstallOptions.dataLenMode",
             "options.repositoryMemoryAllocMode",
             "options.installOrder",
             "options.sqeArgCount",
@@ -444,16 +448,16 @@ class TileXRCcuDirectSmokeProbeTest(unittest.TestCase):
     def test_probe_defaults_to_lower_layer_first_install_order(self):
         source = PROBE_SOURCE.read_text(encoding="utf-8")
         install_order_body = source[
-            source.index("uint32_t InstallOrderFromEnv()"):
+            source.index("TileXR::TileXRCcuInstallOrder InstallOrderFromEnv()"):
             source.index("uint32_t DefaultSyncInstructionCount")
         ]
 
-        self.assertIn("TILEXR_DIRECT_CCU_INSTALL_ORDER_LOWER_LAYER_FIRST", install_order_body)
+        self.assertIn("TileXRCcuInstallOrder::InstallLowerLayerFirst", install_order_body)
         self.assertIn("repository_first", install_order_body)
-        self.assertIn("TILEXR_DIRECT_CCU_INSTALL_ORDER_REPOSITORY_FIRST", install_order_body)
+        self.assertIn("TileXRCcuInstallOrder::RepositoryFirst", install_order_body)
         self.assertLess(
-            install_order_body.index("TILEXR_DIRECT_CCU_INSTALL_ORDER_LOWER_LAYER_FIRST"),
-            install_order_body.index("TILEXR_DIRECT_CCU_INSTALL_ORDER_REPOSITORY_FIRST"),
+            install_order_body.index("TileXRCcuInstallOrder::InstallLowerLayerFirst"),
+            install_order_body.index("TileXRCcuInstallOrder::RepositoryFirst"),
         )
 
     def test_probe_default_sync_instruction_count_includes_hcomm_style_task1_prelude(self):

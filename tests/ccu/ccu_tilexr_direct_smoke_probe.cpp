@@ -11,6 +11,10 @@
 #include "acl/acl_rt.h"
 #include "tilexr_api.h"
 #include "tilexr_types.h"
+#include "ccu/tilexr_ccu_collective_planner.h"
+#include "ccu/tilexr_ccu_executor.h"
+#include "ccu/tilexr_ccu_runtime_session.h"
+#include "tools/socket/tilexr_sock_exchange.h"
 #include "runtime/dev.h"
 
 #include <chrono>
@@ -21,12 +25,34 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <memory>
+#include <new>
 #include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
 
 namespace {
+
+struct DirectCcuSmokeContext {
+    std::unique_ptr<TileXR::TileXRSockExchange> exchange;
+    TileXR::TileXRCcuRuntimeSession session;
+    TileXR::TileXRCcuCollectivePlanner planner;
+    TileXR::TileXRCcuExecutor executor;
+};
+
+using TileXRDirectCcuPrepareOptions = TileXR::TileXRCcuDirectInstallOptions;
+using TileXRDirectCcuPrepareReport = TileXR::TileXRCcuDirectInstallReport;
+using TileXRDirectCcuSubmitReport = TileXR::TileXRCcuDirectSubmitReport;
+using TileXRDirectCcuPreparedTasksPtr = TileXR::TileXRCcuDirectInstallAttempt*;
+using TileXRDirectCcuTaskInfo = TileXR::TileXRCcuTask;
+using TileXRDirectCcuInstructionReadbackReport = TileXR::TileXRCcuDriverAdapterReport;
+
+constexpr uint32_t TILEXR_DIRECT_CCU_SQE_ARGS_LEN = TileXR::TILEXR_CCU_SQE_ARGS_LEN;
+
+struct TileXRDirectCcuInstructionWords {
+    uint32_t words[4] = {};
+};
 
 constexpr const char* kEnableEnv = "TILEXR_CCU_DIRECT_SMOKE_ENABLE";
 constexpr const char* kThreadModeEnv = "TILEXR_CCU_DIRECT_SMOKE_THREAD_MODE";
@@ -231,62 +257,62 @@ bool SyncXnLoadPostOnlyBarrierMode()
     return value != nullptr && std::string(value) == "sync_xn_load_post_only";
 }
 
-uint32_t RepositoryInstallWindowFromEnv()
+TileXR::TileXRCcuRepositoryInstallWindow RepositoryInstallWindowFromEnv()
 {
     const char* value = std::getenv(kRepositoryInstallWindowEnv);
     if (value == nullptr || value[0] == '\0') {
-        return TILEXR_DIRECT_CCU_REPOSITORY_INSTALL_WINDOW_MISSION;
+        return TileXR::TileXRCcuRepositoryInstallWindow::Mission;
     }
     const std::string text(value);
     if (text == "full_repository" || text == "full" || text == "1") {
-        return TILEXR_DIRECT_CCU_REPOSITORY_INSTALL_WINDOW_FULL_REPOSITORY;
+        return TileXR::TileXRCcuRepositoryInstallWindow::FullRepository;
     }
-    return TILEXR_DIRECT_CCU_REPOSITORY_INSTALL_WINDOW_MISSION;
+    return TileXR::TileXRCcuRepositoryInstallWindow::Mission;
 }
 
-uint32_t RepositoryInstallDataLenModeFromEnv()
+TileXR::TileXRCcuRepositoryInstallDataLenMode RepositoryInstallDataLenModeFromEnv()
 {
     const char* value = std::getenv(kRepositoryInstallDataLenModeEnv);
     if (value == nullptr || value[0] == '\0') {
-        return TILEXR_DIRECT_CCU_REPOSITORY_INSTALL_DATA_LEN_INSTRUCTION_BYTES;
+        return TileXR::TileXRCcuRepositoryInstallDataLenMode::InstructionBytes;
     }
     const std::string text(value);
     if (text == "descriptor_bytes" || text == "descriptor" || text == "1") {
-        return TILEXR_DIRECT_CCU_REPOSITORY_INSTALL_DATA_LEN_DESCRIPTOR_BYTES;
+        return TileXR::TileXRCcuRepositoryInstallDataLenMode::DescriptorBytes;
     }
-    return TILEXR_DIRECT_CCU_REPOSITORY_INSTALL_DATA_LEN_INSTRUCTION_BYTES;
+    return TileXR::TileXRCcuRepositoryInstallDataLenMode::InstructionBytes;
 }
 
-uint32_t RepositoryMemoryAllocModeFromEnv()
+TileXR::TileXRCcuRepositoryMemoryAllocMode RepositoryMemoryAllocModeFromEnv()
 {
     const char* value = std::getenv(kRepositoryMemoryAllocModeEnv);
     if (value == nullptr || value[0] == '\0') {
-        return TILEXR_DIRECT_CCU_REPOSITORY_MEMORY_ALLOC_ACL;
+        return TileXR::TileXRCcuRepositoryMemoryAllocMode::Acl;
     }
     const std::string text(value);
     if (text == "acl_module3" || text == "acl_hccl_module" || text == "module3" || text == "1") {
-        return TILEXR_DIRECT_CCU_REPOSITORY_MEMORY_ALLOC_ACL_MODULE3;
+        return TileXR::TileXRCcuRepositoryMemoryAllocMode::AclModule3;
     }
     if (text == "rt_hbm" || text == "rt" || text == "runtime_hbm" || text == "2") {
-        return TILEXR_DIRECT_CCU_REPOSITORY_MEMORY_ALLOC_RT_HBM;
+        return TileXR::TileXRCcuRepositoryMemoryAllocMode::RtHbm;
     }
-    return TILEXR_DIRECT_CCU_REPOSITORY_MEMORY_ALLOC_ACL;
+    return TileXR::TileXRCcuRepositoryMemoryAllocMode::Acl;
 }
 
-uint32_t InstallOrderFromEnv()
+TileXR::TileXRCcuInstallOrder InstallOrderFromEnv()
 {
     const char* value = std::getenv(kInstallOrderEnv);
     if (value == nullptr || value[0] == '\0') {
-        return TILEXR_DIRECT_CCU_INSTALL_ORDER_LOWER_LAYER_FIRST;
+        return TileXR::TileXRCcuInstallOrder::InstallLowerLayerFirst;
     }
     const std::string text(value);
     if (text == "lower_layer_first" || text == "install_lower_layer_first" || text == "1") {
-        return TILEXR_DIRECT_CCU_INSTALL_ORDER_LOWER_LAYER_FIRST;
+        return TileXR::TileXRCcuInstallOrder::InstallLowerLayerFirst;
     }
     if (text == "repository_first" || text == "repo_first" || text == "0") {
-        return TILEXR_DIRECT_CCU_INSTALL_ORDER_REPOSITORY_FIRST;
+        return TileXR::TileXRCcuInstallOrder::RepositoryFirst;
     }
-    return TILEXR_DIRECT_CCU_INSTALL_ORDER_REPOSITORY_FIRST;
+    return TileXR::TileXRCcuInstallOrder::RepositoryFirst;
 }
 
 uint32_t DefaultSyncInstructionCount(uint32_t syncResourceCount)
@@ -501,12 +527,33 @@ int DeviceFromEnv(int rank)
     return DeviceFromList(std::getenv("TILEXR_TEST_DEVICES"), rank, firstDevice + rank);
 }
 
-int InitCommForDirectCcuSmoke(int commDomain, int rankSize, int rank, TileXRCommPtr* raw)
+int InitCommForDirectCcuSmoke(int commDomain, int rankSize, int rank, int device, DirectCcuSmokeContext* context)
 {
-    if (EnvFlag(kDirectCcuOnlyInitEnv)) {
-        return TileXRCommInitRankDirectCcuWithDomain(commDomain, rankSize, rank, raw);
+    if (context == nullptr) {
+        return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
-    return TileXRCommInitRankWithDomain(commDomain, rankSize, rank, raw);
+
+    context->exchange.reset(new (std::nothrow) TileXR::TileXRSockExchange(rank, rankSize, commDomain));
+    if (context->exchange == nullptr) {
+        return TileXR::TILEXR_ERROR_INTERNAL;
+    }
+
+    TileXR::TileXRCcuBackendOptions options {};
+    options.rank = rank;
+    options.rankSize = rankSize;
+    options.devId = device;
+    options.uid = "tilexr-direct-smoke-probe";
+    options.exchange = context->exchange.get();
+    const int ret = context->session.Init(options);
+    if (ret == TileXR::TILEXR_SUCCESS) {
+        std::cout << "tilexr_ccu_direct_smoke internalDirectCcuInit"
+                  << " rank=" << rank
+                  << " rankSize=" << rankSize
+                  << " device=" << device
+                  << " directOnly=" << (EnvFlag(kDirectCcuOnlyInitEnv) ? 1 : 0)
+                  << std::endl;
+    }
+    return ret;
 }
 
 TileXRDirectCcuPrepareOptions MakePrepareOptions(int rank, int rankSize, int device)
@@ -540,8 +587,8 @@ TileXRDirectCcuPrepareOptions MakePrepareOptions(int rank, int rankSize, int dev
         RankEnvInt("TILEXR_CCU_PROBE_RANK", rank, "_REMOTE_NOTIFY_CKE_START", kRemoteNotifyCkeStartEnv, 0));
     options.remoteNotifyCkeCount = static_cast<uint16_t>(
         RankEnvInt("TILEXR_CCU_PROBE_RANK", rank, "_REMOTE_NOTIFY_CKE_COUNT", kRemoteNotifyCkeCountEnv, 0));
-    options.repositoryInstallWindow = RepositoryInstallWindowFromEnv();
-    options.repositoryInstallDataLenMode = RepositoryInstallDataLenModeFromEnv();
+    options.repositoryInstallOptions.window = RepositoryInstallWindowFromEnv();
+    options.repositoryInstallOptions.dataLenMode = RepositoryInstallDataLenModeFromEnv();
     options.repositoryMemoryAllocMode = RepositoryMemoryAllocModeFromEnv();
     options.installOrder = InstallOrderFromEnv();
     options.deviceId = static_cast<uint32_t>(device);
@@ -584,6 +631,76 @@ void PrintSubmitReport(
               << std::endl;
 }
 
+int TileXRDirectCcuGetPreparedTask(
+    TileXRDirectCcuPreparedTasksPtr prepared,
+    uint32_t taskIndex,
+    TileXRDirectCcuTaskInfo* task)
+{
+    if (prepared == nullptr || task == nullptr || taskIndex >= prepared->submitTasks.size()) {
+        return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    *task = prepared->submitTasks[taskIndex];
+    return TileXR::TILEXR_SUCCESS;
+}
+
+int TileXRDirectCcuSubmitPrepared(
+    TileXRDirectCcuPreparedTasksPtr prepared,
+    void* stream,
+    TileXRDirectCcuSubmitReport* report)
+{
+    if (prepared == nullptr) {
+        return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    return TileXR::TileXRCcuSubmitPreparedTasks(prepared->submitTasks, stream, nullptr, nullptr, report);
+}
+
+int TileXRDirectCcuSubmitPreparedTask(
+    TileXRDirectCcuPreparedTasksPtr prepared,
+    uint32_t taskIndex,
+    void* stream,
+    TileXRDirectCcuSubmitReport* report)
+{
+    if (prepared == nullptr || taskIndex >= prepared->submitTasks.size()) {
+        if (report != nullptr) {
+            *report = TileXRDirectCcuSubmitReport {};
+            report->taskCount = prepared == nullptr ? 0U : static_cast<uint32_t>(prepared->submitTasks.size());
+            report->message = "selected direct CCU submit task is missing";
+        }
+        return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    std::vector<TileXR::TileXRCcuTask> selected {prepared->submitTasks[taskIndex]};
+    return TileXR::TileXRCcuSubmitPreparedTasks(selected, stream, nullptr, nullptr, report);
+}
+
+int TileXRDirectCcuDestroyPrepared(TileXRDirectCcuPreparedTasksPtr prepared)
+{
+    if (prepared == nullptr) {
+        return TileXR::TILEXR_SUCCESS;
+    }
+    return TileXR::TileXRCcuReleaseDirectInstallAttemptResources(*prepared);
+}
+
+int TileXRCommReadDirectCcuInstructions(
+    DirectCcuSmokeContext* context,
+    uint8_t dieId,
+    uint16_t instructionStartId,
+    uint32_t instructionCount,
+    TileXRDirectCcuInstructionWords* instructions,
+    TileXRDirectCcuInstructionReadbackReport* report)
+{
+    if (context == nullptr || instructions == nullptr) {
+        return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    return context->executor.ReadDirectCcuInstructionsForDebug(
+        context->session,
+        dieId,
+        instructionStartId,
+        instructions,
+        instructionCount,
+        sizeof(TileXRDirectCcuInstructionWords),
+        report);
+}
+
 int SubmitPreparedWithSelector(
     TileXRDirectCcuPreparedTasksPtr prepared,
     uint32_t taskCount,
@@ -600,10 +717,7 @@ int SubmitPreparedWithSelector(
     if (!selectFirst && !selectSecond) {
         if (report != nullptr) {
             *report = TileXRDirectCcuSubmitReport {};
-            std::strncpy(
-                report->message,
-                "invalid TILEXR_CCU_DIRECT_SMOKE_SUBMIT_TASK_SELECTOR",
-                sizeof(report->message) - 1U);
+            report->message = "invalid TILEXR_CCU_DIRECT_SMOKE_SUBMIT_TASK_SELECTOR";
         }
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
@@ -618,7 +732,7 @@ int SubmitPreparedWithSelector(
         if (report != nullptr) {
             *report = TileXRDirectCcuSubmitReport {};
             report->taskCount = taskCount;
-            std::strncpy(report->message, "selected direct CCU submit task is missing", sizeof(report->message) - 1U);
+            report->message = "selected direct CCU submit task is missing";
         }
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
@@ -669,10 +783,10 @@ void PrintConfig(
               << " localWaitCkeCount=" << options.localWaitCkeCount
               << " remoteNotifyCkeStartId=" << options.remoteNotifyCkeStartId
               << " remoteNotifyCkeCount=" << options.remoteNotifyCkeCount
-              << " repositoryInstallWindow=" << options.repositoryInstallWindow
-              << " repositoryInstallDataLenMode=" << options.repositoryInstallDataLenMode
-              << " repositoryMemoryAllocMode=" << options.repositoryMemoryAllocMode
-              << " installOrder=" << options.installOrder
+              << " repositoryInstallWindow=" << static_cast<uint32_t>(options.repositoryInstallOptions.window)
+              << " repositoryInstallDataLenMode=" << static_cast<uint32_t>(options.repositoryInstallOptions.dataLenMode)
+              << " repositoryMemoryAllocMode=" << static_cast<uint32_t>(options.repositoryMemoryAllocMode)
+              << " installOrder=" << static_cast<uint32_t>(options.installOrder)
               << " barrierMode=\"" << (std::getenv(kBarrierModeEnv) == nullptr ? "" : std::getenv(kBarrierModeEnv))
               << "\""
               << " resourceWindowTokenId=\""
@@ -684,7 +798,7 @@ void PrintConfig(
               << " resourceWindowTokenValue=\""
               << (std::getenv(kResourceWindowTokenValueEnv) == nullptr ? "" : std::getenv(kResourceWindowTokenValueEnv))
               << "\""
-              << " provider=\"" << (options.provider == nullptr ? "" : options.provider) << "\""
+              << " provider=\"" << options.provider << "\""
               << std::endl;
 }
 
@@ -717,15 +831,15 @@ void PrintPreparedTasks(TileXRDirectCcuPreparedTasksPtr prepared, uint32_t taskC
     std::cout << std::endl;
 }
 
-void PrintInstructionReadback(TileXRCommPtr raw, TileXRDirectCcuPreparedTasksPtr prepared, uint32_t taskCount)
+void PrintInstructionReadback(DirectCcuSmokeContext* context, TileXRDirectCcuPreparedTasksPtr prepared, uint32_t taskCount)
 {
     if (!EnvFlag(kReadbackInstructionsEnv)) {
         return;
     }
-    if (raw == nullptr) {
+    if (context == nullptr) {
         std::cout << "tilexr_ccu_direct_smoke instructionReadback ret="
                   << TileXR::TILEXR_ERROR_PARA_CHECK_FAIL
-                  << " message=\"missing TileXRComm\""
+                  << " message=\"missing direct CCU smoke context\""
                   << std::endl;
         return;
     }
@@ -747,7 +861,7 @@ void PrintInstructionReadback(TileXRCommPtr raw, TileXRDirectCcuPreparedTasksPtr
         std::vector<TileXRDirectCcuInstructionWords> readback(readCount);
         TileXRDirectCcuInstructionReadbackReport report;
         const int readRet = TileXRCommReadDirectCcuInstructions(
-            raw,
+            context,
             static_cast<uint8_t>(task.dieId),
             static_cast<uint16_t>(task.instStartId),
             readCount,
@@ -963,7 +1077,7 @@ bool WaitForCollectiveSubmitDone(int rank, int rankSize, int localResult)
     }
 }
 
-int RunPreparedSmokeForRank(TileXRCommPtr raw, int rank, int rankSize, int device)
+int RunPreparedSmokeForRank(DirectCcuSmokeContext* context, int rank, int rankSize, int device)
 {
     TileXRDirectCcuPrepareOptions options = MakePrepareOptions(rank, rankSize, device);
     const int peer = rankSize == 2 ? 1 - rank : (rank + 1) % rankSize;
@@ -977,25 +1091,26 @@ int RunPreparedSmokeForRank(TileXRCommPtr raw, int rank, int rankSize, int devic
     }
     PrintConfig(options, rankSize);
 
-    TileXRDirectCcuPreparedTasksPtr prepared = nullptr;
+    TileXR::TileXRCcuDirectInstallAttempt attempt;
+    TileXRDirectCcuPreparedTasksPtr prepared = &attempt;
     TileXRDirectCcuPrepareReport installReport;
     int ret = p2pCcuCopyEnabled && p2pCcuCopy.initRet != ACL_SUCCESS ?
         p2pCcuCopy.initRet :
         p2pCcuCopyEnabled ?
-        [&]() {
-            TileXRDirectCcuMemoryCopyPrepareOptions copyOptions {};
-            copyOptions.prepare = options;
-            copyOptions.localSourceAddr = reinterpret_cast<uint64_t>(p2pCcuCopy.source.ptr);
-            copyOptions.localDestinationAddr = reinterpret_cast<uint64_t>(p2pCcuCopy.destination.ptr);
-            copyOptions.bytes = p2pCcuCopy.bytes;
-            copyOptions.peerRank = static_cast<uint32_t>(peer);
-            copyOptions.direction = TILEXR_DIRECT_CCU_MEMORY_COPY_REMOTE_TO_LOCAL;
-            return TileXRCommPrepareDirectCcuMemoryCopy(raw, &copyOptions, &prepared, &installReport);
-        }() :
-        TileXRCommPrepareDirectCcu(raw, &options, &prepared, &installReport);
+        context->planner.PrepareDirectCcuMemoryCopyInstallAttempt(
+            context->session,
+            options,
+            reinterpret_cast<uint64_t>(p2pCcuCopy.source.ptr),
+            reinterpret_cast<uint64_t>(p2pCcuCopy.destination.ptr),
+            p2pCcuCopy.bytes,
+            static_cast<uint32_t>(peer),
+            TileXR::TileXRCcuMemoryCopyDirection::RemoteToLocal,
+            prepared,
+            &installReport) :
+        context->planner.PrepareDirectCcuInstallAttempt(context->session, options, prepared, &installReport);
     PrintInstallReport("tilexr_ccu_direct_smoke prepare", ret, installReport);
     PrintPreparedTasks(prepared, installReport.submitTaskCount);
-    PrintInstructionReadback(raw, prepared, installReport.submitTaskCount);
+    PrintInstructionReadback(context, prepared, installReport.submitTaskCount);
 
     int finalRet = 0;
     const bool submitRequested = EnvFlag(kSubmitEnv);
@@ -1127,7 +1242,18 @@ int RunThreadModeSmoke(int rankSize)
                 rankResults[rank] = 14;
                 return;
             }
-            rankResults[rank] = RunPreparedSmokeForRank(comms[rank], rank, rankSize, devices[rank]);
+            DirectCcuSmokeContext context;
+            const int initRet = InitCommForDirectCcuSmoke(0, rankSize, rank, devices[rank], &context);
+            if (initRet != TileXR::TILEXR_SUCCESS) {
+                std::cerr << "tilexr_ccu_direct_smoke threadMode direct CCU init ret="
+                          << initRet
+                          << " rank=" << rank
+                          << " device=" << devices[rank]
+                          << std::endl;
+                rankResults[rank] = 5;
+                return;
+            }
+            rankResults[rank] = RunPreparedSmokeForRank(&context, rank, rankSize, devices[rank]);
         });
     }
     for (auto& rankThread : rankThreads) {
@@ -1215,17 +1341,16 @@ int main()
         return 4;
     }
 
-    TileXRCommPtr raw = nullptr;
-    ret = InitCommForDirectCcuSmoke(commDomain, rankSize, rank, &raw);
-    if (ret != TileXR::TILEXR_SUCCESS || raw == nullptr) {
-        std::cerr << "tilexr_ccu_direct_smoke comm init ret=" << ret
-                  << " raw=" << raw << std::endl;
+    DirectCcuSmokeContext context;
+    ret = InitCommForDirectCcuSmoke(commDomain, rankSize, rank, device, &context);
+    if (ret != TileXR::TILEXR_SUCCESS) {
+        std::cerr << "tilexr_ccu_direct_smoke direct CCU context init ret=" << ret << std::endl;
         aclrtResetDevice(device);
         aclFinalize();
         return 5;
     }
 
-    int finalRet = RunPreparedSmokeForRank(raw, rank, rankSize, device);
+    int finalRet = RunPreparedSmokeForRank(&context, rank, rankSize, device);
     if (ShouldFastExitAfterPrepareFailure(finalRet)) {
         std::cout << "tilexr_ccu_direct_smoke fastExitOnPrepareFailure=1"
                   << " ret=" << finalRet
@@ -1244,13 +1369,9 @@ int main()
         std::fflush(stderr);
         std::_Exit(finalRet);
     }
-    TraceLifecycle("before TileXRCommDestroy");
-    const int destroyRet = TileXRCommDestroy(raw);
-    TraceLifecycle("after TileXRCommDestroy");
-    if (destroyRet != TileXR::TILEXR_SUCCESS) {
-        std::cerr << "tilexr_ccu_direct_smoke destroy ret=" << destroyRet << std::endl;
-        finalRet = finalRet == 0 ? 10 : finalRet;
-    }
+    TraceLifecycle("before DirectCcuSmokeContext shutdown");
+    context.session.Shutdown();
+    TraceLifecycle("after DirectCcuSmokeContext shutdown");
     TraceLifecycle("before aclrtResetDevice");
     aclrtResetDevice(device);
     TraceLifecycle("after aclrtResetDevice");

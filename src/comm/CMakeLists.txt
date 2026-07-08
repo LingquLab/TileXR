@@ -170,6 +170,7 @@ set_target_properties(tile-comm PROPERTIES
         SKIP_BUILD_RPATH TRUE
         INSTALL_RPATH ""
         SKIP_INSTALL_RPATH TRUE)
+target_compile_definitions(tile-comm PRIVATE TILEXR_CCU_TESTING=1)
 
 if(TILEXR_HAVE_PTO_SDMA)
     target_compile_definitions(tile-comm PRIVATE TILEXR_HAVE_PTO_SDMA=1)
