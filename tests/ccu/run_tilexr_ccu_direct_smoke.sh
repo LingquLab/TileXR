@@ -80,6 +80,42 @@ default_sync_instruction_count()
     esac
 }
 
+apply_p2p_ccu_copy_defaults()
+{
+    if [ "${TILEXR_CCU_DIRECT_SMOKE_P2P_CCU_COPY:-0}" != "1" ]; then
+        return
+    fi
+
+    export TILEXR_CCU_DIRECT_SMOKE_DIRECT_CCU_ONLY_INIT="${TILEXR_CCU_DIRECT_SMOKE_DIRECT_CCU_ONLY_INIT:-1}"
+    export TILEXR_CCU_DIRECT_SMOKE_P2P_CCU_COPY_ACTIVE_RANK="${TILEXR_CCU_DIRECT_SMOKE_P2P_CCU_COPY_ACTIVE_RANK:-0}"
+    export TILEXR_CCU_PROBE_MISSION_START="${TILEXR_CCU_PROBE_MISSION_START:-6}"
+    export TILEXR_CCU_PROBE_INSTRUCTION_START="${TILEXR_CCU_PROBE_INSTRUCTION_START:-475}"
+    export TILEXR_CCU_PROBE_MISSION_INSTRUCTION_START="${TILEXR_CCU_PROBE_MISSION_INSTRUCTION_START:-489}"
+    export TILEXR_CCU_PROBE_SQE_ARG_COUNT="${TILEXR_CCU_PROBE_SQE_ARG_COUNT:-13}"
+    export TILEXR_CCU_PROBE_SYNC_INSTRUCTION_COUNT="${TILEXR_CCU_PROBE_SYNC_INSTRUCTION_COUNT:-143}"
+    export TILEXR_CCU_DIRECT_REPOSITORY_INSTALL_WINDOW="${TILEXR_CCU_DIRECT_REPOSITORY_INSTALL_WINDOW:-full_repository}"
+    export TILEXR_CCU_DIRECT_REPOSITORY_DATA_LEN_MODE="${TILEXR_CCU_DIRECT_REPOSITORY_DATA_LEN_MODE:-instruction_bytes}"
+    export TILEXR_CCU_DIRECT_REPOSITORY_MEMORY_ALLOC_MODE="${TILEXR_CCU_DIRECT_REPOSITORY_MEMORY_ALLOC_MODE:-acl}"
+    export TILEXR_CCU_DIRECT_RESOURCE_WINDOW_REGISTRATION_MODE="${TILEXR_CCU_DIRECT_RESOURCE_WINDOW_REGISTRATION_MODE:-ra_ctx}"
+    export TILEXR_CCU_PROBE_RANK0_XN_START="${TILEXR_CCU_PROBE_RANK0_XN_START:-1961}"
+    export TILEXR_CCU_PROBE_RANK1_XN_START="${TILEXR_CCU_PROBE_RANK1_XN_START:-1961}"
+    export TILEXR_CCU_PROBE_GSA_START="${TILEXR_CCU_PROBE_GSA_START:-510}"
+    export TILEXR_CCU_PROBE_RANK0_REMOTE_XN_START="${TILEXR_CCU_PROBE_RANK0_REMOTE_XN_START:-2361}"
+    export TILEXR_CCU_PROBE_RANK1_REMOTE_XN_START="${TILEXR_CCU_PROBE_RANK1_REMOTE_XN_START:-2361}"
+    export TILEXR_CCU_PROBE_REMOTE_XN_COUNT="${TILEXR_CCU_PROBE_REMOTE_XN_COUNT:-8}"
+    export TILEXR_CCU_PROBE_RANK0_LOCAL_WAIT_CKE_START="${TILEXR_CCU_PROBE_RANK0_LOCAL_WAIT_CKE_START:-332}"
+    export TILEXR_CCU_PROBE_RANK1_LOCAL_WAIT_CKE_START="${TILEXR_CCU_PROBE_RANK1_LOCAL_WAIT_CKE_START:-332}"
+    export TILEXR_CCU_PROBE_LOCAL_WAIT_CKE_COUNT="${TILEXR_CCU_PROBE_LOCAL_WAIT_CKE_COUNT:-8}"
+    export TILEXR_CCU_PROBE_RANK0_REMOTE_NOTIFY_CKE_START="${TILEXR_CCU_PROBE_RANK0_REMOTE_NOTIFY_CKE_START:-364}"
+    export TILEXR_CCU_PROBE_RANK1_REMOTE_NOTIFY_CKE_START="${TILEXR_CCU_PROBE_RANK1_REMOTE_NOTIFY_CKE_START:-364}"
+    export TILEXR_CCU_PROBE_REMOTE_NOTIFY_CKE_COUNT="${TILEXR_CCU_PROBE_REMOTE_NOTIFY_CKE_COUNT:-8}"
+    export TILEXR_CCU_PROBE_CHANNEL_START="${TILEXR_CCU_PROBE_CHANNEL_START:-2}"
+    export TILEXR_CCU_DIRECT_BARRIER_MODE="${TILEXR_CCU_DIRECT_BARRIER_MODE:-sync_cke}"
+    export TILEXR_CCU_DIRECT_LOWER_LAYER_WQE_MODE="${TILEXR_CCU_DIRECT_LOWER_LAYER_WQE_MODE:-hcomm_cap}"
+}
+
+apply_p2p_ccu_copy_defaults
+
 if [ "${TILEXR_CCU_DIRECT_SMOKE_DRY_RUN:-0}" = "1" ]; then
     echo "tilexr_ccu_direct_smoke_runner dryRun=1 workDir=${work_dir}"
     for diagnostic_var in \
@@ -88,6 +124,7 @@ if [ "${TILEXR_CCU_DIRECT_SMOKE_DRY_RUN:-0}" = "1" ]; then
         TILEXR_CCU_DIRECT_REPOSITORY_INSTALL_WINDOW \
         TILEXR_CCU_DIRECT_REPOSITORY_DATA_LEN_MODE \
         TILEXR_CCU_DIRECT_REPOSITORY_MEMORY_ALLOC_MODE \
+        TILEXR_CCU_DIRECT_RESOURCE_WINDOW_REGISTRATION_MODE \
         TILEXR_CCU_DIRECT_INSTALL_ORDER \
         TILEXR_CCU_PROBE_SQE_ARG_COUNT \
         TILEXR_CCU_PROBE_MISSION_INSTRUCTION_START; do
@@ -288,6 +325,9 @@ if [ "${TILEXR_CCU_DIRECT_REPOSITORY_DATA_LEN_MODE:-}" != "" ]; then
 fi
 if [ "${TILEXR_CCU_DIRECT_REPOSITORY_MEMORY_ALLOC_MODE:-}" != "" ]; then
     common_env+=("TILEXR_CCU_DIRECT_REPOSITORY_MEMORY_ALLOC_MODE=${TILEXR_CCU_DIRECT_REPOSITORY_MEMORY_ALLOC_MODE}")
+fi
+if [ "${TILEXR_CCU_DIRECT_RESOURCE_WINDOW_REGISTRATION_MODE:-}" != "" ]; then
+    common_env+=("TILEXR_CCU_DIRECT_RESOURCE_WINDOW_REGISTRATION_MODE=${TILEXR_CCU_DIRECT_RESOURCE_WINDOW_REGISTRATION_MODE}")
 fi
 if [ "${TILEXR_CCU_DIRECT_INSTALL_ORDER:-}" != "" ]; then
     common_env+=("TILEXR_CCU_DIRECT_INSTALL_ORDER=${TILEXR_CCU_DIRECT_INSTALL_ORDER}")
@@ -594,16 +634,28 @@ if [ "${TILEXR_CCU_DIRECT_SMOKE_EXPECT_P2P_CCU_COPY:-0}" = "1" ]; then
         echo "ERROR: direct CCU P2P CCU-copy check requires TILEXR_CCU_DIRECT_SMOKE_SUBMIT=1" >&2
         exit 11
     fi
+    p2p_passed_count=0
     for log in "${rank0_log}" "${rank1_log}"; do
         if ! grep -q "tilexr_ccu_direct_smoke p2pCcuCopy" "${log}"; then
             echo "ERROR: direct CCU P2P CCU-copy result missing in ${log}" >&2
             exit 12
+        fi
+        if grep -q "tilexr_ccu_direct_smoke p2pCcuCopy .*passed=1" "${log}"; then
+            p2p_passed_count=$((p2p_passed_count + 1))
+            continue
+        fi
+        if grep -q "tilexr_ccu_direct_smoke p2pCcuCopy skipped" "${log}"; then
+            continue
         fi
         if ! grep -q "tilexr_ccu_direct_smoke p2pCcuCopy .*passed=1" "${log}"; then
             echo "ERROR: direct CCU P2P CCU-copy check failed in ${log}" >&2
             exit 13
         fi
     done
+    if [ "${p2p_passed_count}" -lt 1 ]; then
+        echo "ERROR: direct CCU P2P CCU-copy produced no passing receiver result" >&2
+        exit 13
+    fi
 fi
 
 echo "tilexr_ccu_direct_smoke_runner success workDir=${work_dir}"

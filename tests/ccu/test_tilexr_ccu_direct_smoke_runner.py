@@ -123,6 +123,29 @@ class TileXRCcuDirectSmokeRunnerTest(unittest.TestCase):
             with self.subTest(needle=needle):
                 self.assertLess(gate, source.index(needle))
 
+    def test_runner_p2p_mode_applies_direct_ccu_resource_defaults(self):
+        source = RUNNER.read_text(encoding="utf-8")
+
+        self.assertIn("apply_p2p_ccu_copy_defaults", source)
+        self.assertIn('TILEXR_CCU_DIRECT_SMOKE_DIRECT_CCU_ONLY_INIT="${TILEXR_CCU_DIRECT_SMOKE_DIRECT_CCU_ONLY_INIT:-1}"', source)
+        self.assertIn('TILEXR_CCU_DIRECT_SMOKE_P2P_CCU_COPY_ACTIVE_RANK="${TILEXR_CCU_DIRECT_SMOKE_P2P_CCU_COPY_ACTIVE_RANK:-0}"', source)
+        self.assertIn('TILEXR_CCU_PROBE_GSA_START="${TILEXR_CCU_PROBE_GSA_START:-510}"', source)
+        self.assertIn('TILEXR_CCU_PROBE_RANK0_REMOTE_XN_START="${TILEXR_CCU_PROBE_RANK0_REMOTE_XN_START:-2361}"', source)
+        self.assertIn('TILEXR_CCU_PROBE_RANK1_REMOTE_XN_START="${TILEXR_CCU_PROBE_RANK1_REMOTE_XN_START:-2361}"', source)
+        self.assertIn('TILEXR_CCU_PROBE_REMOTE_XN_COUNT="${TILEXR_CCU_PROBE_REMOTE_XN_COUNT:-8}"', source)
+        self.assertIn('TILEXR_CCU_PROBE_RANK0_LOCAL_WAIT_CKE_START="${TILEXR_CCU_PROBE_RANK0_LOCAL_WAIT_CKE_START:-332}"', source)
+        self.assertIn('TILEXR_CCU_PROBE_RANK1_LOCAL_WAIT_CKE_START="${TILEXR_CCU_PROBE_RANK1_LOCAL_WAIT_CKE_START:-332}"', source)
+        self.assertIn('TILEXR_CCU_PROBE_LOCAL_WAIT_CKE_COUNT="${TILEXR_CCU_PROBE_LOCAL_WAIT_CKE_COUNT:-8}"', source)
+        self.assertIn('TILEXR_CCU_PROBE_RANK0_REMOTE_NOTIFY_CKE_START="${TILEXR_CCU_PROBE_RANK0_REMOTE_NOTIFY_CKE_START:-364}"', source)
+        self.assertIn('TILEXR_CCU_PROBE_RANK1_REMOTE_NOTIFY_CKE_START="${TILEXR_CCU_PROBE_RANK1_REMOTE_NOTIFY_CKE_START:-364}"', source)
+        self.assertIn('TILEXR_CCU_PROBE_REMOTE_NOTIFY_CKE_COUNT="${TILEXR_CCU_PROBE_REMOTE_NOTIFY_CKE_COUNT:-8}"', source)
+        self.assertIn('TILEXR_CCU_PROBE_CHANNEL_START="${TILEXR_CCU_PROBE_CHANNEL_START:-2}"', source)
+        self.assertIn('TILEXR_CCU_DIRECT_RESOURCE_WINDOW_REGISTRATION_MODE="${TILEXR_CCU_DIRECT_RESOURCE_WINDOW_REGISTRATION_MODE:-ra_ctx}"', source)
+        self.assertIn('common_env+=("TILEXR_CCU_DIRECT_RESOURCE_WINDOW_REGISTRATION_MODE=${TILEXR_CCU_DIRECT_RESOURCE_WINDOW_REGISTRATION_MODE}")', source)
+        self.assertIn("p2p_passed_count=0", source)
+        self.assertIn('grep -q "tilexr_ccu_direct_smoke p2pCcuCopy skipped"', source)
+        self.assertIn("direct CCU P2P CCU-copy produced no passing receiver result", source)
+
     def test_runner_default_run_skips_without_hardware(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             env = os.environ.copy()
