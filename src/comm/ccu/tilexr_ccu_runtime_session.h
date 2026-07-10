@@ -41,10 +41,11 @@ public:
     int RefreshLocalVerifiedEndpointRoute(TileXRCcuDirectRuntimeReport *report);
     int CreateDriverAdapter(TileXRCcuDriverAdapter *adapter, TileXRCcuDriverAdapterReport *report);
 
-    static std::string ProcessDirectCcuRuntimeUnavailableMessage();
+    std::string DirectCcuRuntimeUnavailableMessage() const;
 
 private:
     void ResetDirectCcuBasicInfo();
+    static std::string DirectCcuRuntimeUnavailableMessageForDevice(int devId);
     static int DirectCcuAllGatherCallback(const void *sendBuf, size_t sendBytes, void *recvBuf, void *userData);
     int DirectCcuThreadAllGather(const void *sendBuf, size_t sendBytes, void *recvBuf);
 

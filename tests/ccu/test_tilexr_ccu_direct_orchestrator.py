@@ -1719,6 +1719,18 @@ class TileXRCcuDirectOrchestratorTest(unittest.TestCase):
         )
         self.assertIn("installRequest.installOrder = options.installOrder", source)
 
+    def test_direct_memory_copy_submit_tasks_keep_planned_runtime_payload(self):
+        source = DIRECT_SOURCE.read_text(encoding="utf-8")
+        memory_copy_body = source[
+            source.index("int BuildDirectMemoryCopyLaunchPackage"):
+            source.index("void FillReportFromAttempt")
+        ]
+
+        self.assertIn("TileXRCcuBuildTasks(attempt->plan, &tasks, &planReport)", memory_copy_body)
+        self.assertIn("attempt->package.tasks = tasks", memory_copy_body)
+        self.assertNotIn("NormalizeDirectMemoryCopySubmitTasks", source)
+        self.assertNotIn("task.argSize = 1", source)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -80,6 +80,7 @@ private:
     int SyncCommArgs();
     int InitDumpAddr();
     int InitUDMA();
+    int InitCcuBackendIfEnabled();
     int InitSDMA();
     int UpdateCommArgsDev();
     void FreeUDMARegistry();

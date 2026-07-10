@@ -42,6 +42,8 @@ constexpr const char* TILEXR_CCU_DIRECT_RESOURCE_WINDOW_TOKEN_VALUE_ENV =
     "TILEXR_CCU_DIRECT_RESOURCE_WINDOW_TOKEN_VALUE";
 constexpr const char* TILEXR_CCU_DIRECT_RESOURCE_WINDOW_REGISTRATION_MODE_ENV =
     "TILEXR_CCU_DIRECT_RESOURCE_WINDOW_REGISTRATION_MODE";
+constexpr const char* TILEXR_CCU_DIRECT_RESOURCE_WINDOW_EID_INDEX_ENV =
+    "TILEXR_CCU_DIRECT_RESOURCE_WINDOW_EID_INDEX";
 constexpr const char* TILEXR_CCU_DIRECT_ENDPOINT_ROUTE_COLLECTION_MODE_ENV =
     "TILEXR_CCU_DIRECT_ENDPOINT_ROUTE_COLLECTION_MODE";
 constexpr const char* TILEXR_CCU_DIRECT_TRACE_ENDPOINT_ROUTE_ENV =
@@ -172,6 +174,15 @@ bool HasRankedEnv(const char* base, int rank)
     return SelectRankedEnv(base, rank) != nullptr;
 }
 
+std::array<uint8_t, TILEXR_CCU_EID_BYTES> CopyRawEid(const TileXRCcuHccpEid& eid)
+{
+    std::array<uint8_t, TILEXR_CCU_EID_BYTES> copied {};
+    for (uint32_t i = 0; i < TILEXR_CCU_EID_BYTES; ++i) {
+        copied[i] = eid.raw[i];
+    }
+    return copied;
+}
+
 bool IsRaCtxResourceWindowRegistrationMode()
 {
     const char* value = std::getenv(TILEXR_CCU_DIRECT_RESOURCE_WINDOW_REGISTRATION_MODE_ENV);
@@ -199,6 +210,47 @@ void TraceEndpointRouteStep(const std::string& message)
     if (TraceEndpointRoute()) {
         std::cerr << "TileXRDirectCcuTrace endpointRoute " << message << std::endl;
     }
+}
+
+void TraceRaCtxEidInfos(const std::vector<TileXRCcuHccpDevEidInfo>& eidInfos)
+{
+    if (!TraceEndpointRoute()) {
+        return;
+    }
+    for (size_t i = 0; i < eidInfos.size(); ++i) {
+        std::cerr << "TileXRDirectCcuTrace endpointRoute raCtxEidInfo"
+                  << " ordinal=" << i
+                  << " eidIndex=" << eidInfos[i].eidIndex
+                  << " eid=" << FormatEndpointEid(CopyRawEid(eidInfos[i].eid))
+                  << std::endl;
+    }
+}
+
+bool SelectRaCtxResourceWindowEidInfo(
+    int rank,
+    const std::vector<TileXRCcuHccpDevEidInfo>& eidInfos,
+    TileXRCcuHccpDevEidInfo* selectedEid)
+{
+    if (eidInfos.empty() || selectedEid == nullptr) {
+        return false;
+    }
+    TraceRaCtxEidInfos(eidInfos);
+    const char* configured = SelectRankedEnv(TILEXR_CCU_DIRECT_RESOURCE_WINDOW_EID_INDEX_ENV, rank);
+    if (configured == nullptr) {
+        *selectedEid = eidInfos[0];
+        return true;
+    }
+    uint64_t configuredIndex = 0;
+    if (!ParseUnsignedEnv(configured, &configuredIndex) || configuredIndex > 0xffffffffULL) {
+        return false;
+    }
+    for (const auto& eidInfo : eidInfos) {
+        if (eidInfo.eidIndex == static_cast<uint32_t>(configuredIndex)) {
+            *selectedEid = eidInfo;
+            return true;
+        }
+    }
+    return false;
 }
 
 bool IsRaCtxLoopEndpointRouteCollectionMode()
@@ -695,13 +747,18 @@ int TileXRCcuDirectRuntime::RegisterCcuResourceRmaBufferWithRaCtx(
     void* tokenIdHandle = nullptr;
     void* lmemHandle = nullptr;
 
+    TileXRCcuHccpDevEidInfo selectedEid {};
+    if (!SelectRaCtxResourceWindowEidInfo(options_.rank, eidInfos, &selectedEid)) {
+        return TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+
     TileXRCcuHccpCtxInitCfg ctxCfg {};
     ctxCfg.mode = TILEXR_CCU_NETWORK_OFFLINE;
     ctxCfg.rdma.disabledLiteThread = false;
     TileXRCcuHccpCtxInitAttr ctxAttr {};
     ctxAttr.phyId = devicePhyId_;
-    ctxAttr.ub.eidIndex = eidInfos[0].eidIndex;
-    ctxAttr.ub.eid = eidInfos[0].eid;
+    ctxAttr.ub.eidIndex = selectedEid.eidIndex;
+    ctxAttr.ub.eid = selectedEid.eid;
 
     ret = loader_.RaCtxInit(&ctxCfg, &ctxAttr, &ctxHandle);
     if (ret != 0 || ctxHandle == nullptr) {
@@ -771,9 +828,9 @@ int TileXRCcuDirectRuntime::RegisterCcuResourceRmaBufferWithRaCtx(
     localResourceWindow_.tokenIdHandle = tokenIdHandle;
     localResourceWindow_.lmemHandle = lmemHandle;
     for (uint32_t i = 0; i < TILEXR_CCU_EID_BYTES; ++i) {
-        localResourceWindow_.eid[i] = eidInfos[0].eid.raw[i];
+        localResourceWindow_.eid[i] = selectedEid.eid.raw[i];
     }
-    localResourceWindow_.eidIndex = eidInfos[0].eidIndex;
+    localResourceWindow_.eidIndex = selectedEid.eidIndex;
     localResourceWindow_.raCtxRegistered = true;
     resourceWindowRegistered_ = true;
     return TILEXR_SUCCESS;

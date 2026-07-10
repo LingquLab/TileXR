@@ -30,19 +30,23 @@ struct TileXRThreadAllGatherState {
 static map<string, TileXRThreadAllGatherState> g_directCcuAllGatherStates;
 static std::mutex g_mtx;
 static std::mutex g_ccuDirectRuntimeMtx;
-static bool g_ccuDirectRuntimeUnavailable = false;
-static std::string g_ccuDirectRuntimeUnavailableMessage;
+static std::map<int, std::string> g_ccuDirectRuntimeUnavailableByDevice;
 
-std::string TileXRCcuRuntimeSession::ProcessDirectCcuRuntimeUnavailableMessage()
+std::string TileXRCcuRuntimeSession::DirectCcuRuntimeUnavailableMessageForDevice(int devId)
 {
     lock_guard<mutex> lock(g_ccuDirectRuntimeMtx);
-    if (!g_ccuDirectRuntimeUnavailable) {
+    const auto it = g_ccuDirectRuntimeUnavailableByDevice.find(devId);
+    if (it == g_ccuDirectRuntimeUnavailableByDevice.end()) {
         return {};
     }
-    return g_ccuDirectRuntimeUnavailableMessage.empty() ?
-        "direct CCU runtime unavailable after process-level init failure" :
-        "direct CCU runtime unavailable after process-level init failure: " +
-            g_ccuDirectRuntimeUnavailableMessage;
+    return it->second.empty() ?
+        "direct CCU runtime unavailable for device " + std::to_string(devId) :
+        "direct CCU runtime unavailable for device " + std::to_string(devId) + ": " + it->second;
+}
+
+std::string TileXRCcuRuntimeSession::DirectCcuRuntimeUnavailableMessage() const
+{
+    return DirectCcuRuntimeUnavailableMessageForDevice(devId_);
 }
 
 void TileXRCcuRuntimeSession::Shutdown()
@@ -88,8 +92,9 @@ int TileXRCcuRuntimeSession::Init(const TileXRCcuBackendOptions &options)
     }
 
     lock_guard<mutex> lock(g_ccuDirectRuntimeMtx);
-    if (g_ccuDirectRuntimeUnavailable) {
-        TILEXR_LOG(INFO) << "direct CCU runtime skipped after previous init failure";
+    const auto unavailable = g_ccuDirectRuntimeUnavailableByDevice.find(devId_);
+    if (unavailable != g_ccuDirectRuntimeUnavailableByDevice.end()) {
+        TILEXR_LOG(INFO) << "direct CCU runtime skipped after previous init failure on device " << devId_;
         return TILEXR_SUCCESS;
     }
 
@@ -115,8 +120,7 @@ int TileXRCcuRuntimeSession::Init(const TileXRCcuBackendOptions &options)
                          << ", raInitialized " << (runtimeReport.raInitialized ? 1 : 0)
                          << ", ccuTlvInitialized " << (runtimeReport.ccuTlvInitialized ? 1 : 0)
                          << ", " << runtimeReport.message << ", direct CCU disabled";
-        g_ccuDirectRuntimeUnavailable = true;
-        g_ccuDirectRuntimeUnavailableMessage = runtimeReport.message;
+        g_ccuDirectRuntimeUnavailableByDevice[devId_] = runtimeReport.message;
         ResetDirectCcuBasicInfo();
         ccuDirectRuntime_.reset();
         return TILEXR_SUCCESS;
@@ -315,13 +319,13 @@ int TileXRCcuRuntimeSession::DirectCcuThreadAllGather(const void *sendBuf, size_
                 return TILEXR_SUCCESS;
             }
         }
-        const std::string processUnavailableMessage = ProcessDirectCcuRuntimeUnavailableMessage();
-        if (!processUnavailableMessage.empty()) {
+        const std::string unavailableMessage = DirectCcuRuntimeUnavailableMessage();
+        if (!unavailableMessage.empty()) {
             lock_guard<mutex> lock(g_mtx);
             g_directCcuAllGatherStates.erase(key);
             TILEXR_LOG(ERROR) << "direct CCU thread allgather abort rank " << rank_ << "/" << rankSize_
                               << " uid " << uid_ << " round " << round << ", "
-                              << processUnavailableMessage;
+                              << unavailableMessage;
             return TILEXR_ERROR_NOT_FOUND;
         }
         this_thread::sleep_for(1ms);

@@ -37,6 +37,7 @@ endpoint_fields=(
 )
 
 resource_window_token_fields=(
+    EID_INDEX
     TOKEN_ID
     RAW_TOKEN_ID
     TOKEN_VALUE
@@ -577,6 +578,13 @@ for log in "${rank0_log}" "${rank1_log}"; do
     fi
 done
 
+rank_skipped_p2p_ccu_copy_submit()
+{
+    local log="$1"
+    [ "${TILEXR_CCU_DIRECT_SMOKE_P2P_CCU_COPY:-0}" = "1" ] &&
+        grep -q "tilexr_ccu_direct_smoke p2pCcuCopy skipped" "${log}"
+}
+
 if [ "${TILEXR_CCU_DIRECT_SMOKE_SUBMIT:-0}" = "1" ]; then
     for log in "${rank0_log}" "${rank1_log}"; do
         if ! grep -q "submitReady=1" "${log}"; then
@@ -586,10 +594,16 @@ if [ "${TILEXR_CCU_DIRECT_SMOKE_SUBMIT:-0}" = "1" ]; then
     done
     for log in "${rank0_log}" "${rank1_log}"; do
         if ! grep -q "tilexr_ccu_direct_smoke submit ret=0" "${log}"; then
+            if rank_skipped_p2p_ccu_copy_submit "${log}"; then
+                continue
+            fi
             echo "ERROR: direct CCU submit did not return success in ${log}" >&2
             exit 7
         fi
         if ! grep -q "tilexr_ccu_direct_smoke submitTiming" "${log}"; then
+            if rank_skipped_p2p_ccu_copy_submit "${log}"; then
+                continue
+            fi
             echo "ERROR: direct CCU submit timing was not reported in ${log}" >&2
             exit 8
         fi

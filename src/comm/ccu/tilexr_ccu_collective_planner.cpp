@@ -569,12 +569,11 @@ int TileXRCcuCollectivePlanner::PrepareDirectCcuInstallAttempt(
         }
         return TILEXR_ERROR_NOT_INITIALIZED;
     }
-    const std::string processUnavailableMessage =
-        TileXRCcuRuntimeSession::ProcessDirectCcuRuntimeUnavailableMessage();
-    if (!processUnavailableMessage.empty()) {
+    const std::string unavailableMessage = session.DirectCcuRuntimeUnavailableMessage();
+    if (!unavailableMessage.empty()) {
         if (report != nullptr) {
             *report = TileXRCcuDirectInstallReport{};
-            report->message = processUnavailableMessage;
+            report->message = unavailableMessage;
         }
         return TILEXR_ERROR_NOT_FOUND;
     }
@@ -656,12 +655,11 @@ int TileXRCcuCollectivePlanner::PrepareDirectCcuMemoryCopyInstallAttempt(
         }
         return TILEXR_ERROR_PARA_CHECK_FAIL;
     }
-    const std::string processUnavailableMessage =
-        TileXRCcuRuntimeSession::ProcessDirectCcuRuntimeUnavailableMessage();
-    if (!processUnavailableMessage.empty()) {
+    const std::string unavailableMessage = session.DirectCcuRuntimeUnavailableMessage();
+    if (!unavailableMessage.empty()) {
         if (report != nullptr) {
             *report = TileXRCcuDirectInstallReport {};
-            report->message = processUnavailableMessage;
+            report->message = unavailableMessage;
         }
         return TILEXR_ERROR_NOT_FOUND;
     }

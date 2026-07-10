@@ -125,6 +125,34 @@ class TileXRCcuBackendBoundaryTest(unittest.TestCase):
             with self.subTest(fake_ready=fake_ready):
                 self.assertNotIn(fake_ready, source + "\n" + runtime + "\n" + planner + "\n" + executor)
 
+    def test_tilexr_comm_can_auto_initialize_ccu_backend_without_blocking_comm_init(self):
+        source = (REPO_ROOT / "src" / "comm" / "tilexr_comm.cpp").read_text(encoding="utf-8")
+
+        self.assertIn('constexpr const char* TILEXR_ENABLE_CCU_BACKEND_ENV = "TILEXR_ENABLE_CCU_BACKEND"', source)
+        self.assertIn("bool ShouldEnableCcuBackend()", source)
+        self.assertIn("int TileXRComm::InitCcuBackendIfEnabled()", source)
+        self.assertIn("const int ccuRet = InitCcuBackend()", source)
+        self.assertIn("TileXR CCU backend init failed, direct CCU disabled", source)
+        self.assertIn("TileXR CCU backend initialized", source)
+
+        process_init = source[source.index("int TileXRComm::Init()"): source.index("int TileXRComm::InitThread")]
+        thread_init = source[source.index("int TileXRComm::InitThread"): source.index("int TileXRComm::EnablePeerAccess")]
+
+        for body_name, body in [("process", process_init), ("thread", thread_init)]:
+            with self.subTest(body=body_name):
+                self.assertIn("ret = InitCcuBackendIfEnabled();", body)
+                self.assertLess(body.index("ret = InitCcuBackendIfEnabled();"), body.index("ret = SyncCommArgs();"))
+                self.assertIn("if (ret != TILEXR_SUCCESS) {", body)
+                self.assertIn("return ret;", body)
+
+        helper = source[
+            source.index("int TileXRComm::InitCcuBackendIfEnabled()"):
+            source.index("TileXRCcuBackend *TileXRComm::GetCcuBackendForCollectives")
+        ]
+        self.assertIn("if (!ShouldEnableCcuBackend())", helper)
+        self.assertIn("return TILEXR_SUCCESS;", helper)
+        self.assertNotIn("return ccuRet;", helper)
+
 
 if __name__ == "__main__":
     unittest.main()

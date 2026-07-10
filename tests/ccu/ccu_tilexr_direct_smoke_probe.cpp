@@ -71,6 +71,8 @@ constexpr const char* kPreSubmitDelayMsEnv = "TILEXR_CCU_DIRECT_SMOKE_PRE_SUBMIT
 constexpr const char* kP2pCcuCopyEnv = "TILEXR_CCU_DIRECT_SMOKE_P2P_CCU_COPY";
 constexpr const char* kExpectP2pCcuCopyEnv = "TILEXR_CCU_DIRECT_SMOKE_EXPECT_P2P_CCU_COPY";
 constexpr const char* kP2pCcuCopyBytesEnv = "TILEXR_CCU_DIRECT_SMOKE_P2P_CCU_COPY_BYTES";
+constexpr const char* kP2pCcuCopyActiveRankEnv = "TILEXR_CCU_DIRECT_SMOKE_P2P_CCU_COPY_ACTIVE_RANK";
+constexpr const char* kP2pCcuCopyDirectionEnv = "TILEXR_CCU_DIRECT_SMOKE_P2P_CCU_COPY_DIRECTION";
 constexpr const char* kLocalWaitCkeStartEnv = "TILEXR_CCU_PROBE_LOCAL_WAIT_CKE_START";
 constexpr const char* kLocalWaitCkeCountEnv = "TILEXR_CCU_PROBE_LOCAL_WAIT_CKE_COUNT";
 constexpr const char* kRemoteNotifyCkeStartEnv = "TILEXR_CCU_PROBE_REMOTE_NOTIFY_CKE_START";
@@ -180,6 +182,30 @@ int ParseInt(const char* value, int fallback)
 int EnvInt(const char* name, int fallback)
 {
     return ParseInt(std::getenv(name), fallback);
+}
+
+bool IsP2pCcuCopyActiveRank(int rank)
+{
+    return rank == EnvInt(kP2pCcuCopyActiveRankEnv, 0);
+}
+
+TileXR::TileXRCcuMemoryCopyDirection P2pCcuCopyDirectionFromEnv()
+{
+    const char* value = std::getenv(kP2pCcuCopyDirectionEnv);
+    if (value != nullptr && std::string(value) == "local_to_remote") {
+        return TileXR::TileXRCcuMemoryCopyDirection::LocalToRemote;
+    }
+    return TileXR::TileXRCcuMemoryCopyDirection::RemoteToLocal;
+}
+
+bool ShouldCheckInactiveP2pCcuCopyRank()
+{
+    return P2pCcuCopyDirectionFromEnv() == TileXR::TileXRCcuMemoryCopyDirection::LocalToRemote;
+}
+
+bool ShouldCheckActiveP2pCcuCopyRank()
+{
+    return P2pCcuCopyDirectionFromEnv() == TileXR::TileXRCcuMemoryCopyDirection::RemoteToLocal;
 }
 
 uint64_t ParseU64(const char* value, uint64_t fallback)
@@ -476,6 +502,17 @@ void PrintP2pCcuCopy(
               << std::endl;
 }
 
+void PrintP2pCcuCopySkipped(int rank, int peer, const P2pCcuCopyState& state)
+{
+    std::cout << "tilexr_ccu_direct_smoke p2pCcuCopy skipped"
+              << " rank=" << rank
+              << " peer=" << peer
+              << " bytes=" << state.bytes
+              << " activeRank=" << EnvInt(kP2pCcuCopyActiveRankEnv, 0)
+              << " reason=\"inactive p2p CCU-copy rank\""
+              << std::endl;
+}
+
 int RunP2pCcuCopy(
     int rank,
     int peer,
@@ -487,8 +524,10 @@ int RunP2pCcuCopy(
     if (state == nullptr) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
-    if (syncRet == ACL_SUCCESS && submitRet == TileXR::TILEXR_SUCCESS) {
+    if (ShouldCheckActiveP2pCcuCopyRank() && syncRet == ACL_SUCCESS && submitRet == TileXR::TILEXR_SUCCESS) {
         (void)CheckP2pCcuCopyState(state);
+    } else if (!ShouldCheckActiveP2pCcuCopyRank() && syncRet == ACL_SUCCESS && submitRet == TileXR::TILEXR_SUCCESS) {
+        state->passed = true;
     }
     PrintP2pCcuCopy(rank, peer, *state, prepareRet, submitRet, syncRet);
     return state->passed ? TileXR::TILEXR_SUCCESS : TileXR::TILEXR_ERROR_INTERNAL;
@@ -1077,11 +1116,35 @@ bool WaitForCollectiveSubmitDone(int rank, int rankSize, int localResult)
     }
 }
 
+bool WaitForInactiveP2pCcuCopyRank(int rank, int rankSize, int localResult)
+{
+    return WaitForCollectiveSubmitDone(rank, rankSize, localResult);
+}
+
+int RunInactiveP2pCcuCopyRank(int rank, int peer, int rankSize, P2pCcuCopyState* state, int localResult)
+{
+    if (state == nullptr) {
+        return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    PrintP2pCcuCopySkipped(rank, peer, *state);
+    if (!WaitForInactiveP2pCcuCopyRank(rank, rankSize, localResult) && localResult == 0) {
+        return 13;
+    }
+    if (localResult != 0 || !ShouldCheckInactiveP2pCcuCopyRank()) {
+        return localResult;
+    }
+    const int checkRet = CheckP2pCcuCopyState(state);
+    PrintP2pCcuCopy(rank, peer, *state, TileXR::TILEXR_SUCCESS, TileXR::TILEXR_SUCCESS, ACL_SUCCESS);
+    return checkRet == ACL_SUCCESS ? 0 : 14;
+}
+
 int RunPreparedSmokeForRank(DirectCcuSmokeContext* context, int rank, int rankSize, int device)
 {
     TileXRDirectCcuPrepareOptions options = MakePrepareOptions(rank, rankSize, device);
     const int peer = rankSize == 2 ? 1 - rank : (rank + 1) % rankSize;
     const bool p2pCcuCopyEnabled = EnvFlag(kP2pCcuCopyEnv);
+    const bool p2pCcuCopyActiveRank = !p2pCcuCopyEnabled || IsP2pCcuCopyActiveRank(rank);
+    const TileXR::TileXRCcuMemoryCopyDirection p2pCcuCopyDirection = P2pCcuCopyDirectionFromEnv();
     P2pCcuCopyState p2pCcuCopy;
     if (p2pCcuCopyEnabled) {
         options.syncResourceCount = 1;
@@ -1104,7 +1167,7 @@ int RunPreparedSmokeForRank(DirectCcuSmokeContext* context, int rank, int rankSi
             reinterpret_cast<uint64_t>(p2pCcuCopy.destination.ptr),
             p2pCcuCopy.bytes,
             static_cast<uint32_t>(peer),
-            TileXR::TileXRCcuMemoryCopyDirection::RemoteToLocal,
+            p2pCcuCopyDirection,
             prepared,
             &installReport) :
         context->planner.PrepareDirectCcuInstallAttempt(context->session, options, prepared, &installReport);
@@ -1129,6 +1192,8 @@ int RunPreparedSmokeForRank(DirectCcuSmokeContext* context, int rank, int rankSi
     } else if (submitRequested && !installReport.submitReady) {
         std::cout << "tilexr_ccu_direct_smoke submit skipped reason=\"prepare did not reach submitReady\""
                   << std::endl;
+    } else if (submitRequested && !p2pCcuCopyActiveRank) {
+        finalRet = RunInactiveP2pCcuCopyRank(rank, peer, rankSize, &p2pCcuCopy, finalRet);
     } else if (submitRequested) {
         aclrtStream stream = nullptr;
         int streamRet = aclrtCreateStream(&stream);

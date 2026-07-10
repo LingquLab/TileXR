@@ -242,9 +242,58 @@ class TileXRCcuDirectSmokeProbeTest(unittest.TestCase):
         self.assertIn("RunP2pCcuCopy", source)
         self.assertIn("PrepareDirectCcuMemoryCopyInstallAttempt", source)
         self.assertIn("TileXRCcuMemoryCopyDirection::RemoteToLocal", source)
+        self.assertIn("TILEXR_CCU_DIRECT_SMOKE_P2P_CCU_COPY_DIRECTION", source)
+        self.assertIn("P2pCcuCopyDirectionFromEnv", source)
+        self.assertIn("TileXRCcuMemoryCopyDirection::LocalToRemote", source)
         self.assertIn("ACL_MEMCPY_HOST_TO_DEVICE", source)
         self.assertIn("ACL_MEMCPY_DEVICE_TO_HOST", source)
         self.assertIn("p2pCcuCopy", source)
+
+    def test_local_to_remote_p2p_ccu_copy_inactive_rank_checks_destination(self):
+        source = PROBE_SOURCE.read_text(encoding="utf-8")
+        prepared_body = source[
+            source.index("int RunPreparedSmokeForRank"):
+            source.index("int RunThreadModeSmoke")
+        ]
+
+        self.assertIn("ShouldCheckInactiveP2pCcuCopyRank", source)
+        self.assertIn("RunInactiveP2pCcuCopyRank", source)
+        self.assertIn('"local_to_remote"', source)
+        self.assertIn("CheckP2pCcuCopyState", source)
+        inactive_branch = prepared_body[
+            prepared_body.index("!p2pCcuCopyActiveRank"):
+            prepared_body.index("} else if (submitRequested) {", prepared_body.index("!p2pCcuCopyActiveRank"))
+        ]
+        self.assertIn("RunInactiveP2pCcuCopyRank", inactive_branch)
+        self.assertIn("CheckP2pCcuCopyState", source[source.index("RunInactiveP2pCcuCopyRank"):])
+        self.assertNotIn("TileXRDirectCcuSubmitPrepared", inactive_branch)
+
+    def test_p2p_ccu_copy_submit_is_limited_to_active_rank(self):
+        source = PROBE_SOURCE.read_text(encoding="utf-8")
+        prepared_body = source[
+            source.index("int RunPreparedSmokeForRank"):
+            source.index("int RunThreadModeSmoke")
+        ]
+
+        self.assertIn("TILEXR_CCU_DIRECT_SMOKE_P2P_CCU_COPY_ACTIVE_RANK", source)
+        self.assertIn("IsP2pCcuCopyActiveRank", source)
+        self.assertIn("p2pCcuCopyActiveRank", prepared_body)
+        self.assertIn("!p2pCcuCopyActiveRank", prepared_body)
+        self.assertIn("PrintP2pCcuCopySkipped", source)
+        self.assertIn("inactive p2p CCU-copy rank", source)
+        self.assertIn("WaitForInactiveP2pCcuCopyRank", source)
+        inactive_branch = prepared_body[
+            prepared_body.index("!p2pCcuCopyActiveRank"):
+            prepared_body.index("} else if (submitRequested) {", prepared_body.index("!p2pCcuCopyActiveRank"))
+        ]
+        inactive_helper = source[
+            source.index("int RunInactiveP2pCcuCopyRank"):
+            source.index("int RunPreparedSmokeForRank")
+        ]
+        self.assertIn("RunInactiveP2pCcuCopyRank", inactive_branch)
+        self.assertIn("PrintP2pCcuCopySkipped", inactive_helper)
+        self.assertIn("WaitForInactiveP2pCcuCopyRank", inactive_helper)
+        self.assertNotIn("TileXRDirectCcuSubmitPrepared", inactive_branch)
 
     def test_thread_mode_path_uses_single_process_init_and_never_rank_ipc_init(self):
         source = PROBE_SOURCE.read_text(encoding="utf-8")
