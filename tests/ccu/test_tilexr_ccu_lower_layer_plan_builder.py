@@ -540,6 +540,75 @@ class TileXRCcuLowerLayerPlanBuilderTest(unittest.TestCase):
         self.assertEqual("", result.stderr)
         self.assertEqual(0, result.returncode, result.stdout + result.stderr)
 
+    def test_transport_template_uses_local_pfe_id_from_ra_eid_func_id(self):
+        code = textwrap.dedent(
+            r'''
+            #include "ccu/tilexr_ccu_lower_layer_plan_builder.h"
+
+            #include <iostream>
+            #include <vector>
+
+            using namespace TileXR;
+
+            int main()
+            {
+                TileXRCcuBasicInfo basic;
+                basic.dieId = 1;
+                basic.msId = 0x45;
+                basic.msidToken.tokenId = 0x1234;
+                basic.msidToken.valid = true;
+
+                TileXRCcuResourceAllocation allocation;
+                allocation.channels = {1, 2, 1};
+                allocation.localXn = {1, 0x120, 1};
+                allocation.remoteXn = {1, 0x240, 1};
+                allocation.notifyCke = {1, 0x330, 1};
+
+                std::vector<TileXRCcuRemoteCcuBufferInfo> remoteCcuBuffers;
+                TileXRCcuRemoteCcuBufferInfo remote;
+                remote.remoteCcuVa = 0x0000009234000000ULL;
+                remote.memoryTokenId = 0x23456;
+                remote.localPfeId = 7;
+                remote.localPfeIdValid = true;
+                remoteCcuBuffers.push_back(remote);
+
+                TileXRCcuLowerLayerTransportSnapshot snapshot;
+                TileXRCcuLowerLayerPlanBuilderReport report;
+                if (TileXRCcuBuildLowerLayerTransportTemplate(
+                        basic, allocation, remoteCcuBuffers, &snapshot, &report) != TILEXR_SUCCESS) {
+                    std::cerr << "template build failed: " << report.message << "\n";
+                    return 1;
+                }
+                if (snapshot.pfeId != 7 || snapshot.pfeOffset != 23) {
+                    std::cerr << "local PFE id not applied: pfeId=" << snapshot.pfeId
+                              << " pfeOffset=" << snapshot.pfeOffset << "\n";
+                    return 2;
+                }
+                return 0;
+            }
+            '''
+        )
+        env = os.environ.copy()
+        env["TILEXR_CCU_DIRECT_LOWER_LAYER_PFE_OFFSET_SOURCE"] = "hcomm_die"
+
+        result = self.compile_and_run(code, env=env)
+
+        self.assertEqual("", result.stderr)
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+
+    def test_transport_template_prefers_ra_eid_func_id_over_channel_id_in_source(self):
+        source = BUILDER_SOURCE.read_text(encoding="utf-8")
+        build_body = source[
+            source.index("int TileXRCcuBuildLowerLayerTransportTemplate"):
+            source.index("int TileXRCcuOverlayVerifiedEndpointRoutes")
+        ]
+
+        self.assertIn("remoteCcuBuffers.front().localPfeId", build_body)
+        self.assertIn("allocation.channels.startId", build_body)
+        self.assertLess(
+            build_body.index("remoteCcuBuffers.front().localPfeId"),
+            build_body.index("SelectLowerLayerPfeOffset"))
+
     def test_builds_lower_layer_install_plan_from_transport_snapshot(self):
         code = textwrap.dedent(
             r'''

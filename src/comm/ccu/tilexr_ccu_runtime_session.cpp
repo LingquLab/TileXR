@@ -77,6 +77,11 @@ int TileXRCcuRuntimeSession::RankSize() const
     return rankSize_;
 }
 
+int TileXRCcuRuntimeSession::DevId() const
+{
+    return devId_;
+}
+
 int TileXRCcuRuntimeSession::Init(const TileXRCcuBackendOptions &options)
 {
     Shutdown();
@@ -201,6 +206,27 @@ int TileXRCcuRuntimeSession::RegisterCcuResourceRmaBuffer(uint64_t resourceAddr)
         return TILEXR_ERROR_NOT_FOUND;
     }
     return ccuDirectRuntime_->RegisterCcuResourceRmaBuffer(resourceAddr);
+}
+
+int TileXRCcuRuntimeSession::RegisterMemoryBuffer(
+    uint64_t addr,
+    uint64_t bytes,
+    TileXRCcuRegisteredMemoryBufferInfo *info)
+{
+    if (ccuDirectRuntime_ == nullptr || !ccuDirectRuntime_->IsAvailable()) {
+        return TILEXR_ERROR_NOT_FOUND;
+    }
+    return ccuDirectRuntime_->RegisterMemoryBuffer(addr, bytes, info);
+}
+
+int TileXRCcuRuntimeSession::ImportRemoteMemoryBuffer(
+    const TileXRCcuRemoteMemoryBufferImportRequest &request,
+    TileXRCcuImportedRemoteMemoryBufferInfo *info)
+{
+    if (ccuDirectRuntime_ == nullptr || !ccuDirectRuntime_->IsAvailable()) {
+        return TILEXR_ERROR_NOT_FOUND;
+    }
+    return ccuDirectRuntime_->ImportRemoteMemoryBuffer(request, info);
 }
 
 int TileXRCcuRuntimeSession::ExportLocalCcuRmaBuffer(TileXRCcuLocalResourceWindowInfo *info)
