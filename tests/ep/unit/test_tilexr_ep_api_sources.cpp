@@ -114,7 +114,8 @@ void TestEpHostChecksRegisteredWorkspace()
     CheckContains("src/ep/host/ep_launch_context.cpp", launchContext, "ValidateRegisteredWorkspace");
     CheckContains("src/ep/host/ep_launch_context.cpp", launchContext, "TileXRGetUDMARegistryHost");
     CheckContains("src/ep/host/ep_launch_context.cpp", launchContext, "UDMARegionContains");
-    CheckContains("src/ep/host/ep_launch_context.cpp", launchContext, "TileXREpUdmaRequiredWorkspaceBytes");
+    CheckContains("src/ep/host/ep_launch_context.cpp", launchContext,
+        "TileXREpCombineDataAsFlagRequiredWorkspaceBytes");
 }
 
 void TestEpSocDefaultFollowsEnvironment()

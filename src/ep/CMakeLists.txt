@@ -1,6 +1,12 @@
 include(GNUInstallDirs)
 
-find_program(BISHENG_EXECUTABLE bisheng)
+find_program(BISHENG_EXECUTABLE bisheng
+    HINTS
+        "${ASCEND_HOME_PATH}/${ARCH}-linux/ccec_compiler/bin"
+        "${ASCEND_HOME_PATH}/${ARCH}-linux/bin"
+        "${ASCEND_HOME_PATH}/bin"
+        "${ASCEND_HOME_PATH}/tools/bisheng_compiler/bin"
+)
 if(NOT BISHENG_EXECUTABLE)
     message(FATAL_ERROR "bisheng not found; source scripts/common_env.sh before configuring with -DTILEXR_BUILD_EP=ON")
 endif()
@@ -11,6 +17,20 @@ if(NOT TILEXR_EP_DEFAULT_SOC_TYPE)
 endif()
 set(TILEXR_EP_SOC_TYPE "${TILEXR_EP_DEFAULT_SOC_TYPE}" CACHE STRING "TileXR EP kernel SOC type")
 string(TOLOWER "${TILEXR_EP_SOC_TYPE}" TILEXR_EP_SOC_TYPE_LOWER)
+
+set(TILEXR_COMBINE_DAF_WQE_MODE "simt_raw" CACHE STRING "Combine DataAsFlag WQE mode")
+set_property(CACHE TILEXR_COMBINE_DAF_WQE_MODE PROPERTY STRINGS api scalar_raw simt_raw)
+set(TILEXR_COMBINE_DAF_WQE_MODES "api scalar_raw simt_raw")
+if(TILEXR_COMBINE_DAF_WQE_MODE STREQUAL "api")
+    set(TILEXR_EP_COMBINE_WQE_MODE_DEFINE -DTILEXR_COMBINE_DAF_WQE_MODE_API=1)
+elseif(TILEXR_COMBINE_DAF_WQE_MODE STREQUAL "scalar_raw")
+    set(TILEXR_EP_COMBINE_WQE_MODE_DEFINE -DTILEXR_COMBINE_DAF_WQE_MODE_SCALAR_RAW=1)
+elseif(TILEXR_COMBINE_DAF_WQE_MODE STREQUAL "simt_raw")
+    set(TILEXR_EP_COMBINE_WQE_MODE_DEFINE -DTILEXR_COMBINE_DAF_WQE_MODE_SIMT_RAW=1)
+else()
+    message(FATAL_ERROR
+        "Unsupported TILEXR_COMBINE_DAF_WQE_MODE=${TILEXR_COMBINE_DAF_WQE_MODE}; expected ${TILEXR_COMBINE_DAF_WQE_MODES}")
+endif()
 
 if(TILEXR_EP_SOC_TYPE_LOWER MATCHES "ascend950|ascend910_9|ascend910-9|a5")
     set(TILEXR_EP_NPU_ARCH "dav-3510")
@@ -55,6 +75,8 @@ set(TILEXR_EP_KERNEL_INCLUDES
     -I${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc/runtime
     -I${ASCEND_HOME_PATH}/${ARCH}-linux/runtime/include
     -I${ASCEND_HOME_PATH}/${ARCH}-linux/include
+    -I${ASCEND_HOME_PATH}/${ARCH}-linux/asc/include
+    -I${ASCEND_HOME_PATH}/${ARCH}-linux/asc/impl
     -I${ASCEND_DRIVER_PATH}/kernel/inc
     -I${CMAKE_SOURCE_DIR}/3rdparty
     -I${CMAKE_SOURCE_DIR}/src/include
@@ -107,6 +129,7 @@ add_custom_command(
         -shared
         ${TILEXR_EP_KERNEL_LINK_OPTIONS}
         -DCATLASS_ARCH=${TILEXR_EP_CATLASS_ARCH}
+        ${TILEXR_EP_COMBINE_WQE_MODE_DEFINE}
         ${TILEXR_EP_KERNEL_INCLUDES}
         "${TILEXR_EP_COMBINE_KERNEL_SOURCE}"
         -L${ASCEND_DRIVER_PATH}/lib64/driver
@@ -125,9 +148,12 @@ add_custom_command(
         -o "${TILEXR_EP_COMBINE_KERNEL_SO}"
     DEPENDS
         "${TILEXR_EP_COMBINE_KERNEL_SOURCE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_ep_combine_data_as_flag.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_ep_combine_udma_wqe_simt.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_ep_kernel_common.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/common/ep_window.h"
         "${CMAKE_SOURCE_DIR}/src/include/comm_args.h"
+        "${CMAKE_SOURCE_DIR}/src/include/tilexr_data_as_flag.h"
         "${CMAKE_SOURCE_DIR}/src/include/tilexr_sync.h"
         "${CMAKE_SOURCE_DIR}/src/include/tilexr_udma.h"
     VERBATIM

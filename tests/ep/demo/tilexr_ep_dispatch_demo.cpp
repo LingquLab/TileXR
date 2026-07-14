@@ -934,49 +934,6 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    if (EnvEnabled("TILEXR_EP_DEMO_DUMP_WINDOW") && commArgsHost != nullptr) {
-        const std::size_t rowBytes = kH * expandElementBytes;
-        const std::size_t payloadBytes = AlignSize(maxRoutesPerRank * rowBytes +
-            (usePerTokenDynamicQuant ? maxRoutesPerRank * sizeof(float) : 0), 32);
-        const std::size_t assistWindowBytes = AlignSize(maxRoutesPerRank * kAssistInts * sizeof(int32_t), 32);
-        const std::size_t slotBytes = AlignSize(64 + payloadBytes + assistWindowBytes, 32);
-        const std::size_t windowBytes = AlignSize(64 + static_cast<std::size_t>(rankSize) * slotBytes, 32);
-        if (crossNode) {
-            for (int slotRank = 0; slotRank < rankSize; ++slotRank) {
-                uint64_t slotHeader[8] = {};
-                const GM_ADDR slotAddr = static_cast<GM_ADDR>(workspaceDev) + windowBytes + 64 +
-                    static_cast<std::size_t>(slotRank) * slotBytes;
-                if (CheckAcl(aclrtMemcpy(slotHeader, sizeof(slotHeader), slotAddr, sizeof(slotHeader),
-                        ACL_MEMCPY_DEVICE_TO_HOST), "dump slot header")) {
-                    const uint32_t count = static_cast<uint32_t>(slotHeader[0] & 0xffffffffULL);
-                    const uint32_t slotSrc = static_cast<uint32_t>((slotHeader[0] >> 32) & 0xffffffffULL);
-                    std::cerr << "rank " << rank << " dump workspace slotRank " << slotRank
-                              << " count " << count << " slotSrc " << slotSrc
-                              << " payloadBytes " << slotHeader[1] << " assistBytes " << slotHeader[2]
-                              << " magic " << slotHeader[3]
-                              << std::endl;
-                }
-            }
-        } else {
-            for (int srcRank = 0; srcRank < rankSize; ++srcRank) {
-                for (int slotRank = 0; slotRank < rankSize; ++slotRank) {
-                    uint64_t slotHeader[8] = {};
-                    const GM_ADDR slotAddr = commArgsHost->peerMems[srcRank] + TileXR::IPC_DATA_OFFSET + 64 +
-                        static_cast<std::size_t>(slotRank) * slotBytes;
-                    if (CheckAcl(aclrtMemcpy(slotHeader, sizeof(slotHeader), slotAddr, sizeof(slotHeader),
-                            ACL_MEMCPY_DEVICE_TO_HOST), "dump slot header")) {
-                        const uint32_t count = static_cast<uint32_t>(slotHeader[0] & 0xffffffffULL);
-                        const uint32_t slotSrc = static_cast<uint32_t>((slotHeader[0] >> 32) & 0xffffffffULL);
-                        std::cerr << "rank " << rank << " dump sourceWindow " << srcRank << " slotRank " << slotRank
-                                  << " count " << count << " slotSrc " << slotSrc
-                                  << " payloadBytes " << slotHeader[1] << " assistBytes " << slotHeader[2]
-                                  << std::endl;
-                    }
-                }
-            }
-        }
-    }
-
     std::vector<uint8_t> hostExpandX(expandXBytes);
     std::vector<int64_t> hostExpertTokenNums(localExpertNum);
     std::vector<int32_t> hostRecvCounts(rankSize);

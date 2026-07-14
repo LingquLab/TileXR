@@ -129,7 +129,7 @@ int TileXREpPrepareCombineLaunchContext(const EpCombineParams &params, EpHostLau
         *context = EpHostLaunchContext {};
         return ret;
     }
-    const int64_t combineWorkspaceBytes = TileXREpUdmaRequiredWorkspaceBytes(
+    const int64_t combineWorkspaceBytes = TileXREpCombineDataAsFlagRequiredWorkspaceBytes(
         context->window.totalBytes, context->window.rankSize, context->window.slotBytes);
     ret = ValidateRegisteredWorkspace(params.comm, *context->hostArgs, params.workspace, combineWorkspaceBytes);
     if (ret != TileXR::TILEXR_SUCCESS) {

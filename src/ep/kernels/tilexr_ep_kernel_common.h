@@ -3,6 +3,7 @@
 #include "comm_args.h"
 #include "ep_window.h"
 #include "kernel_operator.h"
+#include "tilexr_data_as_flag.h"
 #include "tilexr_sync.h"
 #include "tilexr_udma.h"
 
@@ -14,6 +15,8 @@ constexpr uint32_t kEpCopyTileBytes = kEpUbBytes - kEpSyncUbBytes;
 constexpr uint32_t kEpScalarUbBytes = 64;
 constexpr uint32_t kEpScalarUbOffset = kEpSyncUbBytes - kEpScalarUbBytes;
 constexpr int64_t kTileXrDataTypeFp16 = 3;
+
+__aicore__ inline uint64_t TileXREpReadyValue(int64_t magic, int32_t step);
 
 __aicore__ inline int64_t AlignUp(int64_t value, int64_t alignment)
 {
@@ -98,6 +101,92 @@ __aicore__ inline int64_t UDMARequiredWorkspaceBytes(int64_t totalBytes, int32_t
 {
     return AlignUp(UDMAStatusOffset(totalBytes, rankSize, slotBytes) + static_cast<int64_t>(sizeof(uint64_t)),
         TileXR::TILEXR_UDMA_CACHE_LINE_SIZE);
+}
+
+__aicore__ inline int64_t CombineDataAsFlagSlotBytes(int64_t slotBytes)
+{
+    if (slotBytes <= 0) {
+        return 0;
+    }
+    const int64_t payload = static_cast<int64_t>(TileXR::DATA_AS_FLAG_PAYLOAD_BYTES);
+    const int64_t block = static_cast<int64_t>(TileXR::DATA_AS_FLAG_BLOCK_BYTES);
+    return ((slotBytes + payload - 1) / payload) * block;
+}
+
+__aicore__ inline int64_t CombineDataAsFlagTotalBytes(int32_t rankSize, int64_t slotBytes)
+{
+    return static_cast<int64_t>(rankSize) * CombineDataAsFlagSlotBytes(slotBytes);
+}
+
+__aicore__ inline int64_t CombineDataAsFlagPingPongTotalBytes(int32_t rankSize, int64_t slotBytes)
+{
+    return 2 * CombineDataAsFlagTotalBytes(rankSize, slotBytes);
+}
+
+__aicore__ inline int64_t CombineDataAsFlagRecvWindowOffset(int64_t totalBytes, int32_t rankSize, int64_t slotBytes)
+{
+    return UDMAOperationBytes(totalBytes, rankSize, slotBytes);
+}
+
+__aicore__ inline int64_t CombineDataAsFlagSendWindowOffset(int64_t totalBytes, int32_t rankSize, int64_t slotBytes)
+{
+    return CombineDataAsFlagRecvWindowOffset(totalBytes, rankSize, slotBytes) +
+        AlignUp(totalBytes, TileXR::TILEXR_UDMA_CACHE_LINE_SIZE);
+}
+
+__aicore__ inline int64_t CombineDataAsFlagSendRoundOffset(
+    int64_t totalBytes, int32_t rankSize, int64_t slotBytes, int32_t roundIndex)
+{
+    return CombineDataAsFlagSendWindowOffset(totalBytes, rankSize, slotBytes) +
+        static_cast<int64_t>(roundIndex) *
+            AlignUp(CombineDataAsFlagTotalBytes(rankSize, slotBytes), TileXR::TILEXR_UDMA_CACHE_LINE_SIZE);
+}
+
+__aicore__ inline int64_t CombineDataAsFlagRemoteRecvWindowOffset(
+    int64_t totalBytes, int32_t rankSize, int64_t slotBytes)
+{
+    return CombineDataAsFlagSendWindowOffset(totalBytes, rankSize, slotBytes) +
+        2 * AlignUp(CombineDataAsFlagTotalBytes(rankSize, slotBytes), TileXR::TILEXR_UDMA_CACHE_LINE_SIZE);
+}
+
+__aicore__ inline int64_t CombineDataAsFlagRemoteRecvRoundOffset(
+    int64_t totalBytes, int32_t rankSize, int64_t slotBytes, int32_t roundIndex)
+{
+    return CombineDataAsFlagRemoteRecvWindowOffset(totalBytes, rankSize, slotBytes) +
+        static_cast<int64_t>(roundIndex) *
+            AlignUp(CombineDataAsFlagTotalBytes(rankSize, slotBytes), TileXR::TILEXR_UDMA_CACHE_LINE_SIZE);
+}
+
+__aicore__ inline int64_t CombineDataAsFlagStatusOffset(int64_t totalBytes, int32_t rankSize, int64_t slotBytes)
+{
+    return CombineDataAsFlagRemoteRecvWindowOffset(totalBytes, rankSize, slotBytes) +
+        2 * AlignUp(CombineDataAsFlagTotalBytes(rankSize, slotBytes), TileXR::TILEXR_UDMA_CACHE_LINE_SIZE);
+}
+
+__aicore__ inline int64_t CombineDataAsFlagSlotOffset(int32_t rank, int64_t slotBytes)
+{
+    return static_cast<int64_t>(rank) * CombineDataAsFlagSlotBytes(slotBytes);
+}
+
+__aicore__ inline int32_t TileXREpDataAsFlagRoundIndex(int64_t magic)
+{
+    return static_cast<int32_t>(static_cast<uint64_t>(magic) & 1ULL);
+}
+
+__aicore__ inline uint64_t TileXREpDataAsFlagReadyTag(int64_t magic)
+{
+    return TileXREpReadyValue(magic, TileXREp::kEpStepCombineDataAsFlagReady);
+}
+
+__aicore__ inline void TileXREpStoreCombineDataAsFlagStatusValue(GM_ADDR workspaceGM, int64_t totalBytes,
+    int32_t rankSize, int64_t slotBytes, uint64_t status)
+{
+    GM_ADDR statusAddr = workspaceGM + CombineDataAsFlagStatusOffset(totalBytes, rankSize, slotBytes);
+    auto statusGM = reinterpret_cast<__gm__ uint64_t *>(statusAddr);
+    statusGM[0] = status;
+    AscendC::PipeBarrier<PIPE_ALL>();
+    TileXR::UDMACleanCacheLines(reinterpret_cast<__gm__ uint8_t *>(statusAddr), sizeof(uint64_t));
+    AscendC::PipeBarrier<PIPE_ALL>();
 }
 
 __aicore__ inline void CopyBytesGmToGm(

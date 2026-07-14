@@ -33,6 +33,23 @@ bool AddInt64(int64_t lhs, int64_t rhs, int64_t *out)
     return true;
 }
 
+constexpr int64_t kDataAsFlagPayloadBytes = 480;
+constexpr int64_t kDataAsFlagBlockBytes = 512;
+constexpr int64_t kDataAsFlagPingPongBuffers = 2;
+
+bool DataAsFlagSlotBytesChecked(int64_t slotBytes, int64_t *out)
+{
+    if (out == nullptr || slotBytes <= 0) {
+        return false;
+    }
+    int64_t blocks = 0;
+    if (!AddInt64(slotBytes, kDataAsFlagPayloadBytes - 1, &blocks)) {
+        return false;
+    }
+    blocks /= kDataAsFlagPayloadBytes;
+    return MulInt64(blocks, kDataAsFlagBlockBytes, out);
+}
+
 bool IsPositive(int64_t value)
 {
     return value > 0;
@@ -122,6 +139,128 @@ int64_t TileXREpUdmaRequiredWorkspaceBytes(int64_t totalBytes, int64_t rankSize,
     int64_t withStatus = 0;
     if (!MulInt64(operationBytes, 2, &twoOperations) ||
         !AddInt64(twoOperations, static_cast<int64_t>(sizeof(uint64_t)), &withStatus)) {
+        return TileXR::TILEXR_INVALID_VALUE;
+    }
+    return TileXREpAlignUp(withStatus, TileXR::TILEXR_UDMA_CACHE_LINE_SIZE);
+}
+
+int64_t TileXREpDataAsFlagSlotBytes(int64_t slotBytes)
+{
+    int64_t encoded = 0;
+    return DataAsFlagSlotBytesChecked(slotBytes, &encoded) ? encoded : TileXR::TILEXR_INVALID_VALUE;
+}
+
+int64_t TileXREpDataAsFlagTotalBytes(int64_t rankSize, int64_t slotBytes)
+{
+    if (rankSize <= 0 || rankSize > TileXR::TILEXR_MAX_RANK_SIZE) {
+        return TileXR::TILEXR_INVALID_VALUE;
+    }
+    const int64_t encodedSlot = TileXREpDataAsFlagSlotBytes(slotBytes);
+    int64_t total = 0;
+    if (encodedSlot == TileXR::TILEXR_INVALID_VALUE || !MulInt64(rankSize, encodedSlot, &total)) {
+        return TileXR::TILEXR_INVALID_VALUE;
+    }
+    return total;
+}
+
+int64_t TileXREpDataAsFlagPingPongTotalBytes(int64_t rankSize, int64_t slotBytes)
+{
+    const int64_t total = TileXREpDataAsFlagTotalBytes(rankSize, slotBytes);
+    int64_t pingPongTotal = 0;
+    if (total == TileXR::TILEXR_INVALID_VALUE ||
+        !MulInt64(total, kDataAsFlagPingPongBuffers, &pingPongTotal)) {
+        return TileXR::TILEXR_INVALID_VALUE;
+    }
+    return pingPongTotal;
+}
+
+int64_t TileXREpCombineDataAsFlagRecvWindowOffset(int64_t totalBytes, int64_t rankSize, int64_t slotBytes)
+{
+    return TileXREpUdmaOperationBytes(totalBytes, rankSize, slotBytes);
+}
+
+int64_t TileXREpCombineDataAsFlagSendWindowOffset(int64_t totalBytes, int64_t rankSize, int64_t slotBytes)
+{
+    const int64_t recvOffset = TileXREpCombineDataAsFlagRecvWindowOffset(totalBytes, rankSize, slotBytes);
+    const int64_t alignedTotal = TileXREpAlignUp(totalBytes, TileXR::TILEXR_UDMA_CACHE_LINE_SIZE);
+    int64_t sendOffset = 0;
+    if (recvOffset == TileXR::TILEXR_INVALID_VALUE || alignedTotal == TileXR::TILEXR_INVALID_VALUE ||
+        !AddInt64(recvOffset, alignedTotal, &sendOffset)) {
+        return TileXR::TILEXR_INVALID_VALUE;
+    }
+    return sendOffset;
+}
+
+int64_t TileXREpCombineDataAsFlagSendRoundOffset(
+    int64_t totalBytes, int64_t rankSize, int64_t slotBytes, int64_t roundIndex)
+{
+    const int64_t sendOffset = TileXREpCombineDataAsFlagSendWindowOffset(totalBytes, rankSize, slotBytes);
+    const int64_t dafTotal = TileXREpDataAsFlagTotalBytes(rankSize, slotBytes);
+    const int64_t alignedDafTotal = TileXREpAlignUp(dafTotal, TileXR::TILEXR_UDMA_CACHE_LINE_SIZE);
+    int64_t roundBytes = 0;
+    int64_t roundOffset = 0;
+    if ((roundIndex != 0 && roundIndex != 1) || sendOffset == TileXR::TILEXR_INVALID_VALUE ||
+        alignedDafTotal == TileXR::TILEXR_INVALID_VALUE || !MulInt64(roundIndex, alignedDafTotal, &roundBytes) ||
+        !AddInt64(sendOffset, roundBytes, &roundOffset)) {
+        return TileXR::TILEXR_INVALID_VALUE;
+    }
+    return roundOffset;
+}
+
+int64_t TileXREpCombineDataAsFlagRemoteRecvWindowOffset(int64_t totalBytes, int64_t rankSize, int64_t slotBytes)
+{
+    const int64_t sendOffset = TileXREpCombineDataAsFlagSendWindowOffset(totalBytes, rankSize, slotBytes);
+    const int64_t dafTotal = TileXREpDataAsFlagTotalBytes(rankSize, slotBytes);
+    const int64_t alignedDafTotal = TileXREpAlignUp(dafTotal, TileXR::TILEXR_UDMA_CACHE_LINE_SIZE);
+    int64_t pingPongDafTotal = 0;
+    int64_t remoteRecvOffset = 0;
+    if (sendOffset == TileXR::TILEXR_INVALID_VALUE || alignedDafTotal == TileXR::TILEXR_INVALID_VALUE ||
+        !MulInt64(kDataAsFlagPingPongBuffers, alignedDafTotal, &pingPongDafTotal) ||
+        !AddInt64(sendOffset, pingPongDafTotal, &remoteRecvOffset)) {
+        return TileXR::TILEXR_INVALID_VALUE;
+    }
+    return remoteRecvOffset;
+}
+
+int64_t TileXREpCombineDataAsFlagRemoteRecvRoundOffset(
+    int64_t totalBytes, int64_t rankSize, int64_t slotBytes, int64_t roundIndex)
+{
+    const int64_t remoteRecvOffset =
+        TileXREpCombineDataAsFlagRemoteRecvWindowOffset(totalBytes, rankSize, slotBytes);
+    const int64_t dafTotal = TileXREpDataAsFlagTotalBytes(rankSize, slotBytes);
+    const int64_t alignedDafTotal = TileXREpAlignUp(dafTotal, TileXR::TILEXR_UDMA_CACHE_LINE_SIZE);
+    int64_t roundBytes = 0;
+    int64_t roundOffset = 0;
+    if ((roundIndex != 0 && roundIndex != 1) || remoteRecvOffset == TileXR::TILEXR_INVALID_VALUE ||
+        alignedDafTotal == TileXR::TILEXR_INVALID_VALUE || !MulInt64(roundIndex, alignedDafTotal, &roundBytes) ||
+        !AddInt64(remoteRecvOffset, roundBytes, &roundOffset)) {
+        return TileXR::TILEXR_INVALID_VALUE;
+    }
+    return roundOffset;
+}
+
+int64_t TileXREpCombineDataAsFlagStatusOffset(int64_t totalBytes, int64_t rankSize, int64_t slotBytes)
+{
+    const int64_t remoteRecvOffset =
+        TileXREpCombineDataAsFlagRemoteRecvWindowOffset(totalBytes, rankSize, slotBytes);
+    const int64_t dafTotal = TileXREpDataAsFlagTotalBytes(rankSize, slotBytes);
+    const int64_t alignedDafTotal = TileXREpAlignUp(dafTotal, TileXR::TILEXR_UDMA_CACHE_LINE_SIZE);
+    int64_t pingPongDafTotal = 0;
+    int64_t statusOffset = 0;
+    if (remoteRecvOffset == TileXR::TILEXR_INVALID_VALUE || alignedDafTotal == TileXR::TILEXR_INVALID_VALUE ||
+        !MulInt64(kDataAsFlagPingPongBuffers, alignedDafTotal, &pingPongDafTotal) ||
+        !AddInt64(remoteRecvOffset, pingPongDafTotal, &statusOffset)) {
+        return TileXR::TILEXR_INVALID_VALUE;
+    }
+    return statusOffset;
+}
+
+int64_t TileXREpCombineDataAsFlagRequiredWorkspaceBytes(int64_t totalBytes, int64_t rankSize, int64_t slotBytes)
+{
+    const int64_t statusOffset = TileXREpCombineDataAsFlagStatusOffset(totalBytes, rankSize, slotBytes);
+    int64_t withStatus = 0;
+    if (statusOffset == TileXR::TILEXR_INVALID_VALUE ||
+        !AddInt64(statusOffset, static_cast<int64_t>(sizeof(uint64_t)), &withStatus)) {
         return TileXR::TILEXR_INVALID_VALUE;
     }
     return TileXREpAlignUp(withStatus, TileXR::TILEXR_UDMA_CACHE_LINE_SIZE);

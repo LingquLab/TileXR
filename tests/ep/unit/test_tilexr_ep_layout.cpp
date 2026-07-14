@@ -4,6 +4,7 @@
 #include "comm_args.h"
 #include "ep_layout.h"
 #include "tilexr_types.h"
+#include "tilexr_udma_types.h"
 
 namespace {
 
@@ -58,6 +59,65 @@ void TestDataTypes()
         TileXR::TILEXR_INVALID_VALUE);
 }
 
+void TestDataAsFlagSizing()
+{
+    CheckInt64("daf empty invalid", TileXREp::TileXREpDataAsFlagSlotBytes(0),
+        TileXR::TILEXR_INVALID_VALUE);
+    CheckInt64("daf 1 byte", TileXREp::TileXREpDataAsFlagSlotBytes(1), 512);
+    CheckInt64("daf exact payload", TileXREp::TileXREpDataAsFlagSlotBytes(480), 512);
+    CheckInt64("daf two blocks", TileXREp::TileXREpDataAsFlagSlotBytes(481), 1024);
+    CheckInt64("daf total rank 4", TileXREp::TileXREpDataAsFlagTotalBytes(4, 481), 4096);
+    CheckInt64("daf pingpong rank 4", TileXREp::TileXREpDataAsFlagPingPongTotalBytes(4, 481), 8192);
+}
+
+void TestCombineDataAsFlagWorkspace()
+{
+    const int64_t rankSize = 2;
+    const int64_t totalBytes = 704;
+    const int64_t slotBytes = 320;
+    const int64_t firstOperation = TileXREp::TileXREpUdmaOperationBytes(totalBytes, rankSize, slotBytes);
+    const int64_t alignedTotal = TileXREp::TileXREpAlignUp(totalBytes, TileXR::TILEXR_UDMA_CACHE_LINE_SIZE);
+    const int64_t dafTotal = TileXREp::TileXREpDataAsFlagTotalBytes(rankSize, slotBytes);
+    const int64_t alignedDafTotal = TileXREp::TileXREpAlignUp(dafTotal, TileXR::TILEXR_UDMA_CACHE_LINE_SIZE);
+    const int64_t recvOffset = firstOperation;
+    const int64_t sendOffset = recvOffset + alignedTotal;
+    const int64_t sendRound0Offset = sendOffset;
+    const int64_t sendRound1Offset = sendOffset + alignedDafTotal;
+    const int64_t remoteRecvOffset = sendOffset + 2 * alignedDafTotal;
+    const int64_t remoteRecvRound0Offset = remoteRecvOffset;
+    const int64_t remoteRecvRound1Offset = remoteRecvOffset + alignedDafTotal;
+    const int64_t statusOffset = remoteRecvOffset + 2 * alignedDafTotal;
+    const int64_t required = TileXREp::TileXREpAlignUp(
+        statusOffset + static_cast<int64_t>(sizeof(uint64_t)), TileXR::TILEXR_UDMA_CACHE_LINE_SIZE);
+
+    CheckInt64("combine daf recv offset",
+        TileXREp::TileXREpCombineDataAsFlagRecvWindowOffset(totalBytes, rankSize, slotBytes), recvOffset);
+    CheckInt64("combine daf send offset",
+        TileXREp::TileXREpCombineDataAsFlagSendWindowOffset(totalBytes, rankSize, slotBytes), sendOffset);
+    CheckInt64("combine daf send round 0 offset",
+        TileXREp::TileXREpCombineDataAsFlagSendRoundOffset(totalBytes, rankSize, slotBytes, 0), sendRound0Offset);
+    CheckInt64("combine daf send round 1 offset",
+        TileXREp::TileXREpCombineDataAsFlagSendRoundOffset(totalBytes, rankSize, slotBytes, 1), sendRound1Offset);
+    CheckInt64("combine daf send round invalid",
+        TileXREp::TileXREpCombineDataAsFlagSendRoundOffset(totalBytes, rankSize, slotBytes, 2),
+        TileXR::TILEXR_INVALID_VALUE);
+    CheckInt64("combine daf remote recv offset",
+        TileXREp::TileXREpCombineDataAsFlagRemoteRecvWindowOffset(totalBytes, rankSize, slotBytes), remoteRecvOffset);
+    CheckInt64("combine daf remote recv round 0 offset",
+        TileXREp::TileXREpCombineDataAsFlagRemoteRecvRoundOffset(totalBytes, rankSize, slotBytes, 0),
+        remoteRecvRound0Offset);
+    CheckInt64("combine daf remote recv round 1 offset",
+        TileXREp::TileXREpCombineDataAsFlagRemoteRecvRoundOffset(totalBytes, rankSize, slotBytes, 1),
+        remoteRecvRound1Offset);
+    CheckInt64("combine daf remote recv round invalid",
+        TileXREp::TileXREpCombineDataAsFlagRemoteRecvRoundOffset(totalBytes, rankSize, slotBytes, -1),
+        TileXR::TILEXR_INVALID_VALUE);
+    CheckInt64("combine daf status offset",
+        TileXREp::TileXREpCombineDataAsFlagStatusOffset(totalBytes, rankSize, slotBytes), statusOffset);
+    CheckInt64("combine daf required",
+        TileXREp::TileXREpCombineDataAsFlagRequiredWorkspaceBytes(totalBytes, rankSize, slotBytes), required);
+}
+
 void TestWindowConfig()
 {
     TileXREp::EpWindowConfig config {};
@@ -106,6 +166,8 @@ int main()
 {
     TestExpertMapping();
     TestDataTypes();
+    TestDataAsFlagSizing();
+    TestCombineDataAsFlagWorkspace();
     TestWindowConfig();
     TestRejectsInvalidConfig();
     return g_failures == 0 ? 0 : 1;
