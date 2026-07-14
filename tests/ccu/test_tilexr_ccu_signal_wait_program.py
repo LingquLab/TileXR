@@ -53,7 +53,7 @@ class TileXRCcuSignalWaitProgramTest(unittest.TestCase):
             )
             return subprocess.run([str(test_bin)], cwd=REPO_ROOT, check=False, text=True, capture_output=True)
 
-    def test_signal_wait_program_builds_signal_only_hcomm_style_synccke_post(self):
+    def test_signal_wait_program_initializes_source_cke_before_signal_only_post(self):
         code = textwrap.dedent(
             r'''
             #include "ccu/tilexr_ccu_signal_wait_program.h"
@@ -81,14 +81,15 @@ class TileXRCcuSignalWaitProgramTest(unittest.TestCase):
                     std::cerr << "signal program build failed: " << report.message << "\n";
                     return 1;
                 }
-                if (program.size() != 1 || report.postInstructionCount != 1 ||
-                    report.waitInstructionCount != 0 || report.totalInstructionCount != 1) {
+                if (program.size() != 5 || report.postInstructionCount != 1 ||
+                    report.waitInstructionCount != 0 || report.totalInstructionCount != 5) {
                     std::cerr << "unexpected signal report\n";
                     return 2;
                 }
-                if (program[0].words[0] != 0xffff0101016c100bULL ||
-                    program[0].words[1] != 0x0000000000000002ULL ||
-                    program[0].words[2] != 0x0001000000000000ULL) {
+                if (program[2].words[0] != 0xffff010100010802ULL ||
+                    program[3].words[0] != 0xffff0101016c100bULL ||
+                    program[3].words[1] != 0x0000000000000002ULL ||
+                    program[3].words[2] != 0x0001000000000000ULL) {
                     std::cerr << "unexpected signal instructions\n";
                     return 3;
                 }
@@ -176,14 +177,15 @@ class TileXRCcuSignalWaitProgramTest(unittest.TestCase):
                     std::cerr << "barrier program build failed: " << report.message << "\n";
                     return 1;
                 }
-                if (program.size() != 2 || report.postInstructionCount != 1 ||
-                    report.waitInstructionCount != 1 || report.totalInstructionCount != 2) {
+                if (program.size() != 6 || report.postInstructionCount != 1 ||
+                    report.waitInstructionCount != 1 || report.totalInstructionCount != 6) {
                     std::cerr << "unexpected signal_and_wait report\n";
                     return 2;
                 }
-                if (program[0].words[0] != 0xffff0101016c100bULL ||
-                    program[1].words[0] != 0x0000000000010804ULL ||
-                    program[1].words[1] != 0x0000000000010220ULL) {
+                if (program[2].words[0] != 0xffff010100010802ULL ||
+                    program[3].words[0] != 0xffff0101016c100bULL ||
+                    program[4].words[0] != 0x0000000000010804ULL ||
+                    program[4].words[1] != 0x0000000000010220ULL) {
                     std::cerr << "unexpected signal_and_wait instructions\n";
                     return 3;
                 }

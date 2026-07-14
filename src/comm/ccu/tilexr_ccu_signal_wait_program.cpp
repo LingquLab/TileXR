@@ -196,11 +196,17 @@ int TileXRCcuBuildSignalWaitProgram(
         return Fail(program, report, "missing wait CKE resource for direct CCU signal/wait program");
     }
 
+    if (AppendCommonPrelude(spec, program, report) != TILEXR_SUCCESS) {
+        return TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
     if (AppendSignalInstruction(spec, program, report) != TILEXR_SUCCESS) {
         return TILEXR_ERROR_PARA_CHECK_FAIL;
     }
     if (spec.role == TileXRCcuSignalWaitProgramRole::SignalAndWait &&
         AppendWaitInstruction(spec, program, report, false) != TILEXR_SUCCESS) {
+        return TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    if (AppendFinish(spec, program, report) != TILEXR_SUCCESS) {
         return TILEXR_ERROR_PARA_CHECK_FAIL;
     }
     if (report != nullptr) {
