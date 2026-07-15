@@ -25,6 +25,8 @@ namespace TileXR {
 
 #ifdef TILEXR_CCU_TESTING
 constexpr uint32_t TILEXR_CCU_DIRECT_MEMORY_COPY_INSTRUCTION_COUNT = 7U;
+constexpr uint32_t TILEXR_CCU_DIRECT_ALLTOALL_INSTRUCTION_COUNT =
+    4U + 4U + 64U * 7U + 4U + 4U + 4U + 4U + 1U;
 #endif
 constexpr uint32_t TILEXR_CCU_DIRECT_SIGNAL_INSTRUCTION_COUNT = 5U;
 constexpr uint32_t TILEXR_CCU_DIRECT_WAIT_INSTRUCTION_COUNT = 5U;
@@ -673,6 +675,24 @@ void TileXRCcuCollectivePlanner::SetDirectCcuRemoteRouteMemoryOverride(
     uint32_t rawMemoryTokenId,
     uint32_t memoryTokenValue)
 {
+    SetDirectCcuRemoteRouteMemoryOverrideForSyncRoute(
+        0,
+        peerRank,
+        remoteCcuVa,
+        memoryTokenId,
+        rawMemoryTokenId,
+        memoryTokenValue);
+    directCcuRemoteRouteMemoryOverrideAllRoutes_ = true;
+}
+
+void TileXRCcuCollectivePlanner::SetDirectCcuRemoteRouteMemoryOverrideForSyncRoute(
+    uint32_t syncRouteIndex,
+    uint32_t peerRank,
+    uint64_t remoteCcuVa,
+    uint32_t memoryTokenId,
+    uint32_t rawMemoryTokenId,
+    uint32_t memoryTokenValue)
+{
     directCcuRemoteRouteMemoryOverride_ = TileXRCcuRemoteCcuBufferInfo {};
     directCcuRemoteRouteMemoryOverride_.peerRank = peerRank;
     directCcuRemoteRouteMemoryOverride_.remoteCcuVa = remoteCcuVa;
@@ -681,12 +701,16 @@ void TileXRCcuCollectivePlanner::SetDirectCcuRemoteRouteMemoryOverride(
     directCcuRemoteRouteMemoryOverride_.memoryTokenValue = memoryTokenValue;
     directCcuRemoteRouteMemoryOverrideValid_ =
         remoteCcuVa != 0 && memoryTokenId != 0 && memoryTokenValue != 0;
+    directCcuRemoteRouteMemoryOverrideAllRoutes_ = false;
+    directCcuRemoteRouteMemoryOverrideSyncRouteIndex_ = syncRouteIndex;
 }
 
 void TileXRCcuCollectivePlanner::ClearDirectCcuRemoteRouteMemoryOverride()
 {
     directCcuRemoteRouteMemoryOverride_ = TileXRCcuRemoteCcuBufferInfo {};
     directCcuRemoteRouteMemoryOverrideValid_ = false;
+    directCcuRemoteRouteMemoryOverrideAllRoutes_ = true;
+    directCcuRemoteRouteMemoryOverrideSyncRouteIndex_ = 0;
 }
 
 void TileXRCcuCollectivePlanner::ApplyDirectCcuRemoteRouteMemoryOverride(
@@ -695,14 +719,19 @@ void TileXRCcuCollectivePlanner::ApplyDirectCcuRemoteRouteMemoryOverride(
     if (!directCcuRemoteRouteMemoryOverrideValid_ || remoteCcuBuffers == nullptr) {
         return;
     }
+    uint32_t routeIndex = 0;
     for (auto &remoteCcuBuffer : *remoteCcuBuffers) {
-        if (remoteCcuBuffer.peerRank != directCcuRemoteRouteMemoryOverride_.peerRank) {
+        if (remoteCcuBuffer.peerRank != directCcuRemoteRouteMemoryOverride_.peerRank ||
+            (!directCcuRemoteRouteMemoryOverrideAllRoutes_ &&
+                routeIndex != directCcuRemoteRouteMemoryOverrideSyncRouteIndex_)) {
+            ++routeIndex;
             continue;
         }
         remoteCcuBuffer.remoteCcuVa = directCcuRemoteRouteMemoryOverride_.remoteCcuVa;
         remoteCcuBuffer.memoryTokenId = directCcuRemoteRouteMemoryOverride_.memoryTokenId;
         remoteCcuBuffer.rawMemoryTokenId = directCcuRemoteRouteMemoryOverride_.rawMemoryTokenId;
         remoteCcuBuffer.memoryTokenValue = directCcuRemoteRouteMemoryOverride_.memoryTokenValue;
+        ++routeIndex;
     }
 }
 #endif
@@ -1140,6 +1169,185 @@ int TileXRCcuCollectivePlanner::PrepareDirectCcuMemoryCopyInstallAttempt(
             remoteImportRequest.tokenValue);
     }
     ret = TileXRCcuRunDirectMemoryCopyInstallAttempt(next, memoryCopy, attempt, report);
+    ClearDirectCcuRemoteRouteMemoryOverride();
+    return ret;
+}
+
+int TileXRCcuCollectivePlanner::PrepareDirectCcuAllToAll2RankInstallAttempt(
+    TileXRCcuRuntimeSession &session,
+    const TileXRCcuDirectInstallOptions &options,
+    uint64_t localSourceAddr,
+    uint64_t localDestinationAddr,
+    uint64_t bytes,
+    uint32_t peerRank,
+    TileXRCcuDirectInstallAttempt *attempt,
+    TileXRCcuDirectInstallReport *report)
+{
+    if (!session.Available()) {
+        if (report != nullptr) {
+            *report = TileXRCcuDirectInstallReport {};
+            report->message = "TileXRCcuBackend is not initialized for direct CCU alltoall install attempt";
+        }
+        return TILEXR_ERROR_NOT_INITIALIZED;
+    }
+    const int rank = session.Rank();
+    const int rankSize = session.RankSize();
+    if (rankSize != 2 || localSourceAddr == 0 || localDestinationAddr == 0 || bytes == 0 ||
+        peerRank >= static_cast<uint32_t>(rankSize) || peerRank == static_cast<uint32_t>(rank)) {
+        if (report != nullptr) {
+            *report = TileXRCcuDirectInstallReport {};
+            report->message = "invalid direct CCU alltoall endpoint";
+        }
+        return TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    const std::string unavailableMessage = session.DirectCcuRuntimeUnavailableMessage();
+    if (!unavailableMessage.empty()) {
+        if (report != nullptr) {
+            *report = TileXRCcuDirectInstallReport {};
+            report->message = unavailableMessage;
+        }
+        return TILEXR_ERROR_NOT_FOUND;
+    }
+    const uint8_t installDieId = SelectDirectCcuInstallDieId();
+    const TileXRCcuBasicInfo *basicInfo = session.GetDirectCcuBasicInfo();
+    if (basicInfo == nullptr || basicInfo->dieId != installDieId) {
+        const int ret = session.RefreshDirectCcuBasicInfo(installDieId);
+        if (ret != TILEXR_SUCCESS) {
+            if (report != nullptr) {
+                *report = TileXRCcuDirectInstallReport {};
+                report->message = session.GetDirectCcuBasicInfoReport().message;
+            }
+            return ret;
+        }
+        basicInfo = session.GetDirectCcuBasicInfo();
+    }
+    if (basicInfo == nullptr || !session.Available()) {
+        if (report != nullptr) {
+            *report = TileXRCcuDirectInstallReport {};
+            report->message = "direct CCU runtime is unavailable for alltoall install attempt";
+        }
+        return TILEXR_ERROR_NOT_FOUND;
+    }
+
+    int ret = session.RegisterCcuResourceRmaBuffer(basicInfo->resourceAddr);
+    if (ret != TILEXR_SUCCESS) {
+        if (report != nullptr) {
+            *report = TileXRCcuDirectInstallReport {};
+            report->message = "failed to register direct CCU resource window before alltoall buffer registration";
+        }
+        return ret;
+    }
+
+    DirectCcuMemoryCopyEndpoint localEndpoint;
+    ret = BuildDirectCcuLocalMemoryCopyEndpoint(
+        session,
+        static_cast<uint32_t>(rank),
+        localSourceAddr,
+        localDestinationAddr,
+        bytes,
+        &localEndpoint);
+    if (ret != TILEXR_SUCCESS) {
+        if (report != nullptr) {
+            *report = TileXRCcuDirectInstallReport {};
+            report->message = "failed to query direct CCU alltoall local buffer token";
+        }
+        return ret;
+    }
+
+    std::vector<DirectCcuMemoryCopyEndpoint> allEndpoints(static_cast<size_t>(rankSize));
+    ret = session.AllGather(
+        &localEndpoint,
+        sizeof(localEndpoint),
+        allEndpoints.data());
+    if (ret != TILEXR_SUCCESS) {
+        if (report != nullptr) {
+            *report = TileXRCcuDirectInstallReport {};
+            report->message = "failed to exchange direct CCU alltoall peer endpoints";
+        }
+        return ret;
+    }
+    const DirectCcuMemoryCopyEndpoint &peerEndpoint = allEndpoints[peerRank];
+    if (peerEndpoint.valid == 0 || peerEndpoint.bytes != bytes) {
+        if (report != nullptr) {
+            *report = TileXRCcuDirectInstallReport {};
+            report->message = "invalid direct CCU alltoall peer endpoint";
+        }
+        return TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+
+    TileXRCcuImportedRemoteMemoryBufferInfo importedRemoteBuffer;
+    TileXRCcuRemoteMemoryBufferImportRequest remoteImportRequest = peerEndpoint.sourceRemoteImport;
+    ret = session.ImportRemoteMemoryBuffer(remoteImportRequest, &importedRemoteBuffer);
+    if (ret != TILEXR_SUCCESS) {
+        if (report != nullptr) {
+            *report = TileXRCcuDirectInstallReport {};
+            report->message = "failed to import direct CCU alltoall remote source buffer";
+        }
+        return ret;
+    }
+
+    TileXRCcuDirectAllToAll2RankSpec alltoall;
+    alltoall.localRank = static_cast<uint32_t>(rank);
+    alltoall.localRecvAddr = localEndpoint.destinationAddr;
+    alltoall.localRecvToken = localEndpoint.destinationToken;
+    alltoall.remoteSendAddr = remoteImportRequest.addr;
+    alltoall.remoteSendToken =
+        TileXRCcuPackMemoryToken(remoteImportRequest.tokenId, remoteImportRequest.tokenValue, true);
+    alltoall.bytes = bytes;
+    alltoall.memorySliceBytes = TILEXR_CCU_ALLTOALL_MEMORY_SLICE_BYTES;
+    alltoall.memSlicePerBlock = TILEXR_CCU_ALLTOALL_MEM_SLICE_PER_BLOCK;
+
+    if (TraceDirectCcuMemoryCopy()) {
+        std::cerr << "TileXRDirectCcuTrace alltoallEndpoint"
+                  << " rank=" << rank
+                  << " peerRank=" << peerRank
+                  << " localRecvAddr=0x" << std::hex << alltoall.localRecvAddr
+                  << " localRecvToken=0x" << alltoall.localRecvToken
+                  << " remoteSendAddr=0x" << alltoall.remoteSendAddr
+                  << " remoteSendToken=0x" << alltoall.remoteSendToken
+                  << " bytes=0x" << alltoall.bytes
+                  << std::dec << std::endl;
+    }
+
+    TileXRCcuDriverAdapter adapter;
+    TileXRCcuDriverAdapterReport adapterReport;
+    ret = session.CreateDriverAdapter(&adapter, &adapterReport);
+    if (ret != TILEXR_SUCCESS) {
+        if (report != nullptr) {
+            *report = TileXRCcuDirectInstallReport {};
+            report->message = adapterReport.message;
+        }
+        return ret;
+    }
+
+    LowerLayerPlanCallbackContext callbackContext {this, &session};
+    TileXRCcuDirectInstallOptions next = options;
+    next.basicInfo = basicInfo;
+    next.offlineOnly = false;
+    next.driverAdapter = &adapter;
+    next.repositoryMemoryOps = TileXRCcuMakeRepositoryDeviceMemoryOps(next.repositoryMemoryAllocMode);
+    next.repositoryMemoryUserData = nullptr;
+    next.lowerLayerPlan = nullptr;
+    next.prepareLowerLayerPlan = &TileXRCcuCollectivePlanner::PrepareDirectCcuLowerLayerPlanCallback;
+    next.lowerLayerPlanUserData = &callbackContext;
+    next.sqeArgCount = 0;
+    next.syncResourceCount = 3;
+    next.syncInstructionCount = std::max<uint32_t>(
+        next.syncInstructionCount,
+        TILEXR_CCU_DIRECT_ALLTOALL_INSTRUCTION_COUNT);
+    next.bindingsPerSyncResource = next.bindingsPerSyncResource == 0 ? 1 : next.bindingsPerSyncResource;
+    if (next.provider.empty()) {
+        next.provider = "tilexr-comm-direct-ccu-alltoall";
+    }
+
+    SetDirectCcuRemoteRouteMemoryOverrideForSyncRoute(
+        1U,
+        peerRank,
+        importedRemoteBuffer.targetSegVa,
+        remoteImportRequest.tokenId,
+        remoteImportRequest.rawTokenId,
+        remoteImportRequest.tokenValue);
+    ret = TileXRCcuRunDirectAllToAll2RankInstallAttempt(next, alltoall, attempt, report);
     ClearDirectCcuRemoteRouteMemoryOverride();
     return ret;
 }

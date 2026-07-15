@@ -8,6 +8,7 @@
 
 #include "ccu/tilexr_ccu_install_provider.h"
 #include "ccu/tilexr_ccu_lower_layer_plan_builder.h"
+#include "ccu/tilexr_ccu_alltoall_program.h"
 #include "ccu/tilexr_ccu_memory_program.h"
 #include "ccu/tilexr_ccu_signal_wait_program.h"
 #include "ccu/tilexr_ccu_specs.h"
@@ -69,6 +70,17 @@ struct TileXRCcuDirectMemoryCopySpec {
     uint64_t lengthBytes = 0;
 };
 
+struct TileXRCcuDirectAllToAll2RankSpec {
+    uint32_t localRank = 0;
+    uint64_t localRecvAddr = 0;
+    uint64_t localRecvToken = 0;
+    uint64_t remoteSendAddr = 0;
+    uint64_t remoteSendToken = 0;
+    uint64_t bytes = 0;
+    uint32_t memorySliceBytes = TILEXR_CCU_ALLTOALL_MEMORY_SLICE_BYTES;
+    uint32_t memSlicePerBlock = TILEXR_CCU_ALLTOALL_MEM_SLICE_PER_BLOCK;
+};
+
 struct TileXRCcuDirectSignalWaitSpec {
     TileXRCcuSignalWaitProgramRole role = TileXRCcuSignalWaitProgramRole::Signal;
 };
@@ -126,6 +138,12 @@ int TileXRCcuRunDirectInstallAttempt(
 int TileXRCcuRunDirectMemoryCopyInstallAttempt(
     const TileXRCcuDirectInstallOptions& options,
     const TileXRCcuDirectMemoryCopySpec& memoryCopy,
+    TileXRCcuDirectInstallAttempt* attempt,
+    TileXRCcuDirectInstallReport* report);
+
+int TileXRCcuRunDirectAllToAll2RankInstallAttempt(
+    const TileXRCcuDirectInstallOptions& options,
+    const TileXRCcuDirectAllToAll2RankSpec& alltoall,
     TileXRCcuDirectInstallAttempt* attempt,
     TileXRCcuDirectInstallReport* report);
 

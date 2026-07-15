@@ -1,0 +1,372 @@
+#!/usr/bin/env python3
+#
+# Copyright (c) 2026 TileXR Project
+#
+
+import shutil
+import subprocess
+import tempfile
+import textwrap
+import unittest
+from pathlib import Path
+
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+INCLUDE_DIR = REPO_ROOT / "src" / "include"
+COMM_DIR = REPO_ROOT / "src" / "comm"
+ALLTOALL_HEADER = COMM_DIR / "ccu" / "tilexr_ccu_alltoall_program.h"
+ALLTOALL_SOURCE = COMM_DIR / "ccu" / "tilexr_ccu_alltoall_program.cpp"
+MICROCODE_SOURCE = COMM_DIR / "ccu" / "tilexr_ccu_microcode.cpp"
+MEMORY_SOURCE = COMM_DIR / "ccu" / "tilexr_ccu_memory_program.cpp"
+COMM_CMAKE = COMM_DIR / "CMakeLists.txt"
+
+
+PRIVATE_CCU_PRODUCER_NEEDLES = [
+    "#include <hcomm/",
+    "#include <hccl/",
+    "libhcomm",
+    "libhccl_v2",
+    "libhccl_fwk",
+    "HcommCcuKernelLaunch",
+    "HcclGetCcuTaskInfo",
+    "HcomGetCcuTaskInfo",
+    "CcuLoopGroupCreate",
+    "CcuResBatchAllocator",
+    "CcuResRepository",
+    "CcuDeviceManager",
+    "CcuDevMgrImp",
+    "ccu::",
+]
+
+
+class TileXRCcuAllToAllProgramTest(unittest.TestCase):
+    def compile_and_run(self, code: str):
+        compiler = shutil.which("g++") or shutil.which("clang++") or shutil.which("c++")
+        if compiler is None:
+            self.skipTest("no local C++ compiler found")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            test_cpp = temp_path / "alltoall_program_test.cpp"
+            test_bin = temp_path / "alltoall_program_test"
+            test_cpp.write_text(code, encoding="utf-8")
+            subprocess.run(
+                [
+                    compiler,
+                    "-std=c++14",
+                    "-I",
+                    str(INCLUDE_DIR),
+                    "-I",
+                    str(COMM_DIR),
+                    str(test_cpp),
+                    str(ALLTOALL_SOURCE),
+                    str(MEMORY_SOURCE),
+                    str(MICROCODE_SOURCE),
+                    "-o",
+                    str(test_bin),
+                ],
+                cwd=REPO_ROOT,
+                check=True,
+                text=True,
+                capture_output=True,
+            )
+            return subprocess.run([str(test_bin)], cwd=REPO_ROOT, check=False, text=True, capture_output=True)
+
+    def test_two_mb_program_has_presync_64_copy_blocks_postsync_and_finish(self):
+        code = textwrap.dedent(
+            r'''
+            #include "ccu/tilexr_ccu_alltoall_program.h"
+
+            #include <iostream>
+            #include <vector>
+
+            using namespace TileXR;
+
+            int main()
+            {
+                TileXRCcuAllToAll2RankProgramSpec spec;
+                spec.localRecvAddr = 0x10000000ULL;
+                spec.localRecvToken = TileXRCcuPackMemoryToken(0x12345, 0x11112222U, true);
+                spec.remoteSendAddr = 0x20000000ULL;
+                spec.remoteSendToken = TileXRCcuPackMemoryToken(0x23456, 0x33334444U, true);
+                spec.bytes = 2ULL * 1024ULL * 1024ULL;
+                spec.memorySliceBytes = TILEXR_CCU_ALLTOALL_MEMORY_SLICE_BYTES;
+                spec.memSlicePerBlock = TILEXR_CCU_ALLTOALL_MEM_SLICE_PER_BLOCK;
+                spec.localGsa = 0x101;
+                spec.remoteGsa = 0x102;
+                spec.localXn = 0x201;
+                spec.remoteXn = 0x202;
+                spec.lengthXn = 0x203;
+                spec.channelId = 0x12;
+                spec.copyCompletionCke = 0x301;
+                spec.preSyncLocalWaitCke = 0x302;
+                spec.preSyncRemoteNotifyCke = 0x303;
+                spec.postSyncLocalWaitCke = 0x304;
+                spec.postSyncRemoteNotifyCke = 0x305;
+                spec.sourceCke = 0x306;
+                spec.ckeMask = 1;
+
+                std::vector<TileXRCcuInstr> program;
+                TileXRCcuAllToAllProgramReport report;
+                int ret = TileXRCcuBuildAllToAll2RankProgram(spec, &program, &report);
+                if (ret != TILEXR_SUCCESS) {
+                    std::cerr << "builder failed: " << report.message << "\n";
+                    return 1;
+                }
+                const uint32_t expectedBlocks = 64;
+                const uint32_t expectedInstructions = 4 + 4 + expectedBlocks * 7 + 4 + 4 + 4 + 4 + 1;
+                if (report.blockCount != expectedBlocks ||
+                    report.copyInstructionCount != expectedBlocks * 7 ||
+                    report.preSyncInstructionCount != 4 ||
+                    report.postSyncInstructionCount != 4 ||
+                    report.finishInstructionCount != 1 ||
+                    report.totalInstructionCount != expectedInstructions ||
+                    program.size() != expectedInstructions) {
+                    std::cerr << "unexpected report counts"
+                              << " blocks=" << report.blockCount
+                              << " copyInst=" << report.copyInstructionCount
+                              << " pre=" << report.preSyncInstructionCount
+                              << " post=" << report.postSyncInstructionCount
+                              << " finish=" << report.finishInstructionCount
+                              << " total=" << report.totalInstructionCount
+                              << " size=" << program.size() << "\n";
+                    return 2;
+                }
+                if (report.bytesPerBlock != 32768 || report.message != "ok") {
+                    std::cerr << "unexpected block size or message\n";
+                    return 3;
+                }
+                return 0;
+            }
+            '''
+        )
+
+        result = self.compile_and_run(code)
+
+        self.assertEqual("", result.stderr)
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+
+    def test_two_rank_program_serializes_copy_phases_by_local_rank(self):
+        code = textwrap.dedent(
+            r'''
+            #include "ccu/tilexr_ccu_alltoall_program.h"
+
+            #include <iostream>
+            #include <vector>
+
+            using namespace TileXR;
+
+            constexpr uint16_t kTransRmtMemToLocMemHeader = 0x1008U;
+
+            uint16_t Header(const TileXRCcuInstr& instr)
+            {
+                return static_cast<uint16_t>(instr.words[0] & 0xffffU);
+            }
+
+            TileXRCcuAllToAll2RankProgramSpec ValidSpec(uint32_t localRank)
+            {
+                TileXRCcuAllToAll2RankProgramSpec spec;
+                spec.localRank = localRank;
+                spec.localRecvAddr = 0x10000000ULL;
+                spec.localRecvToken = TileXRCcuPackMemoryToken(0x12345, 0x11112222U, true);
+                spec.remoteSendAddr = 0x20000000ULL;
+                spec.remoteSendToken = TileXRCcuPackMemoryToken(0x23456, 0x33334444U, true);
+                spec.bytes = 2ULL * 1024ULL * 1024ULL;
+                spec.memorySliceBytes = TILEXR_CCU_ALLTOALL_MEMORY_SLICE_BYTES;
+                spec.memSlicePerBlock = TILEXR_CCU_ALLTOALL_MEM_SLICE_PER_BLOCK;
+                spec.localGsa = 0x101;
+                spec.remoteGsa = 0x102;
+                spec.localXn = 0x201;
+                spec.remoteXn = 0x202;
+                spec.lengthXn = 0x203;
+                spec.channelId = 0x12;
+                spec.copyCompletionCke = 0x301;
+                spec.preSyncLocalWaitCke = 0x302;
+                spec.preSyncRemoteNotifyCke = 0x303;
+                spec.postSyncLocalWaitCke = 0x304;
+                spec.postSyncRemoteNotifyCke = 0x305;
+                spec.sourceCke = 0x306;
+                spec.ckeMask = 1;
+                return spec;
+            }
+
+            size_t FirstCopyIndex(const std::vector<TileXRCcuInstr>& program)
+            {
+                for (size_t i = 0; i < program.size(); ++i) {
+                    if (Header(program[i]) == kTransRmtMemToLocMemHeader) {
+                        return i;
+                    }
+                }
+                return program.size();
+            }
+
+            uint32_t CopyInstructionCount(const std::vector<TileXRCcuInstr>& program)
+            {
+                uint32_t count = 0;
+                for (const auto& instr : program) {
+                    if (Header(instr) == kTransRmtMemToLocMemHeader) {
+                        ++count;
+                    }
+                }
+                return count;
+            }
+
+            int main()
+            {
+                std::vector<TileXRCcuInstr> rank0;
+                std::vector<TileXRCcuInstr> rank1;
+                TileXRCcuAllToAllProgramReport report0;
+                TileXRCcuAllToAllProgramReport report1;
+                int ret0 = TileXRCcuBuildAllToAll2RankProgram(ValidSpec(0), &rank0, &report0);
+                int ret1 = TileXRCcuBuildAllToAll2RankProgram(ValidSpec(1), &rank1, &report1);
+                if (ret0 != TILEXR_SUCCESS || ret1 != TILEXR_SUCCESS) {
+                    std::cerr << "builder failed rank0=" << report0.message
+                              << " rank1=" << report1.message << "\n";
+                    return 1;
+                }
+                if (report0.totalInstructionCount != 473 || report1.totalInstructionCount != 473 ||
+                    rank0.size() != 473 || rank1.size() != 473) {
+                    std::cerr << "unexpected two-phase instruction count"
+                              << " rank0=" << rank0.size()
+                              << " rank1=" << rank1.size()
+                              << " report0=" << report0.totalInstructionCount
+                              << " report1=" << report1.totalInstructionCount << "\n";
+                    return 2;
+                }
+                if (CopyInstructionCount(rank0) != 64 || CopyInstructionCount(rank1) != 64) {
+                    std::cerr << "each rank should issue exactly 64 remote-to-local transfers\n";
+                    return 3;
+                }
+                const size_t rank0FirstCopy = FirstCopyIndex(rank0);
+                const size_t rank1FirstCopy = FirstCopyIndex(rank1);
+                if (rank0FirstCopy != 13 || rank1FirstCopy != 21) {
+                    std::cerr << "copy phases overlap or moved unexpectedly"
+                              << " rank0FirstCopy=" << rank0FirstCopy
+                              << " rank1FirstCopy=" << rank1FirstCopy << "\n";
+                    return 4;
+                }
+                return 0;
+            }
+            '''
+        )
+
+        result = self.compile_and_run(code)
+
+        self.assertEqual("", result.stderr)
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+
+    def test_builder_rejects_invalid_slice_configuration(self):
+        code = textwrap.dedent(
+            r'''
+            #include "ccu/tilexr_ccu_alltoall_program.h"
+
+            #include <iostream>
+            #include <vector>
+
+            using namespace TileXR;
+
+            TileXRCcuAllToAll2RankProgramSpec ValidSpec()
+            {
+                TileXRCcuAllToAll2RankProgramSpec spec;
+                spec.localRecvAddr = 0x10000000ULL;
+                spec.localRecvToken = TileXRCcuPackMemoryToken(1, 2, true);
+                spec.remoteSendAddr = 0x20000000ULL;
+                spec.remoteSendToken = TileXRCcuPackMemoryToken(3, 4, true);
+                spec.bytes = 2ULL * 1024ULL * 1024ULL;
+                spec.memorySliceBytes = TILEXR_CCU_ALLTOALL_MEMORY_SLICE_BYTES;
+                spec.memSlicePerBlock = TILEXR_CCU_ALLTOALL_MEM_SLICE_PER_BLOCK;
+                spec.localGsa = 1;
+                spec.remoteGsa = 2;
+                spec.localXn = 3;
+                spec.remoteXn = 4;
+                spec.lengthXn = 5;
+                spec.channelId = 6;
+                spec.copyCompletionCke = 7;
+                spec.preSyncLocalWaitCke = 8;
+                spec.preSyncRemoteNotifyCke = 9;
+                spec.postSyncLocalWaitCke = 10;
+                spec.postSyncRemoteNotifyCke = 11;
+                spec.sourceCke = 12;
+                spec.ckeMask = 1;
+                return spec;
+            }
+
+            int main()
+            {
+                std::vector<TileXRCcuInstr> program;
+                TileXRCcuAllToAllProgramReport report;
+
+                auto spec = ValidSpec();
+                spec.memSlicePerBlock = 9;
+                if (TileXRCcuBuildAllToAll2RankProgram(spec, &program, &report) !=
+                    TILEXR_ERROR_PARA_CHECK_FAIL ||
+                    report.message.find("memSlicePerBlock") == std::string::npos) {
+                    std::cerr << "memSlicePerBlock > 8 accepted: " << report.message << "\n";
+                    return 1;
+                }
+
+                spec = ValidSpec();
+                spec.bytes = 4097;
+                if (TileXRCcuBuildAllToAll2RankProgram(spec, &program, &report) !=
+                    TILEXR_ERROR_PARA_CHECK_FAIL ||
+                    report.message.find("4KB") == std::string::npos) {
+                    std::cerr << "non-4KB size accepted: " << report.message << "\n";
+                    return 2;
+                }
+
+                spec = ValidSpec();
+                spec.remoteSendToken = 0;
+                if (TileXRCcuBuildAllToAll2RankProgram(spec, &program, &report) !=
+                    TILEXR_ERROR_PARA_CHECK_FAIL ||
+                    report.message.find("token") == std::string::npos) {
+                    std::cerr << "missing token accepted: " << report.message << "\n";
+                    return 3;
+                }
+
+                spec = ValidSpec();
+                spec.localRank = 2;
+                if (TileXRCcuBuildAllToAll2RankProgram(spec, &program, &report) !=
+                    TILEXR_ERROR_PARA_CHECK_FAIL ||
+                    report.message.find("localRank") == std::string::npos) {
+                    std::cerr << "invalid localRank accepted: " << report.message << "\n";
+                    return 4;
+                }
+                return 0;
+            }
+            '''
+        )
+
+        result = self.compile_and_run(code)
+
+        self.assertEqual("", result.stderr)
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+
+    def test_builder_is_wired_and_has_no_hccl_dependency_surface(self):
+        cmake = COMM_CMAKE.read_text(encoding="utf-8")
+        header = ALLTOALL_HEADER.read_text(encoding="utf-8")
+        source = ALLTOALL_SOURCE.read_text(encoding="utf-8")
+
+        self.assertIn("ccu/tilexr_ccu_alltoall_program.h", cmake)
+        self.assertIn("ccu/tilexr_ccu_alltoall_program.cpp", cmake)
+        self.assertIn("TileXRCcuBuildAllToAll2RankProgram", header)
+        self.assertIn("TileXRCcuBuildMemoryCopyProgram", source)
+        self.assertIn("TileXRCcuMemoryCopyDirection::RemoteToLocal", source)
+
+        combined = header + "\n" + source
+        for needle in PRIVATE_CCU_PRODUCER_NEEDLES:
+            with self.subTest(needle=needle):
+                self.assertNotIn(needle, combined)
+
+    def test_two_phase_rank_role_is_part_of_program_contract(self):
+        header = ALLTOALL_HEADER.read_text(encoding="utf-8")
+        source = ALLTOALL_SOURCE.read_text(encoding="utf-8")
+        orchestrator = (COMM_DIR / "ccu" / "tilexr_ccu_direct_orchestrator.cpp").read_text(encoding="utf-8")
+        planner = (COMM_DIR / "ccu" / "tilexr_ccu_collective_planner.cpp").read_text(encoding="utf-8")
+
+        self.assertIn("uint32_t localRank = 0", header)
+        self.assertIn("append copy only for the local rank's active phase", source)
+        self.assertIn("alltoallSpec.localRank = alltoall.localRank", orchestrator)
+        self.assertIn("alltoall.localRank = static_cast<uint32_t>(rank)", planner)
+
+
+if __name__ == "__main__":
+    unittest.main()

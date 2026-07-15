@@ -1563,6 +1563,119 @@ class TileXRCcuLowerLayerPlanBuilderTest(unittest.TestCase):
         self.assertEqual("", result.stderr)
         self.assertEqual(0, result.returncode, result.stdout + result.stderr)
 
+    def test_overlay_verified_endpoint_route_expands_pfe_window_for_multi_route_snapshot(self):
+        code = textwrap.dedent(
+            r'''
+            #include "ccu/tilexr_ccu_lower_layer_plan_builder.h"
+
+            #include <iostream>
+            #include <vector>
+
+            using namespace TileXR;
+
+            uint16_t Read16(const uint8_t* raw, uint32_t offset)
+            {
+                return static_cast<uint16_t>(raw[offset]) |
+                    static_cast<uint16_t>(static_cast<uint16_t>(raw[offset + 1]) << 8U);
+            }
+
+            uint16_t DecodeChannelStartJettyId(const TileXRCcuChannelCtxDataV1& ctx)
+            {
+                const uint16_t word18 = Read16(ctx.raw, 18);
+                const uint16_t word20 = Read16(ctx.raw, 20);
+                return static_cast<uint16_t>(((word18 >> 12U) & 0xfU) | ((word20 & 0xfffU) << 4U));
+            }
+
+            int main()
+            {
+                TileXRCcuBasicInfo basic;
+                basic.dieId = 1;
+                basic.msId = 0x45;
+                basic.msidToken.tokenId = 0x1234;
+                basic.msidToken.valid = true;
+
+                TileXRCcuResourceAllocation allocation;
+                allocation.channels = {1, 2, 3};
+                allocation.localXn = {1, 0x1a0, 3};
+                allocation.remoteXn = {1, 0x2a0, 3};
+                allocation.notifyCke = {1, 0x360, 3};
+                allocation.localWaitCke = {1, 0x220, 3};
+                allocation.remoteNotifyCke = {1, 0x360, 3};
+
+                TileXRCcuRemoteCcuBufferInfo remote;
+                remote.remoteCcuVa = 0x0000009234000000ULL;
+                remote.memoryTokenId = 0x23456;
+                remote.memoryTokenValue = 0x5678;
+                remote.remoteXnId = 0x2a0;
+                remote.remoteNotifyCke = 0x360;
+                for (uint32_t i = 0; i < TILEXR_CCU_EID_BYTES; ++i) {
+                    remote.remoteEid[i] = static_cast<uint8_t>(0x40 + i);
+                }
+                remote.tpn = 0x010203;
+                remote.doorbellVa = 0x1111222233334444ULL;
+                remote.doorbellTokenId = 0x12345;
+                remote.doorbellTokenValue = 0;
+                remote.sqDepth = 8;
+                remote.startJettyId = 0x400;
+                remote.endpointRouteVerified = true;
+
+                std::vector<TileXRCcuRemoteCcuBufferInfo> remoteCcuBuffers {remote, remote, remote};
+                for (uint32_t i = 0; i < remoteCcuBuffers.size(); ++i) {
+                    remoteCcuBuffers[i].remoteCcuVa += i * 0x1000ULL;
+                    remoteCcuBuffers[i].memoryTokenValue += i;
+                    remoteCcuBuffers[i].remoteXnId = static_cast<uint16_t>(0x2a0 + i);
+                    remoteCcuBuffers[i].remoteNotifyCke = static_cast<uint16_t>(0x360 + i);
+                }
+
+                TileXRCcuLowerLayerTransportSnapshot snapshot;
+                TileXRCcuLowerLayerPlanBuilderReport report;
+                if (TileXRCcuBuildLowerLayerTransportTemplate(
+                        basic, allocation, remoteCcuBuffers, &snapshot, &report) != TILEXR_SUCCESS) {
+                    std::cerr << "template build failed: " << report.message << "\n";
+                    return 1;
+                }
+
+                TileXRCcuLowerLayerTransportRoute verified = snapshot.routes[0];
+                std::vector<TileXRCcuLowerLayerTransportRoute> verifiedRoutes {verified};
+                if (TileXRCcuOverlayVerifiedEndpointRoutes(verifiedRoutes, &snapshot, &report) != TILEXR_SUCCESS) {
+                    std::cerr << "overlay failed: " << report.message << "\n";
+                    return 2;
+                }
+
+                TileXRCcuLowerLayerInstallPlan plan;
+                if (TileXRCcuBuildLowerLayerInstallPlanFromTransportSnapshot(snapshot, &plan, &report) !=
+                    TILEXR_SUCCESS) {
+                    std::cerr << "install plan build failed: " << report.message
+                              << " pfeJettyCount=" << snapshot.pfeJettyCount
+                              << " routeCount=" << snapshot.routes.size() << "\n";
+                    return 3;
+                }
+                if (plan.jettys.empty() || plan.jettys[0].ctxs.size() != 3 || plan.pfes.empty()) {
+                    std::cerr << "install plan shape mismatch\n";
+                    return 4;
+                }
+                if (plan.channels.size() != 3 ||
+                    plan.remoteXnBindings.size() != 3 ||
+                    snapshot.pfeJettyCount < snapshot.routes.size()) {
+                    std::cerr << "multi-route lower-layer plan did not preserve all routes\n";
+                    return 5;
+                }
+                if (DecodeChannelStartJettyId(plan.channels[0].ctx) != 0x400 ||
+                    DecodeChannelStartJettyId(plan.channels[1].ctx) != 0x401 ||
+                    DecodeChannelStartJettyId(plan.channels[2].ctx) != 0x402) {
+                    std::cerr << "multi-route channel jetty IDs were not expanded from verified start\n";
+                    return 6;
+                }
+                return 0;
+            }
+            '''
+        )
+
+        result = self.compile_and_run(code)
+
+        self.assertEqual("", result.stderr)
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+
     def test_transport_template_uses_peer_exchanged_remote_xn_ids_when_present(self):
         code = textwrap.dedent(
             r'''
