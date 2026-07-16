@@ -78,8 +78,10 @@ constexpr const char* kP2pCcuCopyActiveRankEnv = "TILEXR_CCU_DIRECT_SMOKE_P2P_CC
 constexpr const char* kP2pCcuCopyDirectionEnv = "TILEXR_CCU_DIRECT_SMOKE_P2P_CCU_COPY_DIRECTION";
 constexpr const char* kP2pCcuCopyResourceWindowEnv = "TILEXR_CCU_DIRECT_SMOKE_P2P_CCU_COPY_RESOURCE_WINDOW";
 constexpr const char* kAllToAllEnv = "TILEXR_CCU_DIRECT_SMOKE_ALLTOALL";
+constexpr const char* kAllToAllLongMissionEnv = "TILEXR_CCU_DIRECT_SMOKE_ALLTOALL_LONG_MISSION";
 constexpr const char* kAllToAllBytesEnv = "TILEXR_CCU_ALLTOALL_BYTES";
 constexpr const char* kAllToAllMemSlicePerLoopEnv = "TILEXR_CCU_ALLTOALL_MEM_SLICE_PER_LOOP";
+constexpr const char* kSyncXnPingEnv = "TILEXR_CCU_DIRECT_SMOKE_SYNC_XN_PING";
 constexpr const char* kSignalWaitEnv = "TILEXR_CCU_DIRECT_SMOKE_SIGNAL_WAIT";
 constexpr const char* kSignalWaitSignalRankEnv = "TILEXR_CCU_DIRECT_SMOKE_SIGNAL_RANK";
 constexpr const char* kSignalWaitBarrierEnv = "TILEXR_CCU_DIRECT_SMOKE_BARRIER";
@@ -162,6 +164,16 @@ bool AllToAllSmokeEnabled()
     return EnvFlag(kAllToAllEnv);
 }
 
+bool AllToAllLongMissionEnabled()
+{
+    return EnvFlag(kAllToAllLongMissionEnv);
+}
+
+bool SyncXnPingSmokeEnabled()
+{
+    return EnvFlag(kSyncXnPingEnv);
+}
+
 bool BarrierSmokeEnabled()
 {
     return EnvFlag(kSignalWaitBarrierEnv);
@@ -229,7 +241,8 @@ bool IsP2pCcuCopyActiveRank(int rank)
 TileXR::TileXRCcuMemoryCopyDirection P2pCcuCopyDirectionFromEnv()
 {
     const char* value = std::getenv(kP2pCcuCopyDirectionEnv);
-    if (value != nullptr && std::string(value) == "local_to_remote") {
+    const std::string direction = value == nullptr ? "" : std::string(value);
+    if (direction == "local_to_remote" || direction == "LocalToRemote" || direction == "1") {
         return TileXR::TileXRCcuMemoryCopyDirection::LocalToRemote;
     }
     return TileXR::TileXRCcuMemoryCopyDirection::RemoteToLocal;
@@ -839,6 +852,8 @@ TileXR::TileXRCcuSignalWaitRequest MakeSignalWaitRequest(
     TileXR::TileXRCcuSignalWaitRequest request {};
     request.peerRank = rankSize == 2 ? 1 - rank : (rank + 1) % rankSize;
     request.role = SignalWaitRoleForRank(rank);
+    request.overrideBarrierMode = BarrierSmokeEnabled();
+    request.barrierMode = options.barrierMode;
     request.syncInstructionCount = std::getenv("TILEXR_CCU_PROBE_SYNC_INSTRUCTION_COUNT") == nullptr ?
         0U :
         options.syncInstructionCount;
@@ -1255,18 +1270,27 @@ bool CollectiveSubmitReadyGateConfigured()
     return readyDir != nullptr && readyDir[0] != '\0';
 }
 
-std::string SubmitReadinessPath(int rank)
+std::string RankPhaseFileStem(int rank, int phase)
+{
+    std::string stem = "/rank" + std::to_string(rank);
+    if (phase >= 0) {
+        stem += ".phase" + std::to_string(phase);
+    }
+    return stem;
+}
+
+std::string SubmitReadinessPath(int rank, int phase = -1)
 {
     const char* readyDir = std::getenv(kReadyDirEnv);
     if (readyDir == nullptr || readyDir[0] == '\0') {
         return {};
     }
-    return std::string(readyDir) + "/rank" + std::to_string(rank) + ".ready";
+    return std::string(readyDir) + RankPhaseFileStem(rank, phase) + ".ready";
 }
 
-bool WriteSubmitReadiness(int rank, bool ready)
+bool WriteSubmitReadiness(int rank, bool ready, int phase = -1)
 {
-    const std::string path = SubmitReadinessPath(rank);
+    const std::string path = SubmitReadinessPath(rank, phase);
     if (path.empty()) {
         return true;
     }
@@ -1278,12 +1302,12 @@ bool WriteSubmitReadiness(int rank, bool ready)
     return static_cast<bool>(out);
 }
 
-bool ReadSubmitReadiness(int rank, bool* ready)
+bool ReadSubmitReadiness(int rank, bool* ready, int phase = -1)
 {
     if (ready == nullptr) {
         return false;
     }
-    const std::string path = SubmitReadinessPath(rank);
+    const std::string path = SubmitReadinessPath(rank, phase);
     if (path.empty()) {
         return false;
     }
@@ -1300,12 +1324,12 @@ bool ReadSubmitReadiness(int rank, bool* ready)
     return true;
 }
 
-bool WaitForCollectiveSubmitReadiness(int rank, int rankSize, bool localReady)
+bool WaitForCollectiveSubmitReadiness(int rank, int rankSize, bool localReady, int phase = -1)
 {
     if (!CollectiveSubmitReadyGateConfigured()) {
         return localReady;
     }
-    const bool wrote = WriteSubmitReadiness(rank, localReady);
+    const bool wrote = WriteSubmitReadiness(rank, localReady, phase);
     const int timeoutMs = EnvInt(kReadyTimeoutMsEnv, 5000);
     const auto start = std::chrono::steady_clock::now();
     for (;;) {
@@ -1313,7 +1337,7 @@ bool WaitForCollectiveSubmitReadiness(int rank, int rankSize, bool localReady)
         bool allReady = wrote && localReady;
         for (int peer = 0; peer < rankSize; ++peer) {
             bool peerReady = false;
-            if (!ReadSubmitReadiness(peer, &peerReady)) {
+            if (!ReadSubmitReadiness(peer, &peerReady, phase)) {
                 allSeen = false;
                 allReady = false;
                 break;
@@ -1323,6 +1347,7 @@ bool WaitForCollectiveSubmitReadiness(int rank, int rankSize, bool localReady)
         if (allSeen) {
             std::cout << "tilexr_ccu_direct_smoke collectiveSubmitReady"
                       << " rank=" << rank
+                      << " phase=" << phase
                       << " localReady=" << (localReady ? 1 : 0)
                       << " allRanksReady=" << (allReady ? 1 : 0)
                       << std::endl;
@@ -1333,6 +1358,7 @@ bool WaitForCollectiveSubmitReadiness(int rank, int rankSize, bool localReady)
         if (elapsedMs >= timeoutMs) {
             std::cout << "tilexr_ccu_direct_smoke collectiveSubmitReady"
                       << " rank=" << rank
+                      << " phase=" << phase
                       << " localReady=" << (localReady ? 1 : 0)
                       << " allRanksReady=0"
                       << " timeoutMs=" << timeoutMs
@@ -1349,18 +1375,18 @@ bool CollectiveSubmitDoneGateConfigured()
     return doneDir != nullptr && doneDir[0] != '\0';
 }
 
-std::string SubmitDonePath(int rank)
+std::string SubmitDonePath(int rank, int phase = -1)
 {
     const char* doneDir = std::getenv(kDoneDirEnv);
     if (doneDir == nullptr || doneDir[0] == '\0') {
         return {};
     }
-    return std::string(doneDir) + "/rank" + std::to_string(rank) + ".done";
+    return std::string(doneDir) + RankPhaseFileStem(rank, phase) + ".done";
 }
 
-bool WriteSubmitDone(int rank, int result)
+bool WriteSubmitDone(int rank, int result, int phase = -1)
 {
-    const std::string path = SubmitDonePath(rank);
+    const std::string path = SubmitDonePath(rank, phase);
     if (path.empty()) {
         return true;
     }
@@ -1372,12 +1398,12 @@ bool WriteSubmitDone(int rank, int result)
     return static_cast<bool>(out);
 }
 
-bool ReadSubmitDone(int rank, int* result)
+bool ReadSubmitDone(int rank, int* result, int phase = -1)
 {
     if (result == nullptr) {
         return false;
     }
-    const std::string path = SubmitDonePath(rank);
+    const std::string path = SubmitDonePath(rank, phase);
     if (path.empty()) {
         return false;
     }
@@ -1389,12 +1415,12 @@ bool ReadSubmitDone(int rank, int* result)
     return static_cast<bool>(in);
 }
 
-bool WaitForCollectiveSubmitDone(int rank, int rankSize, int localResult)
+bool WaitForCollectiveSubmitDone(int rank, int rankSize, int localResult, int phase = -1)
 {
     if (!CollectiveSubmitDoneGateConfigured()) {
         return true;
     }
-    const bool wrote = WriteSubmitDone(rank, localResult);
+    const bool wrote = WriteSubmitDone(rank, localResult, phase);
     const int timeoutMs = EnvInt(kReadyTimeoutMsEnv, 5000);
     const auto start = std::chrono::steady_clock::now();
     for (;;) {
@@ -1402,7 +1428,7 @@ bool WaitForCollectiveSubmitDone(int rank, int rankSize, int localResult)
         bool allSucceeded = wrote && localResult == 0;
         for (int peer = 0; peer < rankSize; ++peer) {
             int peerResult = 0;
-            if (!ReadSubmitDone(peer, &peerResult)) {
+            if (!ReadSubmitDone(peer, &peerResult, phase)) {
                 allSeen = false;
                 allSucceeded = false;
                 break;
@@ -1412,6 +1438,7 @@ bool WaitForCollectiveSubmitDone(int rank, int rankSize, int localResult)
         if (allSeen) {
             std::cout << "tilexr_ccu_direct_smoke collectiveSubmitDone"
                       << " rank=" << rank
+                      << " phase=" << phase
                       << " localResult=" << localResult
                       << " allRanksDone=1"
                       << " allRanksSucceeded=" << (allSucceeded ? 1 : 0)
@@ -1423,6 +1450,7 @@ bool WaitForCollectiveSubmitDone(int rank, int rankSize, int localResult)
         if (elapsedMs >= timeoutMs) {
             std::cout << "tilexr_ccu_direct_smoke collectiveSubmitDone"
                       << " rank=" << rank
+                      << " phase=" << phase
                       << " localResult=" << localResult
                       << " allRanksDone=0"
                       << " timeoutMs=" << timeoutMs
@@ -1508,9 +1536,9 @@ int RunAllToAllCopyPhase(
         if (prepareRet != TileXR::TILEXR_SUCCESS) {
             finalRet = 6;
         } else if (submitRequested) {
-            const bool phaseReady = WaitForCollectiveSubmitReadiness(rank, rankSize, installReport.submitReady);
+            const bool phaseReady = WaitForCollectiveSubmitReadiness(rank, rankSize, installReport.submitReady, phase);
             finalRet = phaseReady ? 0 : 13;
-            if (!WaitForCollectiveSubmitDone(rank, rankSize, finalRet) && finalRet == 0) {
+            if (!WaitForCollectiveSubmitDone(rank, rankSize, finalRet, phase) && finalRet == 0) {
                 finalRet = 13;
             }
         }
@@ -1522,7 +1550,8 @@ int RunAllToAllCopyPhase(
         WaitForCollectiveSubmitReadiness(
             rank,
             rankSize,
-            prepareRet == TileXR::TILEXR_SUCCESS && installReport.submitReady) :
+            prepareRet == TileXR::TILEXR_SUCCESS && installReport.submitReady,
+            phase) :
         false;
     if (prepareRet != TileXR::TILEXR_SUCCESS) {
         finalRet = 6;
@@ -1571,7 +1600,7 @@ int RunAllToAllCopyPhase(
             } else if (submitRet != TileXR::TILEXR_SUCCESS) {
                 finalRet = 9;
             }
-            if (!WaitForCollectiveSubmitDone(rank, rankSize, finalRet) && finalRet == 0) {
+            if (!WaitForCollectiveSubmitDone(rank, rankSize, finalRet, phase) && finalRet == 0) {
                 finalRet = 13;
             }
             aclrtDestroyStream(stream);
@@ -1581,10 +1610,167 @@ int RunAllToAllCopyPhase(
     return destroyRet != TileXR::TILEXR_SUCCESS && finalRet == 0 ? 11 : finalRet;
 }
 
+void PrintAllToAllResultAndMaybeFastExit(int rank, int finalRet, const AllToAllState& alltoall)
+{
+    if (finalRet == 0) {
+        std::cout << "tilexr_ccu_alltoall result passed=1"
+                  << " rank=" << rank
+                  << " ret=" << finalRet
+                  << " readRet=" << alltoall.readRet
+                  << " mismatches=" << alltoall.mismatchCount
+                  << std::endl;
+    } else {
+        std::cout << "tilexr_ccu_alltoall result passed=0"
+                  << " rank=" << rank
+                  << " ret=" << finalRet
+                  << " readRet=" << alltoall.readRet
+                  << " mismatches=" << alltoall.mismatchCount
+                  << std::endl;
+    }
+    if (ShouldFastExitAfterRun()) {
+        std::cout << "tilexr_ccu_alltoall fastExitAfterRun=1"
+                  << " ret=" << finalRet
+                  << " reason=\"skipping prepared-task cleanup to isolate cleanup hangs\""
+                  << std::endl;
+        std::fflush(stdout);
+        std::fflush(stderr);
+        std::_Exit(finalRet);
+    }
+}
+
+int RunAllToAllLongMissionSmokeForRank(DirectCcuSmokeContext* context, int rank, int rankSize, int device)
+{
+    if (context == nullptr) {
+        return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    if (rankSize != 2) {
+        std::cout << "tilexr_ccu_alltoall skipped rankSize=" << rankSize
+                  << " reason=\"direct CCU alltoall MVP requires two ranks\"" << std::endl;
+        return 0;
+    }
+
+    const int peer = 1 - rank;
+    AllToAllState alltoall;
+    alltoall.initRet = InitAllToAllState(rank, peer, &alltoall);
+
+    TileXRDirectCcuPrepareOptions options = MakePrepareOptions(rank, rankSize, device);
+    options.syncResourceCount = 3;
+    options.sqeArgCount = 0;
+    options.syncInstructionCount = 3 + 64 * 7 + 3 + 1;
+    if (options.gsaStartId == 0) {
+        options.gsaStartId = 1;
+    }
+
+    std::cout << "tilexr_ccu_alltoall config"
+              << " rank=" << rank
+              << " peer=" << peer
+              << " bytes=" << alltoall.bytes
+              << " memSlicePerLoop=" << AllToAllMemSlicePerLoopFromEnv()
+              << " blockCount=64"
+              << " longMission=1"
+              << " preSync=1"
+              << " postSync=1"
+              << std::endl;
+    PrintConfig(options, rankSize);
+
+    TileXR::TileXRCcuDirectInstallAttempt attempt;
+    TileXRDirectCcuPreparedTasksPtr prepared = &attempt;
+    TileXRDirectCcuPrepareReport installReport;
+    const int prepareRet = alltoall.initRet != ACL_SUCCESS ?
+        alltoall.initRet :
+        context->planner.PrepareDirectCcuAllToAll2RankInstallAttempt(
+            context->session,
+            options,
+            reinterpret_cast<uint64_t>(alltoall.source.ptr),
+            reinterpret_cast<uint64_t>(alltoall.destination.ptr),
+            alltoall.bytes,
+            static_cast<uint32_t>(peer),
+            prepared,
+            &installReport);
+    PrintInstallReport("tilexr_ccu_alltoall prepare", prepareRet, installReport);
+    PrintPreparedTasks(prepared, installReport.submitTaskCount);
+    PrintInstructionReadback(context, prepared, installReport.submitTaskCount);
+
+    int finalRet = 0;
+    const bool submitRequested = EnvFlag(kSubmitEnv);
+    const bool collectiveSubmitReady = submitRequested ?
+        WaitForCollectiveSubmitReadiness(
+            rank,
+            rankSize,
+            prepareRet == TileXR::TILEXR_SUCCESS && installReport.submitReady) :
+        false;
+    if (prepareRet != TileXR::TILEXR_SUCCESS) {
+        finalRet = 6;
+    } else if (submitRequested && !collectiveSubmitReady && CollectiveSubmitReadyGateConfigured()) {
+        std::cout << "tilexr_ccu_alltoall submit skipped reason=\"collective submitReady gate did not pass\""
+                  << " localSubmitReady=" << (installReport.submitReady ? 1 : 0)
+                  << std::endl;
+    } else if (submitRequested && !installReport.submitReady) {
+        std::cout << "tilexr_ccu_alltoall submit skipped reason=\"prepare did not reach submitReady\"" << std::endl;
+    } else if (submitRequested) {
+        aclrtStream stream = nullptr;
+        int streamRet = aclrtCreateStream(&stream);
+        if (streamRet != ACL_SUCCESS) {
+            std::cerr << "tilexr_ccu_alltoall aclrtCreateStream ret=" << streamRet << std::endl;
+            finalRet = 7;
+        } else {
+            TileXRDirectCcuSubmitReport submitReport;
+            const auto submitBegin = std::chrono::steady_clock::now();
+            const int submitRet = TileXRDirectCcuSubmitPrepared(prepared, stream, &submitReport);
+            const auto submitEnd = std::chrono::steady_clock::now();
+            PrintSubmitReport("tilexr_ccu_alltoall submit", submitRet, submitReport);
+            const auto syncBegin = std::chrono::steady_clock::now();
+            const int syncTimeoutMs = std::max(1, EnvInt("TILEXR_CCU_DIRECT_SUBMIT_TIMEOUT", 6000));
+            TraceLifecycle("before alltoall long mission aclrtSynchronizeStreamWithTimeout");
+            const int syncRet = aclrtSynchronizeStreamWithTimeout(stream, syncTimeoutMs);
+            TraceLifecycle("after alltoall long mission aclrtSynchronizeStreamWithTimeout");
+            const auto syncEnd = std::chrono::steady_clock::now();
+            std::cout << "tilexr_ccu_alltoall timing"
+                      << " rank=" << rank
+                      << " longMission=1"
+                      << " submitRet=" << submitRet
+                      << " syncRet=" << syncRet
+                      << " syncTimeoutMs=" << syncTimeoutMs
+                      << " submitMs="
+                      << std::chrono::duration_cast<std::chrono::milliseconds>(submitEnd - submitBegin).count()
+                      << " syncMs="
+                      << std::chrono::duration_cast<std::chrono::milliseconds>(syncEnd - syncBegin).count()
+                      << std::endl;
+            if (syncRet != ACL_SUCCESS) {
+                std::cerr << "tilexr_ccu_alltoall aclrtSynchronizeStreamWithTimeout ret=" << syncRet
+                          << " timeoutMs=" << syncTimeoutMs << std::endl;
+                if (!attempt.submitTasks.empty()) {
+                    PrintMissionContext(context, attempt.submitTasks.front(), "tilexr_ccu_alltoall");
+                }
+                finalRet = 8;
+            } else if (submitRet != TileXR::TILEXR_SUCCESS) {
+                finalRet = 9;
+            }
+            if (!WaitForCollectiveSubmitDone(rank, rankSize, finalRet) && finalRet == 0) {
+                finalRet = 13;
+            }
+            aclrtDestroyStream(stream);
+        }
+    }
+
+    if (finalRet == 0) {
+        const int checkRet = CheckAllToAllState(&alltoall);
+        if (checkRet != ACL_SUCCESS) {
+            finalRet = 14;
+        }
+    }
+    PrintAllToAllResultAndMaybeFastExit(rank, finalRet, alltoall);
+    const int destroyRet = TileXRDirectCcuDestroyPrepared(prepared);
+    return destroyRet != TileXR::TILEXR_SUCCESS && finalRet == 0 ? 11 : finalRet;
+}
+
 int RunAllToAllSmokeForRank(DirectCcuSmokeContext* context, int rank, int rankSize, int device)
 {
     if (context == nullptr) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    if (AllToAllLongMissionEnabled()) {
+        return RunAllToAllLongMissionSmokeForRank(context, rank, rankSize, device);
     }
     if (rankSize != 2) {
         std::cout << "tilexr_ccu_alltoall skipped rankSize=" << rankSize
@@ -1625,23 +1811,127 @@ int RunAllToAllSmokeForRank(DirectCcuSmokeContext* context, int rank, int rankSi
         }
     }
 
+    PrintAllToAllResultAndMaybeFastExit(rank, finalRet, alltoall);
+    return finalRet;
+}
+
+int RunSyncXnPingSmokeForRank(DirectCcuSmokeContext* context, int rank, int rankSize, int device)
+{
+    if (context == nullptr) {
+        return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    if (rankSize != 2) {
+        std::cout << "tilexr_ccu_sync_xn_ping skipped rankSize=" << rankSize
+                  << " reason=\"direct CCU SyncXn ping requires two ranks\"" << std::endl;
+        return 0;
+    }
+
+    const int peer = 1 - rank;
+    AllToAllState routeState;
+    routeState.initRet = InitAllToAllState(rank, peer, &routeState);
+    TileXRDirectCcuPrepareOptions options = MakePrepareOptions(rank, rankSize, device);
+    options.syncResourceCount = 1;
+    options.sqeArgCount = 0;
+    options.syncInstructionCount = 3;
+
+    std::cout << "tilexr_ccu_sync_xn_ping config"
+              << " rank=" << rank
+              << " peer=" << peer
+              << std::endl;
+    PrintConfig(options, rankSize);
+
+    TileXR::TileXRCcuDirectInstallAttempt attempt;
+    TileXRDirectCcuPreparedTasksPtr prepared = &attempt;
+    TileXRDirectCcuPrepareReport installReport;
+    const int prepareRet = routeState.initRet != ACL_SUCCESS ?
+        routeState.initRet :
+        context->planner.PrepareDirectCcuSyncXnPingInstallAttempt(
+            context->session,
+            options,
+            reinterpret_cast<uint64_t>(routeState.source.ptr),
+            reinterpret_cast<uint64_t>(routeState.destination.ptr),
+            routeState.bytes,
+            static_cast<uint32_t>(peer),
+            prepared,
+            &installReport);
+    PrintInstallReport("tilexr_ccu_sync_xn_ping prepare", prepareRet, installReport);
+    PrintPreparedTasks(prepared, installReport.submitTaskCount);
+    PrintInstructionReadback(context, prepared, installReport.submitTaskCount);
+
+    int finalRet = 0;
+    const bool submitRequested = EnvFlag(kSubmitEnv);
+    const bool collectiveSubmitReady = submitRequested ?
+        WaitForCollectiveSubmitReadiness(
+            rank,
+            rankSize,
+            prepareRet == TileXR::TILEXR_SUCCESS && installReport.submitReady) :
+        false;
+    if (prepareRet != TileXR::TILEXR_SUCCESS) {
+        finalRet = 6;
+    } else if (submitRequested && !collectiveSubmitReady && CollectiveSubmitReadyGateConfigured()) {
+        std::cout << "tilexr_ccu_sync_xn_ping submit skipped reason=\"collective submitReady gate did not pass\""
+                  << " localSubmitReady=" << (installReport.submitReady ? 1 : 0)
+                  << std::endl;
+    } else if (submitRequested && !installReport.submitReady) {
+        std::cout << "tilexr_ccu_sync_xn_ping submit skipped reason=\"prepare did not reach submitReady\"" << std::endl;
+    } else if (submitRequested) {
+        aclrtStream stream = nullptr;
+        int streamRet = aclrtCreateStream(&stream);
+        if (streamRet != ACL_SUCCESS) {
+            std::cerr << "tilexr_ccu_sync_xn_ping aclrtCreateStream ret=" << streamRet << std::endl;
+            finalRet = 7;
+        } else {
+            TileXRDirectCcuSubmitReport submitReport;
+            const auto submitBegin = std::chrono::steady_clock::now();
+            const int submitRet = TileXRDirectCcuSubmitPrepared(prepared, stream, &submitReport);
+            const auto submitEnd = std::chrono::steady_clock::now();
+            PrintSubmitReport("tilexr_ccu_sync_xn_ping submit", submitRet, submitReport);
+            const auto syncBegin = std::chrono::steady_clock::now();
+            const int syncTimeoutMs = std::max(1, EnvInt("TILEXR_CCU_DIRECT_SUBMIT_TIMEOUT", 6000));
+            TraceLifecycle("before SyncXn ping aclrtSynchronizeStreamWithTimeout");
+            const int syncRet = aclrtSynchronizeStreamWithTimeout(stream, syncTimeoutMs);
+            TraceLifecycle("after SyncXn ping aclrtSynchronizeStreamWithTimeout");
+            const auto syncEnd = std::chrono::steady_clock::now();
+            std::cout << "tilexr_ccu_sync_xn_ping timing"
+                      << " rank=" << rank
+                      << " submitRet=" << submitRet
+                      << " syncRet=" << syncRet
+                      << " syncTimeoutMs=" << syncTimeoutMs
+                      << " submitMs="
+                      << std::chrono::duration_cast<std::chrono::milliseconds>(submitEnd - submitBegin).count()
+                      << " syncMs="
+                      << std::chrono::duration_cast<std::chrono::milliseconds>(syncEnd - syncBegin).count()
+                      << std::endl;
+            if (syncRet != ACL_SUCCESS) {
+                std::cerr << "tilexr_ccu_sync_xn_ping aclrtSynchronizeStreamWithTimeout ret=" << syncRet
+                          << " timeoutMs=" << syncTimeoutMs << std::endl;
+                if (!attempt.submitTasks.empty()) {
+                    PrintMissionContext(context, attempt.submitTasks.front(), "tilexr_ccu_sync_xn_ping");
+                }
+                finalRet = 8;
+            } else if (submitRet != TileXR::TILEXR_SUCCESS) {
+                finalRet = 9;
+            }
+            if (!WaitForCollectiveSubmitDone(rank, rankSize, finalRet) && finalRet == 0) {
+                finalRet = 13;
+            }
+            aclrtDestroyStream(stream);
+        }
+    }
+
     if (finalRet == 0) {
-        std::cout << "tilexr_ccu_alltoall result passed=1"
+        std::cout << "tilexr_ccu_sync_xn_ping result passed=1"
                   << " rank=" << rank
                   << " ret=" << finalRet
-                  << " readRet=" << alltoall.readRet
-                  << " mismatches=" << alltoall.mismatchCount
                   << std::endl;
     } else {
-        std::cout << "tilexr_ccu_alltoall result passed=0"
+        std::cout << "tilexr_ccu_sync_xn_ping result passed=0"
                   << " rank=" << rank
                   << " ret=" << finalRet
-                  << " readRet=" << alltoall.readRet
-                  << " mismatches=" << alltoall.mismatchCount
                   << std::endl;
     }
     if (ShouldFastExitAfterRun()) {
-        std::cout << "tilexr_ccu_alltoall fastExitAfterRun=1"
+        std::cout << "tilexr_ccu_sync_xn_ping fastExitAfterRun=1"
                   << " ret=" << finalRet
                   << " reason=\"skipping prepared-task cleanup to isolate cleanup hangs\""
                   << std::endl;
@@ -1649,7 +1939,8 @@ int RunAllToAllSmokeForRank(DirectCcuSmokeContext* context, int rank, int rankSi
         std::fflush(stderr);
         std::_Exit(finalRet);
     }
-    return finalRet;
+    const int destroyRet = TileXRDirectCcuDestroyPrepared(prepared);
+    return destroyRet != TileXR::TILEXR_SUCCESS && finalRet == 0 ? 11 : finalRet;
 }
 
 int RunSignalWaitSmokeForRank(DirectCcuSmokeContext* context, int rank, int rankSize, int device)
@@ -1721,9 +2012,10 @@ int RunSignalWaitSmokeForRank(DirectCcuSmokeContext* context, int rank, int rank
             const auto submitEnd = std::chrono::steady_clock::now();
             PrintSubmitReport("tilexr_ccu_signal_wait submit", submitRet, submitReport);
             const auto syncBegin = std::chrono::steady_clock::now();
-            TraceLifecycle("before signal/wait aclrtSynchronizeStream");
-            const int syncRet = aclrtSynchronizeStream(stream);
-            TraceLifecycle("after signal/wait aclrtSynchronizeStream");
+            const int syncTimeoutMs = std::max(1, EnvInt("TILEXR_CCU_DIRECT_SUBMIT_TIMEOUT", 6000));
+            TraceLifecycle("before signal/wait aclrtSynchronizeStreamWithTimeout");
+            const int syncRet = aclrtSynchronizeStreamWithTimeout(stream, syncTimeoutMs);
+            TraceLifecycle("after signal/wait aclrtSynchronizeStreamWithTimeout");
             const auto syncEnd = std::chrono::steady_clock::now();
             std::cout << "tilexr_ccu_signal_wait timing"
                       << " rank=" << rank
@@ -1731,13 +2023,15 @@ int RunSignalWaitSmokeForRank(DirectCcuSmokeContext* context, int rank, int rank
                       << " preSubmitDelayMs=" << effectiveDelayMs
                       << " submitRet=" << submitRet
                       << " syncRet=" << syncRet
+                      << " syncTimeoutMs=" << syncTimeoutMs
                       << " submitMs="
                       << std::chrono::duration_cast<std::chrono::milliseconds>(submitEnd - submitBegin).count()
                       << " syncMs="
                       << std::chrono::duration_cast<std::chrono::milliseconds>(syncEnd - syncBegin).count()
                       << std::endl;
             if (syncRet != ACL_SUCCESS) {
-                std::cerr << "tilexr_ccu_signal_wait aclrtSynchronizeStream ret=" << syncRet << std::endl;
+                std::cerr << "tilexr_ccu_signal_wait aclrtSynchronizeStreamWithTimeout ret=" << syncRet
+                          << " timeoutMs=" << syncTimeoutMs << std::endl;
                 if (!plan.submitTasks.empty()) {
                     PrintMissionContext(context, plan.submitTasks.front(), "tilexr_ccu_signal_wait");
                 }
@@ -1785,6 +2079,9 @@ int RunSignalWaitSmokeForRank(DirectCcuSmokeContext* context, int rank, int rank
 
 int RunPreparedSmokeForRank(DirectCcuSmokeContext* context, int rank, int rankSize, int device)
 {
+    if (SyncXnPingSmokeEnabled()) {
+        return RunSyncXnPingSmokeForRank(context, rank, rankSize, device);
+    }
     if (AllToAllSmokeEnabled()) {
         return RunAllToAllSmokeForRank(context, rank, rankSize, device);
     }

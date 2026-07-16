@@ -38,10 +38,11 @@ constexpr uint32_t TILEXR_CCU_DIRECT_MEMORY_COPY_LOCAL_XN_COUNT = 3U;
 constexpr uint32_t TILEXR_CCU_DIRECT_MEMORY_COPY_LOCAL_GSA_COUNT = 2U;
 constexpr uint32_t TILEXR_CCU_DIRECT_ALLTOALL_SYNC_RESOURCE_COUNT = 3U;
 constexpr uint32_t TILEXR_CCU_DIRECT_ALLTOALL_INSTRUCTION_COUNT =
-    4U + 4U + 64U * 7U + 4U + 4U + 4U + 4U + 1U;
+    3U + 64U * 7U;
 constexpr uint32_t TILEXR_CCU_DIRECT_SIGNAL_INSTRUCTION_COUNT = 5U;
 constexpr uint32_t TILEXR_CCU_DIRECT_WAIT_INSTRUCTION_COUNT = 5U;
 constexpr uint32_t TILEXR_CCU_DIRECT_SIGNAL_WAIT_INSTRUCTION_COUNT = 6U;
+constexpr uint32_t TILEXR_CCU_DIRECT_SYNC_XN_PING_INSTRUCTION_COUNT = 5U;
 
 void ResetReport(TileXRCcuDirectInstallReport* report)
 {
@@ -923,16 +924,20 @@ int BuildDirectAllToAll2RankLaunchPackage(
         return TILEXR_ERROR_PARA_CHECK_FAIL;
     }
 
-    const TileXRCcuSyncResource& preResource = attempt->plan.syncResources[0];
-    const TileXRCcuSyncResource& copyResource = attempt->plan.syncResources[1];
+    const TileXRCcuSyncResource& copyResource = attempt->plan.syncResources[0];
+    const TileXRCcuSyncResource& preResource = attempt->plan.syncResources[1];
     const TileXRCcuSyncResource& postResource = attempt->plan.syncResources[2];
 
     TileXRCcuAllToAll2RankProgramSpec alltoallSpec;
     alltoallSpec.localRank = alltoall.localRank;
+    alltoallSpec.localSendAddr = alltoall.localSendAddr;
+    alltoallSpec.localSendToken = alltoall.localSendToken;
     alltoallSpec.localRecvAddr = alltoall.localRecvAddr;
     alltoallSpec.localRecvToken = alltoall.localRecvToken;
     alltoallSpec.remoteSendAddr = alltoall.remoteSendAddr;
     alltoallSpec.remoteSendToken = alltoall.remoteSendToken;
+    alltoallSpec.remoteRecvAddr = alltoall.remoteRecvAddr;
+    alltoallSpec.remoteRecvToken = alltoall.remoteRecvToken;
     alltoallSpec.bytes = alltoall.bytes;
     alltoallSpec.memorySliceBytes = alltoall.memorySliceBytes;
     alltoallSpec.memSlicePerBlock = alltoall.memSlicePerBlock;
@@ -941,20 +946,31 @@ int BuildDirectAllToAll2RankLaunchPackage(
     alltoallSpec.localXn = attempt->plan.kernelLocalXn.startId;
     alltoallSpec.remoteXn = static_cast<uint16_t>(attempt->plan.kernelLocalXn.startId + 1U);
     alltoallSpec.lengthXn = static_cast<uint16_t>(attempt->plan.kernelLocalXn.startId + 2U);
+    alltoallSpec.preSyncLocalAddrXn = preResource.localXn;
+    alltoallSpec.preSyncLocalTokenXn = postResource.localXn;
     alltoallSpec.channelId = copyResource.channelId;
     alltoallSpec.preSyncChannelId = preResource.channelId;
+    alltoallSpec.preSyncTokenChannelId = postResource.channelId;
     alltoallSpec.copyChannelId = copyResource.channelId;
-    alltoallSpec.postSyncChannelId = postResource.channelId;
+    alltoallSpec.postSyncChannelId = preResource.channelId;
+    alltoallSpec.preSyncRemoteAddrXn = preResource.remoteXn;
+    alltoallSpec.preSyncRemoteTokenXn = postResource.remoteXn;
     alltoallSpec.preSyncRemoteNotifyCke = preResource.notifyCke;
     alltoallSpec.preSyncLocalWaitCke =
         preResource.localWaitCke == 0 ? preResource.notifyCke : preResource.localWaitCke;
+    alltoallSpec.preSyncRemoteTokenNotifyCke = postResource.notifyCke;
+    alltoallSpec.preSyncTokenLocalWaitCke =
+        postResource.localWaitCke == 0 ? postResource.notifyCke : postResource.localWaitCke;
     alltoallSpec.copyCompletionCke =
         copyResource.localWaitCke == 0 ? copyResource.notifyCke : copyResource.localWaitCke;
-    alltoallSpec.postSyncRemoteNotifyCke = postResource.notifyCke;
+    alltoallSpec.postSyncRemoteNotifyCke = preResource.notifyCke;
     alltoallSpec.postSyncLocalWaitCke =
-        postResource.localWaitCke == 0 ? postResource.notifyCke : postResource.localWaitCke;
+        preResource.localWaitCke == 0 ? preResource.notifyCke : preResource.localWaitCke;
     alltoallSpec.sourceCke = preResource.sourceCke;
     alltoallSpec.ckeMask = preResource.remoteNotifyMask == 0 ? 1U : preResource.remoteNotifyMask;
+    alltoallSpec.postSyncNotify = false;
+    alltoallSpec.postSyncWait = false;
+    alltoallSpec.emitFinish = false;
 
     if (DirectTraceEnabled()) {
         std::cerr << "TileXRDirectCcuTrace alltoallSpec"
@@ -965,14 +981,26 @@ int BuildDirectAllToAll2RankLaunchPackage(
                   << " remoteGsa=" << alltoallSpec.remoteGsa
                   << " remoteXn=" << alltoallSpec.remoteXn
                   << " lengthXn=" << alltoallSpec.lengthXn
+                  << " preLocalAddrXn=" << alltoallSpec.preSyncLocalAddrXn
+                  << " preLocalTokenXn=" << alltoallSpec.preSyncLocalTokenXn
                   << " preChannelId=" << alltoallSpec.preSyncChannelId
+                  << " preTokenChannelId=" << alltoallSpec.preSyncTokenChannelId
                   << " copyChannelId=" << alltoallSpec.copyChannelId
                   << " postChannelId=" << alltoallSpec.postSyncChannelId
                   << " preNotifyCke=" << alltoallSpec.preSyncRemoteNotifyCke
+                  << " preTokenNotifyCke=" << alltoallSpec.preSyncRemoteTokenNotifyCke
+                  << " preTokenWaitCke=" << alltoallSpec.preSyncTokenLocalWaitCke
+                  << " preRemoteAddrXn=" << alltoallSpec.preSyncRemoteAddrXn
+                  << " preRemoteTokenXn=" << alltoallSpec.preSyncRemoteTokenXn
                   << " copyCompletionCke=" << alltoallSpec.copyCompletionCke
                   << " postNotifyCke=" << alltoallSpec.postSyncRemoteNotifyCke
-                  << " localRecvAddr=0x" << std::hex << alltoallSpec.localRecvAddr
+                  << " postSyncNotify=" << (alltoallSpec.postSyncNotify ? 1 : 0)
+                  << " postSyncWait=" << (alltoallSpec.postSyncWait ? 1 : 0)
+                  << " emitFinish=" << (alltoallSpec.emitFinish ? 1 : 0)
+                  << " localSendAddr=0x" << std::hex << alltoallSpec.localSendAddr
+                  << " localRecvAddr=0x" << alltoallSpec.localRecvAddr
                   << " remoteSendAddr=0x" << alltoallSpec.remoteSendAddr
+                  << " remoteRecvAddr=0x" << alltoallSpec.remoteRecvAddr
                   << " bytes=0x" << alltoallSpec.bytes
                   << std::dec << std::endl;
     }
@@ -1041,6 +1069,39 @@ TileXRCcuBarrierMode SignalWaitBarrierMode(TileXRCcuSignalWaitProgramRole role)
         TileXRCcuBarrierMode::SyncCke;
 }
 
+TileXRCcuBarrierMode EffectiveSignalWaitBarrierMode(const TileXRCcuDirectSignalWaitSpec& signalWait)
+{
+    return signalWait.overrideBarrierMode ? signalWait.barrierMode : SignalWaitBarrierMode(signalWait.role);
+}
+
+uint32_t BarrierInstructionCount(TileXRCcuBarrierMode mode)
+{
+    switch (mode) {
+        case TileXRCcuBarrierMode::SyncCke:
+        case TileXRCcuBarrierMode::SyncCkeSetWait:
+            return 3U;
+        case TileXRCcuBarrierMode::SyncXnLoadPostOnly:
+            return 2U;
+        case TileXRCcuBarrierMode::SyncXn:
+        case TileXRCcuBarrierMode::LocalCke:
+            return 2U;
+        case TileXRCcuBarrierMode::SyncXnPostOnly:
+        case TileXRCcuBarrierMode::SyncCkePostOnly:
+        case TileXRCcuBarrierMode::LocalCkePostOnly:
+            return 1U;
+        default:
+            return 2U;
+    }
+}
+
+uint32_t SignalWaitInstructionCount(const TileXRCcuDirectSignalWaitSpec& signalWait)
+{
+    if (signalWait.overrideBarrierMode) {
+        return BarrierInstructionCount(signalWait.barrierMode);
+    }
+    return SignalWaitInstructionCount(signalWait.role);
+}
+
 int BuildDirectSignalWaitLaunchPackage(
     const TileXRCcuDirectSignalWaitSpec& signalWait,
     TileXRCcuDirectInstallAttempt* attempt,
@@ -1069,7 +1130,31 @@ int BuildDirectSignalWaitLaunchPackage(
 
     TileXRCcuProgram program;
     TileXRCcuBarrierProgramReport signalWaitReport;
-    if (TileXRCcuBuildSignalWaitProgram(spec, &program.sync, &signalWaitReport) != TILEXR_SUCCESS) {
+    if (signalWait.overrideBarrierMode) {
+        TileXRCcuBarrierSyncSpec barrier;
+        barrier.channelId = spec.channelId;
+        barrier.remoteXn = spec.remoteXn;
+        barrier.localXn = spec.localXn;
+        barrier.remoteNotifyCke = spec.remoteNotifyCke;
+        barrier.remoteNotifyMask = spec.remoteNotifyMask;
+        barrier.localWaitCke = spec.localWaitCke;
+        barrier.localWaitMask = spec.localWaitMask;
+        barrier.sourceCke = spec.sourceCke;
+        barrier.sourceCkeMask = spec.sourceCkeMask;
+        barrier.clearLocalWait = spec.clearLocalWait;
+        std::vector<TileXRCcuBarrierSyncSpec> barriers;
+        barriers.push_back(barrier);
+        if (TileXRCcuBuildBarrierProgram(
+                barriers,
+                &program.sync,
+                &signalWaitReport,
+                signalWait.barrierMode) != TILEXR_SUCCESS) {
+            if (report != nullptr) {
+                report->message = signalWaitReport.message;
+            }
+            return TILEXR_ERROR_PARA_CHECK_FAIL;
+        }
+    } else if (TileXRCcuBuildSignalWaitProgram(spec, &program.sync, &signalWaitReport) != TILEXR_SUCCESS) {
         if (report != nullptr) {
             report->message = signalWaitReport.message;
         }
@@ -1081,6 +1166,132 @@ int BuildDirectSignalWaitLaunchPackage(
         }
         return TILEXR_ERROR_PARA_CHECK_FAIL;
     }
+    attempt->plan.taskWindows[0].instCnt = static_cast<uint16_t>(program.sync.size());
+
+    TileXRCcuRepositoryImage repository;
+    TileXRCcuRepositoryReport repositoryReport;
+    if (TileXRCcuBuildRepositoryImage(attempt->plan, program, &repository, &repositoryReport) != TILEXR_SUCCESS) {
+        if (report != nullptr) {
+            report->message = repositoryReport.message;
+        }
+        return TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+
+    std::vector<TileXRCcuTask> tasks;
+    TileXRCcuProducerPlanReport planReport;
+    if (TileXRCcuBuildTasks(attempt->plan, &tasks, &planReport) != TILEXR_SUCCESS) {
+        if (report != nullptr) {
+            report->message = planReport.message;
+        }
+        return TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+
+    attempt->package.plan = attempt->plan;
+    attempt->package.program = program;
+    attempt->package.repository = repository;
+    attempt->package.tasks = tasks;
+    attempt->package.installScope = TileXRCcuLaunchInstallScope {};
+    attempt->package.requiresHardwareInstall = true;
+    return TILEXR_SUCCESS;
+}
+
+int BuildDirectSyncXnPingLaunchPackage(
+    const TileXRCcuDirectSyncXnPingSpec& syncXnPing,
+    TileXRCcuDirectInstallAttempt* attempt,
+    TileXRCcuDirectInstallReport* report)
+{
+    if (attempt == nullptr || attempt->plan.syncResources.size() != 1 || attempt->plan.taskWindows.size() != 1) {
+        if (report != nullptr) {
+            report->message = "missing direct CCU SyncXn ping producer resources";
+        }
+        return TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    if (syncXnPing.localRank > 1U || syncXnPing.peerRank > 1U || syncXnPing.localRank == syncXnPing.peerRank) {
+        if (report != nullptr) {
+            report->message = "direct CCU SyncXn ping requires two distinct rank ids";
+        }
+        return TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+
+    const TileXRCcuSyncResource& resource = attempt->plan.syncResources[0];
+    const uint16_t localWaitCke = resource.localWaitCke == 0 ? resource.notifyCke : resource.localWaitCke;
+    const uint16_t defaultRemoteNotifyMask = static_cast<uint16_t>(1U << syncXnPing.localRank);
+    const uint16_t defaultLocalWaitMask = static_cast<uint16_t>(1U << syncXnPing.peerRank);
+    const uint16_t remoteNotifyMask =
+        syncXnPing.remoteNotifyMask == 0 ? defaultRemoteNotifyMask : syncXnPing.remoteNotifyMask;
+    const uint16_t localWaitMask =
+        syncXnPing.localWaitMask == 0 ? defaultLocalWaitMask : syncXnPing.localWaitMask;
+    if (resource.localXn == 0 || resource.remoteXn == 0 || resource.channelId == 0 ||
+        resource.notifyCke == 0 || localWaitCke == 0 || resource.sourceCke == 0) {
+        if (report != nullptr) {
+            report->message = "missing direct CCU SyncXn ping XN/CKE/channel resource";
+        }
+        return TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+
+    TileXRCcuProgram program;
+    program.sync.reserve(TILEXR_CCU_DIRECT_SYNC_XN_PING_INSTRUCTION_COUNT);
+    TileXRCcuInstr instr;
+    if (TileXRCcuEncodeLoadImdToXn(resource.localXn, syncXnPing.payload, 0, &instr) != TILEXR_SUCCESS) {
+        if (report != nullptr) {
+            report->message = "failed to encode direct CCU SyncXn ping payload load";
+        }
+        return TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    program.sync.push_back(instr);
+
+    TileXRCcuSyncXnSpec notify;
+    notify.remoteXn = resource.remoteXn;
+    notify.localXn = resource.localXn;
+    notify.channelId = resource.channelId;
+    notify.notifyCke = resource.notifyCke;
+    notify.notifyMask = remoteNotifyMask;
+    notify.clearWait = true;
+    if (TileXRCcuEncodeSyncXn(notify, &instr) != TILEXR_SUCCESS) {
+        if (report != nullptr) {
+            report->message = "failed to encode direct CCU SyncXn ping notify";
+        }
+        return TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    program.sync.push_back(instr);
+
+    TileXRCcuCkeSpec source;
+    source.ckeId = resource.sourceCke;
+    source.mask = remoteNotifyMask;
+    source.clearWait = true;
+    if (TileXRCcuEncodeSetCke(source, &instr) != TILEXR_SUCCESS) {
+        if (report != nullptr) {
+            report->message = "failed to encode direct CCU SyncXn ping source CKE set";
+        }
+        return TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    program.sync.push_back(instr);
+
+    TileXRCcuSyncCkeSpec syncCke;
+    syncCke.remoteCke = resource.notifyCke;
+    syncCke.localCke = resource.sourceCke;
+    syncCke.localCkeMask = remoteNotifyMask;
+    syncCke.channelId = resource.channelId;
+    syncCke.clearWait = true;
+    if (TileXRCcuEncodeSyncCke(syncCke, &instr) != TILEXR_SUCCESS) {
+        if (report != nullptr) {
+            report->message = "failed to encode direct CCU SyncXn ping SyncCke notify";
+        }
+        return TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    program.sync.push_back(instr);
+
+    TileXRCcuCkeSpec wait;
+    wait.waitCkeId = localWaitCke;
+    wait.waitMask = localWaitMask;
+    wait.clearWait = true;
+    if (TileXRCcuEncodeSetCke(wait, &instr) != TILEXR_SUCCESS) {
+        if (report != nullptr) {
+            report->message = "failed to encode direct CCU SyncXn ping wait";
+        }
+        return TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    program.sync.push_back(instr);
     attempt->plan.taskWindows[0].instCnt = static_cast<uint16_t>(program.sync.size());
 
     TileXRCcuRepositoryImage repository;
@@ -1287,6 +1498,7 @@ int RunDirectInstallAttemptImpl(
     const TileXRCcuDirectMemoryCopySpec* memoryCopy,
     const TileXRCcuDirectAllToAll2RankSpec* alltoall,
     const TileXRCcuDirectSignalWaitSpec* signalWait,
+    const TileXRCcuDirectSyncXnPingSpec* syncXnPing,
     TileXRCcuDirectInstallAttempt* attempt,
     TileXRCcuDirectInstallReport* report)
 {
@@ -1331,7 +1543,8 @@ int RunDirectInstallAttemptImpl(
     ApplyRemoteXnOptions(options, &attempt->resourceSpec);
     ApplySplitCkeOptions(options, &attempt->resourceSpec);
 
-    const bool customProgram = memoryCopy != nullptr || alltoall != nullptr || signalWait != nullptr;
+    const bool customProgram =
+        memoryCopy != nullptr || alltoall != nullptr || signalWait != nullptr || syncXnPing != nullptr;
     attempt->resourceRequest.sqeArgCount = customProgram ? 0U : options.sqeArgCount;
     attempt->resourceRequest.syncResourceCount =
         alltoall != nullptr ? TILEXR_CCU_DIRECT_ALLTOALL_SYNC_RESOURCE_COUNT :
@@ -1342,12 +1555,15 @@ int RunDirectInstallAttemptImpl(
         alltoall != nullptr ?
         std::max<uint32_t>(options.syncInstructionCount, TILEXR_CCU_DIRECT_ALLTOALL_INSTRUCTION_COUNT) :
         signalWait != nullptr ?
-        std::max<uint32_t>(options.syncInstructionCount, SignalWaitInstructionCount(signalWait->role)) :
+        std::max<uint32_t>(options.syncInstructionCount, SignalWaitInstructionCount(*signalWait)) :
+        syncXnPing != nullptr ?
+        std::max<uint32_t>(options.syncInstructionCount, TILEXR_CCU_DIRECT_SYNC_XN_PING_INSTRUCTION_COUNT) :
         options.syncInstructionCount;
     attempt->resourceRequest.bindingsPerSyncResource = options.bindingsPerSyncResource;
-    attempt->resourceRequest.barrierMode =
+        attempt->resourceRequest.barrierMode =
         alltoall != nullptr ? TileXRCcuBarrierMode::SyncCke :
-        signalWait == nullptr ? options.barrierMode : SignalWaitBarrierMode(signalWait->role);
+        syncXnPing != nullptr ? TileXRCcuBarrierMode::SyncCke :
+        signalWait == nullptr ? options.barrierMode : EffectiveSignalWaitBarrierMode(*signalWait);
 
     TileXRCcuResourceAllocator allocator;
     if (allocator.Init(attempt->resourceSpec) != TILEXR_SUCCESS) {
@@ -1387,7 +1603,8 @@ int RunDirectInstallAttemptImpl(
     }
     attempt->plan.barrierMode =
         alltoall != nullptr ? TileXRCcuBarrierMode::SyncCke :
-        signalWait == nullptr ? attempt->plan.barrierMode : SignalWaitBarrierMode(signalWait->role);
+        syncXnPing != nullptr ? TileXRCcuBarrierMode::SyncCke :
+        signalWait == nullptr ? attempt->plan.barrierMode : EffectiveSignalWaitBarrierMode(*signalWait);
 
     ret = PrepareLowerLayerPlanIfNeeded(options, attempt, report);
     if (ret != TILEXR_SUCCESS) {
@@ -1422,6 +1639,8 @@ int RunDirectInstallAttemptImpl(
         BuildDirectAllToAll2RankLaunchPackage(*alltoall, attempt, report) :
         signalWait != nullptr ?
         BuildDirectSignalWaitLaunchPackage(*signalWait, attempt, report) :
+        syncXnPing != nullptr ?
+        BuildDirectSyncXnPingLaunchPackage(*syncXnPing, attempt, report) :
         TileXRCcuBuildLaunchPackage(attempt->plan, &attempt->package, &packageReport);
     if (ret != TILEXR_SUCCESS) {
         return Fail(
@@ -1433,6 +1652,8 @@ int RunDirectInstallAttemptImpl(
                         "failed to build direct CCU memory copy launch package" :
                         alltoall != nullptr ?
                         "failed to build direct CCU alltoall launch package" :
+                        syncXnPing != nullptr ?
+                        "failed to build direct CCU SyncXn ping launch package" :
                         "failed to build direct CCU signal/wait launch package") :
                     report->message));
     }
@@ -1496,7 +1717,7 @@ int TileXRCcuRunDirectInstallAttempt(
     TileXRCcuDirectInstallAttempt* attempt,
     TileXRCcuDirectInstallReport* report)
 {
-    return RunDirectInstallAttemptImpl(options, nullptr, nullptr, nullptr, attempt, report);
+    return RunDirectInstallAttemptImpl(options, nullptr, nullptr, nullptr, nullptr, attempt, report);
 }
 
 int TileXRCcuRunDirectMemoryCopyInstallAttempt(
@@ -1515,7 +1736,7 @@ int TileXRCcuRunDirectMemoryCopyInstallAttempt(
         }
         return TILEXR_ERROR_PARA_CHECK_FAIL;
     }
-    return RunDirectInstallAttemptImpl(options, &memoryCopy, nullptr, nullptr, attempt, report);
+    return RunDirectInstallAttemptImpl(options, &memoryCopy, nullptr, nullptr, nullptr, attempt, report);
 }
 
 int TileXRCcuRunDirectAllToAll2RankInstallAttempt(
@@ -1525,8 +1746,10 @@ int TileXRCcuRunDirectAllToAll2RankInstallAttempt(
     TileXRCcuDirectInstallReport* report)
 {
     if (alltoall.localRank > 1U ||
+        alltoall.localSendAddr == 0 || alltoall.localSendToken == 0 ||
         alltoall.localRecvAddr == 0 || alltoall.localRecvToken == 0 ||
         alltoall.remoteSendAddr == 0 || alltoall.remoteSendToken == 0 ||
+        alltoall.remoteRecvAddr == 0 || alltoall.remoteRecvToken == 0 ||
         alltoall.bytes == 0 || alltoall.memorySliceBytes != TILEXR_CCU_ALLTOALL_MEMORY_SLICE_BYTES ||
         alltoall.memSlicePerBlock == 0 ||
         alltoall.memSlicePerBlock > TILEXR_CCU_ALLTOALL_MEM_SLICE_PER_BLOCK) {
@@ -1537,7 +1760,7 @@ int TileXRCcuRunDirectAllToAll2RankInstallAttempt(
         }
         return TILEXR_ERROR_PARA_CHECK_FAIL;
     }
-    return RunDirectInstallAttemptImpl(options, nullptr, &alltoall, nullptr, attempt, report);
+    return RunDirectInstallAttemptImpl(options, nullptr, &alltoall, nullptr, nullptr, attempt, report);
 }
 
 int TileXRCcuRunDirectSignalWaitInstallAttempt(
@@ -1546,7 +1769,16 @@ int TileXRCcuRunDirectSignalWaitInstallAttempt(
     TileXRCcuDirectInstallAttempt* attempt,
     TileXRCcuDirectInstallReport* report)
 {
-    return RunDirectInstallAttemptImpl(options, nullptr, nullptr, &signalWait, attempt, report);
+    return RunDirectInstallAttemptImpl(options, nullptr, nullptr, &signalWait, nullptr, attempt, report);
+}
+
+int TileXRCcuRunDirectSyncXnPingInstallAttempt(
+    const TileXRCcuDirectInstallOptions& options,
+    const TileXRCcuDirectSyncXnPingSpec& syncXnPing,
+    TileXRCcuDirectInstallAttempt* attempt,
+    TileXRCcuDirectInstallReport* report)
+{
+    return RunDirectInstallAttemptImpl(options, nullptr, nullptr, nullptr, &syncXnPing, attempt, report);
 }
 
 int TileXRCcuReleaseDirectInstallAttemptResources(TileXRCcuDirectInstallAttempt& attempt)

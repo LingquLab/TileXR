@@ -2154,8 +2154,8 @@ class TileXRCcuLowerLayerPlanBuilderTest(unittest.TestCase):
         ]
         self.assertNotIn("SelectDirectCcuRemoteBindingOverride", exchange_body)
         self.assertIn("peerLocalWaitCkeOffset", exchange_body)
-        self.assertIn("peerResources.localWaitCkeStartId", exchange_body)
         self.assertIn("peerResources.localWaitCkeCount", exchange_body)
+        self.assertIn("peerResources.remoteNotifyCkeCount", exchange_body)
         self.assertNotIn("allocation.remoteNotifyCke.startId,\n            routeIndex", exchange_body)
         self.assertIn("allocation.localXn.startId", planner_source)
         self.assertIn("remoteXnStartId", exchange_body)
@@ -2225,7 +2225,7 @@ class TileXRCcuLowerLayerPlanBuilderTest(unittest.TestCase):
         self.assertNotIn("RefreshDirectCcuLowerLayerPlan();", register_memory_body)
         self.assertNotIn("ResetDirectCcuLowerLayerPlan();", register_memory_body)
 
-    def test_remote_xn_exchange_uses_peer_channel_local_xn_operand(self):
+    def test_remote_xn_exchange_uses_peer_channel_bound_remote_xn_operand(self):
         planner_source = CCU_PLANNER_SOURCE.read_text(encoding="utf-8")
         exchange_body = planner_source[
             planner_source.index("int TileXRCcuCollectivePlanner::ExchangeDirectCcuRemoteNotifyCke"):
@@ -2234,12 +2234,11 @@ class TileXRCcuLowerLayerPlanBuilderTest(unittest.TestCase):
         compact_body = " ".join(exchange_body.split())
 
         self.assertIn(
-            "channelBoundRemoteXnId = SelectDirectCcuChannelBoundRemoteXnId( peerResources.remoteXnStartId, peerLocalIndex, syncIndex, peerRouteCount)",
-            compact_body)
-        self.assertIn(
             "peerLocalXnId = static_cast<uint16_t>(static_cast<uint32_t>(peerResources.localXnStartId) + peerLocalXnOffset)",
             compact_body)
         self.assertIn("selectedRemoteXnOffset >= peerResources.remoteXnCount", compact_body)
+        self.assertIn("SelectDirectCcuChannelBoundRemoteXnId(", compact_body)
+        self.assertIn("peerResources.remoteXnStartId", compact_body)
         self.assertNotIn("SelectDirectCcuRemoteBindingOverride", compact_body)
         self.assertIn("(*remoteCcuBuffers)[routeIndex].remoteXnId = channelBoundRemoteXnId", compact_body)
         self.assertNotIn("(*remoteCcuBuffers)[routeIndex].remoteCcuVa +=", compact_body)
@@ -2255,7 +2254,7 @@ class TileXRCcuLowerLayerPlanBuilderTest(unittest.TestCase):
             "static_cast<uint64_t>((*remoteCcuBuffers)[routeIndex].remoteXnId) * TILEXR_CCU_XN_SLOT_BYTES",
             compact_body)
 
-    def test_remote_notify_cke_comes_from_peer_exported_local_wait_cke(self):
+    def test_remote_notify_cke_targets_peer_local_wait_cke(self):
         planner_source = CCU_PLANNER_SOURCE.read_text(encoding="utf-8")
         exchange_body = planner_source[
             planner_source.index("int TileXRCcuCollectivePlanner::ExchangeDirectCcuRemoteNotifyCke"):
@@ -2265,9 +2264,12 @@ class TileXRCcuLowerLayerPlanBuilderTest(unittest.TestCase):
 
         self.assertIn("peerLocalWaitCkeOffset", exchange_body)
         self.assertIn("peerLocalWaitCkeOffset >= peerResources.localWaitCkeCount", compact_body)
+        self.assertIn("peerLocalWaitCkeOffset >= peerResources.remoteNotifyCkeCount", compact_body)
         self.assertIn(
             "remoteNotifyCke = static_cast<uint16_t>(static_cast<uint32_t>(peerResources.localWaitCkeStartId) + peerLocalWaitCkeOffset)",
             compact_body)
+        self.assertIn("remoteNotifyCke) >= peerResources.localWaitCkeStartId", compact_body)
+        self.assertIn("peerResources.localWaitCkeStartId) + peerResources.localWaitCkeCount", compact_body)
         self.assertNotIn(
             "remoteNotifyCke = SelectDirectCcuRemoteNotifyCkeId( allocation.remoteNotifyCke.startId, routeIndex)",
             compact_body)
@@ -2291,7 +2293,8 @@ class TileXRCcuLowerLayerPlanBuilderTest(unittest.TestCase):
         self.assertIn("for (uint32_t syncIndex = 0; syncIndex < allocation.remoteXn.num; ++syncIndex)", compact_body)
         self.assertIn("const size_t peerBufferIndex = syncIndex % peerRouteCount", compact_body)
         self.assertIn("(*remoteCcuBuffers)[routeIndex] = peerCcuBuffers[peerBufferIndex]", compact_body)
-        self.assertIn("channelBoundRemoteXnId = SelectDirectCcuChannelBoundRemoteXnId(", compact_body)
+        self.assertIn("SelectDirectCcuChannelBoundRemoteXnId(", compact_body)
+        self.assertIn("peerResources.remoteXnStartId", compact_body)
         self.assertIn("DirectCcuRemoteXnProofSpan(allocation.remoteXn.num)", compact_body)
 
     def test_direct_ccu_runtime_imports_peer_endpoint_route_before_export(self):

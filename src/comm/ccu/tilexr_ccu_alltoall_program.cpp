@@ -8,6 +8,18 @@
 namespace TileXR {
 namespace {
 
+uint16_t PreSyncSignalMask(const TileXRCcuAllToAll2RankProgramSpec& spec)
+{
+    (void)spec;
+    return static_cast<uint16_t>(1U << TILEXR_CCU_ALLTOALL_OUTPUT_XN_ID);
+}
+
+uint16_t PostSyncSignalMask(const TileXRCcuAllToAll2RankProgramSpec& spec)
+{
+    (void)spec;
+    return static_cast<uint16_t>(1U << TILEXR_CCU_ALLTOALL_POST_SYNC_ID);
+}
+
 void ResetReport(TileXRCcuAllToAllProgramReport* report)
 {
     if (report != nullptr) {
@@ -37,17 +49,17 @@ int ValidateSpec(
     if (program == nullptr) {
         return Fail(program, report, "missing output direct CCU alltoall program");
     }
-    if (spec.localRecvAddr == 0 || spec.remoteSendAddr == 0) {
+    if (spec.localRank > 1U) {
+        return Fail(program, report, "direct CCU alltoall localRank must be 0 or 1");
+    }
+    if (spec.localSendAddr == 0 || spec.localRecvAddr == 0 || spec.remoteSendAddr == 0) {
         return Fail(program, report, "missing direct CCU alltoall address");
     }
-    if (spec.localRecvToken == 0 || spec.remoteSendToken == 0) {
+    if (spec.localSendToken == 0 || spec.localRecvToken == 0 || spec.remoteSendToken == 0) {
         return Fail(program, report, "missing direct CCU alltoall token");
     }
     if (spec.bytes == 0 || spec.bytes % TILEXR_CCU_ALLTOALL_MEMORY_SLICE_BYTES != 0) {
         return Fail(program, report, "direct CCU alltoall bytes must be nonzero and 4KB aligned");
-    }
-    if (spec.localRank > 1U) {
-        return Fail(program, report, "direct CCU alltoall localRank must be 0 or 1");
     }
     if (spec.memorySliceBytes != TILEXR_CCU_ALLTOALL_MEMORY_SLICE_BYTES) {
         return Fail(program, report, "direct CCU alltoall memorySliceBytes must be 4096");
@@ -77,12 +89,13 @@ int ValidateSpec(
 
 int AppendSetSourceCke(
     const TileXRCcuAllToAll2RankProgramSpec& spec,
+    uint16_t mask,
     std::vector<TileXRCcuInstr>* program,
     TileXRCcuAllToAllProgramReport* report)
 {
     TileXRCcuCkeSpec set;
     set.ckeId = spec.sourceCke;
-    set.mask = spec.ckeMask;
+    set.mask = mask;
     set.clearWait = true;
 
     TileXRCcuInstr instr;
@@ -93,18 +106,44 @@ int AppendSetSourceCke(
     return TILEXR_SUCCESS;
 }
 
+int AppendNotifyWait(
+    uint16_t localWaitCke,
+    uint16_t mask,
+    const char* phase,
+    bool clearCkeWait,
+    std::vector<TileXRCcuInstr>* program,
+    TileXRCcuAllToAllProgramReport* report)
+{
+    TileXRCcuCkeSpec wait;
+    wait.waitCkeId = localWaitCke;
+    wait.waitMask = mask;
+    wait.clearWait = true;
+
+    TileXRCcuInstr instr;
+    const int ret = clearCkeWait ?
+        TileXRCcuEncodeClearCke(wait, &instr) :
+        TileXRCcuEncodeSetCke(wait, &instr);
+    if (ret != TILEXR_SUCCESS) {
+        return Fail(program, report, std::string("failed to encode direct CCU alltoall ") + phase + " NotifyWait");
+    }
+    program->push_back(instr);
+    return TILEXR_SUCCESS;
+}
+
 int AppendSyncPair(
     uint16_t remoteNotifyCke,
     uint16_t localWaitCke,
     uint16_t channelId,
     const TileXRCcuAllToAll2RankProgramSpec& spec,
+    uint16_t localMask,
+    uint16_t waitMask,
     std::vector<TileXRCcuInstr>* program,
     TileXRCcuAllToAllProgramReport* report)
 {
     TileXRCcuSyncCkeSpec post;
     post.remoteCke = remoteNotifyCke;
     post.localCke = spec.sourceCke;
-    post.localCkeMask = spec.ckeMask;
+    post.localCkeMask = localMask;
     post.channelId = channelId;
     post.clearWait = true;
 
@@ -114,18 +153,62 @@ int AppendSyncPair(
     }
     program->push_back(instr);
 
-    TileXRCcuCkeSpec wait;
-    wait.waitCkeId = localWaitCke;
-    wait.waitMask = spec.ckeMask;
-    wait.clearWait = true;
-    if (TileXRCcuEncodeClearCke(wait, &instr) != TILEXR_SUCCESS) {
-        return Fail(program, report, "failed to encode direct CCU alltoall ClearCke wait");
+    return AppendNotifyWait(localWaitCke, waitMask, "PostSync", true, program, report);
+}
+
+int AppendRemoteNotify(
+    uint16_t remoteNotifyCke,
+    uint16_t channelId,
+    const TileXRCcuAllToAll2RankProgramSpec& spec,
+    uint16_t mask,
+    const char* phase,
+    std::vector<TileXRCcuInstr>* program,
+    TileXRCcuAllToAllProgramReport* report)
+{
+    if (AppendSetSourceCke(spec, mask, program, report) != TILEXR_SUCCESS) {
+        return TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+
+    TileXRCcuSyncCkeSpec post;
+    post.remoteCke = remoteNotifyCke;
+    post.localCke = spec.sourceCke;
+    post.localCkeMask = mask;
+    post.channelId = channelId;
+    post.clearWait = true;
+
+    TileXRCcuInstr instr;
+    if (TileXRCcuEncodeSyncCke(post, &instr) != TILEXR_SUCCESS) {
+        return Fail(program, report, std::string("failed to encode direct CCU alltoall ") + phase + " SyncCke notify");
     }
     program->push_back(instr);
     return TILEXR_SUCCESS;
 }
 
-int AppendSyncPhase(
+int AppendPreSyncPhase(
+    uint16_t remoteNotifyCke,
+    uint16_t localWaitCke,
+    uint16_t outputChannelId,
+    const TileXRCcuAllToAll2RankProgramSpec& spec,
+    std::vector<TileXRCcuInstr>* program,
+    TileXRCcuAllToAllProgramReport* report)
+{
+    const uint16_t notifyMask = PreSyncSignalMask(spec);
+    const uint16_t waitMask = PreSyncSignalMask(spec);
+    if (AppendRemoteNotify(
+            remoteNotifyCke,
+            outputChannelId,
+            spec,
+            notifyMask,
+            "PreSync output",
+            program,
+            report) != TILEXR_SUCCESS) {
+        return TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+
+    return AppendNotifyWait(localWaitCke, waitMask, "PreSync output", false, program, report);
+}
+
+int AppendPostSyncPhase(
     uint16_t remoteNotifyCke,
     uint16_t localWaitCke,
     uint16_t channelId,
@@ -133,16 +216,35 @@ int AppendSyncPhase(
     std::vector<TileXRCcuInstr>* program,
     TileXRCcuAllToAllProgramReport* report)
 {
-    TileXRCcuInstr instr;
-    if (TileXRCcuEncodeLoadImdToXn(spec.localXn, 0, 0, &instr) != TILEXR_SUCCESS) {
-        return Fail(program, report, "failed to encode direct CCU alltoall sync prelude XN");
-    }
-    program->push_back(instr);
-
-    if (AppendSetSourceCke(spec, program, report) != TILEXR_SUCCESS) {
+    const uint16_t notifyMask = PostSyncSignalMask(spec);
+    const uint16_t waitMask = PostSyncSignalMask(spec);
+    if (AppendSetSourceCke(spec, notifyMask, program, report) != TILEXR_SUCCESS) {
         return TILEXR_ERROR_PARA_CHECK_FAIL;
     }
-    return AppendSyncPair(remoteNotifyCke, localWaitCke, channelId, spec, program, report);
+    if (!spec.postSyncWait) {
+        TileXRCcuSyncCkeSpec post;
+        post.remoteCke = remoteNotifyCke;
+        post.localCke = spec.sourceCke;
+        post.localCkeMask = notifyMask;
+        post.channelId = channelId;
+        post.clearWait = true;
+
+        TileXRCcuInstr instr;
+        if (TileXRCcuEncodeSyncCke(post, &instr) != TILEXR_SUCCESS) {
+            return Fail(program, report, "failed to encode direct CCU alltoall PostSync notify-only SyncCke");
+        }
+        program->push_back(instr);
+        return TILEXR_SUCCESS;
+    }
+    return AppendSyncPair(
+        remoteNotifyCke,
+        localWaitCke,
+        channelId,
+        spec,
+        notifyMask,
+        waitMask,
+        program,
+        report);
 }
 
 int AppendCopyBlock(
@@ -199,12 +301,12 @@ void FillReport(
         return;
     }
     const uint32_t bytesPerBlock = spec.memorySliceBytes * spec.memSlicePerBlock;
-    report->preSyncInstructionCount = 4;
+    report->preSyncInstructionCount = 3;
     report->blockCount = static_cast<uint32_t>(spec.bytes / bytesPerBlock);
     report->bytesPerBlock = bytesPerBlock;
     report->copyInstructionCount = report->blockCount * 7U;
-    report->postSyncInstructionCount = 4;
-    report->finishInstructionCount = 1;
+    report->postSyncInstructionCount = !spec.postSyncNotify ? 0U : (spec.postSyncWait ? 3U : 2U);
+    report->finishInstructionCount = spec.emitFinish ? 1U : 0U;
     report->totalInstructionCount = static_cast<uint32_t>(program.size());
     report->message = "ok";
 }
@@ -228,11 +330,13 @@ int TileXRCcuBuildAllToAll2RankProgram(
     const uint64_t bytesPerBlock = static_cast<uint64_t>(spec.memorySliceBytes) * spec.memSlicePerBlock;
     const uint32_t blockCount = static_cast<uint32_t>(spec.bytes / bytesPerBlock);
     const uint16_t preSyncChannelId = spec.preSyncChannelId == 0 ? spec.channelId : spec.preSyncChannelId;
-    const uint16_t copyChannelId = spec.copyChannelId == 0 ? spec.channelId : spec.copyChannelId;
     const uint16_t postSyncChannelId = spec.postSyncChannelId == 0 ? spec.channelId : spec.postSyncChannelId;
-    program->reserve(4U + 4U + blockCount * 7U + 4U + 4U + 4U + 4U + 1U);
+    program->reserve(
+        3U + blockCount * 7U +
+        (!spec.postSyncNotify ? 0U : (spec.postSyncWait ? 3U : 2U)) +
+        (spec.emitFinish ? 1U : 0U));
 
-    ret = AppendSyncPhase(
+    ret = AppendPreSyncPhase(
         spec.preSyncRemoteNotifyCke,
         spec.preSyncLocalWaitCke,
         preSyncChannelId,
@@ -243,30 +347,16 @@ int TileXRCcuBuildAllToAll2RankProgram(
         return ret;
     }
 
-    for (uint32_t phase = 0; phase < 2U; ++phase) {
-        ret = AppendSyncPhase(
-            spec.preSyncRemoteNotifyCke,
-            spec.preSyncLocalWaitCke,
-            preSyncChannelId,
-            spec,
-            program,
-            report);
+    for (uint32_t block = 0; block < blockCount; ++block) {
+        const uint64_t offset = static_cast<uint64_t>(block) * bytesPerBlock;
+        ret = AppendCopyBlock(spec, offset, bytesPerBlock, program, report);
         if (ret != TILEXR_SUCCESS) {
             return ret;
         }
+    }
 
-        // append copy only for the local rank's active phase.
-        if (phase == spec.localRank) {
-            for (uint32_t block = 0; block < blockCount; ++block) {
-                const uint64_t offset = static_cast<uint64_t>(block) * bytesPerBlock;
-                ret = AppendCopyBlock(spec, offset, bytesPerBlock, program, report);
-                if (ret != TILEXR_SUCCESS) {
-                    return ret;
-                }
-            }
-        }
-
-        ret = AppendSyncPhase(
+    if (spec.postSyncNotify) {
+        ret = AppendPostSyncPhase(
             spec.postSyncRemoteNotifyCke,
             spec.postSyncLocalWaitCke,
             postSyncChannelId,
@@ -277,20 +367,11 @@ int TileXRCcuBuildAllToAll2RankProgram(
             return ret;
         }
     }
-
-    ret = AppendSyncPhase(
-        spec.postSyncRemoteNotifyCke,
-        spec.postSyncLocalWaitCke,
-        postSyncChannelId,
-        spec,
-        program,
-        report);
-    if (ret != TILEXR_SUCCESS) {
-        return ret;
-    }
-    ret = AppendFinish(spec, program, report);
-    if (ret != TILEXR_SUCCESS) {
-        return ret;
+    if (spec.emitFinish) {
+        ret = AppendFinish(spec, program, report);
+        if (ret != TILEXR_SUCCESS) {
+            return ret;
+        }
     }
 
     FillReport(spec, *program, report);

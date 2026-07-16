@@ -72,6 +72,15 @@ public:
         uint32_t peerRank,
         TileXRCcuDirectInstallAttempt *attempt,
         TileXRCcuDirectInstallReport *report);
+    int PrepareDirectCcuSyncXnPingInstallAttempt(
+        TileXRCcuRuntimeSession &session,
+        const TileXRCcuDirectInstallOptions &options,
+        uint64_t localSourceAddr,
+        uint64_t localDestinationAddr,
+        uint64_t bytes,
+        uint32_t peerRank,
+        TileXRCcuDirectInstallAttempt *attempt,
+        TileXRCcuDirectInstallReport *report);
 #endif
     int RefreshDirectCcuLowerLayerPlan(TileXRCcuRuntimeSession &session);
     bool HasDirectCcuLowerLayerPlan() const;

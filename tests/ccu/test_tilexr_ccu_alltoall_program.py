@@ -81,13 +81,27 @@ class TileXRCcuAllToAllProgramTest(unittest.TestCase):
 
             using namespace TileXR;
 
+            constexpr uint16_t kSetCkeHeader = 0x0802U;
+            constexpr uint16_t kClearCkeHeader = 0x0804U;
+
+            uint16_t Slot(const TileXRCcuInstr& instr, uint32_t slot)
+            {
+                const uint32_t word = slot / 4U;
+                const uint32_t shift = (slot % 4U) * 16U;
+                return static_cast<uint16_t>((instr.words[word] >> shift) & 0xffffU);
+            }
+
             int main()
             {
                 TileXRCcuAllToAll2RankProgramSpec spec;
-                spec.localRecvAddr = 0x10000000ULL;
-                spec.localRecvToken = TileXRCcuPackMemoryToken(0x12345, 0x11112222U, true);
+                spec.localSendAddr = 0x10000000ULL;
+                spec.localSendToken = TileXRCcuPackMemoryToken(0x12345, 0x11112222U, true);
+                spec.localRecvAddr = 0x18000000ULL;
+                spec.localRecvToken = TileXRCcuPackMemoryToken(0x12346, 0x22223333U, true);
                 spec.remoteSendAddr = 0x20000000ULL;
                 spec.remoteSendToken = TileXRCcuPackMemoryToken(0x23456, 0x33334444U, true);
+                spec.remoteRecvAddr = 0x28000000ULL;
+                spec.remoteRecvToken = TileXRCcuPackMemoryToken(0x23457, 0x44445555U, true);
                 spec.bytes = 2ULL * 1024ULL * 1024ULL;
                 spec.memorySliceBytes = TILEXR_CCU_ALLTOALL_MEMORY_SLICE_BYTES;
                 spec.memSlicePerBlock = TILEXR_CCU_ALLTOALL_MEM_SLICE_PER_BLOCK;
@@ -98,11 +112,15 @@ class TileXRCcuAllToAllProgramTest(unittest.TestCase):
                 spec.lengthXn = 0x203;
                 spec.channelId = 0x12;
                 spec.copyCompletionCke = 0x301;
+                spec.preSyncRemoteAddrXn = 0x211;
+                spec.preSyncRemoteTokenXn = 0x212;
                 spec.preSyncLocalWaitCke = 0x302;
                 spec.preSyncRemoteNotifyCke = 0x303;
-                spec.postSyncLocalWaitCke = 0x304;
-                spec.postSyncRemoteNotifyCke = 0x305;
-                spec.sourceCke = 0x306;
+                spec.preSyncTokenLocalWaitCke = 0x304;
+                spec.preSyncRemoteTokenNotifyCke = 0x305;
+                spec.postSyncLocalWaitCke = 0x306;
+                spec.postSyncRemoteNotifyCke = 0x307;
+                spec.sourceCke = 0x308;
                 spec.ckeMask = 1;
 
                 std::vector<TileXRCcuInstr> program;
@@ -113,11 +131,11 @@ class TileXRCcuAllToAllProgramTest(unittest.TestCase):
                     return 1;
                 }
                 const uint32_t expectedBlocks = 64;
-                const uint32_t expectedInstructions = 4 + 4 + expectedBlocks * 7 + 4 + 4 + 4 + 4 + 1;
+                const uint32_t expectedInstructions = 3 + expectedBlocks * 7 + 3 + 1;
                 if (report.blockCount != expectedBlocks ||
                     report.copyInstructionCount != expectedBlocks * 7 ||
-                    report.preSyncInstructionCount != 4 ||
-                    report.postSyncInstructionCount != 4 ||
+                    report.preSyncInstructionCount != 3 ||
+                    report.postSyncInstructionCount != 3 ||
                     report.finishInstructionCount != 1 ||
                     report.totalInstructionCount != expectedInstructions ||
                     program.size() != expectedInstructions) {
@@ -135,6 +153,35 @@ class TileXRCcuAllToAllProgramTest(unittest.TestCase):
                     std::cerr << "unexpected block size or message\n";
                     return 3;
                 }
+                const uint16_t preSyncMask = static_cast<uint16_t>(1U << TILEXR_CCU_ALLTOALL_OUTPUT_XN_ID);
+                const uint16_t postSyncMask = static_cast<uint16_t>(1U << TILEXR_CCU_ALLTOALL_POST_SYNC_ID);
+                const uint32_t postSyncSetIndex = expectedInstructions - 4;
+                const uint32_t postSyncWaitIndex = expectedInstructions - 2;
+                if (program.size() < 3 ||
+                    Slot(program[2], 0) != kSetCkeHeader ||
+                    Slot(program[2], 4) != spec.preSyncLocalWaitCke ||
+                    Slot(program[2], 5) != preSyncMask) {
+                    std::cerr << "PreSync should use the HCCL-style output barrier bit"
+                              << " header=0x" << std::hex << Slot(program[2], 0)
+                              << " waitCke=0x" << Slot(program[2], 4)
+                              << " waitMask=0x" << Slot(program[2], 5)
+                              << std::dec << "\n";
+                    return 4;
+                }
+                if (Slot(program[postSyncSetIndex], 0) != kSetCkeHeader ||
+                    Slot(program[postSyncSetIndex], 3) != postSyncMask ||
+                    Slot(program[postSyncWaitIndex], 0) != kClearCkeHeader ||
+                    Slot(program[postSyncWaitIndex], 4) != spec.postSyncLocalWaitCke ||
+                    Slot(program[postSyncWaitIndex], 5) != postSyncMask ||
+                    postSyncMask == preSyncMask) {
+                    std::cerr << "PostSync should use a distinct HCCL-style post barrier bit"
+                              << " postSetMask=0x" << std::hex << Slot(program[postSyncSetIndex], 3)
+                              << " postWaitCke=0x" << Slot(program[postSyncWaitIndex], 4)
+                              << " postWaitMask=0x" << Slot(program[postSyncWaitIndex], 5)
+                              << " preMask=0x" << preSyncMask
+                              << std::dec << "\n";
+                    return 5;
+                }
                 return 0;
             }
             '''
@@ -145,7 +192,7 @@ class TileXRCcuAllToAllProgramTest(unittest.TestCase):
         self.assertEqual("", result.stderr)
         self.assertEqual(0, result.returncode, result.stdout + result.stderr)
 
-    def test_two_rank_program_serializes_copy_phases_by_local_rank(self):
+    def test_two_rank_program_uses_same_hccl_style_copy_region_for_both_ranks(self):
         code = textwrap.dedent(
             r'''
             #include "ccu/tilexr_ccu_alltoall_program.h"
@@ -166,10 +213,14 @@ class TileXRCcuAllToAllProgramTest(unittest.TestCase):
             {
                 TileXRCcuAllToAll2RankProgramSpec spec;
                 spec.localRank = localRank;
-                spec.localRecvAddr = 0x10000000ULL;
-                spec.localRecvToken = TileXRCcuPackMemoryToken(0x12345, 0x11112222U, true);
+                spec.localSendAddr = 0x10000000ULL;
+                spec.localSendToken = TileXRCcuPackMemoryToken(0x12345, 0x11112222U, true);
+                spec.localRecvAddr = 0x18000000ULL;
+                spec.localRecvToken = TileXRCcuPackMemoryToken(0x12346, 0x22223333U, true);
                 spec.remoteSendAddr = 0x20000000ULL;
                 spec.remoteSendToken = TileXRCcuPackMemoryToken(0x23456, 0x33334444U, true);
+                spec.remoteRecvAddr = 0x28000000ULL;
+                spec.remoteRecvToken = TileXRCcuPackMemoryToken(0x23457, 0x44445555U, true);
                 spec.bytes = 2ULL * 1024ULL * 1024ULL;
                 spec.memorySliceBytes = TILEXR_CCU_ALLTOALL_MEMORY_SLICE_BYTES;
                 spec.memSlicePerBlock = TILEXR_CCU_ALLTOALL_MEM_SLICE_PER_BLOCK;
@@ -180,11 +231,15 @@ class TileXRCcuAllToAllProgramTest(unittest.TestCase):
                 spec.lengthXn = 0x203;
                 spec.channelId = 0x12;
                 spec.copyCompletionCke = 0x301;
+                spec.preSyncRemoteAddrXn = 0x211;
+                spec.preSyncRemoteTokenXn = 0x212;
                 spec.preSyncLocalWaitCke = 0x302;
                 spec.preSyncRemoteNotifyCke = 0x303;
-                spec.postSyncLocalWaitCke = 0x304;
-                spec.postSyncRemoteNotifyCke = 0x305;
-                spec.sourceCke = 0x306;
+                spec.preSyncTokenLocalWaitCke = 0x304;
+                spec.preSyncRemoteTokenNotifyCke = 0x305;
+                spec.postSyncLocalWaitCke = 0x306;
+                spec.postSyncRemoteNotifyCke = 0x307;
+                spec.sourceCke = 0x308;
                 spec.ckeMask = 1;
                 return spec;
             }
@@ -223,9 +278,12 @@ class TileXRCcuAllToAllProgramTest(unittest.TestCase):
                               << " rank1=" << report1.message << "\n";
                     return 1;
                 }
-                if (report0.totalInstructionCount != 473 || report1.totalInstructionCount != 473 ||
-                    rank0.size() != 473 || rank1.size() != 473) {
-                    std::cerr << "unexpected two-phase instruction count"
+                const uint32_t expectedInstructions = 3 + 64 * 7 + 3 + 1;
+                if (report0.totalInstructionCount != expectedInstructions ||
+                    report1.totalInstructionCount != expectedInstructions ||
+                    rank0.size() != expectedInstructions ||
+                    rank1.size() != expectedInstructions) {
+                    std::cerr << "unexpected instruction count"
                               << " rank0=" << rank0.size()
                               << " rank1=" << rank1.size()
                               << " report0=" << report0.totalInstructionCount
@@ -233,13 +291,13 @@ class TileXRCcuAllToAllProgramTest(unittest.TestCase):
                     return 2;
                 }
                 if (CopyInstructionCount(rank0) != 64 || CopyInstructionCount(rank1) != 64) {
-                    std::cerr << "each rank should issue exactly 64 remote-to-local transfers\n";
+                    std::cerr << "each rank should issue exactly 64 remote-to-local reads\n";
                     return 3;
                 }
                 const size_t rank0FirstCopy = FirstCopyIndex(rank0);
                 const size_t rank1FirstCopy = FirstCopyIndex(rank1);
-                if (rank0FirstCopy != 13 || rank1FirstCopy != 21) {
-                    std::cerr << "copy phases overlap or moved unexpectedly"
+                if (rank0FirstCopy != 8 || rank1FirstCopy != 8) {
+                    std::cerr << "copy region should start at the same instruction after the single PreSync"
                               << " rank0FirstCopy=" << rank0FirstCopy
                               << " rank1FirstCopy=" << rank1FirstCopy << "\n";
                     return 4;
@@ -267,10 +325,14 @@ class TileXRCcuAllToAllProgramTest(unittest.TestCase):
             TileXRCcuAllToAll2RankProgramSpec ValidSpec()
             {
                 TileXRCcuAllToAll2RankProgramSpec spec;
-                spec.localRecvAddr = 0x10000000ULL;
-                spec.localRecvToken = TileXRCcuPackMemoryToken(1, 2, true);
+                spec.localSendAddr = 0x10000000ULL;
+                spec.localSendToken = TileXRCcuPackMemoryToken(1, 2, true);
+                spec.localRecvAddr = 0x18000000ULL;
+                spec.localRecvToken = TileXRCcuPackMemoryToken(2, 3, true);
                 spec.remoteSendAddr = 0x20000000ULL;
                 spec.remoteSendToken = TileXRCcuPackMemoryToken(3, 4, true);
+                spec.remoteRecvAddr = 0x28000000ULL;
+                spec.remoteRecvToken = TileXRCcuPackMemoryToken(4, 5, true);
                 spec.bytes = 2ULL * 1024ULL * 1024ULL;
                 spec.memorySliceBytes = TILEXR_CCU_ALLTOALL_MEMORY_SLICE_BYTES;
                 spec.memSlicePerBlock = TILEXR_CCU_ALLTOALL_MEM_SLICE_PER_BLOCK;
@@ -281,11 +343,15 @@ class TileXRCcuAllToAllProgramTest(unittest.TestCase):
                 spec.lengthXn = 5;
                 spec.channelId = 6;
                 spec.copyCompletionCke = 7;
+                spec.preSyncRemoteAddrXn = 13;
+                spec.preSyncRemoteTokenXn = 14;
                 spec.preSyncLocalWaitCke = 8;
                 spec.preSyncRemoteNotifyCke = 9;
-                spec.postSyncLocalWaitCke = 10;
-                spec.postSyncRemoteNotifyCke = 11;
-                spec.sourceCke = 12;
+                spec.preSyncTokenLocalWaitCke = 10;
+                spec.preSyncRemoteTokenNotifyCke = 11;
+                spec.postSyncLocalWaitCke = 12;
+                spec.postSyncRemoteNotifyCke = 15;
+                spec.sourceCke = 16;
                 spec.ckeMask = 1;
                 return spec;
             }
@@ -350,20 +416,29 @@ class TileXRCcuAllToAllProgramTest(unittest.TestCase):
         self.assertIn("TileXRCcuBuildAllToAll2RankProgram", header)
         self.assertIn("TileXRCcuBuildMemoryCopyProgram", source)
         self.assertIn("TileXRCcuMemoryCopyDirection::RemoteToLocal", source)
+        self.assertIn("preSyncRemoteTokenNotifyCke", header)
+        self.assertIn("preSyncTokenLocalWaitCke", header)
+        self.assertNotIn("tokenLocalWaitCke", source)
+        self.assertIn("PreSyncSignalMask", source)
+        self.assertIn("PostSyncSignalMask", source)
+        self.assertIn("TILEXR_CCU_ALLTOALL_SIGNAL_MASK", header)
+        self.assertIn("TILEXR_CCU_ALLTOALL_RANK0_SIGNAL_MASK", header)
+        self.assertIn("TILEXR_CCU_ALLTOALL_RANK1_SIGNAL_MASK", header)
 
         combined = header + "\n" + source
         for needle in PRIVATE_CCU_PRODUCER_NEEDLES:
             with self.subTest(needle=needle):
                 self.assertNotIn(needle, combined)
 
-    def test_two_phase_rank_role_is_part_of_program_contract(self):
+    def test_local_rank_does_not_split_the_long_mission_into_copy_phases(self):
         header = ALLTOALL_HEADER.read_text(encoding="utf-8")
         source = ALLTOALL_SOURCE.read_text(encoding="utf-8")
         orchestrator = (COMM_DIR / "ccu" / "tilexr_ccu_direct_orchestrator.cpp").read_text(encoding="utf-8")
         planner = (COMM_DIR / "ccu" / "tilexr_ccu_collective_planner.cpp").read_text(encoding="utf-8")
 
         self.assertIn("uint32_t localRank = 0", header)
-        self.assertIn("append copy only for the local rank's active phase", source)
+        self.assertNotIn("append copy only for the local rank's active phase", source)
+        self.assertNotIn("for (uint32_t phase = 0; phase < 2U; ++phase)", source)
         self.assertIn("alltoallSpec.localRank = alltoall.localRank", orchestrator)
         self.assertIn("alltoall.localRank = static_cast<uint32_t>(rank)", planner)
 

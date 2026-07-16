@@ -72,10 +72,14 @@ struct TileXRCcuDirectMemoryCopySpec {
 
 struct TileXRCcuDirectAllToAll2RankSpec {
     uint32_t localRank = 0;
+    uint64_t localSendAddr = 0;
+    uint64_t localSendToken = 0;
     uint64_t localRecvAddr = 0;
     uint64_t localRecvToken = 0;
     uint64_t remoteSendAddr = 0;
     uint64_t remoteSendToken = 0;
+    uint64_t remoteRecvAddr = 0;
+    uint64_t remoteRecvToken = 0;
     uint64_t bytes = 0;
     uint32_t memorySliceBytes = TILEXR_CCU_ALLTOALL_MEMORY_SLICE_BYTES;
     uint32_t memSlicePerBlock = TILEXR_CCU_ALLTOALL_MEM_SLICE_PER_BLOCK;
@@ -83,6 +87,16 @@ struct TileXRCcuDirectAllToAll2RankSpec {
 
 struct TileXRCcuDirectSignalWaitSpec {
     TileXRCcuSignalWaitProgramRole role = TileXRCcuSignalWaitProgramRole::Signal;
+    bool overrideBarrierMode = false;
+    TileXRCcuBarrierMode barrierMode = TileXRCcuBarrierMode::SyncCke;
+};
+
+struct TileXRCcuDirectSyncXnPingSpec {
+    uint32_t localRank = 0;
+    uint32_t peerRank = 1;
+    uint64_t payload = 0;
+    uint16_t remoteNotifyMask = 0;
+    uint16_t localWaitMask = 0;
 };
 
 struct TileXRCcuDirectInstallAttempt {
@@ -150,6 +164,12 @@ int TileXRCcuRunDirectAllToAll2RankInstallAttempt(
 int TileXRCcuRunDirectSignalWaitInstallAttempt(
     const TileXRCcuDirectInstallOptions& options,
     const TileXRCcuDirectSignalWaitSpec& signalWait,
+    TileXRCcuDirectInstallAttempt* attempt,
+    TileXRCcuDirectInstallReport* report);
+
+int TileXRCcuRunDirectSyncXnPingInstallAttempt(
+    const TileXRCcuDirectInstallOptions& options,
+    const TileXRCcuDirectSyncXnPingSpec& syncXnPing,
     TileXRCcuDirectInstallAttempt* attempt,
     TileXRCcuDirectInstallReport* report);
 

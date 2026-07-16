@@ -18,13 +18,23 @@ constexpr uint32_t TILEXR_CCU_ALLTOALL_MEMORY_SLICE_BYTES = 4096U;
 constexpr uint32_t TILEXR_CCU_ALLTOALL_MEM_SLICE_PER_BLOCK = 8U;
 constexpr uint32_t TILEXR_CCU_ALLTOALL_BLOCK_BYTES =
     TILEXR_CCU_ALLTOALL_MEMORY_SLICE_BYTES * TILEXR_CCU_ALLTOALL_MEM_SLICE_PER_BLOCK;
+constexpr uint16_t TILEXR_CCU_ALLTOALL_OUTPUT_XN_ID = 1U;
+constexpr uint16_t TILEXR_CCU_ALLTOALL_TOKEN_XN_ID = 2U;
+constexpr uint16_t TILEXR_CCU_ALLTOALL_POST_SYNC_ID = 3U;
+constexpr uint16_t TILEXR_CCU_ALLTOALL_SIGNAL_MASK = 1U;
+constexpr uint16_t TILEXR_CCU_ALLTOALL_RANK0_SIGNAL_MASK = 1U;
+constexpr uint16_t TILEXR_CCU_ALLTOALL_RANK1_SIGNAL_MASK = 2U;
 
 struct TileXRCcuAllToAll2RankProgramSpec {
     uint32_t localRank = 0;
+    uint64_t localSendAddr = 0;
+    uint64_t localSendToken = 0;
     uint64_t localRecvAddr = 0;
     uint64_t localRecvToken = 0;
     uint64_t remoteSendAddr = 0;
     uint64_t remoteSendToken = 0;
+    uint64_t remoteRecvAddr = 0;
+    uint64_t remoteRecvToken = 0;
     uint64_t bytes = 0;
     uint32_t memorySliceBytes = TILEXR_CCU_ALLTOALL_MEMORY_SLICE_BYTES;
     uint32_t memSlicePerBlock = TILEXR_CCU_ALLTOALL_MEM_SLICE_PER_BLOCK;
@@ -33,17 +43,27 @@ struct TileXRCcuAllToAll2RankProgramSpec {
     uint16_t localXn = 0;
     uint16_t remoteXn = 0;
     uint16_t lengthXn = 0;
+    uint16_t preSyncLocalAddrXn = 0;
+    uint16_t preSyncLocalTokenXn = 0;
     uint16_t channelId = 0;
     uint16_t preSyncChannelId = 0;
+    uint16_t preSyncTokenChannelId = 0;
     uint16_t copyChannelId = 0;
     uint16_t postSyncChannelId = 0;
     uint16_t copyCompletionCke = 0;
+    uint16_t preSyncRemoteAddrXn = 0;
+    uint16_t preSyncRemoteTokenXn = 0;
     uint16_t preSyncLocalWaitCke = 0;
     uint16_t preSyncRemoteNotifyCke = 0;
+    uint16_t preSyncTokenLocalWaitCke = 0;
+    uint16_t preSyncRemoteTokenNotifyCke = 0;
     uint16_t postSyncLocalWaitCke = 0;
     uint16_t postSyncRemoteNotifyCke = 0;
     uint16_t sourceCke = 0;
     uint16_t ckeMask = 1;
+    bool postSyncNotify = true;
+    bool postSyncWait = true;
+    bool emitFinish = true;
 };
 
 struct TileXRCcuAllToAllProgramReport {
