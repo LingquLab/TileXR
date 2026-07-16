@@ -188,16 +188,15 @@ void TestRemoteDeployScriptCleansRemoteCheckout()
     CheckContains(kRemoteDeployScript, deployScript, "mkdir -p -- \"\\${remote_repo}\"");
 }
 
-void TestRemoteDeployScriptInitializesEpSubmodulesOnly()
+void TestRemoteDeployScriptDoesNotInitializeSubmodules()
 {
     std::string deployScript;
     if (!ReadFile(kRemoteDeployScript, &deployScript)) {
         return;
     }
 
-    CheckContains(kRemoteDeployScript, deployScript,
-        "submodule update --init 3rdparty/hcomm");
-    CheckNotContains(kRemoteDeployScript, deployScript, "submodule update --init --recursive");
+    CheckNotContains(kRemoteDeployScript, deployScript, "submodule update");
+    CheckNotContains(kRemoteDeployScript, deployScript, "3rdparty/hcomm");
     CheckNotContains(kRemoteDeployScript, deployScript, "ops-transformer");
     CheckNotContains(kRemoteDeployScript, deployScript, "3rdparty/shmem");
     CheckNotContains(kRemoteDeployScript, deployScript, "3rdparty/spdlog");
@@ -297,7 +296,7 @@ int main()
     TestEpKernelUsesCceArchFlags();
     TestSyncFlagBuffersUseFullFlagUnit();
     TestRemoteDeployScriptCleansRemoteCheckout();
-    TestRemoteDeployScriptInitializesEpSubmodulesOnly();
+    TestRemoteDeployScriptDoesNotInitializeSubmodules();
     TestRemoteDeployScriptDoesNotExposePrivateRemoteDefaults();
     TestDemoRunnerUsesLibAndLib64Paths();
     TestDispatchDemoRegistersAlignedUdmaWorkspace();

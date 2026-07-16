@@ -22,8 +22,8 @@ src/
 op-simulator/     # Operator simulation and testing without physical hardware
 tests/            # Test suites (UDMA, integration tests)
 scripts/          # Build and utility scripts (see scripts/README.md)
-3rdparty/         # Git submodules: hcomm, spdlog
-reference/        # Ignored reference-only source trees downloaded on demand, including ops-transformer
+3rdparty/         # Git submodule: spdlog
+reference/        # Ignored reference-only source downloaded on demand, including hcomm and ops-transformer
 docs/             # Documentation (UDMA, CANN migration, etc.)
 ```
 
@@ -46,9 +46,8 @@ See [scripts/README.md](scripts/README.md) for complete script documentation and
 TileXR requires the following dependencies:
 
 - **CANN toolkit** (9.1.0): Installed via `scripts/cann_download_install.sh`
-- **hcomm**: Git submodule, built via `scripts/hcomm_build_install.sh`
 - **spdlog**: Git submodule (header-only logging)
-- **ops-transformer / shmem** (reference-only): Download on demand with `reference/download_cann_repos.sh` into ignored directories under `reference/` for upstream comparison. Current TileXR libraries do not include or link them.
+- **hcomm / ops-transformer / shmem** (reference-only): Download on demand with `reference/download_cann_repos.sh` into ignored directories under `reference/` for upstream comparison. Current TileXR libraries do not include or link them.
 
 ### Quick setup:
 
@@ -60,7 +59,6 @@ bash scripts/prepare.sh  # Automated CANN + dependencies setup
 
 ```bash
 bash scripts/cann_download_install.sh       # Install CANN toolkit
-bash scripts/hcomm_build_install.sh         # Build and install hcomm submodule
 ```
 
 ### Core tile-comm library:

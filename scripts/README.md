@@ -73,34 +73,6 @@ bash scripts/download_open_source_deps.sh --check
 - Verifies every archive with SHA256
 - Reuses valid existing archives
 
-### `hcomm_build_install.sh`
-**Purpose**: Build and install hcomm submodule.
-
-**Usage**:
-```bash
-bash scripts/hcomm_build_install.sh
-```
-
-**What it does**:
-- Builds `3rdparty/hcomm`
-- Installs to `3rdparty/hcomm/install`
-
-### `hcomm_clean_build_install.sh`
-**Purpose**: Clean rebuild of hcomm (removes build directory first).
-
-**Usage**:
-```bash
-bash scripts/hcomm_clean_build_install.sh
-```
-
-### `hcomm_local_install.sh`
-**Purpose**: Install pre-built hcomm binaries.
-
-**Usage**:
-```bash
-bash scripts/hcomm_local_install.sh
-```
-
 ## Testing
 
 ### `test_build.sh`
@@ -193,10 +165,7 @@ bash scripts/prepare.sh
 # 1. Install CANN
 bash scripts/cann_download_install.sh
 
-# 2. Build dependencies
-bash scripts/hcomm_build_install.sh
-
-# 3. Build TileXR
+# 2. Build TileXR
 source scripts/common_env.sh
 mkdir -p build && cd build
 cmake -DCMAKE_INSTALL_PREFIX=../install ..

@@ -1,6 +1,6 @@
 # TileXR EP Dispatch/Combine Tests
 
-This tree tests the standalone TileXR EP module under `src/ep`. It is independent from HCCL window helpers and `ops-transformer`; the same-node route uses TileXR IPC peer-memory windows and `SyncCollectives`, while cross-node dispatch/combine use TileXR-registered UDMA workspaces.
+This tree tests the standalone TileXR EP module under `src/ep`. It is independent from hcomm, HCCL window helpers, and `ops-transformer`; the same-node route uses TileXR IPC peer-memory windows and `SyncCollectives`, while cross-node dispatch/combine use TileXR-registered UDMA workspaces.
 
 ## Source-Only Tests
 

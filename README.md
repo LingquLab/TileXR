@@ -22,7 +22,7 @@ Instead of stalling every rank at coarse barriers, TileXR splits a phase into ti
 
 ## Features
 
-- **Core communication runtime**: `libtile-comm.so` initializes ranks, shared buffers, peer memory mappings, socket exchange, device `CommArgs`, and DFX state. It builds only against CANN runtime/ACL/driver APIs and TileXR-owned types; it does not include or link hcomm, HCCL, shmem, or reference-only source trees.
+- **Core communication runtime**: `libtile-comm.so` initializes ranks, shared buffers, peer memory mappings, socket exchange, device `CommArgs`, and DFX state. It builds only against CANN runtime/ACL/driver APIs and TileXR-owned types; it does not include or link HCCL, shmem, or reference-only source trees.
 - **Optional TileXR collectives**: `libtilexr-collectives.so`, built only when `TILEXR_BUILD_COLLECTIVES=ON`, layers standalone `TileXRAllGather` and equal-size `TileXRAllToAll` APIs on top of `libtile-comm.so`.
 - **Standalone EP dispatch/combine MVP**: `libtilexr-ep.so`, `libtilexr_ep_dispatch_kernel.so`, and `libtilexr_ep_combine_kernel.so` provide TileXR-native MoE EP dispatch/combine routes under `src/ep`, independent from HCCL window helpers, `ops-transformer`, and shmem. Same-node paths use IPC peer-memory windows; cross-node dispatch/combine use TileXR-registered UDMA workspaces.
 - **Tile-level synchronization**: device-side flag regions and magic values support reusable fine-grained synchronization rounds.
@@ -90,14 +90,6 @@ For first-time setup of local utilities:
 bash scripts/prepare.sh
 ```
 
-Build hcomm separately only when running the HCCL test tooling:
-
-```bash
-bash scripts/hcomm_build_install.sh
-```
-
-Building `libtile-comm.so` does not require `hcomm_build_install.sh`.
-
 ### 3. Build Core Runtime
 
 ```bash
@@ -160,8 +152,8 @@ TileXR/
 |   |-- udma/
 |   `-- sdma/                 # SDMA unit tests, integration test, and data-plane demo
 |-- scripts/                  # Build, setup, test, and utility scripts
-|-- 3rdparty/                 # spdlog plus optional hcomm submodules
-|-- reference/                # ignored reference-only source checkouts, including ops-transformer
+|-- 3rdparty/                 # spdlog submodule
+|-- reference/                # ignored reference-only source, including hcomm and ops-transformer
 `-- docs/                     # Design, migration, and validation notes
 ```
 
@@ -175,7 +167,7 @@ The runtime is layered: applications and integrations sit on top of the TileXR l
 
 ### Core Runtime
 
-`src/comm/` builds `libtile-comm.so` and exposes the public API in `src/include/tilexr_api.h`. This library is intentionally independent of hcomm, HCCL, shmem, and reference-only source trees. It uses CANN runtime/ACL/driver APIs plus TileXR-owned communication metadata and datatypes.
+`src/comm/` builds `libtile-comm.so` and exposes the public API in `src/include/tilexr_api.h`. This library is intentionally independent of HCCL, shmem, and reference-only source trees. It uses CANN runtime/ACL/driver APIs plus TileXR-owned communication metadata and datatypes.
 
 Important host-side entry points, grouped by role:
 
@@ -265,7 +257,7 @@ Optional components:
 
 | Component | Version / Source | Used by | Notes |
 | --- | --- | --- | --- |
-| hcomm / HCCL | submodule / CANN communication stack | HCCL tests | Not included or linked by `src/comm` / `libtile-comm.so` |
+| hcomm | on-demand checkout under `reference/` | Legacy HCCL resource/context comparison | Downloaded with `bash reference/download_cann_repos.sh hcomm`; not a TileXR build dependency |
 | ops-transformer | on-demand checkout under `reference/` | Upstream implementation comparison | Downloaded with `bash reference/download_cann_repos.sh ops-transformer`; not a TileXR build dependency |
 
 ## UDMA Validation
@@ -443,7 +435,7 @@ Build failures:
 - Run `git submodule update --init --recursive`.
 - Run `source scripts/common_env.sh` before CMake or scripts.
 - Check `ASCEND_HOME_PATH`, `TILEXR_CANN_VER`, and CANN 9.1.0 include/library layout.
-- Confirm `install/lib/libtile-comm.so` links only to the expected CANN runtime/driver libraries and does not require hcomm, HCCL, shmem, or reference-only source trees.
+- Confirm `install/lib/libtile-comm.so` links only to the expected CANN runtime/driver libraries and does not require HCCL, shmem, or reference-only source trees.
 - Do not put `${ASCEND_HOME_PATH}/${ARCH}-linux/devlib` into runtime RPATH/RUNPATH. That path is a link-time fallback and may contain stub libraries such as `libascend_hal.so`; runtime should resolve the real driver HAL from `/usr/local/Ascend/driver/lib64/driver`.
 
 Log analysis:

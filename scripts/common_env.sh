@@ -38,8 +38,6 @@ export TILEXR_HCCL_TEST_HOME=${TILEXR_CANN_HOME}/cann/tools/hccl_test
 export ASCEND_DIR=${TILEXR_CANN_HOME}/cann
 export MPI_HOME=${TILEXR_UTIL_HOME}/mpich
 
-export TILEXR_HCOMM_HOME=${TILEXR_3RD_HOME}/hcomm
-
 # 运行日志相关目录
 export TILEXR_RUN_HOME=${TILEXR_HOME}/run
 export TILEXR_PLOG_HOME=${TILEXR_RUN_HOME}/plog
@@ -96,25 +94,9 @@ env_print() {
     success "TILEXR_CANN_VER = ${TILEXR_CANN_VER}"
     success "TILEXR_HOME = ${TILEXR_HOME}"
     success "TILEXR_CANN_HOME = ${TILEXR_CANN_HOME}"
-    success "TILEXR_HCOMM_HOME = ${TILEXR_HCOMM_HOME}"
     line
     env | grep ASCEND
     line
-}
-
-# 构建 hcomm，可选传入 --noclean 跳过清理步骤
-_hcomm_build() {
-    local noclean_flag=${1:-""}
-    rm -rf ${TILEXR_HCOMM_HOME}/build_out/cann-hcomm_*.run
-    local CMD="bash ${TILEXR_HCOMM_HOME}/build.sh -j`nproc` --full ${noclean_flag} -p ${TILEXR_CANN_HOME}/cann"
-    warn ${CMD}
-    colorful_time ${CMD}
-    if [ $? -ne 0 ]; then
-        error "build hcomm failed"
-        return 1
-    else
-        success "build hcomm success"
-    fi
 }
 
 # 解压 tarball 并通过 autoconf configure/make/make install 安装工具包

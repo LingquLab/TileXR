@@ -171,6 +171,7 @@ def test_remote_script_is_isolated_and_logs_environment() -> None:
     ]
     for token in forbidden_tokens:
         assert token not in source
+    assert "3rdparty/hcomm" not in source
 
 
 def test_remote_script_supports_selected_python_environment() -> None:
