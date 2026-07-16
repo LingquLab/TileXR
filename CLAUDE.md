@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**TileXR** (eXtreme Rendezvous for Asynchronous Tile Communication) is a data-centric asynchronous communication runtime for Huawei Ascend NPU chips, built on the CANN stack. It provides tile-level synchronization, MC2 fused collective examples, and a registered-memory UDMA prototype for A5 / Ascend950 hardware.
+**TileXR** (eXtreme Rendezvous for Asynchronous Tile Communication) is a data-centric asynchronous communication runtime for Huawei Ascend NPU chips, built on the CANN stack. It provides tile-level synchronization, standalone collectives and EP communication, and a registered-memory UDMA prototype for A5 / Ascend950 hardware.
 
 - **CANN version:** 9.1.0
 - **Target OS:** Ubuntu 20.04 LTS (root user required for device access)
@@ -19,16 +19,11 @@ src/
   comm/           # Core TileXR communication library -> libtile-comm.so
     udma/         # TileXR-owned HCCP/RA UDMA transport
   include/        # Public C/C++ headers
-examples/         # Example workloads built on the TileXR runtime
-  mc2/            # Fused collective operator examples (AllGather+Add, AllGather+MatMul)
-    all_gather_add/       # Fused AllGather + element-wise Add
-    all_gather_matmul/    # Fused AllGather + MatMul (with op_api, tests/)
-    common/               # Shared MC2 utilities and new_mc2_mm abstractions
 op-simulator/     # Operator simulation and testing without physical hardware
 tests/            # Test suites (UDMA, integration tests)
 scripts/          # Build and utility scripts (see scripts/README.md)
-3rdparty/         # Git submodules: hcomm, ops-transformer, spdlog
-reference/        # Ignored reference-only source trees downloaded on demand
+3rdparty/         # Git submodules: hcomm, spdlog
+reference/        # Ignored reference-only source trees downloaded on demand, including ops-transformer
 docs/             # Documentation (UDMA, CANN migration, etc.)
 ```
 
@@ -52,9 +47,8 @@ TileXR requires the following dependencies:
 
 - **CANN toolkit** (9.1.0): Installed via `scripts/cann_download_install.sh`
 - **hcomm**: Git submodule, built via `scripts/hcomm_build_install.sh`
-- **ops-transformer**: Git submodule, built via `scripts/ops_build_run.sh`
 - **spdlog**: Git submodule (header-only logging)
-- **shmem** (reference-only): Download on demand with `reference/download_shmem.sh` into ignored `reference/shmem/` for historical UDMA experiments and comparison. Current `src/comm` does not include or link shmem.
+- **ops-transformer / shmem** (reference-only): Download on demand with `reference/download_cann_repos.sh` into ignored directories under `reference/` for upstream comparison. Current TileXR libraries do not include or link them.
 
 ### Quick setup:
 
@@ -67,7 +61,6 @@ bash scripts/prepare.sh  # Automated CANN + dependencies setup
 ```bash
 bash scripts/cann_download_install.sh       # Install CANN toolkit
 bash scripts/hcomm_build_install.sh         # Build and install hcomm submodule
-bash scripts/ops_build_run.sh               # Build ops-transformer and run operators
 ```
 
 ### Core tile-comm library:
@@ -91,15 +84,12 @@ cd op-simulator && bash compile_and_run.sh
 ```bash
 bash scripts/test_build.sh        # Build HCCL test suite
 bash scripts/test_allreduce.sh    # Run AllReduce test via mpirun (multiple ranks)
-bash scripts/ops_only_run.sh      # Run ops-transformer operators without rebuilding
 ```
 
 Operator simulator:
 ```bash
 cd op-simulator && bash run_test_ca.sh
 ```
-
-`all_gather_matmul` has its own unit/system tests under `examples/mc2/all_gather_matmul/tests/{ut,st}/`.
 
 Logs: `bash scripts/plog_grep.sh ERROR` filters device logs.
 
@@ -143,17 +133,6 @@ TileXR integrates UDMA (UnifiedBus DMA) for registered-memory communication on A
 - **`tilexr_sync.h`** — `SyncCollectives` class: AICore kernel-side flag-based synchronization primitives. Two flag regions per rank: inner (intra-rank/card) and outer (inter-rank). Flags encode `(magic << 32) | value` to allow multi-round reuse without reset.
 - **`comm_args.h`** — `CommArgs` struct with send matrices, peer memory pointers, and DFX debug info.
 
-### Collective Operator Examples (`examples/mc2/`)
-
-These are examples built on the runtime, not core libraries. Each operator follows the ops-transformer two-phase calling convention:
-1. **Host side:** operator definition (`_def.cpp`), tiling (`_tiling.cpp`), aclnn API (`aclnn_*.h/cpp`), and for `all_gather_matmul` an additional `op_api/` and `op_graph/` layer.
-2. **Kernel side:** AICore kernel implementation (`op_kernel/*.cpp`).
-
-Key operators:
-- **`all_gather_add`** — Fuses AllGather + element-wise Add. Fixed shapes: input `a(240,256)`, output `b(480,256)`, `rank_size=2`, FLOAT16 only.
-- **`all_gather_matmul`** — Fuses AllGather + MatMul. Has full aclnn API (`op_api/`), graph integration (`op_graph/`), and test suite (`tests/`).
-- **`common/`** — Shared MC2 infrastructure including `new_mc2_mm` matrix-multiply primitives.
-
 ### Operator Simulator (`op-simulator/`)
 
 Functional and performance simulation of AICore kernels without physical hardware. Use `base_test.cpp` and `test_template.cpp` as templates for new operator tests.
@@ -161,7 +140,6 @@ Functional and performance simulation of AICore kernels without physical hardwar
 ## Key Notes
 
 - **Git submodules** must be initialized: `git submodule update --init --recursive`
-- `examples/mc2/` and `src/comm/` can be built independently via their own `CMakeLists.txt`
 - All build and utility scripts are in `scripts/` directory (see `scripts/README.md`)
 
 ### CANN Version Compatibility

@@ -429,8 +429,7 @@ void TestNoForbiddenDependencies()
         "src/ep/CMakeLists.txt",
     };
     const std::vector<std::string> forbidden = {
-        "src/mc2",
-        "3rdparty/ops-transformer",
+        "ops-transformer",
         "GetHcclContext",
         "TileXRUDMARegister",
         "shmem",

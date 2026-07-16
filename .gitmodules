@@ -1,6 +1,3 @@
-[submodule "3rdparty/ops-transformer"]
-	path = 3rdparty/ops-transformer
-	url = https://gitcode.com/cann/ops-transformer.git
 [submodule "3rdparty/hcomm"]
 	path = 3rdparty/hcomm
 	url = https://gitcode.com/LingquLab/hcomm.git

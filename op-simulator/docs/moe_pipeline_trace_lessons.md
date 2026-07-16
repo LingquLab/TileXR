@@ -61,9 +61,10 @@ SyncFunc<AscendC::HardEvent::V_MTE2>();
 moeSumQueue_.FreeTensor<XType>(tmpUb);
 ```
 
-This fix is applied in the ops-transformer MoE combine kernel at
-`mc2/moe_distribute_combine_v2/op_kernel/moe_distribute_combine_v2.h` and in
-the matching arch35 host-KFC implementation.
+The upstream comparison for this fix is the ops-transformer MoE combine kernel
+at `reference/ops-transformer/mc2/moe_distribute_combine_v2/op_kernel/moe_distribute_combine_v2.h`
+and the matching arch35 host-KFC implementation. `ops-transformer` is
+reference-only source and is not part of the TileXR build.
 
 The reason is lifetime, not only performance. After `DeQue`, `tmpUb` is still
 read by vector work such as cast, multiply, and add. If the queue tensor is

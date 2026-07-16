@@ -19,6 +19,7 @@ repositories that are useful when working on TileXR:
 - `asc-tools`
 - `oam-tools`
 - `ascend-transformer-boost`
+- `ops-transformer`
 - `shmem`
 
 By default it downloads all repositories into `reference/<repo>/` from
@@ -37,7 +38,7 @@ bash reference/download_cann_repos.sh --dry-run
 To download or update only selected repositories:
 
 ```bash
-bash reference/download_cann_repos.sh asc-devkit runtime shmem
+bash reference/download_cann_repos.sh asc-devkit runtime ops-transformer shmem
 ```
 
 Branch and mirror settings can be overridden with environment variables:
@@ -63,4 +64,5 @@ workflow.
 | `asc-tools` | Ascend C companion tools: CPU debug, NPU check, `msobjdump`, `show_kernel_debug_data`, docs, examples, and tool implementation sources. | You are validating or debugging Ascend C kernels without immediately running full hardware flows, inspecting compiled kernel objects, parsing kernel debug data, or checking kernel implementation issues. |
 | `oam-tools` | Operations, administration, and maintenance tools such as `asys`, `msaicerr`, `msprof`, and `hccl_test`, plus docs and examples for environment collection, AI Core error analysis, and profiling. | You are diagnosing hardware/software environment issues, collecting failure bundles, analyzing AI Core errors, profiling workloads, or comparing TileXR troubleshooting scripts with upstream CANN tools. |
 | `ascend-transformer-boost` | ATB acceleration library for Transformer workloads, including fused ops, graph/plugin mechanisms, PyTorch integration, examples, and LCAL collective kernels under `src/kernels/lcal`. | You are working on TileXR collective kernels, EP/Transformer acceleration ideas, LCAL-derived code, AllGather/AllReduce/ReduceScatter/All2All references, or ATB integration behavior. |
+| `ops-transformer` | Upstream fused communication and computation operators, host tiling code, kernels, examples, and tests. | You need historical MC2 implementation details or want to compare TileXR-owned collectives and EP code with upstream operator implementations. |
 | `shmem` | Ascend SHMEM communication library with host/device APIs, symmetric memory heap, team/sync/RMA/Signal interfaces, RDMA/SDMA/UDMA/MTE/xDMA transports, docs, examples, and tests. | You are comparing TileXR registered-memory UDMA/SDMA work with upstream SHMEM, studying RMA and signal semantics, checking AICore direct-drive communication examples, or revisiting historical TileXR UDMA experiments. |

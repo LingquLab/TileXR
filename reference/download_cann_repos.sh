@@ -13,6 +13,7 @@ repos=(
     "asc-tools"
     "oam-tools"
     "ascend-transformer-boost"
+    "ops-transformer"
     "shmem"
 )
 
@@ -33,6 +34,7 @@ Repos:
   asc-tools
   oam-tools
   ascend-transformer-boost
+  ops-transformer
   shmem
 
 Options:
@@ -51,6 +53,7 @@ Environment:
   CANN_OAM_TOOLS_BRANCH       Branch override for oam-tools
   CANN_ASCEND_TRANSFORMER_BOOST_BRANCH
                               Branch override for ascend-transformer-boost
+  CANN_OPS_TRANSFORMER_BRANCH Branch override for ops-transformer
   CANN_SHMEM_BRANCH           Branch override for shmem
   ATB_BRANCH                  Backward-compatible branch override for ascend-transformer-boost
   SHMEM_BRANCH                Branch override for shmem

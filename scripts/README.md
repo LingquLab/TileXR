@@ -101,37 +101,6 @@ bash scripts/hcomm_clean_build_install.sh
 bash scripts/hcomm_local_install.sh
 ```
 
-### `ops_build_run.sh`
-**Purpose**: Build ops-transformer and run operators.
-
-**Usage**:
-```bash
-bash scripts/ops_build_run.sh
-```
-
-**What it does**:
-- Builds `3rdparty/ops-transformer`
-- Runs operator tests
-- Generates operator binaries
-
-### `ops_only_run.sh`
-**Purpose**: Run ops-transformer operators without rebuilding.
-
-**Usage**:
-```bash
-bash scripts/ops_only_run.sh
-```
-
-**Use case**: After modifying operator code, quickly test without full rebuild.
-
-### `run_ops_test.sh`
-**Purpose**: Run operator test suite.
-
-**Usage**:
-```bash
-bash scripts/run_ops_test.sh
-```
-
 ## Testing
 
 ### `test_build.sh`
@@ -212,9 +181,8 @@ bash scripts/prepare.sh
 ```
 
 **What it does**:
-- Runs CANN installation
-- Builds all dependencies (hcomm, ops-transformer)
-- Sets up environment
+- Installs repo-managed local build utilities
+- Installs MPICH for multi-rank tests
 
 **Use case**: First-time repository setup
 
@@ -227,7 +195,6 @@ bash scripts/cann_download_install.sh
 
 # 2. Build dependencies
 bash scripts/hcomm_build_install.sh
-bash scripts/ops_build_run.sh
 
 # 3. Build TileXR
 source scripts/common_env.sh
@@ -245,9 +212,6 @@ bash scripts/prepare.sh
 ```bash
 # Source environment
 source scripts/common_env.sh
-
-# Rebuild operators after changes
-bash scripts/ops_only_run.sh
 
 # Run tests
 bash scripts/test_allreduce.sh

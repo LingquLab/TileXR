@@ -39,7 +39,6 @@ export ASCEND_DIR=${TILEXR_CANN_HOME}/cann
 export MPI_HOME=${TILEXR_UTIL_HOME}/mpich
 
 export TILEXR_HCOMM_HOME=${TILEXR_3RD_HOME}/hcomm
-export TILEXR_OPS_HOME=${TILEXR_3RD_HOME}/ops-transformer
 
 # 运行日志相关目录
 export TILEXR_RUN_HOME=${TILEXR_HOME}/run
@@ -98,7 +97,6 @@ env_print() {
     success "TILEXR_HOME = ${TILEXR_HOME}"
     success "TILEXR_CANN_HOME = ${TILEXR_CANN_HOME}"
     success "TILEXR_HCOMM_HOME = ${TILEXR_HCOMM_HOME}"
-    success "TILEXR_OPS_HOME = ${TILEXR_OPS_HOME}"
     line
     env | grep ASCEND
     line
