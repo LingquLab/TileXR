@@ -172,7 +172,7 @@ target_link_directories(
 
 The old shmem-backed UDMA proposal has been superseded by TileXR-owned UDMA transport under `src/comm/udma/`.
 
-- `reference/shmem/` is an ignored reference-only checkout created by `reference/download_shmem.sh` when needed.
+- `reference/shmem/` is an ignored reference-only checkout created by `bash reference/download_cann_repos.sh shmem` when needed.
 - Current `tile-comm` does not link `libshmem.so` or `libaclshmem.so`.
 - Do not add shmem includes to `src/comm` unless the architecture is intentionally changed.
 - See [docs/UDMA_INTEGRATION_SUMMARY.md](docs/UDMA_INTEGRATION_SUMMARY.md) for current UDMA architecture notes and historical shmem context.
