@@ -6,6 +6,7 @@ import contextlib
 import dataclasses
 import fcntl
 import json
+import math
 import os
 import pathlib
 import signal
@@ -22,7 +23,7 @@ import npu_state
 
 EXPECTED_REPOSITORY = "LingquLab/TileXR"
 GITHUB_API_VERSION = "2022-11-28"
-GITHUB_TIMEOUT_SECONDS = 30
+GITHUB_TIMEOUT_SECONDS = 10
 BUILD_TIMEOUT_SECONDS = 7200
 HARDWARE_TIMEOUT_SECONDS = 7200
 QUEUE_TIMEOUT_SECONDS = 21600
@@ -233,15 +234,52 @@ def _process_group_exists(pgid: int) -> bool:
         return True
 
 
+def _linux_session_members(pgid: int) -> Tuple[int, ...]:
+    members = []
+    expected_uid = os.geteuid()
+    proc_root = pathlib.Path("/proc")
+    try:
+        entries = list(proc_root.iterdir())
+    except OSError:
+        return ()
+    for entry in entries:
+        if not entry.name.isdecimal():
+            continue
+        try:
+            if entry.stat().st_uid != expected_uid:
+                continue
+            stat_text = (entry / "stat").read_text(encoding="ascii")
+            fields = stat_text.rsplit(")", 1)[1].split()
+            process_group = int(fields[2])
+            session = int(fields[3])
+        except (IndexError, OSError, ValueError):
+            continue
+        if process_group == pgid and session == pgid:
+            members.append(int(entry.name))
+    return tuple(members)
+
+
 def terminate_group(
     child,
     killpg=os.killpg,
     *,
     group_exists: Callable[[int], bool] = _process_group_exists,
+    session_members: Optional[Callable[[int], Tuple[int, ...]]] = None,
     now: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep,
 ):
     """Stop only the process group created for the supplied child."""
+    def members():
+        if session_members is not None:
+            return tuple(session_members(child.pid))
+        if sys.platform.startswith("linux"):
+            return _linux_session_members(child.pid)
+        return (child.pid,) if group_exists(child.pid) else ()
+
+    leader_running = child.poll() is None
+    if not leader_running and not members():
+        child.wait()
+        return
     try:
         killpg(child.pid, signal.SIGTERM)
     except ProcessLookupError:
@@ -249,11 +287,11 @@ def terminate_group(
     deadline = now() + 10.0
     while True:
         child.poll()
-        if not group_exists(child.pid) or now() >= deadline:
+        if not members() or now() >= deadline:
             break
         sleep(min(0.1, max(0.0, deadline - now())))
     child.poll()
-    if group_exists(child.pid):
+    if members():
         try:
             killpg(child.pid, signal.SIGKILL)
         except ProcessLookupError:
@@ -284,9 +322,18 @@ def run_phase(
 ) -> int:
     cancellation = cancellation or CancellationState()
     command = [str(script), str(source), str(artifacts)]
+
+    def command_checkpoint():
+        if cancellation.cancelled:
+            raise Cancelled("gate was cancelled during %s NPU inspection" % phase)
+
     if cancellation.cancelled:
         raise Cancelled("gate was cancelled before %s" % phase)
-    _enforce_policy(phase, read_snapshot())
+    if read_snapshot is npu_state.read_snapshot:
+        preflight_state = read_snapshot(before_command=command_checkpoint)
+    else:
+        preflight_state = read_snapshot()
+    _enforce_policy(phase, preflight_state)
     try:
         child = popen(
             command,
@@ -304,38 +351,49 @@ def run_phase(
         if read_snapshot_with_deadline is not None:
             return read_snapshot_with_deadline(deadline)
         if read_snapshot is npu_state.read_snapshot:
-            return read_snapshot(deadline=deadline, now=now)
+            return read_snapshot(
+                deadline=deadline, now=now, before_command=command_checkpoint
+            )
         return read_snapshot()
 
+    def classify_exit(returncode):
+        if returncode != 0:
+            raise CodeFailure("%s phase exited with status %d" % (phase, returncode))
+        return returncode
+
+    primary_error = None
     try:
         while True:
             if cancellation.cancelled:
                 raise Cancelled("gate was cancelled during %s" % phase)
 
+            returncode = child.poll()
+            if returncode is not None:
+                return classify_exit(returncode)
             if now() >= deadline:
                 raise CodeFailure("%s phase exceeded %.0f seconds" % (phase, timeout_seconds))
             state = monitored_snapshot()
+            returncode = child.poll()
+            if returncode is not None:
+                return classify_exit(returncode)
             if now() >= deadline:
                 raise CodeFailure("%s phase exceeded %.0f seconds" % (phase, timeout_seconds))
             _enforce_policy(phase, state)
-
-            returncode = child.poll()
-            if returncode is not None:
-                if returncode != 0:
-                    if returncode in (23, 126, 127):
-                        raise InfrastructureFailure(
-                            "%s phase reported a runner or toolchain failure (status %d)"
-                            % (phase, returncode)
-                        )
-                    raise CodeFailure("%s phase exited with status %d" % (phase, returncode))
-                return returncode
 
             elapsed = max(0.0, now() - started)
             if elapsed >= timeout_seconds:
                 raise CodeFailure("%s phase exceeded %.0f seconds" % (phase, timeout_seconds))
             sleep(min(10.0, max(0.0, timeout_seconds - elapsed)))
+    except BaseException as error:
+        primary_error = error
+        raise
     finally:
-        terminate(child)
+        try:
+            terminate(child)
+        except BaseException as termination_error:
+            raise _tracked_termination_failure(
+                primary_error, termination_error, collector=False
+            ) from termination_error
 
 
 def fetch_current_merge_sha(
@@ -483,10 +541,23 @@ def orchestrate(
                     raise npu_state.ResourceTimeout(
                         "NPU resource budget was exhausted while acquiring the lock"
                     )
-                snapshot_boundary = queue_snapshot_fn or npu_state.read_snapshot
-
                 def queue_snapshot():
-                    return snapshot_boundary(deadline=resource_deadline, now=resource_clock)
+                    if queue_snapshot_fn is not None:
+                        return queue_snapshot_fn(
+                            deadline=resource_deadline, now=resource_clock
+                        )
+
+                    def command_checkpoint():
+                        if cancellation.cancelled:
+                            raise Cancelled(
+                                "gate was cancelled during queued NPU inspection"
+                            )
+
+                    return npu_state.read_snapshot(
+                        deadline=resource_deadline,
+                        now=resource_clock,
+                        before_command=command_checkpoint,
+                    )
 
                 try:
                     wait_for_idle_fn(
@@ -568,26 +639,56 @@ def parse_cases(path: pathlib.Path) -> Tuple[List[Tuple[str, str, int, float]], 
     cases = []
     diagnostics = []
     if not path.exists():
-        return cases, diagnostics
+        return cases, ["cases.tsv is missing"]
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
     except OSError as error:
         return cases, ["could not read cases.tsv: %s" % error]
+    names = set()
     for number, line in enumerate(lines, 1):
         fields = line.split("\t")
         try:
             if len(fields) != 4 or not fields[0].strip() or not fields[1].strip():
                 raise ValueError("expected four tab-separated fields")
-            cases.append(
-                (fields[0].strip(), fields[1].strip(), int(fields[2]), float(fields[3]))
-            )
+            name = fields[0].strip()
+            status = fields[1].strip().upper()
+            exit_code = int(fields[2])
+            elapsed = float(fields[3])
+            if name in names:
+                raise ValueError("duplicate case name %s" % name)
+            if status not in ("PASS", "FAIL"):
+                raise ValueError("unsupported result status %s" % status)
+            if exit_code < 0:
+                raise ValueError("exit code must be non-negative")
+            if not math.isfinite(elapsed) or elapsed < 0:
+                raise ValueError("elapsed seconds must be finite and non-negative")
+            if status == "PASS" and exit_code != 0:
+                raise ValueError("passing case must have exit code zero")
+            if status == "FAIL" and exit_code == 0:
+                raise ValueError("failing case must have a nonzero exit code")
+            names.add(name)
+            cases.append((name, status, exit_code, elapsed))
         except ValueError as error:
             diagnostics.append("line %d: %s" % (number, error))
     return cases, diagnostics
 
 
+def validate_success_cases(path: pathlib.Path):
+    cases, diagnostics = parse_cases(path)
+    if diagnostics:
+        raise InfrastructureFailure("invalid case evidence: %s" % "; ".join(diagnostics))
+    if not cases:
+        raise InfrastructureFailure("case evidence contains no cases")
+    failed = [case[0] for case in cases if case[1] != "PASS"]
+    if failed:
+        raise InfrastructureFailure(
+            "successful gate contains failed cases: %s" % ", ".join(failed)
+        )
+    return cases
+
+
 def _summary_text(report: GateReport, cases, diagnostics) -> str:
-    passed = [case for case in cases if case[1].lower() in ("pass", "passed", "success")]
+    passed = [case for case in cases if case[1] == "PASS"]
     failed = [case for case in cases if case not in passed]
     failed_names = ", ".join(case[0] for case in failed) or "none"
     detail = report.failure_detail or "none"
@@ -694,7 +795,9 @@ def select_final_failure(current, candidate):
     candidate = _as_gate_failure(candidate)
     if current is None:
         return candidate
-    if getattr(current, "cleanup_failure", False):
+    if getattr(current, "cleanup_failure", False) or getattr(
+        current, "collector_failure", False
+    ):
         return current
     if (
         getattr(candidate, "cleanup_failure", False)
@@ -736,8 +839,21 @@ def invoke_collector(
     except OSError as error:
         raise _collector_failure("artifact collector failed to run: %s" % error) from error
     started = now()
+    normal_deadline = started + 600.0
+    cancellation_deadline = started + 30.0 if cancellation.cancelled else None
+    primary_error = None
     try:
         while True:
+            current = now()
+            if cancellation.cancelled and cancellation_deadline is None:
+                cancellation_deadline = current + 30.0
+            deadline = normal_deadline
+            if cancellation_deadline is not None:
+                deadline = min(deadline, cancellation_deadline)
+            if current >= deadline:
+                raise _collector_failure(
+                    "artifact collector exceeded its bounded finalization deadline"
+                )
             returncode = child.poll()
             if returncode is not None:
                 if returncode != 0:
@@ -745,12 +861,17 @@ def invoke_collector(
                         "artifact collector exited with status %d" % returncode
                     )
                 return
-            elapsed = max(0.0, now() - started)
-            if elapsed >= 600:
-                raise _collector_failure("artifact collector exceeded 600 seconds")
-            collector_sleep(min(1.0, 600 - elapsed))
+            collector_sleep(min(1.0, deadline - current))
+    except BaseException as error:
+        primary_error = error
+        raise
     finally:
-        terminate(child)
+        try:
+            terminate(child)
+        except BaseException as termination_error:
+            raise _tracked_termination_failure(
+                primary_error, termination_error, collector=True
+            ) from termination_error
 
 
 def failure_class_for(error: BaseException) -> str:
@@ -768,6 +889,23 @@ def failure_class_for(error: BaseException) -> str:
 def _collector_failure(message: str) -> InfrastructureFailure:
     error = InfrastructureFailure(message)
     error.collector_failure = True
+    return error
+
+
+def _tracked_termination_failure(primary, termination, *, collector: bool):
+    termination_detail = _as_gate_failure(termination)
+    if primary is None:
+        message = "tracked process-group cleanup failed: %s" % termination_detail
+    else:
+        primary_detail = _as_gate_failure(primary)
+        message = (
+            "primary failure (%s): %s; tracked process-group cleanup failed: %s"
+            % (failure_class_for(primary_detail), primary_detail, termination_detail)
+        )
+    error = InfrastructureFailure(message)
+    error.cleanup_failure = True
+    if collector:
+        error.collector_failure = True
     return error
 
 
@@ -827,6 +965,7 @@ def _run_controller_body(
             cancellation=cancellation,
             report=report,
         )
+        validate_success_cases(config.artifacts / "cases.tsv")
     except BaseException as error:
         failure = _as_gate_failure(error)
 

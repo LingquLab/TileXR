@@ -204,6 +204,22 @@ class ReadSnapshotTests(unittest.TestCase):
         self.assertFalse(state.healthy)
         self.assertEqual(mocked_run.call_count, 1)
 
+    def test_read_snapshot_checks_cancellation_before_each_command(self):
+        before_calls = []
+
+        def before_command():
+            before_calls.append(len(before_calls) + 1)
+            if len(before_calls) == 2:
+                raise RuntimeError("cancelled")
+
+        responses = healthy_responses(fixture("npu_smi_idle.txt"))
+        with mock.patch.object(npu_state.subprocess, "run", side_effect=responses) as mocked_run:
+            with self.assertRaisesRegex(RuntimeError, "cancelled"):
+                npu_state.read_snapshot(before_command=before_command)
+
+        self.assertEqual(before_calls, [1, 2])
+        self.assertEqual(mocked_run.call_count, 1)
+
     def test_read_snapshot_is_unhealthy_when_a_command_fails(self):
         commands = [["npu-smi", "info"]] + [
             ["npu-smi", "info", "-t", "health", "-i", str(device)]

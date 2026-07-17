@@ -112,9 +112,12 @@ def _owner_for_pid(pid: int) -> str:
 def read_snapshot(
     deadline: Optional[float] = None,
     now: Callable[[], float] = time.monotonic,
+    before_command: Optional[Callable[[], None]] = None,
 ) -> Snapshot:
     """Collect processes and all device health reports in one read-only snapshot."""
     def run(command):
+        if before_command is not None:
+            before_command()
         timeout = NPU_SMI_TIMEOUT_SECONDS
         if deadline is not None:
             timeout = min(timeout, max(0.0, deadline - now()))
