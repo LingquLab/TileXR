@@ -120,8 +120,9 @@ The implementation adds these owned components:
 
 The trusted control package contains the test manifest, resource waiter, usage
 monitor, timeout wrapper, process cleanup, artifact collector, and failure
-classifier. Test implementation files remain in their existing suite
-directories.
+classifier. It also contains a runner job-completed hook that removes the
+finished job's workspace after Actions post-job steps have run. Test
+implementation files remain in their existing suite directories.
 
 ## GitHub-hosted Host Checks
 
@@ -191,8 +192,9 @@ The stable toolchain path is:
 Use a trusted provisioning checkout and the repository's local CANN installer
 with an explicit install path. After installation and validation, make the
 toolchain and trusted CI control scripts administrator-owned and read-only to
-the runner. Pull-request workspaces expose the stable toolchain through the
-repo-local `env/cann` location expected by `scripts/common_env.sh`; they do not
+the runner. The workflow supplies the stable path through an explicit
+`TILEXR_CANN_HOME`; `scripts/common_env.sh` preserves that caller-provided path
+while retaining its current repo-local default. Pull-request workspaces do not
 install or update CANN.
 
 One-time provisioning validates:
@@ -247,9 +249,11 @@ second mutual-exclusion boundary in case another CI entrypoint is added later.
 After the build passes, the trusted control script:
 
 1. Acquires the CI lock.
-2. Polls `npu-smi info -t usages` every 60 seconds.
-3. Requires devices 0 through 7 to be healthy and process-free for two
-   consecutive samples, giving a continuous 60-second idle window.
+2. Polls the process table from `npu-smi info` every 60 seconds and queries
+   `npu-smi info -t health -i ${DEVICE_ID}` for each device.
+3. Requires devices 0 through 7 to report `Health: OK` and have no process-table
+   entry for two consecutive samples, giving a continuous 60-second idle
+   window.
 4. Waits at most six hours.
 5. Logs the busy device, process ID, process owner, elapsed time, and remaining
    wait time.
@@ -333,9 +337,11 @@ The gate records these as out of scope rather than silently skipping them:
   is resolved.
 
 The trusted driver handles normal exit, failure, cancellation, `SIGINT`, and
-`SIGTERM`. It tracks the CI process group and terminates only processes owned by
-`tilexr-ci`. It then releases the file lock, removes the untrusted workspace,
-and verifies that no NPU process owned by `tilexr-ci` remains.
+`SIGTERM`. It tracks the CI process group, terminates only processes owned by
+`tilexr-ci`, verifies that no CI NPU process remains, and then releases the file
+lock. An administrator-owned runner job-completed hook removes the untrusted
+workspace after checkout and artifact post-job actions finish, including after
+failure or cancellation.
 
 Mutable compiler caches are not shared between untrusted pull requests in the
 initial implementation. The CANN toolchain is shared only because it is sealed
@@ -397,17 +403,22 @@ boundary as follows:
 - no mutable cross-PR build cache;
 - no use of `pull_request_target` for untrusted code.
 
-Add `.github/CODEOWNERS` entries assigning `@Kur0x` to:
+Create an organization team named `ci-maintainers` with `Kur0x` and `chaowick`
+as team maintainers. Grant `@LingquLab/ci-maintainers` write access only to the
+TileXR repository, then assign that team in `.github/CODEOWNERS` to:
 
 - `.github/CODEOWNERS`;
 - `.github/workflows/`;
 - `.github/actions/` if repository-local Actions are added;
 - `scripts/ci/control/` and `scripts/ci/provision/`;
+- `scripts/cann_download_install.sh` and `scripts/cann_local_install.sh` because
+  provisioning executes them while installing the sealed toolchain;
 - `.gitmodules`.
 
 The existing ruleset's code-owner requirement then protects changes to the
-workflow and runner boundary. The current two-approval requirement remains in
-force.
+workflow and runner boundary. Either team member can review a CI change authored
+by the other; authors cannot approve their own pull requests. The current
+two-approval requirement remains in force.
 
 These controls reduce persistence and privilege but do not make arbitrary
 pull-request execution on a shared host risk-free. That limitation is accepted
@@ -446,25 +457,30 @@ not workflow event types.
 
 ## Rollout
 
-1. Create and validate the `tilexr-ci` account and filesystem layout.
-2. Install and seal CANN 9.1, its 910B Ops package, and the matching trusted
-   control package.
-3. Register the runner and restrict its runner group.
-4. Add CODEOWNERS, workflows, and CI scripts through a normally reviewed pull
+1. Create `ci-maintainers`, add `Kur0x` and `chaowick` as its only team
+   maintainers, grant the team write access only to TileXR, and verify the
+   membership and repository scope.
+2. Add CODEOWNERS, workflows, and CI scripts through a normally reviewed pull
    request. Do not require `PR Gate` yet.
-5. Run a trial pull request through the complete successful path.
-6. Exercise a host-check failure and confirm that `blue` is not scheduled.
-7. Exercise a hardware-test failure and confirm logs and cleanup.
-8. Exercise cancellation by updating a pull request while it is waiting or
+3. Restrict the Actions policy and runner group after the trusted reusable
+   workflow exists on `main`.
+4. Create and validate the `tilexr-ci` account and filesystem layout.
+5. Install and seal CANN 9.1, its 910B Ops package, and the matching trusted
+   control package.
+6. Register the runner in the restricted runner group.
+7. Run a trial pull request through the complete successful path.
+8. Exercise a host-check failure and confirm that `blue` is not scheduled.
+9. Exercise a hardware-test failure and confirm logs and cleanup.
+10. Exercise cancellation by updating a pull request while it is waiting or
    running.
-9. Queue two pull requests and confirm that only one NPU job runs at a time.
-10. Exercise the resource-wait logic with a shortened validation timeout and
+11. Queue two pull requests and confirm that only one NPU job runs at a time.
+12. Exercise the resource-wait logic with a shortened validation timeout and
     confirm that foreign processes are never terminated.
-11. Verify the external-fork approval policy through repository settings and a
+13. Verify the external-fork approval policy through repository settings and a
     controlled fork workflow run.
-12. Confirm that `PR Gate` appears on a real pull request, then add it to the
+14. Confirm that `PR Gate` appears on a real pull request, then add it to the
     ruleset as a strict required check.
-13. Confirm that a failing or pending gate blocks merge and a successful,
+15. Confirm that a failing or pending gate blocks merge and a successful,
     up-to-date gate permits merge.
 
 ## Rollback
