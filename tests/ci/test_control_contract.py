@@ -2,6 +2,7 @@
 
 import pathlib
 import shutil
+import shlex
 import stat
 import subprocess
 import tempfile
@@ -10,6 +11,13 @@ import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 CONTROL = ROOT / "scripts" / "ci" / "control"
+
+
+def extract_shell_function(text, name):
+    marker = "{}() {{".format(name)
+    start = text.index(marker)
+    end = text.index("\n}\n", start) + len("\n}\n")
+    return text[start:end]
 
 
 class ControlSourceContractTests(unittest.TestCase):
@@ -112,6 +120,30 @@ class ControlSourceContractTests(unittest.TestCase):
             self.assertIn(token, text)
         self.assertIn("test -x", text)
 
+    def test_build_manifest_validates_installed_headers_libraries_and_checker(self):
+        text = self.read("scripts/ci/control/build_blue.sh")
+        for token in [
+            "tilexr_api.h",
+            "tilexr_types.h",
+            "comm_args.h",
+            "tilexr_sync.h",
+            "tilexr_udma.h",
+            "tilexr_sdma.h",
+            "tilexr_ep.h",
+            "tilexr_collectives.h",
+            "tilexr_collectives_perf.h",
+            "libtile-comm.so",
+            "libtilexr-ep.so",
+            "libtilexr-collectives.so",
+            "build-ci/tools/checker/tilexr_checker",
+            "build-ci/tools/checker/libtilexr-checker-core.a",
+            "validate_dynamic_output",
+            "ldd-${label}.txt",
+            "readelf-${label}.txt",
+            "top-level-reinstall",
+        ]:
+            self.assertIn(token, text)
+
     def test_hardware_manifest_has_required_8_card_coverage(self):
         text = self.read("scripts/ci/control/run_hardware.sh")
         for token in [
@@ -174,6 +206,26 @@ class ControlSourceContractTests(unittest.TestCase):
         self.assertIn("vLLM model inference: out of scope for this gate", text)
         self.assertIn("Performance regression thresholds: out of scope for this gate", text)
 
+    def test_hardware_manifest_captures_bounded_state_topology_and_cann_evidence(self):
+        hardware = self.read("scripts/ci/control/run_hardware.sh")
+        build = self.read("scripts/ci/control/build_blue.sh")
+        for token in [
+            "npu-state-before.txt",
+            "npu-state-after.txt",
+            "npu-topology.txt",
+            "trap finalize_hardware EXIT",
+            "/usr/bin/timeout --signal=TERM --kill-after=2 10",
+        ]:
+            self.assertIn(token, hardware)
+        for token in [
+            "version-cann.txt",
+            "ascend_toolkit_install.info",
+            "version.info",
+            "version.cfg",
+            "9\\.1",
+        ]:
+            self.assertIn(token, build)
+
     def test_build_manifest_resets_cases_and_records_each_safe_test(self):
         text = self.read("scripts/ci/control/build_blue.sh")
         self.assertIn(': > "${CASES_FILE}"', text)
@@ -218,8 +270,103 @@ class ControlSourceContractTests(unittest.TestCase):
         ]:
             self.assertIn(token, text)
 
+    def test_collector_requires_authoritative_root_evidence(self):
+        text = self.read("scripts/ci/control/collect_artifacts.sh")
+        self.assertIn("require_root_evidence", text)
+        self.assertIn('require_root_evidence "cases.tsv"', text)
+        self.assertIn('require_root_evidence "summary.md"', text)
+
+    def test_job_hook_requires_exact_canonical_fixed_paths(self):
+        text = self.read("scripts/ci/control/job_completed.sh")
+        self.assertTrue(text.startswith("#!/bin/bash\n"))
+        self.assertIn(
+            '[[ "${RUNNER_WORK_ROOT_REAL}" != "${RUNNER_WORK_ROOT}" ]]', text
+        )
+        self.assertIn(
+            '[[ "${WORKSPACE_PARENT_REAL}" != "${WORKSPACE_PARENT}" ]]', text
+        )
+        self.assertIn('[[ "${WORKSPACE_REAL}" != "${WORKSPACE}" ]]', text)
+
+
+class HardwareHelperBehaviorTests(unittest.TestCase):
+    def hardware_function(self, name):
+        text = (CONTROL / "run_hardware.sh").read_text(encoding="utf-8")
+        return extract_shell_function(text, name)
+
+    def test_required_no_skip_wrapper_rejects_skip_and_accepts_real_pass(self):
+        hardware = (CONTROL / "run_hardware.sh").read_text(encoding="utf-8")
+        self.assertIn("run_case sdma-disabled-comm run_required_no_skip", hardware)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            trusted = root / "trusted"
+            trusted.mkdir()
+            skipped = root / "skipped.sh"
+            skipped.write_text(
+                "#!/bin/bash\necho 'Skip test_tilexr_sdma_disabled_comm: aclInit failed'\nexit 0\n"
+            )
+            passed = root / "passed.sh"
+            passed.write_text("#!/bin/bash\necho passed\nexit 0\n")
+            skipped.chmod(0o755)
+            passed.chmod(0o755)
+            function = self.hardware_function("run_required_no_skip")
+
+            def invoke(command):
+                harness = "set -euo pipefail\nTRUSTED_ENV_ROOT={}\n{}\n".format(
+                    shlex.quote(str(trusted)), function
+                )
+                harness += "run_required_no_skip 'Skip test_tilexr_sdma_disabled_comm:' {}\n".format(
+                    shlex.quote(str(command))
+                )
+                return subprocess.run(
+                    ["bash", "-c", harness],
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+
+            self.assertNotEqual(0, invoke(skipped).returncode)
+            self.assertEqual(0, invoke(passed).returncode)
+
+    def test_health_parser_uses_first_exact_top_level_field(self):
+        hardware = (CONTROL / "run_hardware.sh").read_text(encoding="utf-8")
+        self.assertIn("| parse_top_level_health)", hardware)
+        function = self.hardware_function("parse_top_level_health")
+
+        def parse(output):
+            harness = "{}\nprintf '%s' {} | parse_top_level_health\n".format(
+                function, shlex.quote(output)
+            )
+            return subprocess.run(
+                ["bash", "-c", harness],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+
+        ok = "Health : OK\nMCU Health : Warning\n"
+        misleading = "Health : Warning\nMCU Health : OK\n"
+        self.assertEqual("OK", parse(ok).stdout.strip())
+        self.assertEqual("Warning", parse(misleading).stdout.strip())
+
+    def test_exit_evidence_failure_preserves_primary_and_fails_success(self):
+        function = self.hardware_function("finalize_hardware")
+        with tempfile.TemporaryDirectory() as temporary:
+            prefix = "ARTIFACT_DIR={}\n{}\n".format(
+                shlex.quote(temporary), function
+            )
+            prefix += "capture_npu_evidence() { return 9; }\n"
+            failed = subprocess.run(["bash", "-c", prefix + "false; finalize_hardware"])
+            passed = subprocess.run(["bash", "-c", prefix + "true; finalize_hardware"])
+            self.assertEqual(1, failed.returncode)
+            self.assertEqual(9, passed.returncode)
+
 
 class ArtifactCollectorBehaviorTests(unittest.TestCase):
+    def seed_evidence(self, artifacts):
+        artifacts.mkdir(parents=True, exist_ok=True)
+        (artifacts / "cases.tsv").write_text("case\tpass\t0\t1\n")
+        (artifacts / "summary.md").write_text("# Summary\n")
+
     def run_collector(self, source, artifacts):
         return subprocess.run(
             [str(CONTROL / "collect_artifacts.sh"), str(source), str(artifacts)],
@@ -256,7 +403,7 @@ class ArtifactCollectorBehaviorTests(unittest.TestCase):
             (source / "outside.log").symlink_to(external / "outside.log")
             (source / "linked-dir").symlink_to(external, target_is_directory=True)
 
-            artifacts.mkdir()
+            self.seed_evidence(artifacts)
             (artifacts / "ctest-top-level.xml").write_text("<testsuite/>\n")
             result = self.run_collector(source, artifacts)
             self.assertEqual(0, result.returncode, result.stderr)
@@ -283,6 +430,8 @@ class ArtifactCollectorBehaviorTests(unittest.TestCase):
                 self.assertFalse((collected / relative).exists(), relative)
             self.assertFalse((artifacts / "source/.artifacts").exists())
             self.assertTrue((artifacts / "environment.txt").is_file())
+            self.assertEqual("case\tpass\t0\t1\n", (artifacts / "cases.tsv").read_text())
+            self.assertEqual("# Summary\n", (artifacts / "summary.md").read_text())
 
             manifest = (artifacts / "manifest.txt").read_text().splitlines()
             self.assertEqual(sorted(manifest), manifest)
@@ -300,6 +449,7 @@ class ArtifactCollectorBehaviorTests(unittest.TestCase):
             source = root / "source"
             artifacts = root / "artifacts"
             source.mkdir()
+            self.seed_evidence(artifacts)
             huge = source / "huge.log"
             with huge.open("wb") as output:
                 output.truncate(100 * 1024 * 1024 + 1)
@@ -317,7 +467,7 @@ class ArtifactCollectorBehaviorTests(unittest.TestCase):
             artifacts = root / "artifacts"
             external = root / "external.log"
             source.mkdir()
-            artifacts.mkdir()
+            self.seed_evidence(artifacts)
             external.write_text("external\n")
             (artifacts / "keep.xml").write_text("<testsuite/>\n")
             (artifacts / "payload.o").write_bytes(b"object")
@@ -337,6 +487,41 @@ class ArtifactCollectorBehaviorTests(unittest.TestCase):
             rejected = (artifacts / "artifact-rejections.txt").read_text()
             for token in ["payload.o", "library.so", "outside.log", "huge.log"]:
                 self.assertIn(token, rejected)
+
+    def test_collector_fails_closed_on_missing_or_unsafe_root_evidence(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            source = root / "source"
+            source.mkdir()
+
+            cases_missing = root / "cases-missing"
+            cases_missing.mkdir()
+            (cases_missing / "summary.md").write_text("# Summary\n")
+            self.assertNotEqual(
+                0, self.run_collector(source, cases_missing).returncode
+            )
+
+            summary_missing = root / "summary-missing"
+            summary_missing.mkdir()
+            (summary_missing / "cases.tsv").write_text("case\tpass\t0\t1\n")
+            self.assertNotEqual(
+                0, self.run_collector(source, summary_missing).returncode
+            )
+
+            symlinked = root / "symlinked"
+            symlinked.mkdir()
+            real_cases = root / "real-cases.tsv"
+            real_cases.write_text("case\tpass\t0\t1\n")
+            (symlinked / "cases.tsv").symlink_to(real_cases)
+            (symlinked / "summary.md").write_text("# Summary\n")
+            self.assertNotEqual(0, self.run_collector(source, symlinked).returncode)
+
+            oversized = root / "oversized"
+            oversized.mkdir()
+            (oversized / "cases.tsv").write_text("case\tpass\t0\t1\n")
+            with (oversized / "summary.md").open("wb") as output:
+                output.truncate(100 * 1024 * 1024 + 1)
+            self.assertNotEqual(0, self.run_collector(source, oversized).returncode)
 
     def test_collector_rejects_symlink_source_and_artifact_directories(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -358,6 +543,7 @@ class ArtifactCollectorBehaviorTests(unittest.TestCase):
 
 class JobHookBehaviorTests(unittest.TestCase):
     def materialize_hook(self, root, runner_work_root):
+        runner_work_root = runner_work_root.resolve()
         source = (CONTROL / "job_completed.sh").read_text(encoding="utf-8")
         source = source.replace(
             "/home/tilexr-ci/actions-runner/_work", str(runner_work_root)
@@ -419,6 +605,39 @@ class JobHookBehaviorTests(unittest.TestCase):
             workspace_parent = runner_root / "TileXR"
             workspace_parent.mkdir(parents=True)
             (workspace_parent / "TileXR").symlink_to(root / "missing")
+            hook = self.materialize_hook(root, runner_root)
+
+            result = subprocess.run(
+                [str(hook)], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+            )
+            self.assertNotEqual(0, result.returncode)
+
+    def test_job_hook_refuses_an_intermediate_symlink_inside_work_root(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            runner_root = root / "runner" / "_work"
+            redirected = runner_root / "redirected" / "TileXR"
+            redirected.mkdir(parents=True)
+            (redirected / "keep").write_text("keep")
+            (runner_root / "TileXR").symlink_to(
+                runner_root / "redirected", target_is_directory=True
+            )
+            hook = self.materialize_hook(root, runner_root)
+
+            result = subprocess.run(
+                [str(hook)], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+            )
+            self.assertNotEqual(0, result.returncode)
+            self.assertEqual("keep", (redirected / "keep").read_text())
+
+    def test_job_hook_refuses_a_dangling_intermediate_symlink(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            runner_root = root / "runner" / "_work"
+            runner_root.mkdir(parents=True)
+            (runner_root / "TileXR").symlink_to(
+                runner_root / "missing", target_is_directory=True
+            )
             hook = self.materialize_hook(root, runner_root)
 
             result = subprocess.run(

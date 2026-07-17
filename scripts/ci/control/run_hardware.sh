@@ -114,9 +114,42 @@ run_in_dir() {
     )
 }
 
+run_required_no_skip() {
+    local marker="$1"
+    shift
+    local output status
+    output="$(mktemp "${TRUSTED_ENV_ROOT}/required-case.XXXXXX")" || return 1
+    if "$@" > "${output}" 2>&1; then
+        status=0
+    else
+        status=$?
+    fi
+    if ! /bin/cat "${output}"; then
+        status=1
+    fi
+    if grep -F "${marker}" "${output}" >/dev/null; then
+        echo "ERROR: required hardware case reported a skip: ${marker}" >&2
+        status=1
+    fi
+    /bin/rm -f "${output}"
+    return "${status}"
+}
+
+parse_top_level_health() {
+    awk '
+        /^[[:space:]]*Health[[:space:]]*:/ {
+            value = $0
+            sub(/^[[:space:]]*Health[[:space:]]*:[[:space:]]*/, "", value)
+            sub(/[[:space:]]*$/, "", value)
+            print value
+            exit
+        }
+    '
+}
+
 check_device_health() {
     local device="$1"
-    local output status
+    local health output status
     set +e
     output="$(/usr/bin/timeout --signal=TERM --kill-after=2 10 \
         npu-smi info -t health -i "${device}" 2>&1)"
@@ -126,10 +159,52 @@ check_device_health() {
     if [[ "${status}" -ne 0 ]]; then
         return "${status}"
     fi
-    if ! printf '%s\n' "${output}" | grep -Eq 'Health([[:space:]]*:[[:space:]]*|[^[:cntrl:]]*)OK'; then
-        echo "ERROR: device ${device} did not report Health: OK" >&2
+    health="$(printf '%s\n' "${output}" | parse_top_level_health)"
+    if [[ "${health}" != "OK" ]]; then
+        echo "ERROR: device ${device} reported top-level Health: ${health:-missing}" >&2
         return 1
     fi
+}
+
+capture_npu_evidence() {
+    local destination="$1"
+    shift
+    local output status
+    output="$(mktemp "${TRUSTED_ENV_ROOT}/npu-evidence.XXXXXX")" || return 1
+    if /usr/bin/timeout --signal=TERM --kill-after=2 10 "$@" > "${output}" 2>&1; then
+        if [[ -L "${destination}" || -f "${destination}" ]]; then
+            /bin/rm -f "${destination}"
+        elif [[ -e "${destination}" ]]; then
+            echo "ERROR: evidence destination is not a regular file: ${destination}" >&2
+            /bin/rm -f "${output}"
+            return 1
+        fi
+        if /bin/mv -f "${output}" "${destination}"; then
+            return 0
+        else
+            status=$?
+        fi
+    else
+        status=$?
+    fi
+    echo "ERROR: failed to capture ${destination##*/}" >&2
+    /bin/cat "${output}" >&2 || true
+    /bin/rm -f "${output}"
+    return "${status}"
+}
+
+finalize_hardware() {
+    local primary_status=$?
+    local evidence_status
+    trap - EXIT
+    set +e
+    capture_npu_evidence "${ARTIFACT_DIR}/npu-state-after.txt" npu-smi info
+    evidence_status=$?
+    set -e
+    if [[ "${primary_status}" -eq 0 && "${evidence_status}" -ne 0 ]]; then
+        primary_status="${evidence_status}"
+    fi
+    exit "${primary_status}"
 }
 
 case "${PR_NUMBER:-}" in
@@ -162,6 +237,10 @@ export TILEXR_SKIP_IF_INSUFFICIENT_NPUS=0
 export TILEXR_COLLECTIVES_RUN_TIMEOUT_SEC=600
 export TILEXR_COMM_ID="127.0.0.1:$((20000 + PR_NUMBER % 20000))"
 
+trap finalize_hardware EXIT
+capture_npu_evidence "${ARTIFACT_DIR}/npu-state-before.txt" npu-smi info
+capture_npu_evidence "${ARTIFACT_DIR}/npu-topology.txt" npu-smi info -t topo
+
 for device in 0 1 2 3 4 5 6 7; do
     run_case "npu-health-${device}" check_device_health "${device}"
 done
@@ -174,7 +253,8 @@ run_case udma-eight-rank-fallback \
     /usr/bin/timeout --signal=TERM --kill-after=10 600 \
     mpirun -n 8 "${SOURCE_DIR}/tests/udma/install/bin/test_tilexr_udma"
 
-run_case sdma-disabled-comm \
+run_case sdma-disabled-comm run_required_no_skip \
+    "Skip test_tilexr_sdma_disabled_comm:" \
     /usr/bin/timeout --signal=TERM --kill-after=10 600 \
     env -u TILEXR_ENABLE_SDMA ASCEND_RT_VISIBLE_DEVICES=0 \
         "${SOURCE_DIR}/tests/sdma/install/bin/test_tilexr_sdma_disabled_comm"

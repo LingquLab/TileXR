@@ -129,6 +129,107 @@ require_executable() {
     fi
 }
 
+require_regular_file() {
+    local path="$1"
+    if [[ -L "${path}" || ! -f "${path}" ]]; then
+        echo "ERROR: required regular file is missing: ${path}" >&2
+        return 1
+    fi
+}
+
+installed_library() {
+    local name="$1"
+    local path
+    for directory in lib64 lib; do
+        path="${SOURCE_DIR}/install/${directory}/${name}"
+        if [[ -f "${path}" && ! -L "${path}" ]]; then
+            printf '%s\n' "${path}"
+            return 0
+        fi
+    done
+    echo "ERROR: required installed library is missing: ${name}" >&2
+    return 1
+}
+
+validate_dynamic_output() {
+    local label="$1"
+    local path="$2"
+    local expect_hal="$3"
+    local ldd_report="${ARTIFACT_DIR}/ldd-${label}.txt"
+    local readelf_report="${ARTIFACT_DIR}/readelf-${label}.txt"
+
+    if ! /usr/bin/ldd "${path}" > "${ldd_report}" 2>&1; then
+        echo "ERROR: ldd failed for ${path}" >&2
+        return 1
+    fi
+    if grep -E '=>[[:space:]]*not found|[^[:space:]]+[[:space:]]+not found' \
+        "${ldd_report}" >/dev/null; then
+        echo "ERROR: unresolved dynamic dependency for ${path}" >&2
+        return 1
+    fi
+    if grep -E '=>[^[:cntrl:]]*devlib' "${ldd_report}" >/dev/null; then
+        echo "ERROR: runtime dependency resolved through CANN devlib for ${path}" >&2
+        return 1
+    fi
+    if [[ "${expect_hal}" == "yes" ]]; then
+        if ! grep -F 'libascend_hal.so' "${ldd_report}" >/dev/null; then
+            echo "ERROR: libascend_hal.so is absent for ${path}" >&2
+            return 1
+        fi
+        if grep -E 'libascend_hal\.so[^[:cntrl:]]*devlib' "${ldd_report}" >/dev/null; then
+            echo "ERROR: libascend_hal.so resolved through CANN devlib for ${path}" >&2
+            return 1
+        fi
+    fi
+
+    /usr/bin/readelf -d "${path}" > "${readelf_report}"
+    if grep -E '\((RPATH|RUNPATH)\)[^[:cntrl:]]*devlib' \
+        "${readelf_report}" >/dev/null; then
+        echo "ERROR: RPATH or RUNPATH contains CANN devlib for ${path}" >&2
+        return 1
+    fi
+}
+
+capture_cann_metadata() {
+    local output="${ARTIFACT_DIR}/version-cann.txt"
+    local list_file
+    local found=0
+    local metadata
+    local version_match=0
+    list_file="$(mktemp "${TRUSTED_ENV_ROOT}/cann-metadata.XXXXXX")" || return 1
+    if ! /usr/bin/find -P "${ASCEND_HOME_PATH}" -maxdepth 4 -type f \
+        \( -name 'version.info' -o -name 'version.cfg' \
+           -o -name 'ascend_toolkit_install.info' \
+           -o -name '*ops*install.info' \) -print > "${list_file}"; then
+        /bin/rm -f "${list_file}"
+        return 1
+    fi
+    : > "${output}"
+    while IFS= read -r metadata; do
+        if [[ ! -r "${metadata}" || -L "${metadata}" ]]; then
+            continue
+        fi
+        printf '===== %s =====\n' "${metadata}" >> "${output}"
+        /bin/cat "${metadata}" >> "${output}"
+        printf '\n' >> "${output}"
+        if grep -Eq '9\.1([.]0)?' "${metadata}"; then
+            version_match=1
+        fi
+        found=$((found + 1))
+    done < <(LC_ALL=C sort -u "${list_file}")
+    /bin/rm -f "${list_file}"
+    if [[ "${found}" -eq 0 ]]; then
+        echo "ERROR: no sealed CANN version or installation metadata was found" >&2
+        return 1
+    fi
+    if [[ "${version_match}" -ne 1 ]]; then
+        echo "ERROR: sealed CANN metadata does not report version 9.1" >&2
+        return 1
+    fi
+}
+
+capture_cann_metadata
+
 BUILD_JOBS="$(nproc)"
 rm -rf \
     "${SOURCE_DIR}/build-ci" \
@@ -196,6 +297,10 @@ run_logged_step "memory-build" cmake \
     --build "${SOURCE_DIR}/tests/memory/build" --target install -j"${BUILD_JOBS}"
 run_case memory-demo-sources "${SOURCE_DIR}/tests/memory/install/bin/test_tilexr_memory_demo_sources"
 
+# Dedicated suite builds reuse the root install prefix with optional components
+# disabled. Restore the complete top-level install before validating outputs.
+run_logged_step "top-level-reinstall" cmake --install "${SOURCE_DIR}/build-ci"
+
 for required_binary in \
     "${SOURCE_DIR}/tests/udma/install/bin/test_tilexr_udma" \
     "${SOURCE_DIR}/tests/memory/install/bin/tilexr_memory_demo" \
@@ -208,34 +313,25 @@ do
     require_executable "${required_binary}"
 done
 
-TILEXR_LIBRARY="${SOURCE_DIR}/install/lib/libtile-comm.so"
-if [[ -f "${SOURCE_DIR}/install/lib64/libtile-comm.so" ]]; then
-    TILEXR_LIBRARY="${SOURCE_DIR}/install/lib64/libtile-comm.so"
-fi
-if [[ ! -f "${TILEXR_LIBRARY}" ]]; then
-    echo "ERROR: installed libtile-comm.so is missing" >&2
-    exit 1
-fi
+for required_header in \
+    tilexr_api.h tilexr_types.h comm_args.h tilexr_sync.h \
+    tilexr_data_as_flag.h tilexr_perf_trace.h \
+    tilexr_udma.h tilexr_udma_reg.h tilexr_udma_types.h \
+    tilexr_sdma_config.h tilexr_sdma_types.h tilexr_sdma.h tilexr_sdma_compat.h \
+    tilexr_ep.h tilexr_collectives.h tilexr_collectives_perf.h
+do
+    require_regular_file "${SOURCE_DIR}/install/include/${required_header}"
+done
 
-LDD_REPORT="${ARTIFACT_DIR}/ldd-tile-comm.txt"
-READELF_REPORT="${ARTIFACT_DIR}/readelf-tile-comm.txt"
-ldd "${TILEXR_LIBRARY}" > "${LDD_REPORT}" 2>&1 || true
-if ! grep -F "libascend_hal.so" "${LDD_REPORT}" >/dev/null; then
-    echo "ERROR: libascend_hal.so is absent from the libtile-comm dependency report" >&2
-    exit 1
-fi
-if grep -E 'libascend_hal\.so[^[:cntrl:]]*=>[[:space:]]*not found|libascend_hal\.so[[:space:]]*=>[[:space:]]*not found' \
-    "${LDD_REPORT}" >/dev/null; then
-    echo "ERROR: libascend_hal.so is unresolved" >&2
-    exit 1
-fi
-if grep -E 'libascend_hal\.so[^[:cntrl:]]*devlib' "${LDD_REPORT}" >/dev/null; then
-    echo "ERROR: libascend_hal.so resolved through CANN devlib" >&2
-    exit 1
-fi
+TILEXR_LIBRARY="$(installed_library libtile-comm.so)"
+EP_LIBRARY="$(installed_library libtilexr-ep.so)"
+COLLECTIVES_LIBRARY="$(installed_library libtilexr-collectives.so)"
+CHECKER_EXECUTABLE="${SOURCE_DIR}/build-ci/tools/checker/tilexr_checker"
+CHECKER_CORE="${SOURCE_DIR}/build-ci/tools/checker/libtilexr-checker-core.a"
+require_executable "${CHECKER_EXECUTABLE}"
+require_regular_file "${CHECKER_CORE}"
 
-/usr/bin/readelf -d "${TILEXR_LIBRARY}" > "${READELF_REPORT}"
-if grep -E '\((RPATH|RUNPATH)\)[^[:cntrl:]]*devlib' "${READELF_REPORT}" >/dev/null; then
-    echo "ERROR: libtile-comm RPATH|RUNPATH contains CANN devlib" >&2
-    exit 1
-fi
+validate_dynamic_output tile-comm "${TILEXR_LIBRARY}" yes
+validate_dynamic_output tilexr-ep "${EP_LIBRARY}" yes
+validate_dynamic_output tilexr-collectives "${COLLECTIVES_LIBRARY}" yes
+validate_dynamic_output tilexr-checker "${CHECKER_EXECUTABLE}" no

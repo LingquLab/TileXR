@@ -33,6 +33,24 @@ if [[ "${SOURCE_DIR}" == "${ARTIFACT_DIR}/"* ]]; then
     exit 2
 fi
 
+require_root_evidence() {
+    local name="$1"
+    local path="${ARTIFACT_DIR}/${name}"
+    local size
+    if [[ -L "${path}" || ! -f "${path}" ]]; then
+        echo "ERROR: required root evidence is missing or unsafe: ${name}" >&2
+        return 1
+    fi
+    size="$(wc -c < "${path}" | tr -d '[:space:]')"
+    if [[ ! "${size}" =~ ^[0-9]+$ || "${size}" -gt "${MAX_ARTIFACT_BYTES}" ]]; then
+        echo "ERROR: required root evidence exceeds 100 MiB: ${name}" >&2
+        return 1
+    fi
+}
+
+require_root_evidence "cases.tsv"
+require_root_evidence "summary.md"
+
 COLLECTED_ROOT="${ARTIFACT_DIR}/source"
 case "${COLLECTED_ROOT}" in
     "${ARTIFACT_DIR}"/*) ;;
@@ -67,7 +85,7 @@ is_allowed_artifact() {
     esac
     case "${basename}" in
         *.log|*.xml|summary.csv|trace.json|cases.tsv|summary.md|environment.txt|\
-        ldd-*.txt|readelf-*.txt|dependencies-*.txt|npu-state-*.txt|version-*.txt)
+        ldd-*.txt|readelf-*.txt|dependencies-*.txt|npu-state-*.txt|npu-topology.txt|version-*.txt)
             return 0
             ;;
     esac
