@@ -247,8 +247,12 @@ def terminate_group(
     except ProcessLookupError:
         pass
     deadline = now() + 10.0
-    while group_exists(child.pid) and now() < deadline:
+    while True:
+        child.poll()
+        if not group_exists(child.pid) or now() >= deadline:
+            break
         sleep(min(0.1, max(0.0, deadline - now())))
+    child.poll()
     if group_exists(child.pid):
         try:
             killpg(child.pid, signal.SIGKILL)
@@ -420,6 +424,7 @@ def orchestrate(
     sleep_fn: Optional[Callable[[float], None]] = None,
     emit: Callable[[str], None] = print,
     resource_now: Optional[Callable[[], float]] = None,
+    queue_snapshot_fn: Optional[Callable] = None,
 ):
     validate_config(config)
     report = report or GateReport(pr_number=config.pr_number, merge_sha=config.expected_merge_sha)
@@ -455,11 +460,17 @@ def orchestrate(
 
     report.queue_outcome = "waiting"
     queue_started = resource_clock()
+    resource_deadline = queue_started + QUEUE_TIMEOUT_SECONDS
     queue_finished = False
     try:
+        lock_budget = max(0.0, resource_deadline - resource_clock())
+        if lock_budget <= 0:
+            raise npu_state.ResourceTimeout(
+                "NPU resource budget was exhausted before lock acquisition"
+            )
         with lock_fn(
             cancellation=cancellation,
-            max_wait_seconds=QUEUE_TIMEOUT_SECONDS,
+            max_wait_seconds=lock_budget,
             now=resource_clock,
             sleep=phase_sleep,
         ):
@@ -472,9 +483,14 @@ def orchestrate(
                     raise npu_state.ResourceTimeout(
                         "NPU resource budget was exhausted while acquiring the lock"
                     )
+                snapshot_boundary = queue_snapshot_fn or npu_state.read_snapshot
+
+                def queue_snapshot():
+                    return snapshot_boundary(deadline=resource_deadline, now=resource_clock)
+
                 try:
                     wait_for_idle_fn(
-                        read_snapshot=read_snapshot_fn,
+                        read_snapshot=queue_snapshot,
                         sleep=phase_sleep,
                         now=resource_clock,
                         emit=emit,

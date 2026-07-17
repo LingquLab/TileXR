@@ -142,6 +142,26 @@ class FakeProcess:
 
 
 class TerminationTests(unittest.TestCase):
+    def test_live_group_leader_is_reaped_promptly_after_term(self):
+        child = subprocess.Popen(["sleep", "60"], start_new_session=True)
+        signals = []
+
+        def killpg(pgid, signum):
+            signals.append(signum)
+            os.killpg(pgid, signum)
+
+        started = time.monotonic()
+        try:
+            gate.terminate_group(child, killpg=killpg)
+        finally:
+            if child.poll() is None:
+                os.killpg(child.pid, signal.SIGKILL)
+                child.wait()
+
+        self.assertLess(time.monotonic() - started, 2.0)
+        self.assertEqual(signals, [signal.SIGTERM])
+        self.assertIsNotNone(child.returncode)
+
     def test_exited_group_leader_does_not_leave_background_descendant(self):
         with tempfile.TemporaryDirectory() as directory:
             pid_file = pathlib.Path(directory) / "descendant.pid"
@@ -562,6 +582,38 @@ class LockOrchestrationTests(unittest.TestCase):
                 lock_fn=lock, emit=lambda line: None, resource_now=lambda: clock[0],
             )
         waiter.assert_not_called()
+        self.assertEqual(phases, ["build"])
+
+    def test_snapshot_at_end_of_shared_budget_cannot_launch_hardware(self):
+        clock = [0.0]
+        phases = []
+        observed = {}
+
+        @contextlib.contextmanager
+        def lock(**kwargs):
+            observed["lock_budget"] = kwargs["max_wait_seconds"]
+            clock[0] = 21599.0
+            yield
+
+        def queue_snapshot(*, deadline, now):
+            observed["deadline"] = deadline
+            clock[0] = deadline
+            return snapshot()
+
+        with self.assertRaises(npu_state.ResourceTimeout):
+            gate.orchestrate(
+                gate.Config(pathlib.Path("/source"), pathlib.Path("/artifacts"), "merge", "LingquLab/TileXR", 42),
+                control_dir=pathlib.Path("/trusted"), token="token", cancellation=gate.CancellationState(),
+                run_phase_fn=lambda name, *args, **kwargs: phases.append(name) or 0,
+                read_snapshot_fn=lambda: snapshot(), queue_snapshot_fn=queue_snapshot,
+                fetch_merge_sha_fn=lambda pr, token: "merge",
+                verify_merge_sha_fn=lambda source, expected: expected,
+                lock_fn=lock, sleep_fn=lambda seconds: None,
+                emit=lambda line: None, resource_now=lambda: clock[0],
+            )
+
+        self.assertEqual(observed, {"lock_budget": 21600.0, "deadline": 21600.0})
+        self.assertEqual(clock[0], 21600.0)
         self.assertEqual(phases, ["build"])
 
     def test_cancellation_interrupts_resource_wait_and_maps_to_130(self):
