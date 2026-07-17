@@ -693,6 +693,7 @@ void TestAllToAllBigDataSource()
     CHECK_CONTAINS(kernel, "BigDataFullmeshTraceRecordTaskSpan");
     CHECK_CONTAINS(kernel, "if (trace == nullptr");
     CHECK_CONTAINS(kernel, "AscendC::GetSystemCycle()");
+    CHECK_CONTAINS(kernel, "auto fullmeshTrace = (!remotePutOnly && use35Core &&");
     CHECK_CONTAINS(kernel, "kFullmeshTracePhaseSelfCopy");
     CHECK_CONTAINS(kernel, "kFullmeshTracePhasePeerCopy");
     CHECK_CONTAINS(kernel, "kFullmeshTracePhasePublishCopyReady");

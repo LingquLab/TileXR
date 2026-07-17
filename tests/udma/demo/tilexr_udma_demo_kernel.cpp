@@ -2865,11 +2865,7 @@ extern "C" __global__ __aicore__ void tilexr_udma_all_to_all_bigdata_kernel(
     const bool remotePutOnly = (force35CoreFlag & 0x2U) != 0U;
     const int32_t ranksPerNode = BigDataNormalizeRanksPerNode(static_cast<int32_t>(force35CoreFlag >> 8U));
     auto fullmeshTraceBuffer = reinterpret_cast<__gm__ uint8_t*>(fullmeshTraceGM);
-    auto fullmeshTrace = (!remotePutOnly && force35Core &&
-        blockIdx >= 0 && blockIdx < static_cast<int32_t>(TileXR::Demo::kFullmeshTraceMaxCores)) ?
-        fullmeshTraceBuffer : nullptr;
     const uint32_t traceCore = static_cast<uint32_t>(blockIdx);
-    const uint64_t kernelStart = BigDataFullmeshTraceCycle(fullmeshTrace);
 
     if (blockIdx == 0 && debug != nullptr) {
         debug[0] = TILEXR_UDMA_DEMO_MAGIC;
@@ -2891,6 +2887,10 @@ extern "C" __global__ __aicore__ void tilexr_udma_all_to_all_bigdata_kernel(
         return;
     }
     const bool use35Core = BigDataUse35Core(rankSize, force35Core, ranksPerNode);
+    auto fullmeshTrace = (!remotePutOnly && use35Core &&
+        blockIdx >= 0 && blockIdx < static_cast<int32_t>(TileXR::Demo::kFullmeshTraceMaxCores)) ?
+        fullmeshTraceBuffer : nullptr;
+    const uint64_t kernelStart = BigDataFullmeshTraceCycle(fullmeshTrace);
     const uint32_t shardCount = BigDataShardCount(rankSize, force35Core, ranksPerNode);
     const int32_t effectiveChunkElements = chunkElements > 0 ? chunkElements : elementsPerPeer;
     const uint64_t chunkBytesPerPeer = BigDataChunkBytesPerPeer(use35Core, effectiveChunkElements);
