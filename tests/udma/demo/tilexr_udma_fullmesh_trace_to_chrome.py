@@ -33,6 +33,7 @@ PHASE_NAMES = (
     "wait-recv-done",
     "ACK",
 )
+ITERATION_GAP_US = 1.0
 
 
 def kernel_span_offset(iteration, core, region):
@@ -123,14 +124,14 @@ def _metadata(name, pid, tid, value):
     return {"name": name, "ph": "M", "pid": pid, "tid": tid, "args": {"name": value}}
 
 
-def _span_event(name, category, pid, tid, begin, end, base, cycles_per_us, args):
+def _span_event(name, category, pid, tid, begin, end, base, cycles_per_us, args, offset_us=0.0):
     return {
         "name": name,
         "cat": category,
         "ph": "X",
         "pid": pid,
         "tid": tid,
-        "ts": (begin - base) / cycles_per_us,
+        "ts": offset_us + (begin - base) / cycles_per_us,
         "dur": (end - begin) / cycles_per_us,
         "args": {"beginCycle": begin, "endCycle": end, **args},
     }
@@ -139,12 +140,12 @@ def _span_event(name, category, pid, tid, begin, end, base, cycles_per_us, args)
 def build_chrome_trace(rank_traces):
     events = []
     sources = []
-    for rank_trace in sorted(rank_traces, key=lambda item: item["header"]["rank"]):
+    bases = {}
+    iteration_durations = {}
+    for rank_trace in rank_traces:
         header = rank_trace["header"]
         data = rank_trace["data"]
         rank = header["rank"]
-        sources.append(rank_trace["path"])
-        bases = []
         for iteration in range(header["iteration_count"]):
             spans = []
             for core in range(header["core_count"]):
@@ -155,14 +156,29 @@ def build_chrome_trace(rank_traces):
                     spans.append(span)
             if not spans:
                 raise ValueError(f"rank {rank} iteration {iteration} contains no kernel spans")
-            bases.append(min(begin for begin, _ in spans))
+            base = min(begin for begin, _ in spans)
+            bases[(rank, iteration)] = base
+            duration = (max(end for _, end in spans) - base) / header["cycles_per_us"]
+            iteration_durations[iteration] = max(iteration_durations.get(iteration, 0.0), duration)
 
+    iteration_offsets = {}
+    cursor = 0.0
+    for iteration in sorted(iteration_durations):
+        iteration_offsets[iteration] = cursor
+        cursor += iteration_durations[iteration] + ITERATION_GAP_US
+
+    for rank_trace in sorted(rank_traces, key=lambda item: item["header"]["rank"]):
+        header = rank_trace["header"]
+        data = rank_trace["data"]
+        rank = header["rank"]
+        sources.append(rank_trace["path"])
         events.append(_metadata("process_name", rank, 0, f"rank {rank}"))
         for core in range(header["core_count"]):
             events.append(_metadata("thread_name", rank, core, f"core{core} {_core_role(core)}"))
 
         for iteration in range(header["iteration_count"]):
-            base = bases[iteration]
+            base = bases[(rank, iteration)]
+            offset_us = iteration_offsets[iteration]
             for core in range(header["core_count"]):
                 role = _core_role(core)
                 for region, name in ((0, "kernel"), (1, "work")):
@@ -173,7 +189,7 @@ def build_chrome_trace(rank_traces):
                         events.append(_span_event(
                             name, "kernel", rank, core, span[0], span[1], base,
                             header["cycles_per_us"],
-                            {"iteration": iteration, "role": role}))
+                            {"iteration": iteration, "role": role}, offset_us))
                 for pass_index in range(header["pass_count"]):
                     for peer in range(header["rank_size"]):
                         for phase in range(header["phase_count"]):
@@ -190,12 +206,12 @@ def build_chrome_trace(rank_traces):
                                 PHASE_NAMES[phase], role, rank, core,
                                 span[0], span[1], base, header["cycles_per_us"],
                                 {"iteration": iteration, "pass": pass_index,
-                                 "peer": peer, "phase": phase, "role": role}))
+                                 "peer": peer, "phase": phase, "role": role}, offset_us))
     return {
         "traceEvents": events,
         "otherData": {
             "sources": sources,
-            "clock": "GetSystemCycle normalized independently per rank and iteration",
+            "clock": "GetSystemCycle normalized per rank and iteration, iterations laid out sequentially",
         },
     }
 

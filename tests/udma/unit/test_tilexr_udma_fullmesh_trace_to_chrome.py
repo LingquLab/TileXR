@@ -75,6 +75,24 @@ class FullmeshTraceConverterTest(unittest.TestCase):
             data_put = [event for event in trace["traceEvents"] if event.get("name") == "data-put"]
             self.assertEqual([event["ts"] for event in data_put], [0.1, 0.1])
 
+    def test_places_iterations_sequentially(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "rank3.bin"
+            self.make_trace(path, iteration_count=2)
+            data = bytearray(path.read_bytes())
+            struct.pack_into("<QQ", data, MODULE.kernel_span_offset(1, 16, 0), 5000, 6000)
+            struct.pack_into("<QQ", data, MODULE.kernel_span_offset(1, 34, 0), 5000, 6100)
+            struct.pack_into(
+                "<QQ", data, MODULE.task_span_offset(1, 16, 0, 8, 5, 1, 16), 5100, 5200)
+            path.write_bytes(data)
+
+            trace = MODULE.build_chrome_trace([MODULE.read_rank_trace(path)])
+            kernels = [
+                event for event in trace["traceEvents"]
+                if event.get("name") == "kernel" and event["tid"] == 16
+            ]
+            self.assertGreater(kernels[1]["ts"], kernels[0]["ts"] + kernels[0]["dur"])
+
     def test_rejects_unknown_version_truncation_and_capacity_overflow(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "trace.bin"
