@@ -617,7 +617,7 @@ void TestAllToAllBigDataSource()
     CHECK_CONTAINS(kernel, "BigDataSlot(udmaMem, recvDataOffset, slot, networkPeerCount");
     CHECK_CONTAINS(kernel, "UDMAPutSignalNbi<int32_t>");
     CHECK_CONTAINS(kernel, "UDMAPutNbiOnQp<int32_t>");
-    CHECK_CONTAINS(kernel, "UDMAPutSignalNbi<uint64_t>");
+    CHECK_CONTAINS(kernel, "UDMAPutSignalNbiOnQp<uint64_t>");
     CHECK_CONTAINS(kernel, "UDMAPutNbi<int32_t>");
     CHECK_CONTAINS(kernel, "localSrc,");
     CHECK_CONTAINS(kernel, "remoteDataOffset, chunkBytes, remoteReadyOffset, token");
@@ -628,7 +628,7 @@ void TestAllToAllBigDataSource()
     CHECK_CONTAINS(kernel, "BigDataControlSlot(udmaMem, ackSignalOffset, slot, rankSize, shardCount, peer, 0U)");
     CHECK_CONTAINS(kernel, "use35Core ? passCount : TILEXR_UDMA_DEMO_BIGDATA_PINGPONG_SLOTS");
     CHECK_CONTAINS(kernel, "recvSlotInt[0]");
-    CHECK_CONTAINS(kernel, "BigDataPublishAckSignalUdma");
+    CHECK_NOT_CONTAINS(kernel, "BigDataPublishAckSignalUdma");
     CHECK_CONTAINS(kernel, "BigDataRemoteIpcAckSlot(args, peer, rank, slot, rankSize)");
     CHECK_CONTAINS(kernel, "ackSignal");
     CHECK_CONTAINS(kernel, "fillLocal.SetValue(0, value)");

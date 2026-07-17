@@ -805,20 +805,6 @@ __aicore__ inline __gm__ uint64_t* BigDataRemoteIpcReadySlot(
     return BigDataRemoteIpcAckSlot(args, targetRank, rank, slot, rankSize) + 1U + segmentId;
 }
 
-__aicore__ inline uint32_t BigDataPublishAckSignalUdma(
-    const __gm__ TileXR::CommArgs* args, int32_t peer, __gm__ uint8_t* udmaMem,
-    uint64_t ackSignalOffset, uint32_t slot, int32_t rankSize, uint32_t shardCount,
-    int32_t rank, uint64_t token, AscendC::LocalTensor<uint8_t> relayLocal)
-{
-    const uint64_t ackOffset =
-        BigDataRegisteredControlOffset(ackSignalOffset, slot, rankSize, shardCount, rank, 0U);
-    auto localAck = reinterpret_cast<__gm__ uint64_t*>(udmaMem + ackOffset);
-    BigDataStoreTokenMte(localAck, token, relayLocal);
-    TileXR::UDMAPutSignalNbi<uint64_t>(
-        args, peer, localAck, ackOffset, sizeof(uint64_t), ackOffset, token);
-    return TileXR::UDMAQuietStatus(args, peer);
-}
-
 __aicore__ inline void BigDataRemotePutOnlyPublishAck(
     __gm__ uint64_t* remoteAck, uint64_t token, AscendC::LocalTensor<uint8_t> relayLocal)
 {
@@ -1155,13 +1141,16 @@ __aicore__ inline void BigDataRecvPeerWorker(
                 }
             }
 
-            const uint32_t ackStatus = BigDataPublishAckSignalUdma(
-                args, peer, udmaMem, ackSignalOffset, slot, rankSize, shardCount,
-                rank, token, relayLocal);
-            if (debug != nullptr && loop == 0 && pass == 0 && peer < 16) {
-                debug[TILEXR_UDMA_DEMO_DEBUG_UDMA_STATUS_BASE + peer] =
-                    static_cast<int32_t>(ackStatus);
+            auto remoteAck = BigDataRemoteRegisteredControlSlot(
+                args, peer, ackSignalOffset, slot, rankSize, shardCount, rank, 0U);
+            if (remoteAck == nullptr) {
+                if (debug != nullptr && loop == 0 && pass == 0 && peer < 16) {
+                    debug[TILEXR_UDMA_DEMO_DEBUG_UDMA_STATUS_BASE + peer] =
+                        TILEXR_UDMA_DEMO_ACK_TIMEOUT_STATUS;
+                }
+                return;
             }
+            BigDataStoreTokenMte(remoteAck, token, relayLocal);
         }
         return;
     }
@@ -1180,14 +1169,8 @@ __aicore__ inline void BigDataRecvPeerWorker(
 
     __gm__ uint64_t* remoteAck = nullptr;
     if (use35Core) {
-        const uint32_t ackStatus = BigDataPublishAckSignalUdma(
-            args, peer, udmaMem, ackSignalOffset, slot, rankSize, shardCount,
-            rank, token, relayLocal);
-        if (debug != nullptr && loop == 0 && pass == 0 && peer < 16) {
-            debug[TILEXR_UDMA_DEMO_DEBUG_UDMA_STATUS_BASE + peer] =
-                static_cast<int32_t>(ackStatus);
-        }
-        return;
+        remoteAck = BigDataRemoteRegisteredControlSlot(
+            args, peer, ackSignalOffset, slot, rankSize, shardCount, rank, 0U);
     } else {
         remoteAck = BigDataRemoteIpcAckSlot(args, peer, rank, slot, rankSize);
     }
@@ -1293,7 +1276,7 @@ __aicore__ inline bool BigDataRemoteSendSegmentRange(
 __aicore__ inline void BigDataPublishReadySignal(
     __gm__ TileXR::CommArgs* args, int32_t peer, __gm__ uint8_t* udmaMem,
     uint64_t readySignalOffset, uint32_t slot, int32_t rankSize, uint32_t shardCount,
-    int32_t rank, uint64_t token)
+    int32_t rank, uint64_t token, uint32_t qpIdx)
 {
     const uint64_t localReadyPayloadOffset =
         readySignalOffset +
@@ -1302,9 +1285,10 @@ __aicore__ inline void BigDataPublishReadySignal(
         TILEXR_UDMA_DEMO_BIGDATA_CONTROL_SLOT_BYTES;
     const uint64_t remoteReadyOffset = localReadyPayloadOffset;
     auto localSrc = reinterpret_cast<__gm__ uint64_t*>(udmaMem + localReadyPayloadOffset);
-    TileXR::UDMAPutSignalNbi<uint64_t>(
-        args, peer, localSrc, localReadyPayloadOffset, sizeof(uint64_t), remoteReadyOffset, token);
-    (void)TileXR::UDMAQuietStatus(args, peer);
+    TileXR::UDMAPutSignalNbiOnQp<uint64_t>(
+        args, peer, qpIdx, localSrc, localReadyPayloadOffset,
+        sizeof(uint64_t), remoteReadyOffset, token);
+    (void)TileXR::UDMAQuietStatusOnQp(args, peer, qpIdx);
 }
 
 __aicore__ inline void BigDataRemoteSendSegmentWorker(
@@ -1368,11 +1352,15 @@ __aicore__ inline void BigDataRemoteSendSegmentWorker(
         (static_cast<uint64_t>(slot) * static_cast<uint64_t>(networkPeerCount) +
         static_cast<uint64_t>(BigDataNetworkPeerIndex(rank, peer))) * chunkBytesPerPeer +
         static_cast<uint64_t>(segmentOffsetBytes);
+    const uint32_t qpIdx = BigDataSelectWeightedQp(
+        args, peer,
+        segmentId == TILEXR_UDMA_DEMO_BIGDATA_REMOTE_SEND_PRIMARY_SEGMENT);
 
     uint32_t status = 0U;
     if (segmentBytes > 0U) {
-        TileXR::UDMAPutNbi<int32_t>(args, peer, localSrc, remoteDataOffset, segmentBytes);
-        status = TileXR::UDMAQuietStatus(args, peer);
+        TileXR::UDMAPutNbiOnQp<int32_t>(
+            args, peer, qpIdx, localSrc, remoteDataOffset, segmentBytes);
+        status = TileXR::UDMAQuietStatusOnQp(args, peer, qpIdx);
     }
     if (debug != nullptr && loop == 0 && pass == 0 && peer < 16) {
         debug[TILEXR_UDMA_DEMO_DEBUG_UDMA_STATUS_BASE + peer] = static_cast<int32_t>(status);
@@ -1401,7 +1389,7 @@ __aicore__ inline void BigDataRemoteSendSegmentWorker(
         udmaMem, readySignalOffset, slot, rankSize, shardCount, rank, 0U);
     BigDataStoreTokenMte(localReady, token, relayLocal);
     BigDataPublishReadySignal(
-        args, peer, udmaMem, readySignalOffset, slot, rankSize, shardCount, rank, token);
+        args, peer, udmaMem, readySignalOffset, slot, rankSize, shardCount, rank, token, qpIdx);
 }
 
 __aicore__ inline void BigDataRemotePutOnlySendWorker(
