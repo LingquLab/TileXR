@@ -678,7 +678,8 @@ void TestAllToAllBigDataSource()
         kernel, "BigDataRemoteSendSegmentWorker", "BigDataRemotePutOnlySendWorker");
     const std::string fullMeshRecv = SliceBetween(
         kernel, "BigDataRecvPeerWorker", "BigDataWaitCopyDoneRange");
-    CHECK_CONTAINS(kernel, "TILEXR_UDMA_DEMO_BIGDATA_REMOTE_SEND_PRIMARY_SHARD_END = 12U");
+    CHECK_CONTAINS(kernel, "TILEXR_UDMA_DEMO_BIGDATA_REMOTE_SEND_PRIMARY_SHARD_END = 16U");
+    CHECK_CONTAINS(kernel, "TILEXR_UDMA_DEMO_BIGDATA_REMOTE_SEND_SECONDARY_AGGREGATOR = 15U");
     CHECK_CONTAINS(fullMeshReady, "UDMAPutSignalNbiOnQp<uint64_t>");
     CHECK_CONTAINS(fullMeshReady, "UDMAQuietStatusOnQp(args, peer, qpIdx)");
     CHECK_CONTAINS(fullMeshSend, "BigDataSelectWeightedQp(");
