@@ -23,6 +23,18 @@ def completed(command, stdout, returncode=0, stderr=""):
     return npu_state.subprocess.CompletedProcess(command, returncode, stdout, stderr)
 
 
+def healthy_responses(process_output):
+    commands = [["npu-smi", "info"]] + [
+        ["npu-smi", "info", "-t", "health", "-i", str(device)]
+        for device in range(8)
+    ]
+    health = fixture("npu_smi_health_ok.txt")
+    return [completed(commands[0], process_output)] + [
+        completed(command, health.replace(": 0", ": %d" % device, 1))
+        for device, command in enumerate(commands[1:])
+    ]
+
+
 class ParseNpuStateTests(unittest.TestCase):
     def test_busy_process_table_returns_devices_pids_and_names(self):
         processes = npu_state.parse_process_table(fixture("npu_smi_busy.txt"))
@@ -47,7 +59,7 @@ class WaitForIdleTests(unittest.TestCase):
         unhealthy = npu_state.Snapshot(healthy=False, processes=())
         idle = npu_state.Snapshot(healthy=True, processes=())
         snapshots = iter((idle, busy, unhealthy, idle, idle))
-        clock = iter((0.0, 0.0, 1.0, 2.0, 3.0, 4.0))
+        clock = iter((0.0, 0.0, 0.0, 1.0, 1.0, 2.0, 2.0, 3.0, 3.0, 4.0, 4.0))
         emitted = []
         sleeps = []
 
@@ -66,18 +78,21 @@ class WaitForIdleTests(unittest.TestCase):
         self.assertEqual(len(emitted), 5)
         self.assertIn("device=0 pid=3558608 owner=alice", emitted[1])
         self.assertIn("healthy=false", emitted[2])
+        self.assertIn("stable=0/2", emitted[2])
+        self.assertIn("stable=2/2", emitted[-1])
 
     def test_waiter_raises_resource_timeout_at_deadline(self):
         busy = npu_state.Snapshot(
             healthy=True,
             processes=(npu_state.NpuProcess(7, 3558615, "python3.11", "bob"),),
         )
-        clock = iter((0.0, 0.0, 1.0, 2.0))
+        clock = iter((0.0, 0.0, 0.0, 1.0, 1.0, 2.0))
         emitted = []
+        read_snapshot = mock.Mock(return_value=busy)
 
         with self.assertRaises(npu_state.ResourceTimeout):
             npu_state.wait_for_idle(
-                read_snapshot=lambda: busy,
+                read_snapshot=read_snapshot,
                 sleep=lambda seconds: None,
                 now=lambda: next(clock),
                 emit=emitted.append,
@@ -86,8 +101,24 @@ class WaitForIdleTests(unittest.TestCase):
                 stable_samples=2,
             )
 
-        self.assertEqual(len(emitted), 3)
-        self.assertIn("remaining=0", emitted[-1])
+        self.assertEqual(read_snapshot.call_count, 2)
+        self.assertEqual(len(emitted), 2)
+        self.assertIn("remaining=1", emitted[-1])
+
+    def test_waiter_rejects_idle_sample_that_crosses_the_deadline(self):
+        clock = iter((0.0, 0.0, 2.0))
+        idle = npu_state.Snapshot(healthy=True, processes=())
+
+        with self.assertRaises(npu_state.ResourceTimeout):
+            npu_state.wait_for_idle(
+                read_snapshot=lambda: idle,
+                sleep=lambda seconds: None,
+                now=lambda: next(clock),
+                emit=lambda line: None,
+                max_wait_seconds=2,
+                poll_seconds=1,
+                stable_samples=1,
+            )
 
 
 class ReadSnapshotTests(unittest.TestCase):
@@ -130,6 +161,34 @@ class ReadSnapshotTests(unittest.TestCase):
         self.assertEqual([call.args[0] for call in run.call_args_list], expected_commands)
         self.assertEqual([call.args[0] for call in stat.call_args_list],
                          ["/proc/3558608", "/proc/3558615"])
+        self.assertTrue(all(
+            call.kwargs["timeout"] == npu_state.NPU_SMI_TIMEOUT_SECONDS
+            for call in run.call_args_list
+        ))
+
+    def test_read_snapshot_is_unhealthy_when_npu_smi_times_out(self):
+        commands = [["npu-smi", "info"]] + [
+            ["npu-smi", "info", "-t", "health", "-i", str(device)]
+            for device in range(8)
+        ]
+        responses = healthy_responses(fixture("npu_smi_idle.txt"))
+
+        def run(command, **kwargs):
+            if command == commands[4]:
+                raise npu_state.subprocess.TimeoutExpired(
+                    command, npu_state.NPU_SMI_TIMEOUT_SECONDS
+                )
+            return responses[commands.index(command)]
+
+        with mock.patch.object(npu_state.subprocess, "run", side_effect=run) as mocked_run:
+            snapshot = npu_state.read_snapshot()
+
+        self.assertFalse(snapshot.healthy)
+        self.assertEqual(len(mocked_run.call_args_list), 9)
+        self.assertTrue(all(
+            call.kwargs["timeout"] == npu_state.NPU_SMI_TIMEOUT_SECONDS
+            for call in mocked_run.call_args_list
+        ))
 
     def test_read_snapshot_is_unhealthy_when_a_command_fails(self):
         commands = [["npu-smi", "info"]] + [
@@ -168,6 +227,41 @@ class ReadSnapshotTests(unittest.TestCase):
 
         self.assertFalse(snapshot.healthy)
         self.assertEqual(snapshot.processes, ())
+
+    def test_read_snapshot_is_unhealthy_without_process_table_header(self):
+        process_output = "NPU status was truncated before the process table\n"
+
+        with mock.patch.object(
+            npu_state.subprocess, "run", side_effect=healthy_responses(process_output)
+        ):
+            snapshot = npu_state.read_snapshot()
+
+        self.assertFalse(snapshot.healthy)
+
+    def test_read_snapshot_is_unhealthy_for_header_only_process_table(self):
+        process_output = (
+            "| NPU     Chip              | Process id    | Process name             |\n"
+        )
+
+        with mock.patch.object(
+            npu_state.subprocess, "run", side_effect=healthy_responses(process_output)
+        ):
+            snapshot = npu_state.read_snapshot()
+
+        self.assertFalse(snapshot.healthy)
+
+    def test_read_snapshot_is_unhealthy_for_incomplete_device_coverage(self):
+        process_output = fixture("npu_smi_idle.txt").replace(
+            "| No running processes found in NPU 7                                                        |\n",
+            "",
+        )
+
+        with mock.patch.object(
+            npu_state.subprocess, "run", side_effect=healthy_responses(process_output)
+        ):
+            snapshot = npu_state.read_snapshot()
+
+        self.assertFalse(snapshot.healthy)
 
 
 if __name__ == "__main__":
