@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <iostream>
 #include <string>
 #include <thread>
@@ -24,6 +25,7 @@
 #include "tilexr_types.h"
 #include "tilexr_udma_allreduce_layout.h"
 #include "tilexr_udma_alltoall_layout.h"
+#include "tilexr_udma_fullmesh_trace.h"
 
 extern void launch_tilexr_udma_all_gather(
     uint32_t blockDim, void* stream, GM_ADDR commArgs, GM_ADDR data, GM_ADDR debug, int32_t elementsPerRank);
@@ -48,7 +50,8 @@ extern void launch_tilexr_udma_all_to_all_fused(
     int32_t chunkElements, uint32_t passCount, uint32_t loopCount);
 extern void launch_tilexr_udma_all_to_all_bigdata(
     uint32_t blockDim, void* stream, GM_ADDR commArgs, GM_ADDR input, GM_ADDR output,
-    GM_ADDR udmaMem, GM_ADDR debug, int32_t elementsPerPeer,
+    GM_ADDR udmaMem, GM_ADDR debug, GM_ADDR fullmeshTrace, uint32_t fullmeshTraceIteration,
+    int32_t elementsPerPeer,
     uint64_t dataOffset, uint64_t copyDoneOffset,
     uint64_t recvCopyDoneOffset, uint64_t remoteSendDoneOffset,
     uint64_t readySignalOffset, uint64_t ackSignalOffset,
@@ -202,6 +205,26 @@ bool CopyDeviceToHost(int rank, void* dst, size_t dstSize, const void* src, size
 {
     int ret = aclrtMemcpy(dst, dstSize, src, srcSize, ACL_MEMCPY_DEVICE_TO_HOST);
     return CheckAcl(rank, "aclrtMemcpy D2H " + name, ret);
+}
+
+bool WriteFullmeshTraceBinary(int rank, const std::string& directory, const std::vector<uint8_t>& data)
+{
+    const std::string path = directory + "/tilexr_fullmesh_trace_rank_" +
+        std::to_string(rank) + ".bin";
+    std::ofstream output(path, std::ios::binary | std::ios::trunc);
+    if (!output.is_open()) {
+        std::cerr << "[rank " << rank << "] ERROR: open fullmesh trace output failed path="
+                  << path << std::endl;
+        return false;
+    }
+    output.write(reinterpret_cast<const char*>(data.data()), static_cast<std::streamsize>(data.size()));
+    if (!output.good()) {
+        std::cerr << "[rank " << rank << "] ERROR: write fullmesh trace output failed path="
+                  << path << std::endl;
+        return false;
+    }
+    PrintStatus(rank, "fullmesh trace output=" + path + " bytes=" + std::to_string(data.size()));
+    return true;
 }
 
 BarrierEndpoint GetBarrierEndpoint()
@@ -703,6 +726,15 @@ int main(int argc, char** argv)
         isAllToAll ? TileXR::Demo::PlanAllToAllBigDataUdma(
             rankSize, elementsPerRank, forceBigData35Core, bigDataRanksPerNode) :
             TileXR::Demo::AllToAllBigDataPlan {};
+    const bool fullmeshTraceRequested =
+        testType == 7 && GetEnvInt("TILEXR_UDMA_FULLMESH_TRACE", 0) != 0;
+    const bool fullmeshTraceEnabled = fullmeshTraceRequested &&
+        !bigDataRemotePutOnly && TileXR::Demo::AllToAllBigDataIsMultiNode(
+            rankSize, bigDataRanksPerNode);
+    const char* fullmeshTraceDirEnv = std::getenv("TILEXR_UDMA_FULLMESH_TRACE_DIR");
+    const std::string fullmeshTraceDir =
+        fullmeshTraceDirEnv != nullptr && fullmeshTraceDirEnv[0] != '\0' ?
+        fullmeshTraceDirEnv : ".";
     if (testType == 7 && !TileXR::Demo::AllToAllBigDataValidTopology(rankSize, bigDataRanksPerNode)) {
         std::cerr << "[rank " << rank
                   << "] ERROR: bigdata alltoall multi-node requires rankSize multiple of ranksPerNode"
@@ -891,6 +923,14 @@ int main(int argc, char** argv)
     if (testType == 7) {
         void* bigInput = nullptr;
         void* bigOutput = nullptr;
+        void* fullmeshTraceDevice = nullptr;
+        std::vector<uint8_t> hostFullmeshTrace;
+        auto freeFullmeshTrace = [&]() {
+            if (fullmeshTraceDevice != nullptr) {
+                aclrtFree(fullmeshTraceDevice);
+                fullmeshTraceDevice = nullptr;
+            }
+        };
         const size_t bigDataBytes = dataBytes;
         if (!CheckAcl(rank, "aclrtMalloc bigdata input",
                 aclrtMalloc(&bigInput, bigDataBytes, ACL_MEM_MALLOC_HUGE_FIRST)) ||
@@ -944,6 +984,70 @@ int main(int argc, char** argv)
             " chunkElements=" + std::to_string(bigDataPlan.chunkElements) +
             " repeat=" + std::to_string(allToAllRepeat) +
             " profileStage=" + std::to_string(bigDataProfileStage));
+        if (fullmeshTraceRequested && !fullmeshTraceEnabled) {
+            std::cerr << "[rank " << rank << "] ERROR: fullmesh trace requires multi-node "
+                      << "non-remote-put-only bigdata mode" << std::endl;
+            if (udmaRegistered) {
+                CheckTileXR(rank, "TileXRUDMAUnregister", TileXRUDMAUnregister(comm, udmaHandle));
+                udmaRegistered = false;
+            }
+            aclrtFree(bigInput);
+            aclrtFree(bigOutput);
+            Cleanup(comm, stream, registeredMemory, debug, rank, deviceId);
+            return 1;
+        }
+        if (fullmeshTraceEnabled) {
+            if (!TileXR::Demo::FullmeshTraceLayoutFits(
+                    static_cast<uint32_t>(allToAllRepeat), bigDataPlan.passCount,
+                    static_cast<uint32_t>(rankSize))) {
+                std::cerr << "[rank " << rank << "] ERROR: fullmesh trace dimensions exceed capacity"
+                          << " repeat=" << allToAllRepeat
+                          << " passCount=" << bigDataPlan.passCount
+                          << " rankSize=" << rankSize
+                          << " requiredBytes=" << TileXR::Demo::FullmeshTraceLayoutBytes(
+                              static_cast<uint32_t>(allToAllRepeat), bigDataPlan.passCount,
+                              static_cast<uint32_t>(rankSize))
+                          << " capacityBytes=" << TileXR::Demo::kFullmeshTraceBytes << std::endl;
+                if (udmaRegistered) {
+                    CheckTileXR(rank, "TileXRUDMAUnregister", TileXRUDMAUnregister(comm, udmaHandle));
+                    udmaRegistered = false;
+                }
+                aclrtFree(bigInput);
+                aclrtFree(bigOutput);
+                Cleanup(comm, stream, registeredMemory, debug, rank, deviceId);
+                return 1;
+            }
+            hostFullmeshTrace.assign(TileXR::Demo::kFullmeshTraceBytes, 0U);
+            TileXR::Demo::FullmeshTraceHeader header {};
+            header.magic = TileXR::Demo::kFullmeshTraceMagic;
+            header.version = TileXR::Demo::kFullmeshTraceVersion;
+            header.rank = static_cast<uint32_t>(rank);
+            header.iterationCount = static_cast<uint32_t>(allToAllRepeat);
+            header.passCount = bigDataPlan.passCount;
+            header.coreCount = TileXR::Demo::kFullmeshTraceMaxCores;
+            header.rankSize = static_cast<uint32_t>(rankSize);
+            header.phaseCount = TileXR::Demo::kFullmeshTracePhaseCount;
+            header.cyclesPerUs = TileXR::Demo::kFullmeshTraceCyclesPerUs;
+            header.traceBytes = TileXR::Demo::kFullmeshTraceBytes;
+            header.kernelSpanOffset = TileXR::Demo::kFullmeshTraceHeaderBytes;
+            header.taskSpanOffset = TileXR::Demo::FullmeshTraceTaskSpanBaseOffset();
+            std::memcpy(hostFullmeshTrace.data(), &header, sizeof(header));
+            if (!CheckAcl(rank, "aclrtMalloc fullmesh trace",
+                    aclrtMalloc(&fullmeshTraceDevice, TileXR::Demo::kFullmeshTraceBytes,
+                        ACL_MEM_MALLOC_HUGE_FIRST)) ||
+                !CopyHostToDevice(rank, fullmeshTraceDevice, TileXR::Demo::kFullmeshTraceBytes,
+                    hostFullmeshTrace.data(), hostFullmeshTrace.size(), "fullmesh trace")) {
+                freeFullmeshTrace();
+                if (udmaRegistered) {
+                    CheckTileXR(rank, "TileXRUDMAUnregister", TileXRUDMAUnregister(comm, udmaHandle));
+                    udmaRegistered = false;
+                }
+                aclrtFree(bigInput);
+                aclrtFree(bigOutput);
+                Cleanup(comm, stream, registeredMemory, debug, rank, deviceId);
+                return 1;
+            }
+        }
         if (!CheckAcl(rank, "aclrtSynchronizeStream bigdata prime", aclrtSynchronizeStream(stream)) ||
             !DemoBarrierAll(rank, rankSize, "all ranks bigdata prime")) {
             if (udmaRegistered) {
@@ -952,6 +1056,7 @@ int main(int argc, char** argv)
             }
             aclrtFree(bigInput);
             aclrtFree(bigOutput);
+            freeFullmeshTrace();
             Cleanup(comm, stream, registeredMemory, debug, rank, deviceId);
             return 1;
         }
@@ -964,10 +1069,12 @@ int main(int argc, char** argv)
         auto a2aStart = std::chrono::steady_clock::now();
         for (int iter = 0; iter < allToAllRepeat; ++iter) {
             const uint64_t kernelLoopBase = static_cast<uint64_t>(iter);
+            const uint32_t fullmeshTraceIteration = static_cast<uint32_t>(iter);
             launch_tilexr_udma_all_to_all_bigdata(
                 bigDataBlockDim, stream, commArgsDev,
                 reinterpret_cast<GM_ADDR>(bigInput), reinterpret_cast<GM_ADDR>(bigOutput),
                 reinterpret_cast<GM_ADDR>(registeredMemory), reinterpret_cast<GM_ADDR>(debug),
+                reinterpret_cast<GM_ADDR>(fullmeshTraceDevice), fullmeshTraceIteration,
                 elementsPerRank, 0, bigDataPlan.copyDoneOffset,
                 bigDataPlan.recvCopyDoneOffset,
                 bigDataPlan.remoteSendDoneOffset,
@@ -983,6 +1090,7 @@ int main(int argc, char** argv)
             }
             aclrtFree(bigInput);
             aclrtFree(bigOutput);
+            freeFullmeshTrace();
             Cleanup(comm, stream, registeredMemory, debug, rank, deviceId);
             return 1;
         }
@@ -1004,6 +1112,13 @@ int main(int argc, char** argv)
         }
         bigDataCopyBackOk = CopyDeviceToHost(rank, hostDebug.data(), hostDebug.size() * sizeof(int32_t),
             debug, hostDebug.size() * sizeof(int32_t), "debug after bigdata alltoall") && bigDataCopyBackOk;
+        if (fullmeshTraceEnabled) {
+            const bool traceCopyOk = CopyDeviceToHost(
+                rank, hostFullmeshTrace.data(), hostFullmeshTrace.size(), fullmeshTraceDevice,
+                TileXR::Demo::kFullmeshTraceBytes, "fullmesh trace");
+            bigDataCopyBackOk = traceCopyOk &&
+                WriteFullmeshTraceBinary(rank, fullmeshTraceDir, hostFullmeshTrace) && bigDataCopyBackOk;
+        }
         if (!bigDataCopyBackOk) {
             if (udmaRegistered) {
                 CheckTileXR(rank, "TileXRUDMAUnregister", TileXRUDMAUnregister(comm, udmaHandle));
@@ -1011,6 +1126,7 @@ int main(int argc, char** argv)
             }
             aclrtFree(bigInput);
             aclrtFree(bigOutput);
+            freeFullmeshTrace();
             Cleanup(comm, stream, registeredMemory, debug, rank, deviceId);
             return 1;
         }
@@ -1027,6 +1143,7 @@ int main(int argc, char** argv)
             }
             aclrtFree(bigInput);
             aclrtFree(bigOutput);
+            freeFullmeshTrace();
             Cleanup(comm, stream, registeredMemory, debug, rank, deviceId);
             return 1;
         }
@@ -1036,6 +1153,7 @@ int main(int argc, char** argv)
         }
         aclrtFree(bigInput);
         aclrtFree(bigOutput);
+        freeFullmeshTrace();
     } else if (testType == 6) {
         // Forced UDMA alltoall (no IPC fallback). Single kernel launch loops
         // REPEAT times internally; stream sync only after all loops.

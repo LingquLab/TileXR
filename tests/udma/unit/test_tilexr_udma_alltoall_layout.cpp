@@ -665,7 +665,7 @@ void TestAllToAllBigDataSource()
     CHECK_CONTAINS(demo, "TILEXR_UDMA_FULLMESH_TRACE_DIR");
     CHECK_CONTAINS(demo, "FullmeshTraceLayoutFits(");
     CHECK_CONTAINS(demo, "aclrtMalloc(&fullmeshTraceDevice");
-    CHECK_CONTAINS(demo, "aclrtMemcpy D2H fullmesh trace");
+    CHECK_CONTAINS(demo, "TileXR::Demo::kFullmeshTraceBytes, \"fullmesh trace\"");
     CHECK_CONTAINS(demo, "tilexr_fullmesh_trace_rank_");
     CHECK_CONTAINS(demo, "fullmeshTraceIteration");
     CHECK_CONTAINS(demo, "reinterpret_cast<GM_ADDR>(fullmeshTraceDevice)");

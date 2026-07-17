@@ -2689,11 +2689,14 @@ extern "C" __global__ __aicore__ void tilexr_udma_all_to_all_fused_kernel(
 
 extern "C" __global__ __aicore__ void tilexr_udma_all_to_all_bigdata_kernel(
     GM_ADDR commArgsGM, GM_ADDR inputGM, GM_ADDR outputGM, GM_ADDR udmaMemGM, GM_ADDR debugGM,
+    GM_ADDR fullmeshTraceGM, uint32_t fullmeshTraceIteration,
     int32_t elementsPerPeer, uint64_t dataOffset, uint64_t copyDoneOffset,
     uint64_t recvCopyDoneOffset, uint64_t remoteSendDoneOffset, uint64_t readySignalOffset,
     uint64_t ackSignalOffset, int32_t chunkElements, uint32_t passCount, uint32_t loopCount,
     uint64_t kernelLoopBase, uint32_t profileStage, uint32_t force35CoreFlag)
 {
+    (void)fullmeshTraceGM;
+    (void)fullmeshTraceIteration;
     if (profileStage > TILEXR_BIGDATA_PROFILE_STAGE_FULL) {
         profileStage = TILEXR_BIGDATA_PROFILE_STAGE_FULL;
     }
@@ -2928,14 +2931,16 @@ extern "C" __global__ __aicore__ void tilexr_udma_all_to_all_bigdata_kernel(
 
 void launch_tilexr_udma_all_to_all_bigdata(
     uint32_t blockDim, void* stream, GM_ADDR commArgs, GM_ADDR input, GM_ADDR output,
-    GM_ADDR udmaMem, GM_ADDR debug, int32_t elementsPerPeer,
+    GM_ADDR udmaMem, GM_ADDR debug, GM_ADDR fullmeshTrace, uint32_t fullmeshTraceIteration,
+    int32_t elementsPerPeer,
     uint64_t dataOffset, uint64_t copyDoneOffset,
     uint64_t recvCopyDoneOffset, uint64_t remoteSendDoneOffset, uint64_t readySignalOffset,
     uint64_t ackSignalOffset, int32_t chunkElements, uint32_t passCount, uint32_t loopCount,
     uint64_t kernelLoopBase, uint32_t profileStage, uint32_t force35Core)
 {
     tilexr_udma_all_to_all_bigdata_kernel<<<blockDim, nullptr, stream>>>(
-        commArgs, input, output, udmaMem, debug, elementsPerPeer,
+        commArgs, input, output, udmaMem, debug, fullmeshTrace, fullmeshTraceIteration,
+        elementsPerPeer,
         dataOffset, copyDoneOffset, recvCopyDoneOffset, remoteSendDoneOffset, readySignalOffset,
         ackSignalOffset, chunkElements, passCount, loopCount, kernelLoopBase, profileStage, force35Core);
 }
