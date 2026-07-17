@@ -190,6 +190,20 @@ class ReadSnapshotTests(unittest.TestCase):
             for call in mocked_run.call_args_list
         ))
 
+    def test_read_snapshot_caps_commands_to_absolute_deadline(self):
+        clock = [100.0]
+
+        def run(command, **kwargs):
+            self.assertEqual(kwargs["timeout"], 5.0)
+            clock[0] = 105.0
+            raise npu_state.subprocess.TimeoutExpired(command, kwargs["timeout"])
+
+        with mock.patch.object(npu_state.subprocess, "run", side_effect=run) as mocked_run:
+            state = npu_state.read_snapshot(deadline=105.0, now=lambda: clock[0])
+
+        self.assertFalse(state.healthy)
+        self.assertEqual(mocked_run.call_count, 1)
+
     def test_read_snapshot_is_unhealthy_when_a_command_fails(self):
         commands = [["npu-smi", "info"]] + [
             ["npu-smi", "info", "-t", "health", "-i", str(device)]

@@ -6,6 +6,7 @@ import os
 import pwd
 import re
 import subprocess
+import time
 from typing import Callable, List, Optional, Tuple
 
 
@@ -82,7 +83,11 @@ def parse_health(text: str) -> str:
     return ""
 
 
-def _run(command: List[str]) -> Optional[subprocess.CompletedProcess]:
+def _run(
+    command: List[str], timeout_seconds: float = NPU_SMI_TIMEOUT_SECONDS
+) -> Optional[subprocess.CompletedProcess]:
+    if timeout_seconds <= 0:
+        return None
     try:
         return subprocess.run(
             command,
@@ -90,7 +95,7 @@ def _run(command: List[str]) -> Optional[subprocess.CompletedProcess]:
             stderr=subprocess.PIPE,
             text=True,
             check=False,
-            timeout=NPU_SMI_TIMEOUT_SECONDS,
+            timeout=timeout_seconds,
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
@@ -104,9 +109,18 @@ def _owner_for_pid(pid: int) -> str:
         return "unknown"
 
 
-def read_snapshot() -> Snapshot:
+def read_snapshot(
+    deadline: Optional[float] = None,
+    now: Callable[[], float] = time.monotonic,
+) -> Snapshot:
     """Collect processes and all device health reports in one read-only snapshot."""
-    info = _run(["npu-smi", "info"])
+    def run(command):
+        timeout = NPU_SMI_TIMEOUT_SECONDS
+        if deadline is not None:
+            timeout = min(timeout, max(0.0, deadline - now()))
+        return _run(command, timeout)
+
+    info = run(["npu-smi", "info"])
     process_text = info.stdout if info is not None else ""
     parsed_processes, table_recognized, covered_devices = _parse_process_table_state(process_text)
     processes = tuple(
@@ -121,7 +135,7 @@ def read_snapshot() -> Snapshot:
     )
 
     for device in range(8):
-        health = _run(["npu-smi", "info", "-t", "health", "-i", str(device)])
+        health = run(["npu-smi", "info", "-t", "health", "-i", str(device)])
         if health is None or health.returncode != 0 or parse_health(health.stdout) != "OK":
             healthy = False
     return Snapshot(healthy=healthy, processes=processes)

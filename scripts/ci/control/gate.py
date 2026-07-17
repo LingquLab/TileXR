@@ -79,8 +79,6 @@ class GateReport:
     failure_class: str = "none"
     failure_detail: str = ""
     cleanup_checked: bool = dataclasses.field(default=False, repr=False)
-    lock_attempted: bool = dataclasses.field(default=False, repr=False)
-    lock_acquired: bool = dataclasses.field(default=False, repr=False)
 
 
 class CancellationState:
@@ -163,15 +161,17 @@ def verify_merge_sha(source, expected: str, run_git: Callable[[str], str] = _run
     return actual
 
 
-def policy_violation(phase: str, state: npu_state.Snapshot) -> Optional[str]:
+def policy_violation(
+    phase: str, state: npu_state.Snapshot, ci_user: str = "tilexr-ci"
+) -> Optional[str]:
     if not state.healthy:
         raise InfrastructureFailure("npu-smi reported an unhealthy or incomplete state")
     if phase == "build":
-        if any(item.owner == "tilexr-ci" for item in state.processes):
+        if any(item.owner == ci_user for item in state.processes):
             return "ci-npu-before-lock"
         return None
     if phase == "hardware":
-        if any(item.owner != "tilexr-ci" for item in state.processes):
+        if any(item.owner != ci_user for item in state.processes):
             return "foreign-npu-process"
         return None
     raise InfrastructureFailure("unknown gate phase %s" % phase)
@@ -180,7 +180,7 @@ def policy_violation(phase: str, state: npu_state.Snapshot) -> Optional[str]:
 def _enforce_policy(phase: str, state: npu_state.Snapshot):
     violation = policy_violation(phase, state)
     if violation == "ci-npu-before-lock":
-        raise InfrastructureFailure(violation)
+        raise ResourceCollision(violation)
     if violation == "foreign-npu-process":
         raise ResourceCollision(violation)
 
@@ -201,39 +201,59 @@ _SENSITIVE_CHILD_KEYS = frozenset(
 )
 
 
-def child_environment(source, artifacts, pr_number: int, environ=None) -> Dict[str, str]:
+def child_environment(environ=None) -> Dict[str, str]:
     child = dict(os.environ if environ is None else environ)
     for key in _SENSITIVE_CHILD_KEYS:
         child.pop(key, None)
-    child.update(
+    child["PYTHONDONTWRITEBYTECODE"] = "1"
+    return child
+
+
+def phase_environment(environ, source, artifacts, pr_number: int) -> Dict[str, str]:
+    phase = dict(environ)
+    phase.update(
         {
-            "PYTHONDONTWRITEBYTECODE": "1",
             "PR_NUMBER": str(pr_number),
             "TILEXR_CI_SOURCE_DIR": str(source),
             "TILEXR_CI_ARTIFACT_DIR": str(artifacts),
             "TILEXR_CANN_HOME": "/home/tilexr-ci/toolchains/cann/9.1.0",
         }
     )
-    return child
+    return phase
 
 
-def terminate_group(child, killpg=os.killpg):
+def _process_group_exists(pgid: int) -> bool:
+    try:
+        os.killpg(pgid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # macOS can briefly report EPERM while an orphaned group is being reaped.
+        return True
+
+
+def terminate_group(
+    child,
+    killpg=os.killpg,
+    *,
+    group_exists: Callable[[int], bool] = _process_group_exists,
+    now: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
+):
     """Stop only the process group created for the supplied child."""
-    if child.poll() is not None:
-        return
     try:
         killpg(child.pid, signal.SIGTERM)
     except ProcessLookupError:
-        return
-    try:
-        child.wait(timeout=10)
-        return
-    except subprocess.TimeoutExpired:
         pass
-    try:
-        killpg(child.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
+    deadline = now() + 10.0
+    while group_exists(child.pid) and now() < deadline:
+        sleep(min(0.1, max(0.0, deadline - now())))
+    if group_exists(child.pid):
+        try:
+            killpg(child.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
     child.wait()
 
 
@@ -251,6 +271,7 @@ def run_phase(
     *,
     timeout_seconds: float,
     read_snapshot: Callable[[], npu_state.Snapshot] = npu_state.read_snapshot,
+    read_snapshot_with_deadline: Optional[Callable[[float], npu_state.Snapshot]] = None,
     now: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep,
     cancellation: Optional[CancellationState] = None,
@@ -273,12 +294,26 @@ def run_phase(
         raise InfrastructureFailure("could not start trusted %s phase: %s" % (phase, error)) from error
 
     started = now()
+    deadline = started + timeout_seconds
+
+    def monitored_snapshot():
+        if read_snapshot_with_deadline is not None:
+            return read_snapshot_with_deadline(deadline)
+        if read_snapshot is npu_state.read_snapshot:
+            return read_snapshot(deadline=deadline, now=now)
+        return read_snapshot()
+
     try:
         while True:
             if cancellation.cancelled:
                 raise Cancelled("gate was cancelled during %s" % phase)
 
-            _enforce_policy(phase, read_snapshot())
+            if now() >= deadline:
+                raise CodeFailure("%s phase exceeded %.0f seconds" % (phase, timeout_seconds))
+            state = monitored_snapshot()
+            if now() >= deadline:
+                raise CodeFailure("%s phase exceeded %.0f seconds" % (phase, timeout_seconds))
+            _enforce_policy(phase, state)
 
             returncode = child.poll()
             if returncode is not None:
@@ -384,6 +419,7 @@ def orchestrate(
     lock_fn: Callable = npu_lock,
     sleep_fn: Optional[Callable[[float], None]] = None,
     emit: Callable[[str], None] = print,
+    resource_now: Optional[Callable[[], float]] = None,
 ):
     validate_config(config)
     report = report or GateReport(pr_number=config.pr_number, merge_sha=config.expected_merge_sha)
@@ -392,8 +428,11 @@ def orchestrate(
     verify_merge_sha_fn(config.source, config.expected_merge_sha)
     if cancellation.cancelled:
         raise Cancelled("gate was cancelled before build")
-    env = child_environment(config.source, config.artifacts, config.pr_number)
+    env = phase_environment(
+        child_environment(), config.source, config.artifacts, config.pr_number
+    )
     phase_sleep = sleep_fn or (lambda seconds: cancellation_aware_sleep(seconds, cancellation))
+    resource_clock = resource_now or time.monotonic
 
     report.build_outcome = "running"
     try:
@@ -414,27 +453,32 @@ def orchestrate(
         raise
     report.build_outcome = "passed"
 
-    report.lock_attempted = True
     report.queue_outcome = "waiting"
-    queue_started = time.monotonic()
+    queue_started = resource_clock()
     queue_finished = False
     try:
         with lock_fn(
             cancellation=cancellation,
             max_wait_seconds=QUEUE_TIMEOUT_SECONDS,
-            now=time.monotonic,
+            now=resource_clock,
             sleep=phase_sleep,
         ):
-            report.lock_acquired = True
             locked_error = None
             try:
+                remaining_budget = max(
+                    0.0, QUEUE_TIMEOUT_SECONDS - (resource_clock() - queue_started)
+                )
+                if remaining_budget <= 0:
+                    raise npu_state.ResourceTimeout(
+                        "NPU resource budget was exhausted while acquiring the lock"
+                    )
                 try:
                     wait_for_idle_fn(
                         read_snapshot=read_snapshot_fn,
                         sleep=phase_sleep,
-                        now=time.monotonic,
+                        now=resource_clock,
                         emit=emit,
-                        max_wait_seconds=QUEUE_TIMEOUT_SECONDS,
+                        max_wait_seconds=remaining_budget,
                         poll_seconds=QUEUE_POLL_SECONDS,
                         stable_samples=QUEUE_STABLE_SAMPLES,
                     )
@@ -445,7 +489,7 @@ def orchestrate(
                     report.queue_outcome = "failed"
                     raise
                 finally:
-                    report.wait_seconds = max(0.0, time.monotonic() - queue_started)
+                    report.wait_seconds = max(0.0, resource_clock() - queue_started)
                     queue_finished = True
                 report.queue_outcome = "passed"
 
@@ -500,7 +544,7 @@ def orchestrate(
         raise
     finally:
         if not queue_finished:
-            report.wait_seconds = max(0.0, time.monotonic() - queue_started)
+            report.wait_seconds = max(0.0, resource_clock() - queue_started)
     return report
 
 
@@ -585,14 +629,35 @@ def initial_report(config: Config, environ: Mapping[str, str]) -> GateReport:
     )
 
 
-def verify_final_cleanup(read_snapshot: Callable[[], npu_state.Snapshot] = npu_state.read_snapshot):
-    state = read_snapshot()
-    if not state.healthy:
-        raise InfrastructureFailure("could not verify final NPU cleanup")
-    leftovers = [item for item in state.processes if item.owner == "tilexr-ci"]
-    if leftovers:
-        details = ", ".join("device=%d pid=%d" % (item.device, item.pid) for item in leftovers)
-        raise InfrastructureFailure("tilexr-ci NPU processes remain after child cleanup: %s" % details)
+def verify_final_cleanup(
+    read_snapshot: Callable[[], npu_state.Snapshot] = npu_state.read_snapshot,
+    *,
+    sleep: Callable[[float], None] = time.sleep,
+    now: Callable[[], float] = time.monotonic,
+    grace_seconds: float = 10.0,
+    poll_seconds: float = 1.0,
+):
+    started = now()
+    deadline = started + grace_seconds
+    while True:
+        if read_snapshot is npu_state.read_snapshot:
+            state = read_snapshot(deadline=deadline, now=now)
+        else:
+            state = read_snapshot()
+        if not state.healthy:
+            raise InfrastructureFailure("could not verify final NPU cleanup")
+        leftovers = [item for item in state.processes if item.owner == "tilexr-ci"]
+        if not leftovers:
+            return
+        remaining = max(0.0, deadline - now())
+        if remaining <= 0:
+            details = ", ".join(
+                "device=%d pid=%d" % (item.device, item.pid) for item in leftovers
+            )
+            raise InfrastructureFailure(
+                "tilexr-ci NPU processes remain after child cleanup: %s" % details
+            )
+        sleep(min(poll_seconds, remaining))
 
 
 def prefer_cleanup_failure(primary, cleanup: BaseException) -> InfrastructureFailure:
@@ -615,13 +680,17 @@ def select_final_failure(current, candidate):
         return candidate
     if getattr(current, "cleanup_failure", False):
         return current
-    if getattr(candidate, "cleanup_failure", False) or isinstance(candidate, Cancelled):
+    if (
+        getattr(candidate, "cleanup_failure", False)
+        or getattr(candidate, "collector_failure", False)
+        or isinstance(candidate, Cancelled)
+    ):
         return candidate
     return current
 
 
 def requires_outer_cleanup(report: GateReport) -> bool:
-    return not report.cleanup_checked and not report.lock_attempted
+    return not report.cleanup_checked
 
 
 def invoke_collector(
@@ -636,11 +705,11 @@ def invoke_collector(
     terminate: Callable = terminate_group,
 ):
     if not script.is_file() or not os.access(str(script), os.X_OK):
-        raise InfrastructureFailure("trusted artifact collector is missing or not executable: %s" % script)
+        raise _collector_failure(
+            "trusted artifact collector is missing or not executable: %s" % script
+        )
     cancellation = cancellation or CancellationState()
-    collector_sleep = sleep or (lambda seconds: cancellation_aware_sleep(seconds, cancellation))
-    if cancellation.cancelled:
-        raise Cancelled("gate was cancelled before artifact collection")
+    collector_sleep = sleep or time.sleep
     try:
         child = popen(
             [str(script), str(config.source), str(config.artifacts)],
@@ -649,22 +718,20 @@ def invoke_collector(
             start_new_session=True,
         )
     except OSError as error:
-        raise InfrastructureFailure("artifact collector failed to run: %s" % error) from error
+        raise _collector_failure("artifact collector failed to run: %s" % error) from error
     started = now()
     try:
         while True:
-            if cancellation.cancelled:
-                raise Cancelled("gate was cancelled during artifact collection")
             returncode = child.poll()
             if returncode is not None:
                 if returncode != 0:
-                    raise InfrastructureFailure(
+                    raise _collector_failure(
                         "artifact collector exited with status %d" % returncode
                     )
                 return
             elapsed = max(0.0, now() - started)
             if elapsed >= 600:
-                raise InfrastructureFailure("artifact collector exceeded 600 seconds")
+                raise _collector_failure("artifact collector exceeded 600 seconds")
             collector_sleep(min(1.0, 600 - elapsed))
     finally:
         terminate(child)
@@ -680,6 +747,12 @@ def failure_class_for(error: BaseException) -> str:
     if isinstance(error, (Cancelled, ObsoleteRun)):
         return "cancelled-or-obsolete"
     return "runner-or-toolchain-failure"
+
+
+def _collector_failure(message: str) -> InfrastructureFailure:
+    error = InfrastructureFailure(message)
+    error.collector_failure = True
+    return error
 
 
 def exit_code_for(error: BaseException) -> int:
@@ -724,7 +797,9 @@ def _run_controller_body(
     step_summary_path = environ.get("GITHUB_STEP_SUMMARY")
     report = initial_report(config, environ)
     failure = None
-    child_env = child_environment(config.source, config.artifacts, config.pr_number, environ=environ)
+    child_env = phase_environment(
+        child_environment(environ), config.source, config.artifacts, config.pr_number
+    )
     try:
         if not token:
             raise InfrastructureFailure("TILEXR_CI_GITHUB_TOKEN is required")
@@ -803,6 +878,19 @@ def _run_controller_body(
                     write_summary(report, config.artifacts)
                 except GateFailure:
                     pass
+
+    if cancellation.cancelled and not isinstance(failure, Cancelled):
+        selected = select_final_failure(
+            failure, Cancelled("gate was cancelled during final summary writing")
+        )
+        if selected is not failure:
+            failure = selected
+            report.failure_class = failure_class_for(failure)
+            report.failure_detail = str(failure)
+            try:
+                write_summary(report, config.artifacts)
+            except GateFailure:
+                pass
 
     return 0 if failure is None else exit_code_for(failure)
 

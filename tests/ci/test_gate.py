@@ -8,6 +8,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -47,6 +48,14 @@ class MergeVerificationTests(unittest.TestCase):
 
 
 class PolicyTests(unittest.TestCase):
+    def test_policy_uses_supplied_ci_owner(self):
+        state = snapshot(process("ci-special"))
+        self.assertEqual(
+            gate.policy_violation("build", state, "ci-special"),
+            "ci-npu-before-lock",
+        )
+        self.assertIsNone(gate.policy_violation("build", state, "tilexr-ci"))
+
     def test_build_rejects_ci_npu_process_before_lock(self):
         state = snapshot(process("tilexr-ci"))
         self.assertEqual(gate.policy_violation("build", state), "ci-npu-before-lock")
@@ -93,16 +102,19 @@ class ChildEnvironmentTests(unittest.TestCase):
         parent["PATH"] = "/usr/bin:/bin"
         parent["HOME"] = "/home/tilexr-ci"
 
-        child = gate.child_environment("/source", "/artifacts", 42, environ=parent)
+        child = gate.child_environment(parent)
 
         self.assertTrue(removed.isdisjoint(child))
         self.assertEqual(child["PATH"], "/usr/bin:/bin")
         self.assertEqual(child["HOME"], "/home/tilexr-ci")
         self.assertEqual(child["PYTHONDONTWRITEBYTECODE"], "1")
-        self.assertEqual(child["PR_NUMBER"], "42")
-        self.assertEqual(child["TILEXR_CI_SOURCE_DIR"], "/source")
-        self.assertEqual(child["TILEXR_CI_ARTIFACT_DIR"], "/artifacts")
-        self.assertEqual(child["TILEXR_CANN_HOME"], "/home/tilexr-ci/toolchains/cann/9.1.0")
+        self.assertNotIn("PR_NUMBER", child)
+
+        phase = gate.phase_environment(child, "/source", "/artifacts", 42)
+        self.assertEqual(phase["PR_NUMBER"], "42")
+        self.assertEqual(phase["TILEXR_CI_SOURCE_DIR"], "/source")
+        self.assertEqual(phase["TILEXR_CI_ARTIFACT_DIR"], "/artifacts")
+        self.assertEqual(phase["TILEXR_CANN_HOME"], "/home/tilexr-ci/toolchains/cann/9.1.0")
 
 
 class FakeProcess:
@@ -130,26 +142,77 @@ class FakeProcess:
 
 
 class TerminationTests(unittest.TestCase):
+    def test_exited_group_leader_does_not_leave_background_descendant(self):
+        with tempfile.TemporaryDirectory() as directory:
+            pid_file = pathlib.Path(directory) / "descendant.pid"
+            leader = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-c",
+                    (
+                        "import pathlib, subprocess; "
+                        "child=subprocess.Popen(['sleep', '60']); "
+                        "pathlib.Path(%r).write_text(str(child.pid), encoding='ascii')"
+                    )
+                    % str(pid_file),
+                ],
+                start_new_session=True,
+            )
+            try:
+                leader.wait(timeout=10)
+                descendant_pid = int(pid_file.read_text(encoding="ascii"))
+                os.kill(descendant_pid, 0)
+
+                gate.terminate_group(leader)
+
+                deadline = time.monotonic() + 3
+                while time.monotonic() < deadline:
+                    try:
+                        os.kill(descendant_pid, 0)
+                    except ProcessLookupError:
+                        break
+                    time.sleep(0.02)
+                else:
+                    self.fail("background descendant survived tracked process-group cleanup")
+            finally:
+                try:
+                    os.killpg(leader.pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    pass
+
     def test_graceful_termination_targets_only_child_group(self):
         child = FakeProcess()
         killpg = mock.Mock()
+        group_exists = iter((True, False, False))
 
-        gate.terminate_group(child, killpg=killpg)
+        gate.terminate_group(
+            child,
+            killpg=killpg,
+            group_exists=lambda pgid: next(group_exists),
+            now=lambda: 0.0,
+            sleep=lambda seconds: None,
+        )
 
         killpg.assert_called_once_with(4242, signal.SIGTERM)
-        self.assertEqual(child.wait_calls, [10])
+        self.assertEqual(child.wait_calls, [None])
 
     def test_forced_termination_kills_only_child_group_after_ten_seconds(self):
-        child = FakeProcess(forced=True)
+        child = FakeProcess()
         killpg = mock.Mock()
 
-        gate.terminate_group(child, killpg=killpg)
+        gate.terminate_group(
+            child,
+            killpg=killpg,
+            group_exists=lambda pgid: True,
+            now=iter((0.0, 10.0)).__next__,
+            sleep=lambda seconds: None,
+        )
 
         self.assertEqual(
             killpg.call_args_list,
             [mock.call(4242, signal.SIGTERM), mock.call(4242, signal.SIGKILL)],
         )
-        self.assertEqual(child.wait_calls, [10, None])
+        self.assertEqual(child.wait_calls, [None])
 
 
 class RunPhaseTests(unittest.TestCase):
@@ -157,7 +220,7 @@ class RunPhaseTests(unittest.TestCase):
         popen = mock.Mock(return_value=child)
         terminate = mock.Mock()
         states = iter(states or (snapshot(), snapshot()))
-        clock = iter(clock or (0.0, 1.0))
+        clock = iter(clock or (0.0, 1.0, 1.0))
         cancellation = cancelled or gate.CancellationState()
         result = gate.run_phase(
             "build",
@@ -209,6 +272,29 @@ class RunPhaseTests(unittest.TestCase):
             )
         terminate.assert_called_once_with(child)
 
+    def test_snapshot_that_consumes_remaining_deadline_terminates_child(self):
+        child = FakeProcess(polls=(None,))
+        terminate = mock.Mock()
+        clock = [0.0]
+        snapshots = iter((snapshot(),))
+
+        def deadline_snapshot(deadline):
+            self.assertEqual(deadline, 5.0)
+            clock[0] = deadline
+            return snapshot()
+
+        with self.assertRaises(gate.CodeFailure):
+            gate.run_phase(
+                "build", pathlib.Path("/trusted/build_blue.sh"), pathlib.Path("/source"),
+                pathlib.Path("/artifacts"), {}, timeout_seconds=5,
+                read_snapshot=lambda: next(snapshots),
+                read_snapshot_with_deadline=deadline_snapshot,
+                now=lambda: clock[0], sleep=lambda seconds: None,
+                cancellation=gate.CancellationState(),
+                popen=lambda *args, **kwargs: child, terminate=terminate,
+            )
+        terminate.assert_called_once_with(child)
+
     def test_cancellation_terminates_child(self):
         child = FakeProcess(polls=(None,))
         cancellation = gate.CancellationState()
@@ -232,7 +318,7 @@ class RunPhaseTests(unittest.TestCase):
         child = FakeProcess(polls=(None,))
         popen = mock.Mock(return_value=child)
         terminate = mock.Mock()
-        with self.assertRaises(gate.InfrastructureFailure):
+        with self.assertRaises(gate.ResourceCollision) as raised:
             gate.run_phase(
                 "build", pathlib.Path("/trusted/build_blue.sh"), pathlib.Path("/source"),
                 pathlib.Path("/artifacts"), {}, timeout_seconds=5,
@@ -240,6 +326,7 @@ class RunPhaseTests(unittest.TestCase):
                 sleep=lambda seconds: None, cancellation=gate.CancellationState(),
                 popen=popen, terminate=terminate,
             )
+        self.assertEqual(gate.exit_code_for(raised.exception), 22)
         popen.assert_not_called()
         terminate.assert_not_called()
 
@@ -247,7 +334,7 @@ class RunPhaseTests(unittest.TestCase):
         child = FakeProcess(polls=(None,))
         states = iter((snapshot(), snapshot(process("tilexr-ci"))))
         terminate = mock.Mock()
-        with self.assertRaises(gate.InfrastructureFailure):
+        with self.assertRaises(gate.ResourceCollision):
             gate.run_phase(
                 "build", pathlib.Path("/trusted/build_blue.sh"), pathlib.Path("/source"),
                 pathlib.Path("/artifacts"), {}, timeout_seconds=5,
@@ -334,6 +421,40 @@ class CancellationTests(unittest.TestCase):
             self.assertTrue(state.cancelled)
         self.assertIs(signal.getsignal(signal.SIGTERM), previous)
 
+    def test_cancellation_during_final_step_summary_returns_130(self):
+        cancellation = gate.CancellationState()
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            step_summary = root / "step-summary.md"
+            step_summary.touch()
+            config = gate.Config(
+                root / "source", root / "artifacts", "merge", "LingquLab/TileXR", 42
+            )
+            writes = []
+
+            def write_summary(*args, **kwargs):
+                writes.append(kwargs.get("step_summary"))
+                if kwargs.get("step_summary") is not None:
+                    cancellation.cancel()
+                return "summary"
+
+            with mock.patch.object(gate, "orchestrate"), \
+                 mock.patch.object(gate, "verify_final_cleanup"), \
+                 mock.patch.object(gate, "invoke_collector"), \
+                 mock.patch.object(gate, "write_summary", side_effect=write_summary):
+                result = gate._run_controller_body(
+                    config,
+                    {
+                        "TILEXR_CI_GITHUB_TOKEN": "token",
+                        "GITHUB_STEP_SUMMARY": str(step_summary),
+                    },
+                    root / "trusted",
+                    cancellation,
+                )
+
+        self.assertEqual(result, 130)
+        self.assertGreaterEqual(len(writes), 3)
+
 
 class LockOrchestrationTests(unittest.TestCase):
     def test_build_precedes_lock_and_lock_wraps_wait_revalidation_and_hardware(self):
@@ -353,7 +474,8 @@ class LockOrchestrationTests(unittest.TestCase):
 
         def wait(**kwargs):
             events.append("wait")
-            self.assertEqual(kwargs["max_wait_seconds"], 21600)
+            self.assertGreater(kwargs["max_wait_seconds"], 0)
+            self.assertLessEqual(kwargs["max_wait_seconds"], 21600)
             self.assertEqual(kwargs["poll_seconds"], 60)
             self.assertEqual(kwargs["stable_samples"], 2)
             self.assertIs(kwargs["now"], gate.time.monotonic)
@@ -392,6 +514,54 @@ class LockOrchestrationTests(unittest.TestCase):
                 lock_fn=lock, sleep_fn=lambda seconds: None, emit=lambda line: None,
             )
 
+        self.assertEqual(phases, ["build"])
+
+    def test_lock_and_idle_wait_share_one_resource_budget(self):
+        clock = [100.0]
+        observed = {}
+
+        @contextlib.contextmanager
+        def lock(**kwargs):
+            clock[0] += 120.0
+            yield
+
+        def wait(**kwargs):
+            observed["remaining"] = kwargs["max_wait_seconds"]
+            clock[0] += 30.0
+            return snapshot()
+
+        gate.orchestrate(
+            gate.Config(pathlib.Path("/source"), pathlib.Path("/artifacts"), "merge", "LingquLab/TileXR", 42),
+            control_dir=pathlib.Path("/trusted"), token="token", cancellation=gate.CancellationState(),
+            run_phase_fn=lambda name, *args, **kwargs: 0,
+            wait_for_idle_fn=wait, read_snapshot_fn=lambda: snapshot(),
+            fetch_merge_sha_fn=lambda pr, token: "merge",
+            verify_merge_sha_fn=lambda source, expected: expected,
+            lock_fn=lock, emit=lambda line: None, resource_now=lambda: clock[0],
+        )
+        self.assertEqual(observed["remaining"], 21600 - 120)
+
+    def test_exhausted_lock_budget_prevents_idle_wait_and_hardware(self):
+        clock = [0.0]
+        phases = []
+        waiter = mock.Mock()
+
+        @contextlib.contextmanager
+        def lock(**kwargs):
+            clock[0] = 21600.0
+            yield
+
+        with self.assertRaises(npu_state.ResourceTimeout):
+            gate.orchestrate(
+                gate.Config(pathlib.Path("/source"), pathlib.Path("/artifacts"), "merge", "LingquLab/TileXR", 42),
+                control_dir=pathlib.Path("/trusted"), token="token", cancellation=gate.CancellationState(),
+                run_phase_fn=lambda name, *args, **kwargs: phases.append(name) or 0,
+                wait_for_idle_fn=waiter, read_snapshot_fn=lambda: snapshot(),
+                fetch_merge_sha_fn=lambda pr, token: "merge",
+                verify_merge_sha_fn=lambda source, expected: expected,
+                lock_fn=lock, emit=lambda line: None, resource_now=lambda: clock[0],
+            )
+        waiter.assert_not_called()
         self.assertEqual(phases, ["build"])
 
     def test_cancellation_interrupts_resource_wait_and_maps_to_130(self):
@@ -532,11 +702,33 @@ class SummaryTests(unittest.TestCase):
 
 
 class CleanupTests(unittest.TestCase):
+    def test_final_cleanup_polls_read_only_during_bounded_driver_grace(self):
+        states = iter(
+            (
+                snapshot(process("tilexr-ci", 500)),
+                snapshot(process("tilexr-ci", 500)),
+                snapshot(),
+            )
+        )
+        clock = iter((0.0, 0.0, 0.5, 0.5, 1.0))
+        sleeps = []
+
+        gate.verify_final_cleanup(
+            lambda: next(states),
+            sleep=sleeps.append,
+            now=lambda: next(clock),
+            grace_seconds=2.0,
+            poll_seconds=0.5,
+        )
+
+        self.assertEqual(sleeps, [0.5, 0.5])
+
     def test_leftover_ci_process_fails_without_signalling_any_pid(self):
         killpg = mock.Mock()
         with self.assertRaises(gate.InfrastructureFailure):
             gate.verify_final_cleanup(
-                lambda: snapshot(process("tilexr-ci", 500), process("alice", 600))
+                lambda: snapshot(process("tilexr-ci", 500), process("alice", 600)),
+                grace_seconds=0,
             )
         killpg.assert_not_called()
 
@@ -552,14 +744,93 @@ class CleanupTests(unittest.TestCase):
         self.assertIn("tilexr-ci pid 500 remains", str(final))
         self.assertIs(gate.select_final_failure(final, gate.Cancelled("late signal")), final)
 
-    def test_outer_cleanup_runs_only_before_lock_acquisition_is_attempted(self):
+    def test_outer_cleanup_runs_after_lock_failure_until_cleanup_is_checked(self):
         report = gate.GateReport(pr_number=1)
         self.assertTrue(gate.requires_outer_cleanup(report))
-        report.lock_attempted = True
+        report.cleanup_checked = True
         self.assertFalse(gate.requires_outer_cleanup(report))
+
+    def test_lock_failure_outer_cleanup_precedes_collection_and_overrides_timeout(self):
+        events = []
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            config = gate.Config(
+                root / "source", root / "artifacts", "merge", "LingquLab/TileXR", 42
+            )
+
+            def cleanup():
+                events.append("cleanup")
+                raise gate.InfrastructureFailure("cleanup could not be verified")
+
+            with mock.patch.object(
+                gate,
+                "orchestrate",
+                side_effect=npu_state.ResourceTimeout("lock timed out"),
+            ), mock.patch.object(gate, "verify_final_cleanup", side_effect=cleanup), \
+                 mock.patch.object(
+                     gate, "write_summary", side_effect=lambda *args, **kwargs: events.append("summary")
+                 ), mock.patch.object(
+                     gate, "invoke_collector", side_effect=lambda *args, **kwargs: events.append("collector")
+                 ):
+                result = gate._run_controller_body(
+                    config,
+                    {"TILEXR_CI_GITHUB_TOKEN": "token"},
+                    root / "trusted",
+                    gate.CancellationState(),
+                )
+
+        self.assertEqual(result, 23)
+        self.assertLess(events.index("cleanup"), events.index("collector"))
 
 
 class CliValidationTests(unittest.TestCase):
+    def test_preexisting_cancellation_does_not_skip_bounded_collector_attempt(self):
+        config = gate.Config(
+            pathlib.Path("/source"), pathlib.Path("/artifacts"), "sha", "LingquLab/TileXR", 1
+        )
+        cancellation = gate.CancellationState()
+        cancellation.cancel()
+        child = FakeProcess(polls=(0,), returncode=0)
+        popen = mock.Mock(return_value=child)
+        terminate = mock.Mock()
+        with tempfile.TemporaryDirectory() as directory:
+            collector = pathlib.Path(directory) / "collect_artifacts.sh"
+            collector.write_text("#!/bin/sh\n", encoding="utf-8")
+            collector.chmod(0o700)
+
+            gate.invoke_collector(
+                collector,
+                config,
+                {},
+                cancellation=cancellation,
+                popen=popen,
+                now=lambda: 0.0,
+                sleep=lambda seconds: None,
+                terminate=terminate,
+            )
+
+        popen.assert_called_once()
+        terminate.assert_called_once_with(child)
+
+    def test_missing_collector_overrides_primary_code_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            config = gate.Config(
+                root / "source", root / "artifacts", "merge", "LingquLab/TileXR", 42
+            )
+            with mock.patch.object(
+                gate, "orchestrate", side_effect=gate.CodeFailure("tests failed")
+            ), mock.patch.object(gate, "verify_final_cleanup"), mock.patch.object(
+                gate, "write_summary", return_value="summary"
+            ):
+                result = gate._run_controller_body(
+                    config,
+                    {"TILEXR_CI_GITHUB_TOKEN": "token"},
+                    root / "trusted-without-collector",
+                    gate.CancellationState(),
+                )
+        self.assertEqual(result, 23)
+
     def test_repository_and_pr_number_are_strictly_validated(self):
         with self.assertRaises(gate.InfrastructureFailure):
             gate.validate_config(
@@ -577,29 +848,28 @@ class CliValidationTests(unittest.TestCase):
         with self.assertRaises(gate.InfrastructureFailure):
             gate.invoke_collector(pathlib.Path("/does/not/exist"), config, {})
 
-    def test_collector_cancellation_terminates_only_its_tracked_group(self):
+    def test_collector_cancellation_during_launch_still_collects_and_reaps(self):
         config = gate.Config(
             pathlib.Path("/source"), pathlib.Path("/artifacts"), "sha", "LingquLab/TileXR", 1
         )
         cancellation = gate.CancellationState()
-        child = FakeProcess(polls=(None,))
+        child = FakeProcess(polls=(0,), returncode=0)
         terminate = mock.Mock()
         popen = mock.Mock(side_effect=lambda *args, **kwargs: cancellation.cancel() or child)
         with tempfile.TemporaryDirectory() as directory:
             collector = pathlib.Path(directory) / "collect_artifacts.sh"
             collector.write_text("#!/bin/sh\n", encoding="utf-8")
             collector.chmod(0o700)
-            with self.assertRaises(gate.Cancelled):
-                gate.invoke_collector(
-                    collector,
-                    config,
-                    {"PATH": "/usr/bin"},
-                    cancellation=cancellation,
-                    popen=popen,
-                    now=lambda: 0.0,
-                    sleep=lambda seconds: None,
-                    terminate=terminate,
-                )
+            gate.invoke_collector(
+                collector,
+                config,
+                {"PATH": "/usr/bin"},
+                cancellation=cancellation,
+                popen=popen,
+                now=lambda: 0.0,
+                sleep=lambda seconds: None,
+                terminate=terminate,
+            )
         popen.assert_called_once_with(
             [str(collector), "/source", "/artifacts"],
             cwd="/source",
