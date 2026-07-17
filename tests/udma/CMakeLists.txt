@@ -244,6 +244,7 @@ if(BUILD_TILEXR_UDMA_DEMO)
                 -o "${TILEXR_UDMA_DEMO_KERNEL_SO}"
             DEPENDS
                 "${CMAKE_CURRENT_SOURCE_DIR}/demo/tilexr_udma_demo_kernel.cpp"
+                "${CMAKE_CURRENT_SOURCE_DIR}/demo/tilexr_udma_fullmesh_trace.h"
                 "${TILEXR_ROOT}/src/include/tilexr_udma.h"
                 "${TILEXR_ROOT}/src/include/tilexr_data_as_flag.h"
             VERBATIM
