@@ -142,6 +142,143 @@ class FakeProcess:
 
 
 class TerminationTests(unittest.TestCase):
+    def test_live_term_resistant_leader_is_killed_even_when_membership_scan_is_empty(self):
+        child = mock.Mock(pid=4242)
+        child.poll.return_value = None
+        child.wait.return_value = -signal.SIGKILL
+        signals = []
+        clock = [0.0]
+
+        def advance(seconds):
+            clock[0] += seconds
+
+        gate.terminate_group(
+            child,
+            killpg=lambda pgid, signum: signals.append(signum),
+            session_members=lambda pgid: (),
+            now=lambda: clock[0],
+            sleep=advance,
+        )
+
+        self.assertEqual(signals, [signal.SIGTERM, signal.SIGKILL])
+
+    def test_process_generation_reuse_is_not_added_or_signalled(self):
+        old = gate.ProcessRecord(700, 999, 700, 700, 10, os.geteuid())
+        reused = gate.ProcessRecord(700, 999, 700, 700, 20, os.geteuid())
+        scans = iter(({700: old}, {700: reused}))
+        signals = []
+        boundary = gate.LinuxProcessBoundary(
+            parent_pid=999,
+            baseline=(),
+            scan=lambda: next(scans),
+            signal_identity=lambda identity, signum: signals.append((identity, signum)),
+        )
+        boundary.attach(700)
+
+        boundary.signal_tracked(signal.SIGTERM)
+
+        self.assertEqual(signals, [])
+
+    def test_linux_boundary_fails_closed_when_pidfd_open_is_unavailable(self):
+        record = gate.ProcessRecord(700, 999, 700, 700, 10, os.geteuid())
+        boundary = gate.LinuxProcessBoundary(
+            parent_pid=999,
+            baseline=(),
+            scan=lambda: {700: record},
+        )
+
+        with mock.patch.object(
+            gate.os, "pidfd_open", side_effect=PermissionError, create=True
+        ), mock.patch.object(
+            gate.signal, "pidfd_send_signal", create=True
+        ):
+            with self.assertRaises(gate.InfrastructureFailure):
+                boundary.attach(700)
+
+    def test_linux_boundary_fails_if_process_remains_after_kill_and_reap_grace(self):
+        record = gate.ProcessRecord(700, 999, 700, 700, 10, os.geteuid())
+        signals = []
+        boundary = gate.LinuxProcessBoundary(
+            parent_pid=999,
+            baseline=(),
+            scan=lambda: {700: record},
+            signal_identity=lambda identity, signum: signals.append(signum),
+        )
+        boundary.attach(700)
+        child = mock.Mock(pid=700)
+        child.poll.return_value = None
+        child.wait.return_value = -signal.SIGKILL
+        clock = [0.0]
+
+        with self.assertRaises(gate.InfrastructureFailure):
+            boundary.terminate(
+                child,
+                now=lambda: clock[0],
+                sleep=lambda seconds: clock.__setitem__(0, clock[0] + seconds),
+            )
+
+        self.assertIn(signal.SIGKILL, signals)
+
+    def test_newly_adopted_descendant_after_parent_kill_is_also_killed(self):
+        root = gate.ProcessRecord(700, 999, 700, 700, 10, os.geteuid())
+        escaped = gate.ProcessRecord(701, 999, 701, 701, 11, os.geteuid())
+        scans = iter(
+            (
+                {700: root},
+                {700: root},
+                {700: root},
+                {700: root},
+                {701: escaped},
+                {},
+            )
+        )
+        signals = []
+        boundary = gate.LinuxProcessBoundary(
+            parent_pid=999,
+            baseline=(),
+            scan=lambda: next(scans),
+            signal_identity=lambda record, signum: signals.append((record.pid, signum)),
+        )
+        boundary.attach(700)
+        child = mock.Mock(pid=700)
+        child.poll.return_value = None
+        child.wait.return_value = -signal.SIGKILL
+        clock = iter((0.0, 10.0, 10.0, 10.0, 10.1))
+
+        boundary.terminate(
+            child, now=lambda: next(clock), sleep=lambda seconds: None
+        )
+
+        self.assertIn((701, signal.SIGKILL), signals)
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux subreaper regression")
+    def test_subreaper_cleans_descendant_that_escapes_session_and_process_group(self):
+        with tempfile.TemporaryDirectory() as directory:
+            pid_file = pathlib.Path(directory) / "escaped.pid"
+            boundary = gate.LinuxProcessBoundary.prepare()
+            leader = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-c",
+                    (
+                        "import pathlib, subprocess; "
+                        "child=subprocess.Popen(['sleep', '60'], start_new_session=True); "
+                        "pathlib.Path(%r).write_text(str(child.pid), encoding='ascii')"
+                    )
+                    % str(pid_file),
+                ],
+                start_new_session=True,
+            )
+            boundary.attach(leader.pid)
+            leader._tilexr_process_boundary = boundary
+            leader.wait(timeout=10)
+            escaped_pid = int(pid_file.read_text(encoding="ascii"))
+
+            gate.terminate_group(leader)
+
+            with self.assertRaises(ProcessLookupError):
+                os.kill(escaped_pid, 0)
+
     def test_exited_leader_with_reused_numeric_pgid_is_not_signalled(self):
         child = FakeProcess(polls=(0,), returncode=0)
         killpg = mock.Mock()
@@ -251,6 +388,23 @@ class TerminationTests(unittest.TestCase):
 
 
 class RunPhaseTests(unittest.TestCase):
+    def test_child_exit_observed_after_deadline_is_timeout_not_success(self):
+        child = FakeProcess(polls=(0,), returncode=0)
+        terminate = mock.Mock()
+        clock = iter((0.0, 5.0))
+
+        with self.assertRaises(gate.CodeFailure):
+            gate.run_phase(
+                "build", pathlib.Path("/trusted/build_blue.sh"), pathlib.Path("/source"),
+                pathlib.Path("/artifacts"), {}, timeout_seconds=5,
+                read_snapshot=lambda: snapshot(), now=lambda: next(clock),
+                sleep=lambda seconds: None, cancellation=gate.CancellationState(),
+                popen=lambda *args, **kwargs: child, terminate=terminate,
+            )
+
+        self.assertEqual(child._polls, [0])
+        terminate.assert_called_once_with(child)
+
     def test_phase_termination_failure_overrides_and_preserves_primary_code_failure(self):
         child = FakeProcess(polls=(7,), returncode=7)
 
@@ -957,7 +1111,7 @@ class CliValidationTests(unittest.TestCase):
             collector = pathlib.Path(directory) / "collect_artifacts.sh"
             collector.write_text("#!/bin/sh\n", encoding="utf-8")
             collector.chmod(0o700)
-            with self.assertRaises(gate.InfrastructureFailure):
+            with self.assertRaises(gate.Cancelled) as raised:
                 gate.invoke_collector(
                     collector, config, {}, cancellation=cancellation,
                     popen=lambda *args, **kwargs: child, now=lambda: clock[0],
@@ -965,6 +1119,7 @@ class CliValidationTests(unittest.TestCase):
                 )
 
         self.assertEqual(clock[0], 30.0)
+        self.assertEqual(gate.exit_code_for(raised.exception), 130)
         terminate.assert_called_once_with(child)
 
     def test_over_deadline_collector_completion_cannot_succeed(self):
@@ -979,7 +1134,7 @@ class CliValidationTests(unittest.TestCase):
             collector = pathlib.Path(directory) / "collect_artifacts.sh"
             collector.write_text("#!/bin/sh\n", encoding="utf-8")
             collector.chmod(0o700)
-            with self.assertRaises(gate.InfrastructureFailure):
+            with self.assertRaises(gate.Cancelled):
                 gate.invoke_collector(
                     collector, config, {}, cancellation=cancellation,
                     popen=lambda *args, **kwargs: child, now=lambda: next(clock),

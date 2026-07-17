@@ -3,6 +3,7 @@
 
 import argparse
 import contextlib
+import ctypes
 import dataclasses
 import fcntl
 import json
@@ -259,6 +260,246 @@ def _linux_session_members(pgid: int) -> Tuple[int, ...]:
     return tuple(members)
 
 
+@dataclasses.dataclass(frozen=True)
+class ProcessRecord:
+    pid: int
+    parent_pid: int
+    process_group: int
+    session: int
+    start_time: int
+    uid: int
+
+    @property
+    def identity(self):
+        return (self.pid, self.start_time)
+
+
+def _scan_linux_processes() -> Dict[int, ProcessRecord]:
+    records = {}
+    try:
+        entries = list(pathlib.Path("/proc").iterdir())
+    except OSError:
+        return records
+    for entry in entries:
+        if not entry.name.isdecimal():
+            continue
+        try:
+            uid = entry.stat().st_uid
+            fields = (entry / "stat").read_text(encoding="ascii").rsplit(")", 1)[1].split()
+            record = ProcessRecord(
+                pid=int(entry.name),
+                parent_pid=int(fields[1]),
+                process_group=int(fields[2]),
+                session=int(fields[3]),
+                start_time=int(fields[19]),
+                uid=uid,
+            )
+        except (IndexError, OSError, ValueError):
+            continue
+        records[record.pid] = record
+    return records
+
+
+def _enable_linux_subreaper():
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.prctl(36, 1, 0, 0, 0) != 0:  # PR_SET_CHILD_SUBREAPER
+        error_number = ctypes.get_errno()
+        raise InfrastructureFailure(
+            "could not enable Linux child subreaper: %s" % os.strerror(error_number)
+        )
+
+
+class LinuxProcessBoundary:
+    def __init__(self, *, parent_pid, baseline, scan, signal_identity=None):
+        self.parent_pid = parent_pid
+        self.baseline = set(baseline)
+        self.scan = scan
+        self._injected_signaler = signal_identity is not None
+        self.signal_identity = signal_identity or self._signal_record
+        self.root_pid = None
+        self.known = {}
+        self.seen_starts = {}
+        self.pidfds = {}
+
+    @classmethod
+    def prepare(cls):
+        _enable_linux_subreaper()
+        if not hasattr(os, "pidfd_open") or not hasattr(signal, "pidfd_send_signal"):
+            raise InfrastructureFailure(
+                "Linux pidfd support is required for tracked process cleanup"
+            )
+        try:
+            capability_fd = os.pidfd_open(os.getpid(), 0)
+            os.close(capability_fd)
+        except OSError as error:
+            raise InfrastructureFailure(
+                "Linux pidfd cleanup capability is unavailable: %s" % error
+            ) from error
+        records = _scan_linux_processes()
+        parent_pid = os.getpid()
+        baseline = (
+            record.identity
+            for record in records.values()
+            if record.parent_pid == parent_pid
+        )
+        return cls(
+            parent_pid=parent_pid,
+            baseline=baseline,
+            scan=_scan_linux_processes,
+        )
+
+    def _remember(self, record):
+        previous_start = self.seen_starts.get(record.pid)
+        if previous_start is not None and previous_start != record.start_time:
+            return False
+        if record.identity in self.baseline:
+            return False
+        self.seen_starts[record.pid] = record.start_time
+        self.known[record.identity] = record
+        if record.identity not in self.pidfds and not self._injected_signaler:
+            if not hasattr(os, "pidfd_open") or not hasattr(signal, "pidfd_send_signal"):
+                raise InfrastructureFailure(
+                    "Linux pidfd support is required for tracked process cleanup"
+                )
+            try:
+                fd = os.pidfd_open(record.pid, 0)
+                current = self.scan().get(record.pid)
+                if current is None or current.identity != record.identity:
+                    os.close(fd)
+                else:
+                    self.pidfds[record.identity] = fd
+            except ProcessLookupError:
+                self.known.pop(record.identity, None)
+                return False
+            except OSError as error:
+                raise InfrastructureFailure(
+                    "could not open pidfd for tracked process %d: %s"
+                    % (record.pid, error)
+                ) from error
+        return True
+
+    def attach(self, root_pid):
+        self.root_pid = root_pid
+        records = self.scan()
+        root = records.get(root_pid)
+        if root is not None:
+            self._remember(root)
+        self._refresh(records)
+
+    def _refresh(self, records=None):
+        records = self.scan() if records is None else records
+        same_uid = {
+            pid: record
+            for pid, record in records.items()
+            if record.uid == os.geteuid()
+        }
+        if self.root_pid is not None and self.root_pid in same_uid:
+            self._remember(same_uid[self.root_pid])
+
+        tracked_pids = {
+            record.pid
+            for identity, record in self.known.items()
+            if same_uid.get(record.pid) is not None
+            and same_uid[record.pid].identity == identity
+        }
+        changed = True
+        while changed:
+            changed = False
+            for record in same_uid.values():
+                if record.parent_pid in tracked_pids and record.pid not in tracked_pids:
+                    if self._remember(record):
+                        tracked_pids.add(record.pid)
+                        changed = True
+
+        for record in same_uid.values():
+            if record.parent_pid == self.parent_pid and record.identity not in self.baseline:
+                self._remember(record)
+
+        return [
+            current
+            for identity, record in self.known.items()
+            for current in (same_uid.get(record.pid),)
+            if current is not None and current.identity == identity
+        ]
+
+    def _signal_record(self, record, signum):
+        fd = self.pidfds.get(record.identity)
+        if fd is None:
+            raise InfrastructureFailure(
+                "tracked process %d has no pidfd identity" % record.pid
+            )
+        try:
+            signal.pidfd_send_signal(fd, signum, None, 0)
+        except ProcessLookupError:
+            pass
+
+    def signal_tracked(self, signum):
+        records = self._refresh()
+        for record in records:
+            self.signal_identity(record, signum)
+        return records
+
+    def _reap_adopted(self):
+        for record in tuple(self.known.values()):
+            if record.pid == self.root_pid:
+                continue
+            try:
+                os.waitpid(record.pid, os.WNOHANG)
+            except (ChildProcessError, OSError):
+                pass
+
+    def terminate(self, child, *, now=time.monotonic, sleep=time.sleep):
+        try:
+            term_signalled = set()
+            for record in self.signal_tracked(signal.SIGTERM):
+                term_signalled.add(record.identity)
+            deadline = now() + 10.0
+            while True:
+                child.poll()
+                self._reap_adopted()
+                live = self._refresh()
+                for record in live:
+                    if record.identity not in term_signalled:
+                        self.signal_identity(record, signal.SIGTERM)
+                        term_signalled.add(record.identity)
+                if not live or now() >= deadline:
+                    break
+                sleep(min(0.1, max(0.0, deadline - now())))
+            live = self._refresh()
+            kill_signalled = set()
+            for record in live:
+                self.signal_identity(record, signal.SIGKILL)
+                kill_signalled.add(record.identity)
+            try:
+                child.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                pass
+            verification_deadline = now() + 2.0
+            while True:
+                self._reap_adopted()
+                live = self._refresh()
+                for record in live:
+                    if record.identity not in kill_signalled:
+                        self.signal_identity(record, signal.SIGKILL)
+                        kill_signalled.add(record.identity)
+                if not live or now() >= verification_deadline:
+                    break
+                sleep(min(0.05, max(0.0, verification_deadline - now())))
+            if live:
+                details = ", ".join(
+                    "%d:%d" % record.identity for record in live
+                )
+                raise InfrastructureFailure(
+                    "tracked processes remain after SIGKILL: %s" % details
+                )
+        finally:
+            for fd in self.pidfds.values():
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+
+
 def terminate_group(
     child,
     killpg=os.killpg,
@@ -269,15 +510,23 @@ def terminate_group(
     sleep: Callable[[float], None] = time.sleep,
 ):
     """Stop only the process group created for the supplied child."""
+    boundary = getattr(child, "_tilexr_process_boundary", None)
+    if isinstance(boundary, LinuxProcessBoundary):
+        boundary.terminate(child, now=now, sleep=sleep)
+        return
+
+    leader_live = child.poll() is None
+
     def members():
         if session_members is not None:
             return tuple(session_members(child.pid))
+        if group_exists is not _process_group_exists:
+            return (child.pid,) if group_exists(child.pid) else ()
         if sys.platform.startswith("linux"):
             return _linux_session_members(child.pid)
         return (child.pid,) if group_exists(child.pid) else ()
 
-    leader_running = child.poll() is None
-    if not leader_running and not members():
+    if not leader_live and not members():
         child.wait()
         return
     try:
@@ -286,12 +535,12 @@ def terminate_group(
         pass
     deadline = now() + 10.0
     while True:
-        child.poll()
-        if not members() or now() >= deadline:
+        leader_live = child.poll() is None
+        if (not leader_live and not members()) or now() >= deadline:
             break
         sleep(min(0.1, max(0.0, deadline - now())))
-    child.poll()
-    if members():
+    leader_live = child.poll() is None
+    if leader_live or members():
         try:
             killpg(child.pid, signal.SIGKILL)
         except ProcessLookupError:
@@ -334,6 +583,9 @@ def run_phase(
     else:
         preflight_state = read_snapshot()
     _enforce_policy(phase, preflight_state)
+    process_boundary = None
+    if sys.platform.startswith("linux") and popen is subprocess.Popen:
+        process_boundary = LinuxProcessBoundary.prepare()
     try:
         child = popen(
             command,
@@ -343,6 +595,9 @@ def run_phase(
         )
     except OSError as error:
         raise InfrastructureFailure("could not start trusted %s phase: %s" % (phase, error)) from error
+    if process_boundary is not None:
+        process_boundary.attach(child.pid)
+        child._tilexr_process_boundary = process_boundary
 
     started = now()
     deadline = started + timeout_seconds
@@ -367,17 +622,17 @@ def run_phase(
             if cancellation.cancelled:
                 raise Cancelled("gate was cancelled during %s" % phase)
 
+            if now() >= deadline:
+                raise CodeFailure("%s phase exceeded %.0f seconds" % (phase, timeout_seconds))
             returncode = child.poll()
             if returncode is not None:
                 return classify_exit(returncode)
-            if now() >= deadline:
-                raise CodeFailure("%s phase exceeded %.0f seconds" % (phase, timeout_seconds))
             state = monitored_snapshot()
+            if now() >= deadline:
+                raise CodeFailure("%s phase exceeded %.0f seconds" % (phase, timeout_seconds))
             returncode = child.poll()
             if returncode is not None:
                 return classify_exit(returncode)
-            if now() >= deadline:
-                raise CodeFailure("%s phase exceeded %.0f seconds" % (phase, timeout_seconds))
             _enforce_policy(phase, state)
 
             elapsed = max(0.0, now() - started)
@@ -829,6 +1084,9 @@ def invoke_collector(
         )
     cancellation = cancellation or CancellationState()
     collector_sleep = sleep or time.sleep
+    process_boundary = None
+    if sys.platform.startswith("linux") and popen is subprocess.Popen:
+        process_boundary = LinuxProcessBoundary.prepare()
     try:
         child = popen(
             [str(script), str(config.source), str(config.artifacts)],
@@ -838,6 +1096,9 @@ def invoke_collector(
         )
     except OSError as error:
         raise _collector_failure("artifact collector failed to run: %s" % error) from error
+    if process_boundary is not None:
+        process_boundary.attach(child.pid)
+        child._tilexr_process_boundary = process_boundary
     started = now()
     normal_deadline = started + 600.0
     cancellation_deadline = started + 30.0 if cancellation.cancelled else None
@@ -851,6 +1112,13 @@ def invoke_collector(
             if cancellation_deadline is not None:
                 deadline = min(deadline, cancellation_deadline)
             if current >= deadline:
+                if (
+                    cancellation_deadline is not None
+                    and cancellation_deadline <= normal_deadline
+                ):
+                    raise Cancelled(
+                        "artifact collection reached the cancellation finalization deadline"
+                    )
                 raise _collector_failure(
                     "artifact collector exceeded its bounded finalization deadline"
                 )
