@@ -6,6 +6,7 @@
 #include "kernel_operator.h"
 #include "tilexr_data_as_flag.h"
 #include "tilexr_udma.h"
+#include "tilexr_udma_fullmesh_trace.h"
 
 constexpr int32_t TILEXR_UDMA_DEMO_MAGIC = 0x5444554d; // "TDUM"
 constexpr uint64_t TILEXR_UDMA_DEMO_IPC_STAGING_OFFSET = TileXR::IPC_DATA_OFFSET;
@@ -104,6 +105,53 @@ constexpr uint32_t TILEXR_BIGDATA_REMOTE_PUT_STAGE_POST = 6;
 constexpr uint32_t TILEXR_BIGDATA_REMOTE_PUT_STAGE_ACK = 7;
 
 namespace {
+
+__aicore__ inline uint64_t BigDataFullmeshTraceCycle(__gm__ uint8_t* trace)
+{
+    return trace == nullptr ? 0ULL : static_cast<uint64_t>(AscendC::GetSystemCycle());
+}
+
+__aicore__ inline void BigDataFullmeshTraceStoreSpan(
+    __gm__ uint8_t* trace, size_t offset, uint64_t beginCycle, uint64_t endCycle)
+{
+    if (trace == nullptr || beginCycle == 0ULL || endCycle < beginCycle) {
+        return;
+    }
+    auto span = reinterpret_cast<__gm__ uint64_t*>(trace + offset);
+    span[0] = beginCycle;
+    span[1] = endCycle;
+}
+
+__aicore__ inline void BigDataFullmeshTraceRecordKernelSpan(
+    __gm__ uint8_t* trace, uint32_t iteration, uint32_t core, uint32_t region,
+    uint64_t beginCycle, uint64_t endCycle)
+{
+    if (trace == nullptr || iteration >= TileXR::Demo::kFullmeshTraceMaxIterations ||
+        core >= TileXR::Demo::kFullmeshTraceMaxCores ||
+        region >= TileXR::Demo::kFullmeshTraceKernelRegions) {
+        return;
+    }
+    BigDataFullmeshTraceStoreSpan(
+        trace, TileXR::Demo::FullmeshTraceKernelSpanOffset(iteration, core, region),
+        beginCycle, endCycle);
+}
+
+__aicore__ inline void BigDataFullmeshTraceRecordTaskSpan(
+    __gm__ uint8_t* trace, uint32_t iteration, uint32_t core,
+    uint32_t pass, int32_t peer, uint32_t phase,
+    uint32_t passCount, int32_t rankSize, uint64_t beginCycle, uint64_t endCycle)
+{
+    if (trace == nullptr || iteration >= TileXR::Demo::kFullmeshTraceMaxIterations ||
+        core >= TileXR::Demo::kFullmeshTraceMaxCores || pass >= passCount ||
+        peer < 0 || peer >= rankSize || phase >= TileXR::Demo::kFullmeshTracePhaseCount) {
+        return;
+    }
+    BigDataFullmeshTraceStoreSpan(
+        trace, TileXR::Demo::FullmeshTraceTaskSpanOffset(
+            iteration, core, pass, static_cast<uint32_t>(peer), phase,
+            passCount, static_cast<uint32_t>(rankSize)),
+        beginCycle, endCycle);
+}
 
 __aicore__ inline uint64_t AllToAllPayloadBytes(int32_t elementsPerPeer)
 {
@@ -924,6 +972,7 @@ __aicore__ inline void BigDataSendPeerWorker(
     uint64_t kernelLoopBase, uint32_t profileStage, uint32_t shardCount, uint64_t sendDataOffset,
     uint64_t recvDataOffset, uint64_t copyDoneOffset, uint64_t readySignalOffset,
     uint64_t chunkBytesPerPeer, bool use35Core, uint64_t copyReadyOffset,
+    __gm__ uint8_t* fullmeshTrace, uint32_t traceIteration, uint32_t traceCore,
     AscendC::LocalTensor<uint8_t> relayLocal)
 {
     if (peer < 0 || peer >= rankSize || peer == rank || shardCount == 0U ||
@@ -942,6 +991,7 @@ __aicore__ inline void BigDataSendPeerWorker(
     const uint64_t token = BigDataPassToken(globalPass);
     const uint32_t slot = BigDataDataSlot(globalPass, pass, use35Core);
 
+    const uint64_t waitStart = BigDataFullmeshTraceCycle(fullmeshTrace);
     if (use35Core) {
         if (!BigDataWaitCopyReady(udmaMem, debug, copyReadyOffset, slot, rankSize, shardCount,
                 peer, TILEXR_UDMA_DEMO_BIGDATA_LOCAL_COPY_READY, token, loop, pass, relayLocal)) {
@@ -961,6 +1011,11 @@ __aicore__ inline void BigDataSendPeerWorker(
             }
         }
     }
+    const uint64_t waitEnd = BigDataFullmeshTraceCycle(fullmeshTrace);
+    BigDataFullmeshTraceRecordTaskSpan(
+        fullmeshTrace, traceIteration, traceCore, pass, peer,
+        TileXR::Demo::kFullmeshTracePhaseWaitCopyReady,
+        passCount, rankSize, waitStart, waitEnd);
     if (profileStage <= TILEXR_BIGDATA_PROFILE_STAGE_SEND_SYNC) {
         return;
     }
@@ -1005,9 +1060,21 @@ __aicore__ inline void BigDataSendPeerWorker(
             static_cast<int32_t>(remoteReadyOffset);
     }
 
+    const uint64_t dataStart = BigDataFullmeshTraceCycle(fullmeshTrace);
     TileXR::UDMAPutSignalNbi<int32_t>(args, peer, localSrc,
         remoteDataOffset, chunkBytes, remoteReadyOffset, token);
+    const uint64_t dataEnd = BigDataFullmeshTraceCycle(fullmeshTrace);
+    BigDataFullmeshTraceRecordTaskSpan(
+        fullmeshTrace, traceIteration, traceCore, pass, peer,
+        TileXR::Demo::kFullmeshTracePhaseDataPut,
+        passCount, rankSize, dataStart, dataEnd);
+    const uint64_t quietStart = BigDataFullmeshTraceCycle(fullmeshTrace);
     uint32_t status = TileXR::UDMAQuietStatus(args, peer);
+    const uint64_t quietEnd = BigDataFullmeshTraceCycle(fullmeshTrace);
+    BigDataFullmeshTraceRecordTaskSpan(
+        fullmeshTrace, traceIteration, traceCore, pass, peer,
+        TileXR::Demo::kFullmeshTracePhaseQuiet,
+        passCount, rankSize, quietStart, quietEnd);
     if (debug != nullptr && loop == 0 && pass == 0 && peer < 16) {
         uint32_t wqeAfter = ld_dev(reinterpret_cast<__gm__ uint32_t*>(wqCtx->wqeCntAddr), 0);
         debug[TILEXR_UDMA_DEMO_DEBUG_WQE_AFTER_BASE + peer] = static_cast<int32_t>(wqeAfter);
@@ -1022,7 +1089,9 @@ __aicore__ inline void BigDataRecvPeerWorker(
     uint32_t loop, uint32_t pass, uint64_t kernelLoopBase, uint32_t profileStage,
     bool use35Core, uint32_t recvShard, uint32_t shardCount, uint64_t recvDataOffset,
     uint64_t recvCopyDoneOffset, uint64_t readySignalOffset, uint64_t ackSignalOffset,
-    uint64_t chunkBytesPerPeer, AscendC::LocalTensor<uint8_t> relayLocal)
+    uint64_t chunkBytesPerPeer, __gm__ uint8_t* fullmeshTrace,
+    uint32_t traceIteration, uint32_t traceCore,
+    AscendC::LocalTensor<uint8_t> relayLocal)
 {
     const uint32_t dataShardCount = use35Core ?
         TILEXR_UDMA_DEMO_BIGDATA_MULTINODE_RECV_CORES : shardCount;
@@ -1049,6 +1118,7 @@ __aicore__ inline void BigDataRecvPeerWorker(
     const uint32_t slot = BigDataDataSlot(globalPass, pass, use35Core);
 
     uint64_t observed = 0ULL;
+    const uint64_t waitReadyStart = BigDataFullmeshTraceCycle(fullmeshTrace);
     if (use35Core) {
         if (recvShard == TILEXR_UDMA_DEMO_BIGDATA_RECV_READY_WAIT_SHARD) {
             observed = BigDataWaitTokenMte(
@@ -1100,6 +1170,11 @@ __aicore__ inline void BigDataRecvPeerWorker(
             return;
         }
     }
+    const uint64_t waitReadyEnd = BigDataFullmeshTraceCycle(fullmeshTrace);
+    BigDataFullmeshTraceRecordTaskSpan(
+        fullmeshTrace, traceIteration, traceCore, pass, peer,
+        TileXR::Demo::kFullmeshTracePhaseWaitReady,
+        passCount, rankSize, waitReadyStart, waitReadyEnd);
     if (profileStage <= TILEXR_BIGDATA_PROFILE_STAGE_WAIT_READY) {
         return;
     }
@@ -1112,9 +1187,15 @@ __aicore__ inline void BigDataRecvPeerWorker(
     }
     auto dst = reinterpret_cast<__gm__ uint8_t*>(
         output + static_cast<uint64_t>(peer) * elementsPerPeer + chunkOffset);
+    const uint64_t outputCopyStart = BigDataFullmeshTraceCycle(fullmeshTrace);
     if (shardHasBytes) {
         BigDataCopyRangePingPong(dst + shardOffset, recvSlot + shardOffset, shardBytes, relayLocal);
     }
+    const uint64_t outputCopyEnd = BigDataFullmeshTraceCycle(fullmeshTrace);
+    BigDataFullmeshTraceRecordTaskSpan(
+        fullmeshTrace, traceIteration, traceCore, pass, peer,
+        TileXR::Demo::kFullmeshTracePhaseOutputCopy,
+        passCount, rankSize, outputCopyStart, outputCopyEnd);
     if (debug != nullptr && recvShard == 0U && loop == 0 && pass == 0 && peer < 16) {
         auto relayDst = output + static_cast<uint64_t>(peer) * elementsPerPeer + chunkOffset;
         debug[TILEXR_UDMA_DEMO_DEBUG_RECV_SAMPLE_BASE + peer] = relayDst[0];
@@ -1123,11 +1204,18 @@ __aicore__ inline void BigDataRecvPeerWorker(
         return;
     }
 
+    const uint64_t publishDoneStart = BigDataFullmeshTraceCycle(fullmeshTrace);
     BigDataStoreTokenMte(
         BigDataControlSlot(udmaMem, recvCopyDoneOffset, slot, rankSize, shardCount, peer, recvShard),
         token, relayLocal);
+    const uint64_t publishDoneEnd = BigDataFullmeshTraceCycle(fullmeshTrace);
+    BigDataFullmeshTraceRecordTaskSpan(
+        fullmeshTrace, traceIteration, traceCore, pass, peer,
+        TileXR::Demo::kFullmeshTracePhasePublishRecvDone,
+        passCount, rankSize, publishDoneStart, publishDoneEnd);
     if (recvShard + 1U != shardCount) {
         if (use35Core && recvShard + 1U == dataShardCount) {
+            const uint64_t waitDoneStart = BigDataFullmeshTraceCycle(fullmeshTrace);
             for (uint32_t shard = 0U; shard < dataShardCount; ++shard) {
                 observed = BigDataWaitTokenMte(
                     BigDataControlSlot(udmaMem, recvCopyDoneOffset, slot, rankSize, shardCount, peer, shard),
@@ -1140,6 +1228,11 @@ __aicore__ inline void BigDataRecvPeerWorker(
                     return;
                 }
             }
+            const uint64_t waitDoneEnd = BigDataFullmeshTraceCycle(fullmeshTrace);
+            BigDataFullmeshTraceRecordTaskSpan(
+                fullmeshTrace, traceIteration, traceCore, pass, peer,
+                TileXR::Demo::kFullmeshTracePhaseWaitRecvDone,
+                passCount, rankSize, waitDoneStart, waitDoneEnd);
 
             auto remoteAck = BigDataRemoteRegisteredControlSlot(
                 args, peer, ackSignalOffset, slot, rankSize, shardCount, rank, 0U);
@@ -1150,10 +1243,17 @@ __aicore__ inline void BigDataRecvPeerWorker(
                 }
                 return;
             }
+            const uint64_t ackStart = BigDataFullmeshTraceCycle(fullmeshTrace);
             BigDataStoreTokenMte(remoteAck, token, relayLocal);
+            const uint64_t ackEnd = BigDataFullmeshTraceCycle(fullmeshTrace);
+            BigDataFullmeshTraceRecordTaskSpan(
+                fullmeshTrace, traceIteration, traceCore, pass, peer,
+                TileXR::Demo::kFullmeshTracePhaseAck,
+                passCount, rankSize, ackStart, ackEnd);
         }
         return;
     }
+    const uint64_t waitDoneStart = BigDataFullmeshTraceCycle(fullmeshTrace);
     for (uint32_t shard = 0U; shard < shardCount; ++shard) {
         observed = BigDataWaitTokenMte(
             BigDataControlSlot(udmaMem, recvCopyDoneOffset, slot, rankSize, shardCount, peer, shard),
@@ -1166,6 +1266,11 @@ __aicore__ inline void BigDataRecvPeerWorker(
             return;
         }
     }
+    const uint64_t waitDoneEnd = BigDataFullmeshTraceCycle(fullmeshTrace);
+    BigDataFullmeshTraceRecordTaskSpan(
+        fullmeshTrace, traceIteration, traceCore, pass, peer,
+        TileXR::Demo::kFullmeshTracePhaseWaitRecvDone,
+        passCount, rankSize, waitDoneStart, waitDoneEnd);
 
     __gm__ uint64_t* remoteAck = nullptr;
     if (use35Core) {
@@ -1181,7 +1286,13 @@ __aicore__ inline void BigDataRecvPeerWorker(
         }
         return;
     }
+    const uint64_t ackStart = BigDataFullmeshTraceCycle(fullmeshTrace);
     BigDataStoreTokenMte(remoteAck, token, relayLocal);
+    const uint64_t ackEnd = BigDataFullmeshTraceCycle(fullmeshTrace);
+    BigDataFullmeshTraceRecordTaskSpan(
+        fullmeshTrace, traceIteration, traceCore, pass, peer,
+        TileXR::Demo::kFullmeshTracePhaseAck,
+        passCount, rankSize, ackStart, ackEnd);
 }
 
 __aicore__ inline bool BigDataWaitCopyDoneRange(
@@ -1298,7 +1409,9 @@ __aicore__ inline void BigDataRemoteSendSegmentWorker(
     uint64_t kernelLoopBase, uint32_t profileStage, uint32_t shardCount,
     uint64_t sendDataOffset, uint64_t recvDataOffset, uint64_t copyDoneOffset,
     uint64_t remoteSendDoneOffset, uint64_t readySignalOffset, uint64_t chunkBytesPerPeer,
-    int32_t ranksPerNode, AscendC::LocalTensor<uint8_t> relayLocal)
+    int32_t ranksPerNode, __gm__ uint8_t* fullmeshTrace,
+    uint32_t traceIteration, uint32_t traceCore,
+    AscendC::LocalTensor<uint8_t> relayLocal)
 {
     if (peer < 0 || peer >= rankSize || peer == rank || !BigDataIsMultiNode(rankSize, ranksPerNode) ||
         shardCount == 0U || profileStage <= TILEXR_BIGDATA_PROFILE_STAGE_SEND_COPY) {
@@ -1336,10 +1449,16 @@ __aicore__ inline void BigDataRemoteSendSegmentWorker(
         (segmentId == TILEXR_UDMA_DEMO_BIGDATA_REMOTE_SEND_PRIMARY_SEGMENT) ?
         TILEXR_UDMA_DEMO_BIGDATA_REMOTE_COPY_READY_PRIMARY :
         TILEXR_UDMA_DEMO_BIGDATA_REMOTE_COPY_READY_SECONDARY;
+    const uint64_t waitStart = BigDataFullmeshTraceCycle(fullmeshTrace);
     if (!BigDataWaitCopyReady(udmaMem, debug, remoteSendDoneOffset, slot, rankSize,
             shardCount, peer, readyShard, token, loop, pass, relayLocal)) {
         return;
     }
+    const uint64_t waitEnd = BigDataFullmeshTraceCycle(fullmeshTrace);
+    BigDataFullmeshTraceRecordTaskSpan(
+        fullmeshTrace, traceIteration, traceCore, pass, peer,
+        TileXR::Demo::kFullmeshTracePhaseWaitCopyReady,
+        passCount, rankSize, waitStart, waitEnd);
     if (profileStage <= TILEXR_BIGDATA_PROFILE_STAGE_SEND_SYNC) {
         return;
     }
@@ -1358,21 +1477,40 @@ __aicore__ inline void BigDataRemoteSendSegmentWorker(
 
     uint32_t status = 0U;
     if (segmentBytes > 0U) {
+        const uint64_t dataStart = BigDataFullmeshTraceCycle(fullmeshTrace);
         TileXR::UDMAPutNbiOnQp<int32_t>(
             args, peer, qpIdx, localSrc, remoteDataOffset, segmentBytes);
+        const uint64_t dataEnd = BigDataFullmeshTraceCycle(fullmeshTrace);
+        BigDataFullmeshTraceRecordTaskSpan(
+            fullmeshTrace, traceIteration, traceCore, pass, peer,
+            TileXR::Demo::kFullmeshTracePhaseDataPut,
+            passCount, rankSize, dataStart, dataEnd);
+        const uint64_t quietStart = BigDataFullmeshTraceCycle(fullmeshTrace);
         status = TileXR::UDMAQuietStatusOnQp(args, peer, qpIdx);
+        const uint64_t quietEnd = BigDataFullmeshTraceCycle(fullmeshTrace);
+        BigDataFullmeshTraceRecordTaskSpan(
+            fullmeshTrace, traceIteration, traceCore, pass, peer,
+            TileXR::Demo::kFullmeshTracePhaseQuiet,
+            passCount, rankSize, quietStart, quietEnd);
     }
     if (debug != nullptr && loop == 0 && pass == 0 && peer < 16) {
         debug[TILEXR_UDMA_DEMO_DEBUG_UDMA_STATUS_BASE + peer] = static_cast<int32_t>(status);
     }
+    const uint64_t doneStart = BigDataFullmeshTraceCycle(fullmeshTrace);
     BigDataStoreTokenMte(
         BigDataControlSlot(udmaMem, remoteSendDoneOffset, slot, rankSize, shardCount, peer, segmentId),
         token, relayLocal);
+    const uint64_t doneEnd = BigDataFullmeshTraceCycle(fullmeshTrace);
+    BigDataFullmeshTraceRecordTaskSpan(
+        fullmeshTrace, traceIteration, traceCore, pass, peer,
+        TileXR::Demo::kFullmeshTracePhaseSegmentDone,
+        passCount, rankSize, doneStart, doneEnd);
 
     if (segmentId != TILEXR_UDMA_DEMO_BIGDATA_REMOTE_SEND_PRIMARY_SEGMENT ||
         profileStage <= TILEXR_BIGDATA_PROFILE_STAGE_DATA_PUT) {
         return;
     }
+    const uint64_t readyStart = BigDataFullmeshTraceCycle(fullmeshTrace);
     for (uint32_t done = 0U; done <= TILEXR_UDMA_DEMO_BIGDATA_REMOTE_SEND_SECONDARY_SEGMENT; ++done) {
         const uint64_t observed = BigDataWaitTokenMte(
             BigDataControlSlot(udmaMem, remoteSendDoneOffset, slot, rankSize, shardCount, peer, done),
@@ -1390,6 +1528,11 @@ __aicore__ inline void BigDataRemoteSendSegmentWorker(
     BigDataStoreTokenMte(localReady, token, relayLocal);
     BigDataPublishReadySignal(
         args, peer, udmaMem, readySignalOffset, slot, rankSize, shardCount, rank, token, qpIdx);
+    const uint64_t readyEnd = BigDataFullmeshTraceCycle(fullmeshTrace);
+    BigDataFullmeshTraceRecordTaskSpan(
+        fullmeshTrace, traceIteration, traceCore, pass, peer,
+        TileXR::Demo::kFullmeshTracePhasePublishReady,
+        passCount, rankSize, readyStart, readyEnd);
 }
 
 __aicore__ inline void BigDataRemotePutOnlySendWorker(
@@ -1595,7 +1738,8 @@ __aicore__ inline void BigDataRunRoleForPeer(
         BigDataSendPeerWorker(peer, rank, rankSize, args, udmaMem, debug,
             elementsPerPeer, effectiveChunkElements, passCount, loop, pass, kernelLoopBase, profileStage,
             shardCount, sendDataOffset, recvDataOffset, copyDoneOffset, readySignalOffset,
-            chunkBytesPerPeer, use35Core, copyDoneOffset, relayLocal);
+            chunkBytesPerPeer, use35Core, copyDoneOffset,
+            nullptr, 0U, 0U, relayLocal);
         return;
     }
     const uint32_t recvShard =
@@ -1603,7 +1747,7 @@ __aicore__ inline void BigDataRunRoleForPeer(
     BigDataRecvPeerWorker(peer, rank, rankSize, args, output, udmaMem, debug,
         elementsPerPeer, effectiveChunkElements, passCount, loop, pass, kernelLoopBase, profileStage,
         use35Core, recvShard, shardCount, recvDataOffset, recvCopyDoneOffset, readySignalOffset, ackSignalOffset,
-        chunkBytesPerPeer, relayLocal);
+        chunkBytesPerPeer, nullptr, 0U, 0U, relayLocal);
 }
 
 } // namespace
@@ -2695,8 +2839,6 @@ extern "C" __global__ __aicore__ void tilexr_udma_all_to_all_bigdata_kernel(
     uint64_t ackSignalOffset, int32_t chunkElements, uint32_t passCount, uint32_t loopCount,
     uint64_t kernelLoopBase, uint32_t profileStage, uint32_t force35CoreFlag)
 {
-    (void)fullmeshTraceGM;
-    (void)fullmeshTraceIteration;
     if (profileStage > TILEXR_BIGDATA_PROFILE_STAGE_FULL) {
         profileStage = TILEXR_BIGDATA_PROFILE_STAGE_FULL;
     }
@@ -2713,6 +2855,12 @@ extern "C" __global__ __aicore__ void tilexr_udma_all_to_all_bigdata_kernel(
     const bool force35Core = (force35CoreFlag & 0x1U) != 0U;
     const bool remotePutOnly = (force35CoreFlag & 0x2U) != 0U;
     const int32_t ranksPerNode = BigDataNormalizeRanksPerNode(static_cast<int32_t>(force35CoreFlag >> 8U));
+    auto fullmeshTraceBuffer = reinterpret_cast<__gm__ uint8_t*>(fullmeshTraceGM);
+    auto fullmeshTrace = (!remotePutOnly && force35Core &&
+        blockIdx >= 0 && blockIdx < static_cast<int32_t>(TileXR::Demo::kFullmeshTraceMaxCores)) ?
+        fullmeshTraceBuffer : nullptr;
+    const uint32_t traceCore = static_cast<uint32_t>(blockIdx);
+    const uint64_t kernelStart = BigDataFullmeshTraceCycle(fullmeshTrace);
 
     if (blockIdx == 0 && debug != nullptr) {
         debug[0] = TILEXR_UDMA_DEMO_MAGIC;
@@ -2801,8 +2949,10 @@ extern "C" __global__ __aicore__ void tilexr_udma_all_to_all_bigdata_kernel(
         return;
     }
 
+    const uint64_t workStart = BigDataFullmeshTraceCycle(fullmeshTrace);
     for (uint32_t loop = 0; loop < loopCount; ++loop) {
         for (uint32_t pass = 0; pass < passCount; ++pass) {
+            const uint64_t passStart = BigDataFullmeshTraceCycle(fullmeshTrace);
             if (remotePutOnly) {
                 for (int32_t sendTask = blockIdx; sendTask < sendTaskCount;
                      sendTask += static_cast<int32_t>(activeBlockDim)) {
@@ -2840,9 +2990,15 @@ extern "C" __global__ __aicore__ void tilexr_udma_all_to_all_bigdata_kernel(
                 continue;
             }
             if (isCopyCore) {
+                const uint64_t selfCopyStart = BigDataFullmeshTraceCycle(fullmeshTrace);
                 BigDataRunSelfCopyShard(rank, rankSize, input, output,
                     elementsPerPeer, effectiveChunkElements, pass,
                     copyShard, shardCount, relayLocal);
+                const uint64_t selfCopyEnd = BigDataFullmeshTraceCycle(fullmeshTrace);
+                BigDataFullmeshTraceRecordTaskSpan(
+                    fullmeshTrace, fullmeshTraceIteration, traceCore, pass, rank,
+                    TileXR::Demo::kFullmeshTracePhaseSelfCopy,
+                    passCount, rankSize, selfCopyStart, selfCopyEnd);
             }
 
             for (int32_t taskIndex = 0; taskIndex < taskCount; ++taskIndex) {
@@ -2854,25 +3010,38 @@ extern "C" __global__ __aicore__ void tilexr_udma_all_to_all_bigdata_kernel(
                 }
 
                 if (isCopyCore) {
+                    const uint64_t peerCopyStart = BigDataFullmeshTraceCycle(fullmeshTrace);
                     BigDataCopyPeerWorker(peer, rank, rankSize, args, input, output,
                         udmaMem, debug, elementsPerPeer, effectiveChunkElements,
                         passCount, loop, pass, kernelLoopBase, profileStage,
                         use35Core, copyShard, shardCount, sendDataOffset, copyDoneOffset, ackSignalOffset,
                         chunkBytesPerPeer, relayLocal);
+                    const uint64_t peerCopyEnd = BigDataFullmeshTraceCycle(fullmeshTrace);
+                    BigDataFullmeshTraceRecordTaskSpan(
+                        fullmeshTrace, fullmeshTraceIteration, traceCore, pass, peer,
+                        TileXR::Demo::kFullmeshTracePhasePeerCopy,
+                        passCount, rankSize, peerCopyStart, peerCopyEnd);
                     if (profileStage > TILEXR_BIGDATA_PROFILE_STAGE_SEND_COPY) {
                         const uint64_t globalPass = BigDataGlobalPassIndex(kernelLoopBase, passCount, loop, pass);
                         const uint64_t token = BigDataPassToken(globalPass);
                         const uint32_t slot = BigDataDataSlot(globalPass, pass, true);
                         if (!isLocalPeer && copyShard == 0U) {
+                            const uint64_t publishStart = BigDataFullmeshTraceCycle(fullmeshTrace);
                             (void)BigDataPublishCopyReadyRange(
                                 udmaMem, debug, copyDoneOffset, remoteSendDoneOffset,
                                 slot, rankSize, shardCount, peer,
                                 0U, TILEXR_UDMA_DEMO_BIGDATA_REMOTE_SEND_PRIMARY_SHARD_END,
                                 TILEXR_UDMA_DEMO_BIGDATA_REMOTE_COPY_READY_PRIMARY,
                                 token, loop, pass, relayLocal);
+                            const uint64_t publishEnd = BigDataFullmeshTraceCycle(fullmeshTrace);
+                            BigDataFullmeshTraceRecordTaskSpan(
+                                fullmeshTrace, fullmeshTraceIteration, traceCore, pass, peer,
+                                TileXR::Demo::kFullmeshTracePhasePublishCopyReady,
+                                passCount, rankSize, publishStart, publishEnd);
                         }
                         if (!isLocalPeer &&
                             copyShard == TILEXR_UDMA_DEMO_BIGDATA_REMOTE_SEND_SECONDARY_AGGREGATOR) {
+                            const uint64_t publishStart = BigDataFullmeshTraceCycle(fullmeshTrace);
                             (void)BigDataPublishCopyReadyRange(
                                 udmaMem, debug, copyDoneOffset, remoteSendDoneOffset,
                                 slot, rankSize, shardCount, peer,
@@ -2880,14 +3049,25 @@ extern "C" __global__ __aicore__ void tilexr_udma_all_to_all_bigdata_kernel(
                                 TILEXR_UDMA_DEMO_BIGDATA_MULTINODE_COPY_CORES,
                                 TILEXR_UDMA_DEMO_BIGDATA_REMOTE_COPY_READY_SECONDARY,
                                 token, loop, pass, relayLocal);
+                            const uint64_t publishEnd = BigDataFullmeshTraceCycle(fullmeshTrace);
+                            BigDataFullmeshTraceRecordTaskSpan(
+                                fullmeshTrace, fullmeshTraceIteration, traceCore, pass, peer,
+                                TileXR::Demo::kFullmeshTracePhasePublishCopyReady,
+                                passCount, rankSize, publishStart, publishEnd);
                         }
                         if (isLocalPeer && copyShard == 0U) {
+                            const uint64_t publishStart = BigDataFullmeshTraceCycle(fullmeshTrace);
                             (void)BigDataPublishCopyReadyRange(
                                 udmaMem, debug, copyDoneOffset, remoteSendDoneOffset,
                                 slot, rankSize, shardCount, peer,
                                 0U, TILEXR_UDMA_DEMO_BIGDATA_MULTINODE_COPY_CORES,
                                 TILEXR_UDMA_DEMO_BIGDATA_LOCAL_COPY_READY,
                                 token, loop, pass, relayLocal);
+                            const uint64_t publishEnd = BigDataFullmeshTraceCycle(fullmeshTrace);
+                            BigDataFullmeshTraceRecordTaskSpan(
+                                fullmeshTrace, fullmeshTraceIteration, traceCore, pass, peer,
+                                TileXR::Demo::kFullmeshTracePhasePublishCopyReady,
+                                passCount, rankSize, publishStart, publishEnd);
                         }
                     }
                 }
@@ -2898,7 +3078,8 @@ extern "C" __global__ __aicore__ void tilexr_udma_all_to_all_bigdata_kernel(
                         elementsPerPeer, effectiveChunkElements, passCount, loop, pass,
                         kernelLoopBase, profileStage, shardCount, sendDataOffset, recvDataOffset,
                         copyDoneOffset, remoteSendDoneOffset, readySignalOffset,
-                        chunkBytesPerPeer, ranksPerNode, relayLocal);
+                        chunkBytesPerPeer, ranksPerNode, fullmeshTrace,
+                        fullmeshTraceIteration, traceCore, relayLocal);
                 }
                 if (!isLocalPeer && isRemoteSendSecondaryCore) {
                     BigDataRemoteSendSegmentWorker(peer,
@@ -2907,26 +3088,42 @@ extern "C" __global__ __aicore__ void tilexr_udma_all_to_all_bigdata_kernel(
                         elementsPerPeer, effectiveChunkElements, passCount, loop, pass,
                         kernelLoopBase, profileStage, shardCount, sendDataOffset, recvDataOffset,
                         copyDoneOffset, remoteSendDoneOffset, readySignalOffset,
-                        chunkBytesPerPeer, ranksPerNode, relayLocal);
+                        chunkBytesPerPeer, ranksPerNode, fullmeshTrace,
+                        fullmeshTraceIteration, traceCore, relayLocal);
                 }
                 if (isLocalPeer && isLocalSendCore) {
                     BigDataSendPeerWorker(peer, rank, rankSize, args, udmaMem, debug,
                         elementsPerPeer, effectiveChunkElements, passCount, loop, pass,
                         kernelLoopBase, profileStage, shardCount, sendDataOffset, recvDataOffset,
                         copyDoneOffset, readySignalOffset, chunkBytesPerPeer, true,
-                        remoteSendDoneOffset, relayLocal);
+                        remoteSendDoneOffset, fullmeshTrace,
+                        fullmeshTraceIteration, traceCore, relayLocal);
                 }
                 if (isRecvCore) {
                     BigDataRecvPeerWorker(peer, rank, rankSize, args, output, udmaMem, debug,
                         elementsPerPeer, effectiveChunkElements, passCount, loop, pass,
                         kernelLoopBase, profileStage, use35Core, recvShard, shardCount, recvDataOffset,
                         recvCopyDoneOffset, readySignalOffset, ackSignalOffset,
-                        chunkBytesPerPeer, relayLocal);
+                        chunkBytesPerPeer, fullmeshTrace,
+                        fullmeshTraceIteration, traceCore, relayLocal);
                 }
             }
+            const uint64_t passEnd = BigDataFullmeshTraceCycle(fullmeshTrace);
+            BigDataFullmeshTraceRecordTaskSpan(
+                fullmeshTrace, fullmeshTraceIteration, traceCore, pass, rank,
+                TileXR::Demo::kFullmeshTracePhasePass,
+                passCount, rankSize, passStart, passEnd);
         }
     }
+    const uint64_t workEnd = BigDataFullmeshTraceCycle(fullmeshTrace);
     BigDataKernelExitBarrier();
+    const uint64_t kernelEnd = BigDataFullmeshTraceCycle(fullmeshTrace);
+    BigDataFullmeshTraceRecordKernelSpan(
+        fullmeshTrace, fullmeshTraceIteration, traceCore,
+        TileXR::Demo::kFullmeshTraceWork, workStart, workEnd);
+    BigDataFullmeshTraceRecordKernelSpan(
+        fullmeshTrace, fullmeshTraceIteration, traceCore,
+        TileXR::Demo::kFullmeshTraceKernel, kernelStart, kernelEnd);
 }
 
 void launch_tilexr_udma_all_to_all_bigdata(
