@@ -26,3 +26,8 @@ add_test(
     NAME test_tilexr_ci_gate
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_gate.py -v
 )
+
+add_test(
+    NAME test_tilexr_ci_control_contract
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_control_contract.py -v
+)
