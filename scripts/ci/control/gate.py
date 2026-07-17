@@ -320,6 +320,7 @@ class LinuxProcessBoundary:
         self.known = {}
         self.seen_starts = {}
         self.pidfds = {}
+        self._before_step = None
 
     @classmethod
     def prepare(cls):
@@ -348,10 +349,24 @@ class LinuxProcessBoundary:
             scan=_scan_linux_processes,
         )
 
-    def _remember(self, record):
+    def _scan(self):
+        if self._before_step is not None:
+            self._before_step()
+        return self.scan()
+
+    def _remember(self, record, *, lineage_verified=False):
         previous_start = self.seen_starts.get(record.pid)
         if previous_start is not None and previous_start != record.start_time:
-            return False
+            if record.pid == self.root_pid or not lineage_verified:
+                return False
+            previous_identity = (record.pid, previous_start)
+            self.known.pop(previous_identity, None)
+            previous_fd = self.pidfds.pop(previous_identity, None)
+            if previous_fd is not None:
+                try:
+                    os.close(previous_fd)
+                except OSError:
+                    pass
         if record.identity in self.baseline:
             return False
         self.seen_starts[record.pid] = record.start_time
@@ -361,13 +376,16 @@ class LinuxProcessBoundary:
                 raise InfrastructureFailure(
                     "Linux pidfd support is required for tracked process cleanup"
                 )
+            fd = None
             try:
                 fd = os.pidfd_open(record.pid, 0)
-                current = self.scan().get(record.pid)
+                current = self._scan().get(record.pid)
                 if current is None or current.identity != record.identity:
                     os.close(fd)
+                    fd = None
                 else:
                     self.pidfds[record.identity] = fd
+                    fd = None
             except ProcessLookupError:
                 self.known.pop(record.identity, None)
                 return False
@@ -376,22 +394,42 @@ class LinuxProcessBoundary:
                     "could not open pidfd for tracked process %d: %s"
                     % (record.pid, error)
                 ) from error
+            finally:
+                if fd is not None:
+                    try:
+                        os.close(fd)
+                    except OSError:
+                        pass
         return True
 
-    def attach(self, root_pid, child=None):
+    def attach(
+        self,
+        root_pid,
+        child=None,
+        *,
+        deadline=None,
+        now=time.monotonic,
+        before_step=None,
+    ):
         self.root_pid = root_pid
-        records = self.scan()
-        root = records.get(root_pid)
-        if root is not None:
-            self._remember(root)
-        elif child is None or child.poll() is None:
-            raise InfrastructureFailure(
-                "spawned process root identity is missing from /proc"
-            )
-        self._refresh(records)
+        self._before_step = before_step
+        try:
+            records = self._scan()
+            root = records.get(root_pid)
+            if root is not None:
+                self._remember(root)
+            elif child is None or child.poll() is None:
+                raise InfrastructureFailure(
+                    "spawned process root identity is missing from /proc"
+                )
+            self._refresh(records)
+            if deadline is not None and now() >= deadline and before_step is not None:
+                before_step()
+        finally:
+            self._before_step = None
 
     def _refresh(self, records=None):
-        records = self.scan() if records is None else records
+        records = self._scan() if records is None else records
         same_uid = {
             pid: record
             for pid, record in records.items()
@@ -411,13 +449,17 @@ class LinuxProcessBoundary:
             changed = False
             for record in same_uid.values():
                 if record.parent_pid in tracked_pids and record.pid not in tracked_pids:
-                    if self._remember(record):
+                    if self._remember(record, lineage_verified=True):
                         tracked_pids.add(record.pid)
                         changed = True
 
         for record in same_uid.values():
-            if record.parent_pid == self.parent_pid and record.identity not in self.baseline:
-                self._remember(record)
+            if (
+                record.pid != self.root_pid
+                and record.parent_pid == self.parent_pid
+                and record.identity not in self.baseline
+            ):
+                self._remember(record, lineage_verified=True)
 
         return [
             current
@@ -451,6 +493,84 @@ class LinuxProcessBoundary:
                 os.waitpid(record.pid, os.WNOHANG)
             except (ChildProcessError, OSError):
                 pass
+
+    def _close_pidfds(self):
+        for fd in self.pidfds.values():
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        self.pidfds.clear()
+
+    def abort(self, child, *, now=time.monotonic, sleep=time.sleep):
+        errors = []
+
+        def signal_records(records, signum):
+            for record in records:
+                try:
+                    self.signal_identity(record, signum)
+                except BaseException as error:
+                    errors.append(error)
+
+        try:
+            records = list(self.known.values())
+            try:
+                records = self._refresh()
+            except BaseException as error:
+                errors.append(error)
+            signal_records(records, signal.SIGTERM)
+
+            if child.poll() is None:
+                try:
+                    os.killpg(child.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+                except BaseException as error:
+                    errors.append(error)
+            sleep(0.1)
+
+            try:
+                records = self._refresh()
+            except BaseException as error:
+                errors.append(error)
+                records = list(self.known.values())
+            signal_records(records, signal.SIGKILL)
+            if child.poll() is None:
+                try:
+                    os.killpg(child.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                except BaseException as error:
+                    errors.append(error)
+            try:
+                child.wait(timeout=2)
+            except subprocess.TimeoutExpired as error:
+                errors.append(error)
+
+            verification_deadline = now() + 2.0
+            live = []
+            while True:
+                self._reap_adopted()
+                try:
+                    live = self._refresh()
+                except BaseException as error:
+                    errors.append(error)
+                    break
+                signal_records(live, signal.SIGKILL)
+                if not live or now() >= verification_deadline:
+                    break
+                sleep(min(0.05, max(0.0, verification_deadline - now())))
+            if live:
+                errors.append(
+                    InfrastructureFailure("tracked processes remain after abort")
+                )
+        finally:
+            self._close_pidfds()
+        if errors:
+            raise InfrastructureFailure(
+                "Linux process-boundary abort was incomplete: %s"
+                % "; ".join(str(error) for error in errors)
+            )
 
     def terminate(self, child, *, now=time.monotonic, sleep=time.sleep):
         try:
@@ -497,11 +617,7 @@ class LinuxProcessBoundary:
                     "tracked processes remain after SIGKILL: %s" % details
                 )
         finally:
-            for fd in self.pidfds.values():
-                try:
-                    os.close(fd)
-                except OSError:
-                    pass
+            self._close_pidfds()
 
 
 def terminate_group(
@@ -593,6 +709,15 @@ def run_phase(
         process_boundary = process_boundary_factory()
     elif sys.platform.startswith("linux") and popen is subprocess.Popen:
         process_boundary = LinuxProcessBoundary.prepare()
+    started = now()
+    deadline = started + timeout_seconds
+
+    def attach_checkpoint():
+        if cancellation.cancelled:
+            raise Cancelled("gate was cancelled while attaching the %s phase" % phase)
+        if now() >= deadline:
+            raise CodeFailure("%s phase exceeded %.0f seconds" % (phase, timeout_seconds))
+
     try:
         child = popen(
             command,
@@ -603,8 +728,32 @@ def run_phase(
     except OSError as error:
         raise InfrastructureFailure("could not start trusted %s phase: %s" % (phase, error)) from error
     if process_boundary is not None:
+        child._tilexr_process_boundary = process_boundary
         try:
-            process_boundary.attach(child.pid, child=child)
+            process_boundary.attach(
+                child.pid,
+                child=child,
+                deadline=deadline,
+                now=now,
+                before_step=attach_checkpoint,
+            )
+            attach_checkpoint()
+        except BaseException as attach_error:
+            try:
+                process_boundary.abort(child, now=now, sleep=sleep)
+            except BaseException as termination_error:
+                raise _tracked_termination_failure(
+                    attach_error, termination_error, collector=False
+                ) from termination_error
+            if isinstance(attach_error, GateFailure):
+                raise
+            raise InfrastructureFailure(
+                "could not attach spawned phase to Linux process boundary: %s"
+                % attach_error
+            ) from attach_error
+    else:
+        try:
+            attach_checkpoint()
         except BaseException as attach_error:
             try:
                 terminate(child)
@@ -612,14 +761,7 @@ def run_phase(
                 raise _tracked_termination_failure(
                     attach_error, termination_error, collector=False
                 ) from termination_error
-            raise InfrastructureFailure(
-                "could not attach spawned phase to Linux process boundary: %s"
-                % attach_error
-            ) from attach_error
-        child._tilexr_process_boundary = process_boundary
-
-    started = now()
-    deadline = started + timeout_seconds
+            raise
 
     def monitored_snapshot():
         if read_snapshot_with_deadline is not None:
@@ -1109,6 +1251,27 @@ def invoke_collector(
         process_boundary = process_boundary_factory()
     elif sys.platform.startswith("linux") and popen is subprocess.Popen:
         process_boundary = LinuxProcessBoundary.prepare()
+    started = now()
+    normal_deadline = started + 600.0
+    cancellation_deadline = started + 30.0 if cancellation.cancelled else None
+
+    def attach_checkpoint():
+        nonlocal cancellation_deadline
+        current = now()
+        if cancellation.cancelled and cancellation_deadline is None:
+            cancellation_deadline = current + 30.0
+        if cancellation_deadline is not None and current >= min(
+            normal_deadline, cancellation_deadline
+        ):
+            if cancellation_deadline <= normal_deadline:
+                raise Cancelled(
+                    "artifact collection reached the cancellation finalization deadline"
+                )
+        if current >= normal_deadline:
+            raise _collector_failure(
+                "artifact collector exceeded its bounded finalization deadline"
+            )
+
     try:
         child = popen(
             [str(script), str(config.source), str(config.artifacts)],
@@ -1119,8 +1282,39 @@ def invoke_collector(
     except OSError as error:
         raise _collector_failure("artifact collector failed to run: %s" % error) from error
     if process_boundary is not None:
+        child._tilexr_process_boundary = process_boundary
         try:
-            process_boundary.attach(child.pid, child=child)
+            process_boundary.attach(
+                child.pid,
+                child=child,
+                deadline=min(
+                    normal_deadline,
+                    cancellation_deadline
+                    if cancellation_deadline is not None
+                    else normal_deadline,
+                ),
+                now=now,
+                before_step=attach_checkpoint,
+            )
+            attach_checkpoint()
+        except BaseException as attach_error:
+            try:
+                process_boundary.abort(child, now=now, sleep=collector_sleep)
+            except BaseException as termination_error:
+                raise _tracked_termination_failure(
+                    attach_error, termination_error, collector=True
+                ) from termination_error
+            if isinstance(attach_error, Cancelled):
+                raise
+            if getattr(attach_error, "collector_failure", False):
+                raise
+            raise _collector_failure(
+                "could not attach artifact collector to Linux process boundary: %s"
+                % attach_error
+            ) from attach_error
+    else:
+        try:
+            attach_checkpoint()
         except BaseException as attach_error:
             try:
                 terminate(child)
@@ -1128,14 +1322,7 @@ def invoke_collector(
                 raise _tracked_termination_failure(
                     attach_error, termination_error, collector=True
                 ) from termination_error
-            raise _collector_failure(
-                "could not attach artifact collector to Linux process boundary: %s"
-                % attach_error
-            ) from attach_error
-        child._tilexr_process_boundary = process_boundary
-    started = now()
-    normal_deadline = started + 600.0
-    cancellation_deadline = started + 30.0 if cancellation.cancelled else None
+            raise
     primary_error = None
     try:
         while True:

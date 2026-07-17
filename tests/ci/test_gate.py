@@ -141,6 +141,30 @@ class FakeProcess:
         return self.returncode
 
 
+def partial_boundary(signals):
+    root = gate.ProcessRecord(700, 999, 700, 700, 10, os.geteuid())
+    escaped = gate.ProcessRecord(701, 700, 701, 701, 11, os.geteuid())
+    state = {700: root, 701: escaped}
+
+    class PartialBoundary(gate.LinuxProcessBoundary):
+        def attach(self, root_pid, child=None, **kwargs):
+            self.root_pid = root_pid
+            self._remember(root)
+            self._remember(escaped, lineage_verified=True)
+            raise gate.InfrastructureFailure("partial descendant pidfd attach failed")
+
+    def signaler(record, signum):
+        signals.append((record.pid, signum))
+        if signum == signal.SIGKILL:
+            state.clear()
+
+    return PartialBoundary(
+        parent_pid=999,
+        baseline=(),
+        scan=lambda: dict(state),
+        signal_identity=signaler,
+    )
+
 class TerminationTests(unittest.TestCase):
     def test_live_term_resistant_leader_is_killed_even_when_membership_scan_is_empty(self):
         child = mock.Mock(pid=4242)
@@ -162,7 +186,58 @@ class TerminationTests(unittest.TestCase):
 
         self.assertEqual(signals, [signal.SIGTERM, signal.SIGKILL])
 
-    def test_process_generation_reuse_is_not_added_or_signalled(self):
+    def test_reused_descendant_pid_with_tracked_lineage_gets_new_identity(self):
+        root = gate.ProcessRecord(600, 999, 600, 600, 5, os.geteuid())
+        old = gate.ProcessRecord(700, 600, 600, 600, 10, os.geteuid())
+        reused = gate.ProcessRecord(700, 600, 600, 600, 20, os.geteuid())
+        state = {600: root, 700: old}
+        boundary = gate.LinuxProcessBoundary(
+            parent_pid=999,
+            baseline=(),
+            scan=lambda: dict(state),
+        )
+
+        with mock.patch.object(
+            gate.os, "pidfd_open", side_effect=(60, 70, 71), create=True
+        ), mock.patch.object(
+            gate.signal, "pidfd_send_signal", create=True
+        ) as pidfd_signal, mock.patch.object(gate.os, "close") as close:
+            boundary.attach(600)
+            state[700] = reused
+
+            boundary.signal_tracked(signal.SIGTERM)
+
+            self.assertIn(mock.call(70), close.mock_calls)
+            self.assertIn(
+                mock.call(71, signal.SIGTERM, None, 0),
+                pidfd_signal.mock_calls,
+            )
+            self.assertNotIn(
+                mock.call(70, signal.SIGTERM, None, 0),
+                pidfd_signal.mock_calls,
+            )
+            boundary._close_pidfds()
+
+    def test_unrelated_reused_pid_is_not_accepted_as_new_generation(self):
+        root = gate.ProcessRecord(600, 999, 600, 600, 5, os.geteuid())
+        old = gate.ProcessRecord(700, 600, 600, 600, 10, os.geteuid())
+        unrelated = gate.ProcessRecord(700, 888, 888, 888, 20, os.geteuid())
+        state = {600: root, 700: old}
+        signals = []
+        boundary = gate.LinuxProcessBoundary(
+            parent_pid=999,
+            baseline=(),
+            scan=lambda: dict(state),
+            signal_identity=lambda identity, signum: signals.append((identity, signum)),
+        )
+        boundary.attach(600)
+
+        state[700] = unrelated
+        boundary.signal_tracked(signal.SIGTERM)
+
+        self.assertNotIn((unrelated, signal.SIGTERM), signals)
+
+    def test_reused_root_pid_is_never_accepted_as_new_generation(self):
         old = gate.ProcessRecord(700, 999, 700, 700, 10, os.geteuid())
         reused = gate.ProcessRecord(700, 999, 700, 700, 20, os.geteuid())
         scans = iter(({700: old}, {700: reused}))
@@ -194,6 +269,30 @@ class TerminationTests(unittest.TestCase):
         ):
             with self.assertRaises(gate.InfrastructureFailure):
                 boundary.attach(700)
+
+    def test_attach_checkpoint_after_pidfd_open_closes_partial_fd(self):
+        record = gate.ProcessRecord(700, 999, 700, 700, 10, os.geteuid())
+        boundary = gate.LinuxProcessBoundary(
+            parent_pid=999,
+            baseline=(),
+            scan=lambda: {700: record},
+        )
+        checkpoints = []
+
+        def checkpoint():
+            checkpoints.append(True)
+            if len(checkpoints) == 2:
+                raise gate.Cancelled("attach cancelled")
+
+        with mock.patch.object(
+            gate.os, "pidfd_open", return_value=99, create=True
+        ), mock.patch.object(
+            gate.signal, "pidfd_send_signal", create=True
+        ), mock.patch.object(gate.os, "close") as close:
+            with self.assertRaises(gate.Cancelled):
+                boundary.attach(700, before_step=checkpoint)
+
+        close.assert_called_once_with(99)
 
     def test_linux_boundary_fails_if_process_remains_after_kill_and_reap_grace(self):
         record = gate.ProcessRecord(700, 999, 700, 700, 10, os.geteuid())
@@ -388,6 +487,54 @@ class TerminationTests(unittest.TestCase):
 
 
 class RunPhaseTests(unittest.TestCase):
+    def test_partial_phase_attach_aborts_tracked_and_live_root_group(self):
+        child = mock.Mock(pid=700)
+        child.poll.return_value = None
+        child.wait.return_value = -signal.SIGKILL
+        signals = []
+        group_signals = []
+        boundary = partial_boundary(signals)
+
+        with mock.patch.object(
+            gate.os,
+            "killpg",
+            side_effect=lambda pgid, signum: group_signals.append((pgid, signum)),
+        ):
+            with self.assertRaises(gate.InfrastructureFailure) as raised:
+                gate.run_phase(
+                    "build", pathlib.Path("/trusted/build_blue.sh"), pathlib.Path("/source"),
+                    pathlib.Path("/artifacts"), {}, timeout_seconds=5,
+                    read_snapshot=lambda: snapshot(), now=lambda: 0.0,
+                    sleep=lambda seconds: None, cancellation=gate.CancellationState(),
+                    popen=lambda *args, **kwargs: child,
+                    process_boundary_factory=lambda: boundary,
+                )
+
+        self.assertIn("partial descendant", str(raised.exception))
+        self.assertIn((701, signal.SIGKILL), signals)
+        self.assertEqual(
+            group_signals,
+            [(700, signal.SIGTERM), (700, signal.SIGKILL)],
+        )
+
+    def test_phase_boundary_attach_time_counts_against_hard_deadline(self):
+        clock = [0.0]
+        child = FakeProcess(polls=(0,), returncode=0)
+        boundary = mock.Mock()
+        boundary.attach.side_effect = lambda *args, **kwargs: clock.__setitem__(0, 5.0)
+
+        with self.assertRaises(gate.CodeFailure):
+            gate.run_phase(
+                "build", pathlib.Path("/trusted/build_blue.sh"), pathlib.Path("/source"),
+                pathlib.Path("/artifacts"), {}, timeout_seconds=5,
+                read_snapshot=lambda: snapshot(), now=lambda: clock[0],
+                sleep=lambda seconds: None, cancellation=gate.CancellationState(),
+                popen=lambda *args, **kwargs: child,
+                process_boundary_factory=lambda: boundary,
+            )
+
+        boundary.abort.assert_called_once()
+
     def test_linux_boundary_attach_failure_terminates_spawned_phase_child_once(self):
         child = FakeProcess(polls=(None,))
         boundary = mock.Mock()
@@ -405,7 +552,8 @@ class RunPhaseTests(unittest.TestCase):
             )
 
         self.assertIn("root identity missing", str(raised.exception))
-        terminate.assert_called_once_with(child)
+        boundary.abort.assert_called_once()
+        terminate.assert_not_called()
 
     def test_child_exit_observed_after_deadline_is_timeout_not_success(self):
         child = FakeProcess(polls=(0,), returncode=0)
@@ -1113,6 +1261,82 @@ class CleanupTests(unittest.TestCase):
 
 
 class CliValidationTests(unittest.TestCase):
+    def test_partial_collector_attach_uses_same_boundary_abort_path(self):
+        config = gate.Config(
+            pathlib.Path("/source"), pathlib.Path("/artifacts"), "sha", "LingquLab/TileXR", 1
+        )
+        child = mock.Mock(pid=700)
+        child.poll.return_value = None
+        child.wait.return_value = -signal.SIGKILL
+        signals = []
+        group_signals = []
+        boundary = partial_boundary(signals)
+        with tempfile.TemporaryDirectory() as directory:
+            collector = pathlib.Path(directory) / "collect_artifacts.sh"
+            collector.write_text("#!/bin/sh\n", encoding="utf-8")
+            collector.chmod(0o700)
+            with mock.patch.object(
+                gate.os,
+                "killpg",
+                side_effect=lambda pgid, signum: group_signals.append((pgid, signum)),
+            ):
+                with self.assertRaises(gate.InfrastructureFailure) as raised:
+                    gate.invoke_collector(
+                        collector, config, {}, popen=lambda *args, **kwargs: child,
+                        process_boundary_factory=lambda: boundary,
+                        now=lambda: 0.0, sleep=lambda seconds: None,
+                    )
+
+        self.assertTrue(getattr(raised.exception, "collector_failure", False))
+        self.assertIn((701, signal.SIGKILL), signals)
+        self.assertEqual(
+            group_signals,
+            [(700, signal.SIGTERM), (700, signal.SIGKILL)],
+        )
+
+    def test_collector_boundary_attach_time_counts_against_normal_deadline(self):
+        config = gate.Config(
+            pathlib.Path("/source"), pathlib.Path("/artifacts"), "sha", "LingquLab/TileXR", 1
+        )
+        clock = [0.0]
+        child = FakeProcess(polls=(0,), returncode=0)
+        boundary = mock.Mock()
+        boundary.attach.side_effect = lambda *args, **kwargs: clock.__setitem__(0, 600.0)
+        with tempfile.TemporaryDirectory() as directory:
+            collector = pathlib.Path(directory) / "collect_artifacts.sh"
+            collector.write_text("#!/bin/sh\n", encoding="utf-8")
+            collector.chmod(0o700)
+            with self.assertRaises(gate.InfrastructureFailure):
+                gate.invoke_collector(
+                    collector, config, {}, popen=lambda *args, **kwargs: child,
+                    process_boundary_factory=lambda: boundary, now=lambda: clock[0],
+                    sleep=lambda seconds: None,
+                )
+        boundary.abort.assert_called_once()
+
+    def test_collector_boundary_attach_time_counts_against_cancel_deadline(self):
+        config = gate.Config(
+            pathlib.Path("/source"), pathlib.Path("/artifacts"), "sha", "LingquLab/TileXR", 1
+        )
+        cancellation = gate.CancellationState()
+        cancellation.cancel()
+        clock = [0.0]
+        child = FakeProcess(polls=(0,), returncode=0)
+        boundary = mock.Mock()
+        boundary.attach.side_effect = lambda *args, **kwargs: clock.__setitem__(0, 30.0)
+        with tempfile.TemporaryDirectory() as directory:
+            collector = pathlib.Path(directory) / "collect_artifacts.sh"
+            collector.write_text("#!/bin/sh\n", encoding="utf-8")
+            collector.chmod(0o700)
+            with self.assertRaises(gate.Cancelled):
+                gate.invoke_collector(
+                    collector, config, {}, cancellation=cancellation,
+                    popen=lambda *args, **kwargs: child,
+                    process_boundary_factory=lambda: boundary, now=lambda: clock[0],
+                    sleep=lambda seconds: None,
+                )
+        boundary.abort.assert_called_once()
+
     def test_linux_boundary_attach_failure_terminates_spawned_collector_once(self):
         config = gate.Config(
             pathlib.Path("/source"), pathlib.Path("/artifacts"), "sha", "LingquLab/TileXR", 1
@@ -1133,7 +1357,8 @@ class CliValidationTests(unittest.TestCase):
 
         self.assertTrue(getattr(raised.exception, "collector_failure", False))
         self.assertIn("collector root missing", str(raised.exception))
-        terminate.assert_called_once_with(child)
+        boundary.abort.assert_called_once()
+        terminate.assert_not_called()
 
     def test_cancelled_collector_attempt_is_capped_at_thirty_seconds(self):
         config = gate.Config(
