@@ -1,0 +1,5 @@
+    NPU ID                         : 0
+    Chip Count                     : 1
+    Health                         : OK
+    Chip ID                        : 0
+    MCU Health                     : OK
