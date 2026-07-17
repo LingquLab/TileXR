@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "demo/tilexr_udma_alltoall_layout.h"
+#include "demo/tilexr_udma_fullmesh_trace.h"
 
 #ifndef TILEXR_SOURCE_ROOT
 #define TILEXR_SOURCE_ROOT "."
@@ -97,6 +98,30 @@ void TestAllToAllOutputValidation()
     CHECK_EQ(TileXR::Demo::ValidateAllToAllOutput(output, rank, rankSize, elementsPerPeer), true);
     output[static_cast<size_t>(2) * elementsPerPeer + 1] = 123;
     CHECK_EQ(TileXR::Demo::ValidateAllToAllOutput(output, rank, rankSize, elementsPerPeer), false);
+}
+
+void TestFullmeshTraceLayout()
+{
+    using namespace TileXR::Demo;
+    CHECK_EQ(kFullmeshTraceMagic, 0x464d5452U);
+    CHECK_EQ(kFullmeshTraceVersion, 1U);
+    CHECK_EQ(kFullmeshTraceBytes, 8ULL * 1024ULL * 1024ULL);
+    CHECK_EQ(kFullmeshTraceHeaderBytes, 4096ULL);
+    CHECK_EQ(kFullmeshTraceMaxIterations, 50U);
+    CHECK_EQ(kFullmeshTraceMaxCores, 35U);
+    CHECK_EQ(kFullmeshTraceKernelRegions, 2U);
+    CHECK_EQ(kFullmeshTracePhaseCount, 14U);
+    CHECK_EQ(sizeof(FullmeshTraceSpan), 16U);
+    CHECK_EQ(FullmeshTraceLayoutBytes(50U, 1U, 16U) <= kFullmeshTraceBytes, true);
+    CHECK_EQ(FullmeshTraceLayoutBytes(50U, 4U, 16U) > kFullmeshTraceBytes, true);
+    CHECK_EQ(FullmeshTraceLayoutFits(50U, 1U, 16U), true);
+    CHECK_EQ(FullmeshTraceLayoutFits(50U, 4U, 16U), false);
+    CHECK_EQ(FullmeshTraceLayoutFits(51U, 1U, 16U), false);
+    const size_t first = FullmeshTraceTaskSpanOffset(0U, 0U, 0U, 0U, 0U, 1U, 16U);
+    const size_t nextPhase = FullmeshTraceTaskSpanOffset(0U, 0U, 0U, 0U, 1U, 1U, 16U);
+    const size_t nextPeer = FullmeshTraceTaskSpanOffset(0U, 0U, 0U, 1U, 0U, 1U, 16U);
+    CHECK_EQ(nextPhase - first, sizeof(FullmeshTraceSpan));
+    CHECK_EQ(nextPeer - first, kFullmeshTracePhaseCount * sizeof(FullmeshTraceSpan));
 }
 
 void TestBuildAllToAllOutput()
@@ -685,6 +710,7 @@ void TestAllToAllBigDataSource()
 
 int main()
 {
+    TestFullmeshTraceLayout();
     TestAllToAllInputPattern();
     TestAllToAllOutputValidation();
     TestBuildAllToAllOutput();
