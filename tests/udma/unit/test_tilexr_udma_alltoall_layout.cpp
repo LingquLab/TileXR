@@ -637,6 +637,23 @@ void TestAllToAllBigDataSource()
     CHECK_CONTAINS(demo, "TILEXR_DEMO_BIGDATA_REMOTE_PUT_ONLY");
     CHECK_CONTAINS(demo, "skip result validation for bigdata remote-put-only profile");
 
+    const std::string fullMeshReady = SliceBetween(
+        kernel, "BigDataPublishReadySignal", "BigDataRemoteSendSegmentWorker");
+    const std::string fullMeshSend = SliceBetween(
+        kernel, "BigDataRemoteSendSegmentWorker", "BigDataRemotePutOnlySendWorker");
+    const std::string fullMeshRecv = SliceBetween(
+        kernel, "BigDataRecvPeerWorker", "BigDataWaitCopyDoneRange");
+    CHECK_CONTAINS(kernel, "TILEXR_UDMA_DEMO_BIGDATA_REMOTE_SEND_PRIMARY_SHARD_END = 12U");
+    CHECK_CONTAINS(fullMeshReady, "UDMAPutSignalNbiOnQp<uint64_t>");
+    CHECK_CONTAINS(fullMeshReady, "UDMAQuietStatusOnQp(args, peer, qpIdx)");
+    CHECK_CONTAINS(fullMeshSend, "BigDataSelectWeightedQp(");
+    CHECK_CONTAINS(fullMeshSend, "UDMAPutNbiOnQp<int32_t>");
+    CHECK_CONTAINS(fullMeshSend, "UDMAQuietStatusOnQp(args, peer, qpIdx)");
+    CHECK_NOT_CONTAINS(fullMeshSend, "TileXR::UDMAPutNbi<int32_t>(args, peer");
+    CHECK_CONTAINS(fullMeshRecv, "BigDataRemoteRegisteredControlSlot(");
+    CHECK_CONTAINS(fullMeshRecv, "BigDataStoreTokenMte(remoteAck, token, relayLocal)");
+    CHECK_NOT_CONTAINS(fullMeshRecv, "BigDataPublishAckSignalUdma(");
+
     const std::string remotePutOnlySend = SliceBetween(
         kernel, "BigDataRemotePutOnlySendWorker", "BigDataRemotePutOnlyCheckIndex");
     const std::string remotePutOnlyCheck = SliceBetween(
