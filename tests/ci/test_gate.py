@@ -165,6 +165,36 @@ def partial_boundary(signals):
         signal_identity=signaler,
     )
 
+
+def cancelling_partial_boundary(signals, cancellation, clock):
+    root = gate.ProcessRecord(700, 999, 700, 700, 10, os.geteuid())
+    escaped = gate.ProcessRecord(701, 700, 701, 701, 11, os.geteuid())
+    state = {700: root, 701: escaped}
+
+    class CancellingBoundary(gate.LinuxProcessBoundary):
+        def attach(self, root_pid, child=None, **kwargs):
+            self.root_pid = root_pid
+            self._remember(root)
+            self._remember(escaped, lineage_verified=True)
+            cancellation.cancel()
+            clock[0] = 30.0
+            kwargs["before_step"]()
+            clock[0] = 60.0
+            kwargs["before_step"]()
+
+    def signaler(record, signum):
+        signals.append((record.pid, signum))
+        if signum == signal.SIGKILL:
+            state.clear()
+
+    return CancellingBoundary(
+        parent_pid=999,
+        baseline=(),
+        scan=lambda: dict(state),
+        signal_identity=signaler,
+    )
+
+
 class TerminationTests(unittest.TestCase):
     def test_live_term_resistant_leader_is_killed_even_when_membership_scan_is_empty(self):
         child = mock.Mock(pid=4242)
@@ -253,6 +283,40 @@ class TerminationTests(unittest.TestCase):
         boundary.signal_tracked(signal.SIGTERM)
 
         self.assertEqual(signals, [])
+
+    def test_exited_child_does_not_pin_unrelated_reused_root_pid(self):
+        reused_root = gate.ProcessRecord(700, 888, 700, 700, 20, os.geteuid())
+        adopted = gate.ProcessRecord(701, 999, 701, 701, 21, os.geteuid())
+        signals = []
+        boundary = gate.LinuxProcessBoundary(
+            parent_pid=999,
+            baseline=(),
+            scan=lambda: {700: reused_root, 701: adopted},
+            signal_identity=lambda identity, signum: signals.append((identity, signum)),
+        )
+        child = mock.Mock(pid=700)
+        child.poll.return_value = 0
+
+        boundary.attach(700, child=child)
+        boundary.signal_tracked(signal.SIGTERM)
+
+        self.assertEqual(signals, [(adopted, signal.SIGTERM)])
+
+    def test_live_child_root_with_wrong_parent_is_rejected(self):
+        wrong_parent = gate.ProcessRecord(700, 888, 700, 700, 20, os.geteuid())
+        boundary = gate.LinuxProcessBoundary(
+            parent_pid=999,
+            baseline=(),
+            scan=lambda: {700: wrong_parent},
+            signal_identity=lambda identity, signum: None,
+        )
+        child = mock.Mock(pid=700)
+        child.poll.return_value = None
+
+        with self.assertRaises(gate.InfrastructureFailure):
+            boundary.attach(700, child=child)
+
+        self.assertEqual(boundary.known, {})
 
     def test_linux_boundary_fails_closed_when_pidfd_open_is_unavailable(self):
         record = gate.ProcessRecord(700, 999, 700, 700, 10, os.geteuid())
@@ -487,6 +551,46 @@ class TerminationTests(unittest.TestCase):
 
 
 class RunPhaseTests(unittest.TestCase):
+    def test_cancelled_attach_cleanup_ignores_cancellable_sleep_and_returns_130(self):
+        cancellation = gate.CancellationState()
+        clock = [0.0]
+        signals = []
+        group_signals = []
+        child = mock.Mock(pid=700)
+        child.poll.return_value = None
+        child.wait.return_value = -signal.SIGKILL
+        boundary = cancelling_partial_boundary(signals, cancellation, clock)
+
+        with mock.patch.object(
+            gate.os,
+            "killpg",
+            side_effect=lambda pgid, signum: group_signals.append((pgid, signum)),
+        ), mock.patch.object(
+            boundary, "_reap_adopted", wraps=boundary._reap_adopted
+        ) as reap:
+            with self.assertRaises(gate.Cancelled) as raised:
+                gate.run_phase(
+                    "build", pathlib.Path("/trusted/build_blue.sh"),
+                    pathlib.Path("/source"), pathlib.Path("/artifacts"), {},
+                    timeout_seconds=60, read_snapshot=lambda: snapshot(),
+                    now=lambda: clock[0],
+                    sleep=lambda seconds: (_ for _ in ()).throw(
+                        gate.Cancelled("cancellable sleep")
+                    ),
+                    cancellation=cancellation, popen=lambda *args, **kwargs: child,
+                    process_boundary_factory=lambda: boundary,
+                )
+
+        self.assertEqual(gate.exit_code_for(raised.exception), 130)
+        self.assertIn((701, signal.SIGTERM), signals)
+        self.assertIn((701, signal.SIGKILL), signals)
+        self.assertEqual(
+            group_signals,
+            [(700, signal.SIGTERM), (700, signal.SIGKILL)],
+        )
+        child.wait.assert_called_once_with(timeout=2)
+        reap.assert_called()
+
     def test_partial_phase_attach_aborts_tracked_and_live_root_group(self):
         child = mock.Mock(pid=700)
         child.poll.return_value = None
@@ -1261,6 +1365,47 @@ class CleanupTests(unittest.TestCase):
 
 
 class CliValidationTests(unittest.TestCase):
+    def test_cancelled_collector_attach_cleanup_ignores_cancellable_sleep(self):
+        config = gate.Config(
+            pathlib.Path("/source"), pathlib.Path("/artifacts"), "sha",
+            "LingquLab/TileXR", 1
+        )
+        cancellation = gate.CancellationState()
+        clock = [0.0]
+        signals = []
+        group_signals = []
+        child = mock.Mock(pid=700)
+        child.poll.return_value = None
+        child.wait.return_value = -signal.SIGKILL
+        boundary = cancelling_partial_boundary(signals, cancellation, clock)
+        with tempfile.TemporaryDirectory() as directory:
+            collector = pathlib.Path(directory) / "collect_artifacts.sh"
+            collector.write_text("#!/bin/sh\n", encoding="utf-8")
+            collector.chmod(0o700)
+            with mock.patch.object(
+                gate.os,
+                "killpg",
+                side_effect=lambda pgid, signum: group_signals.append((pgid, signum)),
+            ):
+                with self.assertRaises(gate.Cancelled) as raised:
+                    gate.invoke_collector(
+                        collector, config, {}, cancellation=cancellation,
+                        popen=lambda *args, **kwargs: child,
+                        process_boundary_factory=lambda: boundary,
+                        now=lambda: clock[0],
+                        sleep=lambda seconds: (_ for _ in ()).throw(
+                            gate.Cancelled("cancellable sleep")
+                        ),
+                    )
+
+        self.assertEqual(gate.exit_code_for(raised.exception), 130)
+        self.assertIn((701, signal.SIGKILL), signals)
+        self.assertEqual(
+            group_signals,
+            [(700, signal.SIGTERM), (700, signal.SIGKILL)],
+        )
+        child.wait.assert_called_once_with(timeout=2)
+
     def test_partial_collector_attach_uses_same_boundary_abort_path(self):
         config = gate.Config(
             pathlib.Path("/source"), pathlib.Path("/artifacts"), "sha", "LingquLab/TileXR", 1

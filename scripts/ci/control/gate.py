@@ -317,6 +317,7 @@ class LinuxProcessBoundary:
         self._injected_signaler = signal_identity is not None
         self.signal_identity = signal_identity or self._signal_record
         self.root_pid = None
+        self.root_identity = None
         self.known = {}
         self.seen_starts = {}
         self.pidfds = {}
@@ -383,6 +384,8 @@ class LinuxProcessBoundary:
                 if current is None or current.identity != record.identity:
                     os.close(fd)
                     fd = None
+                    self.known.pop(record.identity, None)
+                    return False
                 else:
                     self.pidfds[record.identity] = fd
                     fd = None
@@ -412,16 +415,28 @@ class LinuxProcessBoundary:
         before_step=None,
     ):
         self.root_pid = root_pid
+        self.root_identity = None
         self._before_step = before_step
         try:
+            child_exited = child is not None and child.poll() is not None
             records = self._scan()
             root = records.get(root_pid)
-            if root is not None:
-                self._remember(root)
-            elif child is None or child.poll() is None:
+            if child_exited:
+                root = None
+            elif root is None:
                 raise InfrastructureFailure(
                     "spawned process root identity is missing from /proc"
                 )
+            elif child is not None and root.parent_pid != self.parent_pid:
+                raise InfrastructureFailure(
+                    "spawned process root is not a direct controller child"
+                )
+            elif not self._remember(root):
+                raise InfrastructureFailure(
+                    "could not pin spawned process root identity"
+                )
+            else:
+                self.root_identity = root.identity
             self._refresh(records)
             if deadline is not None and now() >= deadline and before_step is not None:
                 before_step()
@@ -435,8 +450,10 @@ class LinuxProcessBoundary:
             for pid, record in records.items()
             if record.uid == os.geteuid()
         }
-        if self.root_pid is not None and self.root_pid in same_uid:
-            self._remember(same_uid[self.root_pid])
+        if self.root_identity is not None and self.root_pid in same_uid:
+            root = same_uid[self.root_pid]
+            if root.identity == self.root_identity:
+                self._remember(root)
 
         tracked_pids = {
             record.pid
@@ -505,6 +522,13 @@ class LinuxProcessBoundary:
     def abort(self, child, *, now=time.monotonic, sleep=time.sleep):
         errors = []
 
+        def cleanup_sleep(seconds):
+            # Caller-provided sleeps may be cancellation-aware; abort must still kill.
+            try:
+                sleep(seconds)
+            except Exception:
+                pass
+
         def signal_records(records, signum):
             for record in records:
                 try:
@@ -527,7 +551,7 @@ class LinuxProcessBoundary:
                     pass
                 except BaseException as error:
                     errors.append(error)
-            sleep(0.1)
+            cleanup_sleep(0.1)
 
             try:
                 records = self._refresh()
@@ -559,7 +583,9 @@ class LinuxProcessBoundary:
                 signal_records(live, signal.SIGKILL)
                 if not live or now() >= verification_deadline:
                     break
-                sleep(min(0.05, max(0.0, verification_deadline - now())))
+                cleanup_sleep(
+                    min(0.05, max(0.0, verification_deadline - now()))
+                )
             if live:
                 errors.append(
                     InfrastructureFailure("tracked processes remain after abort")
