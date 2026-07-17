@@ -672,6 +672,8 @@ void TestAllToAllBigDataSource()
 
     const std::string fullMeshReady = SliceBetween(
         kernel, "BigDataPublishReadySignal", "BigDataRemoteSendSegmentWorker");
+    const std::string localSend = SliceBetween(
+        kernel, "BigDataSendPeerWorker", "BigDataRecvPeerWorker");
     const std::string fullMeshSend = SliceBetween(
         kernel, "BigDataRemoteSendSegmentWorker", "BigDataRemotePutOnlySendWorker");
     const std::string fullMeshRecv = SliceBetween(
@@ -686,6 +688,27 @@ void TestAllToAllBigDataSource()
     CHECK_CONTAINS(fullMeshRecv, "BigDataRemoteRegisteredControlSlot(");
     CHECK_CONTAINS(fullMeshRecv, "BigDataStoreTokenMte(remoteAck, token, relayLocal)");
     CHECK_NOT_CONTAINS(fullMeshRecv, "BigDataPublishAckSignalUdma(");
+    CHECK_CONTAINS(kernel, "tilexr_udma_fullmesh_trace.h");
+    CHECK_CONTAINS(kernel, "BigDataFullmeshTraceRecordKernelSpan");
+    CHECK_CONTAINS(kernel, "BigDataFullmeshTraceRecordTaskSpan");
+    CHECK_CONTAINS(kernel, "if (trace == nullptr");
+    CHECK_CONTAINS(kernel, "AscendC::GetSystemCycle()");
+    CHECK_CONTAINS(kernel, "kFullmeshTracePhaseSelfCopy");
+    CHECK_CONTAINS(kernel, "kFullmeshTracePhasePeerCopy");
+    CHECK_CONTAINS(kernel, "kFullmeshTracePhasePublishCopyReady");
+    CHECK_CONTAINS(fullMeshSend, "kFullmeshTracePhaseWaitCopyReady");
+    CHECK_CONTAINS(fullMeshSend, "kFullmeshTracePhaseDataPut");
+    CHECK_CONTAINS(fullMeshSend, "kFullmeshTracePhaseQuiet");
+    CHECK_CONTAINS(fullMeshSend, "kFullmeshTracePhaseSegmentDone");
+    CHECK_CONTAINS(fullMeshSend, "kFullmeshTracePhasePublishReady");
+    CHECK_CONTAINS(localSend, "kFullmeshTracePhaseWaitCopyReady");
+    CHECK_CONTAINS(localSend, "kFullmeshTracePhaseDataPut");
+    CHECK_CONTAINS(localSend, "kFullmeshTracePhaseQuiet");
+    CHECK_CONTAINS(fullMeshRecv, "kFullmeshTracePhaseWaitReady");
+    CHECK_CONTAINS(fullMeshRecv, "kFullmeshTracePhaseOutputCopy");
+    CHECK_CONTAINS(fullMeshRecv, "kFullmeshTracePhasePublishRecvDone");
+    CHECK_CONTAINS(fullMeshRecv, "kFullmeshTracePhaseWaitRecvDone");
+    CHECK_CONTAINS(fullMeshRecv, "kFullmeshTracePhaseAck");
 
     const std::string remotePutOnlySend = SliceBetween(
         kernel, "BigDataRemotePutOnlySendWorker", "BigDataRemotePutOnlyCheckIndex");
