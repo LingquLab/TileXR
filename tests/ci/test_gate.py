@@ -388,6 +388,25 @@ class TerminationTests(unittest.TestCase):
 
 
 class RunPhaseTests(unittest.TestCase):
+    def test_linux_boundary_attach_failure_terminates_spawned_phase_child_once(self):
+        child = FakeProcess(polls=(None,))
+        boundary = mock.Mock()
+        boundary.attach.side_effect = gate.InfrastructureFailure("root identity missing")
+        terminate = mock.Mock()
+
+        with self.assertRaises(gate.InfrastructureFailure) as raised:
+            gate.run_phase(
+                "build", pathlib.Path("/trusted/build_blue.sh"), pathlib.Path("/source"),
+                pathlib.Path("/artifacts"), {}, timeout_seconds=5,
+                read_snapshot=lambda: snapshot(), now=lambda: 0.0,
+                sleep=lambda seconds: None, cancellation=gate.CancellationState(),
+                popen=lambda *args, **kwargs: child, terminate=terminate,
+                process_boundary_factory=lambda: boundary,
+            )
+
+        self.assertIn("root identity missing", str(raised.exception))
+        terminate.assert_called_once_with(child)
+
     def test_child_exit_observed_after_deadline_is_timeout_not_success(self):
         child = FakeProcess(polls=(0,), returncode=0)
         terminate = mock.Mock()
@@ -1094,6 +1113,28 @@ class CleanupTests(unittest.TestCase):
 
 
 class CliValidationTests(unittest.TestCase):
+    def test_linux_boundary_attach_failure_terminates_spawned_collector_once(self):
+        config = gate.Config(
+            pathlib.Path("/source"), pathlib.Path("/artifacts"), "sha", "LingquLab/TileXR", 1
+        )
+        child = FakeProcess(polls=(None,))
+        boundary = mock.Mock()
+        boundary.attach.side_effect = gate.InfrastructureFailure("collector root missing")
+        terminate = mock.Mock()
+        with tempfile.TemporaryDirectory() as directory:
+            collector = pathlib.Path(directory) / "collect_artifacts.sh"
+            collector.write_text("#!/bin/sh\n", encoding="utf-8")
+            collector.chmod(0o700)
+            with self.assertRaises(gate.InfrastructureFailure) as raised:
+                gate.invoke_collector(
+                    collector, config, {}, popen=lambda *args, **kwargs: child,
+                    terminate=terminate, process_boundary_factory=lambda: boundary,
+                )
+
+        self.assertTrue(getattr(raised.exception, "collector_failure", False))
+        self.assertIn("collector root missing", str(raised.exception))
+        terminate.assert_called_once_with(child)
+
     def test_cancelled_collector_attempt_is_capped_at_thirty_seconds(self):
         config = gate.Config(
             pathlib.Path("/source"), pathlib.Path("/artifacts"), "sha", "LingquLab/TileXR", 1

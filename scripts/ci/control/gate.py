@@ -378,12 +378,16 @@ class LinuxProcessBoundary:
                 ) from error
         return True
 
-    def attach(self, root_pid):
+    def attach(self, root_pid, child=None):
         self.root_pid = root_pid
         records = self.scan()
         root = records.get(root_pid)
         if root is not None:
             self._remember(root)
+        elif child is None or child.poll() is None:
+            raise InfrastructureFailure(
+                "spawned process root identity is missing from /proc"
+            )
         self._refresh(records)
 
     def _refresh(self, records=None):
@@ -568,6 +572,7 @@ def run_phase(
     cancellation: Optional[CancellationState] = None,
     popen: Callable = subprocess.Popen,
     terminate: Callable = terminate_group,
+    process_boundary_factory: Optional[Callable] = None,
 ) -> int:
     cancellation = cancellation or CancellationState()
     command = [str(script), str(source), str(artifacts)]
@@ -584,7 +589,9 @@ def run_phase(
         preflight_state = read_snapshot()
     _enforce_policy(phase, preflight_state)
     process_boundary = None
-    if sys.platform.startswith("linux") and popen is subprocess.Popen:
+    if process_boundary_factory is not None:
+        process_boundary = process_boundary_factory()
+    elif sys.platform.startswith("linux") and popen is subprocess.Popen:
         process_boundary = LinuxProcessBoundary.prepare()
     try:
         child = popen(
@@ -596,7 +603,19 @@ def run_phase(
     except OSError as error:
         raise InfrastructureFailure("could not start trusted %s phase: %s" % (phase, error)) from error
     if process_boundary is not None:
-        process_boundary.attach(child.pid)
+        try:
+            process_boundary.attach(child.pid, child=child)
+        except BaseException as attach_error:
+            try:
+                terminate(child)
+            except BaseException as termination_error:
+                raise _tracked_termination_failure(
+                    attach_error, termination_error, collector=False
+                ) from termination_error
+            raise InfrastructureFailure(
+                "could not attach spawned phase to Linux process boundary: %s"
+                % attach_error
+            ) from attach_error
         child._tilexr_process_boundary = process_boundary
 
     started = now()
@@ -1077,6 +1096,7 @@ def invoke_collector(
     now: Callable[[], float] = time.monotonic,
     sleep: Optional[Callable[[float], None]] = None,
     terminate: Callable = terminate_group,
+    process_boundary_factory: Optional[Callable] = None,
 ):
     if not script.is_file() or not os.access(str(script), os.X_OK):
         raise _collector_failure(
@@ -1085,7 +1105,9 @@ def invoke_collector(
     cancellation = cancellation or CancellationState()
     collector_sleep = sleep or time.sleep
     process_boundary = None
-    if sys.platform.startswith("linux") and popen is subprocess.Popen:
+    if process_boundary_factory is not None:
+        process_boundary = process_boundary_factory()
+    elif sys.platform.startswith("linux") and popen is subprocess.Popen:
         process_boundary = LinuxProcessBoundary.prepare()
     try:
         child = popen(
@@ -1097,7 +1119,19 @@ def invoke_collector(
     except OSError as error:
         raise _collector_failure("artifact collector failed to run: %s" % error) from error
     if process_boundary is not None:
-        process_boundary.attach(child.pid)
+        try:
+            process_boundary.attach(child.pid, child=child)
+        except BaseException as attach_error:
+            try:
+                terminate(child)
+            except BaseException as termination_error:
+                raise _tracked_termination_failure(
+                    attach_error, termination_error, collector=True
+                ) from termination_error
+            raise _collector_failure(
+                "could not attach artifact collector to Linux process boundary: %s"
+                % attach_error
+            ) from attach_error
         child._tilexr_process_boundary = process_boundary
     started = now()
     normal_deadline = started + 600.0
