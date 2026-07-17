@@ -188,9 +188,9 @@ void TestChipMapCoversObservedAscend950Variants()
     const std::string path = "src/comm/tilexr_internal.cpp";
     const auto text = ReadFile(path);
 
-    CheckContains(path, text, "{\"Ascend950PR\", ChipName::CHIP_950}");
-    CheckContains(path, text, "{\"Ascend950PR_9589\", ChipName::CHIP_950}");
-    CheckContains(path, text, "{\"Ascend950PR_9599\", ChipName::CHIP_950}");
+    CheckContains(path, text, "{\"Ascend950PR\", ChipName::CHIP_950PR}");
+    CheckContains(path, text, "{\"Ascend950PR_9589\", ChipName::CHIP_950PR}");
+    CheckContains(path, text, "{\"Ascend950PR_9599\", ChipName::CHIP_950PR}");
 }
 
 } // namespace
