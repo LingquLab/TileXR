@@ -22,6 +22,7 @@ if(BUILD_TESTING OR TILEXR_BUILD_TESTS)
 endif()
 if(BUILD_TESTING OR TILEXR_BUILD_TESTS)
     add_subdirectory(tests/data_as_flag)
+    add_subdirectory(tests/ci)
 endif()
 include(GNUInstallDirs)
 
