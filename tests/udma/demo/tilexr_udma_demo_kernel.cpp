@@ -131,9 +131,12 @@ __aicore__ inline void BigDataFullmeshTraceRecordKernelSpan(
         region >= TileXR::Demo::kFullmeshTraceKernelRegions) {
         return;
     }
+    const size_t index =
+        (static_cast<size_t>(iteration) * TileXR::Demo::kFullmeshTraceMaxCores + core) *
+        TileXR::Demo::kFullmeshTraceKernelRegions + region;
     BigDataFullmeshTraceStoreSpan(
-        trace, TileXR::Demo::FullmeshTraceKernelSpanOffset(iteration, core, region),
-        beginCycle, endCycle);
+        trace, TileXR::Demo::kFullmeshTraceHeaderBytes +
+        index * sizeof(TileXR::Demo::FullmeshTraceSpan), beginCycle, endCycle);
 }
 
 __aicore__ inline void BigDataFullmeshTraceRecordTaskSpan(
@@ -146,11 +149,17 @@ __aicore__ inline void BigDataFullmeshTraceRecordTaskSpan(
         peer < 0 || peer >= rankSize || phase >= TileXR::Demo::kFullmeshTracePhaseCount) {
         return;
     }
+    const size_t kernelSpanBytes =
+        static_cast<size_t>(TileXR::Demo::kFullmeshTraceMaxIterations) *
+        TileXR::Demo::kFullmeshTraceMaxCores * TileXR::Demo::kFullmeshTraceKernelRegions *
+        sizeof(TileXR::Demo::FullmeshTraceSpan);
+    const size_t index =
+        ((((static_cast<size_t>(iteration) * TileXR::Demo::kFullmeshTraceMaxCores + core) *
+        passCount + pass) * static_cast<uint32_t>(rankSize) + static_cast<uint32_t>(peer)) *
+        TileXR::Demo::kFullmeshTracePhaseCount) + phase;
     BigDataFullmeshTraceStoreSpan(
-        trace, TileXR::Demo::FullmeshTraceTaskSpanOffset(
-            iteration, core, pass, static_cast<uint32_t>(peer), phase,
-            passCount, static_cast<uint32_t>(rankSize)),
-        beginCycle, endCycle);
+        trace, TileXR::Demo::kFullmeshTraceHeaderBytes + kernelSpanBytes +
+        index * sizeof(TileXR::Demo::FullmeshTraceSpan), beginCycle, endCycle);
 }
 
 __aicore__ inline uint64_t AllToAllPayloadBytes(int32_t elementsPerPeer)
