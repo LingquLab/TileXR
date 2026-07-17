@@ -153,15 +153,14 @@ class TileXRCcuAllToAllProgramTest(unittest.TestCase):
                     std::cerr << "unexpected block size or message\n";
                     return 3;
                 }
-                const uint16_t preSyncMask = static_cast<uint16_t>(1U << TILEXR_CCU_ALLTOALL_OUTPUT_XN_ID);
-                const uint16_t postSyncMask = static_cast<uint16_t>(1U << TILEXR_CCU_ALLTOALL_POST_SYNC_ID);
+                const uint16_t syncMask = spec.ckeMask;
                 const uint32_t postSyncSetIndex = expectedInstructions - 4;
                 const uint32_t postSyncWaitIndex = expectedInstructions - 2;
                 if (program.size() < 3 ||
                     Slot(program[2], 0) != kSetCkeHeader ||
                     Slot(program[2], 4) != spec.preSyncLocalWaitCke ||
-                    Slot(program[2], 5) != preSyncMask) {
-                    std::cerr << "PreSync should use the HCCL-style output barrier bit"
+                    Slot(program[2], 5) != syncMask) {
+                    std::cerr << "PreSync should use the allocated CKE resource mask"
                               << " header=0x" << std::hex << Slot(program[2], 0)
                               << " waitCke=0x" << Slot(program[2], 4)
                               << " waitMask=0x" << Slot(program[2], 5)
@@ -169,16 +168,15 @@ class TileXRCcuAllToAllProgramTest(unittest.TestCase):
                     return 4;
                 }
                 if (Slot(program[postSyncSetIndex], 0) != kSetCkeHeader ||
-                    Slot(program[postSyncSetIndex], 3) != postSyncMask ||
+                    Slot(program[postSyncSetIndex], 3) != syncMask ||
                     Slot(program[postSyncWaitIndex], 0) != kClearCkeHeader ||
                     Slot(program[postSyncWaitIndex], 4) != spec.postSyncLocalWaitCke ||
-                    Slot(program[postSyncWaitIndex], 5) != postSyncMask ||
-                    postSyncMask == preSyncMask) {
-                    std::cerr << "PostSync should use a distinct HCCL-style post barrier bit"
+                    Slot(program[postSyncWaitIndex], 5) != syncMask) {
+                    std::cerr << "PostSync should use the allocated post CKE resource with the resource mask"
                               << " postSetMask=0x" << std::hex << Slot(program[postSyncSetIndex], 3)
                               << " postWaitCke=0x" << Slot(program[postSyncWaitIndex], 4)
                               << " postWaitMask=0x" << Slot(program[postSyncWaitIndex], 5)
-                              << " preMask=0x" << preSyncMask
+                              << " syncMask=0x" << syncMask
                               << std::dec << "\n";
                     return 5;
                 }
@@ -202,7 +200,7 @@ class TileXRCcuAllToAllProgramTest(unittest.TestCase):
 
             using namespace TileXR;
 
-            constexpr uint16_t kTransRmtMemToLocMemHeader = 0x1008U;
+            constexpr uint16_t kTransLocMemToRmtMemHeader = 0x1009U;
 
             uint16_t Header(const TileXRCcuInstr& instr)
             {
@@ -247,7 +245,7 @@ class TileXRCcuAllToAllProgramTest(unittest.TestCase):
             size_t FirstCopyIndex(const std::vector<TileXRCcuInstr>& program)
             {
                 for (size_t i = 0; i < program.size(); ++i) {
-                    if (Header(program[i]) == kTransRmtMemToLocMemHeader) {
+                    if (Header(program[i]) == kTransLocMemToRmtMemHeader) {
                         return i;
                     }
                 }
@@ -258,7 +256,7 @@ class TileXRCcuAllToAllProgramTest(unittest.TestCase):
             {
                 uint32_t count = 0;
                 for (const auto& instr : program) {
-                    if (Header(instr) == kTransRmtMemToLocMemHeader) {
+                    if (Header(instr) == kTransLocMemToRmtMemHeader) {
                         ++count;
                     }
                 }
@@ -291,7 +289,7 @@ class TileXRCcuAllToAllProgramTest(unittest.TestCase):
                     return 2;
                 }
                 if (CopyInstructionCount(rank0) != 64 || CopyInstructionCount(rank1) != 64) {
-                    std::cerr << "each rank should issue exactly 64 remote-to-local reads\n";
+                    std::cerr << "each rank should issue exactly 64 local-to-remote writes\n";
                     return 3;
                 }
                 const size_t rank0FirstCopy = FirstCopyIndex(rank0);
@@ -415,12 +413,16 @@ class TileXRCcuAllToAllProgramTest(unittest.TestCase):
         self.assertIn("ccu/tilexr_ccu_alltoall_program.cpp", cmake)
         self.assertIn("TileXRCcuBuildAllToAll2RankProgram", header)
         self.assertIn("TileXRCcuBuildMemoryCopyProgram", source)
-        self.assertIn("TileXRCcuMemoryCopyDirection::RemoteToLocal", source)
+        self.assertIn("TileXRCcuMemoryCopyDirection::LocalToRemote", source)
         self.assertIn("preSyncRemoteTokenNotifyCke", header)
         self.assertIn("preSyncTokenLocalWaitCke", header)
         self.assertNotIn("tokenLocalWaitCke", source)
         self.assertIn("PreSyncSignalMask", source)
         self.assertIn("PostSyncSignalMask", source)
+        self.assertIn("return spec.ckeMask;", source)
+        self.assertNotIn("1U << TILEXR_CCU_ALLTOALL_OUTPUT_XN_ID", source)
+        self.assertNotIn("1U << TILEXR_CCU_ALLTOALL_POST_SYNC_ID", source)
+        self.assertIn("post.clearWait = true;", source)
         self.assertIn("TILEXR_CCU_ALLTOALL_SIGNAL_MASK", header)
         self.assertIn("TILEXR_CCU_ALLTOALL_RANK0_SIGNAL_MASK", header)
         self.assertIn("TILEXR_CCU_ALLTOALL_RANK1_SIGNAL_MASK", header)

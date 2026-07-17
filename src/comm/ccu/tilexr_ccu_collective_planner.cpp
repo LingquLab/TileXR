@@ -1295,12 +1295,12 @@ int TileXRCcuCollectivePlanner::PrepareDirectCcuAllToAll2RankInstallAttempt(
     }
 
     TileXRCcuImportedRemoteMemoryBufferInfo importedRemoteBuffer;
-    TileXRCcuRemoteMemoryBufferImportRequest remoteImportRequest = peerEndpoint.sourceRemoteImport;
+    TileXRCcuRemoteMemoryBufferImportRequest remoteImportRequest = peerEndpoint.destinationRemoteImport;
     ret = session.ImportRemoteMemoryBuffer(remoteImportRequest, &importedRemoteBuffer);
     if (ret != TILEXR_SUCCESS) {
         if (report != nullptr) {
             *report = TileXRCcuDirectInstallReport {};
-            report->message = "failed to import direct CCU alltoall remote source buffer";
+            report->message = "failed to import direct CCU alltoall remote destination buffer";
         }
         return ret;
     }
@@ -1311,11 +1311,11 @@ int TileXRCcuCollectivePlanner::PrepareDirectCcuAllToAll2RankInstallAttempt(
     alltoall.localSendToken = localEndpoint.sourceToken;
     alltoall.localRecvAddr = localEndpoint.destinationAddr;
     alltoall.localRecvToken = localEndpoint.destinationToken;
-    alltoall.remoteSendAddr = remoteImportRequest.addr;
-    alltoall.remoteSendToken =
+    alltoall.remoteSendAddr = peerEndpoint.sourceAddr;
+    alltoall.remoteSendToken = peerEndpoint.sourceToken;
+    alltoall.remoteRecvAddr = remoteImportRequest.addr;
+    alltoall.remoteRecvToken =
         TileXRCcuPackMemoryToken(remoteImportRequest.tokenId, remoteImportRequest.tokenValue, true);
-    alltoall.remoteRecvAddr = peerEndpoint.destinationAddr;
-    alltoall.remoteRecvToken = peerEndpoint.destinationToken;
     alltoall.bytes = bytes;
     alltoall.memorySliceBytes = TILEXR_CCU_ALLTOALL_MEMORY_SLICE_BYTES;
     alltoall.memSlicePerBlock = TILEXR_CCU_ALLTOALL_MEM_SLICE_PER_BLOCK;

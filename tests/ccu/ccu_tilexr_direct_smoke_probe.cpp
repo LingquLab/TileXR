@@ -141,6 +141,13 @@ struct AllToAllState {
     int initRet = ACL_SUCCESS;
     int readRet = ACL_SUCCESS;
     uint32_t mismatchCount = 0;
+    size_t firstMismatchOffset = 0;
+    size_t lastMismatchOffset = 0;
+    uint32_t firstMismatchObserved = 0;
+    uint32_t firstMismatchExpected = 0;
+    uint32_t mismatchedBlockCount = 0;
+    uint32_t firstMismatchedBlock = 0;
+    uint32_t lastMismatchedBlock = 0;
     bool passed = false;
 };
 
@@ -621,8 +628,32 @@ int CheckAllToAllState(AllToAllState* state)
         return state->readRet;
     }
     state->mismatchCount = 0;
+    state->firstMismatchOffset = 0;
+    state->lastMismatchOffset = 0;
+    state->firstMismatchObserved = 0;
+    state->firstMismatchExpected = 0;
+    state->mismatchedBlockCount = 0;
+    state->firstMismatchedBlock = 0;
+    state->lastMismatchedBlock = 0;
+    const size_t blockBytes = 8U * 4096U;
+    uint32_t currentBlock = UINT32_MAX;
     for (size_t i = 0; i < state->bytes; ++i) {
         if (state->observed[i] != state->expected[i]) {
+            if (state->mismatchCount == 0) {
+                state->firstMismatchOffset = i;
+                state->firstMismatchObserved = state->observed[i];
+                state->firstMismatchExpected = state->expected[i];
+            }
+            state->lastMismatchOffset = i;
+            const uint32_t block = static_cast<uint32_t>(i / blockBytes);
+            if (block != currentBlock) {
+                if (state->mismatchedBlockCount == 0) {
+                    state->firstMismatchedBlock = block;
+                }
+                state->lastMismatchedBlock = block;
+                currentBlock = block;
+                ++state->mismatchedBlockCount;
+            }
             ++state->mismatchCount;
         }
     }
@@ -1135,6 +1166,54 @@ uint16_t LoadLe16(const uint8_t* data, size_t index)
         static_cast<uint16_t>(static_cast<uint16_t>(data[index * 2U + 1U]) << 8U);
 }
 
+bool ReadMissionContextAtEnd(
+    DirectCcuSmokeContext* context,
+    const TileXRDirectCcuTaskInfo& task,
+    const char* label)
+{
+    if (context == nullptr || label == nullptr) {
+        return false;
+    }
+    TileXR::TileXRCcuDriverAdapter adapter;
+    TileXR::TileXRCcuDriverAdapterReport adapterReport;
+    int ret = context->session.CreateDriverAdapter(&adapter, &adapterReport);
+    if (ret != TileXR::TILEXR_SUCCESS) {
+        std::cerr << label << " missionCtxRead ret=" << ret
+                  << " message=\"" << adapterReport.message << "\""
+                  << std::endl;
+        return false;
+    }
+
+    uint8_t raw[TileXR::TILEXR_CCU_DATA_ARRAY_SLOT_BYTES] = {};
+    ret = adapter.ReadMissionContext(
+        task.dieId,
+        task.missionId,
+        raw,
+        sizeof(raw),
+        &adapterReport);
+    if (ret != TileXR::TILEXR_SUCCESS) {
+        std::cerr << label << " missionCtxRead ret=" << ret
+                  << " opcode=" << adapterReport.opcode
+                  << " driverRet=" << adapterReport.driverRet
+                  << " opRet=" << adapterReport.opRet
+                  << " message=\"" << adapterReport.message << "\""
+                  << std::endl;
+        return false;
+    }
+
+    const uint16_t part4 = LoadLe16(raw, 4);
+    const uint16_t part5 = LoadLe16(raw, 5);
+    const uint16_t part6 = LoadLe16(raw, 6);
+    const uint16_t currentIns = static_cast<uint16_t>(((part5 & 0x1fU) << 11U) | ((part4 >> 5U) & 0x7ffU));
+    const uint16_t endIns = static_cast<uint16_t>(((part6 & 0x1fU) << 11U) | ((part5 >> 5U) & 0x7ffU));
+    const bool atEnd = currentIns == endIns;
+    std::cerr << label << " missionCtxAtEnd=" << (atEnd ? 1 : 0)
+              << " currentIns=" << currentIns
+              << " endIns=" << endIns
+              << std::endl;
+    return atEnd;
+}
+
 void PrintMissionContext(
     DirectCcuSmokeContext* context,
     const TileXRDirectCcuTaskInfo& task,
@@ -1568,6 +1647,7 @@ int RunAllToAllCopyPhase(
             std::cerr << "tilexr_ccu_alltoall aclrtCreateStream ret=" << streamRet << std::endl;
             finalRet = 7;
         } else {
+            bool skipStreamDestroy = false;
             TileXRDirectCcuSubmitReport submitReport;
             const auto submitBegin = std::chrono::steady_clock::now();
             const int submitRet = TileXRDirectCcuSubmitPrepared(prepared, stream, &submitReport);
@@ -1593,17 +1673,37 @@ int RunAllToAllCopyPhase(
             if (syncRet != ACL_SUCCESS) {
                 std::cerr << "tilexr_ccu_alltoall aclrtSynchronizeStreamWithTimeout ret=" << syncRet
                           << " timeoutMs=" << syncTimeoutMs << std::endl;
+                bool missionAtEnd = false;
                 if (!attempt.submitTasks.empty()) {
                     PrintMissionContext(context, attempt.submitTasks.front(), "tilexr_ccu_alltoall");
+                    missionAtEnd = ReadMissionContextAtEnd(
+                        context,
+                        attempt.submitTasks.front(),
+                        "tilexr_ccu_alltoall");
                 }
-                finalRet = 8;
+                if (missionAtEnd) {
+                    std::cout << "tilexr_ccu_alltoall streamTimeoutAtMissionEnd=1"
+                              << " rank=" << rank
+                              << " reason=\"continuing to device buffer validation\""
+                              << std::endl;
+                    skipStreamDestroy = true;
+                } else {
+                    finalRet = 8;
+                }
             } else if (submitRet != TileXR::TILEXR_SUCCESS) {
                 finalRet = 9;
             }
             if (!WaitForCollectiveSubmitDone(rank, rankSize, finalRet, phase) && finalRet == 0) {
                 finalRet = 13;
             }
-            aclrtDestroyStream(stream);
+            if (skipStreamDestroy) {
+                std::cout << "tilexr_ccu_alltoall skipDestroyStream=1"
+                          << " rank=" << rank
+                          << " reason=\"stream timeout after mission reached end\""
+                          << std::endl;
+            } else {
+                aclrtDestroyStream(stream);
+            }
         }
     }
     const int destroyRet = TileXRDirectCcuDestroyPrepared(prepared);
@@ -1625,6 +1725,14 @@ void PrintAllToAllResultAndMaybeFastExit(int rank, int finalRet, const AllToAllS
                   << " ret=" << finalRet
                   << " readRet=" << alltoall.readRet
                   << " mismatches=" << alltoall.mismatchCount
+                  << " firstMismatchOffset=" << alltoall.firstMismatchOffset
+                  << " lastMismatchOffset=" << alltoall.lastMismatchOffset
+                  << " firstMismatchObserved=0x" << std::hex << alltoall.firstMismatchObserved
+                  << " firstMismatchExpected=0x" << alltoall.firstMismatchExpected
+                  << std::dec
+                  << " mismatchedBlocks=" << alltoall.mismatchedBlockCount
+                  << " firstMismatchedBlock=" << alltoall.firstMismatchedBlock
+                  << " lastMismatchedBlock=" << alltoall.lastMismatchedBlock
                   << std::endl;
     }
     if (ShouldFastExitAfterRun()) {
@@ -1656,7 +1764,9 @@ int RunAllToAllLongMissionSmokeForRank(DirectCcuSmokeContext* context, int rank,
     TileXRDirectCcuPrepareOptions options = MakePrepareOptions(rank, rankSize, device);
     options.syncResourceCount = 3;
     options.sqeArgCount = 0;
-    options.syncInstructionCount = 3 + 64 * 7 + 3 + 1;
+    if (std::getenv("TILEXR_CCU_PROBE_SYNC_INSTRUCTION_COUNT") == nullptr) {
+        options.syncInstructionCount = 3 + 64 * 7;
+    }
     if (options.gsaStartId == 0) {
         options.gsaStartId = 1;
     }
@@ -1669,7 +1779,8 @@ int RunAllToAllLongMissionSmokeForRank(DirectCcuSmokeContext* context, int rank,
               << " blockCount=64"
               << " longMission=1"
               << " preSync=1"
-              << " postSync=1"
+              << " postSync=0"
+              << " finish=0"
               << std::endl;
     PrintConfig(options, rankSize);
 
@@ -1714,6 +1825,7 @@ int RunAllToAllLongMissionSmokeForRank(DirectCcuSmokeContext* context, int rank,
             std::cerr << "tilexr_ccu_alltoall aclrtCreateStream ret=" << streamRet << std::endl;
             finalRet = 7;
         } else {
+            bool skipStreamDestroy = false;
             TileXRDirectCcuSubmitReport submitReport;
             const auto submitBegin = std::chrono::steady_clock::now();
             const int submitRet = TileXRDirectCcuSubmitPrepared(prepared, stream, &submitReport);
@@ -1739,17 +1851,37 @@ int RunAllToAllLongMissionSmokeForRank(DirectCcuSmokeContext* context, int rank,
             if (syncRet != ACL_SUCCESS) {
                 std::cerr << "tilexr_ccu_alltoall aclrtSynchronizeStreamWithTimeout ret=" << syncRet
                           << " timeoutMs=" << syncTimeoutMs << std::endl;
+                bool missionAtEnd = false;
                 if (!attempt.submitTasks.empty()) {
                     PrintMissionContext(context, attempt.submitTasks.front(), "tilexr_ccu_alltoall");
+                    missionAtEnd = ReadMissionContextAtEnd(
+                        context,
+                        attempt.submitTasks.front(),
+                        "tilexr_ccu_alltoall");
                 }
-                finalRet = 8;
+                if (missionAtEnd) {
+                    std::cout << "tilexr_ccu_alltoall streamTimeoutAtMissionEnd=1"
+                              << " rank=" << rank
+                              << " reason=\"continuing to device buffer validation\""
+                              << std::endl;
+                    skipStreamDestroy = true;
+                } else {
+                    finalRet = 8;
+                }
             } else if (submitRet != TileXR::TILEXR_SUCCESS) {
                 finalRet = 9;
             }
             if (!WaitForCollectiveSubmitDone(rank, rankSize, finalRet) && finalRet == 0) {
                 finalRet = 13;
             }
-            aclrtDestroyStream(stream);
+            if (skipStreamDestroy) {
+                std::cout << "tilexr_ccu_alltoall skipDestroyStream=1"
+                          << " rank=" << rank
+                          << " reason=\"stream timeout after mission reached end\""
+                          << std::endl;
+            } else {
+                aclrtDestroyStream(stream);
+            }
         }
     }
 

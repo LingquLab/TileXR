@@ -700,7 +700,12 @@ class TileXRCcuDirectSmokeProbeTest(unittest.TestCase):
         self.assertIn("TILEXR_CCU_ALLTOALL_BYTES", runner)
         self.assertIn("TILEXR_CCU_ALLTOALL_MEM_SLICE_PER_LOOP", runner)
         self.assertIn('if [ "${TILEXR_CCU_DIRECT_SMOKE_ALLTOALL_LONG_MISSION:-0}" = "1" ]; then', runner)
-        self.assertIn("TILEXR_CCU_PROBE_SYNC_INSTRUCTION_COUNT:-476", runner)
+        self.assertIn("TILEXR_CCU_PROBE_SYNC_INSTRUCTION_COUNT:-451", runner)
+        self.assertNotIn("TILEXR_CCU_PROBE_SYNC_INSTRUCTION_COUNT:-452", runner)
+        self.assertNotIn("TILEXR_CCU_PROBE_SYNC_INSTRUCTION_COUNT:-458", runner)
+        self.assertNotIn("TILEXR_CCU_PROBE_SYNC_INSTRUCTION_COUNT:-454", runner)
+        self.assertNotIn("TILEXR_CCU_PROBE_SYNC_INSTRUCTION_COUNT:-455", runner)
+        self.assertNotIn("TILEXR_CCU_PROBE_SYNC_INSTRUCTION_COUNT:-476", runner)
         self.assertIn("TILEXR_CCU_PROBE_SYNC_INSTRUCTION_COUNT:-7", runner)
 
     def test_probe_compiles_and_default_run_skips_without_touching_hardware(self):

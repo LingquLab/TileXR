@@ -952,7 +952,7 @@ int BuildDirectAllToAll2RankLaunchPackage(
     alltoallSpec.preSyncChannelId = preResource.channelId;
     alltoallSpec.preSyncTokenChannelId = postResource.channelId;
     alltoallSpec.copyChannelId = copyResource.channelId;
-    alltoallSpec.postSyncChannelId = preResource.channelId;
+    alltoallSpec.postSyncChannelId = postResource.channelId;
     alltoallSpec.preSyncRemoteAddrXn = preResource.remoteXn;
     alltoallSpec.preSyncRemoteTokenXn = postResource.remoteXn;
     alltoallSpec.preSyncRemoteNotifyCke = preResource.notifyCke;
@@ -963,9 +963,9 @@ int BuildDirectAllToAll2RankLaunchPackage(
         postResource.localWaitCke == 0 ? postResource.notifyCke : postResource.localWaitCke;
     alltoallSpec.copyCompletionCke =
         copyResource.localWaitCke == 0 ? copyResource.notifyCke : copyResource.localWaitCke;
-    alltoallSpec.postSyncRemoteNotifyCke = preResource.notifyCke;
+    alltoallSpec.postSyncRemoteNotifyCke = postResource.notifyCke;
     alltoallSpec.postSyncLocalWaitCke =
-        preResource.localWaitCke == 0 ? preResource.notifyCke : preResource.localWaitCke;
+        postResource.localWaitCke == 0 ? postResource.notifyCke : postResource.localWaitCke;
     alltoallSpec.sourceCke = preResource.sourceCke;
     alltoallSpec.ckeMask = preResource.remoteNotifyMask == 0 ? 1U : preResource.remoteNotifyMask;
     alltoallSpec.postSyncNotify = false;
@@ -974,7 +974,7 @@ int BuildDirectAllToAll2RankLaunchPackage(
 
     if (DirectTraceEnabled()) {
         std::cerr << "TileXRDirectCcuTrace alltoallSpec"
-                  << " direction=RemoteToLocal"
+                  << " direction=LocalToRemote"
                   << " localRank=" << alltoallSpec.localRank
                   << " localGsa=" << alltoallSpec.localGsa
                   << " localXn=" << alltoallSpec.localXn

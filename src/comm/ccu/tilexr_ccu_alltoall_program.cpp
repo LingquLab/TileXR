@@ -10,14 +10,12 @@ namespace {
 
 uint16_t PreSyncSignalMask(const TileXRCcuAllToAll2RankProgramSpec& spec)
 {
-    (void)spec;
-    return static_cast<uint16_t>(1U << TILEXR_CCU_ALLTOALL_OUTPUT_XN_ID);
+    return spec.ckeMask;
 }
 
 uint16_t PostSyncSignalMask(const TileXRCcuAllToAll2RankProgramSpec& spec)
 {
-    (void)spec;
-    return static_cast<uint16_t>(1U << TILEXR_CCU_ALLTOALL_POST_SYNC_ID);
+    return spec.ckeMask;
 }
 
 void ResetReport(TileXRCcuAllToAllProgramReport* report)
@@ -52,10 +50,10 @@ int ValidateSpec(
     if (spec.localRank > 1U) {
         return Fail(program, report, "direct CCU alltoall localRank must be 0 or 1");
     }
-    if (spec.localSendAddr == 0 || spec.localRecvAddr == 0 || spec.remoteSendAddr == 0) {
+    if (spec.localSendAddr == 0 || spec.localRecvAddr == 0 || spec.remoteRecvAddr == 0) {
         return Fail(program, report, "missing direct CCU alltoall address");
     }
-    if (spec.localSendToken == 0 || spec.localRecvToken == 0 || spec.remoteSendToken == 0) {
+    if (spec.localSendToken == 0 || spec.localRecvToken == 0 || spec.remoteRecvToken == 0) {
         return Fail(program, report, "missing direct CCU alltoall token");
     }
     if (spec.bytes == 0 || spec.bytes % TILEXR_CCU_ALLTOALL_MEMORY_SLICE_BYTES != 0) {
@@ -255,16 +253,16 @@ int AppendCopyBlock(
     TileXRCcuAllToAllProgramReport* report)
 {
     TileXRCcuMemoryCopySpec copy;
-    copy.direction = TileXRCcuMemoryCopyDirection::RemoteToLocal;
+    copy.direction = TileXRCcuMemoryCopyDirection::LocalToRemote;
     copy.localGsa = spec.localGsa;
     copy.localXn = spec.localXn;
     copy.remoteGsa = spec.remoteGsa;
     copy.remoteXn = spec.remoteXn;
     copy.lengthXn = spec.lengthXn;
-    copy.localAddr = spec.localRecvAddr + offset;
-    copy.localToken = spec.localRecvToken;
-    copy.remoteAddr = spec.remoteSendAddr + offset;
-    copy.remoteToken = spec.remoteSendToken;
+    copy.localAddr = spec.localSendAddr + offset;
+    copy.localToken = spec.localSendToken;
+    copy.remoteAddr = spec.remoteRecvAddr + offset;
+    copy.remoteToken = spec.remoteRecvToken;
     copy.lengthBytes = bytesPerBlock;
     copy.channelId = spec.copyChannelId == 0 ? spec.channelId : spec.copyChannelId;
     copy.completionCke = spec.copyCompletionCke;
