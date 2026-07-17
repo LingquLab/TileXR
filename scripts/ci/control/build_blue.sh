@@ -190,42 +190,42 @@ validate_dynamic_output() {
     fi
 }
 
+validate_cann_metadata_file() {
+    local metadata="$1"
+    local expected_package="$2"
+    local package_line version_line
+    if [[ -L "${metadata}" || ! -r "${metadata}" || ! -f "${metadata}" ]]; then
+        echo "ERROR: required sealed CANN metadata is missing: ${metadata}" >&2
+        return 1
+    fi
+    package_line="$(grep '^package_name=' "${metadata}" || true)"
+    version_line="$(grep '^version=' "${metadata}" || true)"
+    if [[ "${package_line}" != "package_name=${expected_package}" ]]; then
+        echo "ERROR: unexpected package_name in ${metadata}" >&2
+        return 1
+    fi
+    if [[ "${version_line}" != 'version=9.1.0' ]]; then
+        echo "ERROR: expected exact CANN version=9.1.0 in ${metadata}" >&2
+        return 1
+    fi
+}
+
 capture_cann_metadata() {
     local output="${ARTIFACT_DIR}/version-cann.txt"
-    local list_file
-    local found=0
-    local metadata
-    local version_match=0
-    list_file="$(mktemp "${TRUSTED_ENV_ROOT}/cann-metadata.XXXXXX")" || return 1
-    if ! /usr/bin/find -P "${ASCEND_HOME_PATH}" -maxdepth 4 -type f \
-        \( -name 'version.info' -o -name 'version.cfg' \
-           -o -name 'ascend_toolkit_install.info' \
-           -o -name '*ops*install.info' \) -print > "${list_file}"; then
-        /bin/rm -f "${list_file}"
-        return 1
-    fi
-    : > "${output}"
-    while IFS= read -r metadata; do
-        if [[ ! -r "${metadata}" || -L "${metadata}" ]]; then
-            continue
-        fi
-        printf '===== %s =====\n' "${metadata}" >> "${output}"
-        /bin/cat "${metadata}" >> "${output}"
-        printf '\n' >> "${output}"
-        if grep -Eq '9\.1([.]0)?' "${metadata}"; then
-            version_match=1
-        fi
-        found=$((found + 1))
-    done < <(LC_ALL=C sort -u "${list_file}")
-    /bin/rm -f "${list_file}"
-    if [[ "${found}" -eq 0 ]]; then
-        echo "ERROR: no sealed CANN version or installation metadata was found" >&2
-        return 1
-    fi
-    if [[ "${version_match}" -ne 1 ]]; then
-        echo "ERROR: sealed CANN metadata does not report version 9.1" >&2
-        return 1
-    fi
+    local temporary
+    local toolkit_metadata="${ASCEND_HOME_PATH}/${ARCH}-linux/ascend_toolkit_install.info"
+    local ops_metadata="${ASCEND_HOME_PATH}/${ARCH}-linux/ascend_ops_install.info"
+    validate_cann_metadata_file "${toolkit_metadata}" "Ascend-cann-toolkit"
+    validate_cann_metadata_file "${ops_metadata}" "Ascend-cann-910b-ops"
+    temporary="$(mktemp "${TRUSTED_ENV_ROOT}/cann-metadata.XXXXXX")" || return 1
+    {
+        printf '===== %s =====\n' "${toolkit_metadata}"
+        /bin/cat "${toolkit_metadata}"
+        printf '\n===== %s =====\n' "${ops_metadata}"
+        /bin/cat "${ops_metadata}"
+        printf '\n'
+    } > "${temporary}"
+    /bin/mv -f "${temporary}" "${output}"
 }
 
 capture_cann_metadata
@@ -326,8 +326,8 @@ done
 TILEXR_LIBRARY="$(installed_library libtile-comm.so)"
 EP_LIBRARY="$(installed_library libtilexr-ep.so)"
 COLLECTIVES_LIBRARY="$(installed_library libtilexr-collectives.so)"
-CHECKER_EXECUTABLE="${SOURCE_DIR}/build-ci/tools/checker/tilexr_checker"
-CHECKER_CORE="${SOURCE_DIR}/build-ci/tools/checker/libtilexr-checker-core.a"
+CHECKER_EXECUTABLE="${SOURCE_DIR}/install/bin/tilexr_checker"
+CHECKER_CORE="$(installed_library libtilexr-checker-core.a)"
 require_executable "${CHECKER_EXECUTABLE}"
 require_regular_file "${CHECKER_CORE}"
 

@@ -962,6 +962,37 @@ class CancellationTests(unittest.TestCase):
         self.assertEqual(result, 130)
         self.assertGreaterEqual(len(writes), 3)
 
+    def test_early_obsolete_run_keeps_class_when_collector_requires_cases(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            config = gate.Config(
+                root / "source", root / "artifacts", "merge", "LingquLab/TileXR", 42
+            )
+            collected = []
+
+            def collect(script, collector_config, env, **kwargs):
+                cases = collector_config.artifacts / "cases.tsv"
+                self.assertTrue(cases.is_file())
+                self.assertFalse(cases.is_symlink())
+                self.assertEqual("", cases.read_text(encoding="utf-8"))
+                self.assertTrue((collector_config.artifacts / "summary.md").is_file())
+                collected.append(True)
+
+            with mock.patch.object(
+                gate, "orchestrate", side_effect=gate.ObsoleteRun("merge is obsolete")
+            ), mock.patch.object(gate, "verify_final_cleanup"), mock.patch.object(
+                gate, "invoke_collector", side_effect=collect
+            ):
+                result = gate._run_controller_body(
+                    config,
+                    {"TILEXR_CI_GITHUB_TOKEN": "token"},
+                    root / "trusted",
+                    gate.CancellationState(),
+                )
+
+        self.assertEqual(130, result)
+        self.assertEqual([True], collected)
+
 
 class LockOrchestrationTests(unittest.TestCase):
     def test_build_precedes_lock_and_lock_wraps_wait_revalidation_and_hardware(self):
@@ -1241,6 +1272,17 @@ class SummaryTests(unittest.TestCase):
 
 
 class CaseEvidenceTests(unittest.TestCase):
+    def test_trusted_empty_seed_refuses_a_symlink(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            target = root / "target"
+            target.write_text("keep", encoding="utf-8")
+            cases = root / "cases.tsv"
+            cases.symlink_to(target)
+            with self.assertRaises(gate.InfrastructureFailure):
+                gate.seed_empty_case_evidence(cases)
+            self.assertEqual("keep", target.read_text(encoding="utf-8"))
+
     def test_success_evidence_requires_cases_file(self):
         with tempfile.TemporaryDirectory() as directory:
             with self.assertRaises(gate.InfrastructureFailure):

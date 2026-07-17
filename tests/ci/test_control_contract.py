@@ -135,14 +135,24 @@ class ControlSourceContractTests(unittest.TestCase):
             "libtile-comm.so",
             "libtilexr-ep.so",
             "libtilexr-collectives.so",
-            "build-ci/tools/checker/tilexr_checker",
-            "build-ci/tools/checker/libtilexr-checker-core.a",
+            "install/bin/tilexr_checker",
+            "libtilexr-checker-core.a",
             "validate_dynamic_output",
             "ldd-${label}.txt",
             "readelf-${label}.txt",
             "top-level-reinstall",
         ]:
             self.assertIn(token, text)
+        self.assertNotIn("build-ci/tools/checker/tilexr_checker", text)
+        checker_cmake = self.read("tools/checker/CMakeLists.txt")
+        for token in [
+            "install(TARGETS",
+            "tilexr_checker",
+            "tilexr-checker-core",
+            "${CMAKE_INSTALL_BINDIR}",
+            "${CMAKE_INSTALL_LIBDIR}",
+        ]:
+            self.assertIn(token, checker_cmake)
 
     def test_hardware_manifest_has_required_8_card_coverage(self):
         text = self.read("scripts/ci/control/run_hardware.sh")
@@ -219,12 +229,15 @@ class ControlSourceContractTests(unittest.TestCase):
             self.assertIn(token, hardware)
         for token in [
             "version-cann.txt",
+            "${ASCEND_HOME_PATH}/${ARCH}-linux/ascend_toolkit_install.info",
             "ascend_toolkit_install.info",
-            "version.info",
-            "version.cfg",
-            "9\\.1",
+            "ascend_ops_install.info",
+            "Ascend-cann-toolkit",
+            "Ascend-cann-910b-ops",
+            "version=9.1.0",
         ]:
             self.assertIn(token, build)
+        self.assertNotIn("9\\.1([.]0)?", build)
 
     def test_build_manifest_resets_cases_and_records_each_safe_test(self):
         text = self.read("scripts/ci/control/build_blue.sh")
@@ -272,9 +285,10 @@ class ControlSourceContractTests(unittest.TestCase):
 
     def test_collector_requires_authoritative_root_evidence(self):
         text = self.read("scripts/ci/control/collect_artifacts.sh")
-        self.assertIn("require_root_evidence", text)
-        self.assertIn('require_root_evidence "cases.tsv"', text)
-        self.assertIn('require_root_evidence "summary.md"', text)
+        self.assertIn("check_root_evidence", text)
+        self.assertIn('check_root_evidence "cases.tsv"', text)
+        self.assertIn('check_root_evidence "summary.md"', text)
+        self.assertIn("EVIDENCE_ERROR", text)
 
     def test_job_hook_requires_exact_canonical_fixed_paths(self):
         text = self.read("scripts/ci/control/job_completed.sh")
@@ -359,6 +373,104 @@ class HardwareHelperBehaviorTests(unittest.TestCase):
             passed = subprocess.run(["bash", "-c", prefix + "true; finalize_hardware"])
             self.assertEqual(1, failed.returncode)
             self.assertEqual(9, passed.returncode)
+
+    def test_run_directory_rejects_file_and_symlink_without_running_command(self):
+        hardware = (CONTROL / "run_hardware.sh").read_text(encoding="utf-8")
+        prepare = extract_shell_function(hardware, "prepare_ci_run_root")
+        run_in_dir = extract_shell_function(hardware, "run_in_dir")
+        with tempfile.TemporaryDirectory() as temporary:
+            source = pathlib.Path(temporary).resolve()
+            marker = source / "command-ran"
+
+            def invoke(setup, directory, after_prepare=""):
+                harness = "set -euo pipefail\nSOURCE_DIR={}\n{}\n{}\n".format(
+                    shlex.quote(str(source)), prepare, run_in_dir
+                )
+                harness += setup + "\n"
+                harness += "prepare_ci_run_root\n"
+                harness += after_prepare + "\n"
+                harness += "run_in_dir {} /usr/bin/touch {}\n".format(
+                    shlex.quote(str(directory)), shlex.quote(str(marker))
+                )
+                return subprocess.run(
+                    ["bash", "-c", harness],
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+
+            ci_root = source / ".ci-run"
+            symlink_setup = "mkdir -p {0}; ln -s {0} {1}".format(
+                shlex.quote(str(source / "outside")), shlex.quote(str(ci_root))
+            )
+            self.assertNotEqual(0, invoke(symlink_setup, ci_root / "case").returncode)
+            self.assertFalse(marker.exists())
+
+            file_case = ci_root / "case-file"
+            file_setup = "touch {}".format(shlex.quote(str(file_case)))
+            self.assertNotEqual(
+                0,
+                invoke(
+                    "mkdir -p {}".format(shlex.quote(str(ci_root))),
+                    file_case,
+                    file_setup,
+                ).returncode,
+            )
+            self.assertFalse(marker.exists())
+
+            linked_case = ci_root / "case-link"
+            link_setup = "mkdir -p {0}; ln -s {0} {1}".format(
+                shlex.quote(str(source / "outside-case")),
+                shlex.quote(str(linked_case)),
+            )
+            self.assertNotEqual(
+                0,
+                invoke(
+                    "mkdir -p {}".format(shlex.quote(str(ci_root))),
+                    linked_case,
+                    link_setup,
+                ).returncode,
+            )
+            self.assertFalse(marker.exists())
+
+
+class BuildHelperBehaviorTests(unittest.TestCase):
+    def test_cann_metadata_requires_exact_package_and_version(self):
+        build = (CONTROL / "build_blue.sh").read_text(encoding="utf-8")
+        function = extract_shell_function(build, "validate_cann_metadata_file")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+
+            def validate(contents, package):
+                metadata = root / "metadata.info"
+                metadata.write_text(contents)
+                harness = "{}\nvalidate_cann_metadata_file {} {}\n".format(
+                    function, shlex.quote(str(metadata)), shlex.quote(package)
+                )
+                return subprocess.run(
+                    ["bash", "-c", harness],
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+
+            valid = "package_name=Ascend-cann-toolkit\nversion=9.1.0\n"
+            wrong_version = "package_name=Ascend-cann-toolkit\nversion=9.10.0\n"
+            wrong_package = "package_name=Ascend-cann-910b-ops\nversion=9.1.0\n"
+            conflicting = (
+                "package_name=Ascend-cann-toolkit\n"
+                "version=9.1.0\nversion=9.10.0\n"
+            )
+            self.assertEqual(0, validate(valid, "Ascend-cann-toolkit").returncode)
+            self.assertNotEqual(
+                0, validate(wrong_version, "Ascend-cann-toolkit").returncode
+            )
+            self.assertNotEqual(
+                0, validate(wrong_package, "Ascend-cann-toolkit").returncode
+            )
+            self.assertNotEqual(
+                0, validate(conflicting, "Ascend-cann-toolkit").returncode
+            )
 
 
 class ArtifactCollectorBehaviorTests(unittest.TestCase):
@@ -497,16 +609,18 @@ class ArtifactCollectorBehaviorTests(unittest.TestCase):
             cases_missing = root / "cases-missing"
             cases_missing.mkdir()
             (cases_missing / "summary.md").write_text("# Summary\n")
-            self.assertNotEqual(
-                0, self.run_collector(source, cases_missing).returncode
-            )
+            cases_result = self.run_collector(source, cases_missing)
+            self.assertNotEqual(0, cases_result.returncode)
+            self.assertTrue((cases_missing / "environment.txt").is_file())
+            self.assertTrue((cases_missing / "manifest.txt").is_file())
 
             summary_missing = root / "summary-missing"
             summary_missing.mkdir()
             (summary_missing / "cases.tsv").write_text("case\tpass\t0\t1\n")
-            self.assertNotEqual(
-                0, self.run_collector(source, summary_missing).returncode
-            )
+            summary_result = self.run_collector(source, summary_missing)
+            self.assertNotEqual(0, summary_result.returncode)
+            self.assertTrue((summary_missing / "environment.txt").is_file())
+            self.assertTrue((summary_missing / "manifest.txt").is_file())
 
             symlinked = root / "symlinked"
             symlinked.mkdir()
@@ -514,14 +628,44 @@ class ArtifactCollectorBehaviorTests(unittest.TestCase):
             real_cases.write_text("case\tpass\t0\t1\n")
             (symlinked / "cases.tsv").symlink_to(real_cases)
             (symlinked / "summary.md").write_text("# Summary\n")
-            self.assertNotEqual(0, self.run_collector(source, symlinked).returncode)
+            symlink_result = self.run_collector(source, symlinked)
+            self.assertNotEqual(0, symlink_result.returncode)
+            self.assertFalse((symlinked / "cases.tsv").exists())
+            self.assertTrue((symlinked / "environment.txt").is_file())
+            self.assertTrue((symlinked / "manifest.txt").is_file())
 
             oversized = root / "oversized"
             oversized.mkdir()
             (oversized / "cases.tsv").write_text("case\tpass\t0\t1\n")
             with (oversized / "summary.md").open("wb") as output:
                 output.truncate(100 * 1024 * 1024 + 1)
-            self.assertNotEqual(0, self.run_collector(source, oversized).returncode)
+            oversized_result = self.run_collector(source, oversized)
+            self.assertNotEqual(0, oversized_result.returncode)
+            self.assertFalse((oversized / "summary.md").exists())
+            self.assertTrue((oversized / "environment.txt").is_file())
+            self.assertTrue((oversized / "manifest.txt").is_file())
+
+            unsafe_directory = root / "unsafe-directory"
+            (unsafe_directory / "summary.md").mkdir(parents=True)
+            (unsafe_directory / "summary.md" / "payload.so").write_bytes(b"library")
+            (unsafe_directory / "cases.tsv").write_text("case\tpass\t0\t1\n")
+            directory_result = self.run_collector(source, unsafe_directory)
+            self.assertNotEqual(0, directory_result.returncode)
+            self.assertFalse((unsafe_directory / "summary.md").exists())
+            self.assertTrue((unsafe_directory / "environment.txt").is_file())
+            self.assertTrue((unsafe_directory / "manifest.txt").is_file())
+
+            for upload in [
+                cases_missing,
+                summary_missing,
+                symlinked,
+                oversized,
+                unsafe_directory,
+            ]:
+                for path in upload.rglob("*"):
+                    self.assertFalse(path.is_symlink(), str(path))
+                    if path.is_file():
+                        self.assertLessEqual(path.stat().st_size, 100 * 1024 * 1024)
 
     def test_collector_rejects_symlink_source_and_artifact_directories(self):
         with tempfile.TemporaryDirectory() as temporary:

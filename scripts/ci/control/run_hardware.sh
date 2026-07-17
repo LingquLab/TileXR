@@ -104,12 +104,70 @@ run_case() {
     return "${status}"
 }
 
+prepare_ci_run_root() {
+    CI_RUN_ROOT="${SOURCE_DIR}/.ci-run"
+    if [[ -L "${CI_RUN_ROOT}" || ( -e "${CI_RUN_ROOT}" && ! -d "${CI_RUN_ROOT}" ) ]]; then
+        echo "ERROR: CI run root must be a real directory: ${CI_RUN_ROOT}" >&2
+        return 1
+    fi
+    if [[ -d "${CI_RUN_ROOT}" ]] && ! /bin/rm -rf "${CI_RUN_ROOT}"; then
+        echo "ERROR: could not clean CI run root: ${CI_RUN_ROOT}" >&2
+        return 1
+    fi
+    if ! mkdir -p "${CI_RUN_ROOT}"; then
+        echo "ERROR: could not create CI run root: ${CI_RUN_ROOT}" >&2
+        return 1
+    fi
+    if ! CI_RUN_ROOT_REAL="$(cd "${CI_RUN_ROOT}" && pwd -P)"; then
+        echo "ERROR: could not resolve CI run root: ${CI_RUN_ROOT}" >&2
+        return 1
+    fi
+    if [[ "${CI_RUN_ROOT_REAL}" != "${CI_RUN_ROOT}" ]]; then
+        echo "ERROR: CI run root contains a symbolic-link redirection" >&2
+        return 1
+    fi
+}
+
 run_in_dir() {
     local directory="$1"
     shift
-    mkdir -p "${directory}"
+    local directory_real
+    case "${directory}" in
+        "${CI_RUN_ROOT_REAL}"/*) ;;
+        *)
+            echo "ERROR: case directory is outside the CI run root: ${directory}" >&2
+            return 1
+            ;;
+    esac
+    if [[ -L "${directory}" || ( -e "${directory}" && ! -d "${directory}" ) ]]; then
+        echo "ERROR: case path must be a real directory: ${directory}" >&2
+        return 1
+    fi
+    if ! mkdir -p "${directory}"; then
+        echo "ERROR: could not create case directory: ${directory}" >&2
+        return 1
+    fi
+    if [[ -L "${directory}" || ! -d "${directory}" ]]; then
+        echo "ERROR: case path is not a real directory: ${directory}" >&2
+        return 1
+    fi
+    if ! directory_real="$(cd "${directory}" && pwd -P)"; then
+        echo "ERROR: could not resolve case directory: ${directory}" >&2
+        return 1
+    fi
+    case "${directory_real}" in
+        "${CI_RUN_ROOT_REAL}"/*) ;;
+        *)
+            echo "ERROR: resolved case directory escaped the CI run root" >&2
+            return 1
+            ;;
+    esac
+    if [[ "${directory_real}" != "${directory}" ]]; then
+        echo "ERROR: case directory contains a symbolic-link redirection" >&2
+        return 1
+    fi
     (
-        cd "${directory}"
+        cd "${directory_real}" || exit 1
         exec "$@"
     )
 }
@@ -240,6 +298,7 @@ export TILEXR_COMM_ID="127.0.0.1:$((20000 + PR_NUMBER % 20000))"
 trap finalize_hardware EXIT
 capture_npu_evidence "${ARTIFACT_DIR}/npu-state-before.txt" npu-smi info
 capture_npu_evidence "${ARTIFACT_DIR}/npu-topology.txt" npu-smi info -t topo
+prepare_ci_run_root
 
 for device in 0 1 2 3 4 5 6 7; do
     run_case "npu-health-${device}" check_device_health "${device}"

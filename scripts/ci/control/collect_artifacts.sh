@@ -33,23 +33,7 @@ if [[ "${SOURCE_DIR}" == "${ARTIFACT_DIR}/"* ]]; then
     exit 2
 fi
 
-require_root_evidence() {
-    local name="$1"
-    local path="${ARTIFACT_DIR}/${name}"
-    local size
-    if [[ -L "${path}" || ! -f "${path}" ]]; then
-        echo "ERROR: required root evidence is missing or unsafe: ${name}" >&2
-        return 1
-    fi
-    size="$(wc -c < "${path}" | tr -d '[:space:]')"
-    if [[ ! "${size}" =~ ^[0-9]+$ || "${size}" -gt "${MAX_ARTIFACT_BYTES}" ]]; then
-        echo "ERROR: required root evidence exceeds 100 MiB: ${name}" >&2
-        return 1
-    fi
-}
-
-require_root_evidence "cases.tsv"
-require_root_evidence "summary.md"
+EVIDENCE_ERROR=""
 
 COLLECTED_ROOT="${ARTIFACT_DIR}/source"
 case "${COLLECTED_ROOT}" in
@@ -67,15 +51,62 @@ MANIFEST_TMP="$(mktemp "${TMPDIR:-/tmp}/tilexr-artifact-manifest.XXXXXX")"
 CANDIDATES_TMP="$(mktemp "${TMPDIR:-/tmp}/tilexr-artifact-candidates.XXXXXX")"
 LINKS_TMP="$(mktemp "${TMPDIR:-/tmp}/tilexr-artifact-links.XXXXXX")"
 FILES_TMP="$(mktemp "${TMPDIR:-/tmp}/tilexr-artifact-files.XXXXXX")"
+ENVIRONMENT_TMP="$(mktemp "${TMPDIR:-/tmp}/tilexr-artifact-environment.XXXXXX")"
 cleanup_temporary_files() {
     /bin/rm -f "${REJECTION_TMP}" "${MANIFEST_TMP}" "${CANDIDATES_TMP}" \
-        "${LINKS_TMP}" "${FILES_TMP}"
+        "${LINKS_TMP}" "${FILES_TMP}" "${ENVIRONMENT_TMP}"
 }
 trap cleanup_temporary_files EXIT
 
 reject_artifact() {
     printf '%s\t%s\n' "$1" "$2" >> "${REJECTION_TMP}"
 }
+
+record_evidence_error() {
+    local message="$1"
+    if [[ -z "${EVIDENCE_ERROR}" ]]; then
+        EVIDENCE_ERROR="${message}"
+    else
+        EVIDENCE_ERROR="${EVIDENCE_ERROR}; ${message}"
+    fi
+}
+
+check_root_evidence() {
+    local name="$1"
+    local path="${ARTIFACT_DIR}/${name}"
+    local size
+    if [[ -L "${path}" ]]; then
+        record_evidence_error "required root evidence is a symbolic link: ${name}"
+        reject_artifact "${name}" "unsafe-required-evidence"
+        /bin/rm -f "${path}"
+        return 0
+    fi
+    if [[ ! -e "${path}" ]]; then
+        record_evidence_error "required root evidence is missing: ${name}"
+        reject_artifact "${name}" "missing-required-evidence"
+        return 0
+    fi
+    if [[ ! -f "${path}" ]]; then
+        record_evidence_error "required root evidence is not a regular file: ${name}"
+        reject_artifact "${name}" "unsafe-required-evidence"
+        /bin/rm -rf "${path}"
+        return 0
+    fi
+    if ! size="$(wc -c < "${path}" | tr -d '[:space:]')"; then
+        record_evidence_error "required root evidence is unreadable: ${name}"
+        reject_artifact "${name}" "unreadable-required-evidence"
+        /bin/rm -f "${path}"
+        return 0
+    fi
+    if [[ ! "${size}" =~ ^[0-9]+$ || "${size}" -gt "${MAX_ARTIFACT_BYTES}" ]]; then
+        record_evidence_error "required root evidence exceeds 100 MiB: ${name}"
+        reject_artifact "${name}" "oversized-required-evidence"
+        /bin/rm -f "${path}"
+    fi
+}
+
+check_root_evidence "cases.tsv"
+check_root_evidence "summary.md"
 
 is_allowed_artifact() {
     local relative="$1"
@@ -130,6 +161,33 @@ while IFS= read -r -d '' candidate; do
     copy_candidate "${candidate}"
 done < "${CANDIDATES_TMP}"
 
+# The untrusted phase can write directly into ARTIFACT_DIR. Sanitize everything
+# that Actions will upload, including pre-existing files, before manifesting it.
+/usr/bin/find -P "${ARTIFACT_DIR}" -type l -print0 > "${LINKS_TMP}"
+while IFS= read -r -d '' link; do
+    relative="${link#"${ARTIFACT_DIR}/"}"
+    reject_artifact "${relative}" "symbolic-link"
+    /bin/rm -f "${link}"
+done < "${LINKS_TMP}"
+
+/usr/bin/find -P "${ARTIFACT_DIR}" -type f -print0 > "${FILES_TMP}"
+while IFS= read -r -d '' file; do
+    relative="${file#"${ARTIFACT_DIR}/"}"
+    if [[ "${relative}" == "manifest.txt" || "${relative}" == "artifact-rejections.txt" ]]; then
+        continue
+    fi
+    if ! is_allowed_artifact "${relative}"; then
+        reject_artifact "${relative}" "unsupported-artifact-type"
+        /bin/rm -f "${file}"
+        continue
+    fi
+    size="$(wc -c < "${file}" | tr -d '[:space:]')"
+    if [[ ! "${size}" =~ ^[0-9]+$ || "${size}" -gt "${MAX_ARTIFACT_BYTES}" ]]; then
+        reject_artifact "${relative}" "larger-than-100-MiB"
+        /bin/rm -f "${file}"
+    fi
+done < "${FILES_TMP}"
+
 {
     echo "TileXR CI environment"
     echo "source=${SOURCE_DIR}"
@@ -163,34 +221,14 @@ done < "${CANDIDATES_TMP}"
     if command -v git >/dev/null 2>&1; then
         echo "commit=$(git -C "${SOURCE_DIR}" rev-parse HEAD 2>/dev/null || true)"
     fi
-} > "${ARTIFACT_DIR}/environment.txt"
-
-# The untrusted phase can write directly into ARTIFACT_DIR. Sanitize everything
-# that Actions will upload, including pre-existing files, before manifesting it.
-/usr/bin/find -P "${ARTIFACT_DIR}" -type l -print0 > "${LINKS_TMP}"
-while IFS= read -r -d '' link; do
-    relative="${link#"${ARTIFACT_DIR}/"}"
-    reject_artifact "${relative}" "symbolic-link"
-    /bin/rm -f "${link}"
-done < "${LINKS_TMP}"
-
-/usr/bin/find -P "${ARTIFACT_DIR}" -type f -print0 > "${FILES_TMP}"
-while IFS= read -r -d '' file; do
-    relative="${file#"${ARTIFACT_DIR}/"}"
-    if [[ "${relative}" == "manifest.txt" || "${relative}" == "artifact-rejections.txt" ]]; then
-        continue
-    fi
-    if ! is_allowed_artifact "${relative}"; then
-        reject_artifact "${relative}" "unsupported-artifact-type"
-        /bin/rm -f "${file}"
-        continue
-    fi
-    size="$(wc -c < "${file}" | tr -d '[:space:]')"
-    if [[ ! "${size}" =~ ^[0-9]+$ || "${size}" -gt "${MAX_ARTIFACT_BYTES}" ]]; then
-        reject_artifact "${relative}" "larger-than-100-MiB"
-        /bin/rm -f "${file}"
-    fi
-done < "${FILES_TMP}"
+} > "${ENVIRONMENT_TMP}"
+if [[ -L "${ARTIFACT_DIR}/environment.txt" || -f "${ARTIFACT_DIR}/environment.txt" ]]; then
+    /bin/rm -f "${ARTIFACT_DIR}/environment.txt"
+elif [[ -e "${ARTIFACT_DIR}/environment.txt" ]]; then
+    reject_artifact "environment.txt" "unsafe-environment-destination"
+    /bin/rm -rf "${ARTIFACT_DIR}/environment.txt"
+fi
+/bin/mv -f "${ENVIRONMENT_TMP}" "${ARTIFACT_DIR}/environment.txt"
 
 if [[ -s "${REJECTION_TMP}" ]]; then
     LC_ALL=C sort -u "${REJECTION_TMP}" > "${ARTIFACT_DIR}/artifact-rejections.txt"
@@ -208,3 +246,8 @@ while IFS= read -r -d '' file; do
     printf '%s\t%s\n' "${relative}" "${size}" >> "${MANIFEST_TMP}"
 done < "${FILES_TMP}"
 LC_ALL=C sort "${MANIFEST_TMP}" > "${ARTIFACT_DIR}/manifest.txt"
+
+if [[ -n "${EVIDENCE_ERROR}" ]]; then
+    echo "ERROR: ${EVIDENCE_ERROR}" >&2
+    exit 1
+fi

@@ -58,6 +58,21 @@ class ObsoleteRun(GateFailure):
     pass
 
 
+def seed_empty_case_evidence(path: pathlib.Path) -> None:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(str(path), flags, 0o600)
+    except OSError as error:
+        raise InfrastructureFailure(
+            "could not create trusted empty cases.tsv: %s" % error
+        ) from error
+    os.close(descriptor)
+
+
 @dataclasses.dataclass(frozen=True)
 class Config:
     source: pathlib.Path
@@ -1470,9 +1485,10 @@ def _run_controller_body(
         child_environment(environ), config.source, config.artifacts, config.pr_number
     )
     try:
+        config.artifacts.mkdir(parents=True, exist_ok=True)
+        seed_empty_case_evidence(config.artifacts / "cases.tsv")
         if not token:
             raise InfrastructureFailure("TILEXR_CI_GITHUB_TOKEN is required")
-        config.artifacts.mkdir(parents=True, exist_ok=True)
         orchestrate(
             config,
             control_dir=control_dir,
