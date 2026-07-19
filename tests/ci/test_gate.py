@@ -1319,6 +1319,23 @@ class FinalManifestTests(unittest.TestCase):
         summary_size = (artifacts / "summary.md").stat().st_size
         self.assertIn(("summary.md", summary_size), rows)
 
+    def assert_minimal_recovered_upload(self, artifacts, failure_token):
+        expected = {
+            "artifact-rejections.txt",
+            "cases.tsv",
+            "manifest.txt",
+            "summary.md",
+        }
+        self.assertEqual(expected, {path.name for path in artifacts.iterdir()})
+        for path in artifacts.iterdir():
+            self.assertTrue(path.is_file(), str(path))
+            self.assertFalse(path.is_symlink(), str(path))
+        self.assertEqual("", (artifacts / "cases.tsv").read_text(encoding="utf-8"))
+        summary = (artifacts / "summary.md").read_text(encoding="utf-8")
+        self.assertIn(failure_token, summary)
+        self.assertIn("quarantin", summary.lower())
+        self.assert_final_manifest_matches_upload(artifacts)
+
     def test_refresh_is_atomic_and_requires_safe_collector_boundary(self):
         with tempfile.TemporaryDirectory() as directory:
             artifacts = pathlib.Path(directory)
@@ -1455,8 +1472,79 @@ class FinalManifestTests(unittest.TestCase):
 
             self.assertEqual(23, result)
             self.assertFalse((config.artifacts / "post-collector.log").exists())
-            self.assertFalse((config.artifacts / "manifest.txt").exists())
-            self.assertTrue((config.artifacts / "summary.md").is_file())
+            self.assert_minimal_recovered_upload(config.artifacts, "100 MiB")
+            quarantines = list(root.glob(".tilexr-quarantined-artifacts-*"))
+            self.assertEqual(1, len(quarantines))
+            self.assertTrue(
+                (quarantines[0] / "upload-root" / "post-collector.log").is_file()
+            )
+
+    def test_terminal_unsafe_tree_quarantines_all_fifos(self):
+        if not hasattr(os, "mkfifo"):
+            self.skipTest("FIFO creation is unavailable")
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            config = gate.Config(
+                root / "source", root / "artifacts", "merge", "LingquLab/TileXR", 42
+            )
+
+            def collect(script, collector_config, env, **kwargs):
+                os.mkfifo(collector_config.artifacts / "first.fifo")
+                os.mkfifo(collector_config.artifacts / "second.fifo")
+                write_test_manifest(collector_config.artifacts)
+
+            with mock.patch.object(
+                gate, "orchestrate", side_effect=self.passing_orchestration
+            ), mock.patch.object(gate, "verify_final_cleanup"), mock.patch.object(
+                gate, "invoke_collector", side_effect=collect
+            ):
+                result = gate._run_controller_body(
+                    config,
+                    {"TILEXR_CI_GITHUB_TOKEN": "token"},
+                    root / "trusted",
+                    gate.CancellationState(),
+                )
+
+            self.assertEqual(23, result)
+            self.assert_minimal_recovered_upload(config.artifacts, "nonregular")
+            quarantines = list(root.glob(".tilexr-quarantined-artifacts-*"))
+            self.assertEqual(1, len(quarantines))
+            old_root = quarantines[0] / "upload-root"
+            self.assertTrue((old_root / "first.fifo").exists())
+            self.assertTrue((old_root / "second.fifo").exists())
+            self.assertNotIn(quarantines[0], config.artifacts.parents)
+
+    def test_terminal_entry_cap_quarantines_entire_large_tree(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            config = gate.Config(
+                root / "source", root / "artifacts", "merge", "LingquLab/TileXR", 42
+            )
+
+            def collect(script, collector_config, env, **kwargs):
+                for index in range(10001):
+                    (collector_config.artifacts / ("extra-%05d.log" % index)).touch()
+                write_test_manifest(collector_config.artifacts)
+
+            with mock.patch.object(
+                gate, "orchestrate", side_effect=self.passing_orchestration
+            ), mock.patch.object(gate, "verify_final_cleanup"), mock.patch.object(
+                gate, "invoke_collector", side_effect=collect
+            ):
+                result = gate._run_controller_body(
+                    config,
+                    {"TILEXR_CI_GITHUB_TOKEN": "token"},
+                    root / "trusted",
+                    gate.CancellationState(),
+                )
+
+            self.assertEqual(23, result)
+            self.assert_minimal_recovered_upload(config.artifacts, "entry limit")
+            quarantines = list(root.glob(".tilexr-quarantined-artifacts-*"))
+            self.assertEqual(1, len(quarantines))
+            self.assertTrue(
+                (quarantines[0] / "upload-root" / "extra-10000.log").is_file()
+            )
 
     def test_collector_failure_summary_and_manifest_are_aligned(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1728,7 +1816,7 @@ class FinalManifestTests(unittest.TestCase):
             self.assertIn("transient manifest race", summary)
             self.assert_final_manifest_matches_upload(config.artifacts)
 
-    def test_persistent_refresh_timeout_is_attempted_twice_then_invalidated(self):
+    def test_persistent_refresh_timeout_recovers_minimal_upload_after_two_attempts(self):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             config = gate.Config(
@@ -1757,9 +1845,9 @@ class FinalManifestTests(unittest.TestCase):
 
             self.assertEqual(23, result)
             self.assertEqual(2, refresh.call_count)
-            summary = (config.artifacts / "summary.md").read_text(encoding="utf-8")
-            self.assertIn("manifest deadline exceeded", summary)
-            self.assertFalse((config.artifacts / "manifest.txt").exists())
+            self.assert_minimal_recovered_upload(
+                config.artifacts, "manifest deadline exceeded"
+            )
 
     def test_transient_final_summary_failure_is_retried_and_manifested(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1797,7 +1885,7 @@ class FinalManifestTests(unittest.TestCase):
             self.assertIn("transient final summary failure", summary)
             self.assert_final_manifest_matches_upload(config.artifacts)
 
-    def test_persistent_final_summary_failure_invalidates_summary_and_manifest(self):
+    def test_persistent_final_summary_failure_recovers_minimal_upload(self):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             config = gate.Config(
@@ -1831,10 +1919,11 @@ class FinalManifestTests(unittest.TestCase):
 
             self.assertEqual(23, result)
             self.assertEqual(3, len(writes))
-            self.assertFalse((config.artifacts / "summary.md").exists())
-            self.assertFalse((config.artifacts / "manifest.txt").exists())
+            self.assert_minimal_recovered_upload(
+                config.artifacts, "persistent final summary failure"
+            )
 
-    def test_directory_evidence_is_quarantined_outside_upload_root(self):
+    def test_artifact_root_is_quarantined_outside_upload_path_in_constant_time(self):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             artifacts = root / "artifacts"
@@ -1844,17 +1933,39 @@ class FinalManifestTests(unittest.TestCase):
                 "stale", encoding="utf-8"
             )
 
-            gate.invalidate_artifact_evidence(evidence, artifacts)
+            quarantine = gate.quarantine_artifact_upload_root(artifacts)
 
-            self.assertFalse(evidence.exists())
-            quarantines = list(root.glob(".tilexr-invalid-artifact-*"))
-            self.assertEqual(1, len(quarantines))
+            self.assertFalse(artifacts.exists())
+            self.assertEqual(root, quarantine.parent)
+            with self.assertRaises(ValueError):
+                quarantine.relative_to(artifacts)
             self.assertEqual(
                 "stale",
-                (quarantines[0] / "summary.md" / "nested" / "stale.txt").read_text(
+                (quarantine / "upload-root" / "summary.md" / "nested" / "stale.txt").read_text(
                     encoding="utf-8"
                 ),
             )
+
+    def test_failed_quarantine_unlinks_upload_symlink_without_touching_target(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            target = root / "external"
+            target.mkdir()
+            (target / "keep.txt").write_text("keep", encoding="utf-8")
+            artifacts = root / "artifacts"
+            artifacts.symlink_to(target, target_is_directory=True)
+
+            try:
+                with mock.patch.object(
+                    gate.os, "replace", side_effect=OSError("rename denied")
+                ), self.assertRaises(gate.InfrastructureFailure):
+                    gate.quarantine_artifact_upload_root(artifacts)
+                self.assertFalse(artifacts.is_symlink())
+                self.assertEqual(
+                    "keep", (target / "keep.txt").read_text(encoding="utf-8")
+                )
+            finally:
+                target.chmod(0o700)
 
 
 class CaseEvidenceTests(unittest.TestCase):
@@ -2254,9 +2365,22 @@ class CliValidationTests(unittest.TestCase):
                     gate.CancellationState(),
                 )
             self.assertEqual(result, 23)
-            self.assertFalse(manifest.exists())
+            self.assertTrue(manifest.is_file())
+            self.assertEqual(
+                actual_artifact_rows(config.artifacts), manifest_rows(config.artifacts)
+            )
+            self.assertEqual(
+                {
+                    "artifact-rejections.txt",
+                    "cases.tsv",
+                    "manifest.txt",
+                    "summary.md",
+                },
+                {path.name for path in config.artifacts.iterdir()},
+            )
             summary = (config.artifacts / "summary.md").read_text(encoding="utf-8")
             self.assertIn("trusted artifact collector is missing", summary)
+            self.assertIn("quarantin", summary.lower())
 
     def test_repository_and_pr_number_are_strictly_validated(self):
         with self.assertRaises(gate.InfrastructureFailure):

@@ -1231,48 +1231,153 @@ def reset_collector_manifest_boundary(artifacts: pathlib.Path) -> None:
         ) from error
 
 
-def invalidate_artifact_evidence(
-    path: pathlib.Path, artifacts: pathlib.Path
-) -> None:
+def _disable_artifact_upload_path(artifacts: pathlib.Path) -> bool:
     try:
-        path.relative_to(artifacts)
-    except ValueError as error:
-        raise InfrastructureFailure(
-            "artifact evidence path is outside the upload root: %s" % path
-        ) from error
-    if path == artifacts:
-        raise InfrastructureFailure("refusing to invalidate the artifact root")
-    try:
-        path_status = os.lstat(str(path))
+        path_status = os.lstat(str(artifacts))
     except FileNotFoundError:
-        return
-    except OSError as error:
-        raise InfrastructureFailure(
-            "could not inspect invalid artifact evidence: %s" % error
-        ) from error
+        return True
+    except OSError:
+        return False
+    if not stat.S_ISDIR(path_status.st_mode):
+        try:
+            os.unlink(str(artifacts))
+            return True
+        except OSError:
+            return False
+    descriptor = -1
+    flags = os.O_RDONLY
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    if hasattr(os, "O_DIRECTORY"):
+        flags |= os.O_DIRECTORY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
     try:
-        if stat.S_ISDIR(path_status.st_mode):
-            quarantine = pathlib.Path(
-                tempfile.mkdtemp(
-                    prefix=".tilexr-invalid-artifact-", dir=str(artifacts.parent)
-                )
+        descriptor = os.open(str(artifacts), flags)
+        opened_status = os.fstat(descriptor)
+        if (opened_status.st_dev, opened_status.st_ino) != (
+            path_status.st_dev,
+            path_status.st_ino,
+        ):
+            return False
+        os.fchmod(descriptor, 0)
+        return True
+    except OSError:
+        return False
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def quarantine_artifact_upload_root(artifacts: pathlib.Path) -> pathlib.Path:
+    quarantine = None
+    try:
+        quarantine = pathlib.Path(
+            tempfile.mkdtemp(
+                prefix=".tilexr-quarantined-artifacts-", dir=str(artifacts.parent)
             )
+        )
+        os.replace(str(artifacts), str(quarantine / "upload-root"))
+        return quarantine
+    except OSError as error:
+        if quarantine is not None:
             try:
-                os.replace(str(path), str(quarantine / path.name))
-            except BaseException:
-                try:
-                    os.rmdir(str(quarantine))
-                except OSError:
-                    pass
-                raise
-        else:
-            os.unlink(str(path))
-    except FileNotFoundError:
-        return
+                os.rmdir(str(quarantine))
+            except OSError:
+                pass
+        disabled = _disable_artifact_upload_path(artifacts)
+        raise InfrastructureFailure(
+            "could not quarantine artifact upload root%s: %s"
+            % ("; upload traversal disabled" if disabled else "", error)
+        ) from error
+
+
+def _create_minimal_evidence_file(path: pathlib.Path, contents: bytes) -> None:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = -1
+    try:
+        descriptor = os.open(str(path), flags, 0o600)
+        with os.fdopen(descriptor, "wb") as output:
+            descriptor = -1
+            output.write(contents)
+            output.flush()
+            os.fsync(output.fileno())
     except OSError as error:
         raise InfrastructureFailure(
-            "could not invalidate artifact evidence: %s" % error
+            "could not create minimal artifact evidence %s: %s" % (path.name, error)
         ) from error
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def recover_minimal_artifact_upload(
+    artifacts: pathlib.Path,
+    report: GateReport,
+    failure: BaseException,
+) -> pathlib.Path:
+    quarantine = quarantine_artifact_upload_root(artifacts)
+    try:
+        os.mkdir(str(artifacts), 0o700)
+    except OSError as error:
+        try:
+            os.replace(
+                str(artifacts), str(quarantine / "failed-recreated-upload-root")
+            )
+        except OSError:
+            _disable_artifact_upload_path(artifacts)
+        raise InfrastructureFailure(
+            "artifact root was quarantined but could not be recreated: %s" % error
+        ) from error
+
+    selected_detail = report.failure_detail or str(failure)
+    diagnostic = "artifact upload root quarantined as sibling %s" % quarantine.name
+    suffix = "; %s" % diagnostic
+    marker = " ... [truncated]"
+    if len(selected_detail) + len(suffix) > 8192:
+        selected_detail = selected_detail[: 8192 - len(suffix) - len(marker)] + marker
+    combined_detail = selected_detail + suffix
+    report.failure_class = failure_class_for(failure)
+    report.failure_detail = combined_detail
+    summary = (
+        "# TileXR PR Gate\n\n"
+        "Terminal artifact recovery\n\n"
+        "- PR: #%d\n"
+        "- Failure class: %s\n"
+        "- Failure detail: %s\n"
+        % (report.pr_number, report.failure_class, report.failure_detail)
+    ).encode("utf-8")
+    rejection = (
+        "artifact-root\tquarantined-after-terminal-finalization-failure\n"
+    ).encode("utf-8")
+    contents = {
+        "artifact-rejections.txt": rejection,
+        "cases.tsv": b"",
+        "summary.md": summary,
+    }
+    try:
+        for name in sorted(contents):
+            _create_minimal_evidence_file(artifacts / name, contents[name])
+        manifest = "".join(
+            "%s\t%d\n" % (name, len(contents[name])) for name in sorted(contents)
+        ).encode("utf-8")
+        _create_minimal_evidence_file(artifacts / "manifest.txt", manifest)
+    except BaseException as error:
+        try:
+            os.replace(
+                str(artifacts), str(quarantine / "failed-minimal-evidence-root")
+            )
+        except OSError:
+            pass
+        raise InfrastructureFailure(
+            "could not create bounded minimal artifact evidence: %s"
+            % _as_gate_failure(error)
+        ) from error
+    return quarantine
 
 
 def refresh_final_manifest(
@@ -1827,41 +1932,29 @@ def _run_controller_body(
         report.failure_detail = str(failure)
         return changed
 
-    def invalidate_final_evidence(
-        *, include_summary: bool, unsafe_paths=()
-    ) -> bool:
+    def recover_terminal_evidence() -> bool:
         nonlocal failure
-        paths = [config.artifacts / "manifest.txt"]
-        if include_summary:
-            paths.insert(0, config.artifacts / "summary.md")
-        for unsafe_path in unsafe_paths:
-            try:
-                unsafe_path.relative_to(config.artifacts)
-            except ValueError:
-                continue
-            if unsafe_path != config.artifacts and unsafe_path not in paths:
-                paths.insert(0, unsafe_path)
-        errors = []
-        for path in paths:
-            try:
-                invalidate_artifact_evidence(path, config.artifacts)
-            except GateFailure as error:
-                errors.append(str(error))
-        if not errors:
+        if failure is None:
+            failure = _collector_failure("terminal artifact finalization failed")
+            report.failure_class = failure_class_for(failure)
+            report.failure_detail = str(failure)
+        try:
+            recover_minimal_artifact_upload(config.artifacts, report, failure)
             return True
-        prior = failure
-        detail = "artifact evidence invalidation failed: %s" % "; ".join(errors)
-        if prior is not None:
-            detail = "primary failure (%s): %s; %s" % (
-                failure_class_for(prior),
-                prior,
-                detail,
+        except BaseException as error:
+            prior = failure
+            failure = _collector_failure(
+                "primary failure (%s): %s; minimal artifact recovery failed: %s"
+                % (
+                    failure_class_for(prior),
+                    prior,
+                    _as_gate_failure(error),
+                )
             )
-        failure = _collector_failure(detail)
-        report.failure_class = failure_class_for(failure)
-        report.failure_detail = str(failure)
-        print("ERROR: %s" % failure, file=sys.stderr)
-        return False
+            report.failure_class = failure_class_for(failure)
+            report.failure_detail = str(failure)
+            print("ERROR: %s" % failure, file=sys.stderr)
+            return False
 
     def write_final_summary() -> bool:
         for attempt in range(2):
@@ -1876,7 +1969,7 @@ def _run_controller_body(
                     )
                 )
                 if attempt == 1:
-                    invalidate_final_evidence(include_summary=True)
+                    recover_terminal_evidence()
                     return False
         return False
 
@@ -1896,7 +1989,6 @@ def _run_controller_body(
         return 0 if failure is None else exit_code_for(failure)
 
     refresh_attempt = 0
-    unsafe_paths = []
     while refresh_attempt < 2:
         if cancellation.cancelled and not cancellation_accounted:
             account_new_cancellation(
@@ -1916,9 +2008,6 @@ def _run_controller_body(
                 cancellation_accounted=cancellation_accounted,
             )
         except BaseException as error:
-            unsafe_path = getattr(error, "unsafe_artifact_path", None)
-            if unsafe_path is not None and unsafe_path not in unsafe_paths:
-                unsafe_paths.append(unsafe_path)
             if isinstance(error, Cancelled) or (
                 cancellation.cancelled and not cancellation_accounted
             ):
@@ -1935,11 +2024,9 @@ def _run_controller_body(
                     )
                 )
             if refresh_attempt == 2:
-                if failure_changed:
-                    write_final_summary()
-                invalidate_final_evidence(
-                    include_summary=False, unsafe_paths=unsafe_paths
-                )
+                if failure_changed and not write_final_summary():
+                    break
+                recover_terminal_evidence()
                 break
             if not write_final_summary():
                 return exit_code_for(failure)
@@ -1955,7 +2042,7 @@ def _run_controller_body(
             if not write_final_summary():
                 return exit_code_for(failure)
             if refresh_attempt == 2:
-                invalidate_final_evidence(include_summary=False)
+                recover_terminal_evidence()
                 break
             continue
         break
