@@ -11,8 +11,10 @@ import math
 import os
 import pathlib
 import signal
+import stat
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
@@ -1194,6 +1196,134 @@ def write_summary(report: GateReport, artifacts: pathlib.Path, step_summary: Opt
         raise InfrastructureFailure("could not write gate summary: %s" % error) from error
 
 
+def _path_has_control_characters(path: str) -> bool:
+    return any(ord(character) < 32 or ord(character) == 127 for character in path)
+
+
+def reset_collector_manifest_boundary(artifacts: pathlib.Path) -> None:
+    manifest = artifacts / "manifest.txt"
+    try:
+        manifest_status = os.lstat(str(manifest))
+    except FileNotFoundError:
+        return
+    except OSError as error:
+        raise InfrastructureFailure(
+            "could not inspect stale collector manifest: %s" % error
+        ) from error
+    if stat.S_ISDIR(manifest_status.st_mode):
+        raise InfrastructureFailure(
+            "stale collector manifest path is a directory: %s" % manifest
+        )
+    try:
+        os.unlink(str(manifest))
+    except OSError as error:
+        raise InfrastructureFailure(
+            "could not remove stale collector manifest: %s" % error
+        ) from error
+
+
+def refresh_final_manifest(artifacts: pathlib.Path) -> None:
+    manifest = artifacts / "manifest.txt"
+    try:
+        root_status = os.lstat(str(artifacts))
+        if not stat.S_ISDIR(root_status.st_mode):
+            raise InfrastructureFailure(
+                "artifact root is not a real directory: %s" % artifacts
+            )
+        manifest_status = os.lstat(str(manifest))
+        if not stat.S_ISREG(manifest_status.st_mode):
+            raise InfrastructureFailure(
+                "collector manifest boundary is not a regular file: %s" % manifest
+            )
+    except FileNotFoundError as error:
+        raise InfrastructureFailure(
+            "collector did not produce manifest.txt"
+        ) from error
+    except OSError as error:
+        raise InfrastructureFailure(
+            "could not validate collector manifest boundary: %s" % error
+        ) from error
+
+    boundary_identity = (manifest_status.st_dev, manifest_status.st_ino)
+    rows = []
+
+    def fail_walk(error):
+        raise error
+
+    try:
+        for current, directory_names, file_names in os.walk(
+            str(artifacts), topdown=True, onerror=fail_walk, followlinks=False
+        ):
+            directory_names.sort()
+            file_names.sort()
+            current_path = pathlib.Path(current)
+            for name in directory_names:
+                path = current_path / name
+                relative = path.relative_to(artifacts).as_posix()
+                if _path_has_control_characters(relative):
+                    raise InfrastructureFailure(
+                        "artifact path contains control characters: %r" % relative
+                    )
+                if not stat.S_ISDIR(os.lstat(str(path)).st_mode):
+                    raise InfrastructureFailure(
+                        "artifact tree contains a non-directory entry: %s" % relative
+                    )
+            for name in file_names:
+                path = current_path / name
+                relative = path.relative_to(artifacts).as_posix()
+                if _path_has_control_characters(relative):
+                    raise InfrastructureFailure(
+                        "artifact path contains control characters: %r" % relative
+                    )
+                path_status = os.lstat(str(path))
+                if relative == "manifest.txt":
+                    if not stat.S_ISREG(path_status.st_mode) or (
+                        path_status.st_dev,
+                        path_status.st_ino,
+                    ) != boundary_identity:
+                        raise InfrastructureFailure(
+                            "collector manifest boundary changed during finalization"
+                        )
+                    continue
+                if not stat.S_ISREG(path_status.st_mode):
+                    raise InfrastructureFailure(
+                        "artifact tree contains a nonregular entry: %s" % relative
+                    )
+                rows.append((relative, path_status.st_size))
+    except OSError as error:
+        raise InfrastructureFailure(
+            "could not inspect final artifact tree: %s" % error
+        ) from error
+
+    rows.sort()
+    descriptor = -1
+    temporary = None
+    try:
+        descriptor, temporary = tempfile.mkstemp(
+            prefix=".manifest.txt.", dir=str(artifacts)
+        )
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as output:
+            descriptor = -1
+            for relative, size in rows:
+                output.write("%s\t%d\n" % (relative, size))
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary, str(manifest))
+        temporary = None
+    except OSError as error:
+        raise InfrastructureFailure(
+            "could not atomically refresh final artifact manifest: %s" % error
+        ) from error
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if temporary is not None:
+            try:
+                os.unlink(temporary)
+            except FileNotFoundError:
+                pass
+
+
 def initial_report(config: Config, environ: Mapping[str, str]) -> GateReport:
     return GateReport(
         pr_number=config.pr_number,
@@ -1522,6 +1652,19 @@ def _run_controller_body(
             report.failure_detail = str(failure)
 
     try:
+        reset_collector_manifest_boundary(config.artifacts)
+    except BaseException as error:
+        boundary_failure = _collector_failure(
+            "could not prepare collector manifest boundary: %s"
+            % _as_gate_failure(error)
+        )
+        selected = select_final_failure(failure, boundary_failure)
+        if selected is not failure:
+            failure = selected
+            report.failure_class = failure_class_for(failure)
+            report.failure_detail = str(failure)
+
+    try:
         invoke_collector(
             control_dir / "collect_artifacts.sh",
             config,
@@ -1535,10 +1678,6 @@ def _run_controller_body(
             failure = selected
             report.failure_class = failure_class_for(failure)
             report.failure_detail = str(failure)
-        try:
-            write_summary(report, config.artifacts)
-        except GateFailure:
-            pass
 
     if cancellation.cancelled and not isinstance(failure, Cancelled):
         failure = select_final_failure(
@@ -1546,10 +1685,6 @@ def _run_controller_body(
         )
         report.failure_class = failure_class_for(failure)
         report.failure_detail = str(failure)
-        try:
-            write_summary(report, config.artifacts)
-        except GateFailure:
-            pass
 
     if step_summary_path:
         try:
@@ -1560,10 +1695,6 @@ def _run_controller_body(
                 failure = _as_gate_failure(error)
                 report.failure_class = failure_class_for(failure)
                 report.failure_detail = str(failure)
-                try:
-                    write_summary(report, config.artifacts)
-                except GateFailure:
-                    pass
 
     if cancellation.cancelled and not isinstance(failure, Cancelled):
         selected = select_final_failure(
@@ -1573,10 +1704,37 @@ def _run_controller_body(
             failure = selected
             report.failure_class = failure_class_for(failure)
             report.failure_detail = str(failure)
-            try:
-                write_summary(report, config.artifacts)
-            except GateFailure:
-                pass
+
+    # Nothing may mutate summary.md after the final manifest succeeds. Write the
+    # selected outcome once more after collector, cancellation, and step-summary
+    # handling, then atomically refresh the collector-created manifest boundary.
+    try:
+        write_summary(report, config.artifacts)
+    except BaseException as error:
+        if failure is None:
+            failure = _as_gate_failure(error)
+            report.failure_class = failure_class_for(failure)
+            report.failure_detail = str(failure)
+
+    try:
+        refresh_final_manifest(config.artifacts)
+    except BaseException as error:
+        manifest_failure = _collector_failure(
+            "final artifact manifest refresh failed: %s" % _as_gate_failure(error)
+        )
+        selected = select_final_failure(failure, manifest_failure)
+        if selected is not failure:
+            failure = selected
+            report.failure_class = failure_class_for(failure)
+            report.failure_detail = str(failure)
+        try:
+            write_summary(report, config.artifacts)
+        except GateFailure:
+            pass
+        try:
+            refresh_final_manifest(config.artifacts)
+        except BaseException:
+            pass
 
     return 0 if failure is None else exit_code_for(failure)
 
