@@ -11,6 +11,7 @@ import json
 import math
 import os
 import pathlib
+import secrets
 import signal
 import stat
 import subprocess
@@ -113,6 +114,9 @@ class StepSummaryBoundary:
     device: int
     inode: int
     state: "StepSummaryState" = dataclasses.field(compare=False, repr=False)
+    path_boundary: "StepSummaryPathBoundary" = dataclasses.field(
+        compare=False, repr=False
+    )
 
 
 @dataclasses.dataclass
@@ -121,6 +125,32 @@ class StepSummaryState:
     prefix_digest: bytes
     expected_digest: Optional[bytes]
     prefix_valid: bool = True
+
+
+@dataclasses.dataclass
+class StepSummaryPathBoundary:
+    entry_name: str
+    parent_name: str
+    parent_descriptor: int
+    parent_device: int
+    parent_inode: int
+    ancestor_descriptor: int
+    ancestor_device: int
+    ancestor_inode: int
+    closed: bool = False
+
+    def close(self) -> None:
+        if self.closed:
+            return
+        self.closed = True
+        for descriptor in (self.parent_descriptor, self.ancestor_descriptor):
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+
+    def __del__(self):
+        self.close()
 
 
 class CancellationState:
@@ -1252,14 +1282,142 @@ def _unsafe_step_summary_path_failure(message: str) -> InfrastructureFailure:
     return error
 
 
+def _step_summary_directory_flags() -> int:
+    flags = os.O_RDONLY
+    for flag_name in ("O_DIRECTORY", "O_NOFOLLOW", "O_CLOEXEC"):
+        flag = getattr(os, flag_name, None)
+        if flag is None:
+            raise _unsafe_step_summary_path_failure(
+                "platform lacks safe step-summary directory flag %s" % flag_name
+            )
+        flags |= flag
+    return flags
+
+
+def _prepare_step_summary_path(path: pathlib.Path) -> StepSummaryPathBoundary:
+    entry_name = path.name
+    parent_path = path.parent
+    parent_name = parent_path.name
+    if not entry_name or not parent_name:
+        raise _unsafe_step_summary_path_failure(
+            "GitHub step summary requires a named parent and final entry"
+        )
+
+    ancestor_descriptor = -1
+    parent_descriptor = -1
+    try:
+        flags = _step_summary_directory_flags()
+        ancestor_descriptor = os.open(str(parent_path.parent), flags)
+        ancestor_status = os.fstat(ancestor_descriptor)
+        if not stat.S_ISDIR(ancestor_status.st_mode):
+            raise _unsafe_step_summary_path_failure(
+                "GitHub step summary ancestor is not a directory"
+            )
+        parent_status = os.stat(
+            parent_name,
+            dir_fd=ancestor_descriptor,
+            follow_symlinks=False,
+        )
+        if not stat.S_ISDIR(parent_status.st_mode):
+            raise _unsafe_step_summary_path_failure(
+                "GitHub step summary parent is not a directory"
+            )
+        parent_descriptor = os.open(
+            parent_name, flags, dir_fd=ancestor_descriptor
+        )
+        opened_parent = os.fstat(parent_descriptor)
+        if (opened_parent.st_dev, opened_parent.st_ino) != (
+            parent_status.st_dev,
+            parent_status.st_ino,
+        ):
+            raise _unsafe_step_summary_path_failure(
+                "GitHub step summary parent changed during preparation"
+            )
+        return StepSummaryPathBoundary(
+            entry_name=entry_name,
+            parent_name=parent_name,
+            parent_descriptor=parent_descriptor,
+            parent_device=opened_parent.st_dev,
+            parent_inode=opened_parent.st_ino,
+            ancestor_descriptor=ancestor_descriptor,
+            ancestor_device=ancestor_status.st_dev,
+            ancestor_inode=ancestor_status.st_ino,
+        )
+    except OSError as error:
+        if parent_descriptor >= 0:
+            os.close(parent_descriptor)
+        if ancestor_descriptor >= 0:
+            os.close(ancestor_descriptor)
+        raise _unsafe_step_summary_path_failure(
+            "could not pin GitHub step summary parent: %s" % error
+        ) from error
+    except BaseException:
+        if parent_descriptor >= 0:
+            os.close(parent_descriptor)
+        if ancestor_descriptor >= 0:
+            os.close(ancestor_descriptor)
+        raise
+
+
+def _verify_step_summary_parent(path_boundary: StepSummaryPathBoundary) -> None:
+    try:
+        opened_ancestor = os.fstat(path_boundary.ancestor_descriptor)
+        opened_parent = os.fstat(path_boundary.parent_descriptor)
+        current_parent = os.stat(
+            path_boundary.parent_name,
+            dir_fd=path_boundary.ancestor_descriptor,
+            follow_symlinks=False,
+        )
+    except OSError as error:
+        raise _unsafe_step_summary_path_failure(
+            "could not verify GitHub step summary parent: %s" % error
+        ) from error
+    if not stat.S_ISDIR(opened_ancestor.st_mode) or (
+        opened_ancestor.st_dev,
+        opened_ancestor.st_ino,
+    ) != (path_boundary.ancestor_device, path_boundary.ancestor_inode):
+        raise _unsafe_step_summary_path_failure(
+            "GitHub step summary ancestor changed while pinned"
+        )
+    if not stat.S_ISDIR(opened_parent.st_mode) or (
+        opened_parent.st_dev,
+        opened_parent.st_ino,
+    ) != (path_boundary.parent_device, path_boundary.parent_inode):
+        raise _unsafe_step_summary_path_failure(
+            "GitHub step summary pinned parent changed"
+        )
+    if not stat.S_ISDIR(current_parent.st_mode) or (
+        current_parent.st_dev,
+        current_parent.st_ino,
+    ) != (path_boundary.parent_device, path_boundary.parent_inode):
+        error = _unsafe_step_summary_path_failure(
+            "GitHub step summary parent pathname changed"
+        )
+        error.step_summary_parent_changed = True
+        raise error
+
+
 def _verify_step_summary_identity(
     path: pathlib.Path,
     descriptor: int,
     boundary: Optional[StepSummaryBoundary] = None,
+    path_boundary: Optional[StepSummaryPathBoundary] = None,
 ):
+    path_boundary = (
+        boundary.path_boundary if boundary is not None else path_boundary
+    )
+    if path_boundary is None:
+        raise _unsafe_step_summary_path_failure(
+            "GitHub step summary path boundary is unavailable"
+        )
+    _verify_step_summary_parent(path_boundary)
     try:
         opened_status = os.fstat(descriptor)
-        path_status = os.lstat(str(path))
+        path_status = os.stat(
+            path_boundary.entry_name,
+            dir_fd=path_boundary.parent_descriptor,
+            follow_symlinks=False,
+        )
     except OSError as error:
         raise _unsafe_step_summary_path_failure(
             "could not verify GitHub step summary identity: %s" % error
@@ -1293,7 +1451,15 @@ def _open_regular_step_summary(
     *,
     create_exclusive: bool = False,
     boundary: Optional[StepSummaryBoundary] = None,
+    path_boundary: Optional[StepSummaryPathBoundary] = None,
 ) -> int:
+    path_boundary = (
+        boundary.path_boundary if boundary is not None else path_boundary
+    )
+    if path_boundary is None:
+        raise _unsafe_step_summary_path_failure(
+            "GitHub step summary path boundary is unavailable"
+        )
     for flag_name in ("O_NOFOLLOW", "O_NONBLOCK", "O_CLOEXEC"):
         flag = getattr(os, flag_name, None)
         if flag is None:
@@ -1305,14 +1471,25 @@ def _open_regular_step_summary(
         # Shell redirection to GITHUB_STEP_SUMMARY has create-if-absent semantics.
         flags |= os.O_CREAT | os.O_EXCL
 
+    _verify_step_summary_parent(path_boundary)
     try:
-        descriptor = os.open(str(path), flags, 0o600)
+        descriptor = os.open(
+            path_boundary.entry_name,
+            flags,
+            0o600,
+            dir_fd=path_boundary.parent_descriptor,
+        )
     except OSError as error:
         raise _unsafe_step_summary_path_failure(
             "could not safely open GitHub step summary: %s" % error
         ) from error
     try:
-        _verify_step_summary_identity(path, descriptor, boundary)
+        _verify_step_summary_identity(
+            path,
+            descriptor,
+            boundary,
+            path_boundary,
+        )
     except BaseException:
         try:
             os.close(descriptor)
@@ -1555,55 +1732,71 @@ def append_authoritative_step_summary(
 
 
 def step_summary_size(path: pathlib.Path) -> StepSummaryBoundary:
+    path_boundary = _prepare_step_summary_path(path)
     try:
-        path_status = os.lstat(str(path))
-    except FileNotFoundError:
-        descriptor = _open_regular_step_summary(
-            path,
-            os.O_WRONLY | os.O_APPEND,
-            create_exclusive=True,
-        )
+        _verify_step_summary_parent(path_boundary)
         try:
-            os.fsync(descriptor)
-            path_status = _verify_step_summary_identity(path, descriptor)
+            path_status = os.stat(
+                path_boundary.entry_name,
+                dir_fd=path_boundary.parent_descriptor,
+                follow_symlinks=False,
+            )
+        except FileNotFoundError:
+            descriptor = _open_regular_step_summary(
+                path,
+                os.O_WRONLY | os.O_APPEND,
+                create_exclusive=True,
+                path_boundary=path_boundary,
+            )
+            try:
+                os.fsync(descriptor)
+                path_status = _verify_step_summary_identity(
+                    path,
+                    descriptor,
+                    path_boundary=path_boundary,
+                )
+            except OSError as error:
+                raise InfrastructureFailure(
+                    "could not initialize GitHub step summary: %s" % error
+                ) from error
+            finally:
+                os.close(descriptor)
         except OSError as error:
-            raise InfrastructureFailure(
-                "could not initialize GitHub step summary: %s" % error
+            raise _unsafe_step_summary_path_failure(
+                "could not inspect GitHub step summary: %s" % error
             ) from error
-        finally:
-            os.close(descriptor)
-    except OSError as error:
-        raise InfrastructureFailure(
-            "could not inspect GitHub step summary: %s" % error
-        ) from error
-    if not stat.S_ISREG(path_status.st_mode):
-        raise InfrastructureFailure(
-            "GitHub step summary path is not a regular file: %s" % path
+        if not stat.S_ISREG(path_status.st_mode):
+            raise _unsafe_step_summary_path_failure(
+                "GitHub step summary path is not a regular file: %s" % path
+            )
+        if path_status.st_size > MAX_STEP_SUMMARY_FILE_BYTES:
+            raise InfrastructureFailure(
+                "GitHub step summary exceeds the %d-byte transaction bound"
+                % MAX_STEP_SUMMARY_FILE_BYTES
+            )
+        boundary = StepSummaryBoundary(
+            prefix_size=path_status.st_size,
+            device=path_status.st_dev,
+            inode=path_status.st_ino,
+            state=StepSummaryState(
+                expected_size=path_status.st_size,
+                prefix_digest=b"",
+                expected_digest=None,
+            ),
+            path_boundary=path_boundary,
         )
-    if path_status.st_size > MAX_STEP_SUMMARY_FILE_BYTES:
-        raise InfrastructureFailure(
-            "GitHub step summary exceeds the %d-byte transaction bound"
-            % MAX_STEP_SUMMARY_FILE_BYTES
-        )
-    boundary = StepSummaryBoundary(
-        prefix_size=path_status.st_size,
-        device=path_status.st_dev,
-        inode=path_status.st_ino,
-        state=StepSummaryState(
-            expected_size=path_status.st_size,
-            prefix_digest=b"",
-            expected_digest=None,
-        ),
-    )
-    digest = _read_step_summary_hasher(
-        path,
-        boundary,
-        path_status.st_size,
-        exact_size=True,
-    ).digest()
-    boundary.state.prefix_digest = digest
-    boundary.state.expected_digest = digest
-    return boundary
+        digest = _read_step_summary_hasher(
+            path,
+            boundary,
+            path_status.st_size,
+            exact_size=True,
+        ).digest()
+        boundary.state.prefix_digest = digest
+        boundary.state.expected_digest = digest
+        return boundary
+    except BaseException as error:
+        error.step_summary_path_boundary = path_boundary
+        raise
 
 
 def rollback_step_summary(path: pathlib.Path, boundary: StepSummaryBoundary) -> None:
@@ -1651,67 +1844,213 @@ def rollback_step_summary(path: pathlib.Path, boundary: StepSummaryBoundary) -> 
         os.close(descriptor)
 
 
-def _step_summary_path_is_disabled(
-    path: pathlib.Path, boundary: Optional[StepSummaryBoundary]
+def _step_summary_parent_matches(
+    path_boundary: StepSummaryPathBoundary, parent_status
+) -> bool:
+    return stat.S_ISDIR(parent_status.st_mode) and (
+        parent_status.st_dev,
+        parent_status.st_ino,
+    ) == (path_boundary.parent_device, path_boundary.parent_inode)
+
+
+def _current_step_summary_parent_matches(
+    path_boundary: StepSummaryPathBoundary,
 ) -> bool:
     try:
-        path_status = os.lstat(str(path))
+        parent_status = os.stat(
+            path_boundary.parent_name,
+            dir_fd=path_boundary.ancestor_descriptor,
+            follow_symlinks=False,
+        )
     except FileNotFoundError:
-        return True
-    except OSError as error:
-        raise InfrastructureFailure(
-            "could not inspect invalidated GitHub step summary: %s" % error
-        ) from error
-    if boundary is None or not stat.S_ISREG(path_status.st_mode) or (
-        path_status.st_dev,
-        path_status.st_ino,
-    ) != (boundary.device, boundary.inode):
         return False
-    return path_status.st_size == 0 or stat.S_IMODE(path_status.st_mode) == 0
+    return _step_summary_parent_matches(path_boundary, parent_status)
+
+
+def _create_step_summary_quarantine(
+    container_descriptor: int, prefix: str
+) -> Tuple[str, int]:
+    errors = []
+    for _ in range(2):
+        name = prefix + secrets.token_hex(8)
+        try:
+            os.mkdir(name, 0o700, dir_fd=container_descriptor)
+            descriptor = os.open(
+                name,
+                _step_summary_directory_flags(),
+                dir_fd=container_descriptor,
+            )
+            return name, descriptor
+        except FileExistsError as error:
+            errors.append(error)
+            continue
+        except OSError as error:
+            errors.append(error)
+            try:
+                os.rmdir(name, dir_fd=container_descriptor)
+            except OSError:
+                pass
+            continue
+    raise InfrastructureFailure(
+        "could not create trusted step-summary quarantine: %s"
+        % "; ".join(str(error) for error in errors)
+    )
+
+
+def _quarantine_step_summary_entry(
+    container_descriptor: int, entry_name: str, prefix: str
+) -> None:
+    quarantine_name, quarantine_descriptor = _create_step_summary_quarantine(
+        container_descriptor, prefix
+    )
+    try:
+        os.replace(
+            entry_name,
+            "entry",
+            src_dir_fd=container_descriptor,
+            dst_dir_fd=quarantine_descriptor,
+        )
+    except BaseException:
+        try:
+            os.rmdir(quarantine_name, dir_fd=container_descriptor)
+        except OSError:
+            pass
+        raise
+    finally:
+        os.close(quarantine_descriptor)
 
 
 def _neutralize_step_summary_path(
-    path: pathlib.Path, boundary: Optional[StepSummaryBoundary]
+    path: pathlib.Path,
+    boundary: Optional[StepSummaryBoundary],
+    path_boundary: Optional[StepSummaryPathBoundary] = None,
 ) -> None:
+    path_boundary = (
+        boundary.path_boundary if boundary is not None else path_boundary
+    )
+    if path_boundary is None:
+        raise InfrastructureFailure(
+            "cannot neutralize GitHub step summary without a pinned parent"
+        )
+
     errors = []
     for _ in range(2):
-        if _step_summary_path_is_disabled(path, boundary):
-            return
         try:
-            path_status = os.lstat(str(path))
-        except FileNotFoundError:
-            return
-        except OSError as error:
-            errors.append(error)
-            continue
+            opened_ancestor = os.fstat(path_boundary.ancestor_descriptor)
+            if not stat.S_ISDIR(opened_ancestor.st_mode) or (
+                opened_ancestor.st_dev,
+                opened_ancestor.st_ino,
+            ) != (path_boundary.ancestor_device, path_boundary.ancestor_inode):
+                raise InfrastructureFailure(
+                    "pinned step-summary ancestor changed"
+                )
+            try:
+                parent_status = os.stat(
+                    path_boundary.parent_name,
+                    dir_fd=path_boundary.ancestor_descriptor,
+                    follow_symlinks=False,
+                )
+            except FileNotFoundError:
+                return
 
-        try:
-            if stat.S_ISDIR(path_status.st_mode):
-                quarantine_root = pathlib.Path(
-                    tempfile.mkdtemp(
-                        prefix=".tilexr-step-summary-quarantine-",
-                        dir=str(path.parent),
+            if not _step_summary_parent_matches(path_boundary, parent_status):
+                if stat.S_ISDIR(parent_status.st_mode):
+                    _quarantine_step_summary_entry(
+                        path_boundary.ancestor_descriptor,
+                        path_boundary.parent_name,
+                        ".tilexr-step-summary-parent-quarantine-",
+                    )
+                else:
+                    os.unlink(
+                        path_boundary.parent_name,
+                        dir_fd=path_boundary.ancestor_descriptor,
+                    )
+                try:
+                    os.stat(
+                        path_boundary.parent_name,
+                        dir_fd=path_boundary.ancestor_descriptor,
+                        follow_symlinks=False,
+                    )
+                except FileNotFoundError:
+                    return
+                errors.append(
+                    InfrastructureFailure("step-summary parent entry reappeared")
+                )
+                continue
+
+            opened_parent = os.fstat(path_boundary.parent_descriptor)
+            if not stat.S_ISDIR(opened_parent.st_mode) or (
+                opened_parent.st_dev,
+                opened_parent.st_ino,
+            ) != (path_boundary.parent_device, path_boundary.parent_inode):
+                raise InfrastructureFailure("pinned step-summary parent changed")
+            try:
+                entry_status = os.stat(
+                    path_boundary.entry_name,
+                    dir_fd=path_boundary.parent_descriptor,
+                    follow_symlinks=False,
+                )
+            except FileNotFoundError:
+                if _current_step_summary_parent_matches(path_boundary):
+                    return
+                errors.append(
+                    InfrastructureFailure(
+                        "step-summary parent changed while final entry was absent"
                     )
                 )
-                try:
-                    os.replace(str(path), str(quarantine_root / "entry"))
-                except BaseException:
-                    try:
-                        os.rmdir(str(quarantine_root))
-                    except OSError:
-                        pass
-                    raise
+                continue
+            if (
+                boundary is not None
+                and stat.S_ISREG(entry_status.st_mode)
+                and (entry_status.st_dev, entry_status.st_ino)
+                == (boundary.device, boundary.inode)
+                and (
+                    entry_status.st_size == 0
+                    or stat.S_IMODE(entry_status.st_mode) == 0
+                )
+            ):
+                if _current_step_summary_parent_matches(path_boundary):
+                    return
+                errors.append(
+                    InfrastructureFailure(
+                        "step-summary parent changed before disable verification"
+                    )
+                )
+                continue
+            if stat.S_ISDIR(entry_status.st_mode):
+                _quarantine_step_summary_entry(
+                    path_boundary.parent_descriptor,
+                    path_boundary.entry_name,
+                    ".tilexr-step-summary-quarantine-",
+                )
             else:
-                os.unlink(str(path))
+                os.unlink(
+                    path_boundary.entry_name,
+                    dir_fd=path_boundary.parent_descriptor,
+                )
+            try:
+                os.stat(
+                    path_boundary.entry_name,
+                    dir_fd=path_boundary.parent_descriptor,
+                    follow_symlinks=False,
+                )
+            except FileNotFoundError:
+                if _current_step_summary_parent_matches(path_boundary):
+                    return
+                errors.append(
+                    InfrastructureFailure(
+                        "step-summary parent changed during final neutralization"
+                    )
+                )
+                continue
+            errors.append(
+                InfrastructureFailure("step-summary final entry reappeared")
+            )
         except FileNotFoundError:
-            continue
+            return
         except OSError as error:
             errors.append(error)
             continue
-
-        if _step_summary_path_is_disabled(path, boundary):
-            return
-        errors.append(InfrastructureFailure("step summary pathname reappeared"))
 
     detail = "; ".join(str(error) for error in errors) or "path remained active"
     raise InfrastructureFailure(
@@ -2636,12 +2975,16 @@ def _run_controller_body(
         step_summary_path_terminal = False
 
         def neutralize_controller_step_summary(
-            boundary: Optional[StepSummaryBoundary], context: str
+            boundary: Optional[StepSummaryBoundary],
+            context: str,
+            path_boundary: Optional[StepSummaryPathBoundary] = None,
         ) -> None:
             nonlocal step_summary_path_terminal
             step_summary_path_terminal = True
             try:
-                _neutralize_step_summary_path(step_path, boundary)
+                _neutralize_step_summary_path(
+                    step_path, boundary, path_boundary
+                )
             except BaseException as error:
                 changed = update_report(
                     _collector_failure(
@@ -2659,6 +3002,9 @@ def _run_controller_body(
         try:
             step_summary_boundary = step_summary_size(step_path)
         except BaseException as error:
+            failed_path_boundary = getattr(
+                error, "step_summary_path_boundary", None
+            )
             changed = update_report(
                 _collector_failure(
                     "authoritative GitHub step summary preparation failed: %s"
@@ -2670,7 +3016,10 @@ def _run_controller_body(
             neutralize_controller_step_summary(
                 None,
                 "authoritative GitHub step summary preparation neutralization failed",
+                failed_path_boundary,
             )
+            if failed_path_boundary is not None:
+                failed_path_boundary.close()
             step_summary_boundary = None
 
         if step_summary_boundary is None:
