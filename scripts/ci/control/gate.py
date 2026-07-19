@@ -1246,6 +1246,12 @@ def _authoritative_step_summary_text(
     )
 
 
+def _unsafe_step_summary_path_failure(message: str) -> InfrastructureFailure:
+    error = InfrastructureFailure(message)
+    error.unsafe_step_summary_path = True
+    return error
+
+
 def _verify_step_summary_identity(
     path: pathlib.Path,
     descriptor: int,
@@ -1255,23 +1261,27 @@ def _verify_step_summary_identity(
         opened_status = os.fstat(descriptor)
         path_status = os.lstat(str(path))
     except OSError as error:
-        raise InfrastructureFailure(
+        raise _unsafe_step_summary_path_failure(
             "could not verify GitHub step summary identity: %s" % error
         ) from error
     if not stat.S_ISREG(opened_status.st_mode) or not stat.S_ISREG(
         path_status.st_mode
     ):
-        raise InfrastructureFailure("GitHub step summary is not a regular file")
+        raise _unsafe_step_summary_path_failure(
+            "GitHub step summary is not a regular file"
+        )
     if (path_status.st_dev, path_status.st_ino) != (
         opened_status.st_dev,
         opened_status.st_ino,
     ):
-        raise InfrastructureFailure("GitHub step summary changed while open")
+        raise _unsafe_step_summary_path_failure(
+            "GitHub step summary changed while open"
+        )
     if boundary is not None and (opened_status.st_dev, opened_status.st_ino) != (
         boundary.device,
         boundary.inode,
     ):
-        raise InfrastructureFailure(
+        raise _unsafe_step_summary_path_failure(
             "GitHub step summary changed since transaction preparation"
         )
     return opened_status
@@ -1287,7 +1297,7 @@ def _open_regular_step_summary(
     for flag_name in ("O_NOFOLLOW", "O_NONBLOCK", "O_CLOEXEC"):
         flag = getattr(os, flag_name, None)
         if flag is None:
-            raise InfrastructureFailure(
+            raise _unsafe_step_summary_path_failure(
                 "platform lacks safe GitHub step summary flag %s" % flag_name
             )
         flags |= flag
@@ -1298,7 +1308,7 @@ def _open_regular_step_summary(
     try:
         descriptor = os.open(str(path), flags, 0o600)
     except OSError as error:
-        raise InfrastructureFailure(
+        raise _unsafe_step_summary_path_failure(
             "could not safely open GitHub step summary: %s" % error
         ) from error
     try:
@@ -1642,7 +1652,7 @@ def rollback_step_summary(path: pathlib.Path, boundary: StepSummaryBoundary) -> 
 
 
 def _step_summary_path_is_disabled(
-    path: pathlib.Path, boundary: StepSummaryBoundary
+    path: pathlib.Path, boundary: Optional[StepSummaryBoundary]
 ) -> bool:
     try:
         path_status = os.lstat(str(path))
@@ -1652,7 +1662,7 @@ def _step_summary_path_is_disabled(
         raise InfrastructureFailure(
             "could not inspect invalidated GitHub step summary: %s" % error
         ) from error
-    if not stat.S_ISREG(path_status.st_mode) or (
+    if boundary is None or not stat.S_ISREG(path_status.st_mode) or (
         path_status.st_dev,
         path_status.st_ino,
     ) != (boundary.device, boundary.inode):
@@ -1661,7 +1671,7 @@ def _step_summary_path_is_disabled(
 
 
 def _neutralize_step_summary_path(
-    path: pathlib.Path, boundary: StepSummaryBoundary
+    path: pathlib.Path, boundary: Optional[StepSummaryBoundary]
 ) -> None:
     errors = []
     for _ in range(2):
@@ -2623,6 +2633,29 @@ def _run_controller_body(
 
     if step_summary_path:
         step_path = pathlib.Path(step_summary_path)
+        step_summary_path_terminal = False
+
+        def neutralize_controller_step_summary(
+            boundary: Optional[StepSummaryBoundary], context: str
+        ) -> None:
+            nonlocal step_summary_path_terminal
+            step_summary_path_terminal = True
+            try:
+                _neutralize_step_summary_path(step_path, boundary)
+            except BaseException as error:
+                changed = update_report(
+                    _collector_failure(
+                        "%s: %s" % (context, _as_gate_failure(error))
+                    )
+                )
+                if changed:
+                    recover_terminal_evidence()
+                print(
+                    "ERROR: could not neutralize GitHub step summary pathname: %s"
+                    % _as_gate_failure(error),
+                    file=sys.stderr,
+                )
+
         try:
             step_summary_boundary = step_summary_size(step_path)
         except BaseException as error:
@@ -2634,14 +2667,20 @@ def _run_controller_body(
             )
             if changed:
                 recover_terminal_evidence()
+            neutralize_controller_step_summary(
+                None,
+                "authoritative GitHub step summary preparation neutralization failed",
+            )
             step_summary_boundary = None
 
         if step_summary_boundary is None:
             return 0 if failure is None else exit_code_for(failure)
 
         def invalidate_corrupted_controller_step_summary() -> bool:
+            nonlocal step_summary_path_terminal
             if step_summary_boundary.state.prefix_valid:
                 return False
+            step_summary_path_terminal = True
             try:
                 invalidate_step_summary(step_path, step_summary_boundary)
             except BaseException as error:
@@ -2673,6 +2712,11 @@ def _run_controller_body(
                 )
                 if changed:
                     recover_terminal_evidence()
+                if getattr(error, "unsafe_step_summary_path", False):
+                    neutralize_controller_step_summary(
+                        step_summary_boundary,
+                        "authoritative GitHub step summary rollback neutralization failed",
+                    )
                 print(
                     "ERROR: could not roll back authoritative GitHub step summary: %s"
                     % _as_gate_failure(error),
@@ -2685,11 +2729,11 @@ def _run_controller_body(
             # If that write fails too, remove any partial write so an earlier
             # success block cannot contradict the selected exit state.
             for terminal_attempt in range(2):
-                if (
-                    not roll_back_controller_step_summary()
-                    and invalidate_corrupted_controller_step_summary()
-                ):
-                    return
+                if not roll_back_controller_step_summary():
+                    if step_summary_path_terminal:
+                        return
+                    if invalidate_corrupted_controller_step_summary():
+                        return
                 if cancellation.cancelled and not cancellation_accounted:
                     changed = account_new_cancellation(
                         "gate was cancelled before terminal step summary emission"
@@ -2711,6 +2755,12 @@ def _run_controller_body(
                     )
                     if changed:
                         recover_terminal_evidence()
+                    if getattr(error, "unsafe_step_summary_path", False):
+                        neutralize_controller_step_summary(
+                            step_summary_boundary,
+                            "terminal GitHub step summary pathname neutralization failed",
+                        )
+                        return
                     if invalidate_corrupted_controller_step_summary():
                         return
                     roll_back_controller_step_summary()
@@ -2750,6 +2800,12 @@ def _run_controller_body(
                 )
                 if changed:
                     recover_terminal_evidence()
+                if getattr(error, "unsafe_step_summary_path", False):
+                    neutralize_controller_step_summary(
+                        step_summary_boundary,
+                        "authoritative GitHub step summary pathname neutralization failed",
+                    )
+                    break
                 if invalidate_corrupted_controller_step_summary():
                     break
                 if step_attempt == 1:

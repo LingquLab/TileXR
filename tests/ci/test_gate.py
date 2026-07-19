@@ -2299,6 +2299,43 @@ class FinalManifestTests(unittest.TestCase):
 
             self.assertEqual(23, result)
             self.assertEqual("sentinel\n", target.read_text(encoding="utf-8"))
+            self.assertFalse(os.path.lexists(str(step_summary)))
+            self.assert_minimal_recovered_upload(
+                config.artifacts, "not a regular file"
+            )
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "FIFO requires POSIX")
+    def test_initial_step_summary_fifo_is_removed_without_blocking(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            step_summary = root / "github-step-summary.fifo"
+            os.mkfifo(str(step_summary))
+            config = gate.Config(
+                root / "source", root / "artifacts", "merge", "LingquLab/TileXR", 42
+            )
+
+            def collect(script, collector_config, env, **kwargs):
+                write_test_manifest(collector_config.artifacts)
+
+            with mock.patch.object(
+                gate, "orchestrate", side_effect=self.passing_orchestration
+            ), mock.patch.object(gate, "verify_final_cleanup"), mock.patch.object(
+                gate, "invoke_collector", side_effect=collect
+            ), mock.patch.object(
+                gate.sys, "stderr", io.StringIO()
+            ):
+                result = gate._run_controller_body(
+                    config,
+                    {
+                        "TILEXR_CI_GITHUB_TOKEN": "token",
+                        "GITHUB_STEP_SUMMARY": str(step_summary),
+                    },
+                    root / "trusted",
+                    gate.CancellationState(),
+                )
+
+            self.assertEqual(23, result)
+            self.assertFalse(os.path.lexists(str(step_summary)))
             self.assert_minimal_recovered_upload(
                 config.artifacts, "not a regular file"
             )
@@ -2344,7 +2381,7 @@ class FinalManifestTests(unittest.TestCase):
                 )
 
             self.assertEqual(23, result)
-            self.assertTrue(step_summary.is_symlink())
+            self.assertFalse(os.path.lexists(str(step_summary)))
             self.assertEqual("sentinel\n", target.read_text(encoding="utf-8"))
             self.assert_minimal_recovered_upload(
                 config.artifacts, "step summary write failed"
@@ -2391,7 +2428,7 @@ class FinalManifestTests(unittest.TestCase):
                 )
 
             self.assertEqual(23, result)
-            self.assertTrue(os.path.samefile(str(step_summary), str(target)))
+            self.assertFalse(os.path.lexists(str(step_summary)))
             self.assertEqual("sentinel\n", target.read_text(encoding="utf-8"))
             self.assert_minimal_recovered_upload(
                 config.artifacts, "step summary write failed"
@@ -2443,7 +2480,7 @@ class FinalManifestTests(unittest.TestCase):
 
             self.assertEqual(23, result)
             self.assertEqual([True], races)
-            self.assertTrue(os.path.samefile(str(step_summary), str(target)))
+            self.assertFalse(os.path.lexists(str(step_summary)))
             self.assertEqual("sentinel\n", target.read_text(encoding="utf-8"))
             self.assert_minimal_recovered_upload(
                 config.artifacts, "step summary preparation failed"
