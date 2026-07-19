@@ -32,6 +32,9 @@ HARDWARE_TIMEOUT_SECONDS = 7200
 QUEUE_TIMEOUT_SECONDS = 21600
 QUEUE_POLL_SECONDS = 60
 QUEUE_STABLE_SAMPLES = 2
+FINAL_ARTIFACT_TIMEOUT_SECONDS = 30.0
+MAX_FINAL_ARTIFACT_ENTRIES = 10000
+MAX_FINAL_ARTIFACT_BYTES = 100 * 1024 * 1024
 LOCK_PATH = pathlib.Path("/home/tilexr-ci/locks/npu8.lock")
 CONTROL_DIR = pathlib.Path(__file__).resolve().parent
 
@@ -1200,6 +1203,12 @@ def _path_has_control_characters(path: str) -> bool:
     return any(ord(character) < 32 or ord(character) == 127 for character in path)
 
 
+def _unsafe_artifact_failure(message: str, path: pathlib.Path) -> InfrastructureFailure:
+    error = InfrastructureFailure(message)
+    error.unsafe_artifact_path = path
+    return error
+
+
 def reset_collector_manifest_boundary(artifacts: pathlib.Path) -> None:
     manifest = artifacts / "manifest.txt"
     try:
@@ -1222,18 +1231,94 @@ def reset_collector_manifest_boundary(artifacts: pathlib.Path) -> None:
         ) from error
 
 
-def refresh_final_manifest(artifacts: pathlib.Path) -> None:
+def invalidate_artifact_evidence(
+    path: pathlib.Path, artifacts: pathlib.Path
+) -> None:
+    try:
+        path.relative_to(artifacts)
+    except ValueError as error:
+        raise InfrastructureFailure(
+            "artifact evidence path is outside the upload root: %s" % path
+        ) from error
+    if path == artifacts:
+        raise InfrastructureFailure("refusing to invalidate the artifact root")
+    try:
+        path_status = os.lstat(str(path))
+    except FileNotFoundError:
+        return
+    except OSError as error:
+        raise InfrastructureFailure(
+            "could not inspect invalid artifact evidence: %s" % error
+        ) from error
+    try:
+        if stat.S_ISDIR(path_status.st_mode):
+            quarantine = pathlib.Path(
+                tempfile.mkdtemp(
+                    prefix=".tilexr-invalid-artifact-", dir=str(artifacts.parent)
+                )
+            )
+            try:
+                os.replace(str(path), str(quarantine / path.name))
+            except BaseException:
+                try:
+                    os.rmdir(str(quarantine))
+                except OSError:
+                    pass
+                raise
+        else:
+            os.unlink(str(path))
+    except FileNotFoundError:
+        return
+    except OSError as error:
+        raise InfrastructureFailure(
+            "could not invalidate artifact evidence: %s" % error
+        ) from error
+
+
+def refresh_final_manifest(
+    artifacts: pathlib.Path,
+    *,
+    deadline: Optional[float] = None,
+    now: Callable[[], float] = time.monotonic,
+    cancellation: Optional[CancellationState] = None,
+    cancellation_accounted: bool = False,
+    max_entries: int = MAX_FINAL_ARTIFACT_ENTRIES,
+) -> None:
+    if deadline is None:
+        deadline = now() + FINAL_ARTIFACT_TIMEOUT_SECONDS
+    if max_entries < 1 or max_entries > MAX_FINAL_ARTIFACT_ENTRIES:
+        raise InfrastructureFailure(
+            "invalid final artifact entry limit: %d" % max_entries
+        )
+
+    def checkpoint() -> None:
+        if (
+            cancellation is not None
+            and cancellation.cancelled
+            and not cancellation_accounted
+        ):
+            raise Cancelled(
+                "gate was cancelled during final artifact manifest refresh"
+            )
+        if now() >= deadline:
+            raise InfrastructureFailure(
+                "final artifact manifest refresh exceeded its absolute deadline"
+            )
+
     manifest = artifacts / "manifest.txt"
+    checkpoint()
     try:
         root_status = os.lstat(str(artifacts))
         if not stat.S_ISDIR(root_status.st_mode):
             raise InfrastructureFailure(
                 "artifact root is not a real directory: %s" % artifacts
             )
+        checkpoint()
         manifest_status = os.lstat(str(manifest))
         if not stat.S_ISREG(manifest_status.st_mode):
-            raise InfrastructureFailure(
-                "collector manifest boundary is not a regular file: %s" % manifest
+            raise _unsafe_artifact_failure(
+                "collector manifest boundary is not a regular file: %s" % manifest,
+                manifest,
             )
     except FileNotFoundError as error:
         raise InfrastructureFailure(
@@ -1246,70 +1331,86 @@ def refresh_final_manifest(artifacts: pathlib.Path) -> None:
 
     boundary_identity = (manifest_status.st_dev, manifest_status.st_ino)
     rows = []
-
-    def fail_walk(error):
-        raise error
+    pending = [artifacts]
+    entry_count = 0
+    manifest_seen = False
 
     try:
-        for current, directory_names, file_names in os.walk(
-            str(artifacts), topdown=True, onerror=fail_walk, followlinks=False
-        ):
-            directory_names.sort()
-            file_names.sort()
-            current_path = pathlib.Path(current)
-            for name in directory_names:
-                path = current_path / name
-                relative = path.relative_to(artifacts).as_posix()
-                if _path_has_control_characters(relative):
-                    raise InfrastructureFailure(
-                        "artifact path contains control characters: %r" % relative
-                    )
-                if not stat.S_ISDIR(os.lstat(str(path)).st_mode):
-                    raise InfrastructureFailure(
-                        "artifact tree contains a non-directory entry: %s" % relative
-                    )
-            for name in file_names:
-                path = current_path / name
-                relative = path.relative_to(artifacts).as_posix()
-                if _path_has_control_characters(relative):
-                    raise InfrastructureFailure(
-                        "artifact path contains control characters: %r" % relative
-                    )
-                path_status = os.lstat(str(path))
-                if relative == "manifest.txt":
-                    if not stat.S_ISREG(path_status.st_mode) or (
-                        path_status.st_dev,
-                        path_status.st_ino,
-                    ) != boundary_identity:
+        while pending:
+            checkpoint()
+            current_path = pending.pop()
+            with os.scandir(str(current_path)) as scanner:
+                for entry in scanner:
+                    checkpoint()
+                    entry_count += 1
+                    if entry_count > max_entries:
                         raise InfrastructureFailure(
-                            "collector manifest boundary changed during finalization"
+                            "final artifact tree exceeds the %d entry limit"
+                            % max_entries
                         )
-                    continue
-                if not stat.S_ISREG(path_status.st_mode):
-                    raise InfrastructureFailure(
-                        "artifact tree contains a nonregular entry: %s" % relative
-                    )
-                rows.append((relative, path_status.st_size))
+                    path = pathlib.Path(entry.path)
+                    relative = path.relative_to(artifacts).as_posix()
+                    if _path_has_control_characters(relative):
+                        raise _unsafe_artifact_failure(
+                            "artifact path contains control characters: %r" % relative,
+                            path,
+                        )
+                    path_status = entry.stat(follow_symlinks=False)
+                    if stat.S_ISDIR(path_status.st_mode):
+                        pending.append(path)
+                        continue
+                    if relative == "manifest.txt":
+                        if not stat.S_ISREG(path_status.st_mode) or (
+                            path_status.st_dev,
+                            path_status.st_ino,
+                        ) != boundary_identity:
+                            raise _unsafe_artifact_failure(
+                                "collector manifest boundary changed during finalization",
+                                manifest,
+                            )
+                        manifest_seen = True
+                        continue
+                    if not stat.S_ISREG(path_status.st_mode):
+                        raise _unsafe_artifact_failure(
+                            "artifact tree contains a nonregular entry: %s" % relative,
+                            path,
+                        )
+                    if path_status.st_size > MAX_FINAL_ARTIFACT_BYTES:
+                        raise _unsafe_artifact_failure(
+                            "final artifact exceeds 100 MiB: %s" % relative,
+                            path,
+                        )
+                    rows.append((relative, path_status.st_size))
     except OSError as error:
         raise InfrastructureFailure(
             "could not inspect final artifact tree: %s" % error
         ) from error
 
+    if not manifest_seen:
+        raise InfrastructureFailure(
+            "collector manifest boundary disappeared during finalization"
+        )
+
     rows.sort()
     descriptor = -1
     temporary = None
     try:
+        checkpoint()
         descriptor, temporary = tempfile.mkstemp(
             prefix=".manifest.txt.", dir=str(artifacts)
         )
         with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as output:
             descriptor = -1
             for relative, size in rows:
+                checkpoint()
                 output.write("%s\t%d\n" % (relative, size))
+            checkpoint()
             output.flush()
             os.fsync(output.fileno())
+        checkpoint()
         os.replace(temporary, str(manifest))
         temporary = None
+        checkpoint()
     except OSError as error:
         raise InfrastructureFailure(
             "could not atomically refresh final artifact manifest: %s" % error
@@ -1606,11 +1707,14 @@ def _run_controller_body(
     environ: Mapping[str, str],
     control_dir: pathlib.Path,
     cancellation: CancellationState,
+    *,
+    now: Callable[[], float] = time.monotonic,
 ) -> int:
     token = environ.get("TILEXR_CI_GITHUB_TOKEN", "")
     step_summary_path = environ.get("GITHUB_STEP_SUMMARY")
     report = initial_report(config, environ)
     failure = None
+    cancellation_accounted = False
     child_env = phase_environment(
         child_environment(environ), config.source, config.artifacts, config.pr_number
     )
@@ -1679,12 +1783,14 @@ def _run_controller_body(
             report.failure_class = failure_class_for(failure)
             report.failure_detail = str(failure)
 
-    if cancellation.cancelled and not isinstance(failure, Cancelled):
-        failure = select_final_failure(
-            failure, Cancelled("gate was cancelled during finalization")
-        )
-        report.failure_class = failure_class_for(failure)
-        report.failure_detail = str(failure)
+    if cancellation.cancelled:
+        if not isinstance(failure, Cancelled):
+            failure = select_final_failure(
+                failure, Cancelled("gate was cancelled during finalization")
+            )
+            report.failure_class = failure_class_for(failure)
+            report.failure_detail = str(failure)
+        cancellation_accounted = True
 
     if step_summary_path:
         try:
@@ -1696,45 +1802,163 @@ def _run_controller_body(
                 report.failure_class = failure_class_for(failure)
                 report.failure_detail = str(failure)
 
-    if cancellation.cancelled and not isinstance(failure, Cancelled):
-        selected = select_final_failure(
-            failure, Cancelled("gate was cancelled during final summary writing")
-        )
-        if selected is not failure:
-            failure = selected
-            report.failure_class = failure_class_for(failure)
-            report.failure_detail = str(failure)
+    if cancellation.cancelled:
+        if not isinstance(failure, Cancelled):
+            selected = select_final_failure(
+                failure, Cancelled("gate was cancelled during final summary writing")
+            )
+            if selected is not failure:
+                failure = selected
+                report.failure_class = failure_class_for(failure)
+                report.failure_detail = str(failure)
+        cancellation_accounted = True
 
-    # Nothing may mutate summary.md after the final manifest succeeds. Write the
-    # selected outcome once more after collector, cancellation, and step-summary
-    # handling, then atomically refresh the collector-created manifest boundary.
-    try:
-        write_summary(report, config.artifacts)
-    except BaseException as error:
-        if failure is None:
-            failure = _as_gate_failure(error)
-            report.failure_class = failure_class_for(failure)
-            report.failure_detail = str(failure)
+    # cancellation_accounted distinguishes signals classified above from a new
+    # signal arriving while the bounded final evidence pass is running.
+    finalization_deadline = now() + FINAL_ARTIFACT_TIMEOUT_SECONDS
 
-    try:
-        refresh_final_manifest(config.artifacts)
-    except BaseException as error:
-        manifest_failure = _collector_failure(
-            "final artifact manifest refresh failed: %s" % _as_gate_failure(error)
-        )
-        selected = select_final_failure(failure, manifest_failure)
-        if selected is not failure:
-            failure = selected
-            report.failure_class = failure_class_for(failure)
-            report.failure_detail = str(failure)
+    def update_report(candidate: BaseException) -> bool:
+        nonlocal failure
+        selected = _as_gate_failure(candidate)
+        selected = select_final_failure(failure, selected)
+        changed = selected is not failure
+        failure = selected
+        report.failure_class = failure_class_for(failure)
+        report.failure_detail = str(failure)
+        return changed
+
+    def invalidate_final_evidence(
+        *, include_summary: bool, unsafe_paths=()
+    ) -> bool:
+        nonlocal failure
+        paths = [config.artifacts / "manifest.txt"]
+        if include_summary:
+            paths.insert(0, config.artifacts / "summary.md")
+        for unsafe_path in unsafe_paths:
+            try:
+                unsafe_path.relative_to(config.artifacts)
+            except ValueError:
+                continue
+            if unsafe_path != config.artifacts and unsafe_path not in paths:
+                paths.insert(0, unsafe_path)
+        errors = []
+        for path in paths:
+            try:
+                invalidate_artifact_evidence(path, config.artifacts)
+            except GateFailure as error:
+                errors.append(str(error))
+        if not errors:
+            return True
+        prior = failure
+        detail = "artifact evidence invalidation failed: %s" % "; ".join(errors)
+        if prior is not None:
+            detail = "primary failure (%s): %s; %s" % (
+                failure_class_for(prior),
+                prior,
+                detail,
+            )
+        failure = _collector_failure(detail)
+        report.failure_class = failure_class_for(failure)
+        report.failure_detail = str(failure)
+        print("ERROR: %s" % failure, file=sys.stderr)
+        return False
+
+    def write_final_summary() -> bool:
+        for attempt in range(2):
+            try:
+                write_summary(report, config.artifacts)
+                return True
+            except BaseException as error:
+                update_report(
+                    _collector_failure(
+                        "final artifact summary write failed: %s"
+                        % _as_gate_failure(error)
+                    )
+                )
+                if attempt == 1:
+                    invalidate_final_evidence(include_summary=True)
+                    return False
+        return False
+
+    def account_new_cancellation(detail: str) -> None:
+        nonlocal cancellation_accounted
+        prior = failure
+        if prior is not None and not isinstance(prior, Cancelled):
+            detail = "%s; prior failure (%s): %s" % (
+                detail,
+                failure_class_for(prior),
+                prior,
+            )
+        update_report(Cancelled(detail))
+        cancellation_accounted = True
+
+    if not write_final_summary():
+        return 0 if failure is None else exit_code_for(failure)
+
+    refresh_attempt = 0
+    unsafe_paths = []
+    while refresh_attempt < 2:
+        if cancellation.cancelled and not cancellation_accounted:
+            account_new_cancellation(
+                "gate was cancelled before final artifact manifest refresh"
+            )
+            if not write_final_summary():
+                return exit_code_for(failure)
+
+        refresh_attempt += 1
+        failure_changed = False
         try:
-            write_summary(report, config.artifacts)
-        except GateFailure:
-            pass
-        try:
-            refresh_final_manifest(config.artifacts)
-        except BaseException:
-            pass
+            refresh_final_manifest(
+                config.artifacts,
+                deadline=finalization_deadline,
+                now=now,
+                cancellation=cancellation,
+                cancellation_accounted=cancellation_accounted,
+            )
+        except BaseException as error:
+            unsafe_path = getattr(error, "unsafe_artifact_path", None)
+            if unsafe_path is not None and unsafe_path not in unsafe_paths:
+                unsafe_paths.append(unsafe_path)
+            if isinstance(error, Cancelled) or (
+                cancellation.cancelled and not cancellation_accounted
+            ):
+                detail = str(error) if isinstance(error, Cancelled) else (
+                    "gate was cancelled during final artifact manifest refresh"
+                )
+                account_new_cancellation(detail)
+                failure_changed = True
+            else:
+                failure_changed = update_report(
+                    _collector_failure(
+                        "final artifact manifest refresh failed: %s"
+                        % _as_gate_failure(error)
+                    )
+                )
+            if refresh_attempt == 2:
+                if failure_changed:
+                    write_final_summary()
+                invalidate_final_evidence(
+                    include_summary=False, unsafe_paths=unsafe_paths
+                )
+                break
+            if not write_final_summary():
+                return exit_code_for(failure)
+            continue
+
+        # A signal can arrive after the refresh's last checkpoint but before it
+        # returns to the controller. The summary changed by this classification
+        # must consume the one allowed manifest retry or invalidate the manifest.
+        if cancellation.cancelled and not cancellation_accounted:
+            account_new_cancellation(
+                "gate was cancelled after final artifact manifest refresh"
+            )
+            if not write_final_summary():
+                return exit_code_for(failure)
+            if refresh_attempt == 2:
+                invalidate_final_evidence(include_summary=False)
+                break
+            continue
+        break
 
     return 0 if failure is None else exit_code_for(failure)
 

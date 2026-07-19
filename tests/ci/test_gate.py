@@ -1364,6 +1364,100 @@ class FinalManifestTests(unittest.TestCase):
                     "collector boundary\n", manifest.read_text(encoding="utf-8")
                 )
 
+    def test_refresh_enforces_one_deadline_and_entry_cap(self):
+        self.assertLessEqual(gate.MAX_FINAL_ARTIFACT_ENTRIES, 10000)
+        with tempfile.TemporaryDirectory() as directory:
+            artifacts = pathlib.Path(directory)
+            manifest = artifacts / "manifest.txt"
+            manifest.write_text("collector boundary\n", encoding="utf-8")
+            (artifacts / "one.log").write_text("one", encoding="utf-8")
+            (artifacts / "two.log").write_text("two", encoding="utf-8")
+
+            with self.assertRaises(gate.InfrastructureFailure) as capped:
+                gate.refresh_final_manifest(
+                    artifacts, deadline=30.0, now=lambda: 0.0, max_entries=2
+                )
+            self.assertIn("entry limit", str(capped.exception))
+            self.assertEqual("collector boundary\n", manifest.read_text(encoding="utf-8"))
+
+            clock = iter((0.0, 31.0))
+            with self.assertRaises(gate.InfrastructureFailure) as timed_out:
+                gate.refresh_final_manifest(
+                    artifacts, deadline=30.0, now=lambda: next(clock)
+                )
+            self.assertIn("deadline", str(timed_out.exception))
+            self.assertEqual("collector boundary\n", manifest.read_text(encoding="utf-8"))
+
+    def test_refresh_cancellation_requires_accounting_but_keeps_bounded_window(self):
+        with tempfile.TemporaryDirectory() as directory:
+            artifacts = pathlib.Path(directory)
+            manifest = artifacts / "manifest.txt"
+            manifest.write_text("collector boundary\n", encoding="utf-8")
+            cancellation = gate.CancellationState()
+            cancellation.cancel()
+
+            with self.assertRaises(gate.Cancelled):
+                gate.refresh_final_manifest(
+                    artifacts,
+                    deadline=30.0,
+                    now=lambda: 0.0,
+                    cancellation=cancellation,
+                    cancellation_accounted=False,
+                )
+            self.assertEqual("collector boundary\n", manifest.read_text(encoding="utf-8"))
+
+            gate.refresh_final_manifest(
+                artifacts,
+                deadline=30.0,
+                now=lambda: 0.0,
+                cancellation=cancellation,
+                cancellation_accounted=True,
+            )
+            self.assertEqual(actual_artifact_rows(artifacts), manifest_rows(artifacts))
+
+    def test_refresh_rejects_post_collector_oversized_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            artifacts = pathlib.Path(directory)
+            manifest = artifacts / "manifest.txt"
+            manifest.write_text("collector boundary\n", encoding="utf-8")
+            with (artifacts / "summary.md").open("wb") as output:
+                output.truncate(100 * 1024 * 1024 + 1)
+
+            with self.assertRaises(gate.InfrastructureFailure) as oversized:
+                gate.refresh_final_manifest(artifacts)
+            self.assertIn("100 MiB", str(oversized.exception))
+            self.assertEqual("collector boundary\n", manifest.read_text(encoding="utf-8"))
+
+    def test_persistent_oversized_artifact_is_removed_before_upload(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            config = gate.Config(
+                root / "source", root / "artifacts", "merge", "LingquLab/TileXR", 42
+            )
+
+            def collect(script, collector_config, env, **kwargs):
+                oversized = collector_config.artifacts / "post-collector.log"
+                with oversized.open("wb") as output:
+                    output.truncate(100 * 1024 * 1024 + 1)
+                write_test_manifest(collector_config.artifacts)
+
+            with mock.patch.object(
+                gate, "orchestrate", side_effect=self.passing_orchestration
+            ), mock.patch.object(gate, "verify_final_cleanup"), mock.patch.object(
+                gate, "invoke_collector", side_effect=collect
+            ):
+                result = gate._run_controller_body(
+                    config,
+                    {"TILEXR_CI_GITHUB_TOKEN": "token"},
+                    root / "trusted",
+                    gate.CancellationState(),
+                )
+
+            self.assertEqual(23, result)
+            self.assertFalse((config.artifacts / "post-collector.log").exists())
+            self.assertFalse((config.artifacts / "manifest.txt").exists())
+            self.assertTrue((config.artifacts / "summary.md").is_file())
+
     def test_collector_failure_summary_and_manifest_are_aligned(self):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
@@ -1429,7 +1523,8 @@ class FinalManifestTests(unittest.TestCase):
             self.assertIn("gate was cancelled during finalization", summary)
             self.assert_final_manifest_matches_upload(config.artifacts)
 
-    def test_first_refresh_failure_updates_summary_then_retries_once(self):
+    def test_cancellation_during_refresh_is_reported_then_retried_once(self):
+        cancellation = gate.CancellationState()
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             config = gate.Config(
@@ -1441,11 +1536,174 @@ class FinalManifestTests(unittest.TestCase):
             def collect(script, collector_config, env, **kwargs):
                 write_test_manifest(collector_config.artifacts)
 
-            def transient_refresh(artifacts):
+            def cancel_during_refresh(artifacts, **kwargs):
+                attempts.append(kwargs.get("cancellation_accounted"))
+                if len(attempts) == 1:
+                    cancellation.cancel()
+                return original_refresh(artifacts, **kwargs)
+
+            with mock.patch.object(
+                gate, "orchestrate", side_effect=self.passing_orchestration
+            ), mock.patch.object(gate, "verify_final_cleanup"), mock.patch.object(
+                gate, "invoke_collector", side_effect=collect
+            ), mock.patch.object(
+                gate, "refresh_final_manifest", side_effect=cancel_during_refresh
+            ):
+                result = gate._run_controller_body(
+                    config,
+                    {"TILEXR_CI_GITHUB_TOKEN": "token"},
+                    root / "trusted",
+                    cancellation,
+                )
+
+            self.assertEqual(130, result)
+            self.assertEqual([False, True], attempts)
+            summary = (config.artifacts / "summary.md").read_text(encoding="utf-8")
+            self.assertIn("cancelled-or-obsolete", summary)
+            self.assertIn("final artifact manifest refresh", summary)
+            self.assert_final_manifest_matches_upload(config.artifacts)
+
+    def test_refresh_cancellation_preserves_existing_collector_failure(self):
+        cancellation = gate.CancellationState()
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            config = gate.Config(
+                root / "source", root / "artifacts", "merge", "LingquLab/TileXR", 42
+            )
+            original_refresh = gate.refresh_final_manifest
+            attempts = []
+
+            def fail_after_collection(script, collector_config, env, **kwargs):
+                write_test_manifest(collector_config.artifacts)
+                raise gate._collector_failure("collector primary failure")
+
+            def cancel_during_refresh(artifacts, **kwargs):
+                attempts.append(kwargs.get("cancellation_accounted"))
+                if len(attempts) == 1:
+                    cancellation.cancel()
+                return original_refresh(artifacts, **kwargs)
+
+            with mock.patch.object(
+                gate, "orchestrate", side_effect=self.passing_orchestration
+            ), mock.patch.object(gate, "verify_final_cleanup"), mock.patch.object(
+                gate, "invoke_collector", side_effect=fail_after_collection
+            ), mock.patch.object(
+                gate, "refresh_final_manifest", side_effect=cancel_during_refresh
+            ):
+                result = gate._run_controller_body(
+                    config,
+                    {"TILEXR_CI_GITHUB_TOKEN": "token"},
+                    root / "trusted",
+                    cancellation,
+                )
+
+            self.assertEqual(23, result)
+            self.assertEqual([False, True], attempts)
+            summary = (config.artifacts / "summary.md").read_text(encoding="utf-8")
+            self.assertIn("collector primary failure", summary)
+            self.assertNotIn("cancelled-or-obsolete", summary)
+            self.assert_final_manifest_matches_upload(config.artifacts)
+
+    def test_cancellation_after_successful_refresh_uses_the_one_retry(self):
+        cancellation = gate.CancellationState()
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            config = gate.Config(
+                root / "source", root / "artifacts", "merge", "LingquLab/TileXR", 42
+            )
+            original_refresh = gate.refresh_final_manifest
+            attempts = []
+
+            def collect(script, collector_config, env, **kwargs):
+                write_test_manifest(collector_config.artifacts)
+
+            def cancel_after_refresh(artifacts, **kwargs):
+                attempts.append(kwargs.get("cancellation_accounted"))
+                result = original_refresh(artifacts, **kwargs)
+                if len(attempts) == 1:
+                    cancellation.cancel()
+                return result
+
+            with mock.patch.object(
+                gate, "orchestrate", side_effect=self.passing_orchestration
+            ), mock.patch.object(gate, "verify_final_cleanup"), mock.patch.object(
+                gate, "invoke_collector", side_effect=collect
+            ), mock.patch.object(
+                gate, "refresh_final_manifest", side_effect=cancel_after_refresh
+            ):
+                result = gate._run_controller_body(
+                    config,
+                    {"TILEXR_CI_GITHUB_TOKEN": "token"},
+                    root / "trusted",
+                    cancellation,
+                )
+
+            self.assertEqual(130, result)
+            self.assertEqual([False, True], attempts)
+            summary = (config.artifacts / "summary.md").read_text(encoding="utf-8")
+            self.assertIn("cancelled-or-obsolete", summary)
+            self.assertIn("after final artifact manifest refresh", summary)
+            self.assert_final_manifest_matches_upload(config.artifacts)
+
+    def test_cancellation_between_prior_check_and_finalization_is_not_preaccounted(self):
+        class EdgeCancellation(gate.CancellationState):
+            def __init__(self):
+                super().__init__()
+                self.reads = 0
+
+            @property
+            def cancelled(self):
+                self.reads += 1
+                if self.reads == 3:
+                    self.cancel()
+                return super().cancelled
+
+        cancellation = EdgeCancellation()
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            config = gate.Config(
+                root / "source", root / "artifacts", "merge", "LingquLab/TileXR", 42
+            )
+
+            def collect(script, collector_config, env, **kwargs):
+                write_test_manifest(collector_config.artifacts)
+
+            with mock.patch.object(
+                gate, "orchestrate", side_effect=self.passing_orchestration
+            ), mock.patch.object(gate, "verify_final_cleanup"), mock.patch.object(
+                gate, "invoke_collector", side_effect=collect
+            ):
+                result = gate._run_controller_body(
+                    config,
+                    {"TILEXR_CI_GITHUB_TOKEN": "token"},
+                    root / "trusted",
+                    cancellation,
+                )
+
+            self.assertEqual(130, result)
+            summary = (config.artifacts / "summary.md").read_text(encoding="utf-8")
+            self.assertIn("cancelled-or-obsolete", summary)
+            self.assert_final_manifest_matches_upload(config.artifacts)
+
+    def test_first_refresh_failure_updates_summary_then_retries_once(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            config = gate.Config(
+                root / "source", root / "artifacts", "merge", "LingquLab/TileXR", 42
+            )
+            original_refresh = gate.refresh_final_manifest
+            attempts = []
+            deadlines = []
+
+            def collect(script, collector_config, env, **kwargs):
+                write_test_manifest(collector_config.artifacts)
+
+            def transient_refresh(artifacts, **kwargs):
                 attempts.append(True)
+                deadlines.append(kwargs.get("deadline"))
                 if len(attempts) == 1:
                     raise gate.InfrastructureFailure("transient manifest race")
-                return original_refresh(artifacts)
+                return original_refresh(artifacts, **kwargs)
 
             with mock.patch.object(
                 gate, "orchestrate", side_effect=self.passing_orchestration
@@ -1463,12 +1721,14 @@ class FinalManifestTests(unittest.TestCase):
 
             self.assertEqual(23, result)
             self.assertEqual(2, len(attempts))
+            self.assertIsNotNone(deadlines[0])
+            self.assertEqual([deadlines[0], deadlines[0]], deadlines)
             summary = (config.artifacts / "summary.md").read_text(encoding="utf-8")
             self.assertIn("runner-or-toolchain-failure", summary)
             self.assertIn("transient manifest race", summary)
             self.assert_final_manifest_matches_upload(config.artifacts)
 
-    def test_persistent_refresh_failure_is_attempted_only_twice(self):
+    def test_persistent_refresh_timeout_is_attempted_twice_then_invalidated(self):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             config = gate.Config(
@@ -1479,7 +1739,9 @@ class FinalManifestTests(unittest.TestCase):
                 write_test_manifest(collector_config.artifacts)
 
             refresh = mock.Mock(
-                side_effect=gate.InfrastructureFailure("persistent manifest failure")
+                side_effect=gate.InfrastructureFailure(
+                    "final artifact manifest deadline exceeded"
+                )
             )
             with mock.patch.object(
                 gate, "orchestrate", side_effect=self.passing_orchestration
@@ -1496,7 +1758,103 @@ class FinalManifestTests(unittest.TestCase):
             self.assertEqual(23, result)
             self.assertEqual(2, refresh.call_count)
             summary = (config.artifacts / "summary.md").read_text(encoding="utf-8")
-            self.assertIn("persistent manifest failure", summary)
+            self.assertIn("manifest deadline exceeded", summary)
+            self.assertFalse((config.artifacts / "manifest.txt").exists())
+
+    def test_transient_final_summary_failure_is_retried_and_manifested(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            config = gate.Config(
+                root / "source", root / "artifacts", "merge", "LingquLab/TileXR", 42
+            )
+            original_write = gate.write_summary
+            writes = []
+
+            def collect(script, collector_config, env, **kwargs):
+                write_test_manifest(collector_config.artifacts)
+
+            def transient_write(*args, **kwargs):
+                writes.append(True)
+                if len(writes) == 2:
+                    raise gate.InfrastructureFailure("transient final summary failure")
+                return original_write(*args, **kwargs)
+
+            with mock.patch.object(
+                gate, "orchestrate", side_effect=self.passing_orchestration
+            ), mock.patch.object(gate, "verify_final_cleanup"), mock.patch.object(
+                gate, "invoke_collector", side_effect=collect
+            ), mock.patch.object(gate, "write_summary", side_effect=transient_write):
+                result = gate._run_controller_body(
+                    config,
+                    {"TILEXR_CI_GITHUB_TOKEN": "token"},
+                    root / "trusted",
+                    gate.CancellationState(),
+                )
+
+            self.assertEqual(23, result)
+            self.assertEqual(3, len(writes))
+            summary = (config.artifacts / "summary.md").read_text(encoding="utf-8")
+            self.assertIn("transient final summary failure", summary)
+            self.assert_final_manifest_matches_upload(config.artifacts)
+
+    def test_persistent_final_summary_failure_invalidates_summary_and_manifest(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            config = gate.Config(
+                root / "source", root / "artifacts", "merge", "LingquLab/TileXR", 42
+            )
+            original_write = gate.write_summary
+            writes = []
+
+            def collect(script, collector_config, env, **kwargs):
+                write_test_manifest(collector_config.artifacts)
+
+            def persistent_final_write(*args, **kwargs):
+                writes.append(True)
+                if len(writes) >= 2:
+                    raise gate.InfrastructureFailure("persistent final summary failure")
+                return original_write(*args, **kwargs)
+
+            with mock.patch.object(
+                gate, "orchestrate", side_effect=self.passing_orchestration
+            ), mock.patch.object(gate, "verify_final_cleanup"), mock.patch.object(
+                gate, "invoke_collector", side_effect=collect
+            ), mock.patch.object(
+                gate, "write_summary", side_effect=persistent_final_write
+            ):
+                result = gate._run_controller_body(
+                    config,
+                    {"TILEXR_CI_GITHUB_TOKEN": "token"},
+                    root / "trusted",
+                    gate.CancellationState(),
+                )
+
+            self.assertEqual(23, result)
+            self.assertEqual(3, len(writes))
+            self.assertFalse((config.artifacts / "summary.md").exists())
+            self.assertFalse((config.artifacts / "manifest.txt").exists())
+
+    def test_directory_evidence_is_quarantined_outside_upload_root(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            artifacts = root / "artifacts"
+            evidence = artifacts / "summary.md"
+            (evidence / "nested").mkdir(parents=True)
+            (evidence / "nested" / "stale.txt").write_text(
+                "stale", encoding="utf-8"
+            )
+
+            gate.invalidate_artifact_evidence(evidence, artifacts)
+
+            self.assertFalse(evidence.exists())
+            quarantines = list(root.glob(".tilexr-invalid-artifact-*"))
+            self.assertEqual(1, len(quarantines))
+            self.assertEqual(
+                "stale",
+                (quarantines[0] / "summary.md" / "nested" / "stale.txt").read_text(
+                    encoding="utf-8"
+                ),
+            )
 
 
 class CaseEvidenceTests(unittest.TestCase):
