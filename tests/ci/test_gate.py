@@ -1316,6 +1316,72 @@ class SummaryTests(unittest.TestCase):
 
 
 class StepSummarySafetyTests(unittest.TestCase):
+    def test_append_rejects_same_inode_with_shrunken_pinned_prefix(self):
+        with tempfile.TemporaryDirectory() as directory:
+            step_summary = pathlib.Path(directory) / "step-summary.md"
+            prefix = "0123456789" * 3
+            step_summary.write_text(prefix, encoding="utf-8")
+            boundary = gate.step_summary_size(step_summary)
+            inode = step_summary.stat().st_ino
+            os.truncate(str(step_summary), 0)
+
+            with self.assertRaises(gate.InfrastructureFailure):
+                gate._append_authoritative_step_text(
+                    step_summary, "x" * 64, boundary
+                )
+
+            self.assertEqual(inode, step_summary.stat().st_ino)
+            self.assertEqual("", step_summary.read_text(encoding="utf-8"))
+
+    def test_append_detects_same_inode_shrink_during_write(self):
+        with tempfile.TemporaryDirectory() as directory:
+            step_summary = pathlib.Path(directory) / "step-summary.md"
+            prefix = "0123456789" * 3
+            step_summary.write_text(prefix, encoding="utf-8")
+            boundary = gate.step_summary_size(step_summary)
+            original_write = gate.os.write
+            writes = []
+
+            def shrink_then_write(descriptor, data):
+                if not writes:
+                    os.ftruncate(descriptor, 0)
+                writes.append(True)
+                return original_write(descriptor, data)
+
+            with mock.patch.object(
+                gate.os, "write", side_effect=shrink_then_write
+            ), self.assertRaises(gate.InfrastructureFailure):
+                gate._append_authoritative_step_text(
+                    step_summary, "x" * 64, boundary
+                )
+
+            self.assertEqual([True], writes)
+            corrupted = step_summary.read_bytes()
+            with self.assertRaises(gate.InfrastructureFailure):
+                gate._append_authoritative_step_text(
+                    step_summary, "retry must not be adopted", boundary
+                )
+            self.assertEqual(corrupted, step_summary.read_bytes())
+
+    def test_append_rejects_same_inode_with_rewritten_pinned_prefix(self):
+        with tempfile.TemporaryDirectory() as directory:
+            step_summary = pathlib.Path(directory) / "step-summary.md"
+            prefix = "0123456789" * 3
+            step_summary.write_text(prefix, encoding="utf-8")
+            boundary = gate.step_summary_size(step_summary)
+            inode = step_summary.stat().st_ino
+            step_summary.write_text("z" * len(prefix), encoding="utf-8")
+
+            with self.assertRaises(gate.InfrastructureFailure):
+                gate._append_authoritative_step_text(
+                    step_summary, "x" * 64, boundary
+                )
+
+            self.assertEqual(inode, step_summary.stat().st_ino)
+            self.assertEqual(
+                "z" * len(prefix), step_summary.read_text(encoding="utf-8")
+            )
+
     def test_append_creates_missing_regular_file_and_completes_short_writes(self):
         with tempfile.TemporaryDirectory() as directory:
             step_summary = pathlib.Path(directory) / "step-summary.md"
@@ -2211,6 +2277,61 @@ class FinalManifestTests(unittest.TestCase):
             final = visible.rsplit("Authoritative final gate result", 1)[1]
             self.assertIn("cancelled-or-obsolete", final)
             self.assert_minimal_recovered_upload(config.artifacts, "cancelled")
+
+    def test_correction_rejects_same_inode_with_shrunken_pinned_prefix(self):
+        cancellation = gate.CancellationState()
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            step_summary = root / "github-step-summary.md"
+            prefix = "0123456789" * 3
+            step_summary.write_text(prefix, encoding="utf-8")
+            inode = step_summary.stat().st_ino
+            config = gate.Config(
+                root / "source", root / "artifacts", "merge", "LingquLab/TileXR", 42
+            )
+            original_append = gate.append_authoritative_step_summary
+            appends = []
+
+            def collect(script, collector_config, env, **kwargs):
+                write_test_manifest(collector_config.artifacts)
+
+            def shrink_before_correction(*args, **kwargs):
+                appends.append(True)
+                if len(appends) == 1:
+                    result = original_append(*args, **kwargs)
+                    cancellation.cancel()
+                    return result
+                os.truncate(str(step_summary), 0)
+                return original_append(*args, **kwargs)
+
+            with mock.patch.object(
+                gate, "orchestrate", side_effect=self.passing_orchestration
+            ), mock.patch.object(gate, "verify_final_cleanup"), mock.patch.object(
+                gate, "invoke_collector", side_effect=collect
+            ), mock.patch.object(
+                gate,
+                "append_authoritative_step_summary",
+                side_effect=shrink_before_correction,
+            ), mock.patch.object(
+                gate.sys, "stderr", io.StringIO()
+            ):
+                result = gate._run_controller_body(
+                    config,
+                    {
+                        "TILEXR_CI_GITHUB_TOKEN": "token",
+                        "GITHUB_STEP_SUMMARY": str(step_summary),
+                    },
+                    root / "trusted",
+                    cancellation,
+                )
+
+            self.assertEqual(23, result)
+            self.assertEqual(2, len(appends))
+            self.assertEqual(inode, step_summary.stat().st_ino)
+            self.assertEqual("", step_summary.read_text(encoding="utf-8"))
+            self.assert_minimal_recovered_upload(
+                config.artifacts, "pinned prefix shrank"
+            )
 
     def test_failed_late_cancellation_correction_replaces_success_claim(self):
         cancellation = gate.CancellationState()

@@ -37,6 +37,7 @@ MAX_FINAL_ARTIFACT_ENTRIES = 10000
 MAX_FINAL_ARTIFACT_BYTES = 100 * 1024 * 1024
 MAX_AUTHORITATIVE_STEP_SUMMARY_BYTES = 64 * 1024
 MAX_STEP_SUMMARY_APPEND_BYTES = 128 * 1024
+MAX_STEP_SUMMARY_PREFIX_PROBE_BYTES = 4 * 1024
 LOCK_PATH = pathlib.Path("/home/tilexr-ci/locks/npu8.lock")
 CONTROL_DIR = pathlib.Path(__file__).resolve().parent
 
@@ -110,6 +111,14 @@ class StepSummaryBoundary:
     prefix_size: int
     device: int
     inode: int
+    state: "StepSummaryState" = dataclasses.field(compare=False, repr=False)
+
+
+@dataclasses.dataclass
+class StepSummaryState:
+    expected_size: int
+    prefix_probes: Tuple[Tuple[int, bytes], ...] = ()
+    valid: bool = True
 
 
 class CancellationState:
@@ -1301,6 +1310,99 @@ def _open_regular_step_summary(
     return descriptor
 
 
+def _step_summary_probe_ranges(prefix_size: int) -> Tuple[Tuple[int, int], ...]:
+    if prefix_size <= 0:
+        return ()
+    if prefix_size <= MAX_STEP_SUMMARY_PREFIX_PROBE_BYTES:
+        return ((0, prefix_size),)
+    first_size = MAX_STEP_SUMMARY_PREFIX_PROBE_BYTES // 2
+    last_size = MAX_STEP_SUMMARY_PREFIX_PROBE_BYTES - first_size
+    return ((0, first_size), (prefix_size - last_size, last_size))
+
+
+def _pread_exact(descriptor: int, offset: int, length: int) -> bytes:
+    chunks = []
+    read_size = 0
+    while read_size < length:
+        try:
+            chunk = os.pread(descriptor, length - read_size, offset + read_size)
+        except OSError as error:
+            raise InfrastructureFailure(
+                "could not read GitHub step summary prefix probe: %s" % error
+            ) from error
+        if not chunk:
+            raise InfrastructureFailure(
+                "GitHub step summary pinned prefix shrank while reading"
+            )
+        chunks.append(chunk)
+        read_size += len(chunk)
+    return b"".join(chunks)
+
+
+def _read_step_summary_prefix_probes(
+    path: pathlib.Path, boundary: StepSummaryBoundary
+) -> Tuple[Tuple[int, bytes], ...]:
+    descriptor = _open_regular_step_summary(
+        path, os.O_RDONLY, boundary=boundary
+    )
+    try:
+        before = _verify_step_summary_identity(path, descriptor, boundary)
+        if before.st_size < boundary.prefix_size:
+            raise InfrastructureFailure(
+                "GitHub step summary pinned prefix shrank before probe"
+            )
+        probes = tuple(
+            (offset, _pread_exact(descriptor, offset, length))
+            for offset, length in _step_summary_probe_ranges(boundary.prefix_size)
+        )
+        after = _verify_step_summary_identity(path, descriptor, boundary)
+        if after.st_size != before.st_size:
+            raise InfrastructureFailure(
+                "GitHub step summary size changed while probing prefix"
+            )
+        return probes
+    finally:
+        os.close(descriptor)
+
+
+def _invalidate_step_summary_boundary(
+    boundary: StepSummaryBoundary, message: str
+) -> None:
+    boundary.state.valid = False
+    raise InfrastructureFailure(message)
+
+
+def _validate_step_summary_state(
+    path: pathlib.Path,
+    boundary: StepSummaryBoundary,
+    opened_status,
+    expected_size: int,
+    stage: str,
+) -> None:
+    if not boundary.state.valid:
+        raise InfrastructureFailure("GitHub step summary transaction is invalid")
+    if opened_status.st_size < boundary.prefix_size:
+        _invalidate_step_summary_boundary(
+            boundary,
+            "GitHub step summary pinned prefix shrank %s" % stage,
+        )
+    if opened_status.st_size != expected_size:
+        _invalidate_step_summary_boundary(
+            boundary,
+            "GitHub step summary size changed %s" % stage,
+        )
+    try:
+        probes = _read_step_summary_prefix_probes(path, boundary)
+    except BaseException:
+        boundary.state.valid = False
+        raise
+    if probes != boundary.state.prefix_probes:
+        _invalidate_step_summary_boundary(
+            boundary,
+            "GitHub step summary pinned prefix changed %s" % stage,
+        )
+
+
 def _append_authoritative_step_text(
     path: pathlib.Path,
     text: str,
@@ -1320,10 +1422,21 @@ def _append_authoritative_step_text(
 
     if boundary is None:
         boundary = step_summary_size(path)
+    if not boundary.state.valid:
+        raise InfrastructureFailure("GitHub step summary transaction is invalid")
     descriptor = _open_regular_step_summary(
         path, os.O_WRONLY | os.O_APPEND, boundary=boundary
     )
     try:
+        before = _verify_step_summary_identity(path, descriptor, boundary)
+        _validate_step_summary_state(
+            path,
+            boundary,
+            before,
+            boundary.state.expected_size,
+            "before append",
+        )
+        expected_size = before.st_size + len(encoded)
         offset = 0
         view = memoryview(encoded)
         while offset < len(encoded):
@@ -1334,11 +1447,20 @@ def _append_authoritative_step_text(
                 )
             offset += written
         os.fsync(descriptor)
-        _verify_step_summary_identity(path, descriptor, boundary)
+        after = _verify_step_summary_identity(path, descriptor, boundary)
+        _validate_step_summary_state(
+            path, boundary, after, expected_size, "during append"
+        )
     except OSError as error:
+        boundary.state.valid = False
         raise InfrastructureFailure(
             "could not append authoritative GitHub step summary: %s" % error
         ) from error
+    except BaseException:
+        boundary.state.valid = False
+        raise
+    else:
+        boundary.state.expected_size = expected_size
     finally:
         os.close(descriptor)
 
@@ -1380,30 +1502,51 @@ def step_summary_size(path: pathlib.Path) -> StepSummaryBoundary:
         raise InfrastructureFailure(
             "GitHub step summary path is not a regular file: %s" % path
         )
-    return StepSummaryBoundary(
+    boundary = StepSummaryBoundary(
         prefix_size=path_status.st_size,
         device=path_status.st_dev,
         inode=path_status.st_ino,
+        state=StepSummaryState(expected_size=path_status.st_size),
     )
+    boundary.state.prefix_probes = _read_step_summary_prefix_probes(path, boundary)
+    return boundary
 
 
 def rollback_step_summary(path: pathlib.Path, boundary: StepSummaryBoundary) -> None:
+    if not boundary.state.valid:
+        raise InfrastructureFailure("GitHub step summary transaction is invalid")
     descriptor = _open_regular_step_summary(
         path, os.O_WRONLY, boundary=boundary
     )
     try:
-        opened_status = os.fstat(descriptor)
-        if opened_status.st_size < boundary.prefix_size:
-            raise InfrastructureFailure(
-                "GitHub step summary shrank before rollback"
-            )
+        before = _verify_step_summary_identity(path, descriptor, boundary)
+        _validate_step_summary_state(
+            path,
+            boundary,
+            before,
+            boundary.state.expected_size,
+            "before rollback",
+        )
         os.ftruncate(descriptor, boundary.prefix_size)
         os.fsync(descriptor)
-        _verify_step_summary_identity(path, descriptor, boundary)
+        after = _verify_step_summary_identity(path, descriptor, boundary)
+        _validate_step_summary_state(
+            path,
+            boundary,
+            after,
+            boundary.prefix_size,
+            "during rollback",
+        )
     except OSError as error:
+        boundary.state.valid = False
         raise InfrastructureFailure(
             "could not roll back GitHub step summary: %s" % error
         ) from error
+    except BaseException:
+        boundary.state.valid = False
+        raise
+    else:
+        boundary.state.expected_size = boundary.prefix_size
     finally:
         os.close(descriptor)
 
