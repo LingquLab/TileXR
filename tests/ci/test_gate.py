@@ -1967,6 +1967,79 @@ class FinalManifestTests(unittest.TestCase):
             finally:
                 target.chmod(0o700)
 
+    def test_failed_minimal_recovery_rename_disables_partial_upload_root(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            artifacts = root / "artifacts"
+            artifacts.mkdir()
+            (artifacts / "old.log").write_text("old", encoding="utf-8")
+            target = root / "external.txt"
+            target.write_text("keep", encoding="utf-8")
+            report = gate.GateReport(
+                pr_number=42,
+                failure_class="runner-or-toolchain-failure",
+                failure_detail="terminal failure",
+            )
+            failure = gate._collector_failure("terminal failure")
+            original_replace = gate.os.replace
+
+            def replace(source, destination):
+                if pathlib.Path(destination).name == "failed-minimal-evidence-root":
+                    raise OSError("second quarantine denied")
+                return original_replace(source, destination)
+
+            def fail_minimal_write(path, contents):
+                (path.parent / "unsafe-link").symlink_to(target)
+                raise gate.InfrastructureFailure("minimal write failed")
+
+            try:
+                with mock.patch.object(
+                    gate.os, "replace", side_effect=replace
+                ), mock.patch.object(
+                    gate,
+                    "_create_minimal_evidence_file",
+                    side_effect=fail_minimal_write,
+                ), self.assertRaises(gate.InfrastructureFailure) as raised:
+                    gate.recover_minimal_artifact_upload(artifacts, report, failure)
+
+                self.assertIn("upload traversal disabled", str(raised.exception))
+                self.assertEqual(0, artifacts.lstat().st_mode & 0o777)
+                self.assertEqual("keep", target.read_text(encoding="utf-8"))
+            finally:
+                if artifacts.exists():
+                    artifacts.chmod(0o700)
+
+    def test_failed_minimal_recovery_surfaces_disable_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            artifacts = root / "artifacts"
+            artifacts.mkdir()
+            report = gate.GateReport(
+                pr_number=42,
+                failure_class="runner-or-toolchain-failure",
+                failure_detail="terminal failure",
+            )
+            failure = gate._collector_failure("terminal failure")
+            original_replace = gate.os.replace
+
+            def replace(source, destination):
+                if pathlib.Path(destination).name == "failed-minimal-evidence-root":
+                    raise OSError("second quarantine denied")
+                return original_replace(source, destination)
+
+            with mock.patch.object(
+                gate.os, "replace", side_effect=replace
+            ), mock.patch.object(
+                gate,
+                "_create_minimal_evidence_file",
+                side_effect=gate.InfrastructureFailure("minimal write failed"),
+            ), mock.patch.object(
+                gate, "_disable_artifact_upload_path", return_value=False
+            ), self.assertRaises(gate.InfrastructureFailure) as raised:
+                gate.recover_minimal_artifact_upload(artifacts, report, failure)
+
+            self.assertIn("upload traversal could not be disabled", str(raised.exception))
+
 
 class CaseEvidenceTests(unittest.TestCase):
     def test_trusted_empty_seed_refuses_a_symlink(self):

@@ -1367,15 +1367,30 @@ def recover_minimal_artifact_upload(
         ).encode("utf-8")
         _create_minimal_evidence_file(artifacts / "manifest.txt", manifest)
     except BaseException as error:
+        containment = "partial upload root quarantined"
         try:
             os.replace(
                 str(artifacts), str(quarantine / "failed-minimal-evidence-root")
             )
-        except OSError:
-            pass
+        except OSError as quarantine_error:
+            try:
+                disabled = _disable_artifact_upload_path(artifacts)
+                disable_detail = (
+                    "upload traversal disabled"
+                    if disabled
+                    else "upload traversal could not be disabled"
+                )
+            except BaseException as disable_error:
+                disable_detail = "upload traversal disable failed: %s" % _as_gate_failure(
+                    disable_error
+                )
+            containment = "second quarantine failed: %s; %s" % (
+                quarantine_error,
+                disable_detail,
+            )
         raise InfrastructureFailure(
-            "could not create bounded minimal artifact evidence: %s"
-            % _as_gate_failure(error)
+            "could not create bounded minimal artifact evidence: %s; %s"
+            % (_as_gate_failure(error), containment)
         ) from error
     return quarantine
 
