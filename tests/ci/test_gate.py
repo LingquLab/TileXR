@@ -1317,6 +1317,81 @@ class SummaryTests(unittest.TestCase):
 
 
 class StepSummarySafetyTests(unittest.TestCase):
+    def test_unbounded_append_closes_owned_directory_chain(self):
+        with tempfile.TemporaryDirectory() as directory:
+            step_summary = pathlib.Path(directory) / "step-summary.md"
+            captured = []
+            original_size = gate.step_summary_size
+
+            def capture_boundary(path, **kwargs):
+                boundary = original_size(path, **kwargs)
+                captured.append(boundary)
+                return boundary
+
+            with mock.patch.object(
+                gate, "step_summary_size", side_effect=capture_boundary
+            ):
+                gate._append_authoritative_step_text(step_summary, "complete\n")
+
+            self.assertEqual(1, len(captured))
+            self.assertTrue(captured[0].path_boundary.closed)
+            for binding in captured[0].path_boundary.directories:
+                with self.assertRaises(OSError):
+                    os.fstat(binding.descriptor)
+
+    def test_step_summary_rejects_overlong_path_before_filesystem_walk(self):
+        component = "x" * 240
+        path = pathlib.Path("/").joinpath(*([component] * 18), "summary.md")
+
+        with self.assertRaises(gate.InfrastructureFailure):
+            gate.step_summary_size(path)
+
+    def test_step_summary_rejects_excessive_component_count(self):
+        path = pathlib.Path("/").joinpath(
+            *(["x"] * gate.MAX_STEP_SUMMARY_PATH_COMPONENTS),
+            "summary.md",
+        )
+
+        with self.assertRaises(gate.InfrastructureFailure):
+            gate.step_summary_size(path)
+
+    def test_directory_chain_preparation_closes_fd_when_fstat_fails(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory).resolve()
+            parent = root / "fstat-failure-parent"
+            parent.mkdir()
+            step_summary = parent / "step-summary.md"
+            original_open = gate.os.open
+            original_fstat = gate.os.fstat
+            opened_descriptors = []
+            failing_descriptor = []
+
+            def track_open(path, flags, mode=0o777, **kwargs):
+                descriptor = original_open(path, flags, mode, **kwargs)
+                opened_descriptors.append(descriptor)
+                if path == parent.name:
+                    failing_descriptor.append(descriptor)
+                return descriptor
+
+            def fail_selected_fstat(descriptor):
+                if failing_descriptor and descriptor == failing_descriptor[0]:
+                    raise OSError("injected fstat failure")
+                return original_fstat(descriptor)
+
+            with mock.patch.object(
+                gate.os, "open", side_effect=track_open
+            ), mock.patch.object(
+                gate.os, "fstat", side_effect=fail_selected_fstat
+            ), self.assertRaises(
+                gate.InfrastructureFailure
+            ):
+                gate.step_summary_size(step_summary)
+
+            self.assertTrue(failing_descriptor)
+            for descriptor in opened_descriptors:
+                with self.assertRaises(OSError):
+                    original_fstat(descriptor)
+
     def test_invalidation_disables_exact_inode_when_truncate_fails(self):
         with tempfile.TemporaryDirectory() as directory:
             step_summary = pathlib.Path(directory) / "step-summary.md"
@@ -2355,8 +2430,8 @@ class FinalManifestTests(unittest.TestCase):
             def collect(script, collector_config, env, **kwargs):
                 write_test_manifest(collector_config.artifacts)
 
-            def swap_after_size(path):
-                size = original_size(path)
+            def swap_after_size(path, **kwargs):
+                size = original_size(path, **kwargs)
                 path.unlink()
                 path.symlink_to(target)
                 return size
@@ -2402,8 +2477,8 @@ class FinalManifestTests(unittest.TestCase):
             def collect(script, collector_config, env, **kwargs):
                 write_test_manifest(collector_config.artifacts)
 
-            def swap_after_size(path):
-                boundary = original_size(path)
+            def swap_after_size(path, **kwargs):
+                boundary = original_size(path, **kwargs)
                 path.unlink()
                 os.link(str(target), str(path))
                 return boundary
@@ -2454,8 +2529,8 @@ class FinalManifestTests(unittest.TestCase):
             def collect(script, collector_config, env, **kwargs):
                 write_test_manifest(collector_config.artifacts)
 
-            def replace_parent_with_symlink(path):
-                boundary = original_size(path)
+            def replace_parent_with_symlink(path, **kwargs):
+                boundary = original_size(path, **kwargs)
                 parent.rename(original_parent)
                 parent.symlink_to(target_parent, target_is_directory=True)
                 return boundary
@@ -2503,8 +2578,8 @@ class FinalManifestTests(unittest.TestCase):
             def collect(script, collector_config, env, **kwargs):
                 write_test_manifest(collector_config.artifacts)
 
-            def replace_parent_with_directory(path):
-                boundary = original_size(path)
+            def replace_parent_with_directory(path, **kwargs):
+                boundary = original_size(path, **kwargs)
                 parent.rename(original_parent)
                 parent.mkdir()
                 (parent / step_summary.name).write_text(
@@ -2549,6 +2624,251 @@ class FinalManifestTests(unittest.TestCase):
                 ),
             )
             self.assertTrue((original_parent / step_summary.name).is_file())
+            self.assert_minimal_recovered_upload(
+                config.artifacts, "step summary write failed"
+            )
+
+    def test_step_summary_grandparent_symlink_swap_never_touches_target(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            grandparent = root / "runner"
+            parent = grandparent / "commands"
+            parent.mkdir(parents=True)
+            step_summary = parent / "github-step-summary.md"
+            step_summary.touch()
+            original_grandparent = root / "original-runner"
+            target_grandparent = root / "target-runner"
+            target_parent = target_grandparent / "commands"
+            target_parent.mkdir(parents=True)
+            target_summary = target_parent / step_summary.name
+            target_summary.write_text("sentinel\n", encoding="utf-8")
+            config = gate.Config(
+                root / "source", root / "artifacts", "merge", "LingquLab/TileXR", 42
+            )
+            original_size = gate.step_summary_size
+
+            def collect(script, collector_config, env, **kwargs):
+                write_test_manifest(collector_config.artifacts)
+
+            def replace_grandparent_with_symlink(path, **kwargs):
+                boundary = original_size(path, **kwargs)
+                grandparent.rename(original_grandparent)
+                grandparent.symlink_to(target_grandparent, target_is_directory=True)
+                return boundary
+
+            with mock.patch.object(
+                gate, "orchestrate", side_effect=self.passing_orchestration
+            ), mock.patch.object(gate, "verify_final_cleanup"), mock.patch.object(
+                gate, "invoke_collector", side_effect=collect
+            ), mock.patch.object(
+                gate,
+                "step_summary_size",
+                side_effect=replace_grandparent_with_symlink,
+            ), mock.patch.object(
+                gate.sys, "stderr", io.StringIO()
+            ):
+                result = gate._run_controller_body(
+                    config,
+                    {
+                        "TILEXR_CI_GITHUB_TOKEN": "token",
+                        "GITHUB_STEP_SUMMARY": str(step_summary),
+                    },
+                    root / "trusted",
+                    gate.CancellationState(),
+                )
+
+            self.assertEqual(23, result)
+            self.assertFalse(os.path.lexists(str(grandparent)))
+            self.assertEqual("sentinel\n", target_summary.read_text(encoding="utf-8"))
+            self.assertEqual(
+                "",
+                (original_grandparent / "commands" / step_summary.name).read_text(
+                    encoding="utf-8"
+                ),
+            )
+            self.assert_minimal_recovered_upload(
+                config.artifacts, "step summary write failed"
+            )
+
+    def test_step_summary_canonical_path_is_captured_before_orchestration(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory).resolve()
+            trusted_ancestor = root / "trusted-runner"
+            trusted_parent = trusted_ancestor / "commands"
+            trusted_parent.mkdir(parents=True)
+            trusted_summary = trusted_parent / "github-step-summary.md"
+            trusted_summary.touch()
+            target_ancestor = root / "target-runner"
+            target_parent = target_ancestor / "commands"
+            target_parent.mkdir(parents=True)
+            target_summary = target_parent / trusted_summary.name
+            target_summary.write_text("sentinel\n", encoding="utf-8")
+            visible_ancestor = root / "visible-runner"
+            visible_ancestor.symlink_to(trusted_ancestor, target_is_directory=True)
+            visible_summary = visible_ancestor / "commands" / trusted_summary.name
+            config = gate.Config(
+                root / "source", root / "artifacts", "merge", "LingquLab/TileXR", 42
+            )
+
+            def orchestrate_after_alias_swap(controller_config, **kwargs):
+                visible_ancestor.unlink()
+                visible_ancestor.symlink_to(
+                    target_ancestor, target_is_directory=True
+                )
+                self.passing_orchestration(controller_config, **kwargs)
+
+            def collect(script, collector_config, env, **kwargs):
+                write_test_manifest(collector_config.artifacts)
+
+            with mock.patch.object(
+                gate, "orchestrate", side_effect=orchestrate_after_alias_swap
+            ), mock.patch.object(gate, "verify_final_cleanup"), mock.patch.object(
+                gate, "invoke_collector", side_effect=collect
+            ), mock.patch.object(
+                gate.sys, "stderr", io.StringIO()
+            ):
+                result = gate._run_controller_body(
+                    config,
+                    {
+                        "TILEXR_CI_GITHUB_TOKEN": "token",
+                        "GITHUB_STEP_SUMMARY": str(visible_summary),
+                    },
+                    root / "trusted",
+                    gate.CancellationState(),
+                )
+
+            self.assertEqual(0, result)
+            self.assertEqual("sentinel\n", target_summary.read_text(encoding="utf-8"))
+            self.assertIn(
+                "Authoritative final gate result",
+                trusted_summary.read_text(encoding="utf-8"),
+            )
+            self.assertTrue(visible_ancestor.is_symlink())
+
+    def test_controller_closes_step_summary_directory_chain(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory).resolve()
+            step_summary = root / "commands" / "github-step-summary.md"
+            step_summary.parent.mkdir()
+            step_summary.touch()
+            config = gate.Config(
+                root / "source", root / "artifacts", "merge", "LingquLab/TileXR", 42
+            )
+            captured = []
+            original_size = gate.step_summary_size
+
+            def capture_boundary(path, **kwargs):
+                boundary = original_size(path, **kwargs)
+                captured.append(boundary)
+                return boundary
+
+            def collect(script, collector_config, env, **kwargs):
+                write_test_manifest(collector_config.artifacts)
+
+            with mock.patch.object(
+                gate, "orchestrate", side_effect=self.passing_orchestration
+            ), mock.patch.object(gate, "verify_final_cleanup"), mock.patch.object(
+                gate, "invoke_collector", side_effect=collect
+            ), mock.patch.object(
+                gate, "step_summary_size", side_effect=capture_boundary
+            ), mock.patch.object(
+                gate.sys, "stderr", io.StringIO()
+            ):
+                result = gate._run_controller_body(
+                    config,
+                    {
+                        "TILEXR_CI_GITHUB_TOKEN": "token",
+                        "GITHUB_STEP_SUMMARY": str(step_summary),
+                    },
+                    root / "trusted",
+                    gate.CancellationState(),
+                )
+
+            self.assertEqual(0, result)
+            self.assertEqual(1, len(captured))
+            self.assertTrue(captured[0].path_boundary.closed)
+            for binding in captured[0].path_boundary.directories:
+                with self.assertRaises(OSError):
+                    os.fstat(binding.descriptor)
+
+    def test_step_summary_earlier_ancestor_directory_swap_is_quarantined(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            ancestor = root / "visible"
+            parent = ancestor / "runner" / "commands"
+            parent.mkdir(parents=True)
+            step_summary = parent / "github-step-summary.md"
+            step_summary.touch()
+            original_ancestor = root / "original-visible"
+            config = gate.Config(
+                root / "source", root / "artifacts", "merge", "LingquLab/TileXR", 42
+            )
+            original_size = gate.step_summary_size
+
+            def collect(script, collector_config, env, **kwargs):
+                write_test_manifest(collector_config.artifacts)
+
+            def replace_ancestor_with_directory(path, **kwargs):
+                boundary = original_size(path, **kwargs)
+                ancestor.rename(original_ancestor)
+                replacement_parent = ancestor / "runner" / "commands"
+                replacement_parent.mkdir(parents=True)
+                (replacement_parent / step_summary.name).write_text(
+                    "sentinel\n", encoding="utf-8"
+                )
+                (ancestor / "marker").write_text("untouched\n", encoding="utf-8")
+                return boundary
+
+            with mock.patch.object(
+                gate, "orchestrate", side_effect=self.passing_orchestration
+            ), mock.patch.object(gate, "verify_final_cleanup"), mock.patch.object(
+                gate, "invoke_collector", side_effect=collect
+            ), mock.patch.object(
+                gate,
+                "step_summary_size",
+                side_effect=replace_ancestor_with_directory,
+            ), mock.patch.object(
+                gate.sys, "stderr", io.StringIO()
+            ):
+                result = gate._run_controller_body(
+                    config,
+                    {
+                        "TILEXR_CI_GITHUB_TOKEN": "token",
+                        "GITHUB_STEP_SUMMARY": str(step_summary),
+                    },
+                    root / "trusted",
+                    gate.CancellationState(),
+                )
+
+            self.assertEqual(23, result)
+            self.assertFalse(os.path.lexists(str(ancestor)))
+            quarantines = list(root.glob(".tilexr-step-summary-ancestor-quarantine-*"))
+            self.assertEqual(1, len(quarantines))
+            self.assertEqual(
+                "sentinel\n",
+                (
+                    quarantines[0]
+                    / "entry"
+                    / "runner"
+                    / "commands"
+                    / step_summary.name
+                ).read_text(encoding="utf-8"),
+            )
+            self.assertEqual(
+                "untouched\n",
+                (quarantines[0] / "entry" / "marker").read_text(
+                    encoding="utf-8"
+                ),
+            )
+            self.assertEqual(
+                "",
+                (
+                    original_ancestor
+                    / "runner"
+                    / "commands"
+                    / step_summary.name
+                ).read_text(encoding="utf-8"),
+            )
             self.assert_minimal_recovered_upload(
                 config.artifacts, "step summary write failed"
             )
