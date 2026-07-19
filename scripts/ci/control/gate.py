@@ -2832,6 +2832,50 @@ def _signal_cancellation(cancellation: CancellationState):
             signal.signal(signum, handler)
 
 
+@dataclasses.dataclass
+class ControllerStepSummaryPreparation:
+    path: Optional[pathlib.Path] = None
+    boundary: Optional[StepSummaryBoundary] = None
+    failure: Optional[BaseException] = None
+    failed_path_boundary: Optional[StepSummaryPathBoundary] = None
+    closed: bool = False
+
+    def close(self) -> None:
+        if self.closed:
+            return
+        self.closed = True
+        path_boundary = (
+            self.boundary.path_boundary
+            if self.boundary is not None
+            else self.failed_path_boundary
+        )
+        if path_boundary is not None:
+            path_boundary.close()
+
+
+def _prepare_controller_step_summary(
+    environ: Mapping[str, str],
+) -> ControllerStepSummaryPreparation:
+    preparation = ControllerStepSummaryPreparation()
+    step_summary_path = environ.get("GITHUB_STEP_SUMMARY")
+    if not step_summary_path:
+        return preparation
+    try:
+        preparation.path = _capture_step_summary_path(
+            pathlib.Path(step_summary_path)
+        )
+        preparation.boundary = step_summary_size(
+            preparation.path,
+            canonical_path=True,
+        )
+    except BaseException as error:
+        preparation.failure = error
+        preparation.failed_path_boundary = getattr(
+            error, "step_summary_path_boundary", None
+        )
+    return preparation
+
+
 def _run_controller_body(
     config: Config,
     environ: Mapping[str, str],
@@ -2840,17 +2884,33 @@ def _run_controller_body(
     *,
     now: Callable[[], float] = time.monotonic,
 ) -> int:
+    step_summary = _prepare_controller_step_summary(environ)
+    try:
+        return _run_prepared_controller_body(
+            config,
+            environ,
+            control_dir,
+            cancellation,
+            step_summary,
+            now=now,
+        )
+    finally:
+        step_summary.close()
+
+
+def _run_prepared_controller_body(
+    config: Config,
+    environ: Mapping[str, str],
+    control_dir: pathlib.Path,
+    cancellation: CancellationState,
+    step_summary: ControllerStepSummaryPreparation,
+    *,
+    now: Callable[[], float] = time.monotonic,
+) -> int:
     token = environ.get("TILEXR_CI_GITHUB_TOKEN", "")
-    step_summary_path = environ.get("GITHUB_STEP_SUMMARY")
-    step_path = None
-    step_path_capture_failure = None
-    if step_summary_path:
-        try:
-            step_path = _capture_step_summary_path(
-                pathlib.Path(step_summary_path)
-            )
-        except BaseException as error:
-            step_path_capture_failure = _as_gate_failure(error)
+    step_path = step_summary.path
+    step_summary_boundary = step_summary.boundary
+    step_summary_preparation_failure = step_summary.failure
     report = initial_report(config, environ)
     failure = None
     cancellation_accounted = False
@@ -2860,8 +2920,8 @@ def _run_controller_body(
     try:
         config.artifacts.mkdir(parents=True, exist_ok=True)
         seed_empty_case_evidence(config.artifacts / "cases.tsv")
-        if step_path_capture_failure is not None:
-            raise step_path_capture_failure
+        if step_summary_preparation_failure is not None:
+            raise step_summary_preparation_failure
         if not token:
             raise InfrastructureFailure("TILEXR_CI_GITHUB_TOKEN is required")
         orchestrate(
@@ -3106,13 +3166,9 @@ def _run_controller_body(
                     file=sys.stderr,
                 )
 
-        try:
-            step_summary_boundary = step_summary_size(
-                step_path, canonical_path=True
-            )
-        except BaseException as error:
-            failed_path_boundary = getattr(
-                error, "step_summary_path_boundary", None
+        if step_summary_boundary is None:
+            error = step_summary_preparation_failure or InfrastructureFailure(
+                "GitHub step summary preparation produced no boundary"
             )
             changed = update_report(
                 _collector_failure(
@@ -3125,13 +3181,9 @@ def _run_controller_body(
             neutralize_controller_step_summary(
                 None,
                 "authoritative GitHub step summary preparation neutralization failed",
-                failed_path_boundary,
+                step_summary.failed_path_boundary,
             )
-            if failed_path_boundary is not None:
-                failed_path_boundary.close()
-            step_summary_boundary = None
 
-        if step_summary_boundary is None:
             return 0 if failure is None else exit_code_for(failure)
 
         def invalidate_corrupted_controller_step_summary() -> bool:
@@ -3281,8 +3333,6 @@ def _run_controller_body(
                         continue
                     emit_terminal_step_summary()
             break
-
-        step_summary_boundary.path_boundary.close()
 
     return 0 if failure is None else exit_code_for(failure)
 

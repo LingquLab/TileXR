@@ -2745,6 +2745,78 @@ class FinalManifestTests(unittest.TestCase):
             )
             self.assertTrue(visible_ancestor.is_symlink())
 
+    def test_step_summary_chain_is_pinned_before_orchestration(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory).resolve()
+            ancestor = root / "runner"
+            parent = ancestor / "commands"
+            parent.mkdir(parents=True)
+            step_summary = parent / "github-step-summary.md"
+            step_summary.touch()
+            original_ancestor = root / "original-runner"
+            config = gate.Config(
+                root / "source", root / "artifacts", "merge", "LingquLab/TileXR", 42
+            )
+
+            def orchestrate_after_ancestor_swap(controller_config, **kwargs):
+                ancestor.rename(original_ancestor)
+                replacement_parent = ancestor / "commands"
+                replacement_parent.mkdir(parents=True)
+                (replacement_parent / step_summary.name).write_text(
+                    "sentinel\n", encoding="utf-8"
+                )
+                (ancestor / "marker").write_text("untouched\n", encoding="utf-8")
+                self.passing_orchestration(controller_config, **kwargs)
+
+            def collect(script, collector_config, env, **kwargs):
+                write_test_manifest(collector_config.artifacts)
+
+            with mock.patch.object(
+                gate, "orchestrate", side_effect=orchestrate_after_ancestor_swap
+            ), mock.patch.object(gate, "verify_final_cleanup"), mock.patch.object(
+                gate, "invoke_collector", side_effect=collect
+            ), mock.patch.object(
+                gate.sys, "stderr", io.StringIO()
+            ):
+                result = gate._run_controller_body(
+                    config,
+                    {
+                        "TILEXR_CI_GITHUB_TOKEN": "token",
+                        "GITHUB_STEP_SUMMARY": str(step_summary),
+                    },
+                    root / "trusted",
+                    gate.CancellationState(),
+                )
+
+            self.assertEqual(23, result)
+            self.assertFalse(os.path.lexists(str(ancestor)))
+            quarantines = list(root.glob(".tilexr-step-summary-ancestor-quarantine-*"))
+            self.assertEqual(1, len(quarantines))
+            self.assertEqual(
+                "sentinel\n",
+                (
+                    quarantines[0]
+                    / "entry"
+                    / "commands"
+                    / step_summary.name
+                ).read_text(encoding="utf-8"),
+            )
+            self.assertEqual(
+                "untouched\n",
+                (quarantines[0] / "entry" / "marker").read_text(
+                    encoding="utf-8"
+                ),
+            )
+            self.assertEqual(
+                "",
+                (original_ancestor / "commands" / step_summary.name).read_text(
+                    encoding="utf-8"
+                ),
+            )
+            self.assert_minimal_recovered_upload(
+                config.artifacts, "step summary write failed"
+            )
+
     def test_controller_closes_step_summary_directory_chain(self):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory).resolve()
