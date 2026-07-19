@@ -35,6 +35,7 @@ QUEUE_STABLE_SAMPLES = 2
 FINAL_ARTIFACT_TIMEOUT_SECONDS = 30.0
 MAX_FINAL_ARTIFACT_ENTRIES = 10000
 MAX_FINAL_ARTIFACT_BYTES = 100 * 1024 * 1024
+MAX_AUTHORITATIVE_STEP_SUMMARY_BYTES = 64 * 1024
 LOCK_PATH = pathlib.Path("/home/tilexr-ci/locks/npu8.lock")
 CONTROL_DIR = pathlib.Path(__file__).resolve().parent
 
@@ -1199,6 +1200,41 @@ def write_summary(report: GateReport, artifacts: pathlib.Path, step_summary: Opt
         raise InfrastructureFailure("could not write gate summary: %s" % error) from error
 
 
+def append_authoritative_step_summary(
+    path: pathlib.Path, report: GateReport, artifacts: pathlib.Path
+) -> None:
+    uploaded_summary = "Uploaded artifact summary unavailable."
+    summary_path = artifacts / "summary.md"
+    try:
+        summary_status = os.lstat(str(summary_path))
+        if (
+            stat.S_ISREG(summary_status.st_mode)
+            and summary_status.st_size <= MAX_AUTHORITATIVE_STEP_SUMMARY_BYTES
+        ):
+            uploaded_summary = summary_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        pass
+
+    detail = report.failure_detail or "none"
+    if len(detail) > 8192:
+        detail = detail[:8176] + " ... [truncated]"
+    text = (
+        "## Authoritative final gate result\n\n"
+        "- Failure class: %s\n"
+        "- Failure detail: %s\n\n"
+        "%s\n"
+        % (report.failure_class, detail, uploaded_summary)
+    )
+    try:
+        with path.open("a", encoding="utf-8") as step_summary:
+            step_summary.write(text)
+            step_summary.flush()
+    except OSError as error:
+        raise InfrastructureFailure(
+            "could not append authoritative GitHub step summary: %s" % error
+        ) from error
+
+
 def _path_has_control_characters(path: str) -> bool:
     return any(ord(character) < 32 or ord(character) == 127 for character in path)
 
@@ -1912,16 +1948,6 @@ def _run_controller_body(
             report.failure_detail = str(failure)
         cancellation_accounted = True
 
-    if step_summary_path:
-        try:
-            with pathlib.Path(step_summary_path).open("a", encoding="utf-8") as step_summary:
-                write_summary(report, config.artifacts, step_summary=step_summary)
-        except BaseException as error:
-            if failure is None:
-                failure = _as_gate_failure(error)
-                report.failure_class = failure_class_for(failure)
-                report.failure_detail = str(failure)
-
     if cancellation.cancelled:
         if not isinstance(failure, Cancelled):
             selected = select_final_failure(
@@ -1988,7 +2014,7 @@ def _run_controller_body(
                     return False
         return False
 
-    def account_new_cancellation(detail: str) -> None:
+    def account_new_cancellation(detail: str) -> bool:
         nonlocal cancellation_accounted
         prior = failure
         if prior is not None and not isinstance(prior, Cancelled):
@@ -1997,20 +2023,20 @@ def _run_controller_body(
                 failure_class_for(prior),
                 prior,
             )
-        update_report(Cancelled(detail))
+        changed = update_report(Cancelled(detail))
         cancellation_accounted = True
+        return changed
 
-    if not write_final_summary():
-        return 0 if failure is None else exit_code_for(failure)
-
+    artifact_finalization_terminal = not write_final_summary()
     refresh_attempt = 0
-    while refresh_attempt < 2:
+    while not artifact_finalization_terminal and refresh_attempt < 2:
         if cancellation.cancelled and not cancellation_accounted:
             account_new_cancellation(
                 "gate was cancelled before final artifact manifest refresh"
             )
             if not write_final_summary():
-                return exit_code_for(failure)
+                artifact_finalization_terminal = True
+                break
 
         refresh_attempt += 1
         failure_changed = False
@@ -2040,11 +2066,14 @@ def _run_controller_body(
                 )
             if refresh_attempt == 2:
                 if failure_changed and not write_final_summary():
+                    artifact_finalization_terminal = True
                     break
                 recover_terminal_evidence()
+                artifact_finalization_terminal = True
                 break
             if not write_final_summary():
-                return exit_code_for(failure)
+                artifact_finalization_terminal = True
+                break
             continue
 
         # A signal can arrive after the refresh's last checkpoint but before it
@@ -2055,12 +2084,47 @@ def _run_controller_body(
                 "gate was cancelled after final artifact manifest refresh"
             )
             if not write_final_summary():
-                return exit_code_for(failure)
+                artifact_finalization_terminal = True
+                break
             if refresh_attempt == 2:
                 recover_terminal_evidence()
+                artifact_finalization_terminal = True
                 break
             continue
         break
+
+    if step_summary_path:
+        step_path = pathlib.Path(step_summary_path)
+        for step_attempt in range(2):
+            try:
+                append_authoritative_step_summary(step_path, report, config.artifacts)
+            except BaseException as error:
+                changed = update_report(
+                    _collector_failure(
+                        "authoritative GitHub step summary write failed: %s"
+                        % _as_gate_failure(error)
+                    )
+                )
+                if changed:
+                    recover_terminal_evidence()
+                if step_attempt == 1:
+                    print(
+                        "ERROR: could not emit authoritative GitHub step summary: %s"
+                        % _as_gate_failure(error),
+                        file=sys.stderr,
+                    )
+                    break
+                continue
+
+            if cancellation.cancelled and not cancellation_accounted:
+                changed = account_new_cancellation(
+                    "gate was cancelled during authoritative step summary emission"
+                )
+                if changed:
+                    recover_terminal_evidence()
+                    if step_attempt == 0:
+                        continue
+            break
 
     return 0 if failure is None else exit_code_for(failure)
 

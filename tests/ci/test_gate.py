@@ -968,21 +968,30 @@ class CancellationTests(unittest.TestCase):
             config = gate.Config(
                 root / "source", root / "artifacts", "merge", "LingquLab/TileXR", 42
             )
-            writes = []
+            appends = []
+            original_append = gate.append_authoritative_step_summary
 
-            def write_summary(*args, **kwargs):
-                writes.append(kwargs.get("step_summary"))
-                if kwargs.get("step_summary") is not None:
+            def orchestrate(config, **kwargs):
+                (config.artifacts / "cases.tsv").write_text(
+                    "required checks\tPASS\t0\t1\n", encoding="utf-8"
+                )
+
+            def append(*args, **kwargs):
+                result = original_append(*args, **kwargs)
+                appends.append(True)
+                if len(appends) == 1:
                     cancellation.cancel()
-                return "summary"
+                return result
 
             def collect(script, collector_config, env, **kwargs):
                 write_test_manifest(collector_config.artifacts)
 
-            with mock.patch.object(gate, "orchestrate"), \
+            with mock.patch.object(gate, "orchestrate", side_effect=orchestrate), \
                  mock.patch.object(gate, "verify_final_cleanup"), \
                  mock.patch.object(gate, "invoke_collector", side_effect=collect), \
-                 mock.patch.object(gate, "write_summary", side_effect=write_summary):
+                 mock.patch.object(
+                     gate, "append_authoritative_step_summary", side_effect=append
+                 ):
                 result = gate._run_controller_body(
                     config,
                     {
@@ -994,7 +1003,7 @@ class CancellationTests(unittest.TestCase):
                 )
 
         self.assertEqual(result, 130)
-        self.assertGreaterEqual(len(writes), 3)
+        self.assertEqual(2, len(appends))
 
     def test_early_obsolete_run_keeps_class_when_collector_requires_cases(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1847,6 +1856,138 @@ class FinalManifestTests(unittest.TestCase):
             self.assertEqual(2, refresh.call_count)
             self.assert_minimal_recovered_upload(
                 config.artifacts, "manifest deadline exceeded"
+            )
+
+    def test_persistent_manifest_failure_emits_authoritative_step_summary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            step_summary = root / "github-step-summary.md"
+            step_summary.touch()
+            config = gate.Config(
+                root / "source", root / "artifacts", "merge", "LingquLab/TileXR", 42
+            )
+
+            def collect(script, collector_config, env, **kwargs):
+                write_test_manifest(collector_config.artifacts)
+
+            refresh = mock.Mock(
+                side_effect=gate.InfrastructureFailure("persistent manifest failure")
+            )
+            with mock.patch.object(
+                gate, "orchestrate", side_effect=self.passing_orchestration
+            ), mock.patch.object(gate, "verify_final_cleanup"), mock.patch.object(
+                gate, "invoke_collector", side_effect=collect
+            ), mock.patch.object(gate, "refresh_final_manifest", refresh):
+                result = gate._run_controller_body(
+                    config,
+                    {
+                        "TILEXR_CI_GITHUB_TOKEN": "token",
+                        "GITHUB_STEP_SUMMARY": str(step_summary),
+                    },
+                    root / "trusted",
+                    gate.CancellationState(),
+                )
+
+            self.assertEqual(23, result)
+            self.assertEqual(2, refresh.call_count)
+            visible = step_summary.read_text(encoding="utf-8")
+            self.assertIn("Authoritative final gate result", visible)
+            self.assertIn("runner-or-toolchain-failure", visible)
+            self.assertIn("persistent manifest failure", visible)
+            final = visible.rsplit("Authoritative final gate result", 1)[1]
+            self.assertNotIn("Failure class: none", final)
+            self.assert_minimal_recovered_upload(
+                config.artifacts, "persistent manifest failure"
+            )
+
+    def test_step_summary_late_cancellation_appends_authoritative_correction(self):
+        cancellation = gate.CancellationState()
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            step_summary = root / "github-step-summary.md"
+            step_summary.touch()
+            config = gate.Config(
+                root / "source", root / "artifacts", "merge", "LingquLab/TileXR", 42
+            )
+            original_append = gate.append_authoritative_step_summary
+            appends = []
+
+            def collect(script, collector_config, env, **kwargs):
+                write_test_manifest(collector_config.artifacts)
+
+            def cancel_after_append(*args, **kwargs):
+                result = original_append(*args, **kwargs)
+                appends.append(True)
+                if len(appends) == 1:
+                    cancellation.cancel()
+                return result
+
+            with mock.patch.object(
+                gate, "orchestrate", side_effect=self.passing_orchestration
+            ), mock.patch.object(gate, "verify_final_cleanup"), mock.patch.object(
+                gate, "invoke_collector", side_effect=collect
+            ), mock.patch.object(
+                gate,
+                "append_authoritative_step_summary",
+                side_effect=cancel_after_append,
+            ):
+                result = gate._run_controller_body(
+                    config,
+                    {
+                        "TILEXR_CI_GITHUB_TOKEN": "token",
+                        "GITHUB_STEP_SUMMARY": str(step_summary),
+                    },
+                    root / "trusted",
+                    cancellation,
+                )
+
+            self.assertEqual(130, result)
+            self.assertEqual(2, len(appends))
+            visible = step_summary.read_text(encoding="utf-8")
+            self.assertEqual(2, visible.count("Authoritative final gate result"))
+            final = visible.rsplit("Authoritative final gate result", 1)[1]
+            self.assertIn("cancelled-or-obsolete", final)
+            self.assert_minimal_recovered_upload(config.artifacts, "cancelled")
+
+    def test_persistent_step_summary_failure_recovers_artifact_evidence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            step_summary = root / "github-step-summary.md"
+            step_summary.touch()
+            config = gate.Config(
+                root / "source", root / "artifacts", "merge", "LingquLab/TileXR", 42
+            )
+
+            def collect(script, collector_config, env, **kwargs):
+                write_test_manifest(collector_config.artifacts)
+
+            append = mock.Mock(
+                side_effect=gate.InfrastructureFailure("step summary write failed")
+            )
+            with mock.patch.object(
+                gate, "orchestrate", side_effect=self.passing_orchestration
+            ), mock.patch.object(gate, "verify_final_cleanup"), mock.patch.object(
+                gate, "invoke_collector", side_effect=collect
+            ), mock.patch.object(
+                gate, "append_authoritative_step_summary", append
+            ), mock.patch.object(
+                gate.sys, "stderr", io.StringIO()
+            ):
+                result = gate._run_controller_body(
+                    config,
+                    {
+                        "TILEXR_CI_GITHUB_TOKEN": "token",
+                        "GITHUB_STEP_SUMMARY": str(step_summary),
+                    },
+                    root / "trusted",
+                    gate.CancellationState(),
+                )
+
+            self.assertEqual(23, result)
+            self.assertEqual(2, append.call_count)
+            self.assertEqual("", step_summary.read_text(encoding="utf-8"))
+            self.assert_minimal_recovered_upload(
+                config.artifacts, "step summary write failed"
             )
 
     def test_transient_final_summary_failure_is_retried_and_manifested(self):
