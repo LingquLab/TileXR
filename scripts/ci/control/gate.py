@@ -36,6 +36,7 @@ FINAL_ARTIFACT_TIMEOUT_SECONDS = 30.0
 MAX_FINAL_ARTIFACT_ENTRIES = 10000
 MAX_FINAL_ARTIFACT_BYTES = 100 * 1024 * 1024
 MAX_AUTHORITATIVE_STEP_SUMMARY_BYTES = 64 * 1024
+MAX_STEP_SUMMARY_APPEND_BYTES = 128 * 1024
 LOCK_PATH = pathlib.Path("/home/tilexr-ci/locks/npu8.lock")
 CONTROL_DIR = pathlib.Path(__file__).resolve().parent
 
@@ -1227,15 +1228,91 @@ def _authoritative_step_summary_text(
     )
 
 
+def _verify_step_summary_identity(path: pathlib.Path, descriptor: int):
+    try:
+        opened_status = os.fstat(descriptor)
+        path_status = os.lstat(str(path))
+    except OSError as error:
+        raise InfrastructureFailure(
+            "could not verify GitHub step summary identity: %s" % error
+        ) from error
+    if not stat.S_ISREG(opened_status.st_mode) or not stat.S_ISREG(
+        path_status.st_mode
+    ):
+        raise InfrastructureFailure("GitHub step summary is not a regular file")
+    if (path_status.st_dev, path_status.st_ino) != (
+        opened_status.st_dev,
+        opened_status.st_ino,
+    ):
+        raise InfrastructureFailure("GitHub step summary changed while open")
+    return opened_status
+
+
+def _open_regular_step_summary(
+    path: pathlib.Path, flags: int, *, create: bool = False
+) -> int:
+    for flag_name in ("O_NOFOLLOW", "O_NONBLOCK", "O_CLOEXEC"):
+        flag = getattr(os, flag_name, None)
+        if flag is None:
+            raise InfrastructureFailure(
+                "platform lacks safe GitHub step summary flag %s" % flag_name
+            )
+        flags |= flag
+    if create:
+        # Shell redirection to GITHUB_STEP_SUMMARY has create-if-absent semantics.
+        flags |= os.O_CREAT
+
+    try:
+        descriptor = os.open(str(path), flags, 0o600)
+    except OSError as error:
+        raise InfrastructureFailure(
+            "could not safely open GitHub step summary: %s" % error
+        ) from error
+    try:
+        _verify_step_summary_identity(path, descriptor)
+    except BaseException:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        raise
+    return descriptor
+
+
 def _append_authoritative_step_text(path: pathlib.Path, text: str) -> None:
     try:
-        with path.open("a", encoding="utf-8") as step_summary:
-            step_summary.write(text)
-            step_summary.flush()
+        encoded = text.encode("utf-8")
+    except UnicodeError as error:
+        raise InfrastructureFailure(
+            "could not encode authoritative GitHub step summary: %s" % error
+        ) from error
+    if len(encoded) > MAX_STEP_SUMMARY_APPEND_BYTES:
+        raise InfrastructureFailure(
+            "authoritative GitHub step summary exceeds %d encoded bytes"
+            % MAX_STEP_SUMMARY_APPEND_BYTES
+        )
+
+    descriptor = _open_regular_step_summary(
+        path, os.O_WRONLY | os.O_APPEND, create=True
+    )
+    try:
+        offset = 0
+        view = memoryview(encoded)
+        while offset < len(encoded):
+            written = os.write(descriptor, view[offset:])
+            if written <= 0:
+                raise InfrastructureFailure(
+                    "authoritative GitHub step summary write made no progress"
+                )
+            offset += written
+        os.fsync(descriptor)
+        _verify_step_summary_identity(path, descriptor)
     except OSError as error:
         raise InfrastructureFailure(
             "could not append authoritative GitHub step summary: %s" % error
         ) from error
+    finally:
+        os.close(descriptor)
 
 
 def append_authoritative_step_summary(
@@ -1263,36 +1340,22 @@ def step_summary_size(path: pathlib.Path) -> int:
 
 
 def rollback_step_summary(path: pathlib.Path, size: int) -> None:
-    descriptor = -1
-    flags = os.O_WRONLY
-    if hasattr(os, "O_CLOEXEC"):
-        flags |= os.O_CLOEXEC
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
+    descriptor = _open_regular_step_summary(path, os.O_WRONLY)
     try:
-        descriptor = os.open(str(path), flags)
-        path_status = os.lstat(str(path))
         opened_status = os.fstat(descriptor)
-        if not stat.S_ISREG(path_status.st_mode) or (
-            path_status.st_dev,
-            path_status.st_ino,
-        ) != (opened_status.st_dev, opened_status.st_ino):
-            raise InfrastructureFailure(
-                "GitHub step summary changed during rollback"
-            )
         if opened_status.st_size < size:
             raise InfrastructureFailure(
                 "GitHub step summary shrank before rollback"
             )
         os.ftruncate(descriptor, size)
         os.fsync(descriptor)
+        _verify_step_summary_identity(path, descriptor)
     except OSError as error:
         raise InfrastructureFailure(
             "could not roll back GitHub step summary: %s" % error
         ) from error
     finally:
-        if descriptor >= 0:
-            os.close(descriptor)
+        os.close(descriptor)
 
 
 def _path_has_control_characters(path: str) -> bool:
@@ -2168,9 +2231,10 @@ def _run_controller_body(
                 recover_terminal_evidence()
             step_summary_prefix_size = None
 
+        if step_summary_prefix_size is None:
+            return 0 if failure is None else exit_code_for(failure)
+
         def roll_back_controller_step_summary() -> bool:
-            if step_summary_prefix_size is None:
-                return False
             try:
                 rollback_step_summary(step_path, step_summary_prefix_size)
                 return True

@@ -1315,6 +1315,86 @@ class SummaryTests(unittest.TestCase):
             self.assertIn("Multi-host validation: out of scope for this gate", text)
 
 
+class StepSummarySafetyTests(unittest.TestCase):
+    def test_append_creates_missing_regular_file_and_completes_short_writes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            step_summary = pathlib.Path(directory) / "step-summary.md"
+            original_write = gate.os.write
+            writes = []
+
+            def short_write(descriptor, data):
+                chunk = data[:3]
+                writes.append(len(chunk))
+                return original_write(descriptor, chunk)
+
+            with mock.patch.object(gate.os, "write", side_effect=short_write):
+                gate._append_authoritative_step_text(step_summary, "complete\n")
+
+            self.assertTrue(step_summary.is_file())
+            self.assertFalse(step_summary.is_symlink())
+            self.assertGreater(len(writes), 1)
+            self.assertEqual(
+                "complete\n", step_summary.read_text(encoding="utf-8")
+            )
+
+    def test_append_rejects_oversized_encoded_payload_before_writing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            step_summary = pathlib.Path(directory) / "step-summary.md"
+            step_summary.write_text("sentinel\n", encoding="utf-8")
+
+            with self.assertRaises(gate.InfrastructureFailure):
+                gate._append_authoritative_step_text(
+                    step_summary, "x" * (1024 * 1024)
+                )
+
+            self.assertEqual(
+                "sentinel\n", step_summary.read_text(encoding="utf-8")
+            )
+
+    def test_append_rejects_initial_symlink_without_touching_target(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            target = root / "target.md"
+            target.write_text("sentinel\n", encoding="utf-8")
+            step_summary = root / "step-summary.md"
+            step_summary.symlink_to(target)
+
+            with self.assertRaises(gate.InfrastructureFailure):
+                gate._append_authoritative_step_text(step_summary, "unsafe\n")
+
+            self.assertEqual("sentinel\n", target.read_text(encoding="utf-8"))
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "FIFO requires POSIX")
+    def test_append_rejects_fifo_without_blocking(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fifo = pathlib.Path(directory) / "step-summary.fifo"
+            os.mkfifo(str(fifo))
+            probe = "\n".join(
+                (
+                    "import pathlib",
+                    "import sys",
+                    "sys.path.insert(0, sys.argv[1])",
+                    "import gate",
+                    "try:",
+                    "    gate._append_authoritative_step_text(pathlib.Path(sys.argv[2]), 'x')",
+                    "except gate.InfrastructureFailure:",
+                    "    raise SystemExit(0)",
+                    "raise SystemExit(2)",
+                )
+            )
+            process = subprocess.Popen(
+                [sys.executable, "-c", probe, str(CONTROL_DIR), str(fifo)]
+            )
+            try:
+                returncode = process.wait(timeout=1.0)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+                self.fail("step-summary FIFO write blocked")
+
+            self.assertEqual(0, returncode)
+
+
 class FinalManifestTests(unittest.TestCase):
     def passing_orchestration(self, config, **kwargs):
         (config.artifacts / "cases.tsv").write_text(
@@ -1898,6 +1978,90 @@ class FinalManifestTests(unittest.TestCase):
             self.assertNotIn("Failure class: none", final)
             self.assert_minimal_recovered_upload(
                 config.artifacts, "persistent manifest failure"
+            )
+
+    def test_initial_step_summary_symlink_fails_closed_without_touching_target(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            target = root / "target.md"
+            target.write_text("sentinel\n", encoding="utf-8")
+            step_summary = root / "github-step-summary.md"
+            step_summary.symlink_to(target)
+            config = gate.Config(
+                root / "source", root / "artifacts", "merge", "LingquLab/TileXR", 42
+            )
+
+            def collect(script, collector_config, env, **kwargs):
+                write_test_manifest(collector_config.artifacts)
+
+            with mock.patch.object(
+                gate, "orchestrate", side_effect=self.passing_orchestration
+            ), mock.patch.object(gate, "verify_final_cleanup"), mock.patch.object(
+                gate, "invoke_collector", side_effect=collect
+            ), mock.patch.object(
+                gate.sys, "stderr", io.StringIO()
+            ):
+                result = gate._run_controller_body(
+                    config,
+                    {
+                        "TILEXR_CI_GITHUB_TOKEN": "token",
+                        "GITHUB_STEP_SUMMARY": str(step_summary),
+                    },
+                    root / "trusted",
+                    gate.CancellationState(),
+                )
+
+            self.assertEqual(23, result)
+            self.assertEqual("sentinel\n", target.read_text(encoding="utf-8"))
+            self.assert_minimal_recovered_upload(
+                config.artifacts, "not a regular file"
+            )
+
+    def test_step_summary_swap_after_size_fails_closed_without_touching_target(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            target = root / "target.md"
+            target.write_text("sentinel\n", encoding="utf-8")
+            step_summary = root / "github-step-summary.md"
+            step_summary.touch()
+            config = gate.Config(
+                root / "source", root / "artifacts", "merge", "LingquLab/TileXR", 42
+            )
+            original_size = gate.step_summary_size
+
+            def collect(script, collector_config, env, **kwargs):
+                write_test_manifest(collector_config.artifacts)
+
+            def swap_after_size(path):
+                size = original_size(path)
+                path.unlink()
+                path.symlink_to(target)
+                return size
+
+            with mock.patch.object(
+                gate, "orchestrate", side_effect=self.passing_orchestration
+            ), mock.patch.object(gate, "verify_final_cleanup"), mock.patch.object(
+                gate, "invoke_collector", side_effect=collect
+            ), mock.patch.object(
+                gate, "step_summary_size", side_effect=swap_after_size
+            ), mock.patch.object(
+                gate.sys, "stderr", io.StringIO()
+            ):
+                result = gate._run_controller_body(
+                    config,
+                    {
+                        "TILEXR_CI_GITHUB_TOKEN": "token",
+                        "GITHUB_STEP_SUMMARY": str(step_summary),
+                    },
+                    root / "trusted",
+                    gate.CancellationState(),
+                )
+
+            self.assertEqual(23, result)
+            self.assertTrue(step_summary.is_symlink())
+            self.assertEqual("sentinel\n", target.read_text(encoding="utf-8"))
+            self.assert_minimal_recovered_upload(
+                config.artifacts, "step summary write failed"
             )
 
     def test_step_summary_late_cancellation_appends_authoritative_correction(self):
