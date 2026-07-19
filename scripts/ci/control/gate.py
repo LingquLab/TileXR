@@ -137,6 +137,38 @@ class StepSummaryDirectoryBinding:
     inode: int
 
 
+@dataclasses.dataclass(frozen=True)
+class StepSummarySymlinkBinding:
+    name: str
+    device: int
+    inode: int
+    target: str
+
+
+@dataclasses.dataclass
+class StepSummaryAliasBoundary:
+    directories: Tuple[StepSummaryDirectoryBinding, ...]
+    symlink: StepSummarySymlinkBinding
+    closed: bool = False
+
+    @property
+    def parent_descriptor(self) -> int:
+        return self.directories[-1].descriptor
+
+    def close(self) -> None:
+        if self.closed:
+            return
+        self.closed = True
+        for binding in reversed(self.directories):
+            try:
+                os.close(binding.descriptor)
+            except OSError:
+                pass
+
+    def __del__(self):
+        self.close()
+
+
 @dataclasses.dataclass
 class StepSummaryPathBoundary:
     entry_name: str
@@ -1367,10 +1399,10 @@ def _capture_step_summary_path(path: pathlib.Path) -> pathlib.Path:
     return canonical_path
 
 
-def _first_changed_step_summary_directory(
-    path_boundary: StepSummaryPathBoundary,
+def _first_changed_step_summary_directories(
+    directories: Tuple[StepSummaryDirectoryBinding, ...],
 ):
-    for index, binding in enumerate(path_boundary.directories):
+    for index, binding in enumerate(directories):
         try:
             opened_status = os.fstat(binding.descriptor)
         except OSError as error:
@@ -1388,7 +1420,7 @@ def _first_changed_step_summary_directory(
         if index == 0:
             continue
 
-        parent_binding = path_boundary.directories[index - 1]
+        parent_binding = directories[index - 1]
         try:
             visible_status = os.stat(
                 binding.name,
@@ -1408,6 +1440,189 @@ def _first_changed_step_summary_directory(
         ) != (binding.device, binding.inode):
             return index, visible_status
     return None
+
+
+def _first_changed_step_summary_directory(
+    path_boundary: StepSummaryPathBoundary,
+):
+    return _first_changed_step_summary_directories(path_boundary.directories)
+
+
+def _first_changed_step_summary_alias(
+    alias_boundary: StepSummaryAliasBoundary,
+):
+    changed = _first_changed_step_summary_directories(
+        alias_boundary.directories
+    )
+    if changed is not None:
+        return changed
+
+    link = alias_boundary.symlink
+    try:
+        visible_status = os.stat(
+            link.name,
+            dir_fd=alias_boundary.parent_descriptor,
+            follow_symlinks=False,
+        )
+    except FileNotFoundError:
+        return len(alias_boundary.directories), None
+    except OSError as error:
+        raise _unsafe_step_summary_path_failure(
+            "could not verify GitHub step summary alias binding: %s" % error
+        ) from error
+    if not stat.S_ISLNK(visible_status.st_mode) or (
+        visible_status.st_dev,
+        visible_status.st_ino,
+    ) != (link.device, link.inode):
+        return len(alias_boundary.directories), visible_status
+    try:
+        visible_target = os.readlink(
+            link.name,
+            dir_fd=alias_boundary.parent_descriptor,
+        )
+    except FileNotFoundError:
+        return len(alias_boundary.directories), None
+    except OSError as error:
+        raise _unsafe_step_summary_path_failure(
+            "could not read GitHub step summary alias binding: %s" % error
+        ) from error
+    if visible_target != link.target:
+        return len(alias_boundary.directories), visible_status
+    return None
+
+
+def _verify_step_summary_alias(
+    alias_boundary: Optional[StepSummaryAliasBoundary],
+) -> None:
+    if alias_boundary is None:
+        return
+    changed = _first_changed_step_summary_alias(alias_boundary)
+    if changed is None:
+        return
+    index, _ = changed
+    error = _unsafe_step_summary_path_failure(
+        "GitHub step summary alias changed at component %d" % index
+    )
+    error.step_summary_alias_changed = True
+    raise error
+
+
+def _prepare_step_summary_alias(
+    path: pathlib.Path,
+) -> Optional[StepSummaryAliasBoundary]:
+    _, directory_components = _step_summary_path_components(path)
+    bindings = []
+    opened_descriptors = []
+    alias_boundary = None
+    try:
+        flags = _step_summary_directory_flags()
+        root_descriptor = os.open(os.path.sep, flags)
+        opened_descriptors.append(root_descriptor)
+        root_status = os.fstat(root_descriptor)
+        if not stat.S_ISDIR(root_status.st_mode):
+            raise _unsafe_step_summary_path_failure(
+                "GitHub step summary lexical root is not a directory"
+            )
+        bindings.append(
+            StepSummaryDirectoryBinding(
+                name=os.path.sep,
+                descriptor=root_descriptor,
+                device=root_status.st_dev,
+                inode=root_status.st_ino,
+            )
+        )
+
+        for component in directory_components:
+            parent_binding = bindings[-1]
+            visible_status = os.stat(
+                component,
+                dir_fd=parent_binding.descriptor,
+                follow_symlinks=False,
+            )
+            if stat.S_ISLNK(visible_status.st_mode):
+                target = os.readlink(
+                    component,
+                    dir_fd=parent_binding.descriptor,
+                )
+                confirmed_status = os.stat(
+                    component,
+                    dir_fd=parent_binding.descriptor,
+                    follow_symlinks=False,
+                )
+                if not stat.S_ISLNK(confirmed_status.st_mode) or (
+                    confirmed_status.st_dev,
+                    confirmed_status.st_ino,
+                ) != (visible_status.st_dev, visible_status.st_ino):
+                    raise _unsafe_step_summary_path_failure(
+                        "GitHub step summary alias changed during preparation"
+                    )
+                alias_boundary = StepSummaryAliasBoundary(
+                    directories=tuple(bindings),
+                    symlink=StepSummarySymlinkBinding(
+                        name=component,
+                        device=confirmed_status.st_dev,
+                        inode=confirmed_status.st_ino,
+                        target=target,
+                    ),
+                )
+                _verify_step_summary_alias(alias_boundary)
+                return alias_boundary
+            if not stat.S_ISDIR(visible_status.st_mode):
+                raise _unsafe_step_summary_path_failure(
+                    "GitHub step summary lexical component is not a directory"
+                )
+            descriptor = os.open(
+                component,
+                flags,
+                dir_fd=parent_binding.descriptor,
+            )
+            opened_descriptors.append(descriptor)
+            opened_status = os.fstat(descriptor)
+            if not stat.S_ISDIR(opened_status.st_mode) or (
+                opened_status.st_dev,
+                opened_status.st_ino,
+            ) != (visible_status.st_dev, visible_status.st_ino):
+                raise _unsafe_step_summary_path_failure(
+                    "GitHub step summary lexical directory changed during preparation"
+                )
+            bindings.append(
+                StepSummaryDirectoryBinding(
+                    name=component,
+                    descriptor=descriptor,
+                    device=opened_status.st_dev,
+                    inode=opened_status.st_ino,
+                )
+            )
+
+        for descriptor in reversed(opened_descriptors):
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        return None
+    except OSError as error:
+        failure = _unsafe_step_summary_path_failure(
+            "could not pin GitHub step summary lexical alias: %s" % error
+        )
+        if alias_boundary is not None:
+            failure.step_summary_alias_boundary = alias_boundary
+        else:
+            for descriptor in reversed(opened_descriptors):
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+        raise failure from error
+    except BaseException as error:
+        if alias_boundary is not None:
+            error.step_summary_alias_boundary = alias_boundary
+        else:
+            for descriptor in reversed(opened_descriptors):
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+        raise
 
 
 def _verify_step_summary_parent(path_boundary: StepSummaryPathBoundary) -> None:
@@ -2023,6 +2238,56 @@ def _quarantine_step_summary_entry(
         raise
     finally:
         os.close(quarantine_descriptor)
+
+
+def _step_summary_alias_is_inactive(
+    alias_boundary: StepSummaryAliasBoundary,
+) -> bool:
+    changed = _first_changed_step_summary_alias(alias_boundary)
+    return changed is not None and changed[1] is None
+
+
+def _neutralize_step_summary_alias(
+    alias_boundary: StepSummaryAliasBoundary,
+) -> None:
+    errors = []
+    for _ in range(2):
+        try:
+            changed = _first_changed_step_summary_alias(alias_boundary)
+            if changed is None:
+                return
+            changed_index, visible_status = changed
+            if visible_status is None:
+                return
+            if changed_index < len(alias_boundary.directories):
+                container = alias_boundary.directories[changed_index - 1]
+                entry_name = alias_boundary.directories[changed_index].name
+            else:
+                container = alias_boundary.directories[-1]
+                entry_name = alias_boundary.symlink.name
+            if stat.S_ISDIR(visible_status.st_mode):
+                _quarantine_step_summary_entry(
+                    container.descriptor,
+                    entry_name,
+                    ".tilexr-step-summary-alias-quarantine-",
+                )
+            else:
+                os.unlink(entry_name, dir_fd=container.descriptor)
+            if _step_summary_alias_is_inactive(alias_boundary):
+                return
+            errors.append(
+                InfrastructureFailure(
+                    "step-summary runner-visible alias remained active"
+                )
+            )
+        except OSError as error:
+            errors.append(error)
+            continue
+
+    detail = "; ".join(str(error) for error in errors) or "alias remained active"
+    raise InfrastructureFailure(
+        "could not neutralize GitHub step summary alias: %s" % detail
+    )
 
 
 def _neutralize_step_summary_path(
@@ -2836,6 +3101,7 @@ def _signal_cancellation(cancellation: CancellationState):
 class ControllerStepSummaryPreparation:
     path: Optional[pathlib.Path] = None
     boundary: Optional[StepSummaryBoundary] = None
+    alias_boundary: Optional[StepSummaryAliasBoundary] = None
     failure: Optional[BaseException] = None
     failed_path_boundary: Optional[StepSummaryPathBoundary] = None
     closed: bool = False
@@ -2851,6 +3117,8 @@ class ControllerStepSummaryPreparation:
         )
         if path_boundary is not None:
             path_boundary.close()
+        if self.alias_boundary is not None:
+            self.alias_boundary.close()
 
 
 def _prepare_controller_step_summary(
@@ -2861,15 +3129,21 @@ def _prepare_controller_step_summary(
     if not step_summary_path:
         return preparation
     try:
-        preparation.path = _capture_step_summary_path(
-            pathlib.Path(step_summary_path)
-        )
+        lexical_path = pathlib.Path(step_summary_path)
+        preparation.alias_boundary = _prepare_step_summary_alias(lexical_path)
+        preparation.path = _capture_step_summary_path(lexical_path)
+        _verify_step_summary_alias(preparation.alias_boundary)
         preparation.boundary = step_summary_size(
             preparation.path,
             canonical_path=True,
         )
+        _verify_step_summary_alias(preparation.alias_boundary)
     except BaseException as error:
         preparation.failure = error
+        if preparation.alias_boundary is None:
+            preparation.alias_boundary = getattr(
+                error, "step_summary_alias_boundary", None
+            )
         preparation.failed_path_boundary = getattr(
             error, "step_summary_path_boundary", None
         )
@@ -3166,6 +3440,52 @@ def _run_prepared_controller_body(
                     file=sys.stderr,
                 )
 
+        def neutralize_controller_step_summary_alias(context: str) -> None:
+            nonlocal step_summary_path_terminal
+            step_summary_path_terminal = True
+            alias_boundary = step_summary.alias_boundary
+            if alias_boundary is None:
+                return
+            try:
+                _neutralize_step_summary_alias(alias_boundary)
+            except BaseException as error:
+                changed = update_report(
+                    _collector_failure(
+                        "%s: %s" % (context, _as_gate_failure(error))
+                    )
+                )
+                if changed:
+                    recover_terminal_evidence()
+                print(
+                    "ERROR: could not neutralize GitHub step summary alias: %s"
+                    % _as_gate_failure(error),
+                    file=sys.stderr,
+                )
+
+        def validate_controller_step_summary_alias(context: str) -> bool:
+            if step_summary_path_terminal:
+                return False
+            try:
+                _verify_step_summary_alias(step_summary.alias_boundary)
+                return True
+            except BaseException as error:
+                changed = update_report(
+                    _collector_failure(
+                        "%s: %s" % (context, _as_gate_failure(error))
+                    )
+                )
+                if changed:
+                    recover_terminal_evidence()
+                neutralize_controller_step_summary_alias(
+                    "authoritative GitHub step summary alias neutralization failed"
+                )
+                return False
+
+        if not validate_controller_step_summary_alias(
+            "authoritative GitHub step summary alias validation failed"
+        ):
+            return 0 if failure is None else exit_code_for(failure)
+
         if step_summary_boundary is None:
             error = step_summary_preparation_failure or InfrastructureFailure(
                 "GitHub step summary preparation produced no boundary"
@@ -3250,6 +3570,10 @@ def _run_prepared_controller_body(
                     )
                     if changed:
                         recover_terminal_evidence()
+                if not validate_controller_step_summary_alias(
+                    "terminal GitHub step summary alias validation failed"
+                ):
+                    return
                 try:
                     _append_authoritative_step_text(
                         step_path,
@@ -3294,6 +3618,10 @@ def _run_prepared_controller_body(
                 return
 
         for step_attempt in range(2):
+            if not validate_controller_step_summary_alias(
+                "authoritative GitHub step summary alias validation failed"
+            ):
+                break
             try:
                 append_authoritative_step_summary(
                     step_path,
