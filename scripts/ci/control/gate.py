@@ -1641,39 +1641,126 @@ def rollback_step_summary(path: pathlib.Path, boundary: StepSummaryBoundary) -> 
         os.close(descriptor)
 
 
+def _step_summary_path_is_disabled(
+    path: pathlib.Path, boundary: StepSummaryBoundary
+) -> bool:
+    try:
+        path_status = os.lstat(str(path))
+    except FileNotFoundError:
+        return True
+    except OSError as error:
+        raise InfrastructureFailure(
+            "could not inspect invalidated GitHub step summary: %s" % error
+        ) from error
+    if not stat.S_ISREG(path_status.st_mode) or (
+        path_status.st_dev,
+        path_status.st_ino,
+    ) != (boundary.device, boundary.inode):
+        return False
+    return path_status.st_size == 0 or stat.S_IMODE(path_status.st_mode) == 0
+
+
+def _neutralize_step_summary_path(
+    path: pathlib.Path, boundary: StepSummaryBoundary
+) -> None:
+    errors = []
+    for _ in range(2):
+        if _step_summary_path_is_disabled(path, boundary):
+            return
+        try:
+            path_status = os.lstat(str(path))
+        except FileNotFoundError:
+            return
+        except OSError as error:
+            errors.append(error)
+            continue
+
+        try:
+            if stat.S_ISDIR(path_status.st_mode):
+                quarantine_root = pathlib.Path(
+                    tempfile.mkdtemp(
+                        prefix=".tilexr-step-summary-quarantine-",
+                        dir=str(path.parent),
+                    )
+                )
+                try:
+                    os.replace(str(path), str(quarantine_root / "entry"))
+                except BaseException:
+                    try:
+                        os.rmdir(str(quarantine_root))
+                    except OSError:
+                        pass
+                    raise
+            else:
+                os.unlink(str(path))
+        except FileNotFoundError:
+            continue
+        except OSError as error:
+            errors.append(error)
+            continue
+
+        if _step_summary_path_is_disabled(path, boundary):
+            return
+        errors.append(InfrastructureFailure("step summary pathname reappeared"))
+
+    detail = "; ".join(str(error) for error in errors) or "path remained active"
+    raise InfrastructureFailure(
+        "could not neutralize GitHub step summary pathname: %s" % detail
+    )
+
+
 def invalidate_step_summary(
     path: pathlib.Path, boundary: StepSummaryBoundary
 ) -> None:
     boundary.state.prefix_valid = False
     _mark_step_summary_suffix_indeterminate(boundary)
-    descriptor = _open_regular_step_summary(
-        path, os.O_WRONLY, boundary=boundary
-    )
+    pinned_error = None
+    descriptor = -1
     try:
+        descriptor = _open_regular_step_summary(
+            path, os.O_WRONLY, boundary=boundary
+        )
         _verify_step_summary_identity(path, descriptor, boundary)
         try:
             os.ftruncate(descriptor, 0)
             os.fsync(descriptor)
-            invalidated = _verify_step_summary_identity(
-                path, descriptor, boundary
-            )
+            invalidated = os.fstat(descriptor)
             if invalidated.st_size != 0:
                 raise InfrastructureFailure(
                     "GitHub step summary invalidation did not truncate the file"
                 )
-            return
         except BaseException as truncate_error:
             try:
                 os.fchmod(descriptor, 0)
                 os.fsync(descriptor)
             except BaseException as disable_error:
-                raise InfrastructureFailure(
+                pinned_error = InfrastructureFailure(
                     "GitHub step summary truncation failed: %s; "
                     "disabling the pinned inode failed: %s"
                     % (truncate_error, disable_error)
-                ) from disable_error
+                )
+    except BaseException as error:
+        pinned_error = error
     finally:
-        os.close(descriptor)
+        if descriptor >= 0:
+            try:
+                os.close(descriptor)
+            except OSError as error:
+                if pinned_error is None:
+                    pinned_error = InfrastructureFailure(
+                        "could not close pinned GitHub step summary: %s" % error
+                    )
+
+    try:
+        _neutralize_step_summary_path(path, boundary)
+    except BaseException as path_error:
+        if pinned_error is None:
+            raise
+        raise InfrastructureFailure(
+            "pinned GitHub step summary invalidation failed: %s; "
+            "pathname neutralization failed: %s"
+            % (pinned_error, path_error)
+        ) from path_error
 
 
 def _path_has_control_characters(path: str) -> bool:

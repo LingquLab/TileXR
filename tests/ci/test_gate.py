@@ -1337,21 +1337,25 @@ class StepSummarySafetyTests(unittest.TestCase):
                 step_summary.read_text(encoding="utf-8"),
             )
 
-    def test_invalidation_reports_when_truncate_and_disable_fail(self):
+    def test_invalidation_reports_when_inode_and_path_neutralization_fail(self):
         with tempfile.TemporaryDirectory() as directory:
             step_summary = pathlib.Path(directory) / "step-summary.md"
             step_summary.write_text("stale authoritative success\n", encoding="utf-8")
             boundary = gate.step_summary_size(step_summary)
             invalidator = getattr(gate, "invalidate_step_summary", None)
             self.assertIsNotNone(invalidator)
+            unlink = mock.Mock(side_effect=OSError("unlink denied"))
 
             with mock.patch.object(
                 gate.os, "ftruncate", side_effect=OSError("truncate denied")
             ), mock.patch.object(
                 gate.os, "fchmod", side_effect=OSError("disable denied")
+            ), mock.patch.object(
+                gate.os, "unlink", unlink
             ), self.assertRaises(gate.InfrastructureFailure):
                 invalidator(step_summary, boundary)
 
+            self.assertEqual(2, unlink.call_count)
             self.assertEqual(
                 "stale authoritative success\n",
                 step_summary.read_text(encoding="utf-8"),
@@ -1370,11 +1374,79 @@ class StepSummarySafetyTests(unittest.TestCase):
             invalidator = getattr(gate, "invalidate_step_summary", None)
             self.assertIsNotNone(invalidator)
 
-            with self.assertRaises(gate.InfrastructureFailure):
-                invalidator(step_summary, boundary)
+            invalidator(step_summary, boundary)
 
             self.assertEqual("sentinel\n", target.read_text(encoding="utf-8"))
-            self.assertTrue(os.path.samefile(str(step_summary), str(target)))
+            self.assertFalse(step_summary.exists())
+
+    def test_invalidation_removes_hardlink_replacement_during_truncate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            step_summary = root / "step-summary.md"
+            step_summary.write_text("controller output\n", encoding="utf-8")
+            boundary = gate.step_summary_size(step_summary)
+            target = root / "target.md"
+            target.write_text("sentinel\n", encoding="utf-8")
+            original_ftruncate = gate.os.ftruncate
+
+            def replace_then_truncate(descriptor, size):
+                step_summary.unlink()
+                os.link(str(target), str(step_summary))
+                return original_ftruncate(descriptor, size)
+
+            with mock.patch.object(
+                gate.os, "ftruncate", side_effect=replace_then_truncate
+            ):
+                gate.invalidate_step_summary(step_summary, boundary)
+
+            self.assertFalse(step_summary.exists())
+            self.assertEqual("sentinel\n", target.read_text(encoding="utf-8"))
+
+    def test_invalidation_removes_symlink_replacement_during_truncate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            step_summary = root / "step-summary.md"
+            step_summary.write_text("controller output\n", encoding="utf-8")
+            boundary = gate.step_summary_size(step_summary)
+            target = root / "target.md"
+            target.write_text("sentinel\n", encoding="utf-8")
+            original_ftruncate = gate.os.ftruncate
+
+            def replace_then_truncate(descriptor, size):
+                step_summary.unlink()
+                step_summary.symlink_to(target)
+                return original_ftruncate(descriptor, size)
+
+            with mock.patch.object(
+                gate.os, "ftruncate", side_effect=replace_then_truncate
+            ):
+                gate.invalidate_step_summary(step_summary, boundary)
+
+            self.assertFalse(step_summary.exists())
+            self.assertFalse(step_summary.is_symlink())
+            self.assertEqual("sentinel\n", target.read_text(encoding="utf-8"))
+
+    def test_invalidation_quarantines_directory_replacement(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            step_summary = root / "step-summary.md"
+            step_summary.write_text("controller output\n", encoding="utf-8")
+            boundary = gate.step_summary_size(step_summary)
+            step_summary.unlink()
+            step_summary.mkdir()
+            (step_summary / "sentinel").write_text("untouched\n", encoding="utf-8")
+
+            gate.invalidate_step_summary(step_summary, boundary)
+
+            self.assertFalse(step_summary.exists())
+            quarantines = list(root.glob(".tilexr-step-summary-quarantine-*"))
+            self.assertEqual(1, len(quarantines))
+            self.assertEqual(
+                "untouched\n",
+                (quarantines[0] / "entry" / "sentinel").read_text(
+                    encoding="utf-8"
+                ),
+            )
 
     def test_partial_append_error_still_allows_prefix_rollback(self):
         with tempfile.TemporaryDirectory() as directory:
