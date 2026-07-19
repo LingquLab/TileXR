@@ -2064,6 +2064,105 @@ class FinalManifestTests(unittest.TestCase):
                 config.artifacts, "step summary write failed"
             )
 
+    def test_regular_step_summary_swap_after_size_does_not_adopt_replacement(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            target = root / "target.md"
+            target.write_text("sentinel\n", encoding="utf-8")
+            step_summary = root / "github-step-summary.md"
+            step_summary.touch()
+            config = gate.Config(
+                root / "source", root / "artifacts", "merge", "LingquLab/TileXR", 42
+            )
+            original_size = gate.step_summary_size
+
+            def collect(script, collector_config, env, **kwargs):
+                write_test_manifest(collector_config.artifacts)
+
+            def swap_after_size(path):
+                boundary = original_size(path)
+                path.unlink()
+                os.link(str(target), str(path))
+                return boundary
+
+            with mock.patch.object(
+                gate, "orchestrate", side_effect=self.passing_orchestration
+            ), mock.patch.object(gate, "verify_final_cleanup"), mock.patch.object(
+                gate, "invoke_collector", side_effect=collect
+            ), mock.patch.object(
+                gate, "step_summary_size", side_effect=swap_after_size
+            ), mock.patch.object(
+                gate.sys, "stderr", io.StringIO()
+            ):
+                result = gate._run_controller_body(
+                    config,
+                    {
+                        "TILEXR_CI_GITHUB_TOKEN": "token",
+                        "GITHUB_STEP_SUMMARY": str(step_summary),
+                    },
+                    root / "trusted",
+                    gate.CancellationState(),
+                )
+
+            self.assertEqual(23, result)
+            self.assertTrue(os.path.samefile(str(step_summary), str(target)))
+            self.assertEqual("sentinel\n", target.read_text(encoding="utf-8"))
+            self.assert_minimal_recovered_upload(
+                config.artifacts, "step summary write failed"
+            )
+
+    def test_missing_step_summary_creation_race_does_not_adopt_created_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            target = root / "target.md"
+            target.write_text("sentinel\n", encoding="utf-8")
+            step_summary = root / "github-step-summary.md"
+            config = gate.Config(
+                root / "source", root / "artifacts", "merge", "LingquLab/TileXR", 42
+            )
+            original_open = gate.os.open
+            races = []
+
+            def collect(script, collector_config, env, **kwargs):
+                write_test_manifest(collector_config.artifacts)
+
+            def race_exclusive_create(path, flags, mode=0o777):
+                if (
+                    pathlib.Path(path) == step_summary
+                    and flags & getattr(os, "O_EXCL", 0)
+                    and not races
+                ):
+                    os.link(str(target), str(step_summary))
+                    races.append(True)
+                return original_open(path, flags, mode)
+
+            with mock.patch.object(
+                gate, "orchestrate", side_effect=self.passing_orchestration
+            ), mock.patch.object(gate, "verify_final_cleanup"), mock.patch.object(
+                gate, "invoke_collector", side_effect=collect
+            ), mock.patch.object(
+                gate.os, "open", side_effect=race_exclusive_create
+            ), mock.patch.object(
+                gate.sys, "stderr", io.StringIO()
+            ):
+                result = gate._run_controller_body(
+                    config,
+                    {
+                        "TILEXR_CI_GITHUB_TOKEN": "token",
+                        "GITHUB_STEP_SUMMARY": str(step_summary),
+                    },
+                    root / "trusted",
+                    gate.CancellationState(),
+                )
+
+            self.assertEqual(23, result)
+            self.assertEqual([True], races)
+            self.assertTrue(os.path.samefile(str(step_summary), str(target)))
+            self.assertEqual("sentinel\n", target.read_text(encoding="utf-8"))
+            self.assert_minimal_recovered_upload(
+                config.artifacts, "step summary preparation failed"
+            )
+
     def test_step_summary_late_cancellation_appends_authoritative_correction(self):
         cancellation = gate.CancellationState()
         with tempfile.TemporaryDirectory() as directory:
@@ -2193,10 +2292,10 @@ class FinalManifestTests(unittest.TestCase):
                     return result
                 raise gate.InfrastructureFailure("correction append failed")
 
-            def fail_emergency(path, text):
+            def fail_emergency(path, text, boundary=None):
                 text_appends.append(True)
                 if len(text_appends) == 1:
-                    return original_append_text(path, text)
+                    return original_append_text(path, text, boundary)
                 raise gate.InfrastructureFailure("emergency append failed")
 
             with mock.patch.object(

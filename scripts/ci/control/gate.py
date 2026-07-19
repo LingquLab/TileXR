@@ -105,6 +105,13 @@ class GateReport:
     cleanup_checked: bool = dataclasses.field(default=False, repr=False)
 
 
+@dataclasses.dataclass(frozen=True)
+class StepSummaryBoundary:
+    prefix_size: int
+    device: int
+    inode: int
+
+
 class CancellationState:
     def __init__(self):
         self._event = threading.Event()
@@ -1228,7 +1235,11 @@ def _authoritative_step_summary_text(
     )
 
 
-def _verify_step_summary_identity(path: pathlib.Path, descriptor: int):
+def _verify_step_summary_identity(
+    path: pathlib.Path,
+    descriptor: int,
+    boundary: Optional[StepSummaryBoundary] = None,
+):
     try:
         opened_status = os.fstat(descriptor)
         path_status = os.lstat(str(path))
@@ -1245,11 +1256,22 @@ def _verify_step_summary_identity(path: pathlib.Path, descriptor: int):
         opened_status.st_ino,
     ):
         raise InfrastructureFailure("GitHub step summary changed while open")
+    if boundary is not None and (opened_status.st_dev, opened_status.st_ino) != (
+        boundary.device,
+        boundary.inode,
+    ):
+        raise InfrastructureFailure(
+            "GitHub step summary changed since transaction preparation"
+        )
     return opened_status
 
 
 def _open_regular_step_summary(
-    path: pathlib.Path, flags: int, *, create: bool = False
+    path: pathlib.Path,
+    flags: int,
+    *,
+    create_exclusive: bool = False,
+    boundary: Optional[StepSummaryBoundary] = None,
 ) -> int:
     for flag_name in ("O_NOFOLLOW", "O_NONBLOCK", "O_CLOEXEC"):
         flag = getattr(os, flag_name, None)
@@ -1258,9 +1280,9 @@ def _open_regular_step_summary(
                 "platform lacks safe GitHub step summary flag %s" % flag_name
             )
         flags |= flag
-    if create:
+    if create_exclusive:
         # Shell redirection to GITHUB_STEP_SUMMARY has create-if-absent semantics.
-        flags |= os.O_CREAT
+        flags |= os.O_CREAT | os.O_EXCL
 
     try:
         descriptor = os.open(str(path), flags, 0o600)
@@ -1269,7 +1291,7 @@ def _open_regular_step_summary(
             "could not safely open GitHub step summary: %s" % error
         ) from error
     try:
-        _verify_step_summary_identity(path, descriptor)
+        _verify_step_summary_identity(path, descriptor, boundary)
     except BaseException:
         try:
             os.close(descriptor)
@@ -1279,7 +1301,11 @@ def _open_regular_step_summary(
     return descriptor
 
 
-def _append_authoritative_step_text(path: pathlib.Path, text: str) -> None:
+def _append_authoritative_step_text(
+    path: pathlib.Path,
+    text: str,
+    boundary: Optional[StepSummaryBoundary] = None,
+) -> None:
     try:
         encoded = text.encode("utf-8")
     except UnicodeError as error:
@@ -1292,8 +1318,10 @@ def _append_authoritative_step_text(path: pathlib.Path, text: str) -> None:
             % MAX_STEP_SUMMARY_APPEND_BYTES
         )
 
+    if boundary is None:
+        boundary = step_summary_size(path)
     descriptor = _open_regular_step_summary(
-        path, os.O_WRONLY | os.O_APPEND, create=True
+        path, os.O_WRONLY | os.O_APPEND, boundary=boundary
     )
     try:
         offset = 0
@@ -1306,7 +1334,7 @@ def _append_authoritative_step_text(path: pathlib.Path, text: str) -> None:
                 )
             offset += written
         os.fsync(descriptor)
-        _verify_step_summary_identity(path, descriptor)
+        _verify_step_summary_identity(path, descriptor, boundary)
     except OSError as error:
         raise InfrastructureFailure(
             "could not append authoritative GitHub step summary: %s" % error
@@ -1316,18 +1344,34 @@ def _append_authoritative_step_text(path: pathlib.Path, text: str) -> None:
 
 
 def append_authoritative_step_summary(
-    path: pathlib.Path, report: GateReport, artifacts: pathlib.Path
+    path: pathlib.Path,
+    report: GateReport,
+    artifacts: pathlib.Path,
+    boundary: Optional[StepSummaryBoundary] = None,
 ) -> None:
     _append_authoritative_step_text(
-        path, _authoritative_step_summary_text(report, artifacts)
+        path, _authoritative_step_summary_text(report, artifacts), boundary
     )
 
 
-def step_summary_size(path: pathlib.Path) -> int:
+def step_summary_size(path: pathlib.Path) -> StepSummaryBoundary:
     try:
         path_status = os.lstat(str(path))
     except FileNotFoundError:
-        return 0
+        descriptor = _open_regular_step_summary(
+            path,
+            os.O_WRONLY | os.O_APPEND,
+            create_exclusive=True,
+        )
+        try:
+            os.fsync(descriptor)
+            path_status = _verify_step_summary_identity(path, descriptor)
+        except OSError as error:
+            raise InfrastructureFailure(
+                "could not initialize GitHub step summary: %s" % error
+            ) from error
+        finally:
+            os.close(descriptor)
     except OSError as error:
         raise InfrastructureFailure(
             "could not inspect GitHub step summary: %s" % error
@@ -1336,20 +1380,26 @@ def step_summary_size(path: pathlib.Path) -> int:
         raise InfrastructureFailure(
             "GitHub step summary path is not a regular file: %s" % path
         )
-    return path_status.st_size
+    return StepSummaryBoundary(
+        prefix_size=path_status.st_size,
+        device=path_status.st_dev,
+        inode=path_status.st_ino,
+    )
 
 
-def rollback_step_summary(path: pathlib.Path, size: int) -> None:
-    descriptor = _open_regular_step_summary(path, os.O_WRONLY)
+def rollback_step_summary(path: pathlib.Path, boundary: StepSummaryBoundary) -> None:
+    descriptor = _open_regular_step_summary(
+        path, os.O_WRONLY, boundary=boundary
+    )
     try:
         opened_status = os.fstat(descriptor)
-        if opened_status.st_size < size:
+        if opened_status.st_size < boundary.prefix_size:
             raise InfrastructureFailure(
                 "GitHub step summary shrank before rollback"
             )
-        os.ftruncate(descriptor, size)
+        os.ftruncate(descriptor, boundary.prefix_size)
         os.fsync(descriptor)
-        _verify_step_summary_identity(path, descriptor)
+        _verify_step_summary_identity(path, descriptor, boundary)
     except OSError as error:
         raise InfrastructureFailure(
             "could not roll back GitHub step summary: %s" % error
@@ -2219,7 +2269,7 @@ def _run_controller_body(
     if step_summary_path:
         step_path = pathlib.Path(step_summary_path)
         try:
-            step_summary_prefix_size = step_summary_size(step_path)
+            step_summary_boundary = step_summary_size(step_path)
         except BaseException as error:
             changed = update_report(
                 _collector_failure(
@@ -2229,14 +2279,14 @@ def _run_controller_body(
             )
             if changed:
                 recover_terminal_evidence()
-            step_summary_prefix_size = None
+            step_summary_boundary = None
 
-        if step_summary_prefix_size is None:
+        if step_summary_boundary is None:
             return 0 if failure is None else exit_code_for(failure)
 
         def roll_back_controller_step_summary() -> bool:
             try:
-                rollback_step_summary(step_path, step_summary_prefix_size)
+                rollback_step_summary(step_path, step_summary_boundary)
                 return True
             except BaseException as error:
                 changed = update_report(
@@ -2270,6 +2320,7 @@ def _run_controller_body(
                     _append_authoritative_step_text(
                         step_path,
                         _authoritative_step_summary_text(report, config.artifacts),
+                        step_summary_boundary,
                     )
                 except BaseException as error:
                     changed = update_report(
@@ -2302,7 +2353,12 @@ def _run_controller_body(
 
         for step_attempt in range(2):
             try:
-                append_authoritative_step_summary(step_path, report, config.artifacts)
+                append_authoritative_step_summary(
+                    step_path,
+                    report,
+                    config.artifacts,
+                    step_summary_boundary,
+                )
             except BaseException as error:
                 changed = update_report(
                     _collector_failure(
