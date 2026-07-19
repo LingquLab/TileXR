@@ -5,6 +5,7 @@ import json
 import os
 import pathlib
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -1316,6 +1317,65 @@ class SummaryTests(unittest.TestCase):
 
 
 class StepSummarySafetyTests(unittest.TestCase):
+    def test_invalidation_disables_exact_inode_when_truncate_fails(self):
+        with tempfile.TemporaryDirectory() as directory:
+            step_summary = pathlib.Path(directory) / "step-summary.md"
+            step_summary.write_text("stale authoritative success\n", encoding="utf-8")
+            boundary = gate.step_summary_size(step_summary)
+            invalidator = getattr(gate, "invalidate_step_summary", None)
+            self.assertIsNotNone(invalidator)
+
+            with mock.patch.object(
+                gate.os, "ftruncate", side_effect=OSError("truncate denied")
+            ):
+                invalidator(step_summary, boundary)
+
+            self.assertEqual(0, stat.S_IMODE(step_summary.stat().st_mode))
+            os.chmod(str(step_summary), 0o600)
+            self.assertEqual(
+                "stale authoritative success\n",
+                step_summary.read_text(encoding="utf-8"),
+            )
+
+    def test_invalidation_reports_when_truncate_and_disable_fail(self):
+        with tempfile.TemporaryDirectory() as directory:
+            step_summary = pathlib.Path(directory) / "step-summary.md"
+            step_summary.write_text("stale authoritative success\n", encoding="utf-8")
+            boundary = gate.step_summary_size(step_summary)
+            invalidator = getattr(gate, "invalidate_step_summary", None)
+            self.assertIsNotNone(invalidator)
+
+            with mock.patch.object(
+                gate.os, "ftruncate", side_effect=OSError("truncate denied")
+            ), mock.patch.object(
+                gate.os, "fchmod", side_effect=OSError("disable denied")
+            ), self.assertRaises(gate.InfrastructureFailure):
+                invalidator(step_summary, boundary)
+
+            self.assertEqual(
+                "stale authoritative success\n",
+                step_summary.read_text(encoding="utf-8"),
+            )
+
+    def test_invalidation_never_touches_substituted_regular_target(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            step_summary = root / "step-summary.md"
+            step_summary.write_text("controller output\n", encoding="utf-8")
+            boundary = gate.step_summary_size(step_summary)
+            target = root / "target.md"
+            target.write_text("sentinel\n", encoding="utf-8")
+            step_summary.unlink()
+            os.link(str(target), str(step_summary))
+            invalidator = getattr(gate, "invalidate_step_summary", None)
+            self.assertIsNotNone(invalidator)
+
+            with self.assertRaises(gate.InfrastructureFailure):
+                invalidator(step_summary, boundary)
+
+            self.assertEqual("sentinel\n", target.read_text(encoding="utf-8"))
+            self.assertTrue(os.path.samefile(str(step_summary), str(target)))
+
     def test_partial_append_error_still_allows_prefix_rollback(self):
         with tempfile.TemporaryDirectory() as directory:
             step_summary = pathlib.Path(directory) / "step-summary.md"
@@ -2638,6 +2698,51 @@ class FinalManifestTests(unittest.TestCase):
             self.assertNotIn("Failure class: none", final)
             self.assert_minimal_recovered_upload(
                 config.artifacts, "injected append failure"
+            )
+
+    def test_corrupted_prefix_with_complete_success_block_is_invalidated(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            step_summary = root / "github-step-summary.md"
+            step_summary.write_text("prior step output\n", encoding="utf-8")
+            config = gate.Config(
+                root / "source", root / "artifacts", "merge", "LingquLab/TileXR", 42
+            )
+            original_write = gate.os.write
+            writes = []
+
+            def collect(script, collector_config, env, **kwargs):
+                write_test_manifest(collector_config.artifacts)
+
+            def truncate_then_write_success(descriptor, data):
+                os.ftruncate(descriptor, 0)
+                writes.append(True)
+                return original_write(descriptor, data)
+
+            with mock.patch.object(
+                gate, "orchestrate", side_effect=self.passing_orchestration
+            ), mock.patch.object(gate, "verify_final_cleanup"), mock.patch.object(
+                gate, "invoke_collector", side_effect=collect
+            ), mock.patch.object(
+                gate.os, "write", side_effect=truncate_then_write_success
+            ), mock.patch.object(
+                gate.sys, "stderr", io.StringIO()
+            ):
+                result = gate._run_controller_body(
+                    config,
+                    {
+                        "TILEXR_CI_GITHUB_TOKEN": "token",
+                        "GITHUB_STEP_SUMMARY": str(step_summary),
+                    },
+                    root / "trusted",
+                    gate.CancellationState(),
+                )
+
+            self.assertEqual(23, result)
+            self.assertEqual([True], writes)
+            self.assertEqual("", step_summary.read_text(encoding="utf-8"))
+            self.assert_minimal_recovered_upload(
+                config.artifacts, "pinned prefix changed"
             )
 
     def test_transient_final_summary_failure_is_retried_and_manifested(self):

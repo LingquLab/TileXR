@@ -1641,6 +1641,41 @@ def rollback_step_summary(path: pathlib.Path, boundary: StepSummaryBoundary) -> 
         os.close(descriptor)
 
 
+def invalidate_step_summary(
+    path: pathlib.Path, boundary: StepSummaryBoundary
+) -> None:
+    boundary.state.prefix_valid = False
+    _mark_step_summary_suffix_indeterminate(boundary)
+    descriptor = _open_regular_step_summary(
+        path, os.O_WRONLY, boundary=boundary
+    )
+    try:
+        _verify_step_summary_identity(path, descriptor, boundary)
+        try:
+            os.ftruncate(descriptor, 0)
+            os.fsync(descriptor)
+            invalidated = _verify_step_summary_identity(
+                path, descriptor, boundary
+            )
+            if invalidated.st_size != 0:
+                raise InfrastructureFailure(
+                    "GitHub step summary invalidation did not truncate the file"
+                )
+            return
+        except BaseException as truncate_error:
+            try:
+                os.fchmod(descriptor, 0)
+                os.fsync(descriptor)
+            except BaseException as disable_error:
+                raise InfrastructureFailure(
+                    "GitHub step summary truncation failed: %s; "
+                    "disabling the pinned inode failed: %s"
+                    % (truncate_error, disable_error)
+                ) from disable_error
+    finally:
+        os.close(descriptor)
+
+
 def _path_has_control_characters(path: str) -> bool:
     return any(ord(character) < 32 or ord(character) == 127 for character in path)
 
@@ -2517,6 +2552,27 @@ def _run_controller_body(
         if step_summary_boundary is None:
             return 0 if failure is None else exit_code_for(failure)
 
+        def invalidate_corrupted_controller_step_summary() -> bool:
+            if step_summary_boundary.state.prefix_valid:
+                return False
+            try:
+                invalidate_step_summary(step_path, step_summary_boundary)
+            except BaseException as error:
+                changed = update_report(
+                    _collector_failure(
+                        "authoritative GitHub step summary invalidation failed: %s"
+                        % _as_gate_failure(error)
+                    )
+                )
+                if changed:
+                    recover_terminal_evidence()
+                print(
+                    "ERROR: could not invalidate corrupted GitHub step summary: %s"
+                    % _as_gate_failure(error),
+                    file=sys.stderr,
+                )
+            return True
+
         def roll_back_controller_step_summary() -> bool:
             try:
                 rollback_step_summary(step_path, step_summary_boundary)
@@ -2542,7 +2598,11 @@ def _run_controller_body(
             # If that write fails too, remove any partial write so an earlier
             # success block cannot contradict the selected exit state.
             for terminal_attempt in range(2):
-                roll_back_controller_step_summary()
+                if (
+                    not roll_back_controller_step_summary()
+                    and invalidate_corrupted_controller_step_summary()
+                ):
+                    return
                 if cancellation.cancelled and not cancellation_accounted:
                     changed = account_new_cancellation(
                         "gate was cancelled before terminal step summary emission"
@@ -2564,6 +2624,8 @@ def _run_controller_body(
                     )
                     if changed:
                         recover_terminal_evidence()
+                    if invalidate_corrupted_controller_step_summary():
+                        return
                     roll_back_controller_step_summary()
                     print(
                         "ERROR: could not emit terminal GitHub step summary: %s"
@@ -2601,6 +2663,8 @@ def _run_controller_body(
                 )
                 if changed:
                     recover_terminal_evidence()
+                if invalidate_corrupted_controller_step_summary():
+                    break
                 if step_attempt == 1:
                     emit_terminal_step_summary()
                     break
