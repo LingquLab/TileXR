@@ -1316,6 +1316,94 @@ class SummaryTests(unittest.TestCase):
 
 
 class StepSummarySafetyTests(unittest.TestCase):
+    def test_partial_append_error_still_allows_prefix_rollback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            step_summary = pathlib.Path(directory) / "step-summary.md"
+            prefix = "0123456789" * 3
+            step_summary.write_text(prefix, encoding="utf-8")
+            boundary = gate.step_summary_size(step_summary)
+            original_write = gate.os.write
+            writes = []
+
+            def short_then_error(descriptor, data):
+                writes.append(True)
+                if len(writes) == 1:
+                    return original_write(descriptor, data[:20])
+                raise OSError("injected append failure")
+
+            with mock.patch.object(
+                gate.os, "write", side_effect=short_then_error
+            ), self.assertRaises(gate.InfrastructureFailure):
+                gate._append_authoritative_step_text(
+                    step_summary, "x" * 64, boundary
+                )
+
+            self.assertEqual(2, len(writes))
+            self.assertGreater(step_summary.stat().st_size, len(prefix))
+            try:
+                gate.rollback_step_summary(step_summary, boundary)
+            except gate.InfrastructureFailure as error:
+                self.fail("partial suffix rollback was refused: %s" % error)
+            self.assertEqual(prefix, step_summary.read_text(encoding="utf-8"))
+
+    def test_append_rejects_8k_prefix_with_same_size_middle_rewrite(self):
+        with tempfile.TemporaryDirectory() as directory:
+            step_summary = pathlib.Path(directory) / "step-summary.md"
+            prefix = b"a" * (8 * 1024)
+            step_summary.write_bytes(prefix)
+            boundary = gate.step_summary_size(step_summary)
+            inode = step_summary.stat().st_ino
+            with step_summary.open("r+b") as stream:
+                stream.seek(4 * 1024)
+                stream.write(b"z" * 64)
+
+            with self.assertRaises(gate.InfrastructureFailure):
+                gate._append_authoritative_step_text(
+                    step_summary, "must not append", boundary
+                )
+
+            self.assertEqual(inode, step_summary.stat().st_ino)
+            self.assertEqual(len(prefix), step_summary.stat().st_size)
+            self.assertEqual(
+                b"z" * 64,
+                step_summary.read_bytes()[4 * 1024 : 4 * 1024 + 64],
+            )
+
+    def test_append_detects_same_length_suffix_rewrite_and_allows_rollback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            step_summary = pathlib.Path(directory) / "step-summary.md"
+            step_summary.touch()
+            boundary = gate.step_summary_size(step_summary)
+            original_write = gate.os.write
+            rewrites = []
+
+            def write_then_rewrite_suffix(descriptor, data):
+                written = original_write(descriptor, data)
+                step_summary.write_bytes(b"z" * step_summary.stat().st_size)
+                rewrites.append(True)
+                return written
+
+            with mock.patch.object(
+                gate.os, "write", side_effect=write_then_rewrite_suffix
+            ), self.assertRaises(gate.InfrastructureFailure):
+                gate._append_authoritative_step_text(
+                    step_summary, "expected authoritative suffix", boundary
+                )
+
+            self.assertEqual([True], rewrites)
+            self.assertTrue(step_summary.read_bytes())
+            gate.rollback_step_summary(step_summary, boundary)
+            self.assertEqual(b"", step_summary.read_bytes())
+
+    def test_preparation_rejects_oversized_existing_step_summary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            step_summary = pathlib.Path(directory) / "step-summary.md"
+            with step_summary.open("wb") as stream:
+                stream.truncate(1024 * 1024 + 1)
+
+            with self.assertRaises(gate.InfrastructureFailure):
+                gate.step_summary_size(step_summary)
+
     def test_append_rejects_same_inode_with_shrunken_pinned_prefix(self):
         with tempfile.TemporaryDirectory() as directory:
             step_summary = pathlib.Path(directory) / "step-summary.md"
@@ -2495,6 +2583,61 @@ class FinalManifestTests(unittest.TestCase):
             self.assertIn("step summary write failed", visible)
             self.assert_minimal_recovered_upload(
                 config.artifacts, "step summary write failed"
+            )
+
+    def test_partial_step_summary_write_is_rolled_back_before_terminal_correction(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            step_summary = root / "github-step-summary.md"
+            prefix = "prior step output\n"
+            step_summary.write_text(prefix, encoding="utf-8")
+            config = gate.Config(
+                root / "source", root / "artifacts", "merge", "LingquLab/TileXR", 42
+            )
+            original_write = gate.os.write
+            writes = []
+
+            def collect(script, collector_config, env, **kwargs):
+                write_test_manifest(collector_config.artifacts)
+
+            def short_then_error(descriptor, data):
+                writes.append(True)
+                if len(writes) == 1:
+                    return original_write(descriptor, data[:100])
+                if len(writes) == 2:
+                    raise OSError("injected append failure")
+                return original_write(descriptor, data)
+
+            with mock.patch.object(
+                gate, "orchestrate", side_effect=self.passing_orchestration
+            ), mock.patch.object(gate, "verify_final_cleanup"), mock.patch.object(
+                gate, "invoke_collector", side_effect=collect
+            ), mock.patch.object(
+                gate.os, "write", side_effect=short_then_error
+            ), mock.patch.object(
+                gate.sys, "stderr", io.StringIO()
+            ):
+                result = gate._run_controller_body(
+                    config,
+                    {
+                        "TILEXR_CI_GITHUB_TOKEN": "token",
+                        "GITHUB_STEP_SUMMARY": str(step_summary),
+                    },
+                    root / "trusted",
+                    gate.CancellationState(),
+                )
+
+            self.assertEqual(23, result)
+            self.assertEqual(3, len(writes))
+            visible = step_summary.read_text(encoding="utf-8")
+            self.assertTrue(visible.startswith(prefix))
+            self.assertEqual(1, visible.count("Authoritative final gate result"))
+            final = visible.rsplit("Authoritative final gate result", 1)[1]
+            self.assertIn("runner-or-toolchain-failure", final)
+            self.assertIn("injected append failure", final)
+            self.assertNotIn("Failure class: none", final)
+            self.assert_minimal_recovered_upload(
+                config.artifacts, "injected append failure"
             )
 
     def test_transient_final_summary_failure_is_retried_and_manifested(self):
