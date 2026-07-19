@@ -1200,9 +1200,9 @@ def write_summary(report: GateReport, artifacts: pathlib.Path, step_summary: Opt
         raise InfrastructureFailure("could not write gate summary: %s" % error) from error
 
 
-def append_authoritative_step_summary(
-    path: pathlib.Path, report: GateReport, artifacts: pathlib.Path
-) -> None:
+def _authoritative_step_summary_text(
+    report: GateReport, artifacts: pathlib.Path
+) -> str:
     uploaded_summary = "Uploaded artifact summary unavailable."
     summary_path = artifacts / "summary.md"
     try:
@@ -1218,13 +1218,16 @@ def append_authoritative_step_summary(
     detail = report.failure_detail or "none"
     if len(detail) > 8192:
         detail = detail[:8176] + " ... [truncated]"
-    text = (
+    return (
         "## Authoritative final gate result\n\n"
         "- Failure class: %s\n"
         "- Failure detail: %s\n\n"
         "%s\n"
         % (report.failure_class, detail, uploaded_summary)
     )
+
+
+def _append_authoritative_step_text(path: pathlib.Path, text: str) -> None:
     try:
         with path.open("a", encoding="utf-8") as step_summary:
             step_summary.write(text)
@@ -1233,6 +1236,63 @@ def append_authoritative_step_summary(
         raise InfrastructureFailure(
             "could not append authoritative GitHub step summary: %s" % error
         ) from error
+
+
+def append_authoritative_step_summary(
+    path: pathlib.Path, report: GateReport, artifacts: pathlib.Path
+) -> None:
+    _append_authoritative_step_text(
+        path, _authoritative_step_summary_text(report, artifacts)
+    )
+
+
+def step_summary_size(path: pathlib.Path) -> int:
+    try:
+        path_status = os.lstat(str(path))
+    except FileNotFoundError:
+        return 0
+    except OSError as error:
+        raise InfrastructureFailure(
+            "could not inspect GitHub step summary: %s" % error
+        ) from error
+    if not stat.S_ISREG(path_status.st_mode):
+        raise InfrastructureFailure(
+            "GitHub step summary path is not a regular file: %s" % path
+        )
+    return path_status.st_size
+
+
+def rollback_step_summary(path: pathlib.Path, size: int) -> None:
+    descriptor = -1
+    flags = os.O_WRONLY
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(str(path), flags)
+        path_status = os.lstat(str(path))
+        opened_status = os.fstat(descriptor)
+        if not stat.S_ISREG(path_status.st_mode) or (
+            path_status.st_dev,
+            path_status.st_ino,
+        ) != (opened_status.st_dev, opened_status.st_ino):
+            raise InfrastructureFailure(
+                "GitHub step summary changed during rollback"
+            )
+        if opened_status.st_size < size:
+            raise InfrastructureFailure(
+                "GitHub step summary shrank before rollback"
+            )
+        os.ftruncate(descriptor, size)
+        os.fsync(descriptor)
+    except OSError as error:
+        raise InfrastructureFailure(
+            "could not roll back GitHub step summary: %s" % error
+        ) from error
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
 
 
 def _path_has_control_characters(path: str) -> bool:
@@ -2095,6 +2155,87 @@ def _run_controller_body(
 
     if step_summary_path:
         step_path = pathlib.Path(step_summary_path)
+        try:
+            step_summary_prefix_size = step_summary_size(step_path)
+        except BaseException as error:
+            changed = update_report(
+                _collector_failure(
+                    "authoritative GitHub step summary preparation failed: %s"
+                    % _as_gate_failure(error)
+                )
+            )
+            if changed:
+                recover_terminal_evidence()
+            step_summary_prefix_size = None
+
+        def roll_back_controller_step_summary() -> bool:
+            if step_summary_prefix_size is None:
+                return False
+            try:
+                rollback_step_summary(step_path, step_summary_prefix_size)
+                return True
+            except BaseException as error:
+                changed = update_report(
+                    _collector_failure(
+                        "authoritative GitHub step summary rollback failed: %s"
+                        % _as_gate_failure(error)
+                    )
+                )
+                if changed:
+                    recover_terminal_evidence()
+                print(
+                    "ERROR: could not roll back authoritative GitHub step summary: %s"
+                    % _as_gate_failure(error),
+                    file=sys.stderr,
+                )
+                return False
+
+        def emit_terminal_step_summary() -> None:
+            # Remove every controller-owned block before the private final write.
+            # If that write fails too, remove any partial write so an earlier
+            # success block cannot contradict the selected exit state.
+            for terminal_attempt in range(2):
+                roll_back_controller_step_summary()
+                if cancellation.cancelled and not cancellation_accounted:
+                    changed = account_new_cancellation(
+                        "gate was cancelled before terminal step summary emission"
+                    )
+                    if changed:
+                        recover_terminal_evidence()
+                try:
+                    _append_authoritative_step_text(
+                        step_path,
+                        _authoritative_step_summary_text(report, config.artifacts),
+                    )
+                except BaseException as error:
+                    changed = update_report(
+                        _collector_failure(
+                            "terminal GitHub step summary write failed: %s"
+                            % _as_gate_failure(error)
+                        )
+                    )
+                    if changed:
+                        recover_terminal_evidence()
+                    roll_back_controller_step_summary()
+                    print(
+                        "ERROR: could not emit terminal GitHub step summary: %s"
+                        % _as_gate_failure(error),
+                        file=sys.stderr,
+                    )
+                    return
+
+                # CancellationState is monotonic, so at most one correction is
+                # needed for a signal arriving during the private final write.
+                if cancellation.cancelled and not cancellation_accounted:
+                    changed = account_new_cancellation(
+                        "gate was cancelled during terminal step summary emission"
+                    )
+                    if changed:
+                        recover_terminal_evidence()
+                        if terminal_attempt == 0:
+                            continue
+                return
+
         for step_attempt in range(2):
             try:
                 append_authoritative_step_summary(step_path, report, config.artifacts)
@@ -2108,11 +2249,7 @@ def _run_controller_body(
                 if changed:
                     recover_terminal_evidence()
                 if step_attempt == 1:
-                    print(
-                        "ERROR: could not emit authoritative GitHub step summary: %s"
-                        % _as_gate_failure(error),
-                        file=sys.stderr,
-                    )
+                    emit_terminal_step_summary()
                     break
                 continue
 
@@ -2124,6 +2261,7 @@ def _run_controller_body(
                     recover_terminal_evidence()
                     if step_attempt == 0:
                         continue
+                    emit_terminal_step_summary()
             break
 
     return 0 if failure is None else exit_code_for(failure)

@@ -1949,6 +1949,126 @@ class FinalManifestTests(unittest.TestCase):
             self.assertIn("cancelled-or-obsolete", final)
             self.assert_minimal_recovered_upload(config.artifacts, "cancelled")
 
+    def test_failed_late_cancellation_correction_replaces_success_claim(self):
+        cancellation = gate.CancellationState()
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            step_summary = root / "github-step-summary.md"
+            step_summary.write_text("prior step output\n", encoding="utf-8")
+            config = gate.Config(
+                root / "source", root / "artifacts", "merge", "LingquLab/TileXR", 42
+            )
+            original_append = gate.append_authoritative_step_summary
+            appends = []
+
+            def collect(script, collector_config, env, **kwargs):
+                write_test_manifest(collector_config.artifacts)
+
+            def fail_correction(*args, **kwargs):
+                appends.append(True)
+                if len(appends) == 1:
+                    result = original_append(*args, **kwargs)
+                    cancellation.cancel()
+                    return result
+                raise gate.InfrastructureFailure("correction append failed")
+
+            with mock.patch.object(
+                gate, "orchestrate", side_effect=self.passing_orchestration
+            ), mock.patch.object(gate, "verify_final_cleanup"), mock.patch.object(
+                gate, "invoke_collector", side_effect=collect
+            ), mock.patch.object(
+                gate,
+                "append_authoritative_step_summary",
+                side_effect=fail_correction,
+            ):
+                result = gate._run_controller_body(
+                    config,
+                    {
+                        "TILEXR_CI_GITHUB_TOKEN": "token",
+                        "GITHUB_STEP_SUMMARY": str(step_summary),
+                    },
+                    root / "trusted",
+                    cancellation,
+                )
+
+            self.assertEqual(23, result)
+            self.assertEqual(2, len(appends))
+            visible = step_summary.read_text(encoding="utf-8")
+            self.assertTrue(visible.startswith("prior step output\n"))
+            self.assertEqual(1, visible.count("Authoritative final gate result"))
+            final = visible.rsplit("Authoritative final gate result", 1)[1]
+            self.assertIn("runner-or-toolchain-failure", final)
+            self.assertIn("correction append failed", final)
+            self.assertNotIn("Failure class: none", final)
+            self.assert_minimal_recovered_upload(
+                config.artifacts, "correction append failed"
+            )
+
+    def test_failed_emergency_correction_removes_stale_success_claim(self):
+        cancellation = gate.CancellationState()
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            step_summary = root / "github-step-summary.md"
+            step_summary.write_text("prior step output\n", encoding="utf-8")
+            config = gate.Config(
+                root / "source", root / "artifacts", "merge", "LingquLab/TileXR", 42
+            )
+            original_append = gate.append_authoritative_step_summary
+            original_append_text = gate._append_authoritative_step_text
+            appends = []
+            text_appends = []
+
+            def collect(script, collector_config, env, **kwargs):
+                write_test_manifest(collector_config.artifacts)
+
+            def fail_correction(*args, **kwargs):
+                appends.append(True)
+                if len(appends) == 1:
+                    result = original_append(*args, **kwargs)
+                    cancellation.cancel()
+                    return result
+                raise gate.InfrastructureFailure("correction append failed")
+
+            def fail_emergency(path, text):
+                text_appends.append(True)
+                if len(text_appends) == 1:
+                    return original_append_text(path, text)
+                raise gate.InfrastructureFailure("emergency append failed")
+
+            with mock.patch.object(
+                gate, "orchestrate", side_effect=self.passing_orchestration
+            ), mock.patch.object(gate, "verify_final_cleanup"), mock.patch.object(
+                gate, "invoke_collector", side_effect=collect
+            ), mock.patch.object(
+                gate,
+                "append_authoritative_step_summary",
+                side_effect=fail_correction,
+            ), mock.patch.object(
+                gate, "_append_authoritative_step_text", side_effect=fail_emergency
+            ), mock.patch.object(
+                gate.sys, "stderr", io.StringIO()
+            ):
+                result = gate._run_controller_body(
+                    config,
+                    {
+                        "TILEXR_CI_GITHUB_TOKEN": "token",
+                        "GITHUB_STEP_SUMMARY": str(step_summary),
+                    },
+                    root / "trusted",
+                    cancellation,
+                )
+
+            self.assertEqual(23, result)
+            self.assertEqual(2, len(appends))
+            self.assertEqual(2, len(text_appends))
+            self.assertEqual(
+                "prior step output\n",
+                step_summary.read_text(encoding="utf-8"),
+            )
+            self.assert_minimal_recovered_upload(
+                config.artifacts, "correction append failed"
+            )
+
     def test_persistent_step_summary_failure_recovers_artifact_evidence(self):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
@@ -1985,7 +2105,10 @@ class FinalManifestTests(unittest.TestCase):
 
             self.assertEqual(23, result)
             self.assertEqual(2, append.call_count)
-            self.assertEqual("", step_summary.read_text(encoding="utf-8"))
+            visible = step_summary.read_text(encoding="utf-8")
+            self.assertEqual(1, visible.count("Authoritative final gate result"))
+            self.assertIn("runner-or-toolchain-failure", visible)
+            self.assertIn("step summary write failed", visible)
             self.assert_minimal_recovered_upload(
                 config.artifacts, "step summary write failed"
             )
