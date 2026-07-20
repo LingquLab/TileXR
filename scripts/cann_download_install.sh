@@ -48,7 +48,7 @@ _ensure_curl_running() {
     fi
 
     cd ${TILEXR_TEMP_HOME}
-    curl -k -C - -O ${url} > ${log_file} 2>&1 &
+    curl --fail --location --continue-at - --remote-name ${url} > ${log_file} 2>&1 &
     _curl_pid=$!
     echo ${_curl_pid} > "${pid_file}"
     cd ${TILEXR_HOME}
@@ -80,6 +80,15 @@ done
 echo ""
 rm -f "${ops_pid_file}"
 success "ops downloaded."
+
+if [[ ! -s "${TILEXR_TEMP_HOME}/${toolkit_run}" ]]; then
+    error "downloaded toolkit is missing or empty: ${toolkit_run}"
+    exit 1
+fi
+if [[ ! -s "${TILEXR_TEMP_HOME}/${ops_run}" ]]; then
+    error "downloaded 910B Ops package is missing or empty: ${ops_run}"
+    exit 1
+fi
 
 success "begin install."
 bash ${script_path}/cann_local_install.sh

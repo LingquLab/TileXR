@@ -18,6 +18,11 @@ add_test(
 )
 
 add_test(
+    NAME test_tilexr_ci_provision_dry_run
+    COMMAND "${BASH_EXECUTABLE}" "${CMAKE_CURRENT_LIST_DIR}/test_provision_dry_run.sh"
+)
+
+add_test(
     NAME test_tilexr_ci_npu_state
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_npu_state.py -v
 )
