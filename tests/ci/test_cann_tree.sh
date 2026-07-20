@@ -55,7 +55,14 @@ if cann_tree_is_trusted; then
     echo "CANN tree accepted a setgid directory" >&2
     exit 1
 fi
+chmod u-s,g-s,o-t "${compiler_dir}"
 chmod 0750 "${compiler_dir}"
+compiler_mode="$(cann_entry_stat "${compiler_dir}")"
+compiler_mode="${compiler_mode##*:}"
+if [[ "${compiler_mode}" != 750 ]]; then
+    echo "CANN directory fixture did not clear its special bits" >&2
+    exit 1
+fi
 
 chmod 0700 "${compiler_dir}"
 if cann_tree_is_trusted; then
