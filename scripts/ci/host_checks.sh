@@ -113,12 +113,20 @@ fi
 run_case() {
     local name="$1"
     shift
-    local started finished duration status result
+    local started finished duration status result restore_errexit
+    restore_errexit=0
+    if [[ "$-" == *e* ]]; then
+        restore_errexit=1
+    fi
     started="$(date +%s)"
     set +e
     (set -e; "$@")
     status="$?"
-    set -e
+    if [[ "${restore_errexit}" -eq 1 ]]; then
+        set -e
+    else
+        set +e
+    fi
     finished="$(date +%s)"
     duration=$((finished - started))
     result="PASS"
@@ -128,6 +136,21 @@ run_case() {
     printf '%s\t%s\t%s\t%s\n' \
         "${name}" "${result}" "${status}" "${duration}" >> "${CASES_FILE}"
     return "${status}"
+}
+
+# Bash suppresses errexit inside functions used directly by if/||. Keep run_case
+# as a simple command so a failed command within a multi-command suite stops it.
+overall_status=0
+run_and_accumulate_case() {
+    local case_status
+    set +e
+    run_case "$@"
+    case_status="$?"
+    set -e
+    if [[ "${case_status}" -ne 0 ]]; then
+        overall_status=1
+    fi
+    return 0
 }
 
 copy_ctest_xml() {
@@ -389,14 +412,16 @@ finalize_host_checks() {
 
 trap finalize_host_checks EXIT
 
-run_case shell-syntax check_tracked_shell_syntax
-run_case ci-ctest run_ci_ctest
-run_case comm-host run_comm_host_tests
-run_case ep-source-only run_ep_source_tests
-run_case data-as-flag run_data_as_flag_tests
-run_case collectives-vllm-patch \
+run_and_accumulate_case shell-syntax check_tracked_shell_syntax
+run_and_accumulate_case ci-ctest run_ci_ctest
+run_and_accumulate_case comm-host run_comm_host_tests
+run_and_accumulate_case ep-source-only run_ep_source_tests
+run_and_accumulate_case data-as-flag run_data_as_flag_tests
+run_and_accumulate_case collectives-vllm-patch \
     python3 -m pytest -q "${ROOT_DIR}/tests/collectives/unit/test_vllm_collectives_patch.py"
-run_case collectives-vllm-integration-sources \
+run_and_accumulate_case collectives-vllm-integration-sources \
     python3 -m pytest -q "${ROOT_DIR}/tests/collectives/unit/test_vllm_collectives_integration_sources.py"
-run_case collectives-profile-report \
+run_and_accumulate_case collectives-profile-report \
     python3 "${ROOT_DIR}/tests/collectives/unit/test_collective_profile_report.py"
+
+exit "${overall_status}"

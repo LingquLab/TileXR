@@ -345,7 +345,7 @@ class ControlSourceContractTests(unittest.TestCase):
             "collectives-vllm-integration-sources",
             "collectives-profile-report",
         ]:
-            self.assertIn("run_case {} ".format(suite), text)
+            self.assertIn("run_and_accumulate_case {} ".format(suite), text)
         self.assertGreaterEqual(text.count(':-local}'), 4)
 
 
@@ -924,6 +924,119 @@ class HostChecksBehaviorTests(unittest.TestCase):
 
             unreadable.chmod(0o600)
             self.assertEqual(valid, real_cases.read_text(encoding="utf-8"))
+
+    def test_host_checks_runs_all_cases_after_an_intermediate_failure(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary).resolve()
+            script = self.materialize_host_checks(root)
+            fake_bin = root / "fake-bin"
+            fake_bin.mkdir()
+            tracked_shell = root / "tracked.sh"
+            tracked_shell.write_text("#!/bin/bash\ntrue\n", encoding="utf-8")
+            later_case = root / "later-case-ran"
+            build_root = root / ".ci-build" / "tilexr-host-default"
+            comm_bin = build_root / "comm-install" / "bin"
+
+            fake_git = fake_bin / "git"
+            fake_git.write_text(
+                "#!/bin/bash\nprintf 'tracked.sh\\0'\n", encoding="utf-8"
+            )
+            fake_git.chmod(0o755)
+
+            fake_cmake = fake_bin / "cmake"
+            fake_cmake.write_text(
+                "#!/bin/bash\n"
+                "set -euo pipefail\n"
+                "build_dir=''\n"
+                "while [[ $# -gt 0 ]]; do\n"
+                "  if [[ \"$1\" == '-B' ]]; then\n"
+                "    shift\n"
+                "    build_dir=\"$1\"\n"
+                "  fi\n"
+                "  shift\n"
+                "done\n"
+                "if [[ -n \"$build_dir\" ]]; then\n"
+                "  mkdir -p \"$build_dir/Testing/tag\"\n"
+                "  printf '<testsuite/>\\n' > \"$build_dir/Testing/tag/Test.xml\"\n"
+                "fi\n"
+                "mkdir -p \"${TILEXR_TEST_COMM_BIN:?}\"\n"
+                "for name in test_tilexr_log test_tilexr_log_spdlog_compile "
+                "test_tilexr_source_guards; do\n"
+                "  printf '#!/bin/bash\\nexit 0\\n' > "
+                "\"${TILEXR_TEST_COMM_BIN}/$name\"\n"
+                "  chmod 755 \"${TILEXR_TEST_COMM_BIN}/$name\"\n"
+                "done\n",
+                encoding="utf-8",
+            )
+            fake_cmake.chmod(0o755)
+
+            fake_ctest = fake_bin / "ctest"
+            fake_ctest.write_text(
+                "#!/bin/bash\n"
+                "if [[ \"$PWD\" == */ep ]]; then exit 23; fi\n"
+                "exit 0\n",
+                encoding="utf-8",
+            )
+            fake_ctest.chmod(0o755)
+
+            fake_python = fake_bin / "python3"
+            fake_python.write_text(
+                "#!/bin/bash\n"
+                "set -euo pipefail\n"
+                "if [[ \"${1:-}\" == '-m' && \"${2:-}\" == 'pytest' ]]; then\n"
+                "  exit 0\n"
+                "fi\n"
+                "if [[ \"${1:-}\" == *test_collective_profile_report.py ]]; then\n"
+                "  touch \"${TILEXR_TEST_LATER_CASE:?}\"\n"
+                "  exit 31\n"
+                "fi\n"
+                "exec \"${TILEXR_TEST_REAL_PYTHON:?}\" \"$@\"\n",
+                encoding="utf-8",
+            )
+            fake_python.chmod(0o755)
+
+            environment = dict(os.environ)
+            environment.pop("TILEXR_CI_BUILD_ROOT", None)
+            environment.pop("RUNNER_TEMP", None)
+            environment["PATH"] = "{}:{}".format(
+                fake_bin, environment["PATH"]
+            )
+            environment["TILEXR_TEST_COMM_BIN"] = str(comm_bin)
+            environment["TILEXR_TEST_LATER_CASE"] = str(later_case)
+            environment["TILEXR_TEST_REAL_PYTHON"] = shutil.which("python3")
+            result = subprocess.run(
+                ["/bin/bash", str(script)],
+                cwd=str(root),
+                env=environment,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+
+            self.assertNotEqual(0, result.returncode)
+            self.assertTrue(later_case.is_file())
+            cases = (root / ".ci-artifacts/host/cases.tsv").read_text(
+                encoding="utf-8"
+            ).splitlines()
+            self.assertEqual(8, len(cases))
+            rows = [line.split("\t") for line in cases]
+            self.assertEqual(self.expected_host_cases(), [row[0] for row in rows])
+            self.assertEqual(["ep-source-only", "FAIL", "23"], rows[3][:3])
+            self.assertEqual(
+                ["collectives-profile-report", "FAIL", "31"], rows[7][:3]
+            )
+            for index, row in enumerate(rows):
+                if index not in (3, 7):
+                    self.assertEqual(["PASS", "0"], row[1:3])
+            summary = (root / ".ci-artifacts/host/summary.md").read_text(
+                encoding="utf-8"
+            )
+            self.assertIn("Host cases: 8 total, 6 passed, 2 failed", summary)
+            self.assertIn(
+                "Failed cases: ep-source-only, collectives-profile-report",
+                summary,
+            )
+            self.assertIn("Case evidence: valid", summary)
 
 
 class BuildHelperBehaviorTests(unittest.TestCase):
