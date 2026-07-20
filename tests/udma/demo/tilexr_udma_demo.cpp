@@ -832,6 +832,12 @@ bool RunGroupedAllToAll(
         " blockDim=" + std::to_string(groupBlockDim) +
         " routeStages=" + std::to_string(routeStagesValue));
 
+    if (routeStages &&
+        !DemoBarrierAll(rank, rankSize, "grouped route stages ready")) {
+        release();
+        return false;
+    }
+
     uint32_t invocationId = 0U;
     auto launchGroupStage = [&](TileXR::Demo::AllToAllGroupRouteStage routeStage,
                                 void* trace, uint32_t traceIteration) {

@@ -321,6 +321,8 @@ void TestHostStructure()
     CHECK_CONTAINS(grouped, "AllToAllGroupRouteStage::kCombined");
     CHECK_CONTAINS(grouped, "aclrtEventElapsedTime");
     CHECK_CONTAINS(grouped, "DemoBarrierAll(rank, rankSize, barrierStep)");
+    CHECK_CONTAINS(grouped,
+        "DemoBarrierAll(rank, rankSize, \"grouped route stages ready\")");
     CHECK_CONTAINS(demo, "\"/tilexr_group_trace_\" + stageName + \"_rank_\"");
 }
 
