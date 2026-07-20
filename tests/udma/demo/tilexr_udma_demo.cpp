@@ -878,51 +878,42 @@ bool RunGroupedAllToAll(
         const auto end = std::chrono::steady_clock::now();
         totalUs = std::chrono::duration<double, std::micro>(end - begin).count();
     } else {
-        auto finishStage = [&](const std::string& barrierStep) -> bool {
-            return CheckAcl(rank, "aclrtSynchronizeStream " + barrierStep,
-                       aclrtSynchronizeStream(stream)) &&
-                DemoBarrierAll(rank, rankSize, barrierStep);
-        };
-
-        for (int iter = 0; iter < warmup; ++iter, ++invocationId) {
-            for (size_t stageIndex = 0U; stageIndex < kRouteStageCount; ++stageIndex) {
+        auto runStageBatch = [&](size_t stageIndex) -> bool {
+            invocationId = 0U;
+            for (int iter = 0; iter < warmup; ++iter, ++invocationId) {
                 launchGroupStage(stagedRouteStages[stageIndex], nullptr, 0U);
-                const std::string barrierStep = "grouped route stage " +
-                    std::string(stageNames[stageIndex]) + " warmup=" + std::to_string(iter);
-                if (!finishStage(barrierStep)) {
-                    release();
-                    return false;
-                }
             }
-        }
-
-        for (int iter = 0; iter < repeat; ++iter, ++invocationId) {
-            for (size_t stageIndex = 0U; stageIndex < kRouteStageCount; ++stageIndex) {
-                if (!CheckAcl(rank, "aclrtRecordEvent grouped stage start",
-                        aclrtRecordEvent(stageStartEvent, stream))) {
-                    release();
-                    return false;
-                }
+            if (!CheckAcl(rank, "aclrtSynchronizeStream grouped stage warmup",
+                    aclrtSynchronizeStream(stream)) ||
+                !CheckAcl(rank, "aclrtRecordEvent grouped stage start",
+                    aclrtRecordEvent(stageStartEvent, stream))) {
+                return false;
+            }
+            for (int iter = 0; iter < repeat; ++iter, ++invocationId) {
                 launchGroupStage(stagedRouteStages[stageIndex],
                     groupTraceDevices[stageIndex], static_cast<uint32_t>(iter));
-                if (!CheckAcl(rank, "aclrtRecordEvent grouped stage end",
-                        aclrtRecordEvent(stageEndEvent, stream))) {
-                    release();
-                    return false;
-                }
-                const std::string barrierStep = "grouped route stage " +
-                    std::string(stageNames[stageIndex]) + " repeat=" + std::to_string(iter);
-                if (!finishStage(barrierStep)) {
-                    release();
-                    return false;
-                }
-                float elapsedMs = 0.0F;
-                if (!CheckAcl(rank, "aclrtEventElapsedTime grouped stage",
-                        aclrtEventElapsedTime(&elapsedMs, stageStartEvent, stageEndEvent))) {
-                    release();
-                    return false;
-                }
-                stageTotalUs[stageIndex] += static_cast<double>(elapsedMs) * 1000.0;
+            }
+            if (!CheckAcl(rank, "aclrtRecordEvent grouped stage end",
+                    aclrtRecordEvent(stageEndEvent, stream)) ||
+                !CheckAcl(rank, "aclrtSynchronizeStream grouped stage measured",
+                    aclrtSynchronizeStream(stream))) {
+                return false;
+            }
+            float elapsedMs = 0.0F;
+            if (!CheckAcl(rank, "aclrtEventElapsedTime grouped stage",
+                    aclrtEventElapsedTime(&elapsedMs, stageStartEvent, stageEndEvent))) {
+                return false;
+            }
+            stageTotalUs[stageIndex] = static_cast<double>(elapsedMs) * 1000.0;
+            const std::string barrierStep = "grouped route stage " +
+                std::string(stageNames[stageIndex]) + " complete";
+            return DemoBarrierAll(rank, rankSize, barrierStep);
+        };
+
+        for (size_t stageIndex = 0U; stageIndex < kRouteStageCount; ++stageIndex) {
+            if (!runStageBatch(stageIndex)) {
+                release();
+                return false;
             }
         }
         for (double stageUs : stageTotalUs) {

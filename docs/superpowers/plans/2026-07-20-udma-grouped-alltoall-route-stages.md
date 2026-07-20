@@ -4,7 +4,7 @@
 
 **Goal:** Add an opt-in three-stage grouped AllToAll diagnostic that measures local, six-port, and two-port traffic without overlap, then validate physical 2x8 bandwidth at 128 MiB per rank.
 
-**Architecture:** Introduce a shared route-stage policy with a default combined mode and three diagnostic modes. In diagnostic mode the Host launches one filtered kernel per stage, synchronizes and executes the existing TCP all-rank barrier between stages, and writes one 8 MiB trace per stage; default execution remains one kernel with no added barrier.
+**Architecture:** Introduce a shared route-stage policy with a default combined mode and three diagnostic modes. In diagnostic mode the Host runs warmup and measured kernel batches for one filtered stage at a time, synchronizes and executes one TCP all-rank barrier between stage batches, and writes one 8 MiB trace per stage; default execution remains one kernel with no added barrier.
 
 **Tech Stack:** C++14 Host runtime, AscendC AIV kernel, TileXR UDMA same-QP put-signal/quiet, ACL runtime events, Python trace converter, physical CANN `/home/pkg/b101/cann`.
 
@@ -245,12 +245,13 @@ header. Change `WriteGroupTraceBinary` to accept `stageName`; omit the suffix
 for combined mode and include it for diagnostic modes. The release lambda must
 free every allocated trace pointer on partial failure.
 
-- [ ] **Step 5: Implement stage launch and ACL timing**
+- [ ] **Step 5: Implement stage-batch launch and ACL timing**
 
-Create/reuse ACL start and end events around one kernel launch. Synchronize the
-end event, call `aclrtEventElapsedTime`, accumulate milliseconds by stage, then
-call `DemoBarrierAll` only in diagnostic mode. Use one `invocationId` for all
-three stages of a logical iteration and increment it after secondary completes:
+Create/reuse ACL start and end events around each stage's complete repeat batch.
+Run all warmups for that stage first, synchronize, then record the measured
+batch. Call `aclrtEventElapsedTime`, divide by repeat count, and call
+`DemoBarrierAll` once after the stage completes. Reset `invocationId` at the
+start of each stage because peer sets are disjoint:
 
 ```cpp
 const AllToAllGroupRouteStage stages[] = {
@@ -261,8 +262,8 @@ const AllToAllGroupRouteStage stages[] = {
 const char* stageNames[] = {"local", "primary", "secondary"};
 ```
 
-Warmup follows the same stage sequence and barriers with null traces. Default
-mode remains one `kCombined` launch per invocation.
+Default mode remains one `kCombined` launch per invocation. Staged mode uses one
+ready barrier and three completion barriers, not one barrier per invocation.
 
 - [ ] **Step 6: Report and validate**
 

@@ -11,7 +11,7 @@ The first validation target is physical 2x8 with 128 MiB input/output per rank,
 
 ## Stage Schedule
 
-Each logical AllToAll invocation is split into three kernel launches:
+The diagnostic run is split into three stage batches:
 
 1. `local`: self-copy and peers whose `rank / 8` matches the local rank's node.
 2. `primary`: cross-node peers selected for the primary QP, currently QP0 and
@@ -19,9 +19,12 @@ Each logical AllToAll invocation is split into three kernel launches:
 3. `secondary`: cross-node peers selected for the secondary QP, currently QP4
    and the two-port aggregate route.
 
-The Host synchronizes the stream after each launch and executes the existing
-TCP all-rank barrier before launching the next stage. Therefore no rank can
-start one route stage while another rank is still using the preceding route.
+For each stage, the Host launches all warmup iterations and then all measured
+iterations on the same stream. It synchronizes the stream and executes the
+existing TCP all-rank barrier once after the measured batch. Therefore no rank
+can start one route stage while another rank is still using the preceding
+route. This needs only one ready barrier plus three stage-completion barriers,
+so warmup5/repeat50 remains inside the 60-second process timeout.
 
 The route-stage mode is enabled only through a new environment option. Without
 that option, the Host performs the current single kernel launch and does not add
@@ -47,9 +50,10 @@ scope.
 
 ## Timing And Trace
 
-The Host records one ACL event duration for each stage. The reported staged
-kernel time is the sum of the three device durations and excludes TCP barrier
-latency.
+The Host records one ACL event duration around each stage's complete measured
+batch. The reported per-stage mean divides that duration by repeat count; the
+reported staged kernel time is the sum of the three means and excludes TCP
+barrier latency.
 
 When tracing is enabled, each stage owns a separate existing-size trace buffer.
 This avoids changing or multiplying the trace layout and prevents kernel-span
