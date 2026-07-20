@@ -1625,9 +1625,13 @@ proving that the live ruleset has not changed:
 
 ```bash
 gh api "repos/LingquLab/TileXR/rulesets/${RULESET_ID}" >"${RULESET_CURRENT}"
-cmp -s "${RULESET_BEFORE}" "${RULESET_CURRENT}"
-gh api --method PUT "repos/LingquLab/TileXR/rulesets/${RULESET_ID}" \
-  --input "${RULESET_PAYLOAD}" >/dev/null
+if cmp -s "${RULESET_BEFORE}" "${RULESET_CURRENT}"; then
+  gh api --method PUT "repos/LingquLab/TileXR/rulesets/${RULESET_ID}" \
+    --input "${RULESET_PAYLOAD}" >/dev/null
+else
+  echo "ERROR: live ruleset changed after candidate review; regenerate it" >&2
+  false
+fi
 ```
 
 - [ ] **Step 3: Verify the rule without bypassing it**

@@ -349,9 +349,13 @@ created:
 
 ```bash
 gh api "repos/LingquLab/TileXR/rulesets/${RULESET_ID}" >"${RULESET_CURRENT}"
-cmp -s "${RULESET_BEFORE}" "${RULESET_CURRENT}"
-gh api --method PUT "repos/LingquLab/TileXR/rulesets/${RULESET_ID}" \
-  --input "${RULESET_PAYLOAD}" >/dev/null
+if cmp -s "${RULESET_BEFORE}" "${RULESET_CURRENT}"; then
+  gh api --method PUT "repos/LingquLab/TileXR/rulesets/${RULESET_ID}" \
+    --input "${RULESET_PAYLOAD}" >/dev/null
+else
+  echo "ERROR: live ruleset changed after candidate review; regenerate it" >&2
+  false
+fi
 ```
 
 Read the ruleset back and verify that it still requires two approvals,
@@ -427,9 +431,13 @@ Stop for explicit review. After confirming that the candidate removes only
 
 ```bash
 gh api "repos/LingquLab/TileXR/rulesets/${RULESET_ID}" >"${RULESET_CURRENT}"
-cmp -s "${RULESET_BEFORE}" "${RULESET_CURRENT}"
-gh api --method PUT "repos/LingquLab/TileXR/rulesets/${RULESET_ID}" \
-  --input "${RULESET_PAYLOAD}" >/dev/null
+if cmp -s "${RULESET_BEFORE}" "${RULESET_CURRENT}"; then
+  gh api --method PUT "repos/LingquLab/TileXR/rulesets/${RULESET_ID}" \
+    --input "${RULESET_PAYLOAD}" >/dev/null
+else
+  echo "ERROR: live ruleset changed after rollback review; regenerate it" >&2
+  false
+fi
 ```
 
 Then stop and disable the runner while preserving the account, sealed
