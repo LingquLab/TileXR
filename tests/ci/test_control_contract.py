@@ -348,6 +348,11 @@ class ControlSourceContractTests(unittest.TestCase):
             self.assertIn("run_and_accumulate_case {} ".format(suite), text)
         self.assertGreaterEqual(text.count(':-local}'), 4)
 
+    def test_host_check_generated_roots_are_ignored_at_repository_root(self):
+        rules = self.read(".gitignore").splitlines()
+        self.assertIn("/.ci-build/", rules)
+        self.assertIn("/.ci-artifacts/", rules)
+
 
 class HardwareHelperBehaviorTests(unittest.TestCase):
     def hardware_function(self, name):
