@@ -14,6 +14,18 @@ namespace Demo {
 constexpr uint32_t kAllToAllGroupRanksPerNode = 8U;
 constexpr uint32_t kAllToAllGroupPrimaryPeersPerNode = 6U;
 
+enum class AllToAllGroupRouteStage : uint32_t {
+    kCombined = 0U,
+    kLocal = 1U,
+    kPrimary = 2U,
+    kSecondary = 3U,
+};
+
+inline bool AllToAllGroupValidRouteStage(uint32_t value)
+{
+    return value <= static_cast<uint32_t>(AllToAllGroupRouteStage::kSecondary);
+}
+
 struct AllToAllGroupRouteQps {
     uint32_t primaryQp = 0U;
     uint32_t secondaryQp = 0U;
@@ -37,6 +49,26 @@ inline bool AllToAllGroupUseSecondaryRoute(int rank, int peer)
         static_cast<uint32_t>(peer) % kAllToAllGroupRanksPerNode;
     return (sourceLocal + targetLocal) % kAllToAllGroupRanksPerNode >=
         kAllToAllGroupPrimaryPeersPerNode;
+}
+
+inline bool AllToAllGroupPeerInRouteStage(
+    int rank, int peer, AllToAllGroupRouteStage stage)
+{
+    if (rank < 0 || peer < 0 || rank == peer) {
+        return false;
+    }
+    const bool crossNode = AllToAllGroupIsCrossNode(rank, peer);
+    switch (stage) {
+        case AllToAllGroupRouteStage::kCombined:
+            return true;
+        case AllToAllGroupRouteStage::kLocal:
+            return !crossNode;
+        case AllToAllGroupRouteStage::kPrimary:
+            return crossNode && !AllToAllGroupUseSecondaryRoute(rank, peer);
+        case AllToAllGroupRouteStage::kSecondary:
+            return crossNode && AllToAllGroupUseSecondaryRoute(rank, peer);
+    }
+    return false;
 }
 
 inline AllToAllGroupRouteQps AllToAllGroupSelectRouteQps(

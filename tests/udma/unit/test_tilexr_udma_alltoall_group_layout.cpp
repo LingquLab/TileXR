@@ -205,6 +205,43 @@ void TestDualRouteQpWeights()
     CHECK_EQ(empty.secondaryQp, 0U);
 }
 
+void TestRouteStages()
+{
+    using TileXR::Demo::AllToAllGroupRouteStage;
+    CHECK_EQ(TileXR::Demo::AllToAllGroupValidRouteStage(0U), true);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupValidRouteStage(3U), true);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupValidRouteStage(4U), false);
+
+    for (int rankSize : {8, 16, 128}) {
+        for (int rank = 0; rank < rankSize; ++rank) {
+            int local = 0;
+            int primary = 0;
+            int secondary = 0;
+            for (int peer = 0; peer < rankSize; ++peer) {
+                if (peer == rank) {
+                    continue;
+                }
+                const bool inLocal = TileXR::Demo::AllToAllGroupPeerInRouteStage(
+                    rank, peer, AllToAllGroupRouteStage::kLocal);
+                const bool inPrimary = TileXR::Demo::AllToAllGroupPeerInRouteStage(
+                    rank, peer, AllToAllGroupRouteStage::kPrimary);
+                const bool inSecondary = TileXR::Demo::AllToAllGroupPeerInRouteStage(
+                    rank, peer, AllToAllGroupRouteStage::kSecondary);
+                CHECK_EQ(static_cast<int>(inLocal) + static_cast<int>(inPrimary) +
+                    static_cast<int>(inSecondary), 1);
+                local += inLocal ? 1 : 0;
+                primary += inPrimary ? 1 : 0;
+                secondary += inSecondary ? 1 : 0;
+                CHECK_EQ(TileXR::Demo::AllToAllGroupPeerInRouteStage(
+                    rank, peer, AllToAllGroupRouteStage::kCombined), true);
+            }
+            CHECK_EQ(local, 7);
+            CHECK_EQ(primary + secondary, rankSize - 8);
+            CHECK_EQ(secondary, rankSize == 8 ? 0 : 2 * (rankSize / 8 - 1));
+        }
+    }
+}
+
 void TestCopyoutWorkerPolicy()
 {
     CHECK_EQ(TileXR::Demo::AllToAllGroupValidCopyoutWorkers(8U), true);
@@ -286,6 +323,7 @@ int main()
     TestTokens();
     TestDualRoutePeerPolicy();
     TestDualRouteQpWeights();
+    TestRouteStages();
     TestCopyoutWorkerPolicy();
     TestKernelStructure();
     TestHostStructure();
