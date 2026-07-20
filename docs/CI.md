@@ -104,6 +104,22 @@ trees; requires the hardware demo binaries; and validates installed headers,
 libraries, dependencies, and RPATH/RUNPATH. Stub `libascend_hal.so` resolution
 through CANN `devlib` is a failure.
 
+The build phase records these exact `cases.tsv` cases:
+
+- top level: `top-level-ctest`;
+- comm: `comm-log`, `comm-spdlog-compile`, and `comm-source-guards`;
+- UDMA: `udma-transport-layout`, `udma-registry`, `udma-demo-sources`, and
+  `udma-source-guard`;
+- SDMA: `sdma-metadata`, `sdma-api-invalid`, `sdma-transport-disabled`,
+  `sdma-comm-wiring`, `sdma-source-guard`, and `sdma-header-compile`;
+- EP: `ep-layout`, `ep-api-sources`, `ep-kernel-sources`, and
+  `ep-host-validation`;
+- memory: `memory-demo-sources`.
+
+The top-level configure/build, suite builds, top-level reinstall, required-file
+checks, and dependency/RPATH checks are also mandatory. They fail the build
+phase directly and produce logs rather than additional `cases.tsv` rows.
+
 The hardware manifest runs:
 
 - health checks for devices 0 through 7;
@@ -139,9 +155,10 @@ Failure classes and controller exit codes are:
   case failed;
 - `resource-timeout` (`21`): the shared six-hour lock/idle budget expired;
 - `resource-collision` (`22`): CI touched an NPU during build, a foreign process
-  appeared during hardware, or cleanup found a CI-owned NPU process;
+  appeared during hardware, or another resource-ownership policy was violated;
 - `runner-or-toolchain-failure` (`23`): controller, CANN, runner, GitHub API,
-  evidence, or host-health infrastructure failed;
+  evidence, host-health infrastructure, or final cleanup failed, including a
+  leftover NPU process owned by `tilexr-ci`;
 - `cancelled-or-obsolete` (`130`): Actions cancelled the run or its merge SHA
   changed.
 
@@ -175,14 +192,18 @@ runs.
 
 Provision only from a fresh, commit-addressed checkout of reviewed `main`.
 File transfer to `blue`, when needed, must use mutagen; the normal bootstrap
-below clones the public repository directly on the server.
+below initializes the public repository and fetches the resolved commit
+directly on the server.
 
 ```bash
 CI_SHA="$(gh api repos/LingquLab/TileXR/commits/main --jq .sha)"
 BOOTSTRAP="/home/d00520898/tilexr-ci-bootstrap-${CI_SHA}"
 ssh blue "test ! -e '${BOOTSTRAP}'"
-ssh blue "git clone --branch main --depth 1 https://github.com/LingquLab/TileXR.git '${BOOTSTRAP}'"
+ssh blue "git init '${BOOTSTRAP}'"
+ssh blue "git -C '${BOOTSTRAP}' remote add origin https://github.com/LingquLab/TileXR.git"
+ssh blue "git -C '${BOOTSTRAP}' fetch --depth 1 origin '${CI_SHA}'"
 ssh blue "git -C '${BOOTSTRAP}' checkout --detach '${CI_SHA}'"
+ssh blue "test \"\$(git -C '${BOOTSTRAP}' rev-parse HEAD)\" = '${CI_SHA}'"
 ssh blue "cd '${BOOTSTRAP}' && sudo bash scripts/ci/provision/account.sh"
 ssh blue "cd '${BOOTSTRAP}' && sudo bash scripts/ci/provision/cann.sh"
 ssh blue "cd '${BOOTSTRAP}' && sudo bash scripts/ci/provision/control.sh"
@@ -207,16 +228,39 @@ gh api repos/LingquLab/TileXR/actions/permissions
 gh api repos/LingquLab/TileXR/actions/permissions/selected-actions
 gh api repos/LingquLab/TileXR/actions/permissions/workflow
 gh api repos/LingquLab/TileXR/actions/permissions/fork-pr-contributor-approval
-gh api --paginate orgs/LingquLab/teams/ci-maintainers/members --jq '.[].login'
-gh api --paginate orgs/LingquLab/teams/ci-maintainers/repos --jq '.[].full_name'
+
+diff -u \
+  <(printf '%s\n' Kur0x chaowick | sort -f) \
+  <(gh api --paginate orgs/LingquLab/teams/ci-maintainers/members \
+      --jq '.[].login' | sort -f)
+for login in Kur0x chaowick; do
+  [[ "$(gh api \
+    "orgs/LingquLab/teams/ci-maintainers/memberships/${login}" \
+    --jq '[.state,.role] | @tsv')" == $'active\tmaintainer' ]]
+done
+diff -u \
+  <(printf '%s\n' LingquLab/TileXR) \
+  <(gh api --paginate orgs/LingquLab/teams/ci-maintainers/repos \
+      --jq '.[].full_name' | sort)
+[[ "$(gh api repos/LingquLab/TileXR/teams --jq \
+  '.[] | select(.slug == "ci-maintainers") | .permission')" == push ]]
 
 GROUP_ID="$(gh api orgs/LingquLab/actions/runner-groups --jq \
   '.runner_groups[] | select(.name == "TileXR-NPU") | .id')"
+[[ "${GROUP_ID}" =~ ^[0-9]+$ ]]
 gh api "orgs/LingquLab/actions/runner-groups/${GROUP_ID}" --jq \
   '{name,visibility,allows_public_repositories,restricted_to_workflows,selected_workflows}'
-gh api "orgs/LingquLab/actions/runner-groups/${GROUP_ID}/repositories" --jq \
-  '.repositories[].full_name'
-gh api orgs/LingquLab/actions/runners --jq \
+diff -u \
+  <(printf '%s\n' LingquLab/TileXR) \
+  <(gh api --paginate \
+      "orgs/LingquLab/actions/runner-groups/${GROUP_ID}/repositories" \
+      --jq '.repositories[].full_name' | sort)
+diff -u \
+  <(printf '%s\n' blue-tilexr-npu8) \
+  <(gh api --paginate \
+      "orgs/LingquLab/actions/runner-groups/${GROUP_ID}/runners" \
+      --jq '.runners[].name' | sort)
+gh api "orgs/LingquLab/actions/runner-groups/${GROUP_ID}/runners" --jq \
   '.runners[] | select(.name == "blue-tilexr-npu8") | {status,busy,labels:[.labels[].name]}'
 gh api repos/LingquLab/TileXR/rulesets
 ```
@@ -230,9 +274,11 @@ selected-repository only, contain only TileXR, and be restricted exactly to
 
 ## Enable the required check
 
-Do this only after a successful trial pull request. Resolve `PR Gate` from the
-trial merge commit and preserve the complete current ruleset while replacing
-only its required-status-check rule:
+Do this only after a successful trial pull request. First resolve `PR Gate`
+from the trial merge commit and generate a candidate that preserves every
+existing rule and every non-`PR Gate` required check. It removes any stale or
+duplicate `PR Gate` entries, then adds exactly one entry bound to the observed
+GitHub Actions App:
 
 ```bash
 PR_NUMBER="$(gh pr list --repo LingquLab/TileXR --state all \
@@ -244,36 +290,75 @@ ACTIONS_APP_ID="$(gh api "repos/LingquLab/TileXR/commits/${MERGE_SHA}/check-runs
 
 RULESET_ID="$(gh api repos/LingquLab/TileXR/rulesets --jq \
   '.[] | select(.name == "master" and .target == "branch") | .id')"
+[[ "${RULESET_ID}" =~ ^[0-9]+$ ]]
 RULESET_BEFORE="$(mktemp)"
 RULESET_PAYLOAD="$(mktemp)"
-trap 'rm -f "${RULESET_BEFORE}" "${RULESET_PAYLOAD}"' EXIT
+RULESET_CURRENT="$(mktemp)"
+trap 'rm -f "${RULESET_BEFORE}" "${RULESET_PAYLOAD}" "${RULESET_CURRENT}"' EXIT
 gh api "repos/LingquLab/TileXR/rulesets/${RULESET_ID}" >"${RULESET_BEFORE}"
-jq --argjson app_id "${ACTIONS_APP_ID}" '{
-  name: .name,
-  target: .target,
-  enforcement: .enforcement,
-  bypass_actors: (.bypass_actors // []),
-  conditions: .conditions,
-  rules: (
-    [.rules[] | select(.type != "required_status_checks")] +
-    [{type: "required_status_checks", parameters: {
-      do_not_enforce_on_create: false,
-      required_status_checks: [{context: "PR Gate", integration_id: $app_id}],
-      strict_required_status_checks_policy: true
-    }}]
-  )
-}' "${RULESET_BEFORE}" >"${RULESET_PAYLOAD}"
+jq --argjson app_id "${ACTIONS_APP_ID}" '
+  def pr_gate: {context: "PR Gate", integration_id: $app_id};
+  ([.rules[] | select(.type == "required_status_checks")] | length) as $count
+  | if $count > 1 then
+      error("multiple required_status_checks rules require manual resolution")
+    else
+      {
+        name: .name,
+        target: .target,
+        enforcement: .enforcement,
+        bypass_actors: (.bypass_actors // []),
+        conditions: .conditions,
+        rules: (
+          if $count == 0 then
+            .rules + [{
+              type: "required_status_checks",
+              parameters: {
+                do_not_enforce_on_create: false,
+                required_status_checks: [pr_gate],
+                strict_required_status_checks_policy: true
+              }
+            }]
+          else
+            [.rules[]
+              | if .type == "required_status_checks" then
+                  .parameters.required_status_checks = (
+                    ((.parameters.required_status_checks // [])
+                      | map(select(.context != "PR Gate"))) + [pr_gate]
+                  )
+                  | .parameters.do_not_enforce_on_create = false
+                  | .parameters.strict_required_status_checks_policy = true
+                else . end]
+          end
+        )
+      }
+    end
+' "${RULESET_BEFORE}" >"${RULESET_PAYLOAD}"
 diff -u \
   <(jq -S '{name,target,enforcement,bypass_actors,conditions,rules}' "${RULESET_BEFORE}") \
-  <(jq -S . "${RULESET_PAYLOAD}") || true
+  <(jq -S . "${RULESET_PAYLOAD}")
+```
+
+Stop here for explicit maintainer review. The diff may change only the strict
+and create-time status-check policy fields and the deduplicated `PR Gate`
+entry; every other rule and required check must remain byte-for-byte equivalent
+in normalized JSON. Do not apply a candidate that contains any other change.
+
+Only after that review, run the mutation as a separate subsequent command. It
+first proves that the live ruleset has not changed since the candidate was
+created:
+
+```bash
+gh api "repos/LingquLab/TileXR/rulesets/${RULESET_ID}" >"${RULESET_CURRENT}"
+cmp -s "${RULESET_BEFORE}" "${RULESET_CURRENT}"
 gh api --method PUT "repos/LingquLab/TileXR/rulesets/${RULESET_ID}" \
   --input "${RULESET_PAYLOAD}" >/dev/null
 ```
 
-Inspect the diff before the `PUT`. It must preserve two approvals, code-owner
-review, resolved threads, deletion and non-fast-forward protections, empty
-bypass actors, and every unrelated rule. Verify `PR Gate` is bound to the
-GitHub Actions App and strict up-to-date checking is true.
+Read the ruleset back and verify that it still requires two approvals,
+code-owner review, resolved threads, deletion and non-fast-forward protections,
+has empty bypass actors, and preserves every unrelated rule and required check.
+Verify `PR Gate` occurs exactly once, is bound to the GitHub Actions App, and
+strict up-to-date checking is true.
 
 ## Runner upgrade
 
@@ -287,8 +372,11 @@ published SHA-256 digest before re-registering.
 CI_SHA="$(gh api repos/LingquLab/TileXR/commits/main --jq .sha)"
 BOOTSTRAP="/home/d00520898/tilexr-ci-bootstrap-${CI_SHA}"
 ssh blue "test ! -e '${BOOTSTRAP}'"
-ssh blue "git clone --branch main --depth 1 https://github.com/LingquLab/TileXR.git '${BOOTSTRAP}'"
+ssh blue "git init '${BOOTSTRAP}'"
+ssh blue "git -C '${BOOTSTRAP}' remote add origin https://github.com/LingquLab/TileXR.git"
+ssh blue "git -C '${BOOTSTRAP}' fetch --depth 1 origin '${CI_SHA}'"
 ssh blue "git -C '${BOOTSTRAP}' checkout --detach '${CI_SHA}'"
+ssh blue "test \"\$(git -C '${BOOTSTRAP}' rev-parse HEAD)\" = '${CI_SHA}'"
 ssh blue 'sudo /home/tilexr-ci/actions-runner/svc.sh stop'
 gh api --method POST orgs/LingquLab/actions/runners/registration-token --jq .token | \
   ssh blue "cd '${BOOTSTRAP}' && sudo bash scripts/ci/provision/runner.sh"
@@ -311,7 +399,8 @@ RULESET_ID="$(gh api repos/LingquLab/TileXR/rulesets --jq \
   '.[] | select(.name == "master" and .target == "branch") | .id')"
 RULESET_BEFORE="$(mktemp)"
 RULESET_PAYLOAD="$(mktemp)"
-trap 'rm -f "${RULESET_BEFORE}" "${RULESET_PAYLOAD}"' EXIT
+RULESET_CURRENT="$(mktemp)"
+trap 'rm -f "${RULESET_BEFORE}" "${RULESET_PAYLOAD}" "${RULESET_CURRENT}"' EXIT
 gh api "repos/LingquLab/TileXR/rulesets/${RULESET_ID}" >"${RULESET_BEFORE}"
 jq '{
   name: .name,
@@ -330,7 +419,15 @@ jq '{
 }' "${RULESET_BEFORE}" >"${RULESET_PAYLOAD}"
 diff -u \
   <(jq -S '{name,target,enforcement,bypass_actors,conditions,rules}' "${RULESET_BEFORE}") \
-  <(jq -S . "${RULESET_PAYLOAD}") || true
+  <(jq -S . "${RULESET_PAYLOAD}")
+```
+
+Stop for explicit review. After confirming that the candidate removes only
+`PR Gate`, apply it separately and only if the live ruleset is unchanged:
+
+```bash
+gh api "repos/LingquLab/TileXR/rulesets/${RULESET_ID}" >"${RULESET_CURRENT}"
+cmp -s "${RULESET_BEFORE}" "${RULESET_CURRENT}"
 gh api --method PUT "repos/LingquLab/TileXR/rulesets/${RULESET_ID}" \
   --input "${RULESET_PAYLOAD}" >/dev/null
 ```

@@ -1372,8 +1372,11 @@ Expected: selected visibility, public repository allowed, workflow restriction t
 CI_SHA="$(gh api repos/LingquLab/TileXR/commits/main --jq .sha)"
 BOOTSTRAP="/home/d00520898/tilexr-ci-bootstrap-${CI_SHA}"
 ssh blue "test ! -e '${BOOTSTRAP}'"
-ssh blue "git clone --branch main --depth 1 https://github.com/LingquLab/TileXR.git '${BOOTSTRAP}'"
+ssh blue "git init '${BOOTSTRAP}'"
+ssh blue "git -C '${BOOTSTRAP}' remote add origin https://github.com/LingquLab/TileXR.git"
+ssh blue "git -C '${BOOTSTRAP}' fetch --depth 1 origin '${CI_SHA}'"
 ssh blue "git -C '${BOOTSTRAP}' checkout --detach '${CI_SHA}'"
+ssh blue "test \"\$(git -C '${BOOTSTRAP}' rev-parse HEAD)\" = '${CI_SHA}'"
 ```
 
 Expected: a new commit-addressed checkout succeeds under `/home`, its HEAD is
@@ -1410,6 +1413,13 @@ BOOTSTRAP="/home/d00520898/tilexr-ci-bootstrap-${CI_SHA}"
 ssh blue "cd '${BOOTSTRAP}' && sudo bash scripts/ci/provision/verify.sh"
 gh api orgs/LingquLab/actions/runners --jq \
   '.runners[] | select(.name == "blue-tilexr-npu8") | {status,busy,labels:[.labels[].name]}'
+GROUP_ID="$(gh api orgs/LingquLab/actions/runner-groups --jq \
+  '.runner_groups[] | select(.name == "TileXR-NPU") | .id')"
+diff -u \
+  <(printf '%s\n' blue-tilexr-npu8) \
+  <(gh api --paginate \
+      "orgs/LingquLab/actions/runner-groups/${GROUP_ID}/runners" \
+      --jq '.runners[].name' | sort)
 ```
 
 Expected: verification exits zero; runner is `online`, not busy, and exposes all required labels.
@@ -1544,8 +1554,9 @@ integer belonging to the GitHub Actions App.
 - [ ] **Step 2: Preserve and extend the existing ruleset**
 
 Resolve the active ruleset ID by name `master`, fetch its complete JSON, and
-generate an update payload that preserves every existing rule while replacing
-only the required-status-check rule:
+generate an update payload that preserves every existing rule and required
+check, removes any stale or duplicate `PR Gate` entry, and adds exactly one
+entry for the observed Actions App:
 
 ```bash
 PR_NUMBER="$(gh pr list --repo LingquLab/TileXR --state all \
@@ -1560,38 +1571,64 @@ RULESET_ID="$(gh api repos/LingquLab/TileXR/rulesets --jq \
 test -n "${RULESET_ID}"
 RULESET_BEFORE="$(mktemp)"
 RULESET_PAYLOAD="$(mktemp)"
-trap 'rm -f "${RULESET_BEFORE}" "${RULESET_PAYLOAD}"' EXIT
+RULESET_CURRENT="$(mktemp)"
+trap 'rm -f "${RULESET_BEFORE}" "${RULESET_PAYLOAD}" "${RULESET_CURRENT}"' EXIT
 
 gh api "repos/LingquLab/TileXR/rulesets/${RULESET_ID}" >"${RULESET_BEFORE}"
-jq --argjson app_id "${ACTIONS_APP_ID}" '{
-  name: .name,
-  target: .target,
-  enforcement: .enforcement,
-  bypass_actors: (.bypass_actors // []),
-  conditions: .conditions,
-  rules: (
-    [.rules[] | select(.type != "required_status_checks")] +
-    [{
-      type: "required_status_checks",
-      parameters: {
-        do_not_enforce_on_create: false,
-        required_status_checks: [{context: "PR Gate", integration_id: $app_id}],
-        strict_required_status_checks_policy: true
+jq --argjson app_id "${ACTIONS_APP_ID}" '
+  def pr_gate: {context: "PR Gate", integration_id: $app_id};
+  ([.rules[] | select(.type == "required_status_checks")] | length) as $count
+  | if $count > 1 then
+      error("multiple required_status_checks rules require manual resolution")
+    else
+      {
+        name: .name,
+        target: .target,
+        enforcement: .enforcement,
+        bypass_actors: (.bypass_actors // []),
+        conditions: .conditions,
+        rules: (
+          if $count == 0 then
+            .rules + [{
+              type: "required_status_checks",
+              parameters: {
+                do_not_enforce_on_create: false,
+                required_status_checks: [pr_gate],
+                strict_required_status_checks_policy: true
+              }
+            }]
+          else
+            [.rules[]
+              | if .type == "required_status_checks" then
+                  .parameters.required_status_checks = (
+                    ((.parameters.required_status_checks // [])
+                      | map(select(.context != "PR Gate"))) + [pr_gate]
+                  )
+                  | .parameters.do_not_enforce_on_create = false
+                  | .parameters.strict_required_status_checks_policy = true
+                else . end]
+          end
+        )
       }
-    }]
-  )
-}' "${RULESET_BEFORE}" >"${RULESET_PAYLOAD}"
+    end
+' "${RULESET_BEFORE}" >"${RULESET_PAYLOAD}"
 
 diff -u \
   <(jq -S '{name,target,enforcement,bypass_actors,conditions,rules}' "${RULESET_BEFORE}") \
-  <(jq -S . "${RULESET_PAYLOAD}") || true
+  <(jq -S . "${RULESET_PAYLOAD}")
+```
 
+Stop for explicit maintainer review. Confirm that the candidate preserves every
+existing rule and non-`PR Gate` required check and contains exactly one
+`PR Gate` entry. Only afterward run the mutation as a separate command, first
+proving that the live ruleset has not changed:
+
+```bash
+gh api "repos/LingquLab/TileXR/rulesets/${RULESET_ID}" >"${RULESET_CURRENT}"
+cmp -s "${RULESET_BEFORE}" "${RULESET_CURRENT}"
 gh api --method PUT "repos/LingquLab/TileXR/rulesets/${RULESET_ID}" \
   --input "${RULESET_PAYLOAD}" >/dev/null
 ```
-
-Before the PUT, inspect the diff and confirm that it contains only the new
-`required_status_checks` rule.
 
 - [ ] **Step 3: Verify the rule without bypassing it**
 
