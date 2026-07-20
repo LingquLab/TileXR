@@ -24,6 +24,7 @@
 #include "tilexr_data_as_flag.h"
 #include "tilexr_types.h"
 #include "tilexr_udma_allreduce_layout.h"
+#include "tilexr_udma_alltoall_group_layout.h"
 #include "tilexr_udma_alltoall_layout.h"
 #include "tilexr_udma_fullmesh_trace.h"
 
@@ -48,6 +49,13 @@ extern void launch_tilexr_udma_all_to_all_fused(
     GM_ADDR udmaMem, GM_ADDR signal, GM_ADDR debug, int32_t elementsPerPeer,
     uint64_t udmaMemByteOffset, uint64_t signalByteOffsetBase,
     int32_t chunkElements, uint32_t passCount, uint32_t loopCount);
+extern void launch_tilexr_udma_all_to_all_group(
+    uint32_t blockDim, void* stream, GM_ADDR commArgs, GM_ADDR input, GM_ADDR output,
+    GM_ADDR registeredMemory, GM_ADDR debug, uint32_t invocationId,
+    int32_t elementsPerPeer, int32_t chunkElements,
+    uint32_t passCount, uint32_t groupCount,
+    uint64_t payloadOffset0, uint64_t payloadOffset1,
+    uint64_t signalOffset0, uint64_t signalOffset1);
 extern void launch_tilexr_udma_all_to_all_bigdata(
     uint32_t blockDim, void* stream, GM_ADDR commArgs, GM_ADDR input, GM_ADDR output,
     GM_ADDR udmaMem, GM_ADDR debug, GM_ADDR fullmeshTrace, uint32_t fullmeshTraceIteration,
@@ -600,6 +608,170 @@ bool CopyChunkDeviceToHost(
     return true;
 }
 
+bool RunGroupedAllToAll(
+    int rank, int rankSize, int32_t elementsPerPeer,
+    TileXRCommPtr comm, aclrtStream stream, GM_ADDR commArgsDev)
+{
+    constexpr uint32_t kErrorWordsPerCore = 12U;
+    constexpr uint32_t kErrorCoreCount = TileXR::Demo::kAllToAllGroupBlockDim;
+    const int32_t requestedChunkElements = std::max(
+        1, GetEnvInt("TILEXR_DEMO_ALLTOALL_GROUP_CHUNK_ELEMENTS", elementsPerPeer));
+    const auto plan = TileXR::Demo::PlanAllToAllGroup(
+        rankSize, elementsPerPeer, requestedChunkElements);
+    if (!plan.valid) {
+        std::cerr << "[rank " << rank << "] ERROR: invalid grouped alltoall plan"
+                  << " rankSize=" << rankSize
+                  << " elementsPerPeer=" << elementsPerPeer
+                  << " chunkElements=" << requestedChunkElements << std::endl;
+        return false;
+    }
+
+    const size_t elementCount = static_cast<size_t>(rankSize) * elementsPerPeer;
+    const size_t dataBytes = elementCount * sizeof(int32_t);
+    std::vector<int32_t> hostInput(elementCount, 0);
+    std::vector<int32_t> hostOutput(elementCount, -1);
+    TileXR::Demo::FillAllToAllInput(hostInput, rank, rankSize, elementsPerPeer);
+
+    int32_t* input = nullptr;
+    int32_t* output = nullptr;
+    void* registeredMemory = nullptr;
+    TileXRUDMAMemHandle handle = 0;
+    bool registered = false;
+    auto release = [&]() {
+        if (registered) {
+            CheckTileXR(rank, "TileXRUDMAUnregister grouped alltoall",
+                TileXRUDMAUnregister(comm, handle));
+            registered = false;
+        }
+        if (registeredMemory != nullptr) {
+            aclrtFree(registeredMemory);
+            registeredMemory = nullptr;
+        }
+        if (output != nullptr) {
+            aclrtFree(output);
+            output = nullptr;
+        }
+        if (input != nullptr) {
+            aclrtFree(input);
+            input = nullptr;
+        }
+    };
+
+    if (!CheckAcl(rank, "aclrtMalloc grouped input",
+            aclrtMalloc(reinterpret_cast<void**>(&input), dataBytes, ACL_MEM_MALLOC_HUGE_FIRST)) ||
+        !CheckAcl(rank, "aclrtMalloc grouped output",
+            aclrtMalloc(reinterpret_cast<void**>(&output), dataBytes, ACL_MEM_MALLOC_HUGE_FIRST)) ||
+        !CheckAcl(rank, "aclrtMalloc grouped registered memory",
+            aclrtMalloc(&registeredMemory, plan.registeredBytes, ACL_MEM_MALLOC_HUGE_FIRST)) ||
+        !CopyHostToDevice(rank, input, dataBytes, hostInput.data(), dataBytes, "grouped input") ||
+        !CopyHostToDevice(rank, output, dataBytes, hostOutput.data(), dataBytes, "grouped output init") ||
+        !CheckAcl(rank, "aclrtMemset grouped registered memory",
+            aclrtMemset(registeredMemory, plan.registeredBytes, 0, plan.registeredBytes))) {
+        release();
+        return false;
+    }
+
+    const int registerRet = TileXRUDMARegister(
+        comm, static_cast<GM_ADDR>(registeredMemory), plan.registeredBytes, &handle);
+    if (!CheckTileXR(rank, "TileXRUDMARegister grouped alltoall", registerRet)) {
+        release();
+        return false;
+    }
+    registered = true;
+
+    auto debug = reinterpret_cast<int32_t*>(
+        static_cast<uint8_t*>(registeredMemory) + plan.controlOffset);
+    const int warmup = std::max(0, GetEnvInt("TILEXR_DEMO_ALLTOALL_WARMUP", 0));
+    const int repeat = std::max(1, GetEnvInt("TILEXR_DEMO_ALLTOALL_REPEAT", 1));
+    PrintStatus(rank, "grouped alltoall registeredBytes=" + std::to_string(plan.registeredBytes) +
+        " payloadPlaneBytes=" + std::to_string(plan.payloadPlaneBytes) +
+        " payloadOffset0=" + std::to_string(plan.payloadOffset[0]) +
+        " payloadOffset1=" + std::to_string(plan.payloadOffset[1]) +
+        " signalPlaneBytes=" + std::to_string(plan.signalPlaneBytes) +
+        " signalOffset0=" + std::to_string(plan.signalOffset[0]) +
+        " signalOffset1=" + std::to_string(plan.signalOffset[1]) +
+        " controlOffset=" + std::to_string(plan.controlOffset) +
+        " groups=" + std::to_string(plan.groupCount) +
+        " passes=" + std::to_string(plan.passCount));
+    PrintStatus(rank, "grouped alltoall warmup=" + std::to_string(warmup) +
+        " repeat=" + std::to_string(repeat));
+
+    uint32_t invocationId = 0U;
+    for (int iter = 0; iter < warmup; ++iter, ++invocationId) {
+        launch_tilexr_udma_all_to_all_group(
+            TileXR::Demo::kAllToAllGroupBlockDim, stream, commArgsDev,
+            reinterpret_cast<GM_ADDR>(input), reinterpret_cast<GM_ADDR>(output),
+            reinterpret_cast<GM_ADDR>(registeredMemory), reinterpret_cast<GM_ADDR>(debug),
+            invocationId, elementsPerPeer, plan.chunkElements,
+            plan.passCount, plan.groupCount,
+            plan.payloadOffset[0], plan.payloadOffset[1],
+            plan.signalOffset[0], plan.signalOffset[1]);
+    }
+    if (!CheckAcl(rank, "aclrtSynchronizeStream grouped warmup", aclrtSynchronizeStream(stream))) {
+        release();
+        return false;
+    }
+
+    const auto begin = std::chrono::steady_clock::now();
+    for (int iter = 0; iter < repeat; ++iter, ++invocationId) {
+        launch_tilexr_udma_all_to_all_group(
+            TileXR::Demo::kAllToAllGroupBlockDim, stream, commArgsDev,
+            reinterpret_cast<GM_ADDR>(input), reinterpret_cast<GM_ADDR>(output),
+            reinterpret_cast<GM_ADDR>(registeredMemory), reinterpret_cast<GM_ADDR>(debug),
+            invocationId, elementsPerPeer, plan.chunkElements,
+            plan.passCount, plan.groupCount,
+            plan.payloadOffset[0], plan.payloadOffset[1],
+            plan.signalOffset[0], plan.signalOffset[1]);
+    }
+    if (!CheckAcl(rank, "aclrtSynchronizeStream grouped measured", aclrtSynchronizeStream(stream))) {
+        release();
+        return false;
+    }
+    const auto end = std::chrono::steady_clock::now();
+
+    std::vector<int32_t> hostDebug(kErrorWordsPerCore * kErrorCoreCount, 0);
+    const size_t debugBytes = hostDebug.size() * sizeof(int32_t);
+    bool copyOk = CopyDeviceToHost(
+        rank, hostOutput.data(), dataBytes, output, dataBytes, "grouped alltoall output") &&
+        CopyDeviceToHost(rank, hostDebug.data(), debugBytes, debug, debugBytes,
+            "grouped alltoall debug");
+    bool debugOk = true;
+    for (uint32_t core = 0; core < kErrorCoreCount; ++core) {
+        const size_t base = static_cast<size_t>(core) * kErrorWordsPerCore;
+        if (hostDebug[base] == 0) {
+            continue;
+        }
+        debugOk = false;
+        const uint64_t expected = static_cast<uint32_t>(hostDebug[base + 8]) |
+            (static_cast<uint64_t>(static_cast<uint32_t>(hostDebug[base + 9])) << 32U);
+        const uint64_t observed = static_cast<uint32_t>(hostDebug[base + 10]) |
+            (static_cast<uint64_t>(static_cast<uint32_t>(hostDebug[base + 11])) << 32U);
+        std::cerr << "[rank " << rank << "] ERROR: grouped core=" << core
+                  << " stage=" << hostDebug[base + 1]
+                  << " group=" << hostDebug[base + 2]
+                  << " pass=" << hostDebug[base + 3]
+                  << " peer=" << hostDebug[base + 4]
+                  << " qp=" << hostDebug[base + 5]
+                  << " quiet=" << hostDebug[base + 6]
+                  << " expected=" << expected
+                  << " observed=" << observed << std::endl;
+    }
+
+    const double totalUs = std::chrono::duration<double, std::micro>(end - begin).count();
+    const double perIterUs = totalUs / static_cast<double>(repeat);
+    const double bandwidthGbs = static_cast<double>(dataBytes) / (perIterUs * 1.0e3);
+    std::cout << "[rank " << rank << "] grouped alltoall " << repeat
+              << " iters total=" << totalUs / 1000.0
+              << " ms perIter=" << perIterUs
+              << " us payload=" << dataBytes
+              << " bytes bw=" << bandwidthGbs << " GB/s" << std::endl;
+
+    const bool valid = copyOk && debugOk &&
+        ValidateAllToAllData(rank, rankSize, hostOutput, elementsPerPeer);
+    release();
+    return valid;
+}
+
 void Cleanup(
     TileXRCommPtr comm, aclrtStream stream, void* registeredMemory, int32_t* debug, int rank, int deviceId)
 {
@@ -685,6 +857,18 @@ int main(int argc, char** argv)
                   << "Check A5/Ascend950 hardware support, CANN/driver setup, and LD_LIBRARY_PATH." << std::endl;
         Cleanup(comm, stream, registeredMemory, debug, rank, deviceId);
         return 1;
+    }
+
+    if (testType == 8) {
+        const bool ok = RunGroupedAllToAll(
+            rank, rankSize, elementsPerRank, comm, stream, commArgsDev);
+        Cleanup(comm, stream, nullptr, nullptr, rank, deviceId);
+        if (!ok) {
+            std::cerr << "[rank " << rank << "] TileXR grouped alltoall demo failed" << std::endl;
+            return 1;
+        }
+        std::cout << "[rank " << rank << "] TileXR grouped alltoall demo success" << std::endl;
+        return 0;
     }
 
     bool isAllToAll = testType == 2 || testType == 4 || testType == 5 || testType == 6 || testType == 7;
