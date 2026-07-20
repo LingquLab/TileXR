@@ -1,0 +1,59 @@
+name: Trusted NPU CI
+
+"on":
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  hardware:
+    name: NPU Gate
+    timeout-minutes: 660
+    runs-on:
+      group: TileXR-NPU
+      labels: [self-hosted, Linux, ARM64, tilexr, ascend910b, npu8]
+    steps:
+      - name: Verify sealed controller
+        run: test "$(cat /home/tilexr-ci/control/current/VERSION)" = v1
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: refs/pull/${{ github.event.pull_request.number }}/merge
+          path: source
+          clean: true
+          submodules: recursive
+          persist-credentials: false
+      - name: Verify merge identity
+        env:
+          EXPECTED_MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
+        run: test "$(git -C source rev-parse HEAD)" = "${EXPECTED_MERGE_SHA}"
+      - name: Run trusted gate
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          TILEXR_CI_PR_NUMBER: ${{ github.event.pull_request.number }}
+          TILEXR_CI_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          TILEXR_CI_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          TILEXR_CI_EXPECTED_MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
+          TILEXR_CI_REPOSITORY: ${{ github.repository }}
+          TILEXR_CI_ARTIFACT_DIR: ${{ runner.temp }}/tilexr-ci-artifacts
+        run: |
+          github_token="${GITHUB_TOKEN}"
+          export -n github_token
+          unset GITHUB_TOKEN
+          exec 3<<<"${github_token}"
+          github_token=
+          unset github_token
+          exec python3 /home/tilexr-ci/control/current/gate.py \
+            --source "${GITHUB_WORKSPACE}/source" \
+            --artifacts "${TILEXR_CI_ARTIFACT_DIR}" \
+            --expected-merge-sha "${TILEXR_CI_EXPECTED_MERGE_SHA}" \
+            --repository "${TILEXR_CI_REPOSITORY}" \
+            --pr-number "${TILEXR_CI_PR_NUMBER}" \
+            --github-token-fd 3
+      - name: Upload NPU evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: npu-gate-${{ github.event.pull_request.number }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/tilexr-ci-artifacts
+          retention-days: 14
