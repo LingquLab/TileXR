@@ -279,6 +279,11 @@ void TestKernelStructure()
     CHECK_CONTAINS(kernel, "secondaryQp");
     CHECK_CONTAINS(kernel, "selectedQp");
     CHECK_CONTAINS(kernel, "copyoutWorkers");
+    CHECK_CONTAINS(kernel, "uint32_t copyoutWorkers, uint32_t routeStage");
+    CHECK_CONTAINS(kernel, "AllToAllGroupPeerInRouteStageDevice");
+    CHECK_CONTAINS(kernel,
+        "if (!AllToAllGroupPeerInRouteStageDevice(rank, peer, routeStage))");
+    CHECK_CONTAINS(kernel, "TILEXR_ALLTOALL_GROUP_ROUTE_STAGE_LOCAL");
     CHECK_CONTAINS(kernel, "AllToAllGroupCopyoutLaneDevice");
     CHECK_CONTAINS(kernel, "TILEXR_ALLTOALL_GROUP_SEND_CORES + copyoutWorkers");
     CHECK_CONTAINS(kernel, "traceCore = TILEXR_ALLTOALL_GROUP_SEND_CORES + lane");

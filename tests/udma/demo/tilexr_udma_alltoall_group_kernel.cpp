@@ -20,6 +20,10 @@ constexpr uint32_t TILEXR_ALLTOALL_GROUP_ERROR_WORDS = 12U;
 constexpr uint32_t TILEXR_ALLTOALL_GROUP_STAGE_CONFIG = 1U;
 constexpr uint32_t TILEXR_ALLTOALL_GROUP_STAGE_QUIET = 2U;
 constexpr uint32_t TILEXR_ALLTOALL_GROUP_STAGE_WAIT = 3U;
+constexpr uint32_t TILEXR_ALLTOALL_GROUP_ROUTE_STAGE_COMBINED = 0U;
+constexpr uint32_t TILEXR_ALLTOALL_GROUP_ROUTE_STAGE_LOCAL = 1U;
+constexpr uint32_t TILEXR_ALLTOALL_GROUP_ROUTE_STAGE_PRIMARY = 2U;
+constexpr uint32_t TILEXR_ALLTOALL_GROUP_ROUTE_STAGE_SECONDARY = 3U;
 
 struct AllToAllGroupDeviceError {
     uint32_t valid;
@@ -79,6 +83,27 @@ __aicore__ inline bool AllToAllGroupUseSecondaryRouteDevice(
         TileXR::Demo::kAllToAllGroupRanksPerNode;
     return (sourceLocal + targetLocal) % TileXR::Demo::kAllToAllGroupRanksPerNode >=
         TileXR::Demo::kAllToAllGroupPrimaryPeersPerNode;
+}
+
+__aicore__ inline bool AllToAllGroupPeerInRouteStageDevice(
+    int32_t rank, int32_t peer, uint32_t routeStage)
+{
+    if (rank < 0 || peer < 0 || rank == peer ||
+        routeStage > TILEXR_ALLTOALL_GROUP_ROUTE_STAGE_SECONDARY) {
+        return false;
+    }
+    if (routeStage == TILEXR_ALLTOALL_GROUP_ROUTE_STAGE_COMBINED) {
+        return true;
+    }
+    const bool crossNode =
+        rank / static_cast<int32_t>(TileXR::Demo::kAllToAllGroupRanksPerNode) !=
+        peer / static_cast<int32_t>(TileXR::Demo::kAllToAllGroupRanksPerNode);
+    if (routeStage == TILEXR_ALLTOALL_GROUP_ROUTE_STAGE_LOCAL) {
+        return !crossNode;
+    }
+    const bool secondary = AllToAllGroupUseSecondaryRouteDevice(rank, peer);
+    return routeStage == TILEXR_ALLTOALL_GROUP_ROUTE_STAGE_PRIMARY ?
+        crossNode && !secondary : crossNode && secondary;
 }
 
 __aicore__ inline int32_t AllToAllGroupCopyoutLaneDevice(
@@ -260,7 +285,8 @@ extern "C" __global__ __aicore__ void tilexr_udma_all_to_all_group_kernel(
     uint32_t passCount, uint32_t groupCount,
     uint64_t payloadOffset0, uint64_t payloadOffset1,
     uint64_t signalOffset0, uint64_t signalOffset1,
-    GM_ADDR groupTraceGM, uint32_t traceIteration, uint32_t copyoutWorkers)
+    GM_ADDR groupTraceGM, uint32_t traceIteration,
+    uint32_t copyoutWorkers, uint32_t routeStage)
 {
     const uint32_t blockIdx = static_cast<uint32_t>(AscendC::GetBlockIdx());
     auto groupTrace = blockIdx < TileXR::Demo::kAllToAllGroupTraceCoreCount ?
@@ -275,6 +301,7 @@ extern "C" __global__ __aicore__ void tilexr_udma_all_to_all_group_kernel(
     const int32_t rankSize = args->rankSize;
 
     if ((copyoutWorkers != 8U && copyoutWorkers != 16U) ||
+        routeStage > TILEXR_ALLTOALL_GROUP_ROUTE_STAGE_SECONDARY ||
         blockIdx >= TILEXR_ALLTOALL_GROUP_SEND_CORES + copyoutWorkers ||
         !TileXR::UDMARegistryEnabled(args) || rankSize < 8 ||
         rankSize > TileXR::TILEXR_MAX_RANK_SIZE || (rankSize & 7) != 0 ||
@@ -303,7 +330,9 @@ extern "C" __global__ __aicore__ void tilexr_udma_all_to_all_group_kernel(
             static_cast<int64_t>(elementsPerPeer) * worker / copyoutWorkers);
         const int32_t selfEnd = static_cast<int32_t>(
             static_cast<int64_t>(elementsPerPeer) * (worker + 1U) / copyoutWorkers);
-        if (selfEnd > selfBegin) {
+        if ((routeStage == TILEXR_ALLTOALL_GROUP_ROUTE_STAGE_COMBINED ||
+                routeStage == TILEXR_ALLTOALL_GROUP_ROUTE_STAGE_LOCAL) &&
+            selfEnd > selfBegin) {
             const uint64_t selfCopyBegin = AllToAllGroupTraceCycle(groupTrace);
             auto selfSrc = reinterpret_cast<__gm__ uint8_t*>(
                 input + static_cast<uint64_t>(rank) * elementsPerPeer + selfBegin);
@@ -328,6 +357,9 @@ extern "C" __global__ __aicore__ void tilexr_udma_all_to_all_group_kernel(
                 const uint32_t lane = static_cast<uint32_t>(laneValue);
             const int32_t peer = AllToAllGroupDevicePeer(rank, rankSize, group, lane);
             if (peer < 0) {
+                continue;
+            }
+            if (!AllToAllGroupPeerInRouteStageDevice(rank, peer, routeStage)) {
                 continue;
             }
             const uint32_t traceCore = TILEXR_ALLTOALL_GROUP_SEND_CORES + lane;
@@ -391,6 +423,9 @@ extern "C" __global__ __aicore__ void tilexr_udma_all_to_all_group_kernel(
         if (peer < 0) {
             continue;
         }
+        if (!AllToAllGroupPeerInRouteStageDevice(rank, peer, routeStage)) {
+            continue;
+        }
         uint32_t primaryQp = 0U;
         uint32_t secondaryQp = 0U;
         AllToAllGroupSelectRouteQps(args, peer, primaryQp, secondaryQp);
@@ -449,11 +484,12 @@ void launch_tilexr_udma_all_to_all_group(
     uint32_t passCount, uint32_t groupCount,
     uint64_t payloadOffset0, uint64_t payloadOffset1,
     uint64_t signalOffset0, uint64_t signalOffset1,
-    GM_ADDR groupTrace, uint32_t traceIteration, uint32_t copyoutWorkers)
+    GM_ADDR groupTrace, uint32_t traceIteration,
+    uint32_t copyoutWorkers, uint32_t routeStage)
 {
     tilexr_udma_all_to_all_group_kernel<<<blockDim, nullptr, stream>>>(
         commArgs, input, output, registeredMemory, debug, invocationId,
         elementsPerPeer, chunkElements, passCount, groupCount,
         payloadOffset0, payloadOffset1, signalOffset0, signalOffset1,
-        groupTrace, traceIteration, copyoutWorkers);
+        groupTrace, traceIteration, copyoutWorkers, routeStage);
 }

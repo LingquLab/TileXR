@@ -25,6 +25,7 @@
 #include "tilexr_types.h"
 #include "tilexr_udma_allreduce_layout.h"
 #include "tilexr_udma_alltoall_group_layout.h"
+#include "tilexr_udma_alltoall_group_route.h"
 #include "tilexr_udma_alltoall_group_trace.h"
 #include "tilexr_udma_alltoall_layout.h"
 #include "tilexr_udma_fullmesh_trace.h"
@@ -57,7 +58,8 @@ extern void launch_tilexr_udma_all_to_all_group(
     uint32_t passCount, uint32_t groupCount,
     uint64_t payloadOffset0, uint64_t payloadOffset1,
     uint64_t signalOffset0, uint64_t signalOffset1,
-    GM_ADDR groupTrace, uint32_t traceIteration, uint32_t copyoutWorkers);
+    GM_ADDR groupTrace, uint32_t traceIteration,
+    uint32_t copyoutWorkers, uint32_t routeStage);
 extern void launch_tilexr_udma_all_to_all_bigdata(
     uint32_t blockDim, void* stream, GM_ADDR commArgs, GM_ADDR input, GM_ADDR output,
     GM_ADDR udmaMem, GM_ADDR debug, GM_ADDR fullmeshTrace, uint32_t fullmeshTraceIteration,
@@ -787,7 +789,8 @@ bool RunGroupedAllToAll(
             invocationId, elementsPerPeer, plan.chunkElements,
             plan.passCount, plan.groupCount,
             plan.payloadOffset[0], plan.payloadOffset[1],
-            plan.signalOffset[0], plan.signalOffset[1], nullptr, 0U, copyoutWorkers);
+            plan.signalOffset[0], plan.signalOffset[1], nullptr, 0U, copyoutWorkers,
+            static_cast<uint32_t>(TileXR::Demo::AllToAllGroupRouteStage::kCombined));
     }
     if (!CheckAcl(rank, "aclrtSynchronizeStream grouped warmup", aclrtSynchronizeStream(stream))) {
         release();
@@ -805,7 +808,8 @@ bool RunGroupedAllToAll(
             plan.payloadOffset[0], plan.payloadOffset[1],
             plan.signalOffset[0], plan.signalOffset[1],
             reinterpret_cast<GM_ADDR>(groupTraceDevice), static_cast<uint32_t>(iter),
-            copyoutWorkers);
+            copyoutWorkers,
+            static_cast<uint32_t>(TileXR::Demo::AllToAllGroupRouteStage::kCombined));
     }
     if (!CheckAcl(rank, "aclrtSynchronizeStream grouped measured", aclrtSynchronizeStream(stream))) {
         release();
