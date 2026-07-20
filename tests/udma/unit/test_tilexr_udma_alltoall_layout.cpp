@@ -663,6 +663,9 @@ void TestAllToAllBigDataSource()
     CHECK_CONTAINS(demo, "skip result validation for bigdata remote-put-only profile");
     CHECK_CONTAINS(demo, "TILEXR_UDMA_FULLMESH_TRACE");
     CHECK_CONTAINS(demo, "TILEXR_UDMA_FULLMESH_TRACE_DIR");
+    CHECK_CONTAINS(demo, "TILEXR_DEMO_BIGDATA_ISOLATED_TASK");
+    CHECK_CONTAINS(demo, "bigDataIsolatedTask < 0 || bigDataIsolatedTask > 11");
+    CHECK_CONTAINS(demo, "bigDataProfilePartial = bigDataProfilePartial || bigDataIsolatedTask != 0");
     CHECK_CONTAINS(demo, "FullmeshTraceLayoutFits(");
     CHECK_CONTAINS(demo, "aclrtMalloc(&fullmeshTraceDevice");
     CHECK_CONTAINS(demo, "TileXR::Demo::kFullmeshTraceBytes, \"fullmesh trace\"");
@@ -697,6 +700,8 @@ void TestAllToAllBigDataSource()
     CHECK_CONTAINS(kernel, "if (trace == nullptr");
     CHECK_CONTAINS(kernel, "AscendC::GetSystemCycle()");
     CHECK_CONTAINS(kernel, "auto fullmeshTrace = (!remotePutOnly && use35Core &&");
+    CHECK_CONTAINS(kernel, "uint32_t isolatedTask");
+    CHECK_CONTAINS(kernel, "BigDataRunIsolatedTask(");
     CHECK_CONTAINS(kernel, "kFullmeshTracePhaseSelfCopy");
     CHECK_CONTAINS(kernel, "kFullmeshTracePhasePeerCopy");
     CHECK_CONTAINS(kernel, "kFullmeshTracePhasePublishCopyReady");
@@ -713,6 +718,18 @@ void TestAllToAllBigDataSource()
     CHECK_CONTAINS(fullMeshRecv, "kFullmeshTracePhasePublishRecvDone");
     CHECK_CONTAINS(fullMeshRecv, "kFullmeshTracePhaseWaitRecvDone");
     CHECK_CONTAINS(fullMeshRecv, "kFullmeshTracePhaseAck");
+
+    const std::string isolatedTasks = SliceBetween(
+        kernel, "BigDataRunIsolatedTask", "BigDataRunRoleForPeer");
+    for (uint32_t task = 1U; task <= 11U; ++task) {
+        CHECK_CONTAINS(isolatedTasks, "TILEXR_BIGDATA_ISOLATED_TASK_" + std::to_string(task));
+    }
+    CHECK_NOT_CONTAINS(isolatedTasks, "BigDataWaitTokenMte(");
+    CHECK_NOT_CONTAINS(isolatedTasks, "BigDataWaitCopyReady(");
+    CHECK_CONTAINS(isolatedTasks, "UDMAPutNbiOnQp<int32_t>");
+    CHECK_CONTAINS(isolatedTasks, "UDMAQuietStatusOnQp(args, peer, qpIdx)");
+    CHECK_CONTAINS(isolatedTasks, "UDMAPutSignalNbi<int32_t>");
+    CHECK_CONTAINS(isolatedTasks, "BigDataRemoteRegisteredControlSlot(");
 
     const std::string remotePutOnlySend = SliceBetween(
         kernel, "BigDataRemotePutOnlySendWorker", "BigDataRemotePutOnlyCheckIndex");
