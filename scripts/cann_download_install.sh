@@ -5,8 +5,11 @@ source ${script_path}/common_env.sh
 
 env_print
 
-mkdir -p ${TILEXR_CANN_HOME}
-mkdir -p ${TILEXR_TEMP_HOME}
+if [[ ! -d "${TILEXR_CANN_HOME}" || -L "${TILEXR_CANN_HOME}" ]]; then
+    error "TILEXR_CANN_HOME must be a pre-created real directory: ${TILEXR_CANN_HOME}"
+    exit 1
+fi
+mkdir -p "${TILEXR_TEMP_HOME}"
 
 line
 
