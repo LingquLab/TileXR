@@ -241,6 +241,10 @@ void TestKernelStructure()
     CHECK_CONTAINS(kernel, "AllToAllGroupUseSecondaryRouteDevice(rank, peer)");
     CHECK_CONTAINS(kernel, "secondaryQp");
     CHECK_CONTAINS(kernel, "selectedQp");
+    CHECK_CONTAINS(kernel, "copyoutWorkers");
+    CHECK_CONTAINS(kernel, "AllToAllGroupCopyoutLaneDevice");
+    CHECK_CONTAINS(kernel, "TILEXR_ALLTOALL_GROUP_SEND_CORES + copyoutWorkers");
+    CHECK_CONTAINS(kernel, "traceCore = TILEXR_ALLTOALL_GROUP_SEND_CORES + lane");
     CHECK_CONTAINS(kernel, "UDMAPutSignalNbiOnQp<int32_t>");
     CHECK_CONTAINS(kernel, "UDMAQuietStatusOnQp(args, peer, selectedQp)");
     CHECK_CONTAINS(kernel, "AllToAllGroupWaitTokenMte");
@@ -248,6 +252,7 @@ void TestKernelStructure()
     CHECK_CONTAINS(kernel, "launch_tilexr_udma_all_to_all_group");
     CHECK_NOT_CONTAINS(kernel, "UDMAPutSignalNbi<int32_t>");
     CHECK_NOT_CONTAINS(kernel, "SyncAll");
+    CHECK_NOT_CONTAINS(kernel, "elementsPerPeer) * lane /");
 }
 
 void TestHostStructure()
