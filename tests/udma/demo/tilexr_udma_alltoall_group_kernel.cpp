@@ -5,6 +5,7 @@
 
 #include "kernel_operator.h"
 #include "tilexr_udma.h"
+#include "tilexr_udma_alltoall_group_route.h"
 #include "tilexr_udma_alltoall_group_trace.h"
 
 namespace {
@@ -64,21 +65,47 @@ __aicore__ inline uint64_t AllToAllGroupDeviceToken(
         (static_cast<uint64_t>(pass) + 1ULL);
 }
 
-__aicore__ inline uint32_t AllToAllGroupSelectMaxWeightQp(
-    const __gm__ TileXR::CommArgs* args, int32_t peer)
+__aicore__ inline bool AllToAllGroupUseSecondaryRouteDevice(
+    int32_t rank, int32_t peer)
+{
+    if (rank < 0 || peer < 0 ||
+        rank / static_cast<int32_t>(TileXR::Demo::kAllToAllGroupRanksPerNode) ==
+            peer / static_cast<int32_t>(TileXR::Demo::kAllToAllGroupRanksPerNode)) {
+        return false;
+    }
+    const uint32_t sourceLocal = static_cast<uint32_t>(rank) %
+        TileXR::Demo::kAllToAllGroupRanksPerNode;
+    const uint32_t targetLocal = static_cast<uint32_t>(peer) %
+        TileXR::Demo::kAllToAllGroupRanksPerNode;
+    return (sourceLocal + targetLocal) % TileXR::Demo::kAllToAllGroupRanksPerNode >=
+        TileXR::Demo::kAllToAllGroupPrimaryPeersPerNode;
+}
+
+__aicore__ inline void AllToAllGroupSelectRouteQps(
+    const __gm__ TileXR::CommArgs* args, int32_t peer,
+    uint32_t& primaryQp, uint32_t& secondaryQp)
 {
     auto udmaInfo = TileXR::GetUDMAInfo(args);
     const uint32_t qpCount = udmaInfo->qpNum == 0U ? 1U : udmaInfo->qpNum;
-    uint32_t selected = 0U;
-    uint32_t selectedWeight = TileXR::UDMAGetQpWeight(udmaInfo, peer, 0U);
-    for (uint32_t qpIdx = 1U; qpIdx < qpCount; ++qpIdx) {
-        const uint32_t weight = TileXR::UDMAGetQpWeight(udmaInfo, peer, qpIdx);
-        if (weight > selectedWeight) {
-            selected = qpIdx;
-            selectedWeight = weight;
+    primaryQp = 0U;
+    uint32_t primaryWeight = TileXR::UDMAGetQpWeight(udmaInfo, peer, 0U);
+    for (uint32_t qp = 1U; qp < qpCount; ++qp) {
+        const uint32_t weight = TileXR::UDMAGetQpWeight(udmaInfo, peer, qp);
+        if (weight > primaryWeight) {
+            primaryQp = qp;
+            primaryWeight = weight;
         }
     }
-    return selected;
+
+    secondaryQp = primaryQp;
+    uint32_t secondaryWeight = 0U;
+    for (uint32_t qp = 0U; qp < qpCount; ++qp) {
+        const uint32_t weight = TileXR::UDMAGetQpWeight(udmaInfo, peer, qp);
+        if (weight != 0U && weight < primaryWeight && weight > secondaryWeight) {
+            secondaryQp = qp;
+            secondaryWeight = weight;
+        }
+    }
 }
 
 __aicore__ inline void AllToAllGroupCopyMte(
@@ -348,7 +375,11 @@ extern "C" __global__ __aicore__ void tilexr_udma_all_to_all_group_kernel(
         if (peer < 0) {
             continue;
         }
-        const uint32_t qpIdx = AllToAllGroupSelectMaxWeightQp(args, peer);
+        uint32_t primaryQp = 0U;
+        uint32_t secondaryQp = 0U;
+        AllToAllGroupSelectRouteQps(args, peer, primaryQp, secondaryQp);
+        const uint32_t selectedQp =
+            AllToAllGroupUseSecondaryRouteDevice(rank, peer) ? secondaryQp : primaryQp;
         for (uint32_t pass = 0U; pass < passCount; ++pass) {
             const int32_t chunkElementOffset = static_cast<int32_t>(pass) * chunkElements;
             const int32_t remaining = elementsPerPeer - chunkElementOffset;
@@ -370,21 +401,21 @@ extern "C" __global__ __aicore__ void tilexr_udma_all_to_all_group_kernel(
                 static_cast<uint64_t>(rank) * TILEXR_ALLTOALL_GROUP_SIGNAL_STRIDE;
             const uint64_t putBegin = AllToAllGroupTraceCycle(groupTrace);
             TileXR::UDMAPutSignalNbiOnQp<int32_t>(
-                args, peer, qpIdx, localSrc, remotePayloadOffset, chunkBytes,
+                args, peer, selectedQp, localSrc, remotePayloadOffset, chunkBytes,
                 remoteSignalOffset, expectedToken);
             AllToAllGroupTraceRecordTask(
                 groupTrace, traceIteration, blockIdx, group, pass,
                 TileXR::Demo::kAllToAllGroupTraceSendPutSignal, groupCount, passCount,
-                peer, qpIdx, putBegin, AllToAllGroupTraceCycle(groupTrace));
+                peer, selectedQp, putBegin, AllToAllGroupTraceCycle(groupTrace));
             const uint64_t quietBegin = AllToAllGroupTraceCycle(groupTrace);
-            const uint32_t quietStatus = TileXR::UDMAQuietStatusOnQp(args, peer, qpIdx);
+            const uint32_t quietStatus = TileXR::UDMAQuietStatusOnQp(args, peer, selectedQp);
             AllToAllGroupTraceRecordTask(
                 groupTrace, traceIteration, blockIdx, group, pass,
                 TileXR::Demo::kAllToAllGroupTraceSendQuiet, groupCount, passCount,
-                peer, qpIdx, quietBegin, AllToAllGroupTraceCycle(groupTrace));
+                peer, selectedQp, quietBegin, AllToAllGroupTraceCycle(groupTrace));
             if (quietStatus != 0U) {
                 AllToAllGroupRecordError(debug, blockIdx, TILEXR_ALLTOALL_GROUP_STAGE_QUIET,
-                    group, pass, peer, qpIdx, quietStatus, expectedToken, 0ULL);
+                    group, pass, peer, selectedQp, quietStatus, expectedToken, 0ULL);
                 AllToAllGroupTraceRecordKernel(groupTrace, traceIteration, blockIdx,
                     kernelBegin, AllToAllGroupTraceCycle(groupTrace));
                 return;
