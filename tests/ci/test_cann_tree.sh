@@ -85,7 +85,15 @@ rm -f "${compiler_dir}/bisheng"
 ln -s bisheng-real "${compiler_dir}/bisheng"
 
 fixture="${temp_dir}/fixture"
-mkdir -p "${fixture}/scripts/ci/provision" "${fixture}/mock-bin"
+fixture_ci_home="${temp_dir}/ci-home"
+mkdir -p \
+    "${fixture}/scripts/ci/provision" \
+    "${fixture}/mock-bin" \
+    "${fixture_ci_home}/toolchains/cann"
+chmod 0750 \
+    "${fixture_ci_home}" \
+    "${fixture_ci_home}/toolchains" \
+    "${fixture_ci_home}/toolchains/cann"
 cp "${real_cann}" "${fixture}/scripts/ci/provision/cann.sh"
 {
     printf 'source %q\n' "${real_common}"
@@ -93,6 +101,7 @@ cp "${real_cann}" "${fixture}/scripts/ci/provision/cann.sh"
         'CANN_HOME="${TEST_CANN_HOME:?}"' \
         'CI_HOME="${TEST_CI_HOME:?}"' \
         'CI_GROUP="${TEST_CANN_GROUP:?}"' \
+        'CI_PRIMARY_GROUP="${TEST_CANN_GROUP:?}"' \
         'CANN_OWNER="${TEST_CANN_OWNER:?}"' \
         'require_root() { :; }'
 } > "${fixture}/scripts/ci/provision/common.sh"
@@ -110,7 +119,7 @@ run_existing_tree() {
     set +e
     PATH="${fixture}/mock-bin:${PATH}" \
         TEST_CANN_HOME="${cann_home}" \
-        TEST_CI_HOME="${temp_dir}/ci-home" \
+        TEST_CI_HOME="${fixture_ci_home}" \
         TEST_CANN_GROUP="${current_group}" \
         TEST_CANN_OWNER="${current_user}" \
         TEST_CHOWN_MARKER="${temp_dir}/chown-called" \

@@ -70,6 +70,23 @@ if ! grep -Fx -- \
     exit 1
 fi
 if ! grep -Fx -- \
+    'install -d -o root -g HwHiAiUser -m 0750 /home/tilexr-ci/toolchains /home/tilexr-ci/toolchains/cann ' \
+    "${output_file}" >/dev/null; then
+    echo "the CANN parent directories are not explicitly sealed" >&2
+    exit 1
+fi
+if ! grep -F -- 'TILEXR_CI_SEALED_CANN_HOME=1' "${output_file}" >/dev/null; then
+    echo "the sealed CANN installer permission switch is missing" >&2
+    exit 1
+fi
+for provision_script in account cann verify; do
+    if ! grep -F -- 'cann_parent_directories_are_sealed' \
+        "${provision_root}/${provision_script}.sh" >/dev/null; then
+        echo "${provision_script}.sh does not verify sealed CANN parents" >&2
+        exit 1
+    fi
+done
+if ! grep -Fx -- \
     'chown root:tilexr-ci /home/tilexr-ci/actions-runner ' \
     "${output_file}" >/dev/null; then
     echo "the runner root itself must be administrator-owned" >&2

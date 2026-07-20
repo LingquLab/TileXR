@@ -69,6 +69,10 @@ else
     fi
 fi
 
+if ! cann_parent_directories_are_sealed; then
+    echo "ERROR: CANN parent directories are not sealed" >&2
+    exit 1
+fi
 if ! cann_tree_is_trusted; then
     echo "ERROR: CANN tree is not the expected sealed and contained 9.1.0 toolchain" >&2
     exit 1

@@ -23,14 +23,16 @@ fi
 runner_work="${RUNNER_HOME}/_work"
 lock_home="${CI_HOME}/locks"
 artifact_home="${CI_HOME}/artifacts"
-toolchain_parent="${CI_HOME}/toolchains/cann"
+toolchains_home="${CI_HOME}/toolchains"
+toolchain_parent="${toolchains_home}/cann"
 control_parent="${CI_HOME}/control"
 install_work="${CI_HOME}/install-work"
 
 if [[ "${DRY_RUN}" != 1 ]]; then
     for directory in \
         "${CI_HOME}" "${RUNNER_HOME}" "${runner_work}" "${lock_home}" \
-        "${artifact_home}" "${toolchain_parent}" "${control_parent}" "${install_work}"; do
+        "${artifact_home}" "${toolchains_home}" "${toolchain_parent}" \
+        "${control_parent}" "${install_work}"; do
         if [[ -L "${directory}" || ( -e "${directory}" && ! -d "${directory}" ) ]]; then
             echo "ERROR: provisioning directory must be a real directory: ${directory}" >&2
             exit 1
@@ -66,5 +68,11 @@ run install -d -o root -g "${CI_PRIMARY_GROUP}" -m 0750 \
 run install -d -o "${CI_USER}" -g "${CI_PRIMARY_GROUP}" -m 0750 \
     "${RUNNER_HOME}" "${runner_work}" "${lock_home}" "${artifact_home}"
 run install -d -o root -g "${CI_GROUP}" -m 0750 \
-    "${toolchain_parent}" "${control_parent}" "${install_work}"
+    "${toolchains_home}" "${toolchain_parent}"
+run install -d -o root -g "${CI_GROUP}" -m 0750 \
+    "${control_parent}" "${install_work}"
+if [[ "${DRY_RUN}" != 1 ]] && ! cann_parent_directories_are_sealed; then
+    echo "ERROR: CANN parent directories could not be sealed" >&2
+    exit 1
+fi
 remove_ci_ssh_entry

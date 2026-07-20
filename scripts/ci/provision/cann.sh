@@ -16,6 +16,10 @@ cann_cleanup_state=none
 cann_tree_identity=
 cann_marker_identity=
 cann_marker_token=
+cann_parent_state=none
+cann_ci_home_identity=
+cann_toolchains_identity=
+cann_toolchain_parent_identity=
 stage=
 
 cann_path_identity() {
@@ -58,6 +62,52 @@ cann_owned_install_matches() {
        "${token}" == "${cann_marker_token}" ]]
 }
 
+cann_parent_directories_match_invocation() {
+    local ci_home_identity toolchains_identity toolchain_parent_identity
+    cann_parent_directories_are_real || return 1
+    ci_home_identity="$(cann_path_identity "${CI_HOME}")" || return 1
+    toolchains_identity="$(cann_path_identity "${CI_HOME}/toolchains")" || return 1
+    toolchain_parent_identity="$(cann_path_identity "${CI_HOME}/toolchains/cann")" || return 1
+    [[ "${ci_home_identity}" == "${cann_ci_home_identity}" &&
+       "${toolchains_identity}" == "${cann_toolchains_identity}" &&
+       "${toolchain_parent_identity}" == "${cann_toolchain_parent_identity}" ]]
+}
+
+record_cann_parent_directories() {
+    cann_parent_directories_are_real || return 1
+    cann_ci_home_identity="$(cann_path_identity "${CI_HOME}")" || return 1
+    cann_toolchains_identity="$(cann_path_identity "${CI_HOME}/toolchains")" || return 1
+    cann_toolchain_parent_identity="$(cann_path_identity "${CI_HOME}/toolchains/cann")" || return 1
+    cann_parent_state=recorded
+    cann_parent_directories_match_invocation
+}
+
+converge_cann_parent_directories() {
+    cann_parent_directories_match_invocation || return 1
+    if cann_parent_directories_are_sealed; then
+        return 0
+    fi
+    chown "${CANN_OWNER}:${CI_PRIMARY_GROUP}" "${CI_HOME}" || return 1
+    chmod 0750 "${CI_HOME}" || return 1
+    chown "${CANN_OWNER}:${CI_GROUP}" \
+        "${CI_HOME}/toolchains" "${CI_HOME}/toolchains/cann" || return 1
+    chmod 0750 "${CI_HOME}/toolchains" "${CI_HOME}/toolchains/cann" || return 1
+    cann_parent_directories_match_invocation &&
+        cann_parent_directories_are_sealed
+}
+
+restore_cann_parent_directories() {
+    [[ "${cann_parent_state}" == recorded ]] || return 0
+    if ! cann_parent_directories_match_invocation; then
+        echo "ERROR: refusing to restore replaced CANN parent directories" >&2
+        return 1
+    fi
+    if ! converge_cann_parent_directories; then
+        echo "ERROR: failed to restore sealed CANN parent directories" >&2
+        return 1
+    fi
+}
+
 cleanup_cann_provision() {
     local status=$?
     trap - EXIT INT TERM HUP
@@ -77,6 +127,7 @@ cleanup_cann_provision() {
                 rmdir -- "${CANN_HOME}" 2>/dev/null || true
             fi
         fi
+        restore_cann_parent_directories || true
     fi
     if [[ -n "${stage}" ]]; then
         rm -rf -- "${stage}"
@@ -121,6 +172,26 @@ check_blue_host() {
     fi
 }
 
+if [[ "${DRY_RUN}" != 1 ]]; then
+    trap cleanup_cann_provision EXIT
+    trap 'abort_cann_provision 130' INT
+    trap 'abort_cann_provision 143' TERM
+    trap 'abort_cann_provision 129' HUP
+    if ! record_cann_parent_directories; then
+        echo "ERROR: CANN parent paths must be pre-created real directories" >&2
+        exit 1
+    fi
+    if ! converge_cann_parent_directories; then
+        echo "ERROR: CANN parent directories could not be sealed" >&2
+        exit 1
+    fi
+else
+    run install -d -o "${CANN_OWNER}" -g "${CI_PRIMARY_GROUP}" -m 0750 \
+        "${CI_HOME}"
+    run install -d -o "${CANN_OWNER}" -g "${CI_GROUP}" -m 0750 \
+        "${CI_HOME}/toolchains" "${CI_HOME}/toolchains/cann"
+fi
+
 if [[ "${DRY_RUN}" != 1 && ( -e "${CANN_HOME}" || -L "${CANN_HOME}" ) ]]; then
     if [[ ! -e "${cann_marker}" && ! -L "${cann_marker}" ]] &&
         cann_tree_is_trusted; then
@@ -147,10 +218,6 @@ if [[ "${DRY_RUN}" == 1 ]]; then
     stage="${install_work}/cann.dry-run"
 else
     stage="$(mktemp -d "${install_work}/cann.XXXXXX")"
-    trap cleanup_cann_provision EXIT
-    trap 'abort_cann_provision 130' INT
-    trap 'abort_cann_provision 143' TERM
-    trap 'abort_cann_provision 129' HUP
 fi
 
 run install -d -o root -g "${CI_GROUP}" -m 0750 "${install_work}" "${stage}/scripts"
@@ -184,7 +251,8 @@ else
     fi
 fi
 
-run env TILEXR_CANN_HOME="${CANN_HOME}" bash "${stage}/scripts/cann_download_install.sh"
+run env TILEXR_CI_SEALED_CANN_HOME=1 TILEXR_CANN_HOME="${CANN_HOME}" \
+    bash "${stage}/scripts/cann_download_install.sh"
 run test -s "${stage}/env/temp/${toolkit_run}"
 run test -s "${stage}/env/temp/${ops_run}"
 
@@ -195,14 +263,15 @@ fi
 
 run chown -R "${CANN_OWNER}:${CI_GROUP}" "${CANN_HOME}"
 run chmod -R u+rwX,g+rX,o-rwx,go-w "${CANN_HOME}"
-run install -d -o root -g "${CI_PRIMARY_GROUP}" -m 0750 "${CI_HOME}"
-run install -d -o root -g "${CI_GROUP}" -m 0750 \
-    "${CI_HOME}/toolchains" "${CI_HOME}/toolchains/cann"
 if [[ "${DRY_RUN}" != 1 ]] && ! cann_tree_is_trusted; then
     echo "ERROR: installed CANN tree could not be sealed" >&2
     exit 1
 fi
 if [[ "${DRY_RUN}" != 1 ]]; then
+    if ! converge_cann_parent_directories; then
+        echo "ERROR: CANN parent directories changed during installation" >&2
+        exit 1
+    fi
     if ! cann_owned_install_matches; then
         echo "ERROR: CANN install ownership changed before finalization" >&2
         exit 1

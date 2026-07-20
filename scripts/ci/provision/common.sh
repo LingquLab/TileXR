@@ -130,6 +130,40 @@ cann_entry_stat() {
         stat -f '%Su:%Sg:%Lp' "${path}"
 }
 
+managed_directory_matches() {
+    local path="$1"
+    local expected_owner="$2"
+    local expected_group="$3"
+    local expected_mode="$4"
+    local entry owner group mode
+
+    [[ -d "${path}" && ! -L "${path}" ]] || return 1
+    entry="$(cann_entry_stat "${path}")" || return 1
+    IFS=: read -r owner group mode <<< "${entry}"
+    [[ "${owner}" == "${expected_owner}" &&
+       "${group}" == "${expected_group}" &&
+       "${mode}" == "${expected_mode}" ]]
+}
+
+cann_parent_directories_are_real() {
+    local path
+    for path in \
+        "${CI_HOME}" \
+        "${CI_HOME}/toolchains" \
+        "${CI_HOME}/toolchains/cann"; do
+        [[ -d "${path}" && ! -L "${path}" ]] || return 1
+    done
+}
+
+cann_parent_directories_are_sealed() {
+    managed_directory_matches \
+        "${CI_HOME}" "${CANN_OWNER}" "${CI_PRIMARY_GROUP}" 750 &&
+        managed_directory_matches \
+            "${CI_HOME}/toolchains" "${CANN_OWNER}" "${CI_GROUP}" 750 &&
+        managed_directory_matches \
+            "${CI_HOME}/toolchains/cann" "${CANN_OWNER}" "${CI_GROUP}" 750
+}
+
 cann_tree_regular_entries_are_sealed() {
     local path entry owner group mode group_bits other_bits
     while IFS= read -r -d '' path; do
