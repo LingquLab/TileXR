@@ -211,8 +211,13 @@ void TestKernelStructure()
         std::string(TILEXR_SOURCE_ROOT) + "/tests/udma/demo/tilexr_udma_alltoall_group_kernel.cpp");
     CHECK_CONTAINS(kernel, "tilexr_udma_all_to_all_group_kernel");
     CHECK_CONTAINS(kernel, "TILEXR_ALLTOALL_GROUP_SEND_CORES");
+    CHECK_CONTAINS(kernel, "#include \"tilexr_udma_alltoall_group_route.h\"");
+    CHECK_CONTAINS(kernel, "AllToAllGroupSelectRouteQps");
+    CHECK_CONTAINS(kernel, "AllToAllGroupUseSecondaryRouteDevice(rank, peer)");
+    CHECK_CONTAINS(kernel, "secondaryQp");
+    CHECK_CONTAINS(kernel, "selectedQp");
     CHECK_CONTAINS(kernel, "UDMAPutSignalNbiOnQp<int32_t>");
-    CHECK_CONTAINS(kernel, "UDMAQuietStatusOnQp(args, peer, qpIdx)");
+    CHECK_CONTAINS(kernel, "UDMAQuietStatusOnQp(args, peer, selectedQp)");
     CHECK_CONTAINS(kernel, "AllToAllGroupWaitTokenMte");
     CHECK_CONTAINS(kernel, "observed >= expectedToken");
     CHECK_CONTAINS(kernel, "launch_tilexr_udma_all_to_all_group");
