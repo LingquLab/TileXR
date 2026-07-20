@@ -1,0 +1,88 @@
+name: PR CI
+
+"on":
+  pull_request:
+    branches: [main]
+    types: [opened, reopened, synchronize, ready_for_review]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tilexr-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  host_checks:
+    name: Host Checks
+    runs-on: ubuntu-24.04
+    container: ubuntu:20.04
+    steps:
+      - name: Install host dependencies
+        run: apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential cmake git python3 python3-pytest ruby
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+          submodules: recursive
+      - name: Run host checks
+        env:
+          TILEXR_CI_PR_NUMBER: ${{ github.event.pull_request.number }}
+          TILEXR_CI_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          TILEXR_CI_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          TILEXR_CI_EXPECTED_MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
+        run: bash scripts/ci/host_checks.sh
+      - name: Upload host evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: host-checks-${{ github.event.pull_request.number }}-${{ github.run_attempt }}
+          path: .ci-artifacts/host
+          include-hidden-files: true
+          retention-days: 14
+
+  npu_gate:
+    name: NPU Gate
+    needs: host_checks
+    if: ${{ needs.host_checks.result == 'success' && !github.event.pull_request.draft }}
+    uses: LingquLab/TileXR/.github/workflows/npu-ci.yml@main
+    permissions:
+      contents: read
+
+  pr_gate:
+    name: PR Gate
+    if: always()
+    needs: [host_checks, npu_gate]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Evaluate required jobs
+        env:
+          IS_DRAFT: ${{ github.event.pull_request.draft }}
+          HOST_RESULT: ${{ needs.host_checks.result }}
+          NPU_RESULT: ${{ needs.npu_gate.result }}
+        run: |
+          test "${HOST_RESULT}" = success
+          if test "${IS_DRAFT}" != true; then
+            test "${NPU_RESULT}" = success
+          fi
+      - name: Summarize gate
+        if: always()
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
+          IS_DRAFT: ${{ github.event.pull_request.draft }}
+          HOST_RESULT: ${{ needs.host_checks.result }}
+          NPU_RESULT: ${{ needs.npu_gate.result }}
+        run: |
+          {
+            echo '## PR Gate'
+            echo
+            printf -- '- PR: #%s\n' "${PR_NUMBER}"
+            printf -- '- Head SHA: `%s`\n' "${HEAD_SHA}"
+            printf -- '- Base SHA: `%s`\n' "${BASE_SHA}"
+            printf -- '- Merge SHA: `%s`\n' "${MERGE_SHA}"
+            printf -- '- Draft: `%s`\n' "${IS_DRAFT}"
+            printf -- '- Host Checks: `%s`\n' "${HOST_RESULT}"
+            printf -- '- NPU Gate: `%s`\n' "${NPU_RESULT}"
+          } >>"${GITHUB_STEP_SUMMARY}"

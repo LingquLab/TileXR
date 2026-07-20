@@ -31,3 +31,10 @@ add_test(
     NAME test_tilexr_ci_control_contract
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_control_contract.py -v
 )
+
+if(RUBY_EXECUTABLE)
+    add_test(
+        NAME test_tilexr_ci_workflows
+        COMMAND ${RUBY_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_workflows.rb
+    )
+endif()
