@@ -777,6 +777,10 @@ Use Ruby `YAML.safe_load_file(path, aliases: true)` to assert:
 - the host artifact upload explicitly includes the `.ci-artifacts` hidden path;
 - the NPU job timeout is 660 minutes and artifact retention is 14 days;
 - host, NPU, and final gate summaries contain PR, head, base, and merge identity;
+- the NPU token handoff creates private FD 3, removes token variables, and uses a
+  final `exec` with `--github-token-fd 3`; it never backgrounds the controller or
+  leaves a waiting token-bearing shell; the controller applies
+  `PR_SET_DUMPABLE=0` before its bounded read and then closes the FD;
 - no workflow text contains `pull_request_target`, `secrets: inherit`, or a write permission;
 - CODEOWNERS assigns `@LingquLab/ci-maintainers` to `.github/CODEOWNERS`,
   `.github/workflows/`, `.github/actions/`, `scripts/ci/control/`,
@@ -914,7 +918,7 @@ jobs:
         run: test "$(git -C source rev-parse HEAD)" = "${EXPECTED_MERGE_SHA}"
       - name: Run trusted gate
         env:
-          TILEXR_CI_GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
           TILEXR_CI_PR_NUMBER: ${{ github.event.pull_request.number }}
           TILEXR_CI_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           TILEXR_CI_BASE_SHA: ${{ github.event.pull_request.base.sha }}
@@ -922,12 +926,19 @@ jobs:
           TILEXR_CI_REPOSITORY: ${{ github.repository }}
           TILEXR_CI_ARTIFACT_DIR: ${{ runner.temp }}/tilexr-ci-artifacts
         run: |
-          python3 /home/tilexr-ci/control/current/gate.py \
+          github_token="${GITHUB_TOKEN}"
+          export -n github_token
+          unset GITHUB_TOKEN
+          exec 3<<<"${github_token}"
+          github_token=
+          unset github_token
+          exec python3 /home/tilexr-ci/control/current/gate.py \
             --source "${GITHUB_WORKSPACE}/source" \
             --artifacts "${TILEXR_CI_ARTIFACT_DIR}" \
             --expected-merge-sha "${TILEXR_CI_EXPECTED_MERGE_SHA}" \
             --repository "${TILEXR_CI_REPOSITORY}" \
-            --pr-number "${TILEXR_CI_PR_NUMBER}"
+            --pr-number "${TILEXR_CI_PR_NUMBER}" \
+            --github-token-fd 3
       - name: Upload NPU evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a

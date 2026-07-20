@@ -119,12 +119,10 @@ handoff_markers = [
   'github_token="${GITHUB_TOKEN}"',
   "export -n github_token",
   "unset GITHUB_TOKEN",
-  "python3 /home/tilexr-ci/control/current/gate.py",
-  "--github-token-fd 3",
-  '3<<<"${github_token}" &',
-  'controller_pid=$!',
+  'exec 3<<<"${github_token}"',
   "github_token=\nunset github_token",
-  'wait "${controller_pid}"',
+  "exec python3 /home/tilexr-ci/control/current/gate.py",
+  "--github-token-fd 3",
 ]
 positions = handoff_markers.map do |marker|
   position = gate_run.index(marker)
@@ -136,6 +134,11 @@ assert(!gate_run.include?("TILEXR_CI_GITHUB_TOKEN"),
        "controller command must not use the legacy token environment")
 assert(!gate_run.match?(/--github-token(?:\s|=)/),
        "controller command must not pass the token in argv")
+assert(!gate_run.include?("&"), "NPU gate must not run in the background")
+assert(!gate_run.match?(/(?:^|\n)\s*wait\b/),
+       "NPU gate must not leave a waiting parent shell")
+assert_equal("--github-token-fd 3", gate_run.lines.last.strip,
+             "controller exec must be the final shell command")
 
 summary = named_step(pr, "pr_gate", "Summarize gate")
 assert_equal(%w[PR_NUMBER HEAD_SHA BASE_SHA MERGE_SHA],
