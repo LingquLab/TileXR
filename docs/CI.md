@@ -284,8 +284,22 @@ GitHub Actions App:
 PR_NUMBER="$(gh pr list --repo LingquLab/TileXR --state all \
   --head ci/pr-gate-positive --json number --jq '.[0].number')"
 MERGE_SHA="$(gh api "repos/LingquLab/TileXR/pulls/${PR_NUMBER}" --jq .merge_commit_sha)"
+PR_GATE_APP_ID_JQ='
+  [.check_runs[]
+    | select(
+        .name == "PR Gate"
+        and .conclusion == "success"
+        and .app.slug == "github-actions"
+      )
+    | .app.id] as $ids
+  | if ($ids | length) == 1 and ($ids[0] | type) == "number" then
+      $ids[0]
+    else
+      error("expected exactly one successful GitHub Actions PR Gate check run")
+    end
+'
 ACTIONS_APP_ID="$(gh api "repos/LingquLab/TileXR/commits/${MERGE_SHA}/check-runs" --jq \
-  '[.check_runs[] | select(.name == "PR Gate" and .conclusion == "success")] | first | .app.id')"
+  "${PR_GATE_APP_ID_JQ}")"
 [[ "${ACTIONS_APP_ID}" =~ ^[0-9]+$ ]]
 
 RULESET_ID="$(gh api repos/LingquLab/TileXR/rulesets --jq \
