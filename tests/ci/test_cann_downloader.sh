@@ -12,11 +12,15 @@ run_scenario() {
     local toolkit_status="$2"
     local ops_status="$3"
     local expected_status="$4"
+    local sealed_mode="${5:-0}"
     local fixture="${temp_dir}/${name}"
     local status
 
-    mkdir -p "${fixture}/scripts" "${fixture}/mock-bin" \
-        "${fixture}/temp" "${fixture}/cann"
+    mkdir -p "${fixture}/scripts" "${fixture}/mock-bin" "${fixture}/temp"
+    if [[ "${sealed_mode}" == 1 ]]; then
+        mkdir "${fixture}/cann"
+        printf marker > "${fixture}/cann/.tilexr-ci-installing"
+    fi
     cp "${downloader}" "${fixture}/scripts/cann_download_install.sh"
 
     printf '%s\n' \
@@ -65,6 +69,7 @@ run_scenario() {
         TEST_INSTALL_MARKER="${fixture}/installed" \
         MOCK_TOOLKIT_STATUS="${toolkit_status}" \
         MOCK_OPS_STATUS="${ops_status}" \
+        TILEXR_CI_SEALED_CANN_HOME="${sealed_mode}" \
         bash "${fixture}/scripts/cann_download_install.sh" \
         > "${fixture}/downloader.log" 2>&1
     status=$?
@@ -72,6 +77,10 @@ run_scenario() {
 
     [[ -f "${fixture}/curl-toolkit.done" && -f "${fixture}/curl-ops.done" ]] || {
         echo "${name}: downloader did not wait for both curl children" >&2
+        exit 1
+    }
+    [[ -d "${fixture}/cann" && ! -L "${fixture}/cann" ]] || {
+        echo "${name}: standalone downloader did not create a real CANN home" >&2
         exit 1
     }
     if [[ "${expected_status}" == success ]]; then
@@ -92,9 +101,13 @@ run_scenario() {
 run_scenario toolkit-fails 22 0 failure
 run_scenario ops-fails 0 23 failure
 run_scenario both-succeed 0 0 success
+run_scenario sealed-succeeds 0 0 success 1
 
 missing_fixture="${temp_dir}/missing-home"
-mkdir -p "${missing_fixture}/scripts" "${missing_fixture}/temp"
+mkdir -p \
+    "${missing_fixture}/scripts" \
+    "${missing_fixture}/temp" \
+    "${missing_fixture}/mock-bin"
 cp "${downloader}" "${missing_fixture}/scripts/cann_download_install.sh"
 printf '%s\n' \
     ': "${TEST_FIXTURE_ROOT:?}"' \
@@ -104,13 +117,65 @@ printf '%s\n' \
     'env_print() { :; }' \
     'error() { :; }' \
     > "${missing_fixture}/scripts/common_env.sh"
-if TEST_FIXTURE_ROOT="${missing_fixture}" \
+printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'printf called > "${TEST_CURL_MARKER}"' \
+    'exit 99' \
+    > "${missing_fixture}/mock-bin/curl"
+chmod +x "${missing_fixture}/mock-bin/curl"
+
+if PATH="${missing_fixture}/mock-bin:${PATH}" \
+    TEST_FIXTURE_ROOT="${missing_fixture}" \
+    TEST_CURL_MARKER="${missing_fixture}/curl-called" \
+    TILEXR_CI_SEALED_CANN_HOME=1 \
     bash "${missing_fixture}/scripts/cann_download_install.sh" >/dev/null 2>&1; then
-    echo "downloader accepted a CANN home it did not own" >&2
+    echo "sealed downloader accepted a missing CANN home" >&2
     exit 1
 fi
 if [[ -e "${missing_fixture}/cann" || -L "${missing_fixture}/cann" ]]; then
-    echo "downloader created an unowned CANN home" >&2
+    echo "sealed downloader created a missing CANN home" >&2
+    exit 1
+fi
+if [[ -e "${missing_fixture}/curl-called" ]]; then
+    echo "sealed downloader started downloads before validating its CANN home" >&2
+    exit 1
+fi
+
+mkdir "${missing_fixture}/cann"
+if PATH="${missing_fixture}/mock-bin:${PATH}" \
+    TEST_FIXTURE_ROOT="${missing_fixture}" \
+    TEST_CURL_MARKER="${missing_fixture}/curl-called" \
+    TILEXR_CI_SEALED_CANN_HOME=1 \
+    bash "${missing_fixture}/scripts/cann_download_install.sh" >/dev/null 2>&1; then
+    echo "sealed downloader accepted an unmarked CANN home" >&2
+    exit 1
+fi
+if [[ -e "${missing_fixture}/curl-called" ]]; then
+    echo "sealed downloader started downloads before validating its marker" >&2
+    exit 1
+fi
+rmdir "${missing_fixture}/cann"
+
+replacement_target="${missing_fixture}/replacement-target"
+mkdir "${replacement_target}"
+printf external > "${replacement_target}/sentinel"
+printf marker > "${replacement_target}/.tilexr-ci-installing"
+ln -s "${replacement_target}" "${missing_fixture}/cann"
+if PATH="${missing_fixture}/mock-bin:${PATH}" \
+    TEST_FIXTURE_ROOT="${missing_fixture}" \
+    TEST_CURL_MARKER="${missing_fixture}/curl-called" \
+    TILEXR_CI_SEALED_CANN_HOME=1 \
+    bash "${missing_fixture}/scripts/cann_download_install.sh" >/dev/null 2>&1; then
+    echo "sealed downloader accepted a replaced CANN home" >&2
+    exit 1
+fi
+if [[ ! -L "${missing_fixture}/cann" ||
+      "$(< "${replacement_target}/sentinel")" != external ]]; then
+    echo "sealed downloader mutated a replaced CANN home" >&2
+    exit 1
+fi
+if [[ -e "${missing_fixture}/curl-called" ]]; then
+    echo "sealed downloader started downloads for a replaced CANN home" >&2
     exit 1
 fi
 

@@ -5,9 +5,24 @@ source ${script_path}/common_env.sh
 
 env_print
 
-if [[ ! -d "${TILEXR_CANN_HOME}" || -L "${TILEXR_CANN_HOME}" ]]; then
-    error "TILEXR_CANN_HOME must be a pre-created real directory: ${TILEXR_CANN_HOME}"
-    exit 1
+if [[ "${TILEXR_CI_SEALED_CANN_HOME:-0}" == 1 ]]; then
+    cann_marker="${TILEXR_CANN_HOME}/.tilexr-ci-installing"
+    if [[ ! -d "${TILEXR_CANN_HOME}" || -L "${TILEXR_CANN_HOME}" ||
+          ! -f "${cann_marker}" || -L "${cann_marker}" ]]; then
+        error "sealed CANN home or ownership marker is invalid: ${TILEXR_CANN_HOME}"
+        exit 1
+    fi
+else
+    if [[ -L "${TILEXR_CANN_HOME}" ||
+          ( -e "${TILEXR_CANN_HOME}" && ! -d "${TILEXR_CANN_HOME}" ) ]]; then
+        error "TILEXR_CANN_HOME must be a real directory: ${TILEXR_CANN_HOME}"
+        exit 1
+    fi
+    mkdir -p -- "${TILEXR_CANN_HOME}"
+    if [[ ! -d "${TILEXR_CANN_HOME}" || -L "${TILEXR_CANN_HOME}" ]]; then
+        error "could not create a real TILEXR_CANN_HOME: ${TILEXR_CANN_HOME}"
+        exit 1
+    fi
 fi
 mkdir -p "${TILEXR_TEMP_HOME}"
 
