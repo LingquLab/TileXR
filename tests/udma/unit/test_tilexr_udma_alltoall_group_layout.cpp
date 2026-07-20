@@ -163,6 +163,25 @@ void TestKernelStructure()
     CHECK_NOT_CONTAINS(kernel, "SyncAll");
 }
 
+void TestHostStructure()
+{
+    const std::string demo = ReadFile(
+        std::string(TILEXR_SOURCE_ROOT) + "/tests/udma/demo/tilexr_udma_demo.cpp");
+    CHECK_CONTAINS(demo, "#include \"tilexr_udma_alltoall_group_layout.h\"");
+    CHECK_CONTAINS(demo, "testType == 8");
+    CHECK_CONTAINS(demo, "RunGroupedAllToAll");
+    CHECK_CONTAINS(demo, "PlanAllToAllGroup");
+    CHECK_CONTAINS(demo, "launch_tilexr_udma_all_to_all_group");
+    CHECK_CONTAINS(demo, "TILEXR_DEMO_ALLTOALL_GROUP_CHUNK_ELEMENTS");
+    CHECK_CONTAINS(demo, "grouped alltoall registeredBytes=");
+    CHECK_CONTAINS(demo, "grouped alltoall warmup=");
+    const size_t begin = demo.find("bool RunGroupedAllToAll(");
+    const size_t end = demo.find("void Cleanup(", begin);
+    const std::string grouped = begin == std::string::npos ? std::string() :
+        demo.substr(begin, end == std::string::npos ? std::string::npos : end - begin);
+    CHECK_NOT_CONTAINS(grouped, "DemoBarrierAll");
+}
+
 } // namespace
 
 int main()
@@ -171,6 +190,7 @@ int main()
     TestPlan();
     TestTokens();
     TestKernelStructure();
+    TestHostStructure();
     if (g_failures != 0) {
         std::cerr << "TileXR grouped all-to-all layout checks failed: " << g_failures << std::endl;
         return 1;
