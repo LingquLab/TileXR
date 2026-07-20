@@ -18,7 +18,7 @@ if [[ "${DRY_RUN}" == 1 ]]; then
     run id -nG "${CI_USER}"
     run passwd -S "${CI_USER}"
     run test ! -e "${CI_HOME}/.ssh/authorized_keys"
-    run sudo -n -l -U "${CI_USER}"
+    run env LC_ALL=C LANG=C sudo -n -l -U "${CI_USER}"
     run grep -Fx version=9.1.0 "${toolkit_info}"
     run grep -Fx package_name=Ascend-cann-910b-ops "${ops_info}"
     run test -x "${CANN_HOME}/cann/compiler/ccec_compiler/bin/bisheng"
@@ -63,9 +63,15 @@ fi
     echo "ERROR: ${CI_USER} has an authorized_keys file" >&2
     exit 1
 }
-if sudo -n -l -U "${CI_USER}" >/dev/null 2>&1; then
+if sudo_user_has_allowed_rule "${CI_USER}"; then
     echo "ERROR: ${CI_USER} has a sudo rule" >&2
     exit 1
+else
+    sudo_state=$?
+    if [[ "${sudo_state}" -ne 1 ]]; then
+        echo "ERROR: sudo permission verification failed" >&2
+        exit 1
+    fi
 fi
 
 grep -Fx package_name=Ascend-cann-toolkit "${toolkit_info}" >/dev/null

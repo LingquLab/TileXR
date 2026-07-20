@@ -39,6 +39,34 @@ require_root() {
     fi
 }
 
+sudo_user_has_allowed_rule() {
+    local user="$1"
+    local output status
+
+    if output="$(env LC_ALL=C LANG=C sudo -n -l -U "${user}" 2>&1)"; then
+        status=0
+    else
+        status=$?
+    fi
+
+    if [[ "${status}" -eq 0 ]] &&
+        grep -Eq '^User .+ may run the following commands on .+:$' <<< "${output}"; then
+        return 0
+    fi
+    if grep -Eq '^User .+ is not allowed to run sudo on .+[.]?$' <<< "${output}"; then
+        return 1
+    fi
+
+    echo "ERROR: could not determine sudo permissions for ${user}" >&2
+    printf '%s\n' "${output}" >&2
+    return 2
+}
+
+seal_runner_modes() {
+    run chmod -R u+rwX,g+rX,o-rwx,go-w "${RUNNER_HOME}"
+    run chmod 0440 "${RUNNER_HOME}/.env"
+}
+
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
     parse_args "$@"
 fi

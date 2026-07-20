@@ -4,8 +4,9 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 provision_root="${repo_root}/scripts/ci/provision"
-output_file="$(mktemp)"
-trap 'rm -f "${output_file}"' EXIT
+temp_dir="$(mktemp -d)"
+output_file="${temp_dir}/dry-run.out"
+trap 'rm -rf "${temp_dir}"' EXIT
 
 scripts=(common account cann control verify)
 for script in "${scripts[@]}"; do
@@ -25,7 +26,8 @@ if bash "${provision_root}/runner.sh" --unexpected </dev/null >/dev/null 2>&1; t
 fi
 
 required_output=(
-    'useradd --system --create-home --home-dir /home/tilexr-ci --shell /usr/sbin/nologin'
+    'groupadd --system tilexr-ci'
+    'useradd --system --create-home --home-dir /home/tilexr-ci --shell /usr/sbin/nologin --gid tilexr-ci tilexr-ci'
     'usermod -aG HwHiAiUser tilexr-ci'
     'install -d -o root -g HwHiAiUser -m 0750 /home/tilexr-ci'
     '/home/tilexr-ci/toolchains/cann/9.1.0'
@@ -46,6 +48,15 @@ for expected in "${required_output[@]}"; do
         exit 1
     fi
 done
+
+groupadd_line="$(grep -nFx -- 'groupadd --system tilexr-ci ' "${output_file}" | cut -d: -f1)"
+useradd_line="$(grep -nFx -- \
+    'useradd --system --create-home --home-dir /home/tilexr-ci --shell /usr/sbin/nologin --gid tilexr-ci tilexr-ci ' \
+    "${output_file}" | cut -d: -f1)"
+if [[ -z "${groupadd_line}" || -z "${useradd_line}" || "${groupadd_line}" -ge "${useradd_line}" ]]; then
+    echo "the explicit primary group must be created before the CI account" >&2
+    exit 1
+fi
 
 if ! grep -Fx -- \
     'install -d -o root -g tilexr-ci -m 0750 /home/tilexr-ci ' \
@@ -116,5 +127,77 @@ for service_script in runner verify; do
         exit 1
     fi
 done
+
+mock_bin="${temp_dir}/mock-bin"
+mkdir -p "${mock_bin}"
+printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    '[[ "${LC_ALL:-}" == C && "${LANG:-}" == C ]] || exit 91' \
+    '[[ "$*" == "-n -l -U tilexr-ci" ]] || exit 92' \
+    'printf "%s" "${MOCK_SUDO_OUTPUT:-}"' \
+    'exit "${MOCK_SUDO_STATUS:-0}"' > "${mock_bin}/sudo"
+chmod +x "${mock_bin}/sudo"
+
+source "${provision_root}/common.sh"
+
+if ! grep -F -- 'sudo_user_has_allowed_rule "${CI_USER}"' \
+    "${provision_root}/verify.sh" >/dev/null; then
+    echo "verify.sh does not use the parsed sudo permission state" >&2
+    exit 1
+fi
+
+assert_sudo_state() {
+    local expected_state="$1"
+    local command_status="$2"
+    local command_output="$3"
+    local actual_state
+    if MOCK_SUDO_STATUS="${command_status}" \
+        MOCK_SUDO_OUTPUT="${command_output}" \
+        PATH="${mock_bin}:${PATH}" \
+        sudo_user_has_allowed_rule tilexr-ci 2>/dev/null; then
+        actual_state=0
+    else
+        actual_state=$?
+    fi
+    if [[ "${actual_state}" -ne "${expected_state}" ]]; then
+        echo "unexpected sudo permission state: expected ${expected_state}, got ${actual_state}" >&2
+        exit 1
+    fi
+}
+
+assert_sudo_state 1 0 $'Matching Defaults entries for tilexr-ci on blue:\n    env_reset\n\nUser tilexr-ci is not allowed to run sudo on blue.\n'
+assert_sudo_state 1 1 $'User tilexr-ci is not allowed to run sudo on blue.\n'
+assert_sudo_state 0 0 $'Matching Defaults entries for tilexr-ci on blue:\n    env_reset\n\nUser tilexr-ci may run the following commands on blue:\n    (ALL : ALL) ALL\n'
+assert_sudo_state 2 0 $'Matching Defaults entries for tilexr-ci on blue:\n    env_reset\n'
+assert_sudo_state 2 1 $'sudo: unable to initialize policy plugin\n'
+
+if ! grep -F -- 'seal_runner_modes' "${provision_root}/runner.sh" >/dev/null; then
+    echo "runner.sh does not restore stable modes after recursive sealing" >&2
+    exit 1
+fi
+
+runner_test_home="${temp_dir}/runner-home"
+mkdir -p "${runner_test_home}/_work" "${runner_test_home}/_diag"
+printf '%s\n' 'ACTIONS_RUNNER_HOOK_JOB_COMPLETED=/test/hook' > "${runner_test_home}/.env"
+chmod 0440 "${runner_test_home}/.env"
+
+file_mode() {
+    stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1"
+}
+
+(
+    RUNNER_HOME="${runner_test_home}"
+    DRY_RUN=0
+    seal_runner_modes
+    [[ "$(file_mode "${RUNNER_HOME}/.env")" == 440 ]] || {
+        echo "first runner seal changed .env away from mode 0440" >&2
+        exit 1
+    }
+    seal_runner_modes
+    [[ "$(file_mode "${RUNNER_HOME}/.env")" == 440 ]] || {
+        echo "runner reseal is not idempotent for .env mode" >&2
+        exit 1
+    }
+)
 
 cat "${output_file}"

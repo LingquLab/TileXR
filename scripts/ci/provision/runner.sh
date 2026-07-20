@@ -168,7 +168,7 @@ else
     rm -f "${env_stage}"
 fi
 run chown -R "root:${CI_PRIMARY_GROUP}" "${RUNNER_HOME}"
-run chmod -R u+rwX,g+rX,o-rwx,go-w "${RUNNER_HOME}"
+seal_runner_modes
 run install -d -o "${CI_USER}" -g "${CI_PRIMARY_GROUP}" -m 0750 \
     "${RUNNER_HOME}/_work" "${RUNNER_HOME}/_diag"
 run "${RUNNER_HOME}/svc.sh" install "${CI_USER}"

@@ -35,7 +35,8 @@ if [[ "${DRY_RUN}" != 1 ]]; then
 fi
 
 if [[ "${DRY_RUN}" == 1 ]] || ! getent passwd "${CI_USER}" >/dev/null; then
-    run useradd --system --create-home --home-dir "${CI_HOME}" --shell /usr/sbin/nologin "${CI_USER}"
+    run useradd --system --create-home --home-dir "${CI_HOME}" \
+        --shell /usr/sbin/nologin --gid "${CI_PRIMARY_GROUP}" "${CI_USER}"
 fi
 
 if [[ "${DRY_RUN}" == 1 ]] || ! id -nG "${CI_USER}" | tr ' ' '\n' | grep -Fx "${CI_GROUP}" >/dev/null; then
