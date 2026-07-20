@@ -27,6 +27,7 @@ constexpr uint16_t TILEXR_CCU_TRACE_SET_CKE_HEADER = 0x0802U;
 constexpr uint16_t TILEXR_CCU_TRACE_CLEAR_CKE_HEADER = 0x0804U;
 constexpr uint16_t TILEXR_CCU_TRACE_TRANS_RMT_MEM_TO_LOC_MEM_HEADER = 0x1008U;
 constexpr uint16_t TILEXR_CCU_TRACE_TRANS_LOC_MEM_TO_RMT_MEM_HEADER = 0x1009U;
+constexpr uint16_t TILEXR_CCU_TRACE_TRANS_LOC_MEM_TO_LOC_MEM_HEADER = 0x100aU;
 constexpr uint16_t TILEXR_CCU_TRACE_SYNC_CKE_HEADER = 0x100bU;
 constexpr uint16_t TILEXR_CCU_TRACE_SYNC_XN_HEADER = 0x100dU;
 constexpr uint64_t TILEXR_CCU_PACKED_TOKEN_VALID_SHIFT = 52ULL;
@@ -39,10 +40,62 @@ constexpr uint32_t TILEXR_CCU_DIRECT_MEMORY_COPY_LOCAL_GSA_COUNT = 2U;
 constexpr uint32_t TILEXR_CCU_DIRECT_ALLTOALL_SYNC_RESOURCE_COUNT = 3U;
 constexpr uint32_t TILEXR_CCU_DIRECT_ALLTOALL_INSTRUCTION_COUNT =
     7U + 64U * 7U;
+constexpr uint32_t TILEXR_CCU_DIRECT_ALLTOALL_MESH_SYNC_RESOURCE_COUNT = 9U;
 constexpr uint32_t TILEXR_CCU_DIRECT_SIGNAL_INSTRUCTION_COUNT = 5U;
 constexpr uint32_t TILEXR_CCU_DIRECT_WAIT_INSTRUCTION_COUNT = 5U;
 constexpr uint32_t TILEXR_CCU_DIRECT_SIGNAL_WAIT_INSTRUCTION_COUNT = 6U;
 constexpr uint32_t TILEXR_CCU_DIRECT_SYNC_XN_PING_INSTRUCTION_COUNT = 5U;
+
+uint32_t DirectAllToAllMeshInstructionCount(uint64_t chunkBytes)
+{
+    if (chunkBytes == 0 || chunkBytes % TILEXR_CCU_ALLTOALL_BLOCK_BYTES != 0) {
+        return 0;
+    }
+    const uint64_t blocks = chunkBytes / TILEXR_CCU_ALLTOALL_BLOCK_BYTES;
+    const uint64_t instructions = 21ULL + 4ULL * blocks * 7ULL + 9ULL + 1ULL;
+    return instructions > std::numeric_limits<uint32_t>::max() ? 0U : static_cast<uint32_t>(instructions);
+}
+
+bool DirectAllToAllMeshCapacityFits(
+    const TileXRCcuResourceSpec& resources,
+    uint32_t instructionCount,
+    std::string* message)
+{
+    const auto require = [message](const char* resource, uint32_t requested, uint32_t available) {
+        if (requested <= available) {
+            return true;
+        }
+        if (message != nullptr) {
+            std::ostringstream stream;
+            stream << "insufficient alltoall mesh " << resource
+                   << " resources requested=" << requested
+                   << " available=" << available;
+            *message = stream.str();
+        }
+        return false;
+    };
+    const uint32_t missionInstructionStart = resources.missionInstructionStartId == 0 ?
+        resources.instructionStartId : resources.missionInstructionStartId;
+    const uint32_t repositoryPrefix = missionInstructionStart - resources.instructionStartId;
+    const uint32_t localWaitCkeCount = resources.localWaitCkeCount == 0 ?
+        resources.ckeCount : resources.localWaitCkeCount;
+    const uint32_t remoteNotifyCkeCount = resources.remoteNotifyCkeCount == 0 ?
+        resources.ckeCount : resources.remoteNotifyCkeCount;
+    return require("mission", 1U, resources.missionCount) &&
+        require("instruction", repositoryPrefix + instructionCount, resources.instructionCount) &&
+        require("GSA", TILEXR_CCU_DIRECT_MEMORY_COPY_LOCAL_GSA_COUNT, resources.gsaCount) &&
+        require("local XN", TILEXR_CCU_DIRECT_ALLTOALL_MESH_SYNC_RESOURCE_COUNT, resources.xnCount) &&
+        require("remote XN", TILEXR_CCU_DIRECT_ALLTOALL_MESH_SYNC_RESOURCE_COUNT,
+            resources.remoteXnCount == 0 ?
+                (resources.xnCount > TILEXR_CCU_DIRECT_ALLTOALL_MESH_SYNC_RESOURCE_COUNT ?
+                    resources.xnCount - TILEXR_CCU_DIRECT_ALLTOALL_MESH_SYNC_RESOURCE_COUNT : 0U) :
+                resources.remoteXnCount) &&
+        require("local CKE", TILEXR_CCU_DIRECT_ALLTOALL_MESH_SYNC_RESOURCE_COUNT + 1U,
+            localWaitCkeCount) &&
+        require("remote CKE", TILEXR_CCU_DIRECT_ALLTOALL_MESH_SYNC_RESOURCE_COUNT,
+            remoteNotifyCkeCount) &&
+        require("channel", TILEXR_CCU_DIRECT_ALLTOALL_MESH_SYNC_RESOURCE_COUNT, resources.channelCount);
+}
 
 void ResetReport(TileXRCcuDirectInstallReport* report)
 {
@@ -382,6 +435,27 @@ void TraceDecodedInstr(const char* label, size_t index, const TileXRCcuInstr& in
                       << " localXn=" << TraceSlot(instr.words[1], 0)
                       << " remoteGsa=" << TraceSlot(instr.words[0], 1)
                       << " remoteXn=" << TraceSlot(instr.words[0], 2)
+                      << " lengthXn=" << TraceSlot(instr.words[1], 1)
+                      << " channelId=" << TraceSlot(instr.words[1], 2)
+                      << " clearType=" << (flags & 0x1U)
+                      << " lengthEn=" << ((flags >> 1U) & 0x1U)
+                      << " reduceEn=" << ((flags >> 2U) & 0x1U)
+                      << " reduceDataType=" << ((control >> 8U) & 0xfU)
+                      << " reduceOpCode=" << ((control >> 12U) & 0xfU)
+                      << " setCkeId=" << TraceSlot(instr.words[3], 0)
+                      << " setCkeMask=" << TraceSlot(instr.words[3], 1)
+                      << " waitCkeId=" << TraceSlot(instr.words[3], 2)
+                      << " waitCkeMask=" << TraceSlot(instr.words[3], 3);
+            break;
+        }
+        case TILEXR_CCU_TRACE_TRANS_LOC_MEM_TO_LOC_MEM_HEADER: {
+            const uint16_t control = TraceSlot(instr.words[1], 3);
+            const uint16_t flags = TraceSlot(instr.words[2], 3);
+            std::cerr << "decoded=TransLocMemToLocMem"
+                      << " sourceGsa=" << TraceSlot(instr.words[0], 3)
+                      << " sourceXn=" << TraceSlot(instr.words[1], 0)
+                      << " destinationGsa=" << TraceSlot(instr.words[0], 1)
+                      << " destinationXn=" << TraceSlot(instr.words[0], 2)
                       << " lengthXn=" << TraceSlot(instr.words[1], 1)
                       << " channelId=" << TraceSlot(instr.words[1], 2)
                       << " clearType=" << (flags & 0x1U)
@@ -804,6 +878,48 @@ int ConfigureDirectAllToAll2RankResources(
     return TILEXR_SUCCESS;
 }
 
+int ConfigureDirectAllToAllMeshResources(
+    const TileXRCcuDirectInstallOptions& options,
+    const TileXRCcuDirectAllToAllMeshSpec& alltoall,
+    TileXRCcuDirectInstallAttempt* attempt,
+    TileXRCcuDirectInstallReport* report)
+{
+    const uint32_t instructionCount = DirectAllToAllMeshInstructionCount(alltoall.chunkBytes);
+    if (attempt == nullptr || instructionCount == 0 ||
+        attempt->plan.syncResources.size() != TILEXR_CCU_DIRECT_ALLTOALL_MESH_SYNC_RESOURCE_COUNT ||
+        attempt->plan.taskWindows.size() != 1U) {
+        if (report != nullptr) {
+            report->message = "alltoall mesh direct CCU plan requires nine sync resources and one task";
+        }
+        return TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    if (options.gsaStartId == 0 || attempt->resourceSpec.gsaCount < TILEXR_CCU_DIRECT_MEMORY_COPY_LOCAL_GSA_COUNT) {
+        if (report != nullptr) {
+            report->message = "alltoall mesh direct CCU requires two kernel-local GSA resources";
+        }
+        return TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    if (attempt->allocation.localXn.num < TILEXR_CCU_DIRECT_ALLTOALL_MESH_SYNC_RESOURCE_COUNT ||
+        attempt->allocation.remoteXn.num < TILEXR_CCU_DIRECT_ALLTOALL_MESH_SYNC_RESOURCE_COUNT ||
+        attempt->allocation.localWaitCke.num < TILEXR_CCU_DIRECT_ALLTOALL_MESH_SYNC_RESOURCE_COUNT ||
+        attempt->allocation.remoteNotifyCke.num < TILEXR_CCU_DIRECT_ALLTOALL_MESH_SYNC_RESOURCE_COUNT ||
+        attempt->allocation.channels.num < TILEXR_CCU_DIRECT_ALLTOALL_MESH_SYNC_RESOURCE_COUNT ||
+        attempt->allocation.sourceCke.num != 1U) {
+        if (report != nullptr) {
+            report->message = "alltoall mesh direct CCU allocation is missing XN/CKE/channel resources";
+        }
+        return TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+
+    attempt->allocation.localGsa = MakeRange(
+        attempt->specInfo.dieId,
+        options.gsaStartId,
+        static_cast<uint16_t>(TILEXR_CCU_DIRECT_MEMORY_COPY_LOCAL_GSA_COUNT));
+    attempt->plan.kernelLocalGsa = attempt->allocation.localGsa;
+    attempt->plan.taskWindows[0].instCnt = static_cast<uint16_t>(instructionCount);
+    return TILEXR_SUCCESS;
+}
+
 int BuildDirectMemoryCopyLaunchPackage(
     const TileXRCcuDirectMemoryCopySpec& memoryCopy,
     TileXRCcuDirectInstallAttempt* attempt,
@@ -1062,6 +1178,135 @@ int BuildDirectAllToAll2RankLaunchPackage(
         return TILEXR_ERROR_PARA_CHECK_FAIL;
     }
 
+    attempt->package.plan = attempt->plan;
+    attempt->package.program = program;
+    attempt->package.repository = repository;
+    attempt->package.tasks = tasks;
+    attempt->package.installScope = TileXRCcuLaunchInstallScope {};
+    attempt->package.requiresHardwareInstall = true;
+    return TILEXR_SUCCESS;
+}
+
+int BuildDirectAllToAllMeshLaunchPackage(
+    const TileXRCcuDirectAllToAllMeshSpec& alltoall,
+    TileXRCcuDirectInstallAttempt* attempt,
+    TileXRCcuDirectInstallReport* report)
+{
+    if (attempt == nullptr ||
+        attempt->plan.syncResources.size() != TILEXR_CCU_DIRECT_ALLTOALL_MESH_SYNC_RESOURCE_COUNT ||
+        attempt->plan.kernelLocalGsa.num < TILEXR_CCU_DIRECT_MEMORY_COPY_LOCAL_GSA_COUNT) {
+        if (report != nullptr) {
+            report->message = "missing direct CCU alltoall mesh producer resources";
+        }
+        return TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+
+    auto peers = alltoall.peers;
+    std::sort(peers.begin(), peers.end(), [](const TileXRCcuDirectAllToAllMeshPeerSpec& lhs,
+                                             const TileXRCcuDirectAllToAllMeshPeerSpec& rhs) {
+        return lhs.peerRank < rhs.peerRank;
+    });
+    TileXRCcuAllToAllMeshProgramSpec mesh;
+    mesh.rankSize = alltoall.rankSize;
+    mesh.localRank = alltoall.localRank;
+    mesh.localSendAddr = alltoall.localSendAddr;
+    mesh.localSendToken = alltoall.localSendToken;
+    mesh.localRecvAddr = alltoall.localRecvAddr;
+    mesh.localRecvToken = alltoall.localRecvToken;
+    mesh.chunkBytes = alltoall.chunkBytes;
+    mesh.selfSourceGsa = attempt->plan.kernelLocalGsa.startId;
+    mesh.selfDestinationGsa = static_cast<uint16_t>(attempt->plan.kernelLocalGsa.startId + 1U);
+
+    for (uint32_t ordinal = 0; ordinal < peers.size(); ++ordinal) {
+        const uint32_t base = ordinal * 3U;
+        const TileXRCcuSyncResource& copyResource = attempt->plan.syncResources[base];
+        const TileXRCcuSyncResource& preResource = attempt->plan.syncResources[base + 1U];
+        const TileXRCcuSyncResource& tokenResource = attempt->plan.syncResources[base + 2U];
+        TileXRCcuAllToAllMeshPeerSpec peer;
+        peer.peerRank = peers[ordinal].peerRank;
+        auto& route = peer.route;
+        route.localRank = alltoall.localRank;
+        route.localSendAddr = alltoall.localSendAddr;
+        route.localSendToken = alltoall.localSendToken;
+        route.localRecvAddr = alltoall.localRecvAddr;
+        route.localRecvToken = alltoall.localRecvToken;
+        route.remoteRecvAddr = peers[ordinal].remoteRecvAddr;
+        route.remoteRecvToken = peers[ordinal].remoteRecvToken;
+        route.bytes = alltoall.chunkBytes;
+        route.localGsa = attempt->plan.kernelLocalGsa.startId;
+        route.remoteGsa = static_cast<uint16_t>(attempt->plan.kernelLocalGsa.startId + 1U);
+        route.localXn = copyResource.localXn;
+        route.remoteXn = copyResource.remoteXn;
+        route.lengthXn = tokenResource.localXn;
+        route.preSyncLocalAddrXn = preResource.localXn;
+        route.preSyncLocalTokenXn = tokenResource.localXn;
+        route.preSyncLocalMarkerXn = copyResource.localXn;
+        route.preSyncRemoteMarkerXn = copyResource.remoteXn;
+        route.preSyncRemoteAddrXn = preResource.remoteXn;
+        route.preSyncRemoteTokenXn = tokenResource.remoteXn;
+        route.preSyncMarkerArgIndex = 0;
+        route.preSyncMarkerEnabled = true;
+        route.preSyncChannelId = preResource.channelId;
+        route.preSyncTokenChannelId = tokenResource.channelId;
+        route.copyChannelId = copyResource.channelId;
+        route.postSyncChannelId = copyResource.channelId;
+        route.copyCompletionCke = copyResource.localWaitCke;
+        route.preSyncLocalWaitCke = preResource.localWaitCke;
+        route.preSyncRemoteNotifyCke = preResource.notifyCke;
+        route.preSyncTokenLocalWaitCke = tokenResource.localWaitCke;
+        route.preSyncRemoteTokenNotifyCke = preResource.notifyCke;
+        route.postSyncLocalWaitCke = copyResource.localWaitCke;
+        route.postSyncRemoteNotifyCke = copyResource.notifyCke;
+        route.sourceCke = attempt->allocation.sourceCke.startId;
+        route.ckeMask = 1U;
+        route.preSyncNotify = true;
+        route.preSyncWait = true;
+        route.postSyncNotify = true;
+        route.postSyncWait = true;
+        route.emitFinish = false;
+        mesh.peers.push_back(peer);
+    }
+    const TileXRCcuSyncResource& selfCopy = attempt->plan.syncResources[0];
+    const TileXRCcuSyncResource& selfPre = attempt->plan.syncResources[1];
+    const TileXRCcuSyncResource& selfToken = attempt->plan.syncResources[2];
+    mesh.selfSourceXn = selfCopy.localXn;
+    mesh.selfDestinationXn = selfToken.localXn;
+    mesh.selfLengthXn = selfPre.localXn;
+    mesh.selfChannelId = selfCopy.channelId;
+    mesh.selfCompletionCke = selfCopy.localWaitCke;
+
+    TileXRCcuProgram program;
+    TileXRCcuAllToAllProgramReport alltoallReport;
+    if (TileXRCcuBuildAllToAllMeshProgram(mesh, &program.sync, &alltoallReport) != TILEXR_SUCCESS) {
+        if (report != nullptr) {
+            report->message = alltoallReport.message;
+        }
+        return TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    if (program.sync.empty() || program.sync.size() > std::numeric_limits<uint16_t>::max()) {
+        if (report != nullptr) {
+            report->message = "invalid direct CCU alltoall mesh instruction count";
+        }
+        return TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    attempt->plan.taskWindows[0].instCnt = static_cast<uint16_t>(program.sync.size());
+
+    TileXRCcuRepositoryImage repository;
+    TileXRCcuRepositoryReport repositoryReport;
+    if (TileXRCcuBuildRepositoryImage(attempt->plan, program, &repository, &repositoryReport) != TILEXR_SUCCESS) {
+        if (report != nullptr) {
+            report->message = repositoryReport.message;
+        }
+        return TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    std::vector<TileXRCcuTask> tasks;
+    TileXRCcuProducerPlanReport planReport;
+    if (TileXRCcuBuildTasks(attempt->plan, &tasks, &planReport) != TILEXR_SUCCESS) {
+        if (report != nullptr) {
+            report->message = planReport.message;
+        }
+        return TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
     attempt->package.plan = attempt->plan;
     attempt->package.program = program;
     attempt->package.repository = repository;
@@ -1520,6 +1765,7 @@ int RunDirectInstallAttemptImpl(
     const TileXRCcuDirectInstallOptions& options,
     const TileXRCcuDirectMemoryCopySpec* memoryCopy,
     const TileXRCcuDirectAllToAll2RankSpec* alltoall,
+    const TileXRCcuDirectAllToAllMeshSpec* alltoallMesh,
     const TileXRCcuDirectSignalWaitSpec* signalWait,
     const TileXRCcuDirectSyncXnPingSpec* syncXnPing,
     TileXRCcuDirectInstallAttempt* attempt,
@@ -1565,11 +1811,21 @@ int RunDirectInstallAttemptImpl(
     attempt->resourceSpec.missionInstructionStartId = options.missionInstructionStartId;
     ApplyRemoteXnOptions(options, &attempt->resourceSpec);
     ApplySplitCkeOptions(options, &attempt->resourceSpec);
+    if (alltoallMesh != nullptr) {
+        std::string capacityMessage;
+        if (!DirectAllToAllMeshCapacityFits(
+                attempt->resourceSpec,
+                DirectAllToAllMeshInstructionCount(alltoallMesh->chunkBytes),
+                &capacityMessage)) {
+            return Fail(attempt, report, capacityMessage);
+        }
+    }
 
-    const bool customProgram =
-        memoryCopy != nullptr || alltoall != nullptr || signalWait != nullptr || syncXnPing != nullptr;
+    const bool customProgram = memoryCopy != nullptr || alltoall != nullptr || alltoallMesh != nullptr ||
+        signalWait != nullptr || syncXnPing != nullptr;
     attempt->resourceRequest.sqeArgCount = customProgram ? 0U : options.sqeArgCount;
     attempt->resourceRequest.syncResourceCount =
+        alltoallMesh != nullptr ? TILEXR_CCU_DIRECT_ALLTOALL_MESH_SYNC_RESOURCE_COUNT :
         alltoall != nullptr ? TILEXR_CCU_DIRECT_ALLTOALL_SYNC_RESOURCE_COUNT :
         customProgram ? 1U : options.syncResourceCount;
     attempt->resourceRequest.syncInstructionCount =
@@ -1577,6 +1833,9 @@ int RunDirectInstallAttemptImpl(
         std::max<uint32_t>(options.syncInstructionCount, TILEXR_CCU_DIRECT_MEMORY_COPY_INSTRUCTION_COUNT) :
         alltoall != nullptr ?
         std::max<uint32_t>(options.syncInstructionCount, TILEXR_CCU_DIRECT_ALLTOALL_INSTRUCTION_COUNT) :
+        alltoallMesh != nullptr ?
+        std::max<uint32_t>(options.syncInstructionCount,
+            DirectAllToAllMeshInstructionCount(alltoallMesh->chunkBytes)) :
         signalWait != nullptr ?
         std::max<uint32_t>(options.syncInstructionCount, SignalWaitInstructionCount(*signalWait)) :
         syncXnPing != nullptr ?
@@ -1584,6 +1843,7 @@ int RunDirectInstallAttemptImpl(
         options.syncInstructionCount;
     attempt->resourceRequest.bindingsPerSyncResource = options.bindingsPerSyncResource;
         attempt->resourceRequest.barrierMode =
+        alltoallMesh != nullptr ? TileXRCcuBarrierMode::SyncCke :
         alltoall != nullptr ? TileXRCcuBarrierMode::SyncXn :
         syncXnPing != nullptr ? TileXRCcuBarrierMode::SyncCke :
         signalWait == nullptr ? options.barrierMode : EffectiveSignalWaitBarrierMode(*signalWait);
@@ -1623,8 +1883,19 @@ int RunDirectInstallAttemptImpl(
                     "failed to configure direct CCU alltoall resources" :
                     report->message);
         }
+    } else if (alltoallMesh != nullptr) {
+        ret = ConfigureDirectAllToAllMeshResources(options, *alltoallMesh, attempt, report);
+        if (ret != TILEXR_SUCCESS) {
+            return Fail(
+                attempt,
+                report,
+                report == nullptr || report->message.empty() ?
+                    "failed to configure direct CCU alltoall mesh resources" :
+                    report->message);
+        }
     }
     attempt->plan.barrierMode =
+        alltoallMesh != nullptr ? TileXRCcuBarrierMode::SyncCke :
         alltoall != nullptr ? TileXRCcuBarrierMode::SyncXn :
         syncXnPing != nullptr ? TileXRCcuBarrierMode::SyncCke :
         signalWait == nullptr ? attempt->plan.barrierMode : EffectiveSignalWaitBarrierMode(*signalWait);
@@ -1658,6 +1929,8 @@ int RunDirectInstallAttemptImpl(
     TileXRCcuLaunchPackageReport packageReport;
     ret = memoryCopy != nullptr ?
         BuildDirectMemoryCopyLaunchPackage(*memoryCopy, attempt, report) :
+        alltoallMesh != nullptr ?
+        BuildDirectAllToAllMeshLaunchPackage(*alltoallMesh, attempt, report) :
         alltoall != nullptr ?
         BuildDirectAllToAll2RankLaunchPackage(*alltoall, attempt, report) :
         signalWait != nullptr ?
@@ -1673,6 +1946,8 @@ int RunDirectInstallAttemptImpl(
                 (report == nullptr || report->message.empty() ?
                     (memoryCopy != nullptr ?
                         "failed to build direct CCU memory copy launch package" :
+                        alltoallMesh != nullptr ?
+                        "failed to build direct CCU alltoall mesh launch package" :
                         alltoall != nullptr ?
                         "failed to build direct CCU alltoall launch package" :
                         syncXnPing != nullptr ?
@@ -1740,7 +2015,7 @@ int TileXRCcuRunDirectInstallAttempt(
     TileXRCcuDirectInstallAttempt* attempt,
     TileXRCcuDirectInstallReport* report)
 {
-    return RunDirectInstallAttemptImpl(options, nullptr, nullptr, nullptr, nullptr, attempt, report);
+    return RunDirectInstallAttemptImpl(options, nullptr, nullptr, nullptr, nullptr, nullptr, attempt, report);
 }
 
 int TileXRCcuRunDirectMemoryCopyInstallAttempt(
@@ -1759,7 +2034,7 @@ int TileXRCcuRunDirectMemoryCopyInstallAttempt(
         }
         return TILEXR_ERROR_PARA_CHECK_FAIL;
     }
-    return RunDirectInstallAttemptImpl(options, &memoryCopy, nullptr, nullptr, nullptr, attempt, report);
+    return RunDirectInstallAttemptImpl(options, &memoryCopy, nullptr, nullptr, nullptr, nullptr, attempt, report);
 }
 
 int TileXRCcuRunDirectAllToAll2RankInstallAttempt(
@@ -1783,7 +2058,37 @@ int TileXRCcuRunDirectAllToAll2RankInstallAttempt(
         }
         return TILEXR_ERROR_PARA_CHECK_FAIL;
     }
-    return RunDirectInstallAttemptImpl(options, nullptr, &alltoall, nullptr, nullptr, attempt, report);
+    return RunDirectInstallAttemptImpl(options, nullptr, &alltoall, nullptr, nullptr, nullptr, attempt, report);
+}
+
+int TileXRCcuRunDirectAllToAllMeshInstallAttempt(
+    const TileXRCcuDirectInstallOptions& options,
+    const TileXRCcuDirectAllToAllMeshSpec& alltoall,
+    TileXRCcuDirectInstallAttempt* attempt,
+    TileXRCcuDirectInstallReport* report)
+{
+    bool peerRanks[4] = {};
+    bool valid = alltoall.rankSize == 4U && alltoall.localRank < alltoall.rankSize &&
+        alltoall.localSendAddr != 0 && alltoall.localSendToken != 0 &&
+        alltoall.localRecvAddr != 0 && alltoall.localRecvToken != 0 &&
+        DirectAllToAllMeshInstructionCount(alltoall.chunkBytes) != 0 && alltoall.peers.size() == 3U;
+    for (const auto& peer : alltoall.peers) {
+        if (peer.peerRank >= alltoall.rankSize || peer.peerRank == alltoall.localRank ||
+            peerRanks[peer.peerRank] || peer.remoteRecvAddr == 0 || peer.remoteRecvToken == 0) {
+            valid = false;
+            break;
+        }
+        peerRanks[peer.peerRank] = true;
+    }
+    if (!valid) {
+        ResetReport(report);
+        ClearAttempt(attempt);
+        if (report != nullptr) {
+            report->message = "invalid direct CCU alltoall mesh address/token/rank inputs";
+        }
+        return TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    return RunDirectInstallAttemptImpl(options, nullptr, nullptr, &alltoall, nullptr, nullptr, attempt, report);
 }
 
 int TileXRCcuRunDirectSignalWaitInstallAttempt(
@@ -1792,7 +2097,7 @@ int TileXRCcuRunDirectSignalWaitInstallAttempt(
     TileXRCcuDirectInstallAttempt* attempt,
     TileXRCcuDirectInstallReport* report)
 {
-    return RunDirectInstallAttemptImpl(options, nullptr, nullptr, &signalWait, nullptr, attempt, report);
+    return RunDirectInstallAttemptImpl(options, nullptr, nullptr, nullptr, &signalWait, nullptr, attempt, report);
 }
 
 int TileXRCcuRunDirectSyncXnPingInstallAttempt(
@@ -1801,7 +2106,7 @@ int TileXRCcuRunDirectSyncXnPingInstallAttempt(
     TileXRCcuDirectInstallAttempt* attempt,
     TileXRCcuDirectInstallReport* report)
 {
-    return RunDirectInstallAttemptImpl(options, nullptr, nullptr, nullptr, &syncXnPing, attempt, report);
+    return RunDirectInstallAttemptImpl(options, nullptr, nullptr, nullptr, nullptr, &syncXnPing, attempt, report);
 }
 
 int TileXRCcuReleaseDirectInstallAttemptResources(TileXRCcuDirectInstallAttempt& attempt)

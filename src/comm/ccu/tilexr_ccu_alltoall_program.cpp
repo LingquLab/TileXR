@@ -412,6 +412,23 @@ bool InsertUnique(std::set<uint16_t>* ids, std::initializer_list<uint16_t> value
     return true;
 }
 
+bool InsertPeerUnique(std::set<uint16_t>* ids, std::initializer_list<uint16_t> values)
+{
+    std::set<uint16_t> peerIds;
+    for (const uint16_t value : values) {
+        if (value == 0) {
+            return false;
+        }
+        peerIds.insert(value);
+    }
+    for (const uint16_t value : peerIds) {
+        if (!ids->insert(value).second) {
+            return false;
+        }
+    }
+    return true;
+}
+
 int ValidateMeshSpec(
     const TileXRCcuAllToAllMeshProgramSpec& spec,
     std::vector<TileXRCcuInstr>* program,
@@ -434,7 +451,6 @@ int ValidateMeshSpec(
         return Fail(program, report, "missing direct CCU alltoall mesh self-copy resource");
     }
     bool peerRanks[4] = {};
-    std::set<uint16_t> gsaIds;
     std::set<uint16_t> localXnIds;
     std::set<uint16_t> remoteXnIds;
     std::set<uint16_t> channelIds;
@@ -452,19 +468,18 @@ int ValidateMeshSpec(
             !peer.route.postSyncNotify || !peer.route.postSyncWait) {
             return Fail(program, report, "invalid direct CCU alltoall mesh peer route");
         }
-        if (!InsertUnique(&gsaIds, {peer.route.localGsa, peer.route.remoteGsa}) ||
-            !InsertUnique(&localXnIds,
+        if (!InsertPeerUnique(&localXnIds,
                 {peer.route.localXn, peer.route.lengthXn, peer.route.preSyncLocalAddrXn,
                     peer.route.preSyncLocalTokenXn, peer.route.preSyncLocalMarkerXn}) ||
-            !InsertUnique(&remoteXnIds,
+            !InsertPeerUnique(&remoteXnIds,
                 {peer.route.remoteXn, peer.route.preSyncRemoteAddrXn,
                     peer.route.preSyncRemoteTokenXn, peer.route.preSyncRemoteMarkerXn}) ||
             !InsertUnique(&channelIds,
                 {peer.route.preSyncChannelId, peer.route.preSyncTokenChannelId, peer.route.copyChannelId}) ||
-            !InsertUnique(&localCkeIds,
+            !InsertPeerUnique(&localCkeIds,
                 {peer.route.copyCompletionCke, peer.route.preSyncLocalWaitCke,
-                    peer.route.postSyncLocalWaitCke, peer.route.sourceCke}) ||
-            !InsertUnique(&remoteCkeIds,
+                    peer.route.postSyncLocalWaitCke}) ||
+            !InsertPeerUnique(&remoteCkeIds,
                 {peer.route.preSyncRemoteNotifyCke, peer.route.preSyncRemoteTokenNotifyCke,
                     peer.route.postSyncRemoteNotifyCke})) {
             return Fail(program, report, "duplicate direct CCU alltoall mesh peer resource");
