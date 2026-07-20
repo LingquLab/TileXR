@@ -174,7 +174,7 @@ __aicore__ inline void AllToAllGroupTraceRecordKernel(
     }
     const uint64_t offset = TileXR::Demo::kAllToAllGroupTraceHeaderBytes +
         (static_cast<uint64_t>(iteration) * TileXR::Demo::kAllToAllGroupTraceCoreCount + core) *
-        sizeof(TileXR::Demo::AllToAllGroupTraceSpan);
+        TileXR::Demo::kAllToAllGroupTraceCacheLineBytes;
     auto span = reinterpret_cast<__gm__ TileXR::Demo::AllToAllGroupTraceSpan*>(
         trace + offset);
     span->beginCycle = beginCycle;
@@ -192,16 +192,22 @@ __aicore__ inline void AllToAllGroupTraceRecordTask(
         pass >= passCount || phase >= TileXR::Demo::kAllToAllGroupTracePhaseCount) {
         return;
     }
-    const uint64_t index =
-        (((((static_cast<uint64_t>(iteration) * TileXR::Demo::kAllToAllGroupTraceCoreCount + core) *
-        groupCount + group) * passCount + pass) *
-        TileXR::Demo::kAllToAllGroupTracePhaseCount) + phase);
+    const uint64_t rawCoreBytes = static_cast<uint64_t>(groupCount) * passCount *
+        TileXR::Demo::kAllToAllGroupTracePhaseCount *
+        sizeof(TileXR::Demo::AllToAllGroupTraceTaskSpan);
+    const uint64_t coreBytes =
+        (rawCoreBytes + TileXR::Demo::kAllToAllGroupTraceCacheLineBytes - 1U) &
+        ~(static_cast<uint64_t>(TileXR::Demo::kAllToAllGroupTraceCacheLineBytes) - 1ULL);
+    const uint64_t coreIndex = static_cast<uint64_t>(iteration) *
+        TileXR::Demo::kAllToAllGroupTraceCoreCount + core;
+    const uint64_t taskIndex = ((static_cast<uint64_t>(group) * passCount + pass) *
+        TileXR::Demo::kAllToAllGroupTracePhaseCount) + phase;
     const uint64_t taskBaseOffset = TileXR::Demo::kAllToAllGroupTraceHeaderBytes +
         static_cast<uint64_t>(TileXR::Demo::kAllToAllGroupTraceMaxIterations) *
         TileXR::Demo::kAllToAllGroupTraceCoreCount *
-        sizeof(TileXR::Demo::AllToAllGroupTraceSpan);
+        TileXR::Demo::kAllToAllGroupTraceCacheLineBytes;
     const uint64_t offset = taskBaseOffset +
-        index * sizeof(TileXR::Demo::AllToAllGroupTraceTaskSpan);
+        coreIndex * coreBytes + taskIndex * sizeof(TileXR::Demo::AllToAllGroupTraceTaskSpan);
     auto span = reinterpret_cast<__gm__ TileXR::Demo::AllToAllGroupTraceTaskSpan*>(
         trace + offset);
     span->peer = peer;

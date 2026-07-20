@@ -22,6 +22,7 @@ constexpr uint32_t kAllToAllGroupTraceCoreCount = 32U;
 constexpr uint32_t kAllToAllGroupTracePhaseCount = 5U;
 constexpr uint32_t kAllToAllGroupTraceNoQp = 0xFFFFFFFFU;
 constexpr uint64_t kAllToAllGroupTraceCyclesPerUs = 1000ULL;
+constexpr size_t kAllToAllGroupTraceCacheLineBytes = 128U;
 
 enum AllToAllGroupTracePhase : uint32_t {
     kAllToAllGroupTraceSelfCopy = 0U,
@@ -62,14 +63,14 @@ constexpr size_t AllToAllGroupTraceKernelSpanOffset(uint32_t iteration, uint32_t
 {
     return kAllToAllGroupTraceHeaderBytes +
         (static_cast<size_t>(iteration) * kAllToAllGroupTraceCoreCount + core) *
-        sizeof(AllToAllGroupTraceSpan);
+        kAllToAllGroupTraceCacheLineBytes;
 }
 
 constexpr size_t AllToAllGroupTraceTaskSpanBaseOffset()
 {
     return kAllToAllGroupTraceHeaderBytes +
         static_cast<size_t>(kAllToAllGroupTraceMaxIterations) *
-        kAllToAllGroupTraceCoreCount * sizeof(AllToAllGroupTraceSpan);
+        kAllToAllGroupTraceCoreCount * kAllToAllGroupTraceCacheLineBytes;
 }
 
 inline bool AllToAllGroupTraceCheckedMultiply(size_t lhs, size_t rhs, size_t& result)
@@ -85,16 +86,27 @@ inline bool AllToAllGroupTraceCheckedMultiply(size_t lhs, size_t rhs, size_t& re
 inline size_t AllToAllGroupTraceLayoutBytes(
     uint32_t iterationCount, uint32_t groupCount, uint32_t passCount)
 {
-    size_t count = iterationCount;
+    size_t coreBytes = groupCount;
     size_t next = 0U;
     const size_t factors[] = {
-        kAllToAllGroupTraceCoreCount, groupCount, passCount,
-        kAllToAllGroupTracePhaseCount, sizeof(AllToAllGroupTraceTaskSpan)};
+        passCount, kAllToAllGroupTracePhaseCount, sizeof(AllToAllGroupTraceTaskSpan)};
     for (size_t factor : factors) {
-        if (!AllToAllGroupTraceCheckedMultiply(count, factor, next)) {
+        if (!AllToAllGroupTraceCheckedMultiply(coreBytes, factor, next)) {
             return std::numeric_limits<size_t>::max();
         }
-        count = next;
+        coreBytes = next;
+    }
+    if (coreBytes > std::numeric_limits<size_t>::max() -
+            (kAllToAllGroupTraceCacheLineBytes - 1U)) {
+        return std::numeric_limits<size_t>::max();
+    }
+    coreBytes = (coreBytes + kAllToAllGroupTraceCacheLineBytes - 1U) &
+        ~(kAllToAllGroupTraceCacheLineBytes - 1U);
+    size_t count = iterationCount;
+    if (!AllToAllGroupTraceCheckedMultiply(
+            count, kAllToAllGroupTraceCoreCount, next) ||
+        !AllToAllGroupTraceCheckedMultiply(next, coreBytes, count)) {
+        return std::numeric_limits<size_t>::max();
     }
     if (count > std::numeric_limits<size_t>::max() -
             AllToAllGroupTraceTaskSpanBaseOffset()) {
@@ -117,12 +129,16 @@ inline size_t AllToAllGroupTraceTaskSpanOffset(
     uint32_t iteration, uint32_t core, uint32_t group, uint32_t pass,
     uint32_t phase, uint32_t groupCount, uint32_t passCount)
 {
-    const size_t index =
-        (((((static_cast<size_t>(iteration) * kAllToAllGroupTraceCoreCount + core) *
-        groupCount + group) * passCount + pass) *
+    const size_t rawCoreBytes = static_cast<size_t>(groupCount) * passCount *
+        kAllToAllGroupTracePhaseCount * sizeof(AllToAllGroupTraceTaskSpan);
+    const size_t coreBytes = (rawCoreBytes + kAllToAllGroupTraceCacheLineBytes - 1U) &
+        ~(kAllToAllGroupTraceCacheLineBytes - 1U);
+    const size_t coreIndex = static_cast<size_t>(iteration) *
+        kAllToAllGroupTraceCoreCount + core;
+    const size_t taskIndex = (((static_cast<size_t>(group) * passCount + pass) *
         kAllToAllGroupTracePhaseCount) + phase);
     return AllToAllGroupTraceTaskSpanBaseOffset() +
-        index * sizeof(AllToAllGroupTraceTaskSpan);
+        coreIndex * coreBytes + taskIndex * sizeof(AllToAllGroupTraceTaskSpan);
 }
 
 static_assert(sizeof(AllToAllGroupTraceSpan) == 16U,

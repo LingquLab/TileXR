@@ -13,10 +13,11 @@ MAX_ITERATIONS = 50
 MAX_CORES = 32
 PHASE_COUNT = 5
 SPAN_BYTES = 16
+CACHE_LINE_BYTES = 128
 TASK_FORMAT = "<QQiI"
 TASK_BYTES = struct.calcsize(TASK_FORMAT)
 HEADER_FORMAT = "<8I4Q"
-TASK_BASE_OFFSET = HEADER_BYTES + MAX_ITERATIONS * MAX_CORES * SPAN_BYTES
+TASK_BASE_OFFSET = HEADER_BYTES + MAX_ITERATIONS * MAX_CORES * CACHE_LINE_BYTES
 NO_QP = 0xFFFFFFFF
 ITERATION_GAP_US = 1.0
 
@@ -30,18 +31,21 @@ PHASE_NAMES = (
 
 
 def kernel_span_offset(iteration, core):
-    return HEADER_BYTES + (iteration * MAX_CORES + core) * SPAN_BYTES
+    return HEADER_BYTES + (iteration * MAX_CORES + core) * CACHE_LINE_BYTES
 
 
 def task_span_offset(iteration, core, group, pass_index, phase, group_count, pass_count):
-    index = (((((iteration * MAX_CORES + core) * group_count + group) *
-               pass_count + pass_index) * PHASE_COUNT) + phase)
-    return TASK_BASE_OFFSET + index * TASK_BYTES
+    raw_core_bytes = group_count * pass_count * PHASE_COUNT * TASK_BYTES
+    core_bytes = (raw_core_bytes + CACHE_LINE_BYTES - 1) & ~(CACHE_LINE_BYTES - 1)
+    core_index = iteration * MAX_CORES + core
+    task_index = ((group * pass_count + pass_index) * PHASE_COUNT) + phase
+    return TASK_BASE_OFFSET + core_index * core_bytes + task_index * TASK_BYTES
 
 
 def layout_bytes(iteration_count, group_count, pass_count):
-    return TASK_BASE_OFFSET + (
-        iteration_count * MAX_CORES * group_count * pass_count * PHASE_COUNT * TASK_BYTES)
+    raw_core_bytes = group_count * pass_count * PHASE_COUNT * TASK_BYTES
+    core_bytes = (raw_core_bytes + CACHE_LINE_BYTES - 1) & ~(CACHE_LINE_BYTES - 1)
+    return TASK_BASE_OFFSET + iteration_count * MAX_CORES * core_bytes
 
 
 def _read_span(data, offset, label):

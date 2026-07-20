@@ -20,6 +20,14 @@ SPEC.loader.exec_module(MODULE)
 
 
 class GroupTraceConverterTest(unittest.TestCase):
+    def test_assigns_each_core_disjoint_cache_lines(self):
+        self.assertEqual(MODULE.kernel_span_offset(0, 1) % 128, 0)
+        first = MODULE.task_span_offset(0, 0, 0, 0, 0, 1, 1)
+        second = MODULE.task_span_offset(0, 1, 0, 0, 0, 1, 1)
+        self.assertEqual(first % 128, 0)
+        self.assertEqual(second % 128, 0)
+        self.assertGreaterEqual(second - first, 128)
+
     def make_trace(
         self, path, *, rank=0, magic=None, iteration_count=1,
         group_count=1, pass_count=1, core_count=32,
