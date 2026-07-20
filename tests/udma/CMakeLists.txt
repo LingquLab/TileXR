@@ -212,6 +212,8 @@ if(BUILD_TILEXR_UDMA_DEMO)
         endif()
 
         set(TILEXR_UDMA_DEMO_KERNEL_SO "${CMAKE_CURRENT_BINARY_DIR}/libtilexr_udma_demo_kernel.so")
+        set(TILEXR_UDMA_ALLTOALL_GROUP_KERNEL_SO
+            "${CMAKE_CURRENT_BINARY_DIR}/libtilexr_udma_alltoall_group_kernel.so")
         set(TILEXR_UDMA_DEMO_KERNEL_INCLUDES
             -I${ASCEND_HOME_PATH}/compiler/tikcpp
             -I${ASCEND_HOME_PATH}/compiler/tikcpp/tikcfw
@@ -241,7 +243,6 @@ if(BUILD_TILEXR_UDMA_DEMO)
                 -DTILEXR_UDMA_FORCE_ENABLE=1
                 ${TILEXR_UDMA_DEMO_KERNEL_INCLUDES}
                 "${CMAKE_CURRENT_SOURCE_DIR}/demo/tilexr_udma_demo_kernel.cpp"
-                "${CMAKE_CURRENT_SOURCE_DIR}/demo/tilexr_udma_alltoall_group_kernel.cpp"
                 -L${ASCEND_DRIVER_PATH}/lib64/driver
                 -L${ASCEND_HOME_PATH}/${ARCH}-linux/lib64
                 -L${ASCEND_HOME_PATH}/${ARCH}-linux/devlib
@@ -258,8 +259,6 @@ if(BUILD_TILEXR_UDMA_DEMO)
                 -o "${TILEXR_UDMA_DEMO_KERNEL_SO}"
             DEPENDS
                 "${CMAKE_CURRENT_SOURCE_DIR}/demo/tilexr_udma_demo_kernel.cpp"
-                "${CMAKE_CURRENT_SOURCE_DIR}/demo/tilexr_udma_alltoall_group_kernel.cpp"
-                "${CMAKE_CURRENT_SOURCE_DIR}/demo/tilexr_udma_alltoall_group_layout.h"
                 "${CMAKE_CURRENT_SOURCE_DIR}/demo/tilexr_udma_fullmesh_trace.h"
                 "${TILEXR_ROOT}/src/include/tilexr_udma.h"
                 "${TILEXR_ROOT}/src/include/tilexr_data_as_flag.h"
@@ -268,13 +267,51 @@ if(BUILD_TILEXR_UDMA_DEMO)
         )
         add_custom_target(tilexr_udma_demo_kernel ALL DEPENDS "${TILEXR_UDMA_DEMO_KERNEL_SO}")
 
+        add_custom_command(
+            OUTPUT "${TILEXR_UDMA_ALLTOALL_GROUP_KERNEL_SO}"
+            COMMAND ${BISHENG_EXECUTABLE}
+                ${TILEXR_UDMA_KERNEL_COMPILE_OPTIONS}
+                -std=gnu++17
+                -fPIC
+                -shared
+                ${TILEXR_UDMA_KERNEL_LINK_OPTIONS}
+                -DCATLASS_ARCH=${TILEXR_UDMA_CATLASS_ARCH}
+                -DTILEXR_UDMA_FORCE_ENABLE=1
+                ${TILEXR_UDMA_DEMO_KERNEL_INCLUDES}
+                "${CMAKE_CURRENT_SOURCE_DIR}/demo/tilexr_udma_alltoall_group_kernel.cpp"
+                -L${ASCEND_DRIVER_PATH}/lib64/driver
+                -L${ASCEND_HOME_PATH}/${ARCH}-linux/lib64
+                -L${ASCEND_HOME_PATH}/${ARCH}-linux/devlib
+                -lruntime
+                -lascendcl
+                -lstdc++
+                -lm
+                -ltiling_api
+                -lplatform
+                -lc_sec
+                -ldl
+                -lnnopbase
+                -lpthread
+                -o "${TILEXR_UDMA_ALLTOALL_GROUP_KERNEL_SO}"
+            DEPENDS
+                "${CMAKE_CURRENT_SOURCE_DIR}/demo/tilexr_udma_alltoall_group_kernel.cpp"
+                "${CMAKE_CURRENT_SOURCE_DIR}/demo/tilexr_udma_alltoall_group_layout.h"
+                "${TILEXR_ROOT}/src/include/tilexr_udma.h"
+            VERBATIM
+            COMMENT "Building TileXR grouped AllToAll kernel with bisheng"
+        )
+        add_custom_target(tilexr_udma_alltoall_group_kernel ALL
+            DEPENDS "${TILEXR_UDMA_ALLTOALL_GROUP_KERNEL_SO}")
+
         add_executable(tilexr_udma_demo
             demo/tilexr_udma_demo.cpp
         )
-        add_dependencies(tilexr_udma_demo tilexr_udma_demo_kernel)
+        add_dependencies(tilexr_udma_demo
+            tilexr_udma_demo_kernel tilexr_udma_alltoall_group_kernel)
         target_link_directories(tilexr_udma_demo PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
         target_link_libraries(tilexr_udma_demo
             "${TILEXR_UDMA_DEMO_KERNEL_SO}"
+            "${TILEXR_UDMA_ALLTOALL_GROUP_KERNEL_SO}"
             ${TILEXR_LIB}
             ascendcl
             runtime
@@ -282,6 +319,8 @@ if(BUILD_TILEXR_UDMA_DEMO)
         )
         list(APPEND INSTALL_TARGETS tilexr_udma_demo)
         install(FILES "${TILEXR_UDMA_DEMO_KERNEL_SO}" DESTINATION ${CMAKE_INSTALL_PREFIX}/lib)
+        install(FILES "${TILEXR_UDMA_ALLTOALL_GROUP_KERNEL_SO}"
+            DESTINATION ${CMAKE_INSTALL_PREFIX}/lib)
         message(STATUS "TileXR UDMA demo enabled with ${BISHENG_EXECUTABLE}, SOC=${TILEXR_UDMA_DEMO_SOC_TYPE}")
     endif()
 endif()
