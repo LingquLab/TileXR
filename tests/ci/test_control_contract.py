@@ -301,6 +301,52 @@ class ControlSourceContractTests(unittest.TestCase):
         )
         self.assertIn('[[ "${WORKSPACE_REAL}" != "${WORKSPACE}" ]]', text)
 
+    def test_host_checks_manifest_runs_complete_fast_host_coverage(self):
+        text = self.read("scripts/ci/host_checks.sh")
+        for token in [
+            "set -euo pipefail",
+            "TILEXR_CI_BUILD_ROOT",
+            'git -C "${ROOT_DIR}" ls-files -z --',
+            'bash -n "${tracked_shell_files[@]}"',
+            'cmake -S "${ROOT_DIR}/tests/ci"',
+            "ctest --output-on-failure -T Test --no-compress-output",
+            "ctest-ci.xml",
+            'cmake -S "${ROOT_DIR}/tests/comm"',
+            "test_tilexr_log",
+            "test_tilexr_log_spdlog_compile",
+            "test_tilexr_source_guards",
+            'cmake -S "${ROOT_DIR}/tests/ep"',
+            "-DBUILD_TILEXR_EP_DEMO=OFF",
+            "ctest-ep.xml",
+            'cmake -S "${ROOT_DIR}/tests/data_as_flag"',
+            "ctest-data-as-flag.xml",
+            "test_vllm_collectives_patch.py",
+            "test_vllm_collectives_integration_sources.py",
+            "test_collective_profile_report.py",
+            "run_case()",
+            "cases.tsv",
+            "trap finalize_host_checks EXIT",
+            "GITHUB_STEP_SUMMARY",
+            "TILEXR_CI_PR_NUMBER",
+            "TILEXR_CI_HEAD_SHA",
+            "TILEXR_CI_BASE_SHA",
+            "TILEXR_CI_EXPECTED_MERGE_SHA",
+            "NPU-only coverage is not run by Host Checks",
+        ]:
+            self.assertIn(token, text)
+        for suite in [
+            "shell-syntax",
+            "ci-ctest",
+            "comm-host",
+            "ep-source-only",
+            "data-as-flag",
+            "collectives-vllm-patch",
+            "collectives-vllm-integration-sources",
+            "collectives-profile-report",
+        ]:
+            self.assertIn("run_case {} ".format(suite), text)
+        self.assertGreaterEqual(text.count(':-local}'), 4)
+
 
 class HardwareHelperBehaviorTests(unittest.TestCase):
     def hardware_function(self, name):
@@ -432,6 +478,36 @@ class HardwareHelperBehaviorTests(unittest.TestCase):
                 ).returncode,
             )
             self.assertFalse(marker.exists())
+
+
+class HostChecksBehaviorTests(unittest.TestCase):
+    def test_run_case_stops_at_and_records_an_intermediate_failure(self):
+        host_checks = (ROOT / "scripts/ci/host_checks.sh").read_text(
+            encoding="utf-8"
+        )
+        function = extract_shell_function(host_checks, "run_case")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            cases = root / "cases.tsv"
+            after_failure = root / "after-failure"
+            harness = "set -euo pipefail\nCASES_FILE={}\n{}\n".format(
+                shlex.quote(str(cases)), function
+            )
+            harness += "suite() {{ false; touch {}; }}\n".format(
+                shlex.quote(str(after_failure))
+            )
+            harness += "run_case sample suite\n"
+            result = subprocess.run(
+                ["bash", "-c", harness],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+
+            self.assertNotEqual(0, result.returncode)
+            self.assertFalse(after_failure.exists())
+            fields = cases.read_text(encoding="utf-8").strip().split("\t")
+            self.assertEqual(["sample", "FAIL", "1"], fields[:3])
 
 
 class BuildHelperBehaviorTests(unittest.TestCase):
