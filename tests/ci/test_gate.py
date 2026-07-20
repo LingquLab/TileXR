@@ -2801,6 +2801,141 @@ class FinalManifestTests(unittest.TestCase):
                 config.artifacts, "step summary alias"
             )
 
+    def test_step_summary_alias_retarget_after_normal_write_is_rolled_back(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory).resolve()
+            trusted_ancestor = root / "trusted-runner"
+            trusted_parent = trusted_ancestor / "commands"
+            trusted_parent.mkdir(parents=True)
+            trusted_summary = trusted_parent / "github-step-summary.md"
+            trusted_summary.touch()
+            target_ancestor = root / "target-runner"
+            target_parent = target_ancestor / "commands"
+            target_parent.mkdir(parents=True)
+            target_summary = target_parent / trusted_summary.name
+            target_summary.write_text("sentinel\n", encoding="utf-8")
+            visible_ancestor = root / "visible-runner"
+            visible_ancestor.symlink_to(trusted_ancestor, target_is_directory=True)
+            visible_summary = visible_ancestor / "commands" / trusted_summary.name
+            config = gate.Config(
+                root / "source", root / "artifacts", "merge", "LingquLab/TileXR", 42
+            )
+            original_append = gate.append_authoritative_step_summary
+            appends = []
+
+            def collect(script, collector_config, env, **kwargs):
+                write_test_manifest(collector_config.artifacts)
+
+            def append_then_retarget(*args, **kwargs):
+                result = original_append(*args, **kwargs)
+                appends.append(True)
+                visible_ancestor.unlink()
+                visible_ancestor.symlink_to(
+                    target_ancestor, target_is_directory=True
+                )
+                return result
+
+            with mock.patch.object(
+                gate, "orchestrate", side_effect=self.passing_orchestration
+            ), mock.patch.object(gate, "verify_final_cleanup"), mock.patch.object(
+                gate, "invoke_collector", side_effect=collect
+            ), mock.patch.object(
+                gate,
+                "append_authoritative_step_summary",
+                side_effect=append_then_retarget,
+            ), mock.patch.object(
+                gate.sys, "stderr", io.StringIO()
+            ):
+                result = gate._run_controller_body(
+                    config,
+                    {
+                        "TILEXR_CI_GITHUB_TOKEN": "token",
+                        "GITHUB_STEP_SUMMARY": str(visible_summary),
+                    },
+                    root / "trusted",
+                    gate.CancellationState(),
+                )
+
+            self.assertEqual(23, result)
+            self.assertEqual([True], appends)
+            self.assertFalse(os.path.lexists(str(visible_ancestor)))
+            self.assertEqual("sentinel\n", target_summary.read_text(encoding="utf-8"))
+            self.assertEqual("", trusted_summary.read_text(encoding="utf-8"))
+            self.assert_minimal_recovered_upload(
+                config.artifacts, "step summary alias"
+            )
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "FIFO requires POSIX")
+    def test_step_summary_alias_retarget_after_terminal_write_is_rolled_back(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory).resolve()
+            trusted_ancestor = root / "trusted-runner"
+            trusted_parent = trusted_ancestor / "commands"
+            trusted_parent.mkdir(parents=True)
+            trusted_summary = trusted_parent / "github-step-summary.md"
+            trusted_summary.touch()
+            target_ancestor = root / "target-runner"
+            target_parent = target_ancestor / "commands"
+            target_parent.mkdir(parents=True)
+            target_summary = target_parent / trusted_summary.name
+            os.mkfifo(str(target_summary))
+            visible_ancestor = root / "visible-runner"
+            visible_ancestor.symlink_to(trusted_ancestor, target_is_directory=True)
+            visible_summary = visible_ancestor / "commands" / trusted_summary.name
+            config = gate.Config(
+                root / "source", root / "artifacts", "merge", "LingquLab/TileXR", 42
+            )
+            original_append_text = gate._append_authoritative_step_text
+            private_appends = []
+
+            def collect(script, collector_config, env, **kwargs):
+                write_test_manifest(collector_config.artifacts)
+
+            def append_terminal_then_retarget(path, text, boundary=None):
+                result = original_append_text(path, text, boundary)
+                private_appends.append(True)
+                visible_ancestor.unlink()
+                visible_ancestor.symlink_to(
+                    target_ancestor, target_is_directory=True
+                )
+                return result
+
+            public_append = mock.Mock(
+                side_effect=gate.InfrastructureFailure("forced public append failure")
+            )
+            with mock.patch.object(
+                gate, "orchestrate", side_effect=self.passing_orchestration
+            ), mock.patch.object(gate, "verify_final_cleanup"), mock.patch.object(
+                gate, "invoke_collector", side_effect=collect
+            ), mock.patch.object(
+                gate, "append_authoritative_step_summary", public_append
+            ), mock.patch.object(
+                gate,
+                "_append_authoritative_step_text",
+                side_effect=append_terminal_then_retarget,
+            ), mock.patch.object(
+                gate.sys, "stderr", io.StringIO()
+            ):
+                result = gate._run_controller_body(
+                    config,
+                    {
+                        "TILEXR_CI_GITHUB_TOKEN": "token",
+                        "GITHUB_STEP_SUMMARY": str(visible_summary),
+                    },
+                    root / "trusted",
+                    gate.CancellationState(),
+                )
+
+            self.assertEqual(23, result)
+            self.assertEqual(2, public_append.call_count)
+            self.assertEqual([True], private_appends)
+            self.assertFalse(os.path.lexists(str(visible_ancestor)))
+            self.assertTrue(stat.S_ISFIFO(os.lstat(str(target_summary)).st_mode))
+            self.assertEqual("", trusted_summary.read_text(encoding="utf-8"))
+            self.assert_minimal_recovered_upload(
+                config.artifacts, "step summary alias"
+            )
+
     def test_step_summary_chain_is_pinned_before_orchestration(self):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory).resolve()

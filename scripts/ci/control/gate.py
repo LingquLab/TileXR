@@ -3440,6 +3440,22 @@ def _run_prepared_controller_body(
                     file=sys.stderr,
                 )
 
+        def record_terminal_step_summary_failure(
+            context: str, error: BaseException
+        ) -> None:
+            nonlocal failure
+            detail = "%s: %s" % (context, _as_gate_failure(error))
+            if failure is not None:
+                detail = "primary failure (%s): %s; %s" % (
+                    failure_class_for(failure),
+                    failure,
+                    detail,
+                )
+            failure = _collector_failure(detail)
+            report.failure_class = failure_class_for(failure)
+            report.failure_detail = str(failure)
+            recover_terminal_evidence()
+
         def neutralize_controller_step_summary_alias(context: str) -> None:
             nonlocal step_summary_path_terminal
             step_summary_path_terminal = True
@@ -3449,13 +3465,7 @@ def _run_prepared_controller_body(
             try:
                 _neutralize_step_summary_alias(alias_boundary)
             except BaseException as error:
-                changed = update_report(
-                    _collector_failure(
-                        "%s: %s" % (context, _as_gate_failure(error))
-                    )
-                )
-                if changed:
-                    recover_terminal_evidence()
+                record_terminal_step_summary_failure(context, error)
                 print(
                     "ERROR: could not neutralize GitHub step summary alias: %s"
                     % _as_gate_failure(error),
@@ -3469,13 +3479,7 @@ def _run_prepared_controller_body(
                 _verify_step_summary_alias(step_summary.alias_boundary)
                 return True
             except BaseException as error:
-                changed = update_report(
-                    _collector_failure(
-                        "%s: %s" % (context, _as_gate_failure(error))
-                    )
-                )
-                if changed:
-                    recover_terminal_evidence()
+                record_terminal_step_summary_failure(context, error)
                 neutralize_controller_step_summary_alias(
                     "authoritative GitHub step summary alias neutralization failed"
                 )
@@ -3554,6 +3558,17 @@ def _run_prepared_controller_body(
                 )
                 return False
 
+        def remove_post_write_controller_step_summary() -> None:
+            if roll_back_controller_step_summary():
+                return
+            try:
+                invalidate_step_summary(step_path, step_summary_boundary)
+            except BaseException as error:
+                record_terminal_step_summary_failure(
+                    "post-write GitHub step summary invalidation failed",
+                    error,
+                )
+
         def emit_terminal_step_summary() -> None:
             # Remove every controller-owned block before the private final write.
             # If that write fails too, remove any partial write so an earlier
@@ -3605,6 +3620,12 @@ def _run_prepared_controller_body(
                     )
                     return
 
+                if not validate_controller_step_summary_alias(
+                    "terminal GitHub step summary alias changed after publication"
+                ):
+                    remove_post_write_controller_step_summary()
+                    return
+
                 # CancellationState is monotonic, so at most one correction is
                 # needed for a signal arriving during the private final write.
                 if cancellation.cancelled and not cancellation_accounted:
@@ -3650,6 +3671,12 @@ def _run_prepared_controller_body(
                     emit_terminal_step_summary()
                     break
                 continue
+
+            if not validate_controller_step_summary_alias(
+                "authoritative GitHub step summary alias changed after publication"
+            ):
+                remove_post_write_controller_step_summary()
+                break
 
             if cancellation.cancelled and not cancellation_accounted:
                 changed = account_new_cancellation(
