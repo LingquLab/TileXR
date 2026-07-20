@@ -296,6 +296,7 @@ if(BUILD_TILEXR_UDMA_DEMO)
             DEPENDS
                 "${CMAKE_CURRENT_SOURCE_DIR}/demo/tilexr_udma_alltoall_group_kernel.cpp"
                 "${CMAKE_CURRENT_SOURCE_DIR}/demo/tilexr_udma_alltoall_group_layout.h"
+                "${CMAKE_CURRENT_SOURCE_DIR}/demo/tilexr_udma_alltoall_group_route.h"
                 "${CMAKE_CURRENT_SOURCE_DIR}/demo/tilexr_udma_alltoall_group_trace.h"
                 "${TILEXR_ROOT}/src/include/tilexr_udma.h"
             VERBATIM
