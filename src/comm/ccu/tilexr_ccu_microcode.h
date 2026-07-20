@@ -86,6 +86,8 @@ int TileXRCcuEncodeTransRmtMemToLocMem(const TileXRCcuMemTransferSpec& spec, Til
 
 int TileXRCcuEncodeTransLocMemToRmtMem(const TileXRCcuMemTransferSpec& spec, TileXRCcuInstr* instr);
 
+int TileXRCcuEncodeTransLocMemToLocMem(const TileXRCcuMemTransferSpec& spec, TileXRCcuInstr* instr);
+
 int TileXRCcuBuildSqeLoadProgram(
     uint16_t firstXnId,
     uint32_t argCount,

@@ -15,6 +15,7 @@ constexpr uint64_t TILEXR_CCU_SET_CKE_HEADER = 0x0802U;
 constexpr uint64_t TILEXR_CCU_CLEAR_CKE_HEADER = 0x0804U;
 constexpr uint64_t TILEXR_CCU_TRANS_RMT_MEM_TO_LOC_MEM_HEADER = 0x1008U;
 constexpr uint64_t TILEXR_CCU_TRANS_LOC_MEM_TO_RMT_MEM_HEADER = 0x1009U;
+constexpr uint64_t TILEXR_CCU_TRANS_LOC_MEM_TO_LOC_MEM_HEADER = 0x100aU;
 constexpr uint64_t TILEXR_CCU_SYNC_CKE_HEADER = 0x100bU;
 constexpr uint64_t TILEXR_CCU_SYNC_XN_HEADER = 0x100dU;
 constexpr uint64_t TILEXR_CCU_SYNC_XN_TRACE_FLAG = 0x0001000000000000ULL;
@@ -246,6 +247,23 @@ int TileXRCcuEncodeTransLocMemToRmtMem(const TileXRCcuMemTransferSpec& spec, Til
 
     instr->words[0] = PackSlots(
         static_cast<uint16_t>(TILEXR_CCU_TRANS_LOC_MEM_TO_RMT_MEM_HEADER),
+        spec.remoteGsa,
+        spec.remoteXn,
+        spec.localGsa);
+    instr->words[1] = PackSlots(spec.localXn, spec.lengthXn, spec.channelId, TransferControlSlot(spec));
+    instr->words[2] = PackSlots(0, 0, 0, TransferFlagSlot(spec));
+    instr->words[3] = PackSlots(spec.setCkeId, spec.setCkeMask, spec.waitCkeId, spec.waitCkeMask);
+    return TILEXR_SUCCESS;
+}
+
+int TileXRCcuEncodeTransLocMemToLocMem(const TileXRCcuMemTransferSpec& spec, TileXRCcuInstr* instr)
+{
+    if (ValidateInstrOutput(instr) != TILEXR_SUCCESS || ValidateTransferSpec(spec) != TILEXR_SUCCESS) {
+        return TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+
+    instr->words[0] = PackSlots(
+        static_cast<uint16_t>(TILEXR_CCU_TRANS_LOC_MEM_TO_LOC_MEM_HEADER),
         spec.remoteGsa,
         spec.remoteXn,
         spec.localGsa);
