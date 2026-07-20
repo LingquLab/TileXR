@@ -172,8 +172,11 @@ __aicore__ inline void AllToAllGroupTraceRecordKernel(
         core >= TileXR::Demo::kAllToAllGroupTraceCoreCount) {
         return;
     }
+    const uint64_t offset = TileXR::Demo::kAllToAllGroupTraceHeaderBytes +
+        (static_cast<uint64_t>(iteration) * TileXR::Demo::kAllToAllGroupTraceCoreCount + core) *
+        sizeof(TileXR::Demo::AllToAllGroupTraceSpan);
     auto span = reinterpret_cast<__gm__ TileXR::Demo::AllToAllGroupTraceSpan*>(
-        trace + TileXR::Demo::AllToAllGroupTraceKernelSpanOffset(iteration, core));
+        trace + offset);
     span->beginCycle = beginCycle;
     span->endCycle = endCycle;
 }
@@ -189,9 +192,18 @@ __aicore__ inline void AllToAllGroupTraceRecordTask(
         pass >= passCount || phase >= TileXR::Demo::kAllToAllGroupTracePhaseCount) {
         return;
     }
+    const uint64_t index =
+        (((((static_cast<uint64_t>(iteration) * TileXR::Demo::kAllToAllGroupTraceCoreCount + core) *
+        groupCount + group) * passCount + pass) *
+        TileXR::Demo::kAllToAllGroupTracePhaseCount) + phase);
+    const uint64_t taskBaseOffset = TileXR::Demo::kAllToAllGroupTraceHeaderBytes +
+        static_cast<uint64_t>(TileXR::Demo::kAllToAllGroupTraceMaxIterations) *
+        TileXR::Demo::kAllToAllGroupTraceCoreCount *
+        sizeof(TileXR::Demo::AllToAllGroupTraceSpan);
+    const uint64_t offset = taskBaseOffset +
+        index * sizeof(TileXR::Demo::AllToAllGroupTraceTaskSpan);
     auto span = reinterpret_cast<__gm__ TileXR::Demo::AllToAllGroupTraceTaskSpan*>(
-        trace + TileXR::Demo::AllToAllGroupTraceTaskSpanOffset(
-            iteration, core, group, pass, phase, groupCount, passCount));
+        trace + offset);
     span->peer = peer;
     span->qpIdx = qpIdx;
     span->beginCycle = beginCycle;
