@@ -57,7 +57,7 @@ extern void launch_tilexr_udma_all_to_all_group(
     uint32_t passCount, uint32_t groupCount,
     uint64_t payloadOffset0, uint64_t payloadOffset1,
     uint64_t signalOffset0, uint64_t signalOffset1,
-    GM_ADDR groupTrace, uint32_t traceIteration);
+    GM_ADDR groupTrace, uint32_t traceIteration, uint32_t copyoutWorkers);
 extern void launch_tilexr_udma_all_to_all_bigdata(
     uint32_t blockDim, void* stream, GM_ADDR commArgs, GM_ADDR input, GM_ADDR output,
     GM_ADDR udmaMem, GM_ADDR debug, GM_ADDR fullmeshTrace, uint32_t fullmeshTraceIteration,
@@ -647,6 +647,17 @@ bool RunGroupedAllToAll(
                   << " chunkElements=" << requestedChunkElements << std::endl;
         return false;
     }
+    const int copyoutWorkersValue = GetEnvInt(
+        "TILEXR_DEMO_ALLTOALL_GROUP_COPYOUT_WORKERS", 16);
+    if (copyoutWorkersValue < 0 || !TileXR::Demo::AllToAllGroupValidCopyoutWorkers(
+            static_cast<uint32_t>(copyoutWorkersValue))) {
+        std::cerr << "[rank " << rank
+                  << "] ERROR: TILEXR_DEMO_ALLTOALL_GROUP_COPYOUT_WORKERS must be 8 or 16, got "
+                  << copyoutWorkersValue << std::endl;
+        return false;
+    }
+    const uint32_t copyoutWorkers = static_cast<uint32_t>(copyoutWorkersValue);
+    const uint32_t groupBlockDim = TileXR::Demo::AllToAllGroupBlockDim(copyoutWorkers);
     const int warmup = std::max(0, GetEnvInt("TILEXR_DEMO_ALLTOALL_WARMUP", 0));
     const int repeat = std::max(1, GetEnvInt("TILEXR_DEMO_ALLTOALL_REPEAT", 1));
     const bool traceEnabled = GetEnvInt("TILEXR_UDMA_GROUP_TRACE", 0) != 0;
@@ -763,18 +774,20 @@ bool RunGroupedAllToAll(
         " groups=" + std::to_string(plan.groupCount) +
         " passes=" + std::to_string(plan.passCount));
     PrintStatus(rank, "grouped alltoall warmup=" + std::to_string(warmup) +
-        " repeat=" + std::to_string(repeat));
+        " repeat=" + std::to_string(repeat) +
+        " copyoutWorkers=" + std::to_string(copyoutWorkers) +
+        " blockDim=" + std::to_string(groupBlockDim));
 
     uint32_t invocationId = 0U;
     for (int iter = 0; iter < warmup; ++iter, ++invocationId) {
         launch_tilexr_udma_all_to_all_group(
-            TileXR::Demo::kAllToAllGroupBlockDim, stream, commArgsDev,
+            groupBlockDim, stream, commArgsDev,
             reinterpret_cast<GM_ADDR>(input), reinterpret_cast<GM_ADDR>(output),
             reinterpret_cast<GM_ADDR>(registeredMemory), reinterpret_cast<GM_ADDR>(debug),
             invocationId, elementsPerPeer, plan.chunkElements,
             plan.passCount, plan.groupCount,
             plan.payloadOffset[0], plan.payloadOffset[1],
-            plan.signalOffset[0], plan.signalOffset[1], nullptr, 0U);
+            plan.signalOffset[0], plan.signalOffset[1], nullptr, 0U, copyoutWorkers);
     }
     if (!CheckAcl(rank, "aclrtSynchronizeStream grouped warmup", aclrtSynchronizeStream(stream))) {
         release();
@@ -784,14 +797,15 @@ bool RunGroupedAllToAll(
     const auto begin = std::chrono::steady_clock::now();
     for (int iter = 0; iter < repeat; ++iter, ++invocationId) {
         launch_tilexr_udma_all_to_all_group(
-            TileXR::Demo::kAllToAllGroupBlockDim, stream, commArgsDev,
+            groupBlockDim, stream, commArgsDev,
             reinterpret_cast<GM_ADDR>(input), reinterpret_cast<GM_ADDR>(output),
             reinterpret_cast<GM_ADDR>(registeredMemory), reinterpret_cast<GM_ADDR>(debug),
             invocationId, elementsPerPeer, plan.chunkElements,
             plan.passCount, plan.groupCount,
             plan.payloadOffset[0], plan.payloadOffset[1],
             plan.signalOffset[0], plan.signalOffset[1],
-            reinterpret_cast<GM_ADDR>(groupTraceDevice), static_cast<uint32_t>(iter));
+            reinterpret_cast<GM_ADDR>(groupTraceDevice), static_cast<uint32_t>(iter),
+            copyoutWorkers);
     }
     if (!CheckAcl(rank, "aclrtSynchronizeStream grouped measured", aclrtSynchronizeStream(stream))) {
         release();
