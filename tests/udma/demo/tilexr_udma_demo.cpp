@@ -51,6 +51,7 @@ extern void launch_tilexr_udma_all_to_all_fused(
 extern void launch_tilexr_udma_all_to_all_bigdata(
     uint32_t blockDim, void* stream, GM_ADDR commArgs, GM_ADDR input, GM_ADDR output,
     GM_ADDR udmaMem, GM_ADDR debug, GM_ADDR fullmeshTrace, uint32_t fullmeshTraceIteration,
+    uint32_t isolatedTask,
     int32_t elementsPerPeer,
     uint64_t dataOffset, uint64_t copyDoneOffset,
     uint64_t recvCopyDoneOffset, uint64_t remoteSendDoneOffset,
@@ -700,7 +701,16 @@ int main(int argc, char** argv)
         testType == 7 && GetEnvInt("TILEXR_DEMO_BIGDATA_FORCE_35CORE", 0) != 0;
     const bool bigDataRemotePutOnly =
         testType == 7 && GetEnvInt("TILEXR_DEMO_BIGDATA_REMOTE_PUT_ONLY", 0) != 0;
+    const int bigDataIsolatedTask =
+        testType == 7 ? GetEnvInt("TILEXR_DEMO_BIGDATA_ISOLATED_TASK", 0) : 0;
+    if (bigDataIsolatedTask < 0 || bigDataIsolatedTask > 11) {
+        std::cerr << "[rank " << rank << "] ERROR: TILEXR_DEMO_BIGDATA_ISOLATED_TASK must be 0..11"
+                  << ", got " << bigDataIsolatedTask << std::endl;
+        Cleanup(comm, stream, registeredMemory, debug, rank, deviceId);
+        return 1;
+    }
     bool bigDataProfilePartial = testType == 7 && bigDataProfileStage < kBigDataProfileStageFull;
+    bigDataProfilePartial = bigDataProfilePartial || bigDataIsolatedTask != 0;
     bool syncAllToAllAtEnd =
         isAllToAll && GetEnvInt("TILEXR_DEMO_ALLTOALL_SYNC_AT_END", 0) != 0;
     bool useAllToAllPlainIpc =
@@ -777,6 +787,7 @@ int main(int argc, char** argv)
                     rankSize, bigDataRanksPerNode) ? "true" : "false") +
                 " force35Core=" + std::string(forceBigData35Core ? "true" : "false") +
                 " remotePutOnly=" + std::string(bigDataRemotePutOnly ? "true" : "false") +
+                " isolatedTask=" + std::to_string(bigDataIsolatedTask) +
                 " ranksPerNode=" + std::to_string(bigDataRanksPerNode) +
                 " blockDim=" + std::to_string(TileXR::Demo::AllToAllBigDataBlockDim(
                     rankSize, forceBigData35Core, bigDataRemotePutOnly, bigDataRanksPerNode)) +
@@ -1075,6 +1086,7 @@ int main(int argc, char** argv)
                 reinterpret_cast<GM_ADDR>(bigInput), reinterpret_cast<GM_ADDR>(bigOutput),
                 reinterpret_cast<GM_ADDR>(registeredMemory), reinterpret_cast<GM_ADDR>(debug),
                 reinterpret_cast<GM_ADDR>(fullmeshTraceDevice), fullmeshTraceIteration,
+                static_cast<uint32_t>(bigDataIsolatedTask),
                 elementsPerRank, 0, bigDataPlan.copyDoneOffset,
                 bigDataPlan.recvCopyDoneOffset,
                 bigDataPlan.remoteSendDoneOffset,
