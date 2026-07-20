@@ -367,8 +367,11 @@ __aicore__ inline bool BigDataCopyShardRange(
 __aicore__ inline uint32_t BigDataCopyShardStartBytes(
     uint32_t shard, uint32_t shardCount, uint32_t totalElements)
 {
-    if (shardCount == 0U || shard >= shardCount) {
+    if (shardCount == 0U || shard > shardCount) {
         return 0U;
+    }
+    if (shard == shardCount) {
+        return totalElements * static_cast<uint32_t>(sizeof(int32_t));
     }
     constexpr uint32_t alignElements = 32U / sizeof(int32_t);
     const uint64_t begin =
