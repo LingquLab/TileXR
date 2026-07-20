@@ -205,6 +205,31 @@ void TestDualRouteQpWeights()
     CHECK_EQ(empty.secondaryQp, 0U);
 }
 
+void TestCopyoutWorkerPolicy()
+{
+    CHECK_EQ(TileXR::Demo::AllToAllGroupValidCopyoutWorkers(8U), true);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupValidCopyoutWorkers(16U), true);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupValidCopyoutWorkers(4U), false);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupValidCopyoutWorkers(12U), false);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupBlockDim(8U), 24U);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupBlockDim(16U), 32U);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupBlockDim(4U), 0U);
+
+    std::set<int32_t> lanes;
+    for (uint32_t worker = 0U; worker < 8U; ++worker) {
+        for (uint32_t assignment = 0U; assignment < 2U; ++assignment) {
+            lanes.insert(TileXR::Demo::AllToAllGroupCopyoutLane(
+                worker, assignment, 8U));
+        }
+    }
+    CHECK_EQ(lanes.size(), 16U);
+    CHECK_EQ(*lanes.begin(), 0);
+    CHECK_EQ(*lanes.rbegin(), 15);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupCopyoutLane(7U, 1U, 16U), -1);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupCopyoutLane(15U, 0U, 16U), 15);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupCopyoutLane(8U, 0U, 8U), -1);
+}
+
 void TestKernelStructure()
 {
     const std::string kernel = ReadFile(
@@ -235,6 +260,9 @@ void TestHostStructure()
     CHECK_CONTAINS(demo, "PlanAllToAllGroup");
     CHECK_CONTAINS(demo, "launch_tilexr_udma_all_to_all_group");
     CHECK_CONTAINS(demo, "TILEXR_DEMO_ALLTOALL_GROUP_CHUNK_ELEMENTS");
+    CHECK_CONTAINS(demo, "TILEXR_DEMO_ALLTOALL_GROUP_COPYOUT_WORKERS");
+    CHECK_CONTAINS(demo, "AllToAllGroupValidCopyoutWorkers");
+    CHECK_CONTAINS(demo, "AllToAllGroupBlockDim(copyoutWorkers)");
     CHECK_CONTAINS(demo, "grouped alltoall registeredBytes=");
     CHECK_CONTAINS(demo, "grouped alltoall warmup=");
     const size_t begin = demo.find("bool RunGroupedAllToAll(");
@@ -253,6 +281,7 @@ int main()
     TestTokens();
     TestDualRoutePeerPolicy();
     TestDualRouteQpWeights();
+    TestCopyoutWorkerPolicy();
     TestKernelStructure();
     TestHostStructure();
     if (g_failures != 0) {
