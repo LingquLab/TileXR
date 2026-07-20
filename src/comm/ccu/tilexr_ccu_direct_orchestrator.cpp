@@ -38,7 +38,7 @@ constexpr uint32_t TILEXR_CCU_DIRECT_MEMORY_COPY_LOCAL_XN_COUNT = 3U;
 constexpr uint32_t TILEXR_CCU_DIRECT_MEMORY_COPY_LOCAL_GSA_COUNT = 2U;
 constexpr uint32_t TILEXR_CCU_DIRECT_ALLTOALL_SYNC_RESOURCE_COUNT = 3U;
 constexpr uint32_t TILEXR_CCU_DIRECT_ALLTOALL_INSTRUCTION_COUNT =
-    5U + 64U * 7U;
+    7U + 64U * 7U;
 constexpr uint32_t TILEXR_CCU_DIRECT_SIGNAL_INSTRUCTION_COUNT = 5U;
 constexpr uint32_t TILEXR_CCU_DIRECT_WAIT_INSTRUCTION_COUNT = 5U;
 constexpr uint32_t TILEXR_CCU_DIRECT_SIGNAL_WAIT_INSTRUCTION_COUNT = 6U;
@@ -955,6 +955,10 @@ int BuildDirectAllToAll2RankLaunchPackage(
     alltoallSpec.preSyncLocalAddrXn =
         preSyncOnCopyRoute ? copyResource.localXn : preResource.localXn;
     alltoallSpec.preSyncLocalTokenXn = postResource.localXn;
+    alltoallSpec.preSyncLocalMarkerXn = copyResource.localXn;
+    alltoallSpec.preSyncRemoteMarkerXn = copyResource.remoteXn;
+    alltoallSpec.preSyncMarkerArgIndex = 0;
+    alltoallSpec.preSyncMarkerEnabled = true;
     alltoallSpec.channelId = copyResource.channelId;
     alltoallSpec.preSyncChannelId =
         preSyncOnCopyRoute ? copyResource.channelId : preResource.channelId;

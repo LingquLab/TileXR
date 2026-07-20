@@ -1750,8 +1750,8 @@ class TileXRCcuDirectOrchestratorTest(unittest.TestCase):
         planner = PLANNER_SOURCE.read_text(encoding="utf-8")
 
         self.assertIn("TILEXR_CCU_DIRECT_ALLTOALL_SYNC_RESOURCE_COUNT = 3U", source)
-        self.assertIn("TILEXR_CCU_DIRECT_ALLTOALL_INSTRUCTION_COUNT =\n    5U + 64U * 7U", source)
-        self.assertIn("TILEXR_CCU_DIRECT_ALLTOALL_INSTRUCTION_COUNT =\n    5U + 64U * 7U", planner)
+        self.assertIn("TILEXR_CCU_DIRECT_ALLTOALL_INSTRUCTION_COUNT =\n    7U + 64U * 7U", source)
+        self.assertIn("TILEXR_CCU_DIRECT_ALLTOALL_INSTRUCTION_COUNT =\n    7U + 64U * 7U", planner)
         self.assertIn("alltoall != nullptr ? TILEXR_CCU_DIRECT_ALLTOALL_SYNC_RESOURCE_COUNT", source)
         self.assertIn("alltoall != nullptr ? TileXRCcuBarrierMode::SyncXn", source)
         self.assertIn("const TileXRCcuSyncResource& copyResource = attempt->plan.syncResources[0]", source)
@@ -1775,6 +1775,10 @@ class TileXRCcuDirectOrchestratorTest(unittest.TestCase):
             "preSyncPeerLocalXn ? postResource.localXn : postResource.remoteXn", source
         )
         self.assertIn("preSyncTokenChannelId = preResource.channelId", source)
+        self.assertIn("preSyncLocalMarkerXn = copyResource.localXn", source)
+        self.assertIn("preSyncRemoteMarkerXn = copyResource.remoteXn", source)
+        self.assertIn("preSyncMarkerArgIndex = 0", source)
+        self.assertIn("preSyncMarkerEnabled = true", source)
         self.assertNotIn("preSyncTokenChannelId = postResource.channelId", source)
         self.assertIn(
             "preSyncOnCopyRoute ? attempt->allocation.remoteNotifyCke.startId : preResource.notifyCke", source

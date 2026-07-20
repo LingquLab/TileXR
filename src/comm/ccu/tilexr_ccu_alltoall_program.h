@@ -20,6 +20,7 @@ constexpr uint32_t TILEXR_CCU_ALLTOALL_BLOCK_BYTES =
     TILEXR_CCU_ALLTOALL_MEMORY_SLICE_BYTES * TILEXR_CCU_ALLTOALL_MEM_SLICE_PER_BLOCK;
 constexpr uint16_t TILEXR_CCU_ALLTOALL_OUTPUT_XN_ID = 1U;
 constexpr uint16_t TILEXR_CCU_ALLTOALL_TOKEN_XN_ID = 2U;
+constexpr uint16_t TILEXR_CCU_ALLTOALL_LOOP_MARKER_MASK = 1U;
 constexpr uint16_t TILEXR_CCU_ALLTOALL_POST_SYNC_ID = 3U;
 constexpr uint16_t TILEXR_CCU_ALLTOALL_SIGNAL_MASK = 1U;
 constexpr uint16_t TILEXR_CCU_ALLTOALL_RANK0_SIGNAL_MASK = 1U;
@@ -45,6 +46,9 @@ struct TileXRCcuAllToAll2RankProgramSpec {
     uint16_t lengthXn = 0;
     uint16_t preSyncLocalAddrXn = 0;
     uint16_t preSyncLocalTokenXn = 0;
+    uint16_t preSyncLocalMarkerXn = 0;
+    uint16_t preSyncRemoteMarkerXn = 0;
+    uint16_t preSyncMarkerArgIndex = 0;
     uint16_t channelId = 0;
     uint16_t preSyncChannelId = 0;
     uint16_t preSyncTokenChannelId = 0;
@@ -63,6 +67,7 @@ struct TileXRCcuAllToAll2RankProgramSpec {
     uint16_t ckeMask = 1;
     bool preSyncNotify = true;
     bool preSyncWait = true;
+    bool preSyncMarkerEnabled = false;
     bool postSyncNotify = true;
     bool postSyncWait = true;
     bool emitFinish = true;

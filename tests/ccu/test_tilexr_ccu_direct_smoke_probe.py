@@ -677,6 +677,38 @@ class TileXRCcuDirectSmokeProbeTest(unittest.TestCase):
         self.assertIn("tilexr_ccu_alltoall result passed=1", source)
         self.assertIn("BuildP2pCcuCopyPattern(peer", source)
 
+    def test_alltoall_long_mission_reuses_prepare_with_loop_specific_state(self):
+        source = PROBE_SOURCE.read_text(encoding="utf-8")
+        body = source[
+            source.index("int RunAllToAllLongMissionSmokeForRank"):
+            source.index("int RunAllToAllSmokeForRank")
+        ]
+
+        self.assertIn('kAllToAllLoopCountEnv = "TILEXR_CCU_ALLTOALL_LOOP_COUNT"', source)
+        self.assertIn("AllToAllLoopCountFromEnv", source)
+        loop_count_body = source[
+            source.index("int AllToAllLoopCountFromEnv"):
+            source.index("uint64_t BuildAllToAllLoopMarker")
+        ]
+        self.assertIn("std::strtol", loop_count_body)
+        self.assertIn("parsed < 1 || parsed > 1024", loop_count_body)
+        self.assertIn("BuildAllToAllLoopMarker", source)
+        self.assertIn("BuildAllToAllLoopPattern", source)
+        self.assertIn("ResetAllToAllStateForLoop", source)
+        self.assertIn("ReadAndValidatePeerLoopMarker", source)
+        self.assertIn("for (int loopIndex = 0; loopIndex < loopCount; ++loopIndex)", body)
+        self.assertIn("attempt.submitTasks.front().args[0] =", body)
+        self.assertIn("WaitForCollectiveSubmitReadiness(", body)
+        self.assertIn("loopIndex);", body)
+        self.assertIn("WaitForCollectiveSubmitDone(rank, rankSize, finalRet, loopIndex)", body)
+        self.assertIn("adapter.ReadXnRange", source)
+        self.assertIn("peerLoopMarker", source)
+        self.assertIn("loopIndex=", body)
+        self.assertLess(
+            body.index("PrepareDirectCcuAllToAll2RankInstallAttempt"),
+            body.index("for (int loopIndex = 0; loopIndex < loopCount; ++loopIndex)"),
+        )
+
     def test_sync_xn_ping_smoke_mode_is_opt_in_and_uses_bounded_sync(self):
         source = PROBE_SOURCE.read_text(encoding="utf-8")
 
@@ -715,8 +747,10 @@ class TileXRCcuDirectSmokeProbeTest(unittest.TestCase):
         self.assertIn("TILEXR_CCU_DIRECT_SMOKE_ALLTOALL_LONG_MISSION", runner)
         self.assertIn("TILEXR_CCU_ALLTOALL_BYTES", runner)
         self.assertIn("TILEXR_CCU_ALLTOALL_MEM_SLICE_PER_LOOP", runner)
+        self.assertIn("TILEXR_CCU_ALLTOALL_LOOP_COUNT", runner)
         self.assertIn('if [ "${TILEXR_CCU_DIRECT_SMOKE_ALLTOALL_LONG_MISSION:-0}" = "1" ]; then', runner)
-        self.assertIn("TILEXR_CCU_PROBE_SYNC_INSTRUCTION_COUNT:-451", runner)
+        self.assertIn("TILEXR_CCU_PROBE_SYNC_INSTRUCTION_COUNT:-453", runner)
+        self.assertNotIn("TILEXR_CCU_PROBE_SYNC_INSTRUCTION_COUNT:-451", runner)
         self.assertNotIn("TILEXR_CCU_PROBE_SYNC_INSTRUCTION_COUNT:-452", runner)
         self.assertNotIn("TILEXR_CCU_PROBE_SYNC_INSTRUCTION_COUNT:-458", runner)
         self.assertNotIn("TILEXR_CCU_PROBE_SYNC_INSTRUCTION_COUNT:-454", runner)

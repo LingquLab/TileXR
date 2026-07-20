@@ -90,6 +90,11 @@ int ValidateSpec(
         (spec.postSyncNotify && spec.sourceCke == 0) || spec.ckeMask == 0) {
         return Fail(program, report, "missing direct CCU alltoall CKE/channel resource");
     }
+    if (spec.preSyncMarkerEnabled &&
+        (spec.preSyncLocalMarkerXn == 0 || spec.preSyncRemoteMarkerXn == 0 ||
+            spec.preSyncMarkerArgIndex >= TILEXR_CCU_SQE_ARGS_LEN)) {
+        return Fail(program, report, "missing direct CCU alltoall loop marker resource");
+    }
     return TILEXR_SUCCESS;
 }
 
@@ -195,6 +200,36 @@ int AppendRemoteNotify(
     return TILEXR_SUCCESS;
 }
 
+int AppendRemoteMarkerNotify(
+    uint16_t remoteNotifyCke,
+    uint16_t channelId,
+    const TileXRCcuAllToAll2RankProgramSpec& spec,
+    std::vector<TileXRCcuInstr>* program,
+    TileXRCcuAllToAllProgramReport* report)
+{
+    TileXRCcuInstr instr;
+    if (TileXRCcuEncodeLoadSqeArgsToX(
+            spec.preSyncLocalMarkerXn,
+            spec.preSyncMarkerArgIndex,
+            &instr) != TILEXR_SUCCESS) {
+        return Fail(program, report, "failed to encode direct CCU alltoall PreSync loop marker load");
+    }
+    program->push_back(instr);
+
+    TileXRCcuSyncXnSpec notify;
+    notify.remoteXn = spec.preSyncRemoteMarkerXn;
+    notify.localXn = spec.preSyncLocalMarkerXn;
+    notify.channelId = channelId;
+    notify.notifyCke = remoteNotifyCke;
+    notify.notifyMask = TILEXR_CCU_ALLTOALL_LOOP_MARKER_MASK;
+    notify.clearWait = true;
+    if (TileXRCcuEncodeSyncXn(notify, &instr) != TILEXR_SUCCESS) {
+        return Fail(program, report, "failed to encode direct CCU alltoall PreSync loop marker notify");
+    }
+    program->push_back(instr);
+    return TILEXR_SUCCESS;
+}
+
 int AppendPreSyncPhase(
     uint16_t remoteNotifyCke,
     uint16_t localWaitCke,
@@ -205,7 +240,8 @@ int AppendPreSyncPhase(
 {
     const uint16_t outputMask = PreSyncSignalMask(spec);
     const uint16_t tokenMask = PreSyncTokenMask(spec);
-    const uint16_t waitMask = static_cast<uint16_t>(outputMask | tokenMask);
+    const uint16_t markerMask = spec.preSyncMarkerEnabled ? TILEXR_CCU_ALLTOALL_LOOP_MARKER_MASK : 0U;
+    const uint16_t waitMask = static_cast<uint16_t>(markerMask | outputMask | tokenMask);
     const uint16_t localOutputXn =
         spec.preSyncLocalAddrXn == 0 ? spec.localXn : spec.preSyncLocalAddrXn;
     const uint16_t localTokenXn =
@@ -214,6 +250,15 @@ int AppendPreSyncPhase(
         spec.preSyncTokenChannelId == 0 ? outputChannelId : spec.preSyncTokenChannelId;
     const uint16_t tokenNotifyCke =
         spec.preSyncRemoteTokenNotifyCke == 0 ? remoteNotifyCke : spec.preSyncRemoteTokenNotifyCke;
+    if (spec.preSyncMarkerEnabled &&
+        AppendRemoteMarkerNotify(
+            remoteNotifyCke,
+            outputChannelId,
+            spec,
+            program,
+            report) != TILEXR_SUCCESS) {
+        return TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
     if (AppendRemoteNotify(
             remoteNotifyCke,
             outputChannelId,
@@ -341,7 +386,9 @@ void FillReport(
         return;
     }
     const uint32_t bytesPerBlock = spec.memorySliceBytes * spec.memSlicePerBlock;
-    report->preSyncInstructionCount = spec.preSyncNotify ? (spec.preSyncWait ? 5U : 4U) : 0U;
+    const uint32_t markerInstructionCount = spec.preSyncMarkerEnabled ? 2U : 0U;
+    report->preSyncInstructionCount =
+        spec.preSyncNotify ? (spec.preSyncWait ? 5U : 4U) + markerInstructionCount : 0U;
     report->blockCount = static_cast<uint32_t>(spec.bytes / bytesPerBlock);
     report->bytesPerBlock = bytesPerBlock;
     report->copyInstructionCount = report->blockCount * 7U;
@@ -371,8 +418,9 @@ int TileXRCcuBuildAllToAll2RankProgram(
     const uint32_t blockCount = static_cast<uint32_t>(spec.bytes / bytesPerBlock);
     const uint16_t preSyncChannelId = spec.preSyncChannelId == 0 ? spec.channelId : spec.preSyncChannelId;
     const uint16_t postSyncChannelId = spec.postSyncChannelId == 0 ? spec.channelId : spec.postSyncChannelId;
+    const uint32_t markerInstructionCount = spec.preSyncMarkerEnabled ? 2U : 0U;
     program->reserve(
-        (spec.preSyncNotify ? (spec.preSyncWait ? 5U : 4U) : 0U) + blockCount * 7U +
+        (spec.preSyncNotify ? (spec.preSyncWait ? 5U : 4U) + markerInstructionCount : 0U) + blockCount * 7U +
         (!spec.postSyncNotify ? 0U : (spec.postSyncWait ? 3U : 2U)) +
         (spec.emitFinish ? 1U : 0U));
 

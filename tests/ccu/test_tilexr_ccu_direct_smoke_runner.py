@@ -180,6 +180,8 @@ class TileXRCcuDirectSmokeRunnerTest(unittest.TestCase):
         self.assertIn('TILEXR_CCU_DIRECT_SMOKE_DIRECT_CCU_ONLY_INIT="${TILEXR_CCU_DIRECT_SMOKE_DIRECT_CCU_ONLY_INIT:-1}"', source)
         self.assertIn('TILEXR_CCU_ALLTOALL_BYTES="${TILEXR_CCU_ALLTOALL_BYTES:-2097152}"', source)
         self.assertIn('TILEXR_CCU_ALLTOALL_MEM_SLICE_PER_LOOP="${TILEXR_CCU_ALLTOALL_MEM_SLICE_PER_LOOP:-8}"', source)
+        self.assertIn('TILEXR_CCU_ALLTOALL_LOOP_COUNT="${TILEXR_CCU_ALLTOALL_LOOP_COUNT:-1}"', source)
+        self.assertIn('common_env+=("TILEXR_CCU_ALLTOALL_LOOP_COUNT=${TILEXR_CCU_ALLTOALL_LOOP_COUNT}")', source)
         self.assertIn('TILEXR_CCU_PROBE_SYNC_RESOURCE_COUNT="${TILEXR_CCU_PROBE_SYNC_RESOURCE_COUNT:-1}"', source)
         self.assertIn('TILEXR_CCU_PROBE_SYNC_INSTRUCTION_COUNT="${TILEXR_CCU_PROBE_SYNC_INSTRUCTION_COUNT:-3}"', source)
         self.assertLess(source.index("apply_sync_xn_ping_defaults"), source.index("apply_alltoall_defaults"))
