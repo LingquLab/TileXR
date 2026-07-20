@@ -370,8 +370,15 @@ git commit -m "feat: add NPU resource state detection"
 **Interfaces:**
 
 ```text
-gate.py --source PATH --artifacts PATH --expected-merge-sha SHA --repository LingquLab/TileXR --pr-number NUMBER
+gate.py --source PATH --artifacts PATH --expected-merge-sha SHA --repository LingquLab/TileXR --pr-number NUMBER --github-token-fd FD
 ```
+
+The workflow gives the read-only GitHub token to the controller exactly once
+through a private descriptor. It removes token environment variables, clears
+the shell copy, and replaces the shell with a final `exec`. The controller
+requires an FD of at least 3, rejects token-bearing environments, applies
+`PR_SET_DUMPABLE=0`, reads at most 4096 ASCII bytes, and closes the descriptor
+before orchestration.
 
 Exit codes are stable:
 
@@ -456,12 +463,19 @@ Implement these controller units in `gate.py`:
 - immediately before hardware execution, the controller fetches the current merge SHA and rejects an obsolete run.
 - the hardware phase has a 7200-second timeout and aborts when any NPU PID is owned by an account other than `tilexr-ci`.
 - the controller reads `cases.tsv` files emitted by the build and hardware
-  manifests, writes `summary.md` under the artifact directory, and appends the
-  same Markdown to the captured `GITHUB_STEP_SUMMARY` path when present;
+  manifests and writes `summary.md` under the artifact directory. Before any
+  untrusted phase starts, it captures the runner-visible
+  `GITHUB_STEP_SUMMARY`, pins its lexical alias and complete directory chain by
+  descriptor, authenticates the original inode and content prefix, and uses
+  bounded transactional appends. Replacement or corruption must fail closed,
+  roll back the trusted suffix, or quarantine the unsafe path without touching
+  a substituted target;
 - a `finally` block terminates remaining child processes, verifies no NPU
   process owned by `tilexr-ci` remains, releases the lock, determines one of the
-  five stable failure classes, writes the summary, and invokes artifact
-  collection.
+  five stable failure classes, writes the summary, and invokes bounded artifact
+  collection. The upload root is outside the untrusted source checkout;
+  collection does not follow links, admits only bounded evidence types, and
+  emits an authoritative manifest or disables an unsafe upload tree.
 
 The controller must call sibling scripts by resolving `Path(__file__).resolve().parent`; it must not call a control script from the pull-request checkout.
 

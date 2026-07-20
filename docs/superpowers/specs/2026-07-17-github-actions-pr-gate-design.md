@@ -104,6 +104,13 @@ timeouts, monitoring, cleanup, and result classification. Pull-request code is
 still compiled and executed, because that is the purpose of the test, but it
 cannot replace the control package on disk.
 
+The read-only GitHub token is a one-shot controller input, not a child
+environment variable. The reusable workflow removes token variables, creates
+private FD 3, clears its shell copy, and uses a final `exec` into the sealed
+controller. The controller disables Linux process dumpability before a bounded
+read, closes the FD, and strips token and GitHub command-file variables from
+every untrusted child environment.
+
 Use only the standard `pull_request` event. Do not use `pull_request_target` to
 check out or execute pull-request code.
 
@@ -370,6 +377,16 @@ Upload artifacts on success, failure, and cancellation where cleanup permits:
 Retain artifacts for 14 days. This phase does not publish an install package or
 GitHub Release.
 
+Host evidence is created below the repository's real `.ci-artifacts/host`
+directory. NPU evidence is created below the runner's real temporary directory,
+outside the untrusted merge checkout. The collector never follows source
+links, accepts only bounded regular-file evidence, and writes a final manifest
+and rejection report. Before untrusted phases run, the controller pins the
+runner-visible step-summary alias and complete directory chain using file
+descriptors, authenticates the original inode and prefix, and performs bounded
+transactional appends. A replaced or corrupted path is rolled back,
+neutralized, or quarantined without adopting a substituted target.
+
 Classify failures as one of:
 
 - `code-or-test-failure`;
@@ -398,7 +415,12 @@ boundary as follows:
 - all external contributors require workflow approval;
 - only the trusted reusable workflow can use the NPU runner group;
 - trusted control code and the untrusted merge checkout are separate;
+- the GitHub token uses the one-shot private-FD/final-`exec` handoff and is not
+  inherited by pull-request-controlled processes;
 - CANN and control scripts are read-only;
+- host build, NPU artifact, runner workspace, and step-summary operations
+  enforce their fixed real-directory boundaries and reject symbolic-link
+  redirection;
 - clean workspace and process cleanup after every job;
 - no mutable cross-PR build cache;
 - no use of `pull_request_target` for untrusted code.
