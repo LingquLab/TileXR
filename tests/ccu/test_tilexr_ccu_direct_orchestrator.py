@@ -1750,20 +1750,36 @@ class TileXRCcuDirectOrchestratorTest(unittest.TestCase):
         planner = PLANNER_SOURCE.read_text(encoding="utf-8")
 
         self.assertIn("TILEXR_CCU_DIRECT_ALLTOALL_SYNC_RESOURCE_COUNT = 3U", source)
-        self.assertIn("TILEXR_CCU_DIRECT_ALLTOALL_INSTRUCTION_COUNT =\n    3U + 64U * 7U", source)
-        self.assertIn("TILEXR_CCU_DIRECT_ALLTOALL_INSTRUCTION_COUNT =\n    3U + 64U * 7U", planner)
+        self.assertIn("TILEXR_CCU_DIRECT_ALLTOALL_INSTRUCTION_COUNT =\n    5U + 64U * 7U", source)
+        self.assertIn("TILEXR_CCU_DIRECT_ALLTOALL_INSTRUCTION_COUNT =\n    5U + 64U * 7U", planner)
         self.assertIn("alltoall != nullptr ? TILEXR_CCU_DIRECT_ALLTOALL_SYNC_RESOURCE_COUNT", source)
-        self.assertIn("alltoall != nullptr ? TileXRCcuBarrierMode::SyncCke", source)
+        self.assertIn("alltoall != nullptr ? TileXRCcuBarrierMode::SyncXn", source)
         self.assertIn("const TileXRCcuSyncResource& copyResource = attempt->plan.syncResources[0]", source)
         self.assertIn("const TileXRCcuSyncResource& preResource = attempt->plan.syncResources[1]", source)
         self.assertIn("const TileXRCcuSyncResource& postResource = attempt->plan.syncResources[2]", source)
         self.assertIn("SetDirectCcuRemoteRouteMemoryOverrideForSyncRoute(\n        0U,", planner)
-        self.assertIn("preSyncRemoteAddrXn = preResource.remoteXn", source)
-        self.assertIn("preSyncRemoteTokenXn = postResource.remoteXn", source)
-        self.assertIn("preSyncTokenChannelId = postResource.channelId", source)
-        self.assertNotIn("preSyncTokenChannelId = preResource.channelId", source)
-        self.assertIn("preSyncRemoteNotifyCke = preResource.notifyCke", source)
-        self.assertIn("preSyncRemoteTokenNotifyCke = postResource.notifyCke", source)
+        self.assertIn(
+            "static_cast<uint32_t>(peerResources.localWaitCkeStartId) +\n                peerLocalWaitCkeOffset",
+            planner,
+        )
+        self.assertNotIn(
+            "peerResources.remoteNotifyCkeStartId) +\n                peerLocalWaitCkeOffset", planner
+        )
+        self.assertIn(
+            "preSyncOnCopyRoute ? copyResource.localXn : preResource.localXn", source
+        )
+        self.assertIn(
+            "preSyncOnCopyRoute ? copyResource.localXn : preSyncRemoteAddrXn", source
+        )
+        self.assertIn(
+            "preSyncPeerLocalXn ? postResource.localXn : postResource.remoteXn", source
+        )
+        self.assertIn("preSyncTokenChannelId = preResource.channelId", source)
+        self.assertNotIn("preSyncTokenChannelId = postResource.channelId", source)
+        self.assertIn(
+            "preSyncOnCopyRoute ? attempt->allocation.remoteNotifyCke.startId : preResource.notifyCke", source
+        )
+        self.assertIn("preSyncRemoteTokenNotifyCke = preResource.notifyCke", source)
         self.assertIn("preSyncTokenLocalWaitCke =", source)
         self.assertIn("preResource.localWaitCke == 0 ? preResource.notifyCke : preResource.localWaitCke", source)
         self.assertIn("alltoallSpec.copyCompletionCke =", source)
@@ -1771,11 +1787,26 @@ class TileXRCcuDirectOrchestratorTest(unittest.TestCase):
         self.assertIn("postSyncRemoteNotifyCke = postResource.notifyCke", source)
         self.assertNotIn("postSyncRemoteNotifyCke = preResource.notifyCke", source)
         self.assertIn("postResource.localWaitCke == 0 ? postResource.notifyCke : postResource.localWaitCke", source)
-        self.assertIn("preSyncChannelId = preResource.channelId", source)
+        self.assertIn(
+            "preSyncOnCopyRoute ? copyResource.channelId : preResource.channelId", source
+        )
         self.assertIn("copyChannelId = copyResource.channelId", source)
         self.assertIn("postSyncChannelId = postResource.channelId", source)
         self.assertNotIn("postSyncChannelId = preResource.channelId", source)
         self.assertIn("postSyncNotify = false", source)
+        self.assertIn("TILEXR_CCU_DIRECT_ALLTOALL_SKIP_PRE_SYNC", source)
+        self.assertIn("alltoallSpec.preSyncNotify", source)
+        self.assertIn("TILEXR_CCU_DIRECT_ALLTOALL_SKIP_PRE_SYNC_WAIT", source)
+        self.assertIn("alltoallSpec.preSyncWait", source)
+        self.assertIn("TILEXR_CCU_DIRECT_ALLTOALL_PRE_SYNC_ON_COPY_ROUTE", source)
+        self.assertIn("preSyncOnCopyRoute", source)
+        self.assertIn("TILEXR_CCU_DIRECT_ALLTOALL_PRE_SYNC_PEER_LOCAL_XN", source)
+        self.assertIn(
+            "preSyncPeerLocalXn ? preResource.localXn : preResource.remoteXn", source
+        )
+        self.assertIn(
+            "preSyncPeerLocalXn ? postResource.localXn : postResource.remoteXn", source
+        )
         self.assertIn("postSyncWait = false", source)
         self.assertIn("emitFinish = false", source)
         self.assertNotIn("postSyncNotify = true", source)

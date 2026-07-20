@@ -79,6 +79,8 @@ constexpr const char* kP2pCcuCopyDirectionEnv = "TILEXR_CCU_DIRECT_SMOKE_P2P_CCU
 constexpr const char* kP2pCcuCopyResourceWindowEnv = "TILEXR_CCU_DIRECT_SMOKE_P2P_CCU_COPY_RESOURCE_WINDOW";
 constexpr const char* kAllToAllEnv = "TILEXR_CCU_DIRECT_SMOKE_ALLTOALL";
 constexpr const char* kAllToAllLongMissionEnv = "TILEXR_CCU_DIRECT_SMOKE_ALLTOALL_LONG_MISSION";
+constexpr const char* kAllToAllSingleRouteBidirectionalEnv =
+    "TILEXR_CCU_DIRECT_SMOKE_ALLTOALL_SINGLE_ROUTE_BIDIRECTIONAL";
 constexpr const char* kAllToAllBytesEnv = "TILEXR_CCU_ALLTOALL_BYTES";
 constexpr const char* kAllToAllMemSlicePerLoopEnv = "TILEXR_CCU_ALLTOALL_MEM_SLICE_PER_LOOP";
 constexpr const char* kSyncXnPingEnv = "TILEXR_CCU_DIRECT_SMOKE_SYNC_XN_PING";
@@ -174,6 +176,11 @@ bool AllToAllSmokeEnabled()
 bool AllToAllLongMissionEnabled()
 {
     return EnvFlag(kAllToAllLongMissionEnv);
+}
+
+bool AllToAllSingleRouteBidirectionalEnabled()
+{
+    return EnvFlag(kAllToAllSingleRouteBidirectionalEnv);
 }
 
 bool SyncXnPingSmokeEnabled()
@@ -1281,6 +1288,58 @@ void PrintMissionContext(
     std::cerr << std::dec << std::endl;
 }
 
+void PrintCcuResourceState(
+    DirectCcuSmokeContext* context,
+    uint8_t dieId,
+    const TileXRDirectCcuPrepareOptions& options,
+    const char* label)
+{
+    if (context == nullptr || label == nullptr) {
+        return;
+    }
+    TileXR::TileXRCcuDriverAdapter adapter;
+    TileXR::TileXRCcuDriverAdapterReport report;
+    int ret = context->session.CreateDriverAdapter(&adapter, &report);
+    if (ret != TileXR::TILEXR_SUCCESS) {
+        std::cerr << label << " resourceState adapterRet=" << ret
+                  << " message=\"" << report.message << "\"" << std::endl;
+        return;
+    }
+
+    uint64_t localXn[3] {};
+    uint64_t remoteXn[3] {};
+    uint64_t localWaitCke[3] {};
+    uint64_t remoteNotifyCke[3] {};
+    const uint32_t localXnStartId = options.xnStartId;
+    const uint32_t remoteXnStartId = options.remoteXnStartId;
+    const uint32_t localWaitCkeStartId = options.localWaitCkeStartId;
+    const uint32_t remoteNotifyCkeStartId = options.remoteNotifyCkeStartId;
+    const int localXnRet = adapter.ReadXnRange(dieId, localXnStartId, localXn, 3, &report);
+    const int remoteXnRet = adapter.ReadXnRange(dieId, remoteXnStartId, remoteXn, 3, &report);
+    const int localCkeRet = adapter.ReadCkeRange(
+        dieId, localWaitCkeStartId, localWaitCke, 3, &report);
+    const int remoteCkeRet = adapter.ReadCkeRange(
+        dieId, remoteNotifyCkeStartId, remoteNotifyCke, 3, &report);
+
+    std::cerr << label << " resourceState"
+              << " localXnStartId=" << localXnStartId
+              << " localXnRet=" << localXnRet
+              << " localXn=0x" << std::hex << localXn[0] << ",0x" << localXn[1] << ",0x" << localXn[2]
+              << std::dec
+              << " remoteXnStartId=" << remoteXnStartId
+              << " remoteXnRet=" << remoteXnRet
+              << " remoteXn=0x" << std::hex << remoteXn[0] << ",0x" << remoteXn[1] << ",0x" << remoteXn[2]
+              << std::dec
+              << " localWaitCkeStartId=" << localWaitCkeStartId
+              << " localCkeRet=" << localCkeRet
+              << " localCke=0x" << std::hex << localWaitCke[0] << ",0x" << localWaitCke[1] << ",0x" << localWaitCke[2]
+              << std::dec
+              << " remoteNotifyCkeStartId=" << remoteNotifyCkeStartId
+              << " remoteCkeRet=" << remoteCkeRet
+              << " remoteCke=0x" << std::hex << remoteNotifyCke[0] << ",0x" << remoteNotifyCke[1] << ",0x" << remoteNotifyCke[2]
+              << std::dec << std::endl;
+}
+
 void PrintInstructionReadback(DirectCcuSmokeContext* context, TileXRDirectCcuPreparedTasksPtr prepared, uint32_t taskCount)
 {
     if (!EnvFlag(kReadbackInstructionsEnv)) {
@@ -1582,13 +1641,15 @@ int RunAllToAllCopyPhase(
     }
 
     const int peer = 1 - rank;
-    const bool active = rank == phase;
+    const bool singleRouteBidirectional = AllToAllSingleRouteBidirectionalEnabled();
+    const bool active = singleRouteBidirectional || rank == phase;
     const bool submitRequested = EnvFlag(kSubmitEnv);
 
     std::cout << "tilexr_ccu_alltoall phase"
               << " rank=" << rank
               << " phase=" << phase
-              << " direction=RemoteToLocal"
+              << " direction=" << (singleRouteBidirectional ? "LocalToRemote" : "RemoteToLocal")
+              << " singleRouteBidirectional=" << (singleRouteBidirectional ? 1 : 0)
               << std::endl;
 
     TileXR::TileXRCcuDirectInstallAttempt attempt;
@@ -1603,7 +1664,9 @@ int RunAllToAllCopyPhase(
             reinterpret_cast<uint64_t>(alltoall->destination.ptr),
             alltoall->bytes,
             static_cast<uint32_t>(peer),
-            TileXR::TileXRCcuMemoryCopyDirection::RemoteToLocal,
+            singleRouteBidirectional ?
+                TileXR::TileXRCcuMemoryCopyDirection::LocalToRemote :
+                TileXR::TileXRCcuMemoryCopyDirection::RemoteToLocal,
             prepared,
             &installReport);
     PrintInstallReport("tilexr_ccu_alltoall prepare", prepareRet, installReport);
@@ -1681,6 +1744,11 @@ int RunAllToAllCopyPhase(
                         attempt.submitTasks.front(),
                         "tilexr_ccu_alltoall");
                 }
+                PrintCcuResourceState(
+                    context,
+                    attempt.submitTasks.empty() ? 0 : attempt.submitTasks.front().dieId,
+                    options,
+                    "tilexr_ccu_alltoall");
                 if (missionAtEnd) {
                     std::cout << "tilexr_ccu_alltoall streamTimeoutAtMissionEnd=1"
                               << " rank=" << rank
@@ -1859,6 +1927,11 @@ int RunAllToAllLongMissionSmokeForRank(DirectCcuSmokeContext* context, int rank,
                         attempt.submitTasks.front(),
                         "tilexr_ccu_alltoall");
                 }
+                PrintCcuResourceState(
+                    context,
+                    attempt.submitTasks.empty() ? 0 : attempt.submitTasks.front().dieId,
+                    options,
+                    "tilexr_ccu_alltoall");
                 if (missionAtEnd) {
                     std::cout << "tilexr_ccu_alltoall streamTimeoutAtMissionEnd=1"
                               << " rank=" << rank
@@ -1933,7 +2006,8 @@ int RunAllToAllSmokeForRank(DirectCcuSmokeContext* context, int rank, int rankSi
     PrintConfig(options, rankSize);
 
     int finalRet = alltoall.initRet == ACL_SUCCESS ? 0 : alltoall.initRet;
-    for (int phase = 0; phase < 2 && finalRet == 0; ++phase) {
+    const int phaseCount = AllToAllSingleRouteBidirectionalEnabled() ? 1 : 2;
+    for (int phase = 0; phase < phaseCount && finalRet == 0; ++phase) {
         finalRet = RunAllToAllCopyPhase(context, rank, rankSize, device, phase, &alltoall);
     }
     if (finalRet == 0) {

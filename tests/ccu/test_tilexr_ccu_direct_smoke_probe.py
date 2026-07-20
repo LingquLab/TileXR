@@ -656,11 +656,16 @@ class TileXRCcuDirectSmokeProbeTest(unittest.TestCase):
 
         self.assertIn('kAllToAllEnv = "TILEXR_CCU_DIRECT_SMOKE_ALLTOALL"', source)
         self.assertIn('kAllToAllLongMissionEnv = "TILEXR_CCU_DIRECT_SMOKE_ALLTOALL_LONG_MISSION"', source)
+        self.assertIn("kAllToAllSingleRouteBidirectionalEnv", source)
+        self.assertIn("TILEXR_CCU_DIRECT_SMOKE_ALLTOALL_SINGLE_ROUTE_BIDIRECTIONAL", source)
         self.assertIn('kAllToAllBytesEnv = "TILEXR_CCU_ALLTOALL_BYTES"', source)
         self.assertIn('kAllToAllMemSlicePerLoopEnv = "TILEXR_CCU_ALLTOALL_MEM_SLICE_PER_LOOP"', source)
         self.assertIn("struct AllToAllState", source)
         self.assertIn("AllToAllSmokeEnabled", source)
         self.assertIn("AllToAllLongMissionEnabled", source)
+        self.assertIn("AllToAllSingleRouteBidirectionalEnabled", source)
+        self.assertIn("TileXRCcuMemoryCopyDirection::LocalToRemote", source)
+        self.assertIn("singleRouteBidirectional", source)
         self.assertIn("InitAllToAllState", source)
         self.assertIn("RunAllToAllCopyPhase", source)
         self.assertIn("RunAllToAllLongMissionSmokeForRank", source)
@@ -689,6 +694,17 @@ class TileXRCcuDirectSmokeProbeTest(unittest.TestCase):
         self.assertIn("tilexr_ccu_sync_xn_ping submit", source)
         self.assertIn("tilexr_ccu_sync_xn_ping timing", source)
         self.assertIn("aclrtSynchronizeStreamWithTimeout", source)
+
+    def test_alltoall_timeout_prints_xn_and_cke_readback(self):
+        source = PROBE_SOURCE.read_text(encoding="utf-8")
+
+        self.assertIn("PrintCcuResourceState", source)
+        self.assertIn("adapter.ReadXnRange", source)
+        self.assertIn("adapter.ReadCkeRange", source)
+        self.assertIn("localXnStartId", source)
+        self.assertIn("remoteXnStartId", source)
+        self.assertIn("localWaitCkeStartId", source)
+        self.assertIn("remoteNotifyCkeStartId", source)
         self.assertIn("TILEXR_CCU_DIRECT_SUBMIT_TIMEOUT", source)
         self.assertIn("tilexr_ccu_sync_xn_ping result passed=1", source)
 

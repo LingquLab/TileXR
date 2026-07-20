@@ -38,7 +38,7 @@ constexpr uint32_t TILEXR_CCU_DIRECT_MEMORY_COPY_LOCAL_XN_COUNT = 3U;
 constexpr uint32_t TILEXR_CCU_DIRECT_MEMORY_COPY_LOCAL_GSA_COUNT = 2U;
 constexpr uint32_t TILEXR_CCU_DIRECT_ALLTOALL_SYNC_RESOURCE_COUNT = 3U;
 constexpr uint32_t TILEXR_CCU_DIRECT_ALLTOALL_INSTRUCTION_COUNT =
-    3U + 64U * 7U;
+    5U + 64U * 7U;
 constexpr uint32_t TILEXR_CCU_DIRECT_SIGNAL_INSTRUCTION_COUNT = 5U;
 constexpr uint32_t TILEXR_CCU_DIRECT_WAIT_INSTRUCTION_COUNT = 5U;
 constexpr uint32_t TILEXR_CCU_DIRECT_SIGNAL_WAIT_INSTRUCTION_COUNT = 6U;
@@ -927,6 +927,12 @@ int BuildDirectAllToAll2RankLaunchPackage(
     const TileXRCcuSyncResource& copyResource = attempt->plan.syncResources[0];
     const TileXRCcuSyncResource& preResource = attempt->plan.syncResources[1];
     const TileXRCcuSyncResource& postResource = attempt->plan.syncResources[2];
+    const bool preSyncOnCopyRoute =
+        std::getenv("TILEXR_CCU_DIRECT_ALLTOALL_PRE_SYNC_ON_COPY_ROUTE") != nullptr;
+    const bool preSyncPeerLocalXn =
+        std::getenv("TILEXR_CCU_DIRECT_ALLTOALL_PRE_SYNC_PEER_LOCAL_XN") != nullptr;
+    const uint16_t preSyncRemoteAddrXn =
+        preSyncPeerLocalXn ? preResource.localXn : preResource.remoteXn;
 
     TileXRCcuAllToAll2RankProgramSpec alltoallSpec;
     alltoallSpec.localRank = alltoall.localRank;
@@ -946,21 +952,28 @@ int BuildDirectAllToAll2RankLaunchPackage(
     alltoallSpec.localXn = attempt->plan.kernelLocalXn.startId;
     alltoallSpec.remoteXn = static_cast<uint16_t>(attempt->plan.kernelLocalXn.startId + 1U);
     alltoallSpec.lengthXn = static_cast<uint16_t>(attempt->plan.kernelLocalXn.startId + 2U);
-    alltoallSpec.preSyncLocalAddrXn = preResource.localXn;
+    alltoallSpec.preSyncLocalAddrXn =
+        preSyncOnCopyRoute ? copyResource.localXn : preResource.localXn;
     alltoallSpec.preSyncLocalTokenXn = postResource.localXn;
     alltoallSpec.channelId = copyResource.channelId;
-    alltoallSpec.preSyncChannelId = preResource.channelId;
-    alltoallSpec.preSyncTokenChannelId = postResource.channelId;
+    alltoallSpec.preSyncChannelId =
+        preSyncOnCopyRoute ? copyResource.channelId : preResource.channelId;
+    alltoallSpec.preSyncTokenChannelId = preResource.channelId;
     alltoallSpec.copyChannelId = copyResource.channelId;
     alltoallSpec.postSyncChannelId = postResource.channelId;
-    alltoallSpec.preSyncRemoteAddrXn = preResource.remoteXn;
-    alltoallSpec.preSyncRemoteTokenXn = postResource.remoteXn;
-    alltoallSpec.preSyncRemoteNotifyCke = preResource.notifyCke;
+    alltoallSpec.preSyncRemoteAddrXn =
+        preSyncOnCopyRoute ? copyResource.localXn : preSyncRemoteAddrXn;
+    alltoallSpec.preSyncRemoteTokenXn =
+        preSyncPeerLocalXn ? postResource.localXn : postResource.remoteXn;
+    alltoallSpec.preSyncRemoteNotifyCke =
+        preSyncOnCopyRoute ? attempt->allocation.remoteNotifyCke.startId : preResource.notifyCke;
     alltoallSpec.preSyncLocalWaitCke =
-        preResource.localWaitCke == 0 ? preResource.notifyCke : preResource.localWaitCke;
-    alltoallSpec.preSyncRemoteTokenNotifyCke = postResource.notifyCke;
+        preSyncOnCopyRoute
+            ? (copyResource.localWaitCke == 0 ? copyResource.notifyCke : copyResource.localWaitCke)
+            : (preResource.localWaitCke == 0 ? preResource.notifyCke : preResource.localWaitCke);
+    alltoallSpec.preSyncRemoteTokenNotifyCke = preResource.notifyCke;
     alltoallSpec.preSyncTokenLocalWaitCke =
-        postResource.localWaitCke == 0 ? postResource.notifyCke : postResource.localWaitCke;
+        preResource.localWaitCke == 0 ? preResource.notifyCke : preResource.localWaitCke;
     alltoallSpec.copyCompletionCke =
         copyResource.localWaitCke == 0 ? copyResource.notifyCke : copyResource.localWaitCke;
     alltoallSpec.postSyncRemoteNotifyCke = postResource.notifyCke;
@@ -968,6 +981,8 @@ int BuildDirectAllToAll2RankLaunchPackage(
         postResource.localWaitCke == 0 ? postResource.notifyCke : postResource.localWaitCke;
     alltoallSpec.sourceCke = preResource.sourceCke;
     alltoallSpec.ckeMask = preResource.remoteNotifyMask == 0 ? 1U : preResource.remoteNotifyMask;
+    alltoallSpec.preSyncNotify = std::getenv("TILEXR_CCU_DIRECT_ALLTOALL_SKIP_PRE_SYNC") == nullptr;
+    alltoallSpec.preSyncWait = std::getenv("TILEXR_CCU_DIRECT_ALLTOALL_SKIP_PRE_SYNC_WAIT") == nullptr;
     alltoallSpec.postSyncNotify = false;
     alltoallSpec.postSyncWait = false;
     alltoallSpec.emitFinish = false;
@@ -994,6 +1009,10 @@ int BuildDirectAllToAll2RankLaunchPackage(
                   << " preRemoteTokenXn=" << alltoallSpec.preSyncRemoteTokenXn
                   << " copyCompletionCke=" << alltoallSpec.copyCompletionCke
                   << " postNotifyCke=" << alltoallSpec.postSyncRemoteNotifyCke
+                  << " preSyncNotify=" << (alltoallSpec.preSyncNotify ? 1 : 0)
+                  << " preSyncWait=" << (alltoallSpec.preSyncWait ? 1 : 0)
+                  << " preSyncOnCopyRoute=" << (preSyncOnCopyRoute ? 1 : 0)
+                  << " preSyncPeerLocalXn=" << (preSyncPeerLocalXn ? 1 : 0)
                   << " postSyncNotify=" << (alltoallSpec.postSyncNotify ? 1 : 0)
                   << " postSyncWait=" << (alltoallSpec.postSyncWait ? 1 : 0)
                   << " emitFinish=" << (alltoallSpec.emitFinish ? 1 : 0)
@@ -1561,7 +1580,7 @@ int RunDirectInstallAttemptImpl(
         options.syncInstructionCount;
     attempt->resourceRequest.bindingsPerSyncResource = options.bindingsPerSyncResource;
         attempt->resourceRequest.barrierMode =
-        alltoall != nullptr ? TileXRCcuBarrierMode::SyncCke :
+        alltoall != nullptr ? TileXRCcuBarrierMode::SyncXn :
         syncXnPing != nullptr ? TileXRCcuBarrierMode::SyncCke :
         signalWait == nullptr ? options.barrierMode : EffectiveSignalWaitBarrierMode(*signalWait);
 
@@ -1602,7 +1621,7 @@ int RunDirectInstallAttemptImpl(
         }
     }
     attempt->plan.barrierMode =
-        alltoall != nullptr ? TileXRCcuBarrierMode::SyncCke :
+        alltoall != nullptr ? TileXRCcuBarrierMode::SyncXn :
         syncXnPing != nullptr ? TileXRCcuBarrierMode::SyncCke :
         signalWait == nullptr ? attempt->plan.barrierMode : EffectiveSignalWaitBarrierMode(*signalWait);
 

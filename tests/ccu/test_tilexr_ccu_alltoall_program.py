@@ -83,6 +83,8 @@ class TileXRCcuAllToAllProgramTest(unittest.TestCase):
 
             constexpr uint16_t kSetCkeHeader = 0x0802U;
             constexpr uint16_t kClearCkeHeader = 0x0804U;
+            constexpr uint16_t kLoadImdToXnHeader = 0x0003U;
+            constexpr uint16_t kSyncXnHeader = 0x100dU;
 
             uint16_t Slot(const TileXRCcuInstr& instr, uint32_t slot)
             {
@@ -110,14 +112,18 @@ class TileXRCcuAllToAllProgramTest(unittest.TestCase):
                 spec.localXn = 0x201;
                 spec.remoteXn = 0x202;
                 spec.lengthXn = 0x203;
+                spec.preSyncLocalAddrXn = 0x209;
+                spec.preSyncLocalTokenXn = 0x20a;
                 spec.channelId = 0x12;
+                spec.preSyncChannelId = 0x13;
+                spec.preSyncTokenChannelId = 0x13;
                 spec.copyCompletionCke = 0x301;
                 spec.preSyncRemoteAddrXn = 0x211;
                 spec.preSyncRemoteTokenXn = 0x212;
                 spec.preSyncLocalWaitCke = 0x302;
                 spec.preSyncRemoteNotifyCke = 0x303;
-                spec.preSyncTokenLocalWaitCke = 0x304;
-                spec.preSyncRemoteTokenNotifyCke = 0x305;
+                spec.preSyncTokenLocalWaitCke = 0x302;
+                spec.preSyncRemoteTokenNotifyCke = 0x303;
                 spec.postSyncLocalWaitCke = 0x306;
                 spec.postSyncRemoteNotifyCke = 0x307;
                 spec.sourceCke = 0x308;
@@ -131,10 +137,10 @@ class TileXRCcuAllToAllProgramTest(unittest.TestCase):
                     return 1;
                 }
                 const uint32_t expectedBlocks = 64;
-                const uint32_t expectedInstructions = 3 + expectedBlocks * 7 + 3 + 1;
+                const uint32_t expectedInstructions = 5 + expectedBlocks * 7 + 3 + 1;
                 if (report.blockCount != expectedBlocks ||
                     report.copyInstructionCount != expectedBlocks * 7 ||
-                    report.preSyncInstructionCount != 3 ||
+                    report.preSyncInstructionCount != 5 ||
                     report.postSyncInstructionCount != 3 ||
                     report.finishInstructionCount != 1 ||
                     report.totalInstructionCount != expectedInstructions ||
@@ -153,17 +159,50 @@ class TileXRCcuAllToAllProgramTest(unittest.TestCase):
                     std::cerr << "unexpected block size or message\n";
                     return 3;
                 }
+                const uint16_t outputMask = 1U << TILEXR_CCU_ALLTOALL_OUTPUT_XN_ID;
+                const uint16_t tokenMask = 1U << TILEXR_CCU_ALLTOALL_TOKEN_XN_ID;
+                const uint16_t waitMask = outputMask | tokenMask;
                 const uint16_t syncMask = spec.ckeMask;
                 const uint32_t postSyncSetIndex = expectedInstructions - 4;
                 const uint32_t postSyncWaitIndex = expectedInstructions - 2;
-                if (program.size() < 3 ||
-                    Slot(program[2], 0) != kSetCkeHeader ||
-                    Slot(program[2], 4) != spec.preSyncLocalWaitCke ||
-                    Slot(program[2], 5) != syncMask) {
-                    std::cerr << "PreSync should use the allocated CKE resource mask"
-                              << " header=0x" << std::hex << Slot(program[2], 0)
-                              << " waitCke=0x" << Slot(program[2], 4)
-                              << " waitMask=0x" << Slot(program[2], 5)
+                if (program.size() < 5 ||
+                    Slot(program[0], 0) != kLoadImdToXnHeader ||
+                    Slot(program[0], 1) != spec.preSyncLocalAddrXn ||
+                    Slot(program[1], 0) != kSyncXnHeader ||
+                    Slot(program[1], 1) != spec.preSyncRemoteAddrXn ||
+                    Slot(program[1], 2) != spec.preSyncLocalAddrXn ||
+                    Slot(program[1], 4) != spec.preSyncChannelId ||
+                    Slot(program[1], 5) != spec.preSyncRemoteNotifyCke ||
+                    Slot(program[1], 6) != outputMask ||
+                    Slot(program[2], 0) != kLoadImdToXnHeader ||
+                    Slot(program[2], 1) != spec.preSyncLocalTokenXn ||
+                    Slot(program[3], 0) != kSyncXnHeader ||
+                    Slot(program[3], 1) != spec.preSyncRemoteTokenXn ||
+                    Slot(program[3], 2) != spec.preSyncLocalTokenXn ||
+                    Slot(program[3], 4) != spec.preSyncTokenChannelId ||
+                    Slot(program[3], 5) != spec.preSyncRemoteTokenNotifyCke ||
+                    Slot(program[3], 6) != tokenMask ||
+                    Slot(program[4], 0) != kSetCkeHeader ||
+                    Slot(program[4], 4) != spec.preSyncLocalWaitCke ||
+                    Slot(program[4], 5) != waitMask) {
+                    std::cerr << "PreSync should publish output and token then wait for both"
+                              << " loadHeader=0x" << std::hex << Slot(program[0], 0)
+                              << " loadXn=0x" << Slot(program[0], 1)
+                              << " notifyHeader=0x" << Slot(program[1], 0)
+                              << " remoteXn=0x" << Slot(program[1], 1)
+                              << " localXn=0x" << Slot(program[1], 2)
+                              << " channel=0x" << Slot(program[1], 4)
+                              << " remoteCke=0x" << Slot(program[1], 5)
+                              << " notifyMask=0x" << Slot(program[1], 6)
+                              << " tokenNotifyHeader=0x" << Slot(program[3], 0)
+                              << " tokenRemoteXn=0x" << Slot(program[3], 1)
+                              << " tokenLocalXn=0x" << Slot(program[3], 2)
+                              << " tokenChannel=0x" << Slot(program[3], 4)
+                              << " tokenRemoteCke=0x" << Slot(program[3], 5)
+                              << " tokenNotifyMask=0x" << Slot(program[3], 6)
+                              << " waitHeader=0x" << Slot(program[4], 0)
+                              << " waitCke=0x" << Slot(program[4], 4)
+                              << " waitMask=0x" << Slot(program[4], 5)
                               << std::dec << "\n";
                     return 4;
                 }
@@ -176,9 +215,35 @@ class TileXRCcuAllToAllProgramTest(unittest.TestCase):
                               << " postSetMask=0x" << std::hex << Slot(program[postSyncSetIndex], 3)
                               << " postWaitCke=0x" << Slot(program[postSyncWaitIndex], 4)
                               << " postWaitMask=0x" << Slot(program[postSyncWaitIndex], 5)
-                              << " syncMask=0x" << syncMask
+                              << " syncMask=0x" << spec.ckeMask
                               << std::dec << "\n";
                     return 5;
+                }
+
+                spec.preSyncNotify = false;
+                spec.postSyncNotify = false;
+                spec.emitFinish = false;
+                ret = TileXRCcuBuildAllToAll2RankProgram(spec, &program, &report);
+                if (ret != TILEXR_SUCCESS ||
+                    report.preSyncInstructionCount != 0 ||
+                    report.postSyncInstructionCount != 0 ||
+                    report.finishInstructionCount != 0 ||
+                    report.totalInstructionCount != expectedBlocks * 7 ||
+                    program.size() != expectedBlocks * 7) {
+                    std::cerr << "copy-only diagnostic program has unexpected counts\n";
+                    return 6;
+                }
+
+                spec.preSyncNotify = true;
+                spec.preSyncWait = false;
+                spec.sourceCke = 0;
+                ret = TileXRCcuBuildAllToAll2RankProgram(spec, &program, &report);
+                if (ret != TILEXR_SUCCESS ||
+                    report.preSyncInstructionCount != 4 ||
+                    report.totalInstructionCount != expectedBlocks * 7 + 4 ||
+                    program.size() != expectedBlocks * 7 + 4) {
+                    std::cerr << "notify-only PreSync program has unexpected counts\n";
+                    return 7;
                 }
                 return 0;
             }
@@ -276,7 +341,7 @@ class TileXRCcuAllToAllProgramTest(unittest.TestCase):
                               << " rank1=" << report1.message << "\n";
                     return 1;
                 }
-                const uint32_t expectedInstructions = 3 + 64 * 7 + 3 + 1;
+                const uint32_t expectedInstructions = 5 + 64 * 7 + 3 + 1;
                 if (report0.totalInstructionCount != expectedInstructions ||
                     report1.totalInstructionCount != expectedInstructions ||
                     rank0.size() != expectedInstructions ||
@@ -294,7 +359,7 @@ class TileXRCcuAllToAllProgramTest(unittest.TestCase):
                 }
                 const size_t rank0FirstCopy = FirstCopyIndex(rank0);
                 const size_t rank1FirstCopy = FirstCopyIndex(rank1);
-                if (rank0FirstCopy != 8 || rank1FirstCopy != 8) {
+                if (rank0FirstCopy != 10 || rank1FirstCopy != 10) {
                     std::cerr << "copy region should start at the same instruction after the single PreSync"
                               << " rank0FirstCopy=" << rank0FirstCopy
                               << " rank1FirstCopy=" << rank1FirstCopy << "\n";
@@ -378,7 +443,7 @@ class TileXRCcuAllToAllProgramTest(unittest.TestCase):
                 }
 
                 spec = ValidSpec();
-                spec.remoteSendToken = 0;
+                spec.remoteRecvToken = 0;
                 if (TileXRCcuBuildAllToAll2RankProgram(spec, &program, &report) !=
                     TILEXR_ERROR_PARA_CHECK_FAIL ||
                     report.message.find("token") == std::string::npos) {
@@ -419,8 +484,8 @@ class TileXRCcuAllToAllProgramTest(unittest.TestCase):
         self.assertNotIn("tokenLocalWaitCke", source)
         self.assertIn("PreSyncSignalMask", source)
         self.assertIn("PostSyncSignalMask", source)
-        self.assertIn("return spec.ckeMask;", source)
-        self.assertNotIn("1U << TILEXR_CCU_ALLTOALL_OUTPUT_XN_ID", source)
+        self.assertIn("1U << TILEXR_CCU_ALLTOALL_OUTPUT_XN_ID", source)
+        self.assertIn("1U << TILEXR_CCU_ALLTOALL_TOKEN_XN_ID", source)
         self.assertNotIn("1U << TILEXR_CCU_ALLTOALL_POST_SYNC_ID", source)
         self.assertIn("post.clearWait = true;", source)
         self.assertIn("TILEXR_CCU_ALLTOALL_SIGNAL_MASK", header)

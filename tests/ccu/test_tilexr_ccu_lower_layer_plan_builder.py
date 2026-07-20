@@ -1563,7 +1563,7 @@ class TileXRCcuLowerLayerPlanBuilderTest(unittest.TestCase):
         self.assertEqual("", result.stderr)
         self.assertEqual(0, result.returncode, result.stdout + result.stderr)
 
-    def test_overlay_verified_endpoint_route_expands_pfe_window_for_multi_route_snapshot(self):
+    def test_overlay_verified_endpoint_route_reuses_shared_jetty_for_multi_route_snapshot(self):
         code = textwrap.dedent(
             r'''
             #include "ccu/tilexr_ccu_lower_layer_plan_builder.h"
@@ -1661,9 +1661,9 @@ class TileXRCcuLowerLayerPlanBuilderTest(unittest.TestCase):
                     return 5;
                 }
                 if (DecodeChannelStartJettyId(plan.channels[0].ctx) != 0x400 ||
-                    DecodeChannelStartJettyId(plan.channels[1].ctx) != 0x401 ||
-                    DecodeChannelStartJettyId(plan.channels[2].ctx) != 0x402) {
-                    std::cerr << "multi-route channel jetty IDs were not expanded from verified start\n";
+                    DecodeChannelStartJettyId(plan.channels[1].ctx) != 0x400 ||
+                    DecodeChannelStartJettyId(plan.channels[2].ctx) != 0x400) {
+                    std::cerr << "multi-route channels did not reuse the verified endpoint jetty\n";
                     return 6;
                 }
                 return 0;

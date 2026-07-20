@@ -10,7 +10,14 @@ namespace {
 
 uint16_t PreSyncSignalMask(const TileXRCcuAllToAll2RankProgramSpec& spec)
 {
-    return spec.ckeMask;
+    (void)spec;
+    return static_cast<uint16_t>(1U << TILEXR_CCU_ALLTOALL_OUTPUT_XN_ID);
+}
+
+uint16_t PreSyncTokenMask(const TileXRCcuAllToAll2RankProgramSpec& spec)
+{
+    (void)spec;
+    return static_cast<uint16_t>(1U << TILEXR_CCU_ALLTOALL_TOKEN_XN_ID);
 }
 
 uint16_t PostSyncSignalMask(const TileXRCcuAllToAll2RankProgramSpec& spec)
@@ -79,7 +86,8 @@ int ValidateSpec(
     if (preSyncChannelId == 0 || copyChannelId == 0 || postSyncChannelId == 0 ||
         spec.copyCompletionCke == 0 || spec.preSyncLocalWaitCke == 0 ||
         spec.preSyncRemoteNotifyCke == 0 || spec.postSyncLocalWaitCke == 0 ||
-        spec.postSyncRemoteNotifyCke == 0 || spec.sourceCke == 0 || spec.ckeMask == 0) {
+        spec.postSyncRemoteNotifyCke == 0 ||
+        (spec.postSyncNotify && spec.sourceCke == 0) || spec.ckeMask == 0) {
         return Fail(program, report, "missing direct CCU alltoall CKE/channel resource");
     }
     return TILEXR_SUCCESS;
@@ -157,26 +165,31 @@ int AppendSyncPair(
 int AppendRemoteNotify(
     uint16_t remoteNotifyCke,
     uint16_t channelId,
-    const TileXRCcuAllToAll2RankProgramSpec& spec,
+    uint16_t localXn,
+    uint16_t remoteXn,
+    uint64_t value,
+    uint16_t secFlag,
     uint16_t mask,
     const char* phase,
     std::vector<TileXRCcuInstr>* program,
     TileXRCcuAllToAllProgramReport* report)
 {
-    if (AppendSetSourceCke(spec, mask, program, report) != TILEXR_SUCCESS) {
-        return TILEXR_ERROR_PARA_CHECK_FAIL;
-    }
-
-    TileXRCcuSyncCkeSpec post;
-    post.remoteCke = remoteNotifyCke;
-    post.localCke = spec.sourceCke;
-    post.localCkeMask = mask;
-    post.channelId = channelId;
-    post.clearWait = true;
-
     TileXRCcuInstr instr;
-    if (TileXRCcuEncodeSyncCke(post, &instr) != TILEXR_SUCCESS) {
-        return Fail(program, report, std::string("failed to encode direct CCU alltoall ") + phase + " SyncCke notify");
+    if (TileXRCcuEncodeLoadImdToXn(localXn, value, secFlag, &instr) != TILEXR_SUCCESS) {
+        return Fail(program, report, std::string("failed to encode direct CCU alltoall ") + phase + " variable load");
+    }
+    program->push_back(instr);
+
+    TileXRCcuSyncXnSpec notify;
+    notify.remoteXn = remoteXn;
+    notify.localXn = localXn;
+    notify.channelId = channelId;
+    notify.notifyCke = remoteNotifyCke;
+    notify.notifyMask = mask;
+    notify.clearWait = true;
+
+    if (TileXRCcuEncodeSyncXn(notify, &instr) != TILEXR_SUCCESS) {
+        return Fail(program, report, std::string("failed to encode direct CCU alltoall ") + phase + " SyncXn notify");
     }
     program->push_back(instr);
     return TILEXR_SUCCESS;
@@ -190,17 +203,46 @@ int AppendPreSyncPhase(
     std::vector<TileXRCcuInstr>* program,
     TileXRCcuAllToAllProgramReport* report)
 {
-    const uint16_t notifyMask = PreSyncSignalMask(spec);
-    const uint16_t waitMask = PreSyncSignalMask(spec);
+    const uint16_t outputMask = PreSyncSignalMask(spec);
+    const uint16_t tokenMask = PreSyncTokenMask(spec);
+    const uint16_t waitMask = static_cast<uint16_t>(outputMask | tokenMask);
+    const uint16_t localOutputXn =
+        spec.preSyncLocalAddrXn == 0 ? spec.localXn : spec.preSyncLocalAddrXn;
+    const uint16_t localTokenXn =
+        spec.preSyncLocalTokenXn == 0 ? spec.lengthXn : spec.preSyncLocalTokenXn;
+    const uint16_t tokenChannelId =
+        spec.preSyncTokenChannelId == 0 ? outputChannelId : spec.preSyncTokenChannelId;
+    const uint16_t tokenNotifyCke =
+        spec.preSyncRemoteTokenNotifyCke == 0 ? remoteNotifyCke : spec.preSyncRemoteTokenNotifyCke;
     if (AppendRemoteNotify(
             remoteNotifyCke,
             outputChannelId,
-            spec,
-            notifyMask,
+            localOutputXn,
+            spec.preSyncRemoteAddrXn,
+            spec.localRecvAddr,
+            0,
+            outputMask,
             "PreSync output",
             program,
             report) != TILEXR_SUCCESS) {
         return TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    if (AppendRemoteNotify(
+            tokenNotifyCke,
+            tokenChannelId,
+            localTokenXn,
+            spec.preSyncRemoteTokenXn,
+            spec.localRecvToken,
+            1,
+            tokenMask,
+            "PreSync token",
+            program,
+            report) != TILEXR_SUCCESS) {
+        return TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+
+    if (!spec.preSyncWait) {
+        return TILEXR_SUCCESS;
     }
 
     return AppendNotifyWait(localWaitCke, waitMask, "PreSync output", false, program, report);
@@ -299,7 +341,7 @@ void FillReport(
         return;
     }
     const uint32_t bytesPerBlock = spec.memorySliceBytes * spec.memSlicePerBlock;
-    report->preSyncInstructionCount = 3;
+    report->preSyncInstructionCount = spec.preSyncNotify ? (spec.preSyncWait ? 5U : 4U) : 0U;
     report->blockCount = static_cast<uint32_t>(spec.bytes / bytesPerBlock);
     report->bytesPerBlock = bytesPerBlock;
     report->copyInstructionCount = report->blockCount * 7U;
@@ -330,19 +372,21 @@ int TileXRCcuBuildAllToAll2RankProgram(
     const uint16_t preSyncChannelId = spec.preSyncChannelId == 0 ? spec.channelId : spec.preSyncChannelId;
     const uint16_t postSyncChannelId = spec.postSyncChannelId == 0 ? spec.channelId : spec.postSyncChannelId;
     program->reserve(
-        3U + blockCount * 7U +
+        (spec.preSyncNotify ? (spec.preSyncWait ? 5U : 4U) : 0U) + blockCount * 7U +
         (!spec.postSyncNotify ? 0U : (spec.postSyncWait ? 3U : 2U)) +
         (spec.emitFinish ? 1U : 0U));
 
-    ret = AppendPreSyncPhase(
-        spec.preSyncRemoteNotifyCke,
-        spec.preSyncLocalWaitCke,
-        preSyncChannelId,
-        spec,
-        program,
-        report);
-    if (ret != TILEXR_SUCCESS) {
-        return ret;
+    if (spec.preSyncNotify) {
+        ret = AppendPreSyncPhase(
+            spec.preSyncRemoteNotifyCke,
+            spec.preSyncLocalWaitCke,
+            preSyncChannelId,
+            spec,
+            program,
+            report);
+        if (ret != TILEXR_SUCCESS) {
+            return ret;
+        }
     }
 
     for (uint32_t block = 0; block < blockCount; ++block) {

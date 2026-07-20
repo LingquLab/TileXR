@@ -61,6 +61,8 @@ struct TileXRCcuAllToAll2RankProgramSpec {
     uint16_t postSyncRemoteNotifyCke = 0;
     uint16_t sourceCke = 0;
     uint16_t ckeMask = 1;
+    bool preSyncNotify = true;
+    bool preSyncWait = true;
     bool postSyncNotify = true;
     bool postSyncWait = true;
     bool emitFinish = true;

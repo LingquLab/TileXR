@@ -124,33 +124,20 @@ void NormalizeVerifiedEndpointRouteJettyWindow(TileXRCcuLowerLayerTransportSnaps
         return;
     }
 
-    uint16_t firstExplicitStart = 0;
     uint16_t minExplicitStart = 0;
     uint32_t explicitEnd = 0;
     uint32_t explicitStartCount = 0;
-    bool allExplicitStartsEqual = true;
     for (const auto& route : snapshot->routes) {
         if (route.startJettyId == 0) {
             continue;
         }
-        if (firstExplicitStart == 0) {
-            firstExplicitStart = route.startJettyId;
+        if (explicitStartCount == 0) {
             minExplicitStart = route.startJettyId;
-        } else if (route.startJettyId != firstExplicitStart) {
-            allExplicitStartsEqual = false;
+        } else {
             minExplicitStart = std::min<uint16_t>(minExplicitStart, route.startJettyId);
         }
         explicitEnd = std::max<uint32_t>(explicitEnd, static_cast<uint32_t>(route.startJettyId) + 1U);
         ++explicitStartCount;
-    }
-
-    if (explicitStartCount != 0 && allExplicitStartsEqual && snapshot->routes.size() > 1) {
-        const uint32_t routeCount = static_cast<uint32_t>(snapshot->routes.size());
-        for (uint32_t i = 0; i < routeCount; ++i) {
-            snapshot->routes[i].startJettyId = CheckedU16(static_cast<uint32_t>(firstExplicitStart) + i);
-        }
-        minExplicitStart = firstExplicitStart;
-        explicitEnd = static_cast<uint32_t>(firstExplicitStart) + routeCount;
     }
 
     if (minExplicitStart != 0) {

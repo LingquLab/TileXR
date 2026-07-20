@@ -26,7 +26,7 @@ namespace TileXR {
 #ifdef TILEXR_CCU_TESTING
 constexpr uint32_t TILEXR_CCU_DIRECT_MEMORY_COPY_INSTRUCTION_COUNT = 7U;
 constexpr uint32_t TILEXR_CCU_DIRECT_ALLTOALL_INSTRUCTION_COUNT =
-    3U + 64U * 7U;
+    5U + 64U * 7U;
 constexpr uint32_t TILEXR_CCU_DIRECT_SYNC_XN_PING_INSTRUCTION_COUNT = 5U;
 #endif
 constexpr uint32_t TILEXR_CCU_DIRECT_SIGNAL_INSTRUCTION_COUNT = 5U;
@@ -662,7 +662,8 @@ int TileXRCcuCollectivePlanner::ExchangeDirectCcuRemoteNotifyCke(
         const bool notifyCkeOwnerVerified =
             static_cast<uint32_t>(remoteNotifyCke) >= peerResources.localWaitCkeStartId &&
             static_cast<uint32_t>(remoteNotifyCke) <
-                static_cast<uint32_t>(peerResources.localWaitCkeStartId) + peerResources.localWaitCkeCount;
+                static_cast<uint32_t>(peerResources.localWaitCkeStartId) +
+                    peerResources.localWaitCkeCount;
         const bool localChannelOwnerVerified =
             allocation.channels.num != 0 &&
             peerLocalXnOwnerVerified &&
