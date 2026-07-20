@@ -1,10 +1,17 @@
 #include <cstdint>
+#include <fstream>
 #include <iostream>
 #include <set>
+#include <sstream>
+#include <string>
 
 #include "demo/tilexr_udma_alltoall_group_layout.h"
 
 namespace {
+
+#ifndef TILEXR_SOURCE_ROOT
+#define TILEXR_SOURCE_ROOT "."
+#endif
 
 int g_failures = 0;
 
@@ -18,6 +25,30 @@ int g_failures = 0;
             ++g_failures; \
         } \
     } while (0)
+
+#define CHECK_CONTAINS(text, needle) \
+    do { \
+        if ((text).find(needle) == std::string::npos) { \
+            std::cerr << "CHECK_CONTAINS failed at line " << __LINE__ << ": " << needle << std::endl; \
+            ++g_failures; \
+        } \
+    } while (0)
+
+#define CHECK_NOT_CONTAINS(text, needle) \
+    do { \
+        if ((text).find(needle) != std::string::npos) { \
+            std::cerr << "CHECK_NOT_CONTAINS failed at line " << __LINE__ << ": " << needle << std::endl; \
+            ++g_failures; \
+        } \
+    } while (0)
+
+std::string ReadFile(const std::string& path)
+{
+    std::ifstream in(path.c_str());
+    std::ostringstream out;
+    out << in.rdbuf();
+    return out.str();
+}
 
 void CheckSchedule(int rankSize)
 {
@@ -117,6 +148,21 @@ void TestTokens()
         TileXR::Demo::AllToAllGroupToken(49U, 1U, 0U), true);
 }
 
+void TestKernelStructure()
+{
+    const std::string kernel = ReadFile(
+        std::string(TILEXR_SOURCE_ROOT) + "/tests/udma/demo/tilexr_udma_alltoall_group_kernel.cpp");
+    CHECK_CONTAINS(kernel, "tilexr_udma_all_to_all_group_kernel");
+    CHECK_CONTAINS(kernel, "TILEXR_ALLTOALL_GROUP_SEND_CORES");
+    CHECK_CONTAINS(kernel, "UDMAPutSignalNbiOnQp<int32_t>");
+    CHECK_CONTAINS(kernel, "UDMAQuietStatusOnQp(args, peer, qpIdx)");
+    CHECK_CONTAINS(kernel, "AllToAllGroupWaitTokenMte");
+    CHECK_CONTAINS(kernel, "observed >= expectedToken");
+    CHECK_CONTAINS(kernel, "launch_tilexr_udma_all_to_all_group");
+    CHECK_NOT_CONTAINS(kernel, "UDMAPutSignalNbi<int32_t>");
+    CHECK_NOT_CONTAINS(kernel, "SyncAll");
+}
+
 } // namespace
 
 int main()
@@ -124,6 +170,7 @@ int main()
     TestSchedules();
     TestPlan();
     TestTokens();
+    TestKernelStructure();
     if (g_failures != 0) {
         std::cerr << "TileXR grouped all-to-all layout checks failed: " << g_failures << std::endl;
         return 1;
