@@ -20,9 +20,10 @@ The diagnostic run is split into three stage batches:
    and the two-port aggregate route.
 
 For each stage, the Host launches all warmup iterations and then all measured
-iterations on the same stream. It synchronizes the stream and executes the
-existing TCP all-rank barrier once after the measured batch. Therefore no rank
-can start one route stage while another rank is still using the preceding
+iterations. It synchronizes the local stream after every invocation so a fast
+rank cannot run more than one ping-pong generation ahead, but executes the
+expensive TCP all-rank barrier only once after the measured batch. Therefore no
+rank can start one route stage while another rank is still using the preceding
 route. This needs only one ready barrier plus three stage-completion barriers,
 so warmup5/repeat50 remains inside the 60-second process timeout.
 
@@ -50,10 +51,10 @@ scope.
 
 ## Timing And Trace
 
-The Host records one ACL event duration around each stage's complete measured
-batch. The reported per-stage mean divides that duration by repeat count; the
-reported staged kernel time is the sum of the three means and excludes TCP
-barrier latency.
+The Host records one ACL event duration per measured invocation and accumulates
+the durations by stage. The reported per-stage mean divides that sum by repeat
+count; the reported staged kernel time is the sum of the three means and
+excludes stream synchronization and TCP barrier latency.
 
 When tracing is enabled, each stage owns a separate existing-size trace buffer.
 This avoids changing or multiplying the trace layout and prevents kernel-span

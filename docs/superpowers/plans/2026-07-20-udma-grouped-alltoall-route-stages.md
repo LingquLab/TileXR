@@ -247,11 +247,12 @@ free every allocated trace pointer on partial failure.
 
 - [ ] **Step 5: Implement stage-batch launch and ACL timing**
 
-Create/reuse ACL start and end events around each stage's complete repeat batch.
-Run all warmups for that stage first, synchronize, then record the measured
-batch. Call `aclrtEventElapsedTime`, divide by repeat count, and call
-`DemoBarrierAll` once after the stage completes. Reset `invocationId` at the
-start of each stage because peer sets are disjoint:
+Create/reuse ACL start and end events around every measured invocation. Run all
+warmups for that stage first and synchronize the local stream after each
+invocation; do the same for measured invocations while accumulating event
+durations. Divide by repeat count, and call `DemoBarrierAll` once after the
+stage completes. Reset `invocationId` at the start of each stage because peer
+sets are disjoint:
 
 ```cpp
 const AllToAllGroupRouteStage stages[] = {

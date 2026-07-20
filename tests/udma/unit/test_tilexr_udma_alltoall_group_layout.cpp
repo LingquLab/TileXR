@@ -322,6 +322,7 @@ void TestHostStructure()
     CHECK_CONTAINS(grouped, "aclrtEventElapsedTime");
     CHECK_CONTAINS(grouped, "DemoBarrierAll(rank, rankSize, barrierStep)");
     CHECK_CONTAINS(grouped, "auto runStageBatch");
+    CHECK_CONTAINS(grouped, "aclrtSynchronizeStream grouped stage iteration");
     CHECK_NOT_CONTAINS(grouped, "\" warmup=\"");
     CHECK_CONTAINS(grouped, "\" complete\"");
     CHECK_CONTAINS(grouped,
