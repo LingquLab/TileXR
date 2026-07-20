@@ -65,9 +65,24 @@ if ! grep -Fx -- \
     exit 1
 fi
 if ! grep -Fx -- \
-    'chown -R root:tilexr-ci /home/tilexr-ci/actions-runner ' \
+    'chown root:tilexr-ci /home/tilexr-ci/actions-runner ' \
     "${output_file}" >/dev/null; then
-    echo "the installed runner and its root-owned environment must be sealed" >&2
+    echo "the runner root itself must be administrator-owned" >&2
+    exit 1
+fi
+if ! grep -F -- '! -name _diag' "${provision_root}/runner.sh" >/dev/null; then
+    echo "runner reinstall does not preserve the diagnostic directory" >&2
+    exit 1
+fi
+if grep -F -- 'run chown -R "root:${CI_PRIMARY_GROUP}" "${RUNNER_HOME}"' \
+    "${provision_root}/runner.sh" >/dev/null; then
+    echo "runner sealing must not make mutable work trees root-owned" >&2
+    exit 1
+fi
+if ! grep -F -- \
+    'chown -R tilexr-ci:tilexr-ci /home/tilexr-ci/actions-runner/_work /home/tilexr-ci/actions-runner/_diag ' \
+    "${output_file}" >/dev/null; then
+    echo "runner mutable trees are not recursively restored to the CI account" >&2
     exit 1
 fi
 
@@ -118,6 +133,13 @@ fi
 if ! grep -F -- 'offline runner has an unexpected registration name' \
     "${provision_root}/runner.sh" >/dev/null; then
     echo "offline replacement does not constrain the existing runner name" >&2
+    exit 1
+fi
+if grep -F -- '"${RUNNER_HOME}/config.sh" remove' \
+    "${provision_root}/runner.sh" >/dev/null ||
+    grep -Eq 'remove[^[:cntrl:]]*registration_token' \
+        "${provision_root}/runner.sh"; then
+    echo "runner registration tokens must not be used to remove runners" >&2
     exit 1
 fi
 for service_script in runner verify; do
@@ -171,13 +193,94 @@ assert_sudo_state 0 0 $'Matching Defaults entries for tilexr-ci on blue:\n    en
 assert_sudo_state 2 0 $'Matching Defaults entries for tilexr-ci on blue:\n    env_reset\n'
 assert_sudo_state 2 1 $'sudo: unable to initialize policy plugin\n'
 
+printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    '[[ "${LC_ALL:-}" == C && "${LANG:-}" == C ]] || exit 91' \
+    '[[ "$*" == "show --property=User --property=ExecStart -- actions.runner.LingquLab-TileXR.blue-tilexr-npu8.service" ]] || exit 92' \
+    'printf "%s" "${MOCK_SYSTEMCTL_OUTPUT:-}"' \
+    'exit "${MOCK_SYSTEMCTL_STATUS:-0}"' > "${mock_bin}/systemctl"
+chmod +x "${mock_bin}/systemctl"
+
+assert_runner_service_state() {
+    local expected_state="$1"
+    local command_status="$2"
+    local command_output="$3"
+    local actual_state
+    if MOCK_SYSTEMCTL_STATUS="${command_status}" \
+        MOCK_SYSTEMCTL_OUTPUT="${command_output}" \
+        PATH="${mock_bin}:${PATH}" \
+        runner_service_matches \
+            actions.runner.LingquLab-TileXR.blue-tilexr-npu8.service 2>/dev/null; then
+        actual_state=0
+    else
+        actual_state=$?
+    fi
+    if [[ "${actual_state}" -ne "${expected_state}" ]]; then
+        echo "unexpected runner service state: expected ${expected_state}, got ${actual_state}" >&2
+        exit 1
+    fi
+}
+
+good_service=$'User=tilexr-ci\nExecStart={ path=/home/tilexr-ci/actions-runner/runsvc.sh ; argv[]=/home/tilexr-ci/actions-runner/runsvc.sh ; ignore_errors=no ; }\n'
+assert_runner_service_state 0 0 "${good_service}"
+assert_runner_service_state 1 0 $'User=root\nExecStart={ path=/home/tilexr-ci/actions-runner/runsvc.sh ; argv[]=/home/tilexr-ci/actions-runner/runsvc.sh ; }\n'
+assert_runner_service_state 1 0 $'User=tilexr-ci\nExecStart={ path=/tmp/runsvc.sh ; argv[]=/tmp/runsvc.sh ; }\n'
+assert_runner_service_state 1 0 $'User=tilexr-ci\nExecStart={ path=/home/tilexr-ci/actions-runner-evil/runsvc.sh ; argv[]=/home/tilexr-ci/actions-runner-evil/runsvc.sh ; }\n'
+assert_runner_service_state 1 1 'systemctl failed'
+
+if [[ "$(grep -Fc 'runner_service_matches "${service_name}"' \
+        "${provision_root}/runner.sh")" -lt 2 ]]; then
+    echo "runner.sh must validate the service before accepting and starting it" >&2
+    exit 1
+fi
+if ! grep -F -- 'runner_service_matches "${service_name}"' \
+    "${provision_root}/verify.sh" >/dev/null; then
+    echo "verify.sh does not validate the runner service identity" >&2
+    exit 1
+fi
+
+account_last_command="$(awk '
+    NF && $1 !~ /^#/ { line = $0 }
+    END { sub(/^[[:space:]]*/, "", line); print line }
+' "${provision_root}/account.sh")"
+if [[ "${account_last_command}" != remove_ci_ssh_entry ]]; then
+    echo "account.sh must remove the SSH entry only after sealing the CI home" >&2
+    exit 1
+fi
+
+ssh_test_home="${temp_dir}/ssh-home"
+ssh_external="${temp_dir}/external-ssh"
+mkdir -p "${ssh_test_home}" "${ssh_external}"
+printf '%s\n' preserve > "${ssh_external}/authorized_keys"
+ln -s "${ssh_external}" "${ssh_test_home}/.ssh"
+(
+    CI_HOME="${ssh_test_home}"
+    DRY_RUN=0
+    remove_ci_ssh_entry
+    [[ ! -e "${CI_HOME}/.ssh" && ! -L "${CI_HOME}/.ssh" ]] || {
+        echo "account SSH entry was not removed" >&2
+        exit 1
+    }
+    remove_ci_ssh_entry
+)
+if [[ "$(< "${ssh_external}/authorized_keys")" != preserve ]]; then
+    echo "removing the account SSH entry followed its external symlink" >&2
+    exit 1
+fi
+
 if ! grep -F -- 'seal_runner_modes' "${provision_root}/runner.sh" >/dev/null; then
     echo "runner.sh does not restore stable modes after recursive sealing" >&2
     exit 1
 fi
 
 runner_test_home="${temp_dir}/runner-home"
-mkdir -p "${runner_test_home}/_work" "${runner_test_home}/_diag"
+mkdir -p "${runner_test_home}/_work/job/nested" "${runner_test_home}/_diag/logs"
+printf '%s\n' work > "${runner_test_home}/_work/job/nested/output.txt"
+printf '%s\n' diag > "${runner_test_home}/_diag/logs/runner.log"
+chmod -R 0777 "${runner_test_home}/_work" "${runner_test_home}/_diag"
+chmod 0666 \
+    "${runner_test_home}/_work/job/nested/output.txt" \
+    "${runner_test_home}/_diag/logs/runner.log"
 printf '%s\n' 'ACTIONS_RUNNER_HOOK_JOB_COMPLETED=/test/hook' > "${runner_test_home}/.env"
 chmod 0440 "${runner_test_home}/.env"
 
@@ -191,6 +294,13 @@ file_mode() {
     seal_runner_modes
     [[ "$(file_mode "${RUNNER_HOME}/.env")" == 440 ]] || {
         echo "first runner seal changed .env away from mode 0440" >&2
+        exit 1
+    }
+    [[ "$(file_mode "${RUNNER_HOME}/_work/job/nested")" == 750 &&
+       "$(file_mode "${RUNNER_HOME}/_work/job/nested/output.txt")" == 640 &&
+       "$(file_mode "${RUNNER_HOME}/_diag/logs")" == 750 &&
+       "$(file_mode "${RUNNER_HOME}/_diag/logs/runner.log")" == 640 ]] || {
+        echo "runner mutable trees were not recursively normalized" >&2
         exit 1
     }
     seal_runner_modes

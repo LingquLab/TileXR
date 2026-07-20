@@ -54,10 +54,10 @@ if [[ "${DRY_RUN}" == 1 ]] || {
     run gpasswd --delete "${CI_USER}" docker
 fi
 
-run rm -f "${CI_HOME}/.ssh/authorized_keys" "${CI_HOME}/.ssh/authorized_keys2"
 run install -d -o root -g "${CI_PRIMARY_GROUP}" -m 0750 \
     "${CI_HOME}"
 run install -d -o "${CI_USER}" -g "${CI_PRIMARY_GROUP}" -m 0750 \
     "${RUNNER_HOME}" "${runner_work}" "${lock_home}" "${artifact_home}"
 run install -d -o root -g "${CI_GROUP}" -m 0750 \
     "${toolchain_parent}" "${control_parent}" "${install_work}"
+remove_ci_ssh_entry

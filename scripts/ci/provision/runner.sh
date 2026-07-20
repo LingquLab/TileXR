@@ -47,6 +47,10 @@ if [[ "${DRY_RUN}" != 1 && -f "${RUNNER_HOME}/.service" ]]; then
         exit 1
     fi
     if systemctl is-active --quiet -- "${service_name}"; then
+        if ! runner_service_matches "${service_name}"; then
+            echo "ERROR: active runner service has an unexpected user or executable" >&2
+            exit 1
+        fi
         if [[ "$(stat -c '%U:%G' "${RUNNER_HOME}")" != "root:${CI_PRIMARY_GROUP}" ]] ||
             [[ ! -f "${RUNNER_HOME}/.env" ]] ||
             ! grep -Fx "${env_entry}" "${RUNNER_HOME}/.env" >/dev/null ||
@@ -135,12 +139,10 @@ if [[ "${DRY_RUN}" != 1 && -f "${RUNNER_HOME}/.runner" ]]; then
         echo "ERROR: offline runner has an unexpected registration name" >&2
         exit 1
     fi
-    chown -R "${CI_USER}:${CI_PRIMARY_GROUP}" "${RUNNER_HOME}"
-    runuser -u "${CI_USER}" -- "${RUNNER_HOME}/config.sh" remove \
-        --token "${registration_token}"
 fi
 
-run find "${RUNNER_HOME}" -mindepth 1 -maxdepth 1 ! -name _work -exec rm -rf -- '{}' +
+run find "${RUNNER_HOME}" -mindepth 1 -maxdepth 1 \
+    ! -name _work ! -name _diag -exec rm -rf -- '{}' +
 run tar -xzf "${asset_path}" -C "${RUNNER_HOME}"
 run chown -R "${CI_USER}:${CI_PRIMARY_GROUP}" "${RUNNER_HOME}"
 
@@ -167,9 +169,29 @@ else
     install -o root -g "${CI_PRIMARY_GROUP}" -m 0440 "${env_stage}" "${RUNNER_HOME}/.env"
     rm -f "${env_stage}"
 fi
-run chown -R "root:${CI_PRIMARY_GROUP}" "${RUNNER_HOME}"
+run chown "root:${CI_PRIMARY_GROUP}" "${RUNNER_HOME}"
+run find "${RUNNER_HOME}" -mindepth 1 -maxdepth 1 \
+    ! -name _work ! -name _diag \
+    -exec chown -R "root:${CI_PRIMARY_GROUP}" '{}' +
+run chown -R "${CI_USER}:${CI_PRIMARY_GROUP}" \
+    "${RUNNER_HOME}/_work" "${RUNNER_HOME}/_diag"
 seal_runner_modes
 run install -d -o "${CI_USER}" -g "${CI_PRIMARY_GROUP}" -m 0750 \
     "${RUNNER_HOME}/_work" "${RUNNER_HOME}/_diag"
 run "${RUNNER_HOME}/svc.sh" install "${CI_USER}"
+if [[ "${DRY_RUN}" == 1 ]]; then
+    service_name=actions.runner.LingquLab-TileXR.blue-tilexr-npu8.service
+    run env LC_ALL=C LANG=C systemctl show \
+        --property=User --property=ExecStart -- "${service_name}"
+else
+    [[ -f "${RUNNER_HOME}/.service" && ! -L "${RUNNER_HOME}/.service" ]] || {
+        echo "ERROR: runner service identity file is missing or unsafe" >&2
+        exit 1
+    }
+    service_name="$(< "${RUNNER_HOME}/.service")"
+    if ! runner_service_matches "${service_name}"; then
+        echo "ERROR: installed runner service has an unexpected user or executable" >&2
+        exit 1
+    fi
+fi
 run "${RUNNER_HOME}/svc.sh" start

@@ -28,6 +28,9 @@ if [[ "${DRY_RUN}" == 1 ]]; then
     run readlink -f "${control_current}"
     run test -x "${hook}"
     run grep -Fx "${env_entry}" "${RUNNER_HOME}/.env"
+    run env LC_ALL=C LANG=C systemctl show \
+        --property=User --property=ExecStart -- \
+        actions.runner.LingquLab-TileXR.blue-tilexr-npu8.service
     run systemctl is-active actions.runner.LingquLab-TileXR.blue-tilexr-npu8.service
     run df -h / /home
     run python3 "${CONTROL_HOME}/npu_state.py"
@@ -154,6 +157,10 @@ fi
 service_name="$(< "${RUNNER_HOME}/.service")"
 [[ "${service_name}" =~ ^actions\.runner\.[A-Za-z0-9_.-]+\.service$ ]] || {
     echo "ERROR: runner service name is invalid" >&2
+    exit 1
+}
+runner_service_matches "${service_name}" || {
+    echo "ERROR: runner service has an unexpected user or executable" >&2
     exit 1
 }
 systemctl is-active --quiet -- "${service_name}" || {
