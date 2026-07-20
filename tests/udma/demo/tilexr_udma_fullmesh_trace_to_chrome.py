@@ -223,7 +223,8 @@ def main():
     args = parser.parse_args()
     trace = build_chrome_trace([read_rank_trace(path) for path in args.inputs])
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(json.dumps(trace, separators=(",", ":")), encoding="utf-8")
+    with args.output.open("w", encoding="utf-8") as stream:
+        json.dump(trace, stream, separators=(",", ":"))
     print(f"wrote {args.output} events={len(trace['traceEvents'])}")
 
 

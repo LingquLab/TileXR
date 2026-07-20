@@ -5,6 +5,7 @@ import struct
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "demo" / "tilexr_udma_fullmesh_trace_to_chrome.py"
@@ -118,6 +119,19 @@ class FullmeshTraceConverterTest(unittest.TestCase):
             path.write_bytes(data)
             with self.assertRaisesRegex(ValueError, "incomplete"):
                 MODULE.build_chrome_trace([MODULE.read_rank_trace(path)])
+
+    def test_main_streams_json_output(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "rank3.bin"
+            output = Path(directory) / "trace.json"
+            self.make_trace(source)
+
+            with mock.patch.object(MODULE.json, "dumps", side_effect=AssertionError("no bulk JSON")):
+                with mock.patch("sys.argv", ["converter", str(source), "--output", str(output)]):
+                    MODULE.main()
+
+            parsed = json.loads(output.read_text(encoding="utf-8"))
+            self.assertTrue(parsed["traceEvents"])
 
 
 if __name__ == "__main__":
