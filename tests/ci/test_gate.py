@@ -2936,6 +2936,246 @@ class FinalManifestTests(unittest.TestCase):
                 config.artifacts, "step summary alias"
             )
 
+    def test_second_step_summary_alias_retarget_is_neutralized(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory).resolve()
+            real_outer = root / "real-outer"
+            real_outer.mkdir()
+            visible_outer = root / "visible-outer"
+            visible_outer.symlink_to(real_outer.name, target_is_directory=True)
+            target_a = root / "target-a"
+            parent_a = target_a / "commands"
+            parent_a.mkdir(parents=True)
+            summary_a = parent_a / "github-step-summary.md"
+            summary_a.touch()
+            inner = real_outer / "inner"
+            inner.symlink_to("../" + target_a.name, target_is_directory=True)
+            target_b = root / "target-b"
+            parent_b = target_b / "commands"
+            parent_b.mkdir(parents=True)
+            summary_b = parent_b / summary_a.name
+            summary_b.write_text("sentinel\n", encoding="utf-8")
+            visible_summary = visible_outer / "inner" / "commands" / summary_a.name
+            config = gate.Config(
+                root / "source", root / "artifacts", "merge", "LingquLab/TileXR", 42
+            )
+
+            def orchestrate_after_inner_swap(controller_config, **kwargs):
+                inner.unlink()
+                inner.symlink_to(target_b, target_is_directory=True)
+                self.passing_orchestration(controller_config, **kwargs)
+
+            def collect(script, collector_config, env, **kwargs):
+                write_test_manifest(collector_config.artifacts)
+
+            with mock.patch.object(
+                gate, "orchestrate", side_effect=orchestrate_after_inner_swap
+            ), mock.patch.object(gate, "verify_final_cleanup"), mock.patch.object(
+                gate, "invoke_collector", side_effect=collect
+            ), mock.patch.object(
+                gate.sys, "stderr", io.StringIO()
+            ):
+                result = gate._run_controller_body(
+                    config,
+                    {
+                        "TILEXR_CI_GITHUB_TOKEN": "token",
+                        "GITHUB_STEP_SUMMARY": str(visible_summary),
+                    },
+                    root / "trusted",
+                    gate.CancellationState(),
+                )
+
+            self.assertEqual(23, result)
+            self.assertTrue(visible_outer.is_symlink())
+            self.assertFalse(os.path.lexists(str(inner)))
+            self.assertEqual("sentinel\n", summary_b.read_text(encoding="utf-8"))
+            self.assertEqual("", summary_a.read_text(encoding="utf-8"))
+            self.assert_minimal_recovered_upload(
+                config.artifacts, "step summary alias"
+            )
+
+    def test_second_step_summary_alias_retarget_after_terminal_write_is_rolled_back(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory).resolve()
+            real_outer = root / "real-outer"
+            real_outer.mkdir()
+            visible_outer = root / "visible-outer"
+            visible_outer.symlink_to(real_outer, target_is_directory=True)
+            target_a = root / "target-a"
+            parent_a = target_a / "commands"
+            parent_a.mkdir(parents=True)
+            summary_a = parent_a / "github-step-summary.md"
+            summary_a.touch()
+            inner = real_outer / "inner"
+            inner.symlink_to(target_a, target_is_directory=True)
+            target_b = root / "target-b"
+            parent_b = target_b / "commands"
+            parent_b.mkdir(parents=True)
+            summary_b = parent_b / summary_a.name
+            summary_b.write_text("sentinel\n", encoding="utf-8")
+            visible_summary = visible_outer / "inner" / "commands" / summary_a.name
+            config = gate.Config(
+                root / "source", root / "artifacts", "merge", "LingquLab/TileXR", 42
+            )
+            original_append_text = gate._append_authoritative_step_text
+            private_appends = []
+
+            def collect(script, collector_config, env, **kwargs):
+                write_test_manifest(collector_config.artifacts)
+
+            def append_terminal_then_retarget(path, text, boundary=None):
+                result = original_append_text(path, text, boundary)
+                private_appends.append(True)
+                inner.unlink()
+                inner.symlink_to(target_b, target_is_directory=True)
+                return result
+
+            public_append = mock.Mock(
+                side_effect=gate.InfrastructureFailure("forced public append failure")
+            )
+            with mock.patch.object(
+                gate, "orchestrate", side_effect=self.passing_orchestration
+            ), mock.patch.object(gate, "verify_final_cleanup"), mock.patch.object(
+                gate, "invoke_collector", side_effect=collect
+            ), mock.patch.object(
+                gate, "append_authoritative_step_summary", public_append
+            ), mock.patch.object(
+                gate,
+                "_append_authoritative_step_text",
+                side_effect=append_terminal_then_retarget,
+            ), mock.patch.object(
+                gate.sys, "stderr", io.StringIO()
+            ):
+                result = gate._run_controller_body(
+                    config,
+                    {
+                        "TILEXR_CI_GITHUB_TOKEN": "token",
+                        "GITHUB_STEP_SUMMARY": str(visible_summary),
+                    },
+                    root / "trusted",
+                    gate.CancellationState(),
+                )
+
+            self.assertEqual(23, result)
+            self.assertEqual(2, public_append.call_count)
+            self.assertEqual([True], private_appends)
+            self.assertTrue(visible_outer.is_symlink())
+            self.assertFalse(os.path.lexists(str(inner)))
+            self.assertEqual("sentinel\n", summary_b.read_text(encoding="utf-8"))
+            self.assertEqual("", summary_a.read_text(encoding="utf-8"))
+            self.assert_minimal_recovered_upload(
+                config.artifacts, "step summary alias"
+            )
+
+    def test_step_summary_alias_loop_is_rejected_before_orchestration(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory).resolve()
+            first = root / "first"
+            second = root / "second"
+            first.symlink_to(second, target_is_directory=True)
+            second.symlink_to(first, target_is_directory=True)
+            config = gate.Config(
+                root / "source", root / "artifacts", "merge", "LingquLab/TileXR", 42
+            )
+            orchestrate = mock.Mock(side_effect=self.passing_orchestration)
+
+            with mock.patch.object(gate, "orchestrate", orchestrate), mock.patch.object(
+                gate, "verify_final_cleanup"
+            ), mock.patch.object(gate.sys, "stderr", io.StringIO()):
+                result = gate._run_controller_body(
+                    config,
+                    {
+                        "TILEXR_CI_GITHUB_TOKEN": "token",
+                        "GITHUB_STEP_SUMMARY": str(
+                            first / "commands" / "github-step-summary.md"
+                        ),
+                    },
+                    root / "trusted",
+                    gate.CancellationState(),
+                )
+
+            self.assertEqual(23, result)
+            orchestrate.assert_not_called()
+
+    def test_step_summary_alias_depth_is_bounded_before_orchestration(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory).resolve()
+            target = root / "target"
+            parent = target / "commands"
+            parent.mkdir(parents=True)
+            summary = parent / "github-step-summary.md"
+            summary.touch()
+            aliases = [root / ("alias-%02d" % index) for index in range(33)]
+            for alias, next_alias in zip(aliases, aliases[1:]):
+                alias.symlink_to(next_alias.name, target_is_directory=True)
+            aliases[-1].symlink_to(target.name, target_is_directory=True)
+            config = gate.Config(
+                root / "source", root / "artifacts", "merge", "LingquLab/TileXR", 42
+            )
+            orchestrate = mock.Mock(side_effect=self.passing_orchestration)
+
+            with mock.patch.object(gate, "orchestrate", orchestrate), mock.patch.object(
+                gate, "verify_final_cleanup"
+            ), mock.patch.object(gate.sys, "stderr", io.StringIO()):
+                result = gate._run_controller_body(
+                    config,
+                    {
+                        "TILEXR_CI_GITHUB_TOKEN": "token",
+                        "GITHUB_STEP_SUMMARY": str(
+                            aliases[0] / "commands" / summary.name
+                        ),
+                    },
+                    root / "trusted",
+                    gate.CancellationState(),
+                )
+
+            self.assertEqual(23, result)
+            orchestrate.assert_not_called()
+            self.assertEqual("", summary.read_text(encoding="utf-8"))
+
+    def test_step_summary_alias_expansion_component_count_is_bounded(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory).resolve()
+            expanded_target = root.joinpath(
+                *(
+                    "d"
+                    for _ in range(
+                        gate.MAX_STEP_SUMMARY_RESOLVED_COMPONENTS + 1
+                    )
+                )
+            )
+            parent = expanded_target / "commands"
+            parent.mkdir(parents=True)
+            summary = parent / "github-step-summary.md"
+            summary.touch()
+            alias = root / "expanded"
+            alias.symlink_to(expanded_target, target_is_directory=True)
+            config = gate.Config(
+                root / "source", root / "artifacts", "merge", "LingquLab/TileXR", 42
+            )
+            orchestrate = mock.Mock(side_effect=self.passing_orchestration)
+
+            with mock.patch.object(gate, "orchestrate", orchestrate), mock.patch.object(
+                gate, "verify_final_cleanup"
+            ), mock.patch.object(gate.sys, "stderr", io.StringIO()):
+                result = gate._run_controller_body(
+                    config,
+                    {
+                        "TILEXR_CI_GITHUB_TOKEN": "token",
+                        "GITHUB_STEP_SUMMARY": str(
+                            alias / "commands" / summary.name
+                        ),
+                    },
+                    root / "trusted",
+                    gate.CancellationState(),
+                )
+
+            self.assertEqual(23, result)
+            orchestrate.assert_not_called()
+            self.assertEqual("", summary.read_text(encoding="utf-8"))
+
     def test_step_summary_chain_is_pinned_before_orchestration(self):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory).resolve()

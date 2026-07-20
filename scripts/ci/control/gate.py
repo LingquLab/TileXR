@@ -42,6 +42,8 @@ MAX_STEP_SUMMARY_APPEND_BYTES = 128 * 1024
 MAX_STEP_SUMMARY_FILE_BYTES = 1024 * 1024
 MAX_STEP_SUMMARY_PATH_BYTES = 4096
 MAX_STEP_SUMMARY_PATH_COMPONENTS = 128
+MAX_STEP_SUMMARY_RESOLVED_COMPONENTS = 256
+MAX_STEP_SUMMARY_SYMLINK_DEPTH = 32
 LOCK_PATH = pathlib.Path("/home/tilexr-ci/locks/npu8.lock")
 CONTROL_DIR = pathlib.Path(__file__).resolve().parent
 
@@ -138,32 +140,42 @@ class StepSummaryDirectoryBinding:
 
 
 @dataclasses.dataclass(frozen=True)
-class StepSummarySymlinkBinding:
+class StepSummaryLexicalBinding:
     name: str
+    parent_descriptor: int
+    descriptor: int
     device: int
     inode: int
-    target: str
+    symlink_target: Optional[str] = None
+
+    @property
+    def is_symlink(self) -> bool:
+        return self.symlink_target is not None
 
 
 @dataclasses.dataclass
 class StepSummaryAliasBoundary:
-    directories: Tuple[StepSummaryDirectoryBinding, ...]
-    symlink: StepSummarySymlinkBinding
+    root_descriptor: int
+    root_device: int
+    root_inode: int
+    bindings: Tuple[StepSummaryLexicalBinding, ...]
     closed: bool = False
-
-    @property
-    def parent_descriptor(self) -> int:
-        return self.directories[-1].descriptor
 
     def close(self) -> None:
         if self.closed:
             return
         self.closed = True
-        for binding in reversed(self.directories):
+        for binding in reversed(self.bindings):
+            if binding.descriptor < 0:
+                continue
             try:
                 os.close(binding.descriptor)
             except OSError:
                 pass
+        try:
+            os.close(self.root_descriptor)
+        except OSError:
+            pass
 
     def __del__(self):
         self.close()
@@ -1451,43 +1463,73 @@ def _first_changed_step_summary_directory(
 def _first_changed_step_summary_alias(
     alias_boundary: StepSummaryAliasBoundary,
 ):
-    changed = _first_changed_step_summary_directories(
-        alias_boundary.directories
-    )
-    if changed is not None:
-        return changed
+    try:
+        root_status = os.fstat(alias_boundary.root_descriptor)
+    except OSError as error:
+        raise _unsafe_step_summary_path_failure(
+            "could not verify pinned GitHub step summary lexical root: %s" % error
+        ) from error
+    if not stat.S_ISDIR(root_status.st_mode) or (
+        root_status.st_dev,
+        root_status.st_ino,
+    ) != (alias_boundary.root_device, alias_boundary.root_inode):
+        raise _unsafe_step_summary_path_failure(
+            "pinned GitHub step summary lexical root changed"
+        )
 
-    link = alias_boundary.symlink
-    try:
-        visible_status = os.stat(
-            link.name,
-            dir_fd=alias_boundary.parent_descriptor,
-            follow_symlinks=False,
-        )
-    except FileNotFoundError:
-        return len(alias_boundary.directories), None
-    except OSError as error:
-        raise _unsafe_step_summary_path_failure(
-            "could not verify GitHub step summary alias binding: %s" % error
-        ) from error
-    if not stat.S_ISLNK(visible_status.st_mode) or (
-        visible_status.st_dev,
-        visible_status.st_ino,
-    ) != (link.device, link.inode):
-        return len(alias_boundary.directories), visible_status
-    try:
-        visible_target = os.readlink(
-            link.name,
-            dir_fd=alias_boundary.parent_descriptor,
-        )
-    except FileNotFoundError:
-        return len(alias_boundary.directories), None
-    except OSError as error:
-        raise _unsafe_step_summary_path_failure(
-            "could not read GitHub step summary alias binding: %s" % error
-        ) from error
-    if visible_target != link.target:
-        return len(alias_boundary.directories), visible_status
+    for index, binding in enumerate(alias_boundary.bindings):
+        try:
+            visible_status = os.stat(
+                binding.name,
+                dir_fd=binding.parent_descriptor,
+                follow_symlinks=False,
+            )
+        except FileNotFoundError:
+            return index, None
+        except OSError as error:
+            raise _unsafe_step_summary_path_failure(
+                "could not verify GitHub step summary lexical binding: %s"
+                % error
+            ) from error
+        if (visible_status.st_dev, visible_status.st_ino) != (
+            binding.device,
+            binding.inode,
+        ):
+            return index, visible_status
+        if binding.is_symlink:
+            if not stat.S_ISLNK(visible_status.st_mode):
+                return index, visible_status
+            try:
+                visible_target = os.readlink(
+                    binding.name,
+                    dir_fd=binding.parent_descriptor,
+                )
+            except FileNotFoundError:
+                return index, None
+            except OSError as error:
+                raise _unsafe_step_summary_path_failure(
+                    "could not read GitHub step summary lexical binding: %s"
+                    % error
+                ) from error
+            if visible_target != binding.symlink_target:
+                return index, visible_status
+            continue
+        if not stat.S_ISDIR(visible_status.st_mode):
+            return index, visible_status
+        try:
+            opened_status = os.fstat(binding.descriptor)
+        except OSError as error:
+            raise _unsafe_step_summary_path_failure(
+                "could not verify pinned GitHub step summary lexical directory: %s"
+                % error
+            ) from error
+        if not stat.S_ISDIR(opened_status.st_mode) or (
+            opened_status.st_dev,
+            opened_status.st_ino,
+        ) != (binding.device, binding.inode):
+            raise _unsafe_step_summary_path_failure(
+                "pinned GitHub step summary lexical directory changed"
+            )
     return None
 
 
@@ -1523,30 +1565,42 @@ def _prepare_step_summary_alias(
             raise _unsafe_step_summary_path_failure(
                 "GitHub step summary lexical root is not a directory"
             )
-        bindings.append(
-            StepSummaryDirectoryBinding(
-                name=os.path.sep,
-                descriptor=root_descriptor,
-                device=root_status.st_dev,
-                inode=root_status.st_ino,
-            )
-        )
+        directory_stack = [root_descriptor]
+        pending_components = list(directory_components)
+        resolved_components = 0
+        symlink_depth = 0
+        expanded_path_bytes = len(os.fsencode(os.fspath(path)))
+        followed_symlinks = set()
 
-        for component in directory_components:
-            parent_binding = bindings[-1]
+        while pending_components:
+            component = pending_components.pop(0)
+            resolved_components += 1
+            if resolved_components > MAX_STEP_SUMMARY_RESOLVED_COMPONENTS:
+                raise _unsafe_step_summary_path_failure(
+                    "GitHub step summary resolution exceeds the %d-component bound"
+                    % MAX_STEP_SUMMARY_RESOLVED_COMPONENTS
+                )
+            if component in ("", os.curdir):
+                continue
+            if component == os.pardir:
+                if len(directory_stack) > 1:
+                    directory_stack.pop()
+                continue
+
+            parent_descriptor = directory_stack[-1]
             visible_status = os.stat(
                 component,
-                dir_fd=parent_binding.descriptor,
+                dir_fd=parent_descriptor,
                 follow_symlinks=False,
             )
             if stat.S_ISLNK(visible_status.st_mode):
                 target = os.readlink(
                     component,
-                    dir_fd=parent_binding.descriptor,
+                    dir_fd=parent_descriptor,
                 )
                 confirmed_status = os.stat(
                     component,
-                    dir_fd=parent_binding.descriptor,
+                    dir_fd=parent_descriptor,
                     follow_symlinks=False,
                 )
                 if not stat.S_ISLNK(confirmed_status.st_mode) or (
@@ -1556,17 +1610,50 @@ def _prepare_step_summary_alias(
                     raise _unsafe_step_summary_path_failure(
                         "GitHub step summary alias changed during preparation"
                     )
-                alias_boundary = StepSummaryAliasBoundary(
-                    directories=tuple(bindings),
-                    symlink=StepSummarySymlinkBinding(
+                symlink_identity = (
+                    confirmed_status.st_dev,
+                    confirmed_status.st_ino,
+                )
+                if symlink_identity in followed_symlinks:
+                    raise _unsafe_step_summary_path_failure(
+                        "GitHub step summary alias loop detected"
+                    )
+                followed_symlinks.add(symlink_identity)
+                symlink_depth += 1
+                if symlink_depth > MAX_STEP_SUMMARY_SYMLINK_DEPTH:
+                    raise _unsafe_step_summary_path_failure(
+                        "GitHub step summary exceeds the %d-symlink bound"
+                        % MAX_STEP_SUMMARY_SYMLINK_DEPTH
+                    )
+                try:
+                    expanded_path_bytes += len(os.fsencode(target))
+                except (TypeError, UnicodeError) as error:
+                    raise _unsafe_step_summary_path_failure(
+                        "could not encode GitHub step summary alias target: %s"
+                        % error
+                    ) from error
+                if expanded_path_bytes > MAX_STEP_SUMMARY_PATH_BYTES:
+                    raise _unsafe_step_summary_path_failure(
+                        "GitHub step summary alias expansion exceeds the %d-byte bound"
+                        % MAX_STEP_SUMMARY_PATH_BYTES
+                    )
+                bindings.append(
+                    StepSummaryLexicalBinding(
                         name=component,
+                        parent_descriptor=parent_descriptor,
+                        descriptor=-1,
                         device=confirmed_status.st_dev,
                         inode=confirmed_status.st_ino,
-                        target=target,
-                    ),
+                        symlink_target=target,
+                    )
                 )
-                _verify_step_summary_alias(alias_boundary)
-                return alias_boundary
+                target_path = pathlib.PurePosixPath(target)
+                target_components = list(target_path.parts)
+                if target_path.is_absolute():
+                    directory_stack = [root_descriptor]
+                    target_components = target_components[1:]
+                pending_components = target_components + pending_components
+                continue
             if not stat.S_ISDIR(visible_status.st_mode):
                 raise _unsafe_step_summary_path_failure(
                     "GitHub step summary lexical component is not a directory"
@@ -1574,7 +1661,7 @@ def _prepare_step_summary_alias(
             descriptor = os.open(
                 component,
                 flags,
-                dir_fd=parent_binding.descriptor,
+                dir_fd=parent_descriptor,
             )
             opened_descriptors.append(descriptor)
             opened_status = os.fstat(descriptor)
@@ -1586,20 +1673,47 @@ def _prepare_step_summary_alias(
                     "GitHub step summary lexical directory changed during preparation"
                 )
             bindings.append(
-                StepSummaryDirectoryBinding(
+                StepSummaryLexicalBinding(
                     name=component,
+                    parent_descriptor=parent_descriptor,
                     descriptor=descriptor,
                     device=opened_status.st_dev,
                     inode=opened_status.st_ino,
                 )
             )
+            directory_stack.append(descriptor)
 
-        for descriptor in reversed(opened_descriptors):
+        if not followed_symlinks:
+            for descriptor in reversed(opened_descriptors):
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+            return None
+        last_symlink_index = max(
+            index for index, binding in enumerate(bindings) if binding.is_symlink
+        )
+        retained_bindings = bindings[: last_symlink_index + 1]
+        retained_descriptors = {
+            binding.descriptor
+            for binding in retained_bindings
+            if binding.descriptor >= 0
+        }
+        for descriptor in reversed(opened_descriptors[1:]):
+            if descriptor in retained_descriptors:
+                continue
             try:
                 os.close(descriptor)
             except OSError:
                 pass
-        return None
+        alias_boundary = StepSummaryAliasBoundary(
+            root_descriptor=root_descriptor,
+            root_device=root_status.st_dev,
+            root_inode=root_status.st_ino,
+            bindings=tuple(retained_bindings),
+        )
+        _verify_step_summary_alias(alias_boundary)
+        return alias_boundary
     except OSError as error:
         failure = _unsafe_step_summary_path_failure(
             "could not pin GitHub step summary lexical alias: %s" % error
@@ -2259,20 +2373,18 @@ def _neutralize_step_summary_alias(
             changed_index, visible_status = changed
             if visible_status is None:
                 return
-            if changed_index < len(alias_boundary.directories):
-                container = alias_boundary.directories[changed_index - 1]
-                entry_name = alias_boundary.directories[changed_index].name
-            else:
-                container = alias_boundary.directories[-1]
-                entry_name = alias_boundary.symlink.name
+            changed_binding = alias_boundary.bindings[changed_index]
             if stat.S_ISDIR(visible_status.st_mode):
                 _quarantine_step_summary_entry(
-                    container.descriptor,
-                    entry_name,
+                    changed_binding.parent_descriptor,
+                    changed_binding.name,
                     ".tilexr-step-summary-alias-quarantine-",
                 )
             else:
-                os.unlink(entry_name, dir_fd=container.descriptor)
+                os.unlink(
+                    changed_binding.name,
+                    dir_fd=changed_binding.parent_descriptor,
+                )
             if _step_summary_alias_is_inactive(alias_boundary):
                 return
             errors.append(
