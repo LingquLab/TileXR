@@ -8,7 +8,7 @@ one stable set of QP, jetty, CKE, XN, channel, and registered-memory resources.
 Validation first runs one submission and then ten consecutive submissions with
 the same prepared resources.
 
-The hardware target is `141.61.49.192` on NPU devices `4,5,6,7`. Each rank owns
+The hardware target is `141.61.50.31` on NPU devices `4,5,6,7`. Each rank owns
 an 8 MiB send buffer and an 8 MiB receive buffer. Each peer chunk is 2 MiB.
 
 ## Collective Semantics
@@ -171,16 +171,15 @@ Every loop must report zero mismatches.
 
 ## Deployment And Cleanup
 
-Use Mutagen as the preferred source synchronization mechanism. First determine
-whether the installed Mutagen version supports an explicit SSH identity without
-the disabled Windows `ssh-agent`. If it does not, record that incompatibility
-and use the previously approved `scp -i` fallback for only the changed files.
+Use Mutagen as the preferred source synchronization mechanism and reuse the
+existing passwordless SSH configuration for `141.61.50.31`. Do not install a
+new key or modify the remote `authorized_keys` file. Confirm the remote account
+and repository path before creating a sync session or transferring files. If
+the installed Mutagen version cannot use the existing SSH configuration, record
+that incompatibility and use `scp` for only the changed files.
 
-A temporary root SSH key may be installed for validation. After successful or
-aborted validation, remove only its uniquely tagged remote authorized-key entry
-and delete its local private key, public key, askpass helper, and any temporary
-SSH wrapper or configuration. Do not modify unrelated untracked files or stop
-unrelated remote workloads.
+Do not modify unrelated untracked files, SSH configuration, or remote
+authentication state, and do not stop unrelated remote workloads.
 
 ## Non-Goals
 
