@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import contextlib
+import errno
 import io
 import json
 import os
@@ -58,6 +59,11 @@ def actual_artifact_rows(artifacts):
             continue
         rows.append((relative, path.stat().st_size))
     return sorted(rows)
+
+
+def run_controller_body(*args, **kwargs):
+    kwargs.setdefault("token", "token")
+    return gate._run_controller_body(*args, **kwargs)
 
 
 class MergeVerificationTests(unittest.TestCase):
@@ -147,6 +153,121 @@ class ChildEnvironmentTests(unittest.TestCase):
         self.assertEqual(phase["TILEXR_CI_SOURCE_DIR"], "/source")
         self.assertEqual(phase["TILEXR_CI_ARTIFACT_DIR"], "/artifacts")
         self.assertEqual(phase["TILEXR_CANN_HOME"], "/home/tilexr-ci/toolchains/cann/9.1.0")
+
+
+class CredentialHandoffTests(unittest.TestCase):
+    def argv(self):
+        return [
+            "--source", "/source",
+            "--artifacts", "/artifacts",
+            "--expected-merge-sha", "merge",
+            "--repository", "LingquLab/TileXR",
+            "--pr-number", "42",
+            "--github-token-fd", "3",
+        ]
+
+    def test_config_requires_private_github_token_fd(self):
+        config = gate.parse_config(self.argv())
+
+        self.assertEqual(config.github_token_fd, 3)
+
+    def test_token_fd_is_bounded_and_closed_after_dumpability_is_disabled(self):
+        events = []
+        chunks = iter((b"read-token\n", b""))
+
+        def read(descriptor, size):
+            events.append(("read", descriptor, size))
+            self.assertLessEqual(size, gate.MAX_GITHUB_TOKEN_BYTES + 1)
+            return next(chunks)
+
+        token = gate.read_github_token_fd(
+            3,
+            disable_dumpability=lambda: events.append(("dumpable", 0)),
+            read=read,
+            close=lambda descriptor: events.append(("close", descriptor)),
+        )
+
+        self.assertEqual(token, "read-token")
+        self.assertEqual(events[0], ("dumpable", 0))
+        self.assertEqual(events[-1], ("close", 3))
+
+    def test_oversized_token_fd_is_rejected_and_closed(self):
+        close = mock.Mock()
+        with self.assertRaises(gate.InfrastructureFailure):
+            gate.read_github_token_fd(
+                7,
+                disable_dumpability=lambda: None,
+                read=lambda descriptor, size: b"x" * size,
+                close=close,
+            )
+
+        close.assert_called_once_with(7)
+
+    def test_prctl_failure_fails_closed_before_reading_token(self):
+        read = mock.Mock()
+        close = mock.Mock()
+        prctl = mock.Mock(return_value=-1)
+
+        def disable():
+            gate.disable_process_dumpability(
+                platform="linux",
+                prctl=prctl,
+                get_errno=lambda: errno.EPERM,
+            )
+
+        with self.assertRaises(gate.InfrastructureFailure):
+            gate.read_github_token_fd(
+                3,
+                disable_dumpability=disable,
+                read=read,
+                close=close,
+            )
+
+        read.assert_not_called()
+        close.assert_called_once_with(3)
+        prctl.assert_called_once_with(gate.PR_SET_DUMPABLE, 0, 0, 0, 0)
+
+    def test_non_linux_controller_fails_closed(self):
+        with self.assertRaises(gate.InfrastructureFailure):
+            gate.disable_process_dumpability(
+                platform="darwin", prctl=lambda *args: 0
+            )
+
+    def test_controller_keeps_fd_token_out_of_its_environment(self):
+        config = gate.Config(
+            pathlib.Path("/source"), pathlib.Path("/artifacts"), "merge",
+            "LingquLab/TileXR", 42, 3,
+        )
+        body = mock.Mock(return_value=0)
+
+        with mock.patch.object(gate, "_run_controller_body", body):
+            result = gate.run_controller(
+                config,
+                token="read-token",
+                environ={"PATH": "/usr/bin:/bin"},
+                control_dir=pathlib.Path("/trusted"),
+            )
+
+        self.assertEqual(result, 0)
+        controller_environ = body.call_args.args[1]
+        self.assertNotIn("GITHUB_TOKEN", controller_environ)
+        self.assertNotIn("TILEXR_CI_GITHUB_TOKEN", controller_environ)
+        self.assertNotIn("read-token", controller_environ.values())
+        self.assertEqual(body.call_args.kwargs["token"], "read-token")
+
+    def test_main_rejects_token_environment_without_reading_fd(self):
+        for name in ("GITHUB_TOKEN", "TILEXR_CI_GITHUB_TOKEN"):
+            read_token = mock.Mock(return_value="read-token")
+            with self.subTest(name=name), \
+                 mock.patch.object(gate.sys, "stderr", io.StringIO()):
+                result = gate.main(
+                    self.argv(),
+                    environ={name: "legacy-token"},
+                    read_token=read_token,
+                )
+
+            self.assertEqual(result, 23)
+            read_token.assert_not_called()
 
 
 class FakeProcess:
@@ -993,10 +1114,9 @@ class CancellationTests(unittest.TestCase):
                  mock.patch.object(
                      gate, "append_authoritative_step_summary", side_effect=append
                  ):
-                result = gate._run_controller_body(
+                result = run_controller_body(
                     config,
                     {
-                        "TILEXR_CI_GITHUB_TOKEN": "token",
                         "GITHUB_STEP_SUMMARY": str(step_summary),
                     },
                     root / "trusted",
@@ -1028,9 +1148,9 @@ class CancellationTests(unittest.TestCase):
             ), mock.patch.object(gate, "verify_final_cleanup"), mock.patch.object(
                 gate, "invoke_collector", side_effect=collect
             ):
-                result = gate._run_controller_body(
+                result = run_controller_body(
                     config,
-                    {"TILEXR_CI_GITHUB_TOKEN": "token"},
+                    {},
                     root / "trusted",
                     gate.CancellationState(),
                 )
@@ -1913,9 +2033,9 @@ class FinalManifestTests(unittest.TestCase):
             ), mock.patch.object(gate, "verify_final_cleanup"), mock.patch.object(
                 gate, "invoke_collector", side_effect=collect
             ):
-                result = gate._run_controller_body(
+                result = run_controller_body(
                     config,
-                    {"TILEXR_CI_GITHUB_TOKEN": "token"},
+                    {},
                     root / "trusted",
                     gate.CancellationState(),
                 )
@@ -1948,9 +2068,9 @@ class FinalManifestTests(unittest.TestCase):
             ), mock.patch.object(gate, "verify_final_cleanup"), mock.patch.object(
                 gate, "invoke_collector", side_effect=collect
             ):
-                result = gate._run_controller_body(
+                result = run_controller_body(
                     config,
-                    {"TILEXR_CI_GITHUB_TOKEN": "token"},
+                    {},
                     root / "trusted",
                     gate.CancellationState(),
                 )
@@ -1981,9 +2101,9 @@ class FinalManifestTests(unittest.TestCase):
             ), mock.patch.object(gate, "verify_final_cleanup"), mock.patch.object(
                 gate, "invoke_collector", side_effect=collect
             ):
-                result = gate._run_controller_body(
+                result = run_controller_body(
                     config,
-                    {"TILEXR_CI_GITHUB_TOKEN": "token"},
+                    {},
                     root / "trusted",
                     gate.CancellationState(),
                 )
@@ -2015,9 +2135,9 @@ class FinalManifestTests(unittest.TestCase):
             ), mock.patch.object(gate, "verify_final_cleanup"), mock.patch.object(
                 gate, "invoke_collector", side_effect=fail_after_collection
             ):
-                result = gate._run_controller_body(
+                result = run_controller_body(
                     config,
-                    {"TILEXR_CI_GITHUB_TOKEN": "token"},
+                    {},
                     root / "trusted",
                     gate.CancellationState(),
                 )
@@ -2048,9 +2168,9 @@ class FinalManifestTests(unittest.TestCase):
             ), mock.patch.object(gate, "verify_final_cleanup"), mock.patch.object(
                 gate, "invoke_collector", side_effect=cancel_after_collection
             ):
-                result = gate._run_controller_body(
+                result = run_controller_body(
                     config,
-                    {"TILEXR_CI_GITHUB_TOKEN": "token"},
+                    {},
                     root / "trusted",
                     cancellation,
                 )
@@ -2087,9 +2207,9 @@ class FinalManifestTests(unittest.TestCase):
             ), mock.patch.object(
                 gate, "refresh_final_manifest", side_effect=cancel_during_refresh
             ):
-                result = gate._run_controller_body(
+                result = run_controller_body(
                     config,
-                    {"TILEXR_CI_GITHUB_TOKEN": "token"},
+                    {},
                     root / "trusted",
                     cancellation,
                 )
@@ -2128,9 +2248,9 @@ class FinalManifestTests(unittest.TestCase):
             ), mock.patch.object(
                 gate, "refresh_final_manifest", side_effect=cancel_during_refresh
             ):
-                result = gate._run_controller_body(
+                result = run_controller_body(
                     config,
-                    {"TILEXR_CI_GITHUB_TOKEN": "token"},
+                    {},
                     root / "trusted",
                     cancellation,
                 )
@@ -2169,9 +2289,9 @@ class FinalManifestTests(unittest.TestCase):
             ), mock.patch.object(
                 gate, "refresh_final_manifest", side_effect=cancel_after_refresh
             ):
-                result = gate._run_controller_body(
+                result = run_controller_body(
                     config,
-                    {"TILEXR_CI_GITHUB_TOKEN": "token"},
+                    {},
                     root / "trusted",
                     cancellation,
                 )
@@ -2211,9 +2331,9 @@ class FinalManifestTests(unittest.TestCase):
             ), mock.patch.object(gate, "verify_final_cleanup"), mock.patch.object(
                 gate, "invoke_collector", side_effect=collect
             ):
-                result = gate._run_controller_body(
+                result = run_controller_body(
                     config,
-                    {"TILEXR_CI_GITHUB_TOKEN": "token"},
+                    {},
                     root / "trusted",
                     cancellation,
                 )
@@ -2250,9 +2370,9 @@ class FinalManifestTests(unittest.TestCase):
             ), mock.patch.object(
                 gate, "refresh_final_manifest", side_effect=transient_refresh
             ):
-                result = gate._run_controller_body(
+                result = run_controller_body(
                     config,
-                    {"TILEXR_CI_GITHUB_TOKEN": "token"},
+                    {},
                     root / "trusted",
                     gate.CancellationState(),
                 )
@@ -2286,9 +2406,9 @@ class FinalManifestTests(unittest.TestCase):
             ), mock.patch.object(gate, "verify_final_cleanup"), mock.patch.object(
                 gate, "invoke_collector", side_effect=collect
             ), mock.patch.object(gate, "refresh_final_manifest", refresh):
-                result = gate._run_controller_body(
+                result = run_controller_body(
                     config,
-                    {"TILEXR_CI_GITHUB_TOKEN": "token"},
+                    {},
                     root / "trusted",
                     gate.CancellationState(),
                 )
@@ -2319,10 +2439,9 @@ class FinalManifestTests(unittest.TestCase):
             ), mock.patch.object(gate, "verify_final_cleanup"), mock.patch.object(
                 gate, "invoke_collector", side_effect=collect
             ), mock.patch.object(gate, "refresh_final_manifest", refresh):
-                result = gate._run_controller_body(
+                result = run_controller_body(
                     config,
                     {
-                        "TILEXR_CI_GITHUB_TOKEN": "token",
                         "GITHUB_STEP_SUMMARY": str(step_summary),
                     },
                     root / "trusted",
@@ -2362,10 +2481,9 @@ class FinalManifestTests(unittest.TestCase):
             ), mock.patch.object(
                 gate.sys, "stderr", io.StringIO()
             ):
-                result = gate._run_controller_body(
+                result = run_controller_body(
                     config,
                     {
-                        "TILEXR_CI_GITHUB_TOKEN": "token",
                         "GITHUB_STEP_SUMMARY": str(step_summary),
                     },
                     root / "trusted",
@@ -2399,10 +2517,9 @@ class FinalManifestTests(unittest.TestCase):
             ), mock.patch.object(
                 gate.sys, "stderr", io.StringIO()
             ):
-                result = gate._run_controller_body(
+                result = run_controller_body(
                     config,
                     {
-                        "TILEXR_CI_GITHUB_TOKEN": "token",
                         "GITHUB_STEP_SUMMARY": str(step_summary),
                     },
                     root / "trusted",
@@ -2445,10 +2562,9 @@ class FinalManifestTests(unittest.TestCase):
             ), mock.patch.object(
                 gate.sys, "stderr", io.StringIO()
             ):
-                result = gate._run_controller_body(
+                result = run_controller_body(
                     config,
                     {
-                        "TILEXR_CI_GITHUB_TOKEN": "token",
                         "GITHUB_STEP_SUMMARY": str(step_summary),
                     },
                     root / "trusted",
@@ -2492,10 +2608,9 @@ class FinalManifestTests(unittest.TestCase):
             ), mock.patch.object(
                 gate.sys, "stderr", io.StringIO()
             ):
-                result = gate._run_controller_body(
+                result = run_controller_body(
                     config,
                     {
-                        "TILEXR_CI_GITHUB_TOKEN": "token",
                         "GITHUB_STEP_SUMMARY": str(step_summary),
                     },
                     root / "trusted",
@@ -2544,10 +2659,9 @@ class FinalManifestTests(unittest.TestCase):
             ), mock.patch.object(
                 gate.sys, "stderr", io.StringIO()
             ):
-                result = gate._run_controller_body(
+                result = run_controller_body(
                     config,
                     {
-                        "TILEXR_CI_GITHUB_TOKEN": "token",
                         "GITHUB_STEP_SUMMARY": str(step_summary),
                     },
                     root / "trusted",
@@ -2597,10 +2711,9 @@ class FinalManifestTests(unittest.TestCase):
             ), mock.patch.object(
                 gate.sys, "stderr", io.StringIO()
             ):
-                result = gate._run_controller_body(
+                result = run_controller_body(
                     config,
                     {
-                        "TILEXR_CI_GITHUB_TOKEN": "token",
                         "GITHUB_STEP_SUMMARY": str(step_summary),
                     },
                     root / "trusted",
@@ -2667,10 +2780,9 @@ class FinalManifestTests(unittest.TestCase):
             ), mock.patch.object(
                 gate.sys, "stderr", io.StringIO()
             ):
-                result = gate._run_controller_body(
+                result = run_controller_body(
                     config,
                     {
-                        "TILEXR_CI_GITHUB_TOKEN": "token",
                         "GITHUB_STEP_SUMMARY": str(step_summary),
                     },
                     root / "trusted",
@@ -2727,10 +2839,9 @@ class FinalManifestTests(unittest.TestCase):
             ), mock.patch.object(
                 gate.sys, "stderr", io.StringIO()
             ):
-                result = gate._run_controller_body(
+                result = run_controller_body(
                     config,
                     {
-                        "TILEXR_CI_GITHUB_TOKEN": "token",
                         "GITHUB_STEP_SUMMARY": str(visible_summary),
                     },
                     root / "trusted",
@@ -2783,10 +2894,9 @@ class FinalManifestTests(unittest.TestCase):
             ), mock.patch.object(
                 gate.sys, "stderr", io.StringIO()
             ):
-                result = gate._run_controller_body(
+                result = run_controller_body(
                     config,
                     {
-                        "TILEXR_CI_GITHUB_TOKEN": "token",
                         "GITHUB_STEP_SUMMARY": str(visible_summary),
                     },
                     root / "trusted",
@@ -2846,10 +2956,9 @@ class FinalManifestTests(unittest.TestCase):
             ), mock.patch.object(
                 gate.sys, "stderr", io.StringIO()
             ):
-                result = gate._run_controller_body(
+                result = run_controller_body(
                     config,
                     {
-                        "TILEXR_CI_GITHUB_TOKEN": "token",
                         "GITHUB_STEP_SUMMARY": str(visible_summary),
                     },
                     root / "trusted",
@@ -2916,10 +3025,9 @@ class FinalManifestTests(unittest.TestCase):
             ), mock.patch.object(
                 gate.sys, "stderr", io.StringIO()
             ):
-                result = gate._run_controller_body(
+                result = run_controller_body(
                     config,
                     {
-                        "TILEXR_CI_GITHUB_TOKEN": "token",
                         "GITHUB_STEP_SUMMARY": str(visible_summary),
                     },
                     root / "trusted",
@@ -2975,10 +3083,9 @@ class FinalManifestTests(unittest.TestCase):
             ), mock.patch.object(
                 gate.sys, "stderr", io.StringIO()
             ):
-                result = gate._run_controller_body(
+                result = run_controller_body(
                     config,
                     {
-                        "TILEXR_CI_GITHUB_TOKEN": "token",
                         "GITHUB_STEP_SUMMARY": str(visible_summary),
                     },
                     root / "trusted",
@@ -3048,10 +3155,9 @@ class FinalManifestTests(unittest.TestCase):
             ), mock.patch.object(
                 gate.sys, "stderr", io.StringIO()
             ):
-                result = gate._run_controller_body(
+                result = run_controller_body(
                     config,
                     {
-                        "TILEXR_CI_GITHUB_TOKEN": "token",
                         "GITHUB_STEP_SUMMARY": str(visible_summary),
                     },
                     root / "trusted",
@@ -3084,10 +3190,9 @@ class FinalManifestTests(unittest.TestCase):
             with mock.patch.object(gate, "orchestrate", orchestrate), mock.patch.object(
                 gate, "verify_final_cleanup"
             ), mock.patch.object(gate.sys, "stderr", io.StringIO()):
-                result = gate._run_controller_body(
+                result = run_controller_body(
                     config,
                     {
-                        "TILEXR_CI_GITHUB_TOKEN": "token",
                         "GITHUB_STEP_SUMMARY": str(
                             first / "commands" / "github-step-summary.md"
                         ),
@@ -3119,10 +3224,9 @@ class FinalManifestTests(unittest.TestCase):
             with mock.patch.object(gate, "orchestrate", orchestrate), mock.patch.object(
                 gate, "verify_final_cleanup"
             ), mock.patch.object(gate.sys, "stderr", io.StringIO()):
-                result = gate._run_controller_body(
+                result = run_controller_body(
                     config,
                     {
-                        "TILEXR_CI_GITHUB_TOKEN": "token",
                         "GITHUB_STEP_SUMMARY": str(
                             aliases[0] / "commands" / summary.name
                         ),
@@ -3160,10 +3264,9 @@ class FinalManifestTests(unittest.TestCase):
             with mock.patch.object(gate, "orchestrate", orchestrate), mock.patch.object(
                 gate, "verify_final_cleanup"
             ), mock.patch.object(gate.sys, "stderr", io.StringIO()):
-                result = gate._run_controller_body(
+                result = run_controller_body(
                     config,
                     {
-                        "TILEXR_CI_GITHUB_TOKEN": "token",
                         "GITHUB_STEP_SUMMARY": str(
                             alias / "commands" / summary.name
                         ),
@@ -3209,10 +3312,9 @@ class FinalManifestTests(unittest.TestCase):
             ), mock.patch.object(
                 gate.sys, "stderr", io.StringIO()
             ):
-                result = gate._run_controller_body(
+                result = run_controller_body(
                     config,
                     {
-                        "TILEXR_CI_GITHUB_TOKEN": "token",
                         "GITHUB_STEP_SUMMARY": str(step_summary),
                     },
                     root / "trusted",
@@ -3277,10 +3379,9 @@ class FinalManifestTests(unittest.TestCase):
             ), mock.patch.object(
                 gate.sys, "stderr", io.StringIO()
             ):
-                result = gate._run_controller_body(
+                result = run_controller_body(
                     config,
                     {
-                        "TILEXR_CI_GITHUB_TOKEN": "token",
                         "GITHUB_STEP_SUMMARY": str(step_summary),
                     },
                     root / "trusted",
@@ -3333,10 +3434,9 @@ class FinalManifestTests(unittest.TestCase):
             ), mock.patch.object(
                 gate.sys, "stderr", io.StringIO()
             ):
-                result = gate._run_controller_body(
+                result = run_controller_body(
                     config,
                     {
-                        "TILEXR_CI_GITHUB_TOKEN": "token",
                         "GITHUB_STEP_SUMMARY": str(step_summary),
                     },
                     root / "trusted",
@@ -3410,10 +3510,9 @@ class FinalManifestTests(unittest.TestCase):
             ), mock.patch.object(
                 gate.sys, "stderr", io.StringIO()
             ):
-                result = gate._run_controller_body(
+                result = run_controller_body(
                     config,
                     {
-                        "TILEXR_CI_GITHUB_TOKEN": "token",
                         "GITHUB_STEP_SUMMARY": str(step_summary),
                     },
                     root / "trusted",
@@ -3459,10 +3558,9 @@ class FinalManifestTests(unittest.TestCase):
                 "append_authoritative_step_summary",
                 side_effect=cancel_after_append,
             ):
-                result = gate._run_controller_body(
+                result = run_controller_body(
                     config,
                     {
-                        "TILEXR_CI_GITHUB_TOKEN": "token",
                         "GITHUB_STEP_SUMMARY": str(step_summary),
                     },
                     root / "trusted",
@@ -3514,10 +3612,9 @@ class FinalManifestTests(unittest.TestCase):
             ), mock.patch.object(
                 gate.sys, "stderr", io.StringIO()
             ):
-                result = gate._run_controller_body(
+                result = run_controller_body(
                     config,
                     {
-                        "TILEXR_CI_GITHUB_TOKEN": "token",
                         "GITHUB_STEP_SUMMARY": str(step_summary),
                     },
                     root / "trusted",
@@ -3564,10 +3661,9 @@ class FinalManifestTests(unittest.TestCase):
                 "append_authoritative_step_summary",
                 side_effect=fail_correction,
             ):
-                result = gate._run_controller_body(
+                result = run_controller_body(
                     config,
                     {
-                        "TILEXR_CI_GITHUB_TOKEN": "token",
                         "GITHUB_STEP_SUMMARY": str(step_summary),
                     },
                     root / "trusted",
@@ -3631,10 +3727,9 @@ class FinalManifestTests(unittest.TestCase):
             ), mock.patch.object(
                 gate.sys, "stderr", io.StringIO()
             ):
-                result = gate._run_controller_body(
+                result = run_controller_body(
                     config,
                     {
-                        "TILEXR_CI_GITHUB_TOKEN": "token",
                         "GITHUB_STEP_SUMMARY": str(step_summary),
                     },
                     root / "trusted",
@@ -3676,10 +3771,9 @@ class FinalManifestTests(unittest.TestCase):
             ), mock.patch.object(
                 gate.sys, "stderr", io.StringIO()
             ):
-                result = gate._run_controller_body(
+                result = run_controller_body(
                     config,
                     {
-                        "TILEXR_CI_GITHUB_TOKEN": "token",
                         "GITHUB_STEP_SUMMARY": str(step_summary),
                     },
                     root / "trusted",
@@ -3728,10 +3822,9 @@ class FinalManifestTests(unittest.TestCase):
             ), mock.patch.object(
                 gate.sys, "stderr", io.StringIO()
             ):
-                result = gate._run_controller_body(
+                result = run_controller_body(
                     config,
                     {
-                        "TILEXR_CI_GITHUB_TOKEN": "token",
                         "GITHUB_STEP_SUMMARY": str(step_summary),
                     },
                     root / "trusted",
@@ -3779,10 +3872,9 @@ class FinalManifestTests(unittest.TestCase):
             ), mock.patch.object(
                 gate.sys, "stderr", io.StringIO()
             ):
-                result = gate._run_controller_body(
+                result = run_controller_body(
                     config,
                     {
-                        "TILEXR_CI_GITHUB_TOKEN": "token",
                         "GITHUB_STEP_SUMMARY": str(step_summary),
                     },
                     root / "trusted",
@@ -3819,9 +3911,9 @@ class FinalManifestTests(unittest.TestCase):
             ), mock.patch.object(gate, "verify_final_cleanup"), mock.patch.object(
                 gate, "invoke_collector", side_effect=collect
             ), mock.patch.object(gate, "write_summary", side_effect=transient_write):
-                result = gate._run_controller_body(
+                result = run_controller_body(
                     config,
-                    {"TILEXR_CI_GITHUB_TOKEN": "token"},
+                    {},
                     root / "trusted",
                     gate.CancellationState(),
                 )
@@ -3857,9 +3949,9 @@ class FinalManifestTests(unittest.TestCase):
             ), mock.patch.object(
                 gate, "write_summary", side_effect=persistent_final_write
             ):
-                result = gate._run_controller_body(
+                result = run_controller_body(
                     config,
-                    {"TILEXR_CI_GITHUB_TOKEN": "token"},
+                    {},
                     root / "trusted",
                     gate.CancellationState(),
                 )
@@ -4116,9 +4208,9 @@ class CleanupTests(unittest.TestCase):
                  ), mock.patch.object(
                      gate, "invoke_collector", side_effect=collect
                  ):
-                result = gate._run_controller_body(
+                result = run_controller_body(
                     config,
-                    {"TILEXR_CI_GITHUB_TOKEN": "token"},
+                    {},
                     root / "trusted",
                     gate.CancellationState(),
                 )
@@ -4378,9 +4470,9 @@ class CliValidationTests(unittest.TestCase):
             with mock.patch.object(
                 gate, "orchestrate", side_effect=gate.CodeFailure("tests failed")
             ), mock.patch.object(gate, "verify_final_cleanup"):
-                result = gate._run_controller_body(
+                result = run_controller_body(
                     config,
-                    {"TILEXR_CI_GITHUB_TOKEN": "token"},
+                    {},
                     root / "trusted-without-collector",
                     gate.CancellationState(),
                 )

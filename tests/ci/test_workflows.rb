@@ -109,6 +109,33 @@ identity_keys.each do |key|
   assert(npu_env.key?("TILEXR_CI_#{key}"),
          "NPU summary is missing #{key} identity input")
 end
+assert_equal("${{ github.token }}", npu_env.fetch("GITHUB_TOKEN"),
+             "NPU token handoff input differs")
+assert(!npu_env.key?("TILEXR_CI_GITHUB_TOKEN"),
+       "legacy controller token environment is forbidden")
+
+gate_run = named_step(npu, "hardware", "Run trusted gate").fetch("run")
+handoff_markers = [
+  'github_token="${GITHUB_TOKEN}"',
+  "export -n github_token",
+  "unset GITHUB_TOKEN",
+  "python3 /home/tilexr-ci/control/current/gate.py",
+  "--github-token-fd 3",
+  '3<<<"${github_token}" &',
+  'controller_pid=$!',
+  "github_token=\nunset github_token",
+  'wait "${controller_pid}"',
+]
+positions = handoff_markers.map do |marker|
+  position = gate_run.index(marker)
+  assert(position, "NPU token handoff is missing #{marker.inspect}")
+  position
+end
+assert_equal(positions.sort, positions, "NPU token handoff ordering differs")
+assert(!gate_run.include?("TILEXR_CI_GITHUB_TOKEN"),
+       "controller command must not use the legacy token environment")
+assert(!gate_run.match?(/--github-token(?:\s|=)/),
+       "controller command must not pass the token in argv")
 
 summary = named_step(pr, "pr_gate", "Summarize gate")
 assert_equal(%w[PR_NUMBER HEAD_SHA BASE_SHA MERGE_SHA],

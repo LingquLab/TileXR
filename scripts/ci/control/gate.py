@@ -44,6 +44,8 @@ MAX_STEP_SUMMARY_PATH_BYTES = 4096
 MAX_STEP_SUMMARY_PATH_COMPONENTS = 128
 MAX_STEP_SUMMARY_RESOLVED_COMPONENTS = 256
 MAX_STEP_SUMMARY_SYMLINK_DEPTH = 32
+MAX_GITHUB_TOKEN_BYTES = 4096
+PR_SET_DUMPABLE = 4
 LOCK_PATH = pathlib.Path("/home/tilexr-ci/locks/npu8.lock")
 CONTROL_DIR = pathlib.Path(__file__).resolve().parent
 
@@ -94,6 +96,7 @@ class Config:
     expected_merge_sha: str
     repository: str
     pr_number: int
+    github_token_fd: Optional[int] = None
 
 
 @dataclasses.dataclass
@@ -258,7 +261,10 @@ def parse_config(argv=None) -> Config:
     parser.add_argument("--expected-merge-sha", required=True)
     parser.add_argument("--repository", required=True)
     parser.add_argument("--pr-number", type=int, required=True)
+    parser.add_argument("--github-token-fd", type=int, required=True)
     args = parser.parse_args(argv)
+    if args.github_token_fd < 3:
+        raise InfrastructureFailure("GitHub token FD must be at least 3")
     return validate_config(
         Config(
             source=args.source.resolve(),
@@ -266,8 +272,100 @@ def parse_config(argv=None) -> Config:
             expected_merge_sha=args.expected_merge_sha,
             repository=args.repository,
             pr_number=args.pr_number,
+            github_token_fd=args.github_token_fd,
         )
     )
+
+
+def disable_process_dumpability(
+    *,
+    platform: Optional[str] = None,
+    prctl: Optional[Callable] = None,
+    get_errno: Callable[[], int] = ctypes.get_errno,
+) -> None:
+    platform = sys.platform if platform is None else platform
+    if not platform.startswith("linux"):
+        raise InfrastructureFailure("the trusted controller requires Linux")
+    try:
+        if prctl is None:
+            libc = ctypes.CDLL(None, use_errno=True)
+            prctl = libc.prctl
+            prctl.argtypes = [
+                ctypes.c_int,
+                ctypes.c_ulong,
+                ctypes.c_ulong,
+                ctypes.c_ulong,
+                ctypes.c_ulong,
+            ]
+            prctl.restype = ctypes.c_int
+        result = prctl(PR_SET_DUMPABLE, 0, 0, 0, 0)
+    except (AttributeError, OSError, TypeError, ValueError) as error:
+        raise InfrastructureFailure(
+            "could not disable controller process dumpability: %s" % error
+        ) from error
+    if result != 0:
+        error_number = get_errno()
+        detail = os.strerror(error_number) if error_number else "unknown error"
+        raise InfrastructureFailure(
+            "could not disable controller process dumpability: %s" % detail
+        )
+
+
+def read_github_token_fd(
+    descriptor: int,
+    *,
+    disable_dumpability: Callable[[], None] = disable_process_dumpability,
+    read: Callable[[int, int], bytes] = os.read,
+    close: Callable[[int], None] = os.close,
+) -> str:
+    if not isinstance(descriptor, int) or descriptor < 3:
+        raise InfrastructureFailure("GitHub token FD must be at least 3")
+    payload = bytearray()
+    try:
+        disable_dumpability()
+        while len(payload) <= MAX_GITHUB_TOKEN_BYTES:
+            try:
+                chunk = read(
+                    descriptor,
+                    MAX_GITHUB_TOKEN_BYTES + 1 - len(payload),
+                )
+            except OSError as error:
+                raise InfrastructureFailure(
+                    "could not read GitHub token FD: %s" % error
+                ) from error
+            if not isinstance(chunk, bytes):
+                raise InfrastructureFailure("GitHub token FD returned non-byte data")
+            if not chunk:
+                break
+            payload.extend(chunk)
+            if len(payload) > MAX_GITHUB_TOKEN_BYTES:
+                raise InfrastructureFailure("GitHub token FD exceeds the size limit")
+    finally:
+        try:
+            close(descriptor)
+        except OSError as error:
+            raise InfrastructureFailure(
+                "could not close GitHub token FD: %s" % error
+            ) from error
+
+    if payload.endswith(b"\n"):
+        del payload[-1]
+    if not payload:
+        raise InfrastructureFailure("GitHub token FD is empty")
+    if b"\n" in payload or b"\r" in payload:
+        raise InfrastructureFailure("GitHub token FD contains an invalid line break")
+    try:
+        return bytes(payload).decode("ascii")
+    except UnicodeDecodeError as error:
+        raise InfrastructureFailure("GitHub token FD is not ASCII") from error
+
+
+def reject_token_environment(environ: Mapping[str, str]) -> None:
+    forbidden = ("GITHUB_TOKEN", "TILEXR_CI_GITHUB_TOKEN")
+    if any(key in environ for key in forbidden):
+        raise InfrastructureFailure(
+            "GitHub token environment is forbidden; use --github-token-fd"
+        )
 
 
 def _run_git_head(source: str) -> str:
@@ -983,7 +1081,7 @@ def fetch_current_merge_sha(
     urlopen: Callable = urllib.request.urlopen,
 ) -> str:
     if not token:
-        raise InfrastructureFailure("TILEXR_CI_GITHUB_TOKEN is required")
+        raise InfrastructureFailure("GitHub token is required")
     url = "https://api.github.com/repos/%s/pulls/%d" % (EXPECTED_REPOSITORY, pr_number)
     request = urllib.request.Request(
         url,
@@ -3268,6 +3366,7 @@ def _run_controller_body(
     control_dir: pathlib.Path,
     cancellation: CancellationState,
     *,
+    token: str,
     now: Callable[[], float] = time.monotonic,
 ) -> int:
     step_summary = _prepare_controller_step_summary(environ)
@@ -3278,6 +3377,7 @@ def _run_controller_body(
             control_dir,
             cancellation,
             step_summary,
+            token=token,
             now=now,
         )
     finally:
@@ -3291,9 +3391,9 @@ def _run_prepared_controller_body(
     cancellation: CancellationState,
     step_summary: ControllerStepSummaryPreparation,
     *,
+    token: str,
     now: Callable[[], float] = time.monotonic,
 ) -> int:
-    token = environ.get("TILEXR_CI_GITHUB_TOKEN", "")
     step_path = step_summary.path
     step_summary_boundary = step_summary.boundary
     step_summary_preparation_failure = step_summary.failure
@@ -3309,7 +3409,7 @@ def _run_prepared_controller_body(
         if step_summary_preparation_failure is not None:
             raise step_summary_preparation_failure
         if not token:
-            raise InfrastructureFailure("TILEXR_CI_GITHUB_TOKEN is required")
+            raise InfrastructureFailure("GitHub token FD is empty")
         orchestrate(
             config,
             control_dir=control_dir,
@@ -3804,21 +3904,39 @@ def _run_prepared_controller_body(
     return 0 if failure is None else exit_code_for(failure)
 
 
-def run_controller(config: Config, *, environ=None, control_dir: pathlib.Path = CONTROL_DIR) -> int:
+def run_controller(
+    config: Config,
+    *,
+    token: str,
+    environ=None,
+    control_dir: pathlib.Path = CONTROL_DIR,
+) -> int:
     copied_environ = dict(os.environ if environ is None else environ)
+    reject_token_environment(copied_environ)
     cancellation = CancellationState()
     with _signal_cancellation(cancellation):
-        return _run_controller_body(config, copied_environ, control_dir, cancellation)
+        return _run_controller_body(
+            config,
+            copied_environ,
+            control_dir,
+            cancellation,
+            token=token,
+        )
 
 
-def main(argv=None) -> int:
+def main(argv=None, *, environ=None, read_token: Callable[[int], str] = read_github_token_fd) -> int:
+    copied_environ = dict(os.environ if environ is None else environ)
     try:
         config = parse_config(argv)
+        reject_token_environment(copied_environ)
+        if config.github_token_fd is None:
+            raise InfrastructureFailure("GitHub token FD is required")
+        token = read_token(config.github_token_fd)
     except BaseException as error:
         failure = _as_gate_failure(error)
         print(str(failure), file=sys.stderr)
         return exit_code_for(failure)
-    return run_controller(config)
+    return run_controller(config, token=token, environ=copied_environ)
 
 
 if __name__ == "__main__":
