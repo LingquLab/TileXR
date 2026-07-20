@@ -25,6 +25,7 @@
 #include "tilexr_types.h"
 #include "tilexr_udma_allreduce_layout.h"
 #include "tilexr_udma_alltoall_group_layout.h"
+#include "tilexr_udma_alltoall_group_trace.h"
 #include "tilexr_udma_alltoall_layout.h"
 #include "tilexr_udma_fullmesh_trace.h"
 
@@ -55,7 +56,8 @@ extern void launch_tilexr_udma_all_to_all_group(
     int32_t elementsPerPeer, int32_t chunkElements,
     uint32_t passCount, uint32_t groupCount,
     uint64_t payloadOffset0, uint64_t payloadOffset1,
-    uint64_t signalOffset0, uint64_t signalOffset1);
+    uint64_t signalOffset0, uint64_t signalOffset1,
+    GM_ADDR groupTrace, uint32_t traceIteration);
 extern void launch_tilexr_udma_all_to_all_bigdata(
     uint32_t blockDim, void* stream, GM_ADDR commArgs, GM_ADDR input, GM_ADDR output,
     GM_ADDR udmaMem, GM_ADDR debug, GM_ADDR fullmeshTrace, uint32_t fullmeshTraceIteration,
@@ -233,6 +235,26 @@ bool WriteFullmeshTraceBinary(int rank, const std::string& directory, const std:
         return false;
     }
     PrintStatus(rank, "fullmesh trace output=" + path + " bytes=" + std::to_string(data.size()));
+    return true;
+}
+
+bool WriteGroupTraceBinary(int rank, const std::string& directory, const std::vector<uint8_t>& data)
+{
+    const std::string path = directory + "/tilexr_group_trace_rank_" +
+        std::to_string(rank) + ".bin";
+    std::ofstream output(path, std::ios::binary | std::ios::trunc);
+    if (!output.is_open()) {
+        std::cerr << "[rank " << rank << "] ERROR: open grouped trace output failed path="
+                  << path << std::endl;
+        return false;
+    }
+    output.write(reinterpret_cast<const char*>(data.data()), static_cast<std::streamsize>(data.size()));
+    if (!output.good()) {
+        std::cerr << "[rank " << rank << "] ERROR: write grouped trace output failed path="
+                  << path << std::endl;
+        return false;
+    }
+    PrintStatus(rank, "grouped trace output=" + path + " bytes=" + std::to_string(data.size()));
     return true;
 }
 
@@ -625,6 +647,23 @@ bool RunGroupedAllToAll(
                   << " chunkElements=" << requestedChunkElements << std::endl;
         return false;
     }
+    const int warmup = std::max(0, GetEnvInt("TILEXR_DEMO_ALLTOALL_WARMUP", 0));
+    const int repeat = std::max(1, GetEnvInt("TILEXR_DEMO_ALLTOALL_REPEAT", 1));
+    const bool traceEnabled = GetEnvInt("TILEXR_UDMA_GROUP_TRACE", 0) != 0;
+    const char* traceDirEnv = std::getenv("TILEXR_UDMA_GROUP_TRACE_DIR");
+    const std::string traceDir = traceDirEnv != nullptr && traceDirEnv[0] != '\0' ?
+        traceDirEnv : ".";
+    if (traceEnabled && !TileXR::Demo::AllToAllGroupTraceLayoutFits(
+            static_cast<uint32_t>(repeat), plan.groupCount, plan.passCount)) {
+        std::cerr << "[rank " << rank << "] ERROR: grouped trace dimensions exceed capacity"
+                  << " repeat=" << repeat
+                  << " groupCount=" << plan.groupCount
+                  << " passCount=" << plan.passCount
+                  << " requiredBytes=" << TileXR::Demo::AllToAllGroupTraceLayoutBytes(
+                      static_cast<uint32_t>(repeat), plan.groupCount, plan.passCount)
+                  << " capacityBytes=" << TileXR::Demo::kAllToAllGroupTraceBytes << std::endl;
+        return false;
+    }
 
     const size_t elementCount = static_cast<size_t>(rankSize) * elementsPerPeer;
     const size_t dataBytes = elementCount * sizeof(int32_t);
@@ -635,6 +674,8 @@ bool RunGroupedAllToAll(
     int32_t* input = nullptr;
     int32_t* output = nullptr;
     void* registeredMemory = nullptr;
+    void* groupTraceDevice = nullptr;
+    std::vector<uint8_t> hostGroupTrace;
     TileXRUDMAMemHandle handle = 0;
     bool registered = false;
     auto release = [&]() {
@@ -646,6 +687,10 @@ bool RunGroupedAllToAll(
         if (registeredMemory != nullptr) {
             aclrtFree(registeredMemory);
             registeredMemory = nullptr;
+        }
+        if (groupTraceDevice != nullptr) {
+            aclrtFree(groupTraceDevice);
+            groupTraceDevice = nullptr;
         }
         if (output != nullptr) {
             aclrtFree(output);
@@ -671,6 +716,32 @@ bool RunGroupedAllToAll(
         return false;
     }
 
+    if (traceEnabled) {
+        hostGroupTrace.assign(TileXR::Demo::kAllToAllGroupTraceBytes, 0U);
+        TileXR::Demo::AllToAllGroupTraceHeader header {};
+        header.magic = TileXR::Demo::kAllToAllGroupTraceMagic;
+        header.version = TileXR::Demo::kAllToAllGroupTraceVersion;
+        header.rank = static_cast<uint32_t>(rank);
+        header.iterationCount = static_cast<uint32_t>(repeat);
+        header.groupCount = plan.groupCount;
+        header.passCount = plan.passCount;
+        header.coreCount = TileXR::Demo::kAllToAllGroupTraceCoreCount;
+        header.phaseCount = TileXR::Demo::kAllToAllGroupTracePhaseCount;
+        header.cyclesPerUs = TileXR::Demo::kAllToAllGroupTraceCyclesPerUs;
+        header.traceBytes = TileXR::Demo::kAllToAllGroupTraceBytes;
+        header.kernelSpanOffset = TileXR::Demo::kAllToAllGroupTraceHeaderBytes;
+        header.taskSpanOffset = TileXR::Demo::AllToAllGroupTraceTaskSpanBaseOffset();
+        std::memcpy(hostGroupTrace.data(), &header, sizeof(header));
+        if (!CheckAcl(rank, "aclrtMalloc grouped trace",
+                aclrtMalloc(&groupTraceDevice, TileXR::Demo::kAllToAllGroupTraceBytes,
+                    ACL_MEM_MALLOC_HUGE_FIRST)) ||
+            !CopyHostToDevice(rank, groupTraceDevice, TileXR::Demo::kAllToAllGroupTraceBytes,
+                hostGroupTrace.data(), hostGroupTrace.size(), "grouped trace")) {
+            release();
+            return false;
+        }
+    }
+
     const int registerRet = TileXRUDMARegister(
         comm, static_cast<GM_ADDR>(registeredMemory), plan.registeredBytes, &handle);
     if (!CheckTileXR(rank, "TileXRUDMARegister grouped alltoall", registerRet)) {
@@ -681,8 +752,6 @@ bool RunGroupedAllToAll(
 
     auto debug = reinterpret_cast<int32_t*>(
         static_cast<uint8_t*>(registeredMemory) + plan.controlOffset);
-    const int warmup = std::max(0, GetEnvInt("TILEXR_DEMO_ALLTOALL_WARMUP", 0));
-    const int repeat = std::max(1, GetEnvInt("TILEXR_DEMO_ALLTOALL_REPEAT", 1));
     PrintStatus(rank, "grouped alltoall registeredBytes=" + std::to_string(plan.registeredBytes) +
         " payloadPlaneBytes=" + std::to_string(plan.payloadPlaneBytes) +
         " payloadOffset0=" + std::to_string(plan.payloadOffset[0]) +
@@ -705,7 +774,7 @@ bool RunGroupedAllToAll(
             invocationId, elementsPerPeer, plan.chunkElements,
             plan.passCount, plan.groupCount,
             plan.payloadOffset[0], plan.payloadOffset[1],
-            plan.signalOffset[0], plan.signalOffset[1]);
+            plan.signalOffset[0], plan.signalOffset[1], nullptr, 0U);
     }
     if (!CheckAcl(rank, "aclrtSynchronizeStream grouped warmup", aclrtSynchronizeStream(stream))) {
         release();
@@ -721,7 +790,8 @@ bool RunGroupedAllToAll(
             invocationId, elementsPerPeer, plan.chunkElements,
             plan.passCount, plan.groupCount,
             plan.payloadOffset[0], plan.payloadOffset[1],
-            plan.signalOffset[0], plan.signalOffset[1]);
+            plan.signalOffset[0], plan.signalOffset[1],
+            reinterpret_cast<GM_ADDR>(groupTraceDevice), static_cast<uint32_t>(iter));
     }
     if (!CheckAcl(rank, "aclrtSynchronizeStream grouped measured", aclrtSynchronizeStream(stream))) {
         release();
@@ -735,6 +805,12 @@ bool RunGroupedAllToAll(
         rank, hostOutput.data(), dataBytes, output, dataBytes, "grouped alltoall output") &&
         CopyDeviceToHost(rank, hostDebug.data(), debugBytes, debug, debugBytes,
             "grouped alltoall debug");
+    if (traceEnabled) {
+        copyOk = CopyDeviceToHost(
+            rank, hostGroupTrace.data(), hostGroupTrace.size(), groupTraceDevice,
+            TileXR::Demo::kAllToAllGroupTraceBytes, "grouped trace") &&
+            WriteGroupTraceBinary(rank, traceDir, hostGroupTrace) && copyOk;
+    }
     bool debugOk = true;
     for (uint32_t core = 0; core < kErrorCoreCount; ++core) {
         const size_t base = static_cast<size_t>(core) * kErrorWordsPerCore;
