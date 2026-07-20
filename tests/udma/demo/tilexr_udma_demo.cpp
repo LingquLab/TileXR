@@ -4,6 +4,7 @@
  */
 
 #include <algorithm>
+#include <array>
 #include <cerrno>
 #include <chrono>
 #include <cstdint>
@@ -240,9 +241,13 @@ bool WriteFullmeshTraceBinary(int rank, const std::string& directory, const std:
     return true;
 }
 
-bool WriteGroupTraceBinary(int rank, const std::string& directory, const std::vector<uint8_t>& data)
+bool WriteGroupTraceBinary(
+    int rank, const std::string& directory, const std::string& stageName,
+    const std::vector<uint8_t>& data)
 {
-    const std::string path = directory + "/tilexr_group_trace_rank_" +
+    const std::string path = stageName.empty() ?
+        directory + "/tilexr_group_trace_rank_" + std::to_string(rank) + ".bin" :
+        directory + "/tilexr_group_trace_" + stageName + "_rank_" +
         std::to_string(rank) + ".bin";
     std::ofstream output(path, std::ios::binary | std::ios::trunc);
     if (!output.is_open()) {
@@ -660,6 +665,25 @@ bool RunGroupedAllToAll(
     }
     const uint32_t copyoutWorkers = static_cast<uint32_t>(copyoutWorkersValue);
     const uint32_t groupBlockDim = TileXR::Demo::AllToAllGroupBlockDim(copyoutWorkers);
+    const int routeStagesValue = GetEnvInt(
+        "TILEXR_DEMO_ALLTOALL_GROUP_ROUTE_STAGES", 0);
+    if (routeStagesValue != 0 && routeStagesValue != 1) {
+        std::cerr << "[rank " << rank
+                  << "] ERROR: TILEXR_DEMO_ALLTOALL_GROUP_ROUTE_STAGES must be 0 or 1, got "
+                  << routeStagesValue << std::endl;
+        return false;
+    }
+    const bool routeStages = routeStagesValue == 1;
+    constexpr size_t kRouteStageCount = 3U;
+    const std::array<TileXR::Demo::AllToAllGroupRouteStage, kRouteStageCount>
+        stagedRouteStages {{
+            TileXR::Demo::AllToAllGroupRouteStage::kLocal,
+            TileXR::Demo::AllToAllGroupRouteStage::kPrimary,
+            TileXR::Demo::AllToAllGroupRouteStage::kSecondary,
+        }};
+    const std::array<const char*, kRouteStageCount> stageNames {{
+        "local", "primary", "secondary"
+    }};
     const int warmup = std::max(0, GetEnvInt("TILEXR_DEMO_ALLTOALL_WARMUP", 0));
     const int repeat = std::max(1, GetEnvInt("TILEXR_DEMO_ALLTOALL_REPEAT", 1));
     const bool traceEnabled = GetEnvInt("TILEXR_UDMA_GROUP_TRACE", 0) != 0;
@@ -687,8 +711,10 @@ bool RunGroupedAllToAll(
     int32_t* input = nullptr;
     int32_t* output = nullptr;
     void* registeredMemory = nullptr;
-    void* groupTraceDevice = nullptr;
-    std::vector<uint8_t> hostGroupTrace;
+    std::array<void*, kRouteStageCount> groupTraceDevices {{nullptr, nullptr, nullptr}};
+    std::array<std::vector<uint8_t>, kRouteStageCount> hostGroupTraces;
+    aclrtEvent stageStartEvent = nullptr;
+    aclrtEvent stageEndEvent = nullptr;
     TileXRUDMAMemHandle handle = 0;
     bool registered = false;
     auto release = [&]() {
@@ -701,9 +727,19 @@ bool RunGroupedAllToAll(
             aclrtFree(registeredMemory);
             registeredMemory = nullptr;
         }
-        if (groupTraceDevice != nullptr) {
-            aclrtFree(groupTraceDevice);
-            groupTraceDevice = nullptr;
+        if (stageEndEvent != nullptr) {
+            aclrtDestroyEvent(stageEndEvent);
+            stageEndEvent = nullptr;
+        }
+        if (stageStartEvent != nullptr) {
+            aclrtDestroyEvent(stageStartEvent);
+            stageStartEvent = nullptr;
+        }
+        for (void*& groupTraceDevice : groupTraceDevices) {
+            if (groupTraceDevice != nullptr) {
+                aclrtFree(groupTraceDevice);
+                groupTraceDevice = nullptr;
+            }
         }
         if (output != nullptr) {
             aclrtFree(output);
@@ -730,28 +766,34 @@ bool RunGroupedAllToAll(
     }
 
     if (traceEnabled) {
-        hostGroupTrace.assign(TileXR::Demo::kAllToAllGroupTraceBytes, 0U);
-        TileXR::Demo::AllToAllGroupTraceHeader header {};
-        header.magic = TileXR::Demo::kAllToAllGroupTraceMagic;
-        header.version = TileXR::Demo::kAllToAllGroupTraceVersion;
-        header.rank = static_cast<uint32_t>(rank);
-        header.iterationCount = static_cast<uint32_t>(repeat);
-        header.groupCount = plan.groupCount;
-        header.passCount = plan.passCount;
-        header.coreCount = TileXR::Demo::kAllToAllGroupTraceCoreCount;
-        header.phaseCount = TileXR::Demo::kAllToAllGroupTracePhaseCount;
-        header.cyclesPerUs = TileXR::Demo::kAllToAllGroupTraceCyclesPerUs;
-        header.traceBytes = TileXR::Demo::kAllToAllGroupTraceBytes;
-        header.kernelSpanOffset = TileXR::Demo::kAllToAllGroupTraceHeaderBytes;
-        header.taskSpanOffset = TileXR::Demo::AllToAllGroupTraceTaskSpanBaseOffset();
-        std::memcpy(hostGroupTrace.data(), &header, sizeof(header));
-        if (!CheckAcl(rank, "aclrtMalloc grouped trace",
-                aclrtMalloc(&groupTraceDevice, TileXR::Demo::kAllToAllGroupTraceBytes,
-                    ACL_MEM_MALLOC_HUGE_FIRST)) ||
-            !CopyHostToDevice(rank, groupTraceDevice, TileXR::Demo::kAllToAllGroupTraceBytes,
-                hostGroupTrace.data(), hostGroupTrace.size(), "grouped trace")) {
-            release();
-            return false;
+        const size_t traceCount = routeStages ? kRouteStageCount : 1U;
+        for (size_t traceIndex = 0U; traceIndex < traceCount; ++traceIndex) {
+            auto& hostGroupTrace = hostGroupTraces[traceIndex];
+            hostGroupTrace.assign(TileXR::Demo::kAllToAllGroupTraceBytes, 0U);
+            TileXR::Demo::AllToAllGroupTraceHeader header {};
+            header.magic = TileXR::Demo::kAllToAllGroupTraceMagic;
+            header.version = TileXR::Demo::kAllToAllGroupTraceVersion;
+            header.rank = static_cast<uint32_t>(rank);
+            header.iterationCount = static_cast<uint32_t>(repeat);
+            header.groupCount = plan.groupCount;
+            header.passCount = plan.passCount;
+            header.coreCount = TileXR::Demo::kAllToAllGroupTraceCoreCount;
+            header.phaseCount = TileXR::Demo::kAllToAllGroupTracePhaseCount;
+            header.cyclesPerUs = TileXR::Demo::kAllToAllGroupTraceCyclesPerUs;
+            header.traceBytes = TileXR::Demo::kAllToAllGroupTraceBytes;
+            header.kernelSpanOffset = TileXR::Demo::kAllToAllGroupTraceHeaderBytes;
+            header.taskSpanOffset = TileXR::Demo::AllToAllGroupTraceTaskSpanBaseOffset();
+            std::memcpy(hostGroupTrace.data(), &header, sizeof(header));
+            if (!CheckAcl(rank, "aclrtMalloc grouped trace",
+                    aclrtMalloc(&groupTraceDevices[traceIndex],
+                        TileXR::Demo::kAllToAllGroupTraceBytes,
+                        ACL_MEM_MALLOC_HUGE_FIRST)) ||
+                !CopyHostToDevice(rank, groupTraceDevices[traceIndex],
+                    TileXR::Demo::kAllToAllGroupTraceBytes,
+                    hostGroupTrace.data(), hostGroupTrace.size(), "grouped trace")) {
+                release();
+                return false;
+            }
         }
     }
 
@@ -762,6 +804,15 @@ bool RunGroupedAllToAll(
         return false;
     }
     registered = true;
+
+    if (routeStages &&
+        (!CheckAcl(rank, "aclrtCreateEvent grouped stage start",
+            aclrtCreateEvent(&stageStartEvent)) ||
+         !CheckAcl(rank, "aclrtCreateEvent grouped stage end",
+            aclrtCreateEvent(&stageEndEvent)))) {
+        release();
+        return false;
+    }
 
     auto debug = reinterpret_cast<int32_t*>(
         static_cast<uint8_t*>(registeredMemory) + plan.controlOffset);
@@ -778,27 +829,12 @@ bool RunGroupedAllToAll(
     PrintStatus(rank, "grouped alltoall warmup=" + std::to_string(warmup) +
         " repeat=" + std::to_string(repeat) +
         " copyoutWorkers=" + std::to_string(copyoutWorkers) +
-        " blockDim=" + std::to_string(groupBlockDim));
+        " blockDim=" + std::to_string(groupBlockDim) +
+        " routeStages=" + std::to_string(routeStagesValue));
 
     uint32_t invocationId = 0U;
-    for (int iter = 0; iter < warmup; ++iter, ++invocationId) {
-        launch_tilexr_udma_all_to_all_group(
-            groupBlockDim, stream, commArgsDev,
-            reinterpret_cast<GM_ADDR>(input), reinterpret_cast<GM_ADDR>(output),
-            reinterpret_cast<GM_ADDR>(registeredMemory), reinterpret_cast<GM_ADDR>(debug),
-            invocationId, elementsPerPeer, plan.chunkElements,
-            plan.passCount, plan.groupCount,
-            plan.payloadOffset[0], plan.payloadOffset[1],
-            plan.signalOffset[0], plan.signalOffset[1], nullptr, 0U, copyoutWorkers,
-            static_cast<uint32_t>(TileXR::Demo::AllToAllGroupRouteStage::kCombined));
-    }
-    if (!CheckAcl(rank, "aclrtSynchronizeStream grouped warmup", aclrtSynchronizeStream(stream))) {
-        release();
-        return false;
-    }
-
-    const auto begin = std::chrono::steady_clock::now();
-    for (int iter = 0; iter < repeat; ++iter, ++invocationId) {
+    auto launchGroupStage = [&](TileXR::Demo::AllToAllGroupRouteStage routeStage,
+                                void* trace, uint32_t traceIteration) {
         launch_tilexr_udma_all_to_all_group(
             groupBlockDim, stream, commArgsDev,
             reinterpret_cast<GM_ADDR>(input), reinterpret_cast<GM_ADDR>(output),
@@ -807,15 +843,86 @@ bool RunGroupedAllToAll(
             plan.passCount, plan.groupCount,
             plan.payloadOffset[0], plan.payloadOffset[1],
             plan.signalOffset[0], plan.signalOffset[1],
-            reinterpret_cast<GM_ADDR>(groupTraceDevice), static_cast<uint32_t>(iter),
-            copyoutWorkers,
-            static_cast<uint32_t>(TileXR::Demo::AllToAllGroupRouteStage::kCombined));
+            reinterpret_cast<GM_ADDR>(trace), traceIteration, copyoutWorkers,
+            static_cast<uint32_t>(routeStage));
+    };
+
+    double totalUs = 0.0;
+    std::array<double, kRouteStageCount> stageTotalUs {{0.0, 0.0, 0.0}};
+    if (!routeStages) {
+        for (int iter = 0; iter < warmup; ++iter, ++invocationId) {
+            launchGroupStage(TileXR::Demo::AllToAllGroupRouteStage::kCombined, nullptr, 0U);
+        }
+        if (!CheckAcl(rank, "aclrtSynchronizeStream grouped warmup",
+                aclrtSynchronizeStream(stream))) {
+            release();
+            return false;
+        }
+
+        const auto begin = std::chrono::steady_clock::now();
+        for (int iter = 0; iter < repeat; ++iter, ++invocationId) {
+            launchGroupStage(TileXR::Demo::AllToAllGroupRouteStage::kCombined,
+                groupTraceDevices[0], static_cast<uint32_t>(iter));
+        }
+        if (!CheckAcl(rank, "aclrtSynchronizeStream grouped measured",
+                aclrtSynchronizeStream(stream))) {
+            release();
+            return false;
+        }
+        const auto end = std::chrono::steady_clock::now();
+        totalUs = std::chrono::duration<double, std::micro>(end - begin).count();
+    } else {
+        auto finishStage = [&](const std::string& barrierStep) -> bool {
+            return CheckAcl(rank, "aclrtSynchronizeStream " + barrierStep,
+                       aclrtSynchronizeStream(stream)) &&
+                DemoBarrierAll(rank, rankSize, barrierStep);
+        };
+
+        for (int iter = 0; iter < warmup; ++iter, ++invocationId) {
+            for (size_t stageIndex = 0U; stageIndex < kRouteStageCount; ++stageIndex) {
+                launchGroupStage(stagedRouteStages[stageIndex], nullptr, 0U);
+                const std::string barrierStep = "grouped route stage " +
+                    std::string(stageNames[stageIndex]) + " warmup=" + std::to_string(iter);
+                if (!finishStage(barrierStep)) {
+                    release();
+                    return false;
+                }
+            }
+        }
+
+        for (int iter = 0; iter < repeat; ++iter, ++invocationId) {
+            for (size_t stageIndex = 0U; stageIndex < kRouteStageCount; ++stageIndex) {
+                if (!CheckAcl(rank, "aclrtRecordEvent grouped stage start",
+                        aclrtRecordEvent(stageStartEvent, stream))) {
+                    release();
+                    return false;
+                }
+                launchGroupStage(stagedRouteStages[stageIndex],
+                    groupTraceDevices[stageIndex], static_cast<uint32_t>(iter));
+                if (!CheckAcl(rank, "aclrtRecordEvent grouped stage end",
+                        aclrtRecordEvent(stageEndEvent, stream))) {
+                    release();
+                    return false;
+                }
+                const std::string barrierStep = "grouped route stage " +
+                    std::string(stageNames[stageIndex]) + " repeat=" + std::to_string(iter);
+                if (!finishStage(barrierStep)) {
+                    release();
+                    return false;
+                }
+                float elapsedMs = 0.0F;
+                if (!CheckAcl(rank, "aclrtEventElapsedTime grouped stage",
+                        aclrtEventElapsedTime(&elapsedMs, stageStartEvent, stageEndEvent))) {
+                    release();
+                    return false;
+                }
+                stageTotalUs[stageIndex] += static_cast<double>(elapsedMs) * 1000.0;
+            }
+        }
+        for (double stageUs : stageTotalUs) {
+            totalUs += stageUs;
+        }
     }
-    if (!CheckAcl(rank, "aclrtSynchronizeStream grouped measured", aclrtSynchronizeStream(stream))) {
-        release();
-        return false;
-    }
-    const auto end = std::chrono::steady_clock::now();
 
     std::vector<int32_t> hostDebug(kErrorWordsPerCore * kErrorCoreCount, 0);
     const size_t debugBytes = hostDebug.size() * sizeof(int32_t);
@@ -824,10 +931,16 @@ bool RunGroupedAllToAll(
         CopyDeviceToHost(rank, hostDebug.data(), debugBytes, debug, debugBytes,
             "grouped alltoall debug");
     if (traceEnabled) {
-        copyOk = CopyDeviceToHost(
-            rank, hostGroupTrace.data(), hostGroupTrace.size(), groupTraceDevice,
-            TileXR::Demo::kAllToAllGroupTraceBytes, "grouped trace") &&
-            WriteGroupTraceBinary(rank, traceDir, hostGroupTrace) && copyOk;
+        const size_t traceCount = routeStages ? kRouteStageCount : 1U;
+        for (size_t traceIndex = 0U; traceIndex < traceCount; ++traceIndex) {
+            auto& hostGroupTrace = hostGroupTraces[traceIndex];
+            const std::string stageName = routeStages ? stageNames[traceIndex] : "";
+            copyOk = CopyDeviceToHost(
+                rank, hostGroupTrace.data(), hostGroupTrace.size(),
+                groupTraceDevices[traceIndex], TileXR::Demo::kAllToAllGroupTraceBytes,
+                "grouped trace " + stageName) &&
+                WriteGroupTraceBinary(rank, traceDir, stageName, hostGroupTrace) && copyOk;
+        }
     }
     bool debugOk = true;
     for (uint32_t core = 0; core < kErrorCoreCount; ++core) {
@@ -851,7 +964,6 @@ bool RunGroupedAllToAll(
                   << " observed=" << observed << std::endl;
     }
 
-    const double totalUs = std::chrono::duration<double, std::micro>(end - begin).count();
     const double perIterUs = totalUs / static_cast<double>(repeat);
     const double bandwidthGbs = static_cast<double>(dataBytes) / (perIterUs * 1.0e3);
     std::cout << "[rank " << rank << "] grouped alltoall " << repeat
@@ -859,6 +971,14 @@ bool RunGroupedAllToAll(
               << " ms perIter=" << perIterUs
               << " us payload=" << dataBytes
               << " bytes bw=" << bandwidthGbs << " GB/s" << std::endl;
+    if (routeStages) {
+        for (size_t stageIndex = 0U; stageIndex < kRouteStageCount; ++stageIndex) {
+            std::cout << "[rank " << rank << "] grouped route stage "
+                      << stageNames[stageIndex] << " mean="
+                      << stageTotalUs[stageIndex] / static_cast<double>(repeat)
+                      << " us" << std::endl;
+        }
+    }
 
     const bool valid = copyOk && debugOk &&
         ValidateAllToAllData(rank, rankSize, hostOutput, elementsPerPeer);

@@ -308,6 +308,7 @@ void TestHostStructure()
     CHECK_CONTAINS(demo, "launch_tilexr_udma_all_to_all_group");
     CHECK_CONTAINS(demo, "TILEXR_DEMO_ALLTOALL_GROUP_CHUNK_ELEMENTS");
     CHECK_CONTAINS(demo, "TILEXR_DEMO_ALLTOALL_GROUP_COPYOUT_WORKERS");
+    CHECK_CONTAINS(demo, "TILEXR_DEMO_ALLTOALL_GROUP_ROUTE_STAGES");
     CHECK_CONTAINS(demo, "AllToAllGroupValidCopyoutWorkers");
     CHECK_CONTAINS(demo, "AllToAllGroupBlockDim(copyoutWorkers)");
     CHECK_CONTAINS(demo, "grouped alltoall registeredBytes=");
@@ -316,7 +317,11 @@ void TestHostStructure()
     const size_t end = demo.find("void Cleanup(", begin);
     const std::string grouped = begin == std::string::npos ? std::string() :
         demo.substr(begin, end == std::string::npos ? std::string::npos : end - begin);
-    CHECK_NOT_CONTAINS(grouped, "DemoBarrierAll");
+    CHECK_CONTAINS(grouped, "\"local\", \"primary\", \"secondary\"");
+    CHECK_CONTAINS(grouped, "AllToAllGroupRouteStage::kCombined");
+    CHECK_CONTAINS(grouped, "aclrtEventElapsedTime");
+    CHECK_CONTAINS(grouped, "DemoBarrierAll(rank, rankSize, barrierStep)");
+    CHECK_CONTAINS(demo, "\"/tilexr_group_trace_\" + stageName + \"_rank_\"");
 }
 
 } // namespace
