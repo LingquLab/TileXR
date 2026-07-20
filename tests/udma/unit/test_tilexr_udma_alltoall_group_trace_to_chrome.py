@@ -95,6 +95,17 @@ class GroupTraceConverterTest(unittest.TestCase):
             self.assertEqual(trace["otherData"]["displayTimeUnit"], "ns")
             json.loads(json.dumps(trace))
 
+    def test_reads_suffixed_stage_trace(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "tilexr_group_trace_primary_rank_0.bin"
+            self.make_trace(path)
+
+            rank_trace = MODULE.read_rank_trace(path)
+            trace = MODULE.build_chrome_trace([rank_trace])
+
+            self.assertEqual(rank_trace["path"], str(path))
+            self.assertIn(str(path), trace["otherData"]["sources"])
+
     def test_normalizes_ranks_independently(self):
         with tempfile.TemporaryDirectory() as directory:
             first = Path(directory) / "rank0.bin"
