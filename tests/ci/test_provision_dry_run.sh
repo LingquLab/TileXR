@@ -28,7 +28,7 @@ fi
 required_output=(
     'groupadd --system tilexr-ci'
     'useradd --system --create-home --home-dir /home/tilexr-ci --shell /usr/sbin/nologin --gid tilexr-ci tilexr-ci'
-    'usermod -aG HwHiAiUser tilexr-ci'
+    'usermod --groups HwHiAiUser tilexr-ci'
     'install -d -o root -g HwHiAiUser -m 0750 /home/tilexr-ci'
     '/home/tilexr-ci/toolchains/cann/9.1.0'
     'Ascend-cann-toolkit_9.1.0_linux-aarch64.run'
@@ -48,6 +48,11 @@ for expected in "${required_output[@]}"; do
         exit 1
     fi
 done
+
+if grep -F -- 'usermod -aG ' "${output_file}" >/dev/null; then
+    echo "account provisioning must replace, not append, supplementary groups" >&2
+    exit 1
+fi
 
 groupadd_line="$(grep -nFx -- 'groupadd --system tilexr-ci ' "${output_file}" | cut -d: -f1)"
 useradd_line="$(grep -nFx -- \
@@ -192,6 +197,69 @@ assert_sudo_state 1 1 $'User tilexr-ci is not allowed to run sudo on blue.\n'
 assert_sudo_state 0 0 $'Matching Defaults entries for tilexr-ci on blue:\n    env_reset\n\nUser tilexr-ci may run the following commands on blue:\n    (ALL : ALL) ALL\n'
 assert_sudo_state 2 0 $'Matching Defaults entries for tilexr-ci on blue:\n    env_reset\n'
 assert_sudo_state 2 1 $'sudo: unable to initialize policy plugin\n'
+
+printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'case "$1" in' \
+    '    -u) printf "%s\\n" "${MOCK_ID_UID}" ;;' \
+    '    -g) printf "%s\\n" "${MOCK_ID_GID}" ;;' \
+    '    -gn) printf "%s\\n" "${MOCK_ID_PRIMARY_GROUP}" ;;' \
+    '    -nG) printf "%s\\n" "${MOCK_ID_GROUPS}" ;;' \
+    '    *) exit 93 ;;' \
+    'esac' \
+    > "${mock_bin}/id"
+chmod +x "${mock_bin}/id"
+
+printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    '[[ "$1" == group && "$2" == tilexr-ci ]] || exit 94' \
+    'printf "tilexr-ci:x:%s:\\n" "${MOCK_PRIMARY_GROUP_GID}"' \
+    > "${mock_bin}/getent"
+chmod +x "${mock_bin}/getent"
+
+assert_identity_state() {
+    local expected_state="$1"
+    local uid="$2"
+    local gid="$3"
+    local primary_group="$4"
+    local groups="$5"
+    local primary_group_gid="$6"
+    local actual_state
+    if MOCK_ID_UID="${uid}" \
+        MOCK_ID_GID="${gid}" \
+        MOCK_ID_PRIMARY_GROUP="${primary_group}" \
+        MOCK_ID_GROUPS="${groups}" \
+        MOCK_PRIMARY_GROUP_GID="${primary_group_gid}" \
+        PATH="${mock_bin}:${PATH}" \
+        ci_identity_is_bounded tilexr-ci 2>/dev/null; then
+        actual_state=0
+    else
+        actual_state=$?
+    fi
+    if [[ "${actual_state}" -ne "${expected_state}" ]]; then
+        echo "unexpected CI identity state: expected ${expected_state}, got ${actual_state}" >&2
+        exit 1
+    fi
+}
+
+assert_identity_state 0 990 991 tilexr-ci 'HwHiAiUser tilexr-ci' 991
+assert_identity_state 1 0 991 tilexr-ci 'tilexr-ci HwHiAiUser' 991
+assert_identity_state 1 990 0 tilexr-ci 'tilexr-ci HwHiAiUser' 991
+assert_identity_state 1 990 991 tilexr-ci 'tilexr-ci HwHiAiUser' 0
+assert_identity_state 1 990 991 tilexr-ci 'tilexr-ci HwHiAiUser disk lxd' 991
+assert_identity_state 1 990 991 tilexr-ci 'tilexr-ci' 991
+assert_identity_state 1 990 991 root 'root HwHiAiUser' 991
+
+if [[ "$(grep -Fc 'ci_identity_is_bounded "${CI_USER}"' \
+        "${provision_root}/account.sh")" -lt 1 ]]; then
+    echo "account.sh does not verify the converged CI identity" >&2
+    exit 1
+fi
+if ! grep -F -- 'ci_identity_is_bounded "${CI_USER}"' \
+    "${provision_root}/verify.sh" >/dev/null; then
+    echo "verify.sh does not enforce the exact CI identity" >&2
+    exit 1
+fi
 
 printf '%s\n' \
     '#!/usr/bin/env bash' \

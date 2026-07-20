@@ -46,16 +46,8 @@ IFS=: read -r _ _ _ _ _ account_home account_shell <<< "${passwd_entry}"
     echo "ERROR: ${CI_USER} has an unexpected home or shell" >&2
     exit 1
 }
-id -nG "${CI_USER}" | tr ' ' '\n' | grep -Fx "${CI_GROUP}" >/dev/null || {
-    echo "ERROR: ${CI_USER} is not a member of ${CI_GROUP}" >&2
-    exit 1
-}
-[[ "$(id -gn "${CI_USER}")" == "${CI_PRIMARY_GROUP}" ]] || {
-    echo "ERROR: ${CI_USER} has an unexpected primary group" >&2
-    exit 1
-}
-if id -nG "${CI_USER}" | tr ' ' '\n' | grep -Fx docker >/dev/null; then
-    echo "ERROR: ${CI_USER} must not be a Docker member" >&2
+if ! ci_identity_is_bounded "${CI_USER}"; then
+    echo "ERROR: ${CI_USER} has an unexpected UID, GID, or group set" >&2
     exit 1
 fi
 [[ "$(passwd -S "${CI_USER}" | awk '{print $2}')" == L ]] || {
@@ -77,19 +69,10 @@ else
     fi
 fi
 
-grep -Fx package_name=Ascend-cann-toolkit "${toolkit_info}" >/dev/null
-grep -Fx version=9.1.0 "${toolkit_info}" >/dev/null
-grep -Fx package_name=Ascend-cann-910b-ops "${ops_info}" >/dev/null
-grep -Fx version=9.1.0 "${ops_info}" >/dev/null
-if find "${CANN_HOME}" \( ! -user root -o -perm /022 \) -print -quit | grep -q .; then
-    echo "ERROR: CANN tree is not sealed root-owned and read-only to group/other" >&2
+if ! cann_tree_is_trusted; then
+    echo "ERROR: CANN tree is not the expected sealed and contained 9.1.0 toolchain" >&2
     exit 1
 fi
-bisheng="${CANN_HOME}/cann/compiler/ccec_compiler/bin/bisheng"
-[[ -x "${bisheng}" && "$(realpath "${bisheng}")" == "${CANN_HOME}"/* ]] || {
-    echo "ERROR: bisheng does not resolve from the sealed CANN tree" >&2
-    exit 1
-}
 
 total_count="$(npu-smi info -l | awk -F: '/Total Count/ {gsub(/[[:space:]]/, "", $2); print $2; exit}')"
 [[ "${total_count}" == 8 ]] || {
