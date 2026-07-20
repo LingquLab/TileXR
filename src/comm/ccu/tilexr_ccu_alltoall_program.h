@@ -73,6 +73,29 @@ struct TileXRCcuAllToAll2RankProgramSpec {
     bool emitFinish = true;
 };
 
+struct TileXRCcuAllToAllMeshPeerSpec {
+    uint32_t peerRank = 0;
+    TileXRCcuAllToAll2RankProgramSpec route;
+};
+
+struct TileXRCcuAllToAllMeshProgramSpec {
+    uint32_t rankSize = 4;
+    uint32_t localRank = 0;
+    uint64_t localSendAddr = 0;
+    uint64_t localSendToken = 0;
+    uint64_t localRecvAddr = 0;
+    uint64_t localRecvToken = 0;
+    uint64_t chunkBytes = 0;
+    uint16_t selfSourceGsa = 0;
+    uint16_t selfDestinationGsa = 0;
+    uint16_t selfSourceXn = 0;
+    uint16_t selfDestinationXn = 0;
+    uint16_t selfLengthXn = 0;
+    uint16_t selfChannelId = 0;
+    uint16_t selfCompletionCke = 0;
+    std::vector<TileXRCcuAllToAllMeshPeerSpec> peers;
+};
+
 struct TileXRCcuAllToAllProgramReport {
     uint32_t preSyncInstructionCount = 0;
     uint32_t blockCount = 0;
@@ -81,11 +104,20 @@ struct TileXRCcuAllToAllProgramReport {
     uint32_t postSyncInstructionCount = 0;
     uint32_t finishInstructionCount = 0;
     uint32_t totalInstructionCount = 0;
+    uint32_t peerCount = 0;
+    uint32_t syncResourceCount = 0;
+    uint32_t remoteBlockCount = 0;
+    uint32_t selfBlockCount = 0;
     std::string message;
 };
 
 int TileXRCcuBuildAllToAll2RankProgram(
     const TileXRCcuAllToAll2RankProgramSpec& spec,
+    std::vector<TileXRCcuInstr>* program,
+    TileXRCcuAllToAllProgramReport* report);
+
+int TileXRCcuBuildAllToAllMeshProgram(
+    const TileXRCcuAllToAllMeshProgramSpec& spec,
     std::vector<TileXRCcuInstr>* program,
     TileXRCcuAllToAllProgramReport* report);
 
