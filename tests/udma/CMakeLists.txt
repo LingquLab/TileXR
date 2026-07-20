@@ -241,6 +241,7 @@ if(BUILD_TILEXR_UDMA_DEMO)
                 -DTILEXR_UDMA_FORCE_ENABLE=1
                 ${TILEXR_UDMA_DEMO_KERNEL_INCLUDES}
                 "${CMAKE_CURRENT_SOURCE_DIR}/demo/tilexr_udma_demo_kernel.cpp"
+                "${CMAKE_CURRENT_SOURCE_DIR}/demo/tilexr_udma_alltoall_group_kernel.cpp"
                 -L${ASCEND_DRIVER_PATH}/lib64/driver
                 -L${ASCEND_HOME_PATH}/${ARCH}-linux/lib64
                 -L${ASCEND_HOME_PATH}/${ARCH}-linux/devlib
@@ -257,6 +258,8 @@ if(BUILD_TILEXR_UDMA_DEMO)
                 -o "${TILEXR_UDMA_DEMO_KERNEL_SO}"
             DEPENDS
                 "${CMAKE_CURRENT_SOURCE_DIR}/demo/tilexr_udma_demo_kernel.cpp"
+                "${CMAKE_CURRENT_SOURCE_DIR}/demo/tilexr_udma_alltoall_group_kernel.cpp"
+                "${CMAKE_CURRENT_SOURCE_DIR}/demo/tilexr_udma_alltoall_group_layout.h"
                 "${CMAKE_CURRENT_SOURCE_DIR}/demo/tilexr_udma_fullmesh_trace.h"
                 "${TILEXR_ROOT}/src/include/tilexr_udma.h"
                 "${TILEXR_ROOT}/src/include/tilexr_data_as_flag.h"
