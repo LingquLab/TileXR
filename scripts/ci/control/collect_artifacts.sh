@@ -200,7 +200,7 @@ done < "${FILES_TMP}"
     if command -v c++ >/dev/null 2>&1; then
         c++ --version 2>&1 | head -n 1 || true
     fi
-    SEALED_BISHENG="${TILEXR_CANN_HOME:-/home/tilexr-ci/toolchains/cann/9.1.0}/cann/compiler/ccec_compiler/bin/bisheng"
+    SEALED_BISHENG="${TILEXR_CANN_HOME:-/home/tilexr-ci/toolchains/cann/9.1.0}/cann/tools/bisheng_compiler/bin/bisheng"
     if [[ -x "${SEALED_BISHENG}" ]]; then
         "${SEALED_BISHENG}" -v 2>&1 | head -n 1 || true
     elif command -v bisheng >/dev/null 2>&1; then

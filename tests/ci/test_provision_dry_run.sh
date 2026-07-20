@@ -33,9 +33,11 @@ required_output=(
     '/home/tilexr-ci/toolchains/cann/9.1.0'
     'Ascend-cann-toolkit_9.1.0_linux-aarch64.run'
     'Ascend-cann-910b-ops_9.1.0_linux-aarch64.run'
+    '/home/tilexr-ci/toolchains/cann/9.1.0/cann/tools/bisheng_compiler/bin/bisheng'
     '/home/tilexr-ci/control/v1'
     '/home/tilexr-ci/control/current/job_completed.sh'
     'ACTIONS_RUNNER_HOOK_JOB_COMPLETED=/home/tilexr-ci/control/current/job_completed.sh'
+    'ACTIONS_RUNNER_INPUT_TOKEN='
     'TileXR-NPU'
     'blue-tilexr-npu8'
     'tilexr,ascend910b,npu8'
@@ -129,6 +131,35 @@ for forbidden in \
         exit 1
     fi
 done
+if grep -F -- '--token' "${output_file}" >/dev/null ||
+    grep -F -- '--token' "${provision_root}/runner.sh" >/dev/null; then
+    echo "runner registration token is still passed in process arguments" >&2
+    exit 1
+fi
+if ! grep -F -- 'run_with_runner_registration_token' \
+    "${provision_root}/runner.sh" >/dev/null; then
+    echo "runner.sh does not use the bounded token environment helper" >&2
+    exit 1
+fi
+if ! grep -F -- 'pgrep -u "${CI_USER}"' \
+    "${provision_root}/runner.sh" >/dev/null; then
+    echo "runner.sh does not reject other CI-account processes before registration" >&2
+    exit 1
+fi
+process_guard_line="$(grep -nF -- 'pgrep -u "${CI_USER}"' \
+    "${provision_root}/runner.sh" | cut -d: -f1)"
+token_export_line="$(grep -nF -- 'if run_with_runner_registration_token' \
+    "${provision_root}/runner.sh" | cut -d: -f1)"
+if [[ -z "${process_guard_line}" || -z "${token_export_line}" ||
+      "${process_guard_line}" -ge "${token_export_line}" ]]; then
+    echo "runner process isolation is not checked before token export" >&2
+    exit 1
+fi
+if ! grep -F -- 'runner service is still active before registration' \
+    "${provision_root}/runner.sh" >/dev/null; then
+    echo "runner.sh does not reject an active service before registration" >&2
+    exit 1
+fi
 
 downloader="${repo_root}/scripts/cann_download_install.sh"
 if ! grep -F -- \

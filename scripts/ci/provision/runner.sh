@@ -21,7 +21,8 @@ if [[ -z "${registration_token:-}" ]]; then
     echo "ERROR: a short-lived registration token is required on standard input" >&2
     exit 2
 fi
-trap 'unset registration_token' EXIT
+unset ACTIONS_RUNNER_INPUT_TOKEN
+trap 'unset registration_token ACTIONS_RUNNER_INPUT_TOKEN' EXIT
 
 if [[ "${DRY_RUN}" != 1 && ( -L "${RUNNER_HOME}" || ! -d "${RUNNER_HOME}" ) ]]; then
     echo "ERROR: runner home must be a real directory: ${RUNNER_HOME}" >&2
@@ -75,7 +76,7 @@ if [[ "${DRY_RUN}" == 1 ]]; then
 else
     install -d -o root -g "${CI_GROUP}" -m 0750 "${install_work}"
     stage="$(mktemp -d "${install_work}/runner.XXXXXX")"
-    trap 'unset registration_token; rm -rf -- "${stage}"' EXIT
+    trap 'unset registration_token ACTIONS_RUNNER_INPUT_TOKEN; rm -rf -- "${stage}"' EXIT
 fi
 release_json="${stage}/release.json"
 
@@ -141,24 +142,45 @@ if [[ "${DRY_RUN}" != 1 && -f "${RUNNER_HOME}/.runner" ]]; then
     fi
 fi
 
+if [[ "${DRY_RUN}" != 1 ]]; then
+    if [[ -n "${service_name}" ]] && systemctl is-active --quiet -- "${service_name}"; then
+        echo "ERROR: runner service is still active before registration" >&2
+        exit 1
+    fi
+    if pgrep -u "${CI_USER}" >/dev/null; then
+        echo "ERROR: another ${CI_USER} process is running before registration" >&2
+        exit 1
+    fi
+fi
+
 run find "${RUNNER_HOME}" -mindepth 1 -maxdepth 1 \
     ! -name _work ! -name _diag -exec rm -rf -- '{}' +
 run tar -xzf "${asset_path}" -C "${RUNNER_HOME}"
 run chown -R "${CI_USER}:${CI_PRIMARY_GROUP}" "${RUNNER_HOME}"
 
 if [[ "${DRY_RUN}" == 1 ]]; then
-    printf 'runuser -u %s -- %s --url %s --token %s --runnergroup %s --name %s --labels %s --work %s --unattended --replace --disableupdate\n' \
-        "${CI_USER}" "${RUNNER_HOME}/config.sh" "${runner_url}" '<registration-token>' \
+    printf 'export ACTIONS_RUNNER_INPUT_TOKEN=%q\n' '<registration-token>'
+    printf 'runuser -u %s -- %s --url %s --runnergroup %s --name %s --labels %s --work %s --unattended --replace --disableupdate\n' \
+        "${CI_USER}" "${RUNNER_HOME}/config.sh" "${runner_url}" \
         "${runner_group}" "${runner_name}" "${runner_labels}" "${runner_work}"
+    printf 'unset ACTIONS_RUNNER_INPUT_TOKEN\n'
 else
-    runuser -u "${CI_USER}" -- "${RUNNER_HOME}/config.sh" \
+    if run_with_runner_registration_token "${registration_token}" \
+        runuser -u "${CI_USER}" -- "${RUNNER_HOME}/config.sh" \
         --url "${runner_url}" \
-        --token "${registration_token}" \
         --runnergroup "${runner_group}" \
         --name "${runner_name}" \
         --labels "${runner_labels}" \
         --work "${runner_work}" \
-        --unattended --replace --disableupdate
+        --unattended --replace --disableupdate; then
+        registration_status=0
+    else
+        registration_status=$?
+    fi
+    if [[ "${registration_status}" -ne 0 ]]; then
+        echo "ERROR: runner registration failed" >&2
+        exit "${registration_status}"
+    fi
 fi
 
 if [[ "${DRY_RUN}" == 1 ]]; then

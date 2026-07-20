@@ -21,10 +21,9 @@ if [[ "${DRY_RUN}" == 1 ]]; then
     run env LC_ALL=C LANG=C sudo -n -l -U "${CI_USER}"
     run grep -Fx version=9.1.0 "${toolkit_info}"
     run grep -Fx package_name=Ascend-cann-910b-ops "${ops_info}"
-    run test -x "${CANN_HOME}/cann/compiler/ccec_compiler/bin/bisheng"
-    for device in 0 1 2 3 4 5 6 7; do
-        run npu-smi info -t health -i "${device}"
-    done
+    run test -x "${CANN_HOME}/cann/tools/bisheng_compiler/bin/bisheng"
+    run npu-smi info
+    run npu-smi info -l
     run readlink -f "${control_current}"
     run test -x "${hook}"
     run grep -Fx "${env_entry}" "${RUNNER_HOME}/.env"
@@ -83,18 +82,14 @@ total_count="$(npu-smi info -l | awk -F: '/Total Count/ {gsub(/[[:space:]]/, "",
     echo "ERROR: exactly eight NPU devices are required" >&2
     exit 1
 }
-for device in 0 1 2 3 4 5 6 7; do
-    product="$(npu-smi info -t product -i "${device}")"
-    health="$(npu-smi info -t health -i "${device}")"
-    grep -Eq 'Name[[:space:]]*:[[:space:]]*(Ascend[[:space:]]*)?910B3([[:space:]]|$)' <<< "${product}" || {
-        echo "ERROR: device ${device} is not an Ascend 910B3" >&2
-        exit 1
-    }
-    grep -Eq '^[[:space:]]*Health[[:space:]]*:[[:space:]]*OK[[:space:]]*$' <<< "${health}" || {
-        echo "ERROR: device ${device} is not healthy" >&2
-        exit 1
-    }
-done
+npu_info="$(npu-smi info)" || {
+    echo "ERROR: could not read the NPU inventory" >&2
+    exit 1
+}
+if ! npu_smi_info_has_expected_devices "${npu_info}"; then
+    echo "ERROR: expected exactly devices 0..7 as healthy 910B3 NPUs" >&2
+    exit 1
+fi
 
 [[ "$(< "${CONTROL_HOME}/VERSION")" == v1 ]] || {
     echo "ERROR: sealed controller is not v1" >&2

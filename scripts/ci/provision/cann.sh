@@ -140,7 +140,7 @@ abort_cann_provision() {
 }
 
 check_blue_host() {
-    local driver_version total_count device product health available
+    local driver_version total_count npu_info available
     driver_version="$(sed -n 's/^Version=//p' /usr/local/Ascend/driver/version.info | head -n1)"
     if [[ "${driver_version}" != 25.5.0 ]]; then
         echo "ERROR: driver 25.5.0 is required, found ${driver_version:-unknown}" >&2
@@ -152,18 +152,14 @@ check_blue_host() {
         echo "ERROR: exactly eight NPU devices are required, found ${total_count:-unknown}" >&2
         return 1
     fi
-    for device in 0 1 2 3 4 5 6 7; do
-        product="$(npu-smi info -t product -i "${device}")"
-        health="$(npu-smi info -t health -i "${device}")"
-        if ! grep -Eq 'Name[[:space:]]*:[[:space:]]*(Ascend[[:space:]]*)?910B3([[:space:]]|$)' <<< "${product}"; then
-            echo "ERROR: device ${device} is not an Ascend 910B3" >&2
-            return 1
-        fi
-        if ! grep -Eq '^[[:space:]]*Health[[:space:]]*:[[:space:]]*OK[[:space:]]*$' <<< "${health}"; then
-            echo "ERROR: device ${device} is not healthy" >&2
-            return 1
-        fi
-    done
+    if ! npu_info="$(npu-smi info)"; then
+        echo "ERROR: could not read the NPU inventory" >&2
+        return 1
+    fi
+    if ! npu_smi_info_has_expected_devices "${npu_info}"; then
+        echo "ERROR: expected exactly devices 0..7 as healthy 910B3 NPUs" >&2
+        return 1
+    fi
 
     available="$(df --output=avail -B1 /home | tail -n1 | tr -d '[:space:]')"
     if [[ ! "${available}" =~ ^[0-9]+$ ]] || (( available < 30 * 1024 * 1024 * 1024 )); then
@@ -204,11 +200,8 @@ fi
 
 if [[ "${DRY_RUN}" == 1 ]]; then
     run grep -Fx Version=25.5.0 /usr/local/Ascend/driver/version.info
+    run npu-smi info
     run npu-smi info -l
-    for device in 0 1 2 3 4 5 6 7; do
-        run npu-smi info -t product -i "${device}"
-        run npu-smi info -t health -i "${device}"
-    done
     run df --output=avail -B1 /home
 else
     check_blue_host

@@ -5,6 +5,7 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 real_common="${repo_root}/scripts/ci/provision/common.sh"
 real_cann="${repo_root}/scripts/ci/provision/cann.sh"
+npu_info_fixture="${repo_root}/tests/ci/fixtures/npu_smi_info_blue_25_5.txt"
 temp_dir="$(mktemp -d)"
 trap 'rm -rf "${temp_dir}"' EXIT
 
@@ -53,7 +54,7 @@ printf '%s\n' \
     'write_valid_tree() {' \
     '    local toolkit_info="${TILEXR_CANN_HOME}/cann/aarch64-linux/ascend_toolkit_install.info"' \
     '    local ops_info="${TILEXR_CANN_HOME}/cann/aarch64-linux/ascend_ops_install.info"' \
-    '    local compiler_dir="${TILEXR_CANN_HOME}/cann/compiler/ccec_compiler/bin"' \
+    '    local compiler_dir="${TILEXR_CANN_HOME}/cann/tools/bisheng_compiler/bin"' \
     '    mkdir -p "$(dirname "${toolkit_info}")" "${compiler_dir}"' \
     '    printf "%s\n" package_name=Ascend-cann-toolkit version=9.1.0 > "${toolkit_info}"' \
     '    printf "%s\n" package_name=Ascend-cann-910b-ops version=9.1.0 > "${ops_info}"' \
@@ -151,8 +152,9 @@ printf '%s\n' '#!/usr/bin/env bash' 'printf "25.5.0\n"' \
 printf '%s\n' \
     '#!/usr/bin/env bash' \
     'case "$*" in' \
+    '    "info") cat "${TEST_NPU_INFO_FIXTURE}" ;;' \
     '    "info -l") printf "Total Count: 8\n" ;;' \
-    '    *"-t product"*) printf "Name : Ascend 910B3\n" ;;' \
+    '    *"-t product"*) printf "This device does not support querying product.\n"; exit 2 ;;' \
     '    *"-t health"*) printf "Health : OK\n" ;;' \
     '    *) exit 98 ;;' \
     'esac' \
@@ -172,6 +174,7 @@ run_phase() {
         TEST_GROUP="${current_group}" \
         TEST_OWNER="${current_user}" \
         TEST_EXTERNAL_TREE="${external_tree}" \
+        TEST_NPU_INFO_FIXTURE="${npu_info_fixture}" \
         TEST_CHOWN_LOG="${fixture}/chown.log" \
         bash "${fixture}/scripts/ci/provision/cann.sh" \
         > "${fixture}/${phase}.log" 2>&1
@@ -227,7 +230,7 @@ assert_failure_then_success() {
         echo "${phase}: successful rerun did not finalize the CANN tree" >&2
         exit 1
     }
-    compiler_dir="${cann_home}/cann/compiler/ccec_compiler/bin"
+    compiler_dir="${cann_home}/cann/tools/bisheng_compiler/bin"
     [[ "$(entry_metadata "${compiler_dir}/bisheng-real" | awk -F: '{print $3}')" == 750 &&
        "$(entry_metadata "${compiler_dir}/setgid-helper" | awk -F: '{print $3}')" == 750 ]] || {
         echo "${phase}: successful sealing preserved setuid or setgid bits" >&2

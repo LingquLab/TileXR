@@ -81,6 +81,74 @@ ci_identity_is_bounded() {
     [[ "${actual_supplementary}" == "${expected_supplementary}" ]]
 }
 
+npu_smi_info_has_expected_devices() {
+    local info="$1"
+    awk '
+        function trim(value) {
+            sub(/^[[:space:]]+/, "", value)
+            sub(/[[:space:]]+$/, "", value)
+            return value
+        }
+
+        /^\|[[:space:]]*NPU[[:space:]]+Name[[:space:]]*\|[[:space:]]*Health/ {
+            in_inventory = 1
+            found_header = 1
+            next
+        }
+        /^\|[[:space:]]*NPU[[:space:]]+Chip[[:space:]]*\|[[:space:]]*Process id/ {
+            in_inventory = 0
+            next
+        }
+        in_inventory && /^\|/ {
+            cell_count = split($0, cells, "|")
+            if (cell_count < 4) {
+                next
+            }
+            identity = trim(cells[2])
+            field_count = split(identity, fields, /[[:space:]]+/)
+            if (field_count != 2 || fields[1] !~ /^[0-9]+$/) {
+                next
+            }
+            device = fields[1] + 0
+            name = fields[2]
+            health = trim(cells[3])
+            if (device < 0 || device > 7 || name != "910B3" || health != "OK" || seen[device]) {
+                bad = 1
+                next
+            }
+            seen[device] = 1
+            count++
+        }
+        END {
+            if (!found_header || bad || count != 8) {
+                exit 1
+            }
+            for (device = 0; device < 8; device++) {
+                if (!seen[device]) {
+                    exit 1
+                }
+            }
+        }
+    ' <<< "${info}"
+}
+
+run_with_runner_registration_token() {
+    local token="$1"
+    local status
+    shift
+
+    unset registration_token
+    export ACTIONS_RUNNER_INPUT_TOKEN="${token}"
+    unset token
+    if "$@"; then
+        status=0
+    else
+        status=$?
+    fi
+    unset ACTIONS_RUNNER_INPUT_TOKEN
+    return "${status}"
+}
+
 cann_metadata_matches() {
     local path="$1"
     local package="$2"
@@ -112,7 +180,7 @@ cann_tree_links_are_contained() {
 cann_tree_has_expected_payload() {
     local toolkit_info="${CANN_HOME}/cann/aarch64-linux/ascend_toolkit_install.info"
     local ops_info="${CANN_HOME}/cann/aarch64-linux/ascend_ops_install.info"
-    local compiler="${CANN_HOME}/cann/compiler/ccec_compiler/bin/bisheng"
+    local compiler="${CANN_HOME}/cann/tools/bisheng_compiler/bin/bisheng"
 
     [[ -d "${CANN_HOME}" && ! -L "${CANN_HOME}" ]] || return 1
     cann_metadata_matches "${toolkit_info}" Ascend-cann-toolkit || return 1

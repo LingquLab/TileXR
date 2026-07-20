@@ -283,6 +283,11 @@ class ControlSourceContractTests(unittest.TestCase):
             "git -C",
         ]:
             self.assertIn(token, text)
+        self.assertIn(
+            "/cann/tools/bisheng_compiler/bin/bisheng",
+            text,
+        )
+        self.assertNotIn("/cann/compiler/ccec_compiler/bin/bisheng", text)
 
     def test_collector_requires_authoritative_root_evidence(self):
         text = self.read("scripts/ci/control/collect_artifacts.sh")

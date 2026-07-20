@@ -13,7 +13,7 @@ current_group="$(id -gn)"
 cann_home="${temp_dir}/tree"
 toolkit_info="${cann_home}/cann/aarch64-linux/ascend_toolkit_install.info"
 ops_info="${cann_home}/cann/aarch64-linux/ascend_ops_install.info"
-compiler_dir="${cann_home}/cann/compiler/ccec_compiler/bin"
+compiler_dir="${cann_home}/cann/tools/bisheng_compiler/bin"
 
 mkdir -p "$(dirname "${toolkit_info}")" "${compiler_dir}"
 printf '%s\n' \

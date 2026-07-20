@@ -43,6 +43,16 @@ add_test(
 )
 
 add_test(
+    NAME test_tilexr_ci_npu_inventory
+    COMMAND "${BASH_EXECUTABLE}" "${CMAKE_CURRENT_LIST_DIR}/test_npu_inventory.sh"
+)
+
+add_test(
+    NAME test_tilexr_ci_runner_token
+    COMMAND "${BASH_EXECUTABLE}" "${CMAKE_CURRENT_LIST_DIR}/test_runner_token.sh"
+)
+
+add_test(
     NAME test_tilexr_ci_npu_state
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_npu_state.py -v
 )

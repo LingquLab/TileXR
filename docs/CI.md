@@ -43,6 +43,7 @@ authorizes the reviewed merge commit to execute on the shared host.
 | Service account | `tilexr-ci`, primary group `tilexr-ci`, device group `HwHiAiUser` |
 | Home | `/home/tilexr-ci` |
 | Sealed CANN 9.1 | `/home/tilexr-ci/toolchains/cann/9.1.0` |
+| Sealed Bisheng compiler | `/home/tilexr-ci/toolchains/cann/9.1.0/cann/tools/bisheng_compiler/bin/bisheng` |
 | Sealed controller | `/home/tilexr-ci/control/v1` |
 | Active controller link | `/home/tilexr-ci/control/current` |
 | Actions runner | `/home/tilexr-ci/actions-runner` |
@@ -214,7 +215,9 @@ ssh blue "cd '${BOOTSTRAP}' && sudo bash scripts/ci/provision/verify.sh"
 
 The provisioning scripts are idempotent, accept `--dry-run`, and require root
 for live changes. `runner.sh` reads the short-lived registration token from
-standard input and does not log it.
+standard input, passes it only through `ACTIONS_RUNNER_INPUT_TOKEN` while the
+runner configuration process is isolated, and does not log it or place it in
+process arguments.
 
 ## GitHub policy verification
 
