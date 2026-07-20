@@ -131,12 +131,23 @@ cann_entry_stat() {
 }
 
 cann_tree_regular_entries_are_sealed() {
-    local path entry owner group mode
+    local path entry owner group mode group_bits other_bits
     while IFS= read -r -d '' path; do
         entry="$(cann_entry_stat "${path}")" || return 1
         IFS=: read -r owner group mode <<< "${entry}"
         [[ "${owner}" == "${CANN_OWNER}" && "${group}" == "${CI_GROUP}" ]] || return 1
-        [[ "${mode}" =~ ^[0-7]*[0-7][0145][0145]$ ]] || return 1
+        [[ "${mode}" =~ ([0-7])([0-7])([0-7])$ ]] || return 1
+        group_bits="${BASH_REMATCH[2]}"
+        other_bits="${BASH_REMATCH[3]}"
+        [[ "${group_bits}" =~ ^[0145]$ && "${other_bits}" =~ ^[0145]$ ]] || return 1
+        if [[ -d "${path}" ]]; then
+            [[ "${group_bits}" == 5 ]] || return 1
+        else
+            [[ "${group_bits}" == 4 || "${group_bits}" == 5 ]] || return 1
+            if [[ -x "${path}" && "${group_bits}" != 5 ]]; then
+                return 1
+            fi
+        fi
     done < <(find -P "${CANN_HOME}" \( -type f -o -type d \) -print0)
 }
 

@@ -38,6 +38,27 @@ if ! cann_tree_is_trusted; then
     exit 1
 fi
 
+chmod 0700 "${compiler_dir}"
+if cann_tree_is_trusted; then
+    echo "CANN tree accepted a directory that the CI group cannot traverse" >&2
+    exit 1
+fi
+chmod 0750 "${compiler_dir}"
+
+chmod 0600 "${toolkit_info}"
+if cann_tree_is_trusted; then
+    echo "CANN tree accepted metadata that the CI group cannot read" >&2
+    exit 1
+fi
+chmod 0640 "${toolkit_info}"
+
+chmod 0700 "${compiler_dir}/bisheng-real"
+if cann_tree_is_trusted; then
+    echo "CANN tree accepted a compiler that the CI group cannot execute" >&2
+    exit 1
+fi
+chmod 0750 "${compiler_dir}/bisheng-real"
+
 printf outside > "${temp_dir}/outside"
 ln -s "${temp_dir}/outside" "${cann_home}/cann/external-link"
 if cann_tree_is_trusted; then
