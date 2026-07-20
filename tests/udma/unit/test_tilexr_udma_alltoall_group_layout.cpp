@@ -6,6 +6,7 @@
 #include <string>
 
 #include "demo/tilexr_udma_alltoall_group_layout.h"
+#include "demo/tilexr_udma_alltoall_group_route.h"
 
 namespace {
 
@@ -148,6 +149,62 @@ void TestTokens()
         TileXR::Demo::AllToAllGroupToken(49U, 1U, 0U), true);
 }
 
+void TestDualRoutePeerPolicy()
+{
+    using TileXR::Demo::AllToAllGroupIsCrossNode;
+    using TileXR::Demo::AllToAllGroupUseSecondaryRoute;
+    CHECK_EQ(AllToAllGroupIsCrossNode(0, 7), false);
+    CHECK_EQ(AllToAllGroupIsCrossNode(0, 8), true);
+    CHECK_EQ(AllToAllGroupIsCrossNode(15, 8), false);
+    CHECK_EQ(AllToAllGroupIsCrossNode(15, 0), true);
+
+    for (int sourceNode = 0; sourceNode < 3; ++sourceNode) {
+        for (int targetNode = 0; targetNode < 3; ++targetNode) {
+            if (sourceNode == targetNode) {
+                continue;
+            }
+            int rowSecondary[8] = {};
+            int columnSecondary[8] = {};
+            for (int sourceLocal = 0; sourceLocal < 8; ++sourceLocal) {
+                for (int targetLocal = 0; targetLocal < 8; ++targetLocal) {
+                    const int source = sourceNode * 8 + sourceLocal;
+                    const int target = targetNode * 8 + targetLocal;
+                    if (AllToAllGroupUseSecondaryRoute(source, target)) {
+                        ++rowSecondary[sourceLocal];
+                        ++columnSecondary[targetLocal];
+                    }
+                }
+            }
+            for (int local = 0; local < 8; ++local) {
+                CHECK_EQ(rowSecondary[local], 2);
+                CHECK_EQ(columnSecondary[local], 2);
+            }
+        }
+    }
+}
+
+void TestDualRouteQpWeights()
+{
+    const uint32_t weighted[] = {6U, 6U, 6U, 6U, 2U, 2U, 2U, 2U};
+    const auto split = TileXR::Demo::AllToAllGroupSelectRouteQps(weighted, 8U);
+    CHECK_EQ(split.primaryQp, 0U);
+    CHECK_EQ(split.secondaryQp, 4U);
+
+    const uint32_t threeWeights[] = {2U, 6U, 4U, 6U};
+    const auto distinct = TileXR::Demo::AllToAllGroupSelectRouteQps(threeWeights, 4U);
+    CHECK_EQ(distinct.primaryQp, 1U);
+    CHECK_EQ(distinct.secondaryQp, 2U);
+
+    const uint32_t equal[] = {3U, 3U, 3U, 3U};
+    const auto fallback = TileXR::Demo::AllToAllGroupSelectRouteQps(equal, 4U);
+    CHECK_EQ(fallback.primaryQp, 0U);
+    CHECK_EQ(fallback.secondaryQp, 0U);
+
+    const auto empty = TileXR::Demo::AllToAllGroupSelectRouteQps(nullptr, 0U);
+    CHECK_EQ(empty.primaryQp, 0U);
+    CHECK_EQ(empty.secondaryQp, 0U);
+}
+
 void TestKernelStructure()
 {
     const std::string kernel = ReadFile(
@@ -189,6 +246,8 @@ int main()
     TestSchedules();
     TestPlan();
     TestTokens();
+    TestDualRoutePeerPolicy();
+    TestDualRouteQpWeights();
     TestKernelStructure();
     TestHostStructure();
     if (g_failures != 0) {
