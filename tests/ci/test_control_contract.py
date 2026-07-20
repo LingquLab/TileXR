@@ -670,6 +670,261 @@ class HostChecksBehaviorTests(unittest.TestCase):
                     self.assertFalse(marker.exists())
                     self.assertTrue(build_root.is_dir())
 
+    def test_artifact_parent_symlink_is_rejected_without_touching_target(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary).resolve()
+            script = self.materialize_host_checks(root)
+            outside = root / "outside-artifacts"
+            host_target = outside / "host"
+            host_target.mkdir(parents=True)
+            stale = host_target / "stale.txt"
+            cases = host_target / "cases.tsv"
+            stale.write_text("keep stale", encoding="utf-8")
+            cases.write_text("keep cases", encoding="utf-8")
+            (root / ".ci-artifacts").symlink_to(
+                outside, target_is_directory=True
+            )
+
+            result, _ = self.run_host_checks(script)
+
+            self.assertNotEqual(0, result.returncode)
+            self.assertEqual("keep stale", stale.read_text(encoding="utf-8"))
+            self.assertEqual("keep cases", cases.read_text(encoding="utf-8"))
+            self.assertFalse((host_target / "summary.md").exists())
+
+    def test_artifact_host_directory_is_recreated_without_stale_files(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary).resolve()
+            script = self.materialize_host_checks(root)
+            artifact_host = root / ".ci-artifacts" / "host"
+            stale = artifact_host / "nested" / "stale.txt"
+            stale.parent.mkdir(parents=True)
+            stale.write_text("stale", encoding="utf-8")
+
+            result, _ = self.run_host_checks(script)
+
+            self.assertNotEqual(0, result.returncode)
+            self.assertTrue(artifact_host.is_dir())
+            self.assertFalse(artifact_host.is_symlink())
+            self.assertFalse(stale.exists())
+            self.assertTrue((artifact_host / "cases.tsv").is_file())
+            self.assertTrue((artifact_host / "summary.md").is_file())
+
+    def test_failed_ctest_still_copies_xml_and_returns_ctest_status(self):
+        source = (ROOT / "scripts/ci/host_checks.sh").read_text(
+            encoding="utf-8"
+        )
+        copy_function = extract_shell_function(source, "copy_ctest_xml")
+        suites = [
+            ("run_ci_ctest", "ci", "ctest-ci.xml"),
+            ("run_ep_source_tests", "ep", "ctest-ep.xml"),
+            (
+                "run_data_as_flag_tests",
+                "data-as-flag",
+                "ctest-data-as-flag.xml",
+            ),
+        ]
+        for function_name, build_name, artifact_name in suites:
+            with self.subTest(function=function_name):
+                with tempfile.TemporaryDirectory() as temporary:
+                    root = pathlib.Path(temporary).resolve()
+                    build_root = root / "build"
+                    artifacts = root / "artifacts"
+                    testing = build_root / build_name / "Testing" / "tag"
+                    testing.mkdir(parents=True)
+                    artifacts.mkdir()
+                    expected_xml = "<testsuite failures=\"1\"/>\n"
+                    (testing / "Test.xml").write_text(
+                        expected_xml, encoding="utf-8"
+                    )
+                    fake_bin = root / "fake-bin"
+                    fake_bin.mkdir()
+                    for command, status in [("cmake", 0), ("ctest", 19)]:
+                        executable = fake_bin / command
+                        executable.write_text(
+                            "#!/bin/bash\nexit {}\n".format(status),
+                            encoding="utf-8",
+                        )
+                        executable.chmod(0o755)
+
+                    suite_function = extract_shell_function(
+                        source, function_name
+                    )
+                    harness = (
+                        "set -euo pipefail\n"
+                        "ROOT_DIR={}\nBUILD_ROOT={}\nARTIFACT_DIR={}\n"
+                        "nproc() {{ printf '1\\n'; }}\n{}\n{}\n"
+                        "set +e\n(set -e; {})\ncase_status=$?\n"
+                        "set -e\nprintf '%s\\n' \"$case_status\"\n"
+                    ).format(
+                        shlex.quote(str(root)),
+                        shlex.quote(str(build_root)),
+                        shlex.quote(str(artifacts)),
+                        copy_function,
+                        suite_function,
+                        function_name,
+                    )
+                    environment = dict(os.environ)
+                    environment["PATH"] = "{}:{}".format(
+                        fake_bin, environment["PATH"]
+                    )
+                    result = subprocess.run(
+                        ["bash", "-c", harness],
+                        env=environment,
+                        text=True,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                    )
+
+                    self.assertEqual(0, result.returncode, result.stderr)
+                    self.assertEqual("19", result.stdout.strip())
+                    copied = artifacts / artifact_name
+                    self.assertEqual(
+                        expected_xml, copied.read_text(encoding="utf-8")
+                    )
+
+    def invoke_host_finalizer(self, root, cases_path):
+        source = (ROOT / "scripts/ci/host_checks.sh").read_text(
+            encoding="utf-8"
+        )
+        validator = ""
+        if "validate_case_evidence() {" in source:
+            validator = extract_shell_function(source, "validate_case_evidence")
+        finalizer = extract_shell_function(source, "finalize_host_checks")
+        summary = root / "summary.md"
+        harness = (
+            "set -euo pipefail\nCASES_FILE={}\nSUMMARY_FILE={}\n"
+            "HOST_STARTED=$(date +%s)\n{}\n{}\n"
+            "true\nfinalize_host_checks\n"
+        ).format(
+            shlex.quote(str(cases_path)),
+            shlex.quote(str(summary)),
+            validator,
+            finalizer,
+        )
+        result = subprocess.run(
+            ["bash", "-c", harness],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        return result, summary
+
+    def expected_host_cases(self):
+        return [
+            "shell-syntax",
+            "ci-ctest",
+            "comm-host",
+            "ep-source-only",
+            "data-as-flag",
+            "collectives-vllm-patch",
+            "collectives-vllm-integration-sources",
+            "collectives-profile-report",
+        ]
+
+    def test_finalizer_accepts_only_complete_valid_case_evidence(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary).resolve()
+            cases = root / "cases.tsv"
+            cases.write_text(
+                "".join(
+                    "{}\tPASS\t0\t1\n".format(name)
+                    for name in self.expected_host_cases()
+                ),
+                encoding="utf-8",
+            )
+
+            result, summary = self.invoke_host_finalizer(root, cases)
+
+            self.assertEqual(0, result.returncode, result.stderr)
+            report = summary.read_text(encoding="utf-8")
+            self.assertIn("Host cases: 8 total, 8 passed, 0 failed", report)
+            self.assertIn("Case evidence: valid", report)
+
+    def test_finalizer_fails_success_on_invalid_or_replaced_case_evidence(self):
+        expected = self.expected_host_cases()
+        valid = "".join(
+            "{}\tPASS\t0\t1\n".format(name) for name in expected
+        )
+
+        def replace_first_case(result, exit_code, duration):
+            return "{}\t{}\t{}\t{}\n".format(
+                expected[0], result, exit_code, duration
+            ) + "".join(
+                "{}\tPASS\t0\t1\n".format(name) for name in expected[1:]
+            )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary).resolve()
+            scenarios = {}
+
+            scenarios["missing"] = root / "missing.tsv"
+
+            unreadable = root / "unreadable.tsv"
+            unreadable.write_text(valid, encoding="utf-8")
+            unreadable.chmod(0)
+            scenarios["unreadable"] = unreadable
+
+            real_cases = root / "real-cases.tsv"
+            real_cases.write_text(valid, encoding="utf-8")
+            replaced = root / "replaced.tsv"
+            replaced.symlink_to(real_cases)
+            scenarios["replaced"] = replaced
+
+            malformed = root / "malformed.tsv"
+            malformed.write_text(
+                replace_first_case("PASS", "not-an-exit-code", "1"),
+                encoding="utf-8",
+            )
+            scenarios["malformed"] = malformed
+
+            invalid_status = root / "invalid-status.tsv"
+            invalid_status.write_text(
+                replace_first_case("UNKNOWN", "0", "1"), encoding="utf-8"
+            )
+            scenarios["invalid-status"] = invalid_status
+
+            inconsistent_status = root / "inconsistent-status.tsv"
+            inconsistent_status.write_text(
+                replace_first_case("PASS", "7", "1"), encoding="utf-8"
+            )
+            scenarios["inconsistent-status"] = inconsistent_status
+
+            invalid_duration = root / "invalid-duration.tsv"
+            invalid_duration.write_text(
+                replace_first_case("PASS", "0", "nan"), encoding="utf-8"
+            )
+            scenarios["invalid-duration"] = invalid_duration
+
+            incomplete = root / "incomplete.tsv"
+            incomplete.write_text(
+                "{}\tPASS\t0\t1\n".format(expected[0]), encoding="utf-8"
+            )
+            scenarios["incomplete"] = incomplete
+
+            duplicate = root / "duplicate.tsv"
+            duplicate.write_text(
+                "".join(
+                    "{}\tPASS\t0\t1\n".format(expected[0])
+                    for _ in expected
+                ),
+                encoding="utf-8",
+            )
+            scenarios["duplicate"] = duplicate
+
+            for name, cases in scenarios.items():
+                with self.subTest(name=name):
+                    summary = root / "summary.md"
+                    if summary.exists():
+                        summary.unlink()
+                    result, summary = self.invoke_host_finalizer(root, cases)
+                    self.assertNotEqual(0, result.returncode)
+                    report = summary.read_text(encoding="utf-8")
+                    self.assertIn("Case evidence: invalid", report)
+
+            unreadable.chmod(0o600)
+            self.assertEqual(valid, real_cases.read_text(encoding="utf-8"))
+
 
 class BuildHelperBehaviorTests(unittest.TestCase):
     def test_cann_metadata_requires_exact_package_and_version(self):
