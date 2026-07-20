@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import os
 import pathlib
 import shutil
 import shlex
@@ -481,6 +482,52 @@ class HardwareHelperBehaviorTests(unittest.TestCase):
 
 
 class HostChecksBehaviorTests(unittest.TestCase):
+    def materialize_host_checks(self, root):
+        destination = root / "scripts" / "ci" / "host_checks.sh"
+        destination.parent.mkdir(parents=True)
+        shutil.copy2(ROOT / "scripts/ci/host_checks.sh", destination)
+        destination.chmod(0o755)
+        return destination
+
+    def run_host_checks(self, script, environment=None, intercept_rm=False):
+        root = script.parents[2]
+        fake_bin = root / "fake-bin"
+        fake_bin.mkdir(exist_ok=True)
+        fake_git = fake_bin / "git"
+        fake_git.write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
+        fake_git.chmod(0o755)
+
+        rm_log = root / "rm-invocations"
+        if intercept_rm:
+            fake_rm = fake_bin / "rm"
+            fake_rm.write_text(
+                "#!/bin/bash\n"
+                "printf '%s\\n' \"$*\" >> \"${TILEXR_TEST_RM_LOG:?}\"\n"
+                "exit 97\n",
+                encoding="utf-8",
+            )
+            fake_rm.chmod(0o755)
+
+        command_environment = dict(os.environ)
+        command_environment.pop("TILEXR_CI_BUILD_ROOT", None)
+        command_environment.pop("RUNNER_TEMP", None)
+        command_environment["PATH"] = "{}:{}".format(
+            fake_bin, command_environment["PATH"]
+        )
+        if intercept_rm:
+            command_environment["TILEXR_TEST_RM_LOG"] = str(rm_log)
+        if environment:
+            command_environment.update(environment)
+        result = subprocess.run(
+            ["bash", str(script)],
+            cwd=str(root),
+            env=command_environment,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        return result, rm_log
+
     def test_run_case_stops_at_and_records_an_intermediate_failure(self):
         host_checks = (ROOT / "scripts/ci/host_checks.sh").read_text(
             encoding="utf-8"
@@ -508,6 +555,120 @@ class HostChecksBehaviorTests(unittest.TestCase):
             self.assertFalse(after_failure.exists())
             fields = cases.read_text(encoding="utf-8").strip().split("\t")
             self.assertEqual(["sample", "FAIL", "1"], fields[:3])
+
+    def test_build_root_rejects_arbitrary_and_non_absolute_paths_before_rm(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary).resolve()
+            script = self.materialize_host_checks(root)
+            cases = [
+                "",
+                "relative/tilexr-host-build",
+                str(root / "scripts"),
+                "/tmp",
+                "/home",
+            ]
+            for build_root in cases:
+                with self.subTest(build_root=build_root):
+                    rm_log = root / "rm-invocations"
+                    if rm_log.exists():
+                        rm_log.unlink()
+                    result, rm_log = self.run_host_checks(
+                        script,
+                        {"TILEXR_CI_BUILD_ROOT": build_root},
+                        intercept_rm=True,
+                    )
+                    self.assertNotEqual(0, result.returncode)
+                    self.assertFalse(rm_log.exists(), result.stderr)
+
+    def test_build_root_rejects_symlinked_allowed_parent_before_rm(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary).resolve()
+            script = self.materialize_host_checks(root)
+            real_runner_temp = root / "real-runner-temp"
+            real_runner_temp.mkdir()
+            runner_temp_link = root / "runner-temp-link"
+            runner_temp_link.symlink_to(real_runner_temp, target_is_directory=True)
+            build_root = runner_temp_link / "tilexr-host-build"
+
+            result, rm_log = self.run_host_checks(
+                script,
+                {
+                    "RUNNER_TEMP": str(runner_temp_link),
+                    "TILEXR_CI_BUILD_ROOT": str(build_root),
+                },
+                intercept_rm=True,
+            )
+
+            self.assertNotEqual(0, result.returncode)
+            self.assertFalse(rm_log.exists(), result.stderr)
+
+    def test_build_root_rejects_symlinked_repo_namespace_before_rm(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary).resolve()
+            script = self.materialize_host_checks(root)
+            outside = root / "outside"
+            outside.mkdir()
+            marker = outside / "tilexr-host-default" / "keep"
+            marker.parent.mkdir()
+            marker.write_text("keep", encoding="utf-8")
+            (root / ".ci-build").symlink_to(outside, target_is_directory=True)
+
+            result, rm_log = self.run_host_checks(
+                script, intercept_rm=True
+            )
+
+            self.assertNotEqual(0, result.returncode)
+            self.assertFalse(rm_log.exists(), result.stderr)
+            self.assertEqual("keep", marker.read_text(encoding="utf-8"))
+
+    def test_build_root_rejects_a_symlink_candidate_without_unlinking_it(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary).resolve()
+            script = self.materialize_host_checks(root)
+            runner_temp = root / "runner-temp"
+            outside = root / "outside"
+            runner_temp.mkdir()
+            outside.mkdir()
+            marker = outside / "keep"
+            marker.write_text("keep", encoding="utf-8")
+            build_root = runner_temp / "tilexr-host-linked"
+            build_root.symlink_to(outside, target_is_directory=True)
+
+            result, _ = self.run_host_checks(
+                script,
+                {
+                    "RUNNER_TEMP": str(runner_temp),
+                    "TILEXR_CI_BUILD_ROOT": str(build_root),
+                },
+            )
+
+            self.assertNotEqual(0, result.returncode)
+            self.assertTrue(build_root.is_symlink())
+            self.assertEqual("keep", marker.read_text(encoding="utf-8"))
+
+    def test_build_root_accepts_default_and_owned_direct_child_overrides(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary).resolve()
+            script = self.materialize_host_checks(root)
+            runner_temp = root / "runner-temp"
+            runner_temp.mkdir()
+            build_roots = [
+                root / ".ci-build" / "tilexr-host-default",
+                root / ".ci-build" / ".tilexr-host-local",
+                runner_temp / "tilexr-host-runner",
+            ]
+            for index, build_root in enumerate(build_roots):
+                with self.subTest(build_root=build_root):
+                    build_root.mkdir(parents=True, exist_ok=True)
+                    marker = build_root / "remove-me"
+                    marker.write_text("remove", encoding="utf-8")
+                    environment = {"RUNNER_TEMP": str(runner_temp)}
+                    if index > 0:
+                        environment["TILEXR_CI_BUILD_ROOT"] = str(build_root)
+                    result, _ = self.run_host_checks(script, environment)
+                    self.assertNotEqual(0, result.returncode)
+                    self.assertFalse(marker.exists())
+                    self.assertTrue(build_root.is_dir())
 
 
 class BuildHelperBehaviorTests(unittest.TestCase):

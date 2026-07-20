@@ -4,23 +4,71 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd -P)"
-BUILD_ROOT="${TILEXR_CI_BUILD_ROOT:-${ROOT_DIR}/.ci-build/host}"
-if [[ "${BUILD_ROOT}" != /* ]]; then
-    BUILD_ROOT="${ROOT_DIR}/${BUILD_ROOT}"
+REPO_BUILD_PARENT="${ROOT_DIR}/.ci-build"
+
+build_root_error() {
+    echo "ERROR: refusing unsafe TILEXR_CI_BUILD_ROOT: $1" >&2
+    exit 2
+}
+
+if [[ "${TILEXR_CI_BUILD_ROOT+x}" == "x" ]]; then
+    if [[ -z "${TILEXR_CI_BUILD_ROOT}" || "${TILEXR_CI_BUILD_ROOT}" != /* ]]; then
+        build_root_error "${TILEXR_CI_BUILD_ROOT:-<empty>}"
+    fi
+    BUILD_ROOT_INPUT="${TILEXR_CI_BUILD_ROOT}"
+else
+    BUILD_ROOT_INPUT="${REPO_BUILD_PARENT}/tilexr-host-default"
 fi
-BUILD_ROOT="$(python3 -c 'import os, sys; print(os.path.abspath(sys.argv[1]))' "${BUILD_ROOT}")"
+
+BUILD_ROOT="$(
+    python3 -c 'import os, sys; print(os.path.normpath(sys.argv[1]))' \
+        "${BUILD_ROOT_INPUT}"
+)"
+BUILD_PARENT="$(dirname -- "${BUILD_ROOT}")"
+BUILD_BASENAME="$(basename -- "${BUILD_ROOT}")"
+if [[ ! "${BUILD_BASENAME}" =~ ^\.?tilexr-host-.+ ]]; then
+    build_root_error "${BUILD_ROOT}"
+fi
+
+if [[ "${BUILD_PARENT}" == "${REPO_BUILD_PARENT}" ]]; then
+    if [[ -L "${REPO_BUILD_PARENT}" || \
+          ( -e "${REPO_BUILD_PARENT}" && ! -d "${REPO_BUILD_PARENT}" ) ]]; then
+        build_root_error "${BUILD_ROOT} (invalid repository build parent)"
+    fi
+    mkdir -p -- "${REPO_BUILD_PARENT}"
+    BUILD_PARENT_REAL="$(cd "${REPO_BUILD_PARENT}" && pwd -P)"
+    if [[ "${BUILD_PARENT_REAL}" != "${REPO_BUILD_PARENT}" ]]; then
+        build_root_error "${BUILD_ROOT} (repository build parent is redirected)"
+    fi
+else
+    RUNNER_BUILD_PARENT="${RUNNER_TEMP:-/tmp}"
+    if [[ -z "${RUNNER_BUILD_PARENT}" || "${RUNNER_BUILD_PARENT}" != /* ]]; then
+        build_root_error "${BUILD_ROOT} (invalid RUNNER_TEMP)"
+    fi
+    RUNNER_BUILD_PARENT="$(
+        python3 -c 'import os, sys; print(os.path.normpath(sys.argv[1]))' \
+            "${RUNNER_BUILD_PARENT}"
+    )"
+    if [[ "${BUILD_PARENT}" != "${RUNNER_BUILD_PARENT}" || \
+          -L "${RUNNER_BUILD_PARENT}" || \
+          ! -d "${RUNNER_BUILD_PARENT}" ]]; then
+        build_root_error "${BUILD_ROOT} (outside an allowed build parent)"
+    fi
+    BUILD_PARENT_REAL="$(cd "${RUNNER_BUILD_PARENT}" && pwd -P)"
+    if [[ "${BUILD_PARENT_REAL}" != "${RUNNER_BUILD_PARENT}" ]]; then
+        build_root_error "${BUILD_ROOT} (runner build parent is redirected)"
+    fi
+fi
+
+BUILD_ROOT="${BUILD_PARENT_REAL}/${BUILD_BASENAME}"
+if [[ -L "${BUILD_ROOT}" ]]; then
+    build_root_error "${BUILD_ROOT} (build root is a symbolic link)"
+fi
 
 ARTIFACT_DIR="${ROOT_DIR}/.ci-artifacts/host"
 CASES_FILE="${ARTIFACT_DIR}/cases.tsv"
 SUMMARY_FILE="${ARTIFACT_DIR}/summary.md"
 HOST_STARTED="$(date +%s)"
-
-case "${BUILD_ROOT}" in
-    /|"${ROOT_DIR}"|"${ARTIFACT_DIR}")
-        echo "ERROR: refusing unsafe TILEXR_CI_BUILD_ROOT: ${BUILD_ROOT}" >&2
-        exit 2
-        ;;
-esac
 
 if [[ -L "${ARTIFACT_DIR}" ]]; then
     echo "ERROR: host artifact directory must not be a symbolic link: ${ARTIFACT_DIR}" >&2
