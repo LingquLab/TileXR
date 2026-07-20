@@ -709,6 +709,50 @@ class TileXRCcuDirectSmokeProbeTest(unittest.TestCase):
             body.index("for (int loopIndex = 0; loopIndex < loopCount; ++loopIndex)"),
         )
 
+    def test_four_rank_mesh_reuses_one_prepare_and_validates_full_matrix_each_loop(self):
+        source = PROBE_SOURCE.read_text(encoding="utf-8")
+
+        self.assertIn(
+            'kAllToAllMeshEnv = "TILEXR_CCU_DIRECT_SMOKE_ALLTOALL_MESH"', source
+        )
+        self.assertIn("AllToAllMeshSmokeEnabled", source)
+        self.assertIn("InitAllToAllMeshState", source)
+        self.assertIn("ResetAllToAllMeshStateForLoop", source)
+        self.assertIn("BuildAllToAllMeshByte", source)
+        self.assertIn("RunAllToAllMeshLongMissionSmokeForRank", source)
+        body = source[
+            source.index("int RunAllToAllMeshLongMissionSmokeForRank"):
+            source.index("int RunAllToAllLongMissionSmokeForRank")
+        ]
+        loop = "for (int loopIndex = 0; loopIndex < loopCount; ++loopIndex)"
+        self.assertIn("rankSize != 4", body)
+        self.assertIn("PrepareDirectCcuAllToAllMeshInstallAttempt", body)
+        self.assertIn("aclrtCreateStream", body)
+        self.assertIn(loop, body)
+        self.assertLess(body.index("PrepareDirectCcuAllToAllMeshInstallAttempt"), body.index(loop))
+        self.assertLess(body.index("aclrtCreateStream"), body.index(loop))
+        self.assertIn("attempt.submitTasks.front().args[0] = localLoopMarker", body)
+        self.assertIn("WaitForCollectiveSubmitReadiness", body)
+        self.assertIn("WaitForCollectiveSubmitDone", body)
+        self.assertIn("for (int peerRank = 0; peerRank < rankSize; ++peerRank)", body)
+        self.assertIn("peerOrdinal * 3U", body)
+        self.assertIn("ReadAndValidatePeerLoopMarker", body)
+        self.assertIn("CheckAllToAllState(&alltoall)", body)
+        self.assertIn("PrintCcuResourceState", body)
+        self.assertIn("resourceCount=9", body)
+
+        pattern = source[
+            source.index("uint8_t BuildAllToAllMeshByte"):
+            source.index("int InitAllToAllMeshState")
+        ]
+        for field in ["sourceRank", "targetRank", "loopIndex", "chunkOffset"]:
+            with self.subTest(field=field):
+                self.assertIn(field, pattern)
+        self.assertIn("static_cast<size_t>(rankSize) * state->chunkBytes", source)
+        self.assertIn("sourceRank=", source)
+        self.assertIn("chunkOffset=", source)
+        self.assertIn("globalOffset=", source)
+
     def test_sync_xn_ping_smoke_mode_is_opt_in_and_uses_bounded_sync(self):
         source = PROBE_SOURCE.read_text(encoding="utf-8")
 
