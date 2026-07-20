@@ -35,9 +35,8 @@ build_hccd/
 output/
 install/
 
-# CI-generated local build and evidence roots
+# CI-generated local build root
 /.ci-build/
-/.ci-artifacts/
 
 # binary files
 *.so

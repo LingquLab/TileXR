@@ -88,17 +88,8 @@ assert_equal("refs/pull/${{ github.event.pull_request.number }}/merge",
              npu_checkout.fetch("with").fetch("ref"),
              "NPU checkout must select the PR merge ref")
 
-upload_steps = [pr, npu].flat_map { |workflow| steps_using(workflow, UPLOAD_ACTION) }
-assert_equal(2, upload_steps.length, "each workflow must use pinned artifact upload")
-upload_steps.each do |step|
-  assert_equal(14, step.fetch("with").fetch("retention-days"),
-               "artifact retention differs")
-end
-host_upload = steps_using(pr, UPLOAD_ACTION).fetch(0).fetch("with")
-assert_equal(".ci-artifacts/host", host_upload.fetch("path"),
-             "host artifact path differs")
-assert_equal(true, host_upload.fetch("include-hidden-files"),
-             "host upload must include hidden files")
+assert_equal([], [pr, npu].flat_map { |workflow| steps_using(workflow, UPLOAD_ACTION) },
+             "CI workflows must not upload artifacts")
 
 identity_keys = %w[PR_NUMBER HEAD_SHA BASE_SHA EXPECTED_MERGE_SHA]
 host_env = named_step(pr, "host_checks", "Run host checks").fetch("env")
@@ -109,35 +100,22 @@ identity_keys.each do |key|
   assert(npu_env.key?("TILEXR_CI_#{key}"),
          "NPU summary is missing #{key} identity input")
 end
-assert_equal("${{ github.token }}", npu_env.fetch("GITHUB_TOKEN"),
-             "NPU token handoff input differs")
+assert(!npu_env.key?("GITHUB_TOKEN"),
+       "NPU controller must not receive a GitHub token")
 assert(!npu_env.key?("TILEXR_CI_GITHUB_TOKEN"),
        "legacy controller token environment is forbidden")
 
 gate_run = named_step(npu, "hardware", "Run trusted gate").fetch("run")
-handoff_markers = [
-  'github_token="${GITHUB_TOKEN}"',
-  "export -n github_token",
-  "unset GITHUB_TOKEN",
-  'exec 3<<<"${github_token}"',
-  "github_token=\nunset github_token",
-  "exec python3 /home/tilexr-ci/control/current/gate.py",
-  "--github-token-fd 3",
-]
-positions = handoff_markers.map do |marker|
-  position = gate_run.index(marker)
-  assert(position, "NPU token handoff is missing #{marker.inspect}")
-  position
-end
-assert_equal(positions.sort, positions, "NPU token handoff ordering differs")
-assert(!gate_run.include?("TILEXR_CI_GITHUB_TOKEN"),
-       "controller command must not use the legacy token environment")
-assert(!gate_run.match?(/--github-token(?:\s|=)/),
-       "controller command must not pass the token in argv")
+assert(gate_run.include?("exec python3 /home/tilexr-ci/control/current/gate.py"),
+       "NPU workflow must exec the sealed controller")
+assert(!gate_run.include?("GITHUB_TOKEN"),
+       "controller step must not reference a GitHub token")
+assert(!gate_run.include?("github-token"),
+       "controller command must not accept a GitHub token")
 assert(!gate_run.include?("&"), "NPU gate must not run in the background")
 assert(!gate_run.match?(/(?:^|\n)\s*wait\b/),
        "NPU gate must not leave a waiting parent shell")
-assert_equal("--github-token-fd 3", gate_run.lines.last.strip,
+assert_equal('--pr-number "${TILEXR_CI_PR_NUMBER}"', gate_run.lines.last.strip,
              "controller exec must be the final shell command")
 
 summary = named_step(pr, "pr_gate", "Summarize gate")

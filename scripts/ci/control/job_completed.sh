@@ -67,7 +67,6 @@ if [[ "${WORKSPACE_REAL}" == "${RUNNER_WORK_ROOT_REAL}" || "${WORKSPACE_REAL}" =
     exit 1
 fi
 
-# The hook runs after Actions post-job and artifact-upload steps. Artifacts live
-# under runner.temp, outside this checkout, so only checkout children are removed.
+# The hook runs after Actions post-job steps and removes only checkout children.
 /usr/bin/find -P "${WORKSPACE_REAL}" -mindepth 1 -maxdepth 1 \
     -exec /usr/bin/rm -rf -- {} +

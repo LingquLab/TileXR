@@ -31,14 +31,6 @@ jobs:
           TILEXR_CI_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           TILEXR_CI_EXPECTED_MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
         run: bash scripts/ci/host_checks.sh
-      - name: Upload host evidence
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        with:
-          name: host-checks-${{ github.event.pull_request.number }}-${{ github.run_attempt }}
-          path: .ci-artifacts/host
-          include-hidden-files: true
-          retention-days: 14
 
   npu_gate:
     name: NPU Gate

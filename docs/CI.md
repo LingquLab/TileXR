@@ -19,18 +19,16 @@ The reusable NPU workflow is the only workflow allowed to use the
 `refs/pull/NUMBER/merge` below the runner workspace and verifies its SHA before
 the administrator-owned controller runs. The merge checkout is untrusted; the
 controller and CANN toolchain are sealed, read-only installations outside it.
-The controller rechecks the current GitHub merge SHA after acquiring resources
-so an obsolete run cannot start hardware tests.
+The check result belongs to that merge commit; a newer commit cancels the old
+run and must produce its own successful `PR Gate` result.
 
 Workflow permissions are `contents: read`. Checkout credentials are not
 persisted, no repository or environment secret is exposed, and
-`pull_request_target` is not used. The ephemeral read-only `github.token` is
-handed to the controller once: the workflow removes token environment
-variables, opens private file descriptor 3, clears the shell variable, and
-uses a final `exec`. The controller disables Linux process dumpability before
-a bounded read, closes the descriptor, and rejects token-bearing environments.
-Untrusted child phases do not inherit the token, Actions runtime or OIDC
-tokens, or GitHub command-file paths.
+`pull_request_target` is not used. The workflow does not pass `github.token` to
+the controller. Untrusted child phases do not inherit Actions runtime or OIDC
+tokens, or GitHub command-file paths. Before any pull-request code runs, the
+Linux controller makes itself non-dumpable so same-account child processes
+cannot read the controller's inherited environment through `/proc`.
 
 This is defense in depth, not a sandbox. Pull-request code is built and run as
 `tilexr-ci` with NPU access. Approval of an external-fork workflow explicitly
@@ -49,8 +47,6 @@ authorizes the reviewed merge commit to execute on the shared host.
 | Actions runner | `/home/tilexr-ci/actions-runner` |
 | Runner workspace root | `/home/tilexr-ci/actions-runner/_work` |
 | Fixed repository workspace | `/home/tilexr-ci/actions-runner/_work/TileXR/TileXR` |
-| NPU lock | `/home/tilexr-ci/locks/npu8.lock` |
-| Persistent operator artifacts | `/home/tilexr-ci/artifacts` |
 | Provisioning staging | `/home/tilexr-ci/install-work` |
 
 The account has a locked password, `nologin` shell, no SSH key, no sudo rule,
@@ -58,26 +54,23 @@ and no Docker membership. The job-completed hook is
 `/home/tilexr-ci/control/current/job_completed.sh`; its path is stored in the
 root-owned runner `.env`. The hook removes children of the fixed repository
 workspace only after Actions post-job steps complete. It refuses symbolic-link
-redirection and never removes the CANN tree or uploaded artifact directory.
+redirection and never removes the CANN tree.
 
-Host checks use `.ci-build/tilexr-host-default` by default and write evidence
-to `.ci-artifacts/host`. A `TILEXR_CI_BUILD_ROOT` override is accepted only as
-an appropriately named direct child of the real repository build parent or
-the real `RUNNER_TEMP`. The NPU workflow uses
-`${RUNNER_TEMP}/tilexr-ci-artifacts`, outside the untrusted source checkout.
-The controller pins the GitHub step-summary alias and complete directory chain
-before running untrusted code, verifies the original inode and content prefix
-for bounded writes, and fails closed or quarantines the entry if the path is
-replaced. Artifact collection never follows source links, accepts only bounded
-file types and sizes, and emits a manifest and rejection report.
+Host checks use `.ci-build/tilexr-host-default` by default. A
+`TILEXR_CI_BUILD_ROOT` override is accepted only as an appropriately named
+direct child of the real repository build parent or the real `RUNNER_TEMP`.
+The NPU workflow uses `${RUNNER_TEMP}/tilexr-ci-scratch` for temporary build and
+test logs. Neither workflow uploads artifacts. The trusted controller reports
+its result through its exit code and the Actions log; it never writes a GitHub
+step summary.
 
 ## Time and resource policy
 
-The build runs before reserving NPUs and has a two-hour timeout. Any NPU
-process owned by `tilexr-ci` during build is a policy violation. Lock
-acquisition plus idle waiting share one six-hour resource budget. After the
-lock is held, devices 0 through 7 must be healthy and process-free for two
-consecutive samples 60 seconds apart.
+The single self-hosted runner provides the cross-PR queue. The build runs before
+waiting for NPUs and has a two-hour timeout. Any NPU process owned by
+`tilexr-ci` during build is a policy violation. Idle waiting has a six-hour
+budget. Devices 0 through 7 must be healthy and process-free for two consecutive
+samples 60 seconds apart.
 
 Hardware execution has a two-hour total timeout; each multi-rank launch is
 bounded to ten minutes. A foreign NPU process observed after acquisition stops
@@ -105,7 +98,7 @@ trees; requires the hardware demo binaries; and validates installed headers,
 libraries, dependencies, and RPATH/RUNPATH. Stub `libascend_hal.so` resolution
 through CANN `devlib` is a failure.
 
-The build phase records these exact `cases.tsv` cases:
+The build phase logs these named cases:
 
 - top level: `top-level-ctest`;
 - comm: `comm-log`, `comm-spdlog-compile`, and `comm-source-guards`;
@@ -119,7 +112,7 @@ The build phase records these exact `cases.tsv` cases:
 
 The top-level configure/build, suite builds, top-level reinstall, required-file
 checks, and dependency/RPATH checks are also mandatory. They fail the build
-phase directly and produce logs rather than additional `cases.tsv` rows.
+phase directly.
 
 The hardware manifest runs:
 
@@ -141,32 +134,25 @@ coverage.
 
 ## Results and failures
 
-Host evidence is uploaded as
-`host-checks-PR_NUMBER-RUN_ATTEMPT`; NPU evidence is uploaded as
-`npu-gate-PR_NUMBER-RUN_ATTEMPT`. Both are retained for 14 days. Host evidence
-comes from `.ci-artifacts/host`. NPU evidence is assembled under
-`${RUNNER_TEMP}/tilexr-ci-artifacts` and includes `summary.md`, `cases.tsv`,
-`manifest.txt`, environment/version data, CTest/JUnit reports, build and
-per-case logs, dependency reports, and pre/post NPU state. Artifacts are
-uploaded on success, failure, and cancellation when cleanup permits.
+Host and NPU results are available in the Actions log. `Host Checks` also writes
+a short, non-authoritative GitHub step summary. No CI artifacts are uploaded.
 
 Failure classes and controller exit codes are:
 
-- `code-or-test-failure` (`20`): a build, test, required target, or manifest
-  case failed;
-- `resource-timeout` (`21`): the shared six-hour lock/idle budget expired;
+- `code-or-test-failure` (`20`): a build, test, or required target failed;
+- `resource-timeout` (`21`): the six-hour NPU idle budget expired;
 - `resource-collision` (`22`): CI touched an NPU during build, a foreign process
   appeared during hardware, or another resource-ownership policy was violated;
-- `runner-or-toolchain-failure` (`23`): controller, CANN, runner, GitHub API,
-  evidence, host-health infrastructure, or final cleanup failed, including a
+- `runner-or-toolchain-failure` (`23`): controller, CANN, runner, host-health
+  infrastructure, or final cleanup failed, including a
   leftover NPU process owned by `tilexr-ci`;
-- `cancelled-or-obsolete` (`130`): Actions cancelled the run or its merge SHA
-  changed.
+- `cancelled-or-obsolete` (`130`): Actions cancelled the run or the checked-out
+  merge SHA did not match the event.
 
 Resolve code failures in the pull request. For resource or infrastructure
-failures, inspect the uploaded summary and manifest, confirm all NPUs are
-healthy and no CI process remains, then rerun the failed job. Do not retry a
-resource collision until the competing workload is understood.
+failures, inspect the Actions log, confirm all NPUs are healthy and no CI
+process remains, then rerun the failed job. Do not retry a resource collision
+until the competing workload is understood.
 
 ## Local repository validation
 
@@ -174,14 +160,13 @@ Run from a clean TileXR checkout:
 
 ```bash
 bash scripts/ci/host_checks.sh
-bash tests/ci/test_provision_dry_run.sh
 ruby tests/ci/test_workflows.rb
 bash -n scripts/ci/host_checks.sh scripts/ci/control/*.sh scripts/ci/provision/*.sh
 git diff --check
 git status --short
 ```
 
-`gate.py` requires Linux process, `prctl`, `/proc`, pidfd, and subreaper
+`gate.py` requires Linux `prctl`, `/proc`, pidfd, and subreaper
 semantics for live orchestration. Its unit tests contain macOS-compatible
 fakes, but stock macOS `/bin/bash` 3.2 lacks `wait -n`; the collectives launcher
 source test therefore cannot complete there. Run the complete entrypoint in
@@ -269,7 +254,7 @@ gh api repos/LingquLab/TileXR/rulesets
 ```
 
 Expected policy is selected Actions with full-SHA pinning; only repository
-local Actions, `actions/checkout@*`, and `actions/upload-artifact@*`; read-only
+local Actions and `actions/checkout@*`; read-only
 workflow tokens; no workflow PR approval; and approval required for all
 external contributors. `TileXR-NPU` must allow this public repository but be
 selected-repository only, contain only TileXR, and be restricted exactly to
@@ -458,7 +443,7 @@ fi
 ```
 
 Then stop and disable the runner while preserving the account, sealed
-controller, CANN toolchain, and diagnostics:
+controller, and CANN toolchain:
 
 ```bash
 ssh blue 'service="$(sudo cat /home/tilexr-ci/actions-runner/.service)"; \

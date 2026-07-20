@@ -20,7 +20,6 @@ def extract_shell_function(text, name):
     end = text.index("\n}\n", start) + len("\n}\n")
     return text[start:end]
 
-
 class ControlSourceContractTests(unittest.TestCase):
     def read(self, relative_path):
         return (ROOT / relative_path).read_text(encoding="utf-8")
@@ -29,11 +28,39 @@ class ControlSourceContractTests(unittest.TestCase):
         for name in [
             "build_blue.sh",
             "run_hardware.sh",
-            "collect_artifacts.sh",
             "job_completed.sh",
         ]:
             mode = (CONTROL / name).stat().st_mode
             self.assertTrue(mode & stat.S_IXUSR, name)
+
+    def test_controller_omits_removed_output_and_queue_protocols(self):
+        text = self.read("scripts/ci/control/gate.py")
+        for token in [
+            "StepSummaryBoundary",
+            "_prepare_controller_step_summary",
+            "append_authoritative_step_summary",
+            "collect_artifacts.sh",
+            "manifest.txt",
+            "--github-token-fd",
+            "fetch_current_merge_sha",
+            "def npu_lock(",
+            "fcntl.flock",
+            "urllib.request",
+        ]:
+            self.assertNotIn(token, text)
+        self.assertFalse((CONTROL / "collect_artifacts.sh").exists())
+
+    def test_host_checks_do_not_create_artifact_evidence(self):
+        text = self.read("scripts/ci/host_checks.sh")
+        for token in [
+            ".ci-artifacts",
+            "cases.tsv",
+            "summary.md",
+            "--output-junit",
+            "copy_ctest_xml",
+            "validate_case_evidence",
+        ]:
+            self.assertNotIn(token, text)
 
     def test_build_manifest_enables_and_runs_all_non_hardware_coverage(self):
         text = self.read("scripts/ci/control/build_blue.sh")
@@ -270,32 +297,6 @@ class ControlSourceContractTests(unittest.TestCase):
         self.assertIn("/usr/bin/rm", text)
         self.assertNotIn("TILEXR_CI_WORKSPACE", text)
 
-    def test_collector_records_environment_and_tool_versions(self):
-        text = self.read("scripts/ci/control/collect_artifacts.sh")
-        for token in [
-            "environment.txt",
-            "TILEXR_CANN_HOME",
-            "cmake --version",
-            "c++ --version",
-            "bisheng -v",
-            "mpirun --version",
-            "npu-smi info",
-            "git -C",
-        ]:
-            self.assertIn(token, text)
-        self.assertIn(
-            "/cann/tools/bisheng_compiler/bin/bisheng",
-            text,
-        )
-        self.assertNotIn("/cann/compiler/ccec_compiler/bin/bisheng", text)
-
-    def test_collector_requires_authoritative_root_evidence(self):
-        text = self.read("scripts/ci/control/collect_artifacts.sh")
-        self.assertIn("check_root_evidence", text)
-        self.assertIn('check_root_evidence "cases.tsv"', text)
-        self.assertIn('check_root_evidence "summary.md"', text)
-        self.assertIn("EVIDENCE_ERROR", text)
-
     def test_job_hook_requires_exact_canonical_fixed_paths(self):
         text = self.read("scripts/ci/control/job_completed.sh")
         self.assertTrue(text.startswith("#!/bin/bash\n"))
@@ -307,7 +308,7 @@ class ControlSourceContractTests(unittest.TestCase):
         )
         self.assertIn('[[ "${WORKSPACE_REAL}" != "${WORKSPACE}" ]]', text)
 
-    def test_host_checks_manifest_runs_complete_fast_host_coverage(self):
+    def test_host_checks_run_complete_fast_coverage(self):
         text = self.read("scripts/ci/host_checks.sh")
         for token in [
             "set -euo pipefail",
@@ -315,22 +316,19 @@ class ControlSourceContractTests(unittest.TestCase):
             'git -C "${ROOT_DIR}" ls-files -z --',
             'bash -n "${tracked_shell_files[@]}"',
             'cmake -S "${ROOT_DIR}/tests/ci"',
-            "ctest --output-on-failure -T Test --no-compress-output",
-            "ctest-ci.xml",
+            "ctest --output-on-failure",
             'cmake -S "${ROOT_DIR}/tests/comm"',
             "test_tilexr_log",
             "test_tilexr_log_spdlog_compile",
             "test_tilexr_source_guards",
             'cmake -S "${ROOT_DIR}/tests/ep"',
             "-DBUILD_TILEXR_EP_DEMO=OFF",
-            "ctest-ep.xml",
             'cmake -S "${ROOT_DIR}/tests/data_as_flag"',
-            "ctest-data-as-flag.xml",
             "test_vllm_collectives_patch.py",
             "test_vllm_collectives_integration_sources.py",
             "test_collective_profile_report.py",
+            "CASE_NAMES=()",
             "run_case()",
-            "cases.tsv",
             "trap finalize_host_checks EXIT",
             "GITHUB_STEP_SUMMARY",
             "TILEXR_CI_PR_NUMBER",
@@ -351,12 +349,12 @@ class ControlSourceContractTests(unittest.TestCase):
             "collectives-profile-report",
         ]:
             self.assertIn("run_and_accumulate_case {} ".format(suite), text)
-        self.assertGreaterEqual(text.count(':-local}'), 4)
+        self.assertGreaterEqual(text.count(":-local}"), 4)
 
-    def test_host_check_generated_roots_are_ignored_at_repository_root(self):
+    def test_host_check_generated_root_is_ignored_at_repository_root(self):
         rules = self.read(".gitignore").splitlines()
         self.assertIn("/.ci-build/", rules)
-        self.assertIn("/.ci-artifacts/", rules)
+        self.assertNotIn("/.ci-artifacts/", rules)
 
 
 class HardwareHelperBehaviorTests(unittest.TestCase):
@@ -490,7 +488,6 @@ class HardwareHelperBehaviorTests(unittest.TestCase):
             )
             self.assertFalse(marker.exists())
 
-
 class HostChecksBehaviorTests(unittest.TestCase):
     def materialize_host_checks(self, root):
         destination = root / "scripts" / "ci" / "host_checks.sh"
@@ -538,17 +535,16 @@ class HostChecksBehaviorTests(unittest.TestCase):
         )
         return result, rm_log
 
-    def test_run_case_stops_at_and_records_an_intermediate_failure(self):
-        host_checks = (ROOT / "scripts/ci/host_checks.sh").read_text(
-            encoding="utf-8"
-        )
-        function = extract_shell_function(host_checks, "run_case")
+    def test_run_case_stops_at_and_reports_an_intermediate_failure(self):
+        source = (ROOT / "scripts/ci/host_checks.sh").read_text(encoding="utf-8")
+        function = extract_shell_function(source, "run_case")
         with tempfile.TemporaryDirectory() as temporary:
             root = pathlib.Path(temporary)
-            cases = root / "cases.tsv"
             after_failure = root / "after-failure"
-            harness = "set -euo pipefail\nCASES_FILE={}\n{}\n".format(
-                shlex.quote(str(cases)), function
+            harness = (
+                "set -euo pipefail\n"
+                "CASE_NAMES=()\nCASE_RESULTS=()\nCASE_STATUSES=()\nCASE_DURATIONS=()\n"
+                + function
             )
             harness += "suite() {{ false; touch {}; }}\n".format(
                 shlex.quote(str(after_failure))
@@ -563,8 +559,8 @@ class HostChecksBehaviorTests(unittest.TestCase):
 
             self.assertNotEqual(0, result.returncode)
             self.assertFalse(after_failure.exists())
-            fields = cases.read_text(encoding="utf-8").strip().split("\t")
-            self.assertEqual(["sample", "FAIL", "1"], fields[:3])
+            self.assertIn("[host-check] sample: FAIL (exit=1", result.stdout)
+
 
     def test_build_root_rejects_arbitrary_and_non_absolute_paths_before_rm(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -680,261 +676,6 @@ class HostChecksBehaviorTests(unittest.TestCase):
                     self.assertFalse(marker.exists())
                     self.assertTrue(build_root.is_dir())
 
-    def test_artifact_parent_symlink_is_rejected_without_touching_target(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = pathlib.Path(temporary).resolve()
-            script = self.materialize_host_checks(root)
-            outside = root / "outside-artifacts"
-            host_target = outside / "host"
-            host_target.mkdir(parents=True)
-            stale = host_target / "stale.txt"
-            cases = host_target / "cases.tsv"
-            stale.write_text("keep stale", encoding="utf-8")
-            cases.write_text("keep cases", encoding="utf-8")
-            (root / ".ci-artifacts").symlink_to(
-                outside, target_is_directory=True
-            )
-
-            result, _ = self.run_host_checks(script)
-
-            self.assertNotEqual(0, result.returncode)
-            self.assertEqual("keep stale", stale.read_text(encoding="utf-8"))
-            self.assertEqual("keep cases", cases.read_text(encoding="utf-8"))
-            self.assertFalse((host_target / "summary.md").exists())
-
-    def test_artifact_host_directory_is_recreated_without_stale_files(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = pathlib.Path(temporary).resolve()
-            script = self.materialize_host_checks(root)
-            artifact_host = root / ".ci-artifacts" / "host"
-            stale = artifact_host / "nested" / "stale.txt"
-            stale.parent.mkdir(parents=True)
-            stale.write_text("stale", encoding="utf-8")
-
-            result, _ = self.run_host_checks(script)
-
-            self.assertNotEqual(0, result.returncode)
-            self.assertTrue(artifact_host.is_dir())
-            self.assertFalse(artifact_host.is_symlink())
-            self.assertFalse(stale.exists())
-            self.assertTrue((artifact_host / "cases.tsv").is_file())
-            self.assertTrue((artifact_host / "summary.md").is_file())
-
-    def test_failed_ctest_still_copies_xml_and_returns_ctest_status(self):
-        source = (ROOT / "scripts/ci/host_checks.sh").read_text(
-            encoding="utf-8"
-        )
-        copy_function = extract_shell_function(source, "copy_ctest_xml")
-        suites = [
-            ("run_ci_ctest", "ci", "ctest-ci.xml"),
-            ("run_ep_source_tests", "ep", "ctest-ep.xml"),
-            (
-                "run_data_as_flag_tests",
-                "data-as-flag",
-                "ctest-data-as-flag.xml",
-            ),
-        ]
-        for function_name, build_name, artifact_name in suites:
-            with self.subTest(function=function_name):
-                with tempfile.TemporaryDirectory() as temporary:
-                    root = pathlib.Path(temporary).resolve()
-                    build_root = root / "build"
-                    artifacts = root / "artifacts"
-                    testing = build_root / build_name / "Testing" / "tag"
-                    testing.mkdir(parents=True)
-                    artifacts.mkdir()
-                    expected_xml = "<testsuite failures=\"1\"/>\n"
-                    (testing / "Test.xml").write_text(
-                        expected_xml, encoding="utf-8"
-                    )
-                    fake_bin = root / "fake-bin"
-                    fake_bin.mkdir()
-                    for command, status in [("cmake", 0), ("ctest", 19)]:
-                        executable = fake_bin / command
-                        executable.write_text(
-                            "#!/bin/bash\nexit {}\n".format(status),
-                            encoding="utf-8",
-                        )
-                        executable.chmod(0o755)
-
-                    suite_function = extract_shell_function(
-                        source, function_name
-                    )
-                    harness = (
-                        "set -euo pipefail\n"
-                        "ROOT_DIR={}\nBUILD_ROOT={}\nARTIFACT_DIR={}\n"
-                        "nproc() {{ printf '1\\n'; }}\n{}\n{}\n"
-                        "set +e\n(set -e; {})\ncase_status=$?\n"
-                        "set -e\nprintf '%s\\n' \"$case_status\"\n"
-                    ).format(
-                        shlex.quote(str(root)),
-                        shlex.quote(str(build_root)),
-                        shlex.quote(str(artifacts)),
-                        copy_function,
-                        suite_function,
-                        function_name,
-                    )
-                    environment = dict(os.environ)
-                    environment["PATH"] = "{}:{}".format(
-                        fake_bin, environment["PATH"]
-                    )
-                    result = subprocess.run(
-                        ["bash", "-c", harness],
-                        env=environment,
-                        text=True,
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE,
-                    )
-
-                    self.assertEqual(0, result.returncode, result.stderr)
-                    self.assertEqual("19", result.stdout.strip())
-                    copied = artifacts / artifact_name
-                    self.assertEqual(
-                        expected_xml, copied.read_text(encoding="utf-8")
-                    )
-
-    def invoke_host_finalizer(self, root, cases_path):
-        source = (ROOT / "scripts/ci/host_checks.sh").read_text(
-            encoding="utf-8"
-        )
-        validator = ""
-        if "validate_case_evidence() {" in source:
-            validator = extract_shell_function(source, "validate_case_evidence")
-        finalizer = extract_shell_function(source, "finalize_host_checks")
-        summary = root / "summary.md"
-        harness = (
-            "set -euo pipefail\nCASES_FILE={}\nSUMMARY_FILE={}\n"
-            "HOST_STARTED=$(date +%s)\n{}\n{}\n"
-            "true\nfinalize_host_checks\n"
-        ).format(
-            shlex.quote(str(cases_path)),
-            shlex.quote(str(summary)),
-            validator,
-            finalizer,
-        )
-        result = subprocess.run(
-            ["bash", "-c", harness],
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        return result, summary
-
-    def expected_host_cases(self):
-        return [
-            "shell-syntax",
-            "ci-ctest",
-            "comm-host",
-            "ep-source-only",
-            "data-as-flag",
-            "collectives-vllm-patch",
-            "collectives-vllm-integration-sources",
-            "collectives-profile-report",
-        ]
-
-    def test_finalizer_accepts_only_complete_valid_case_evidence(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = pathlib.Path(temporary).resolve()
-            cases = root / "cases.tsv"
-            cases.write_text(
-                "".join(
-                    "{}\tPASS\t0\t1\n".format(name)
-                    for name in self.expected_host_cases()
-                ),
-                encoding="utf-8",
-            )
-
-            result, summary = self.invoke_host_finalizer(root, cases)
-
-            self.assertEqual(0, result.returncode, result.stderr)
-            report = summary.read_text(encoding="utf-8")
-            self.assertIn("Host cases: 8 total, 8 passed, 0 failed", report)
-            self.assertIn("Case evidence: valid", report)
-
-    def test_finalizer_fails_success_on_invalid_or_replaced_case_evidence(self):
-        expected = self.expected_host_cases()
-        valid = "".join(
-            "{}\tPASS\t0\t1\n".format(name) for name in expected
-        )
-
-        def replace_first_case(result, exit_code, duration):
-            return "{}\t{}\t{}\t{}\n".format(
-                expected[0], result, exit_code, duration
-            ) + "".join(
-                "{}\tPASS\t0\t1\n".format(name) for name in expected[1:]
-            )
-
-        with tempfile.TemporaryDirectory() as temporary:
-            root = pathlib.Path(temporary).resolve()
-            scenarios = {}
-
-            scenarios["missing"] = root / "missing.tsv"
-
-            unreadable = root / "unreadable.tsv"
-            unreadable.write_text(valid, encoding="utf-8")
-            unreadable.chmod(0)
-            scenarios["unreadable"] = unreadable
-
-            real_cases = root / "real-cases.tsv"
-            real_cases.write_text(valid, encoding="utf-8")
-            replaced = root / "replaced.tsv"
-            replaced.symlink_to(real_cases)
-            scenarios["replaced"] = replaced
-
-            malformed = root / "malformed.tsv"
-            malformed.write_text(
-                replace_first_case("PASS", "not-an-exit-code", "1"),
-                encoding="utf-8",
-            )
-            scenarios["malformed"] = malformed
-
-            invalid_status = root / "invalid-status.tsv"
-            invalid_status.write_text(
-                replace_first_case("UNKNOWN", "0", "1"), encoding="utf-8"
-            )
-            scenarios["invalid-status"] = invalid_status
-
-            inconsistent_status = root / "inconsistent-status.tsv"
-            inconsistent_status.write_text(
-                replace_first_case("PASS", "7", "1"), encoding="utf-8"
-            )
-            scenarios["inconsistent-status"] = inconsistent_status
-
-            invalid_duration = root / "invalid-duration.tsv"
-            invalid_duration.write_text(
-                replace_first_case("PASS", "0", "nan"), encoding="utf-8"
-            )
-            scenarios["invalid-duration"] = invalid_duration
-
-            incomplete = root / "incomplete.tsv"
-            incomplete.write_text(
-                "{}\tPASS\t0\t1\n".format(expected[0]), encoding="utf-8"
-            )
-            scenarios["incomplete"] = incomplete
-
-            duplicate = root / "duplicate.tsv"
-            duplicate.write_text(
-                "".join(
-                    "{}\tPASS\t0\t1\n".format(expected[0])
-                    for _ in expected
-                ),
-                encoding="utf-8",
-            )
-            scenarios["duplicate"] = duplicate
-
-            for name, cases in scenarios.items():
-                with self.subTest(name=name):
-                    summary = root / "summary.md"
-                    if summary.exists():
-                        summary.unlink()
-                    result, summary = self.invoke_host_finalizer(root, cases)
-                    self.assertNotEqual(0, result.returncode)
-                    report = summary.read_text(encoding="utf-8")
-                    self.assertIn("Case evidence: invalid", report)
-
-            unreadable.chmod(0o600)
-            self.assertEqual(valid, real_cases.read_text(encoding="utf-8"))
-
     def test_host_checks_runs_all_cases_after_an_intermediate_failure(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = pathlib.Path(temporary).resolve()
@@ -1025,28 +766,38 @@ class HostChecksBehaviorTests(unittest.TestCase):
 
             self.assertNotEqual(0, result.returncode)
             self.assertTrue(later_case.is_file())
-            cases = (root / ".ci-artifacts/host/cases.tsv").read_text(
-                encoding="utf-8"
-            ).splitlines()
-            self.assertEqual(8, len(cases))
-            rows = [line.split("\t") for line in cases]
-            self.assertEqual(self.expected_host_cases(), [row[0] for row in rows])
-            self.assertEqual(["ep-source-only", "FAIL", "23"], rows[3][:3])
+
+            self.assertNotEqual(0, result.returncode)
+            self.assertTrue(later_case.is_file())
+            case_lines = [
+                line for line in result.stdout.splitlines()
+                if line.startswith("[host-check] ")
+            ]
+            self.assertEqual(8, len(case_lines))
+            expected = [
+                "shell-syntax",
+                "ci-ctest",
+                "comm-host",
+                "ep-source-only",
+                "data-as-flag",
+                "collectives-vllm-patch",
+                "collectives-vllm-integration-sources",
+                "collectives-profile-report",
+            ]
             self.assertEqual(
-                ["collectives-profile-report", "FAIL", "31"], rows[7][:3]
+                expected,
+                [line.split(":", 1)[0].removeprefix("[host-check] ") for line in case_lines],
             )
-            for index, row in enumerate(rows):
-                if index not in (3, 7):
-                    self.assertEqual(["PASS", "0"], row[1:3])
-            summary = (root / ".ci-artifacts/host/summary.md").read_text(
-                encoding="utf-8"
+            self.assertIn("[host-check] ep-source-only: FAIL (exit=23", result.stdout)
+            self.assertIn(
+                "[host-check] collectives-profile-report: FAIL (exit=31",
+                result.stdout,
             )
-            self.assertIn("Host cases: 8 total, 6 passed, 2 failed", summary)
+            self.assertIn("Host cases: 8 total, 6 passed, 2 failed", result.stdout)
             self.assertIn(
                 "Failed cases: ep-source-only, collectives-profile-report",
-                summary,
+                result.stdout,
             )
-            self.assertIn("Case evidence: valid", summary)
 
 
 class BuildHelperBehaviorTests(unittest.TestCase):
@@ -1086,219 +837,6 @@ class BuildHelperBehaviorTests(unittest.TestCase):
             self.assertNotEqual(
                 0, validate(conflicting, "Ascend-cann-toolkit").returncode
             )
-
-
-class ArtifactCollectorBehaviorTests(unittest.TestCase):
-    def seed_evidence(self, artifacts):
-        artifacts.mkdir(parents=True, exist_ok=True)
-        (artifacts / "cases.tsv").write_text("case\tpass\t0\t1\n")
-        (artifacts / "summary.md").write_text("# Summary\n")
-
-    def run_collector(self, source, artifacts):
-        return subprocess.run(
-            [str(CONTROL / "collect_artifacts.sh"), str(source), str(artifacts)],
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            check=False,
-        )
-
-    def test_collector_preserves_paths_and_rejects_unsafe_payloads(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = pathlib.Path(temporary)
-            source = root / "source"
-            artifacts = source / ".artifacts"
-            external = root / "external"
-            (source / "logs" / "one").mkdir(parents=True)
-            (source / "logs" / "two").mkdir(parents=True)
-            (source / "build-ci").mkdir()
-            (source / "install" / "lib").mkdir(parents=True)
-            external.mkdir()
-
-            (source / "logs" / "one" / "same.log").write_text("one\n")
-            (source / "logs" / "two" / "same.log").write_text("two\n")
-            (source / "results.xml").write_text("<testsuite/>\n")
-            (source / "summary.csv").write_text("name,value\na,1\n")
-            (source / "trace.json").write_text("{}\n")
-            (source / "ldd-tile-comm.txt").write_text("libascend_hal.so\n")
-            (source / "build-ci" / "payload.o").write_bytes(b"object")
-            (source / "install" / "lib" / "libbad.so").write_bytes(b"library")
-            (source / "model.om").write_bytes(b"model")
-            (source / "cann.run").write_bytes(b"package")
-            (source / "notes.txt").write_text("not an artifact\n")
-            (external / "outside.log").write_text("outside\n")
-            (source / "outside.log").symlink_to(external / "outside.log")
-            (source / "linked-dir").symlink_to(external, target_is_directory=True)
-
-            self.seed_evidence(artifacts)
-            (artifacts / "ctest-top-level.xml").write_text("<testsuite/>\n")
-            result = self.run_collector(source, artifacts)
-            self.assertEqual(0, result.returncode, result.stderr)
-
-            collected = artifacts / "source"
-            self.assertEqual("one\n", (collected / "logs/one/same.log").read_text())
-            self.assertEqual("two\n", (collected / "logs/two/same.log").read_text())
-            for relative in [
-                "results.xml",
-                "summary.csv",
-                "trace.json",
-                "ldd-tile-comm.txt",
-            ]:
-                self.assertTrue((collected / relative).is_file(), relative)
-            for relative in [
-                "build-ci/payload.o",
-                "install/lib/libbad.so",
-                "model.om",
-                "cann.run",
-                "notes.txt",
-                "outside.log",
-                "linked-dir/outside.log",
-            ]:
-                self.assertFalse((collected / relative).exists(), relative)
-            self.assertFalse((artifacts / "source/.artifacts").exists())
-            self.assertTrue((artifacts / "environment.txt").is_file())
-            self.assertEqual("case\tpass\t0\t1\n", (artifacts / "cases.tsv").read_text())
-            self.assertEqual("# Summary\n", (artifacts / "summary.md").read_text())
-
-            manifest = (artifacts / "manifest.txt").read_text().splitlines()
-            self.assertEqual(sorted(manifest), manifest)
-            self.assertTrue(any(line.startswith("source/logs/one/same.log\t") for line in manifest))
-            self.assertTrue(any(line.startswith("source/logs/two/same.log\t") for line in manifest))
-            for line in manifest:
-                relative, size = line.split("\t")
-                self.assertEqual((artifacts / relative).stat().st_size, int(size))
-            for path in artifacts.rglob("*"):
-                self.assertFalse(path.is_symlink(), str(path))
-
-    def test_collector_refuses_files_larger_than_100_mib(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = pathlib.Path(temporary)
-            source = root / "source"
-            artifacts = root / "artifacts"
-            source.mkdir()
-            self.seed_evidence(artifacts)
-            huge = source / "huge.log"
-            with huge.open("wb") as output:
-                output.truncate(100 * 1024 * 1024 + 1)
-
-            result = self.run_collector(source, artifacts)
-            self.assertEqual(0, result.returncode, result.stderr)
-            self.assertFalse((artifacts / "source/huge.log").exists())
-            rejected = (artifacts / "artifact-rejections.txt").read_text()
-            self.assertIn("source/huge.log", rejected)
-
-    def test_collector_sanitizes_preexisting_upload_directory(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = pathlib.Path(temporary)
-            source = root / "source"
-            artifacts = root / "artifacts"
-            external = root / "external.log"
-            source.mkdir()
-            self.seed_evidence(artifacts)
-            external.write_text("external\n")
-            (artifacts / "keep.xml").write_text("<testsuite/>\n")
-            (artifacts / "payload.o").write_bytes(b"object")
-            (artifacts / "library.so").write_bytes(b"library")
-            (artifacts / "outside.log").symlink_to(external)
-            with (artifacts / "huge.log").open("wb") as output:
-                output.truncate(100 * 1024 * 1024 + 1)
-
-            result = self.run_collector(source, artifacts)
-            self.assertEqual(0, result.returncode, result.stderr)
-            self.assertTrue((artifacts / "keep.xml").is_file())
-            self.assertFalse((artifacts / "payload.o").exists())
-            self.assertFalse((artifacts / "library.so").exists())
-            self.assertFalse((artifacts / "outside.log").exists())
-            self.assertFalse((artifacts / "huge.log").exists())
-            self.assertEqual("external\n", external.read_text())
-            rejected = (artifacts / "artifact-rejections.txt").read_text()
-            for token in ["payload.o", "library.so", "outside.log", "huge.log"]:
-                self.assertIn(token, rejected)
-
-    def test_collector_fails_closed_on_missing_or_unsafe_root_evidence(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = pathlib.Path(temporary)
-            source = root / "source"
-            source.mkdir()
-
-            cases_missing = root / "cases-missing"
-            cases_missing.mkdir()
-            (cases_missing / "summary.md").write_text("# Summary\n")
-            cases_result = self.run_collector(source, cases_missing)
-            self.assertNotEqual(0, cases_result.returncode)
-            self.assertTrue((cases_missing / "environment.txt").is_file())
-            self.assertTrue((cases_missing / "manifest.txt").is_file())
-
-            summary_missing = root / "summary-missing"
-            summary_missing.mkdir()
-            (summary_missing / "cases.tsv").write_text("case\tpass\t0\t1\n")
-            summary_result = self.run_collector(source, summary_missing)
-            self.assertNotEqual(0, summary_result.returncode)
-            self.assertTrue((summary_missing / "environment.txt").is_file())
-            self.assertTrue((summary_missing / "manifest.txt").is_file())
-
-            symlinked = root / "symlinked"
-            symlinked.mkdir()
-            real_cases = root / "real-cases.tsv"
-            real_cases.write_text("case\tpass\t0\t1\n")
-            (symlinked / "cases.tsv").symlink_to(real_cases)
-            (symlinked / "summary.md").write_text("# Summary\n")
-            symlink_result = self.run_collector(source, symlinked)
-            self.assertNotEqual(0, symlink_result.returncode)
-            self.assertFalse((symlinked / "cases.tsv").exists())
-            self.assertTrue((symlinked / "environment.txt").is_file())
-            self.assertTrue((symlinked / "manifest.txt").is_file())
-
-            oversized = root / "oversized"
-            oversized.mkdir()
-            (oversized / "cases.tsv").write_text("case\tpass\t0\t1\n")
-            with (oversized / "summary.md").open("wb") as output:
-                output.truncate(100 * 1024 * 1024 + 1)
-            oversized_result = self.run_collector(source, oversized)
-            self.assertNotEqual(0, oversized_result.returncode)
-            self.assertFalse((oversized / "summary.md").exists())
-            self.assertTrue((oversized / "environment.txt").is_file())
-            self.assertTrue((oversized / "manifest.txt").is_file())
-
-            unsafe_directory = root / "unsafe-directory"
-            (unsafe_directory / "summary.md").mkdir(parents=True)
-            (unsafe_directory / "summary.md" / "payload.so").write_bytes(b"library")
-            (unsafe_directory / "cases.tsv").write_text("case\tpass\t0\t1\n")
-            directory_result = self.run_collector(source, unsafe_directory)
-            self.assertNotEqual(0, directory_result.returncode)
-            self.assertFalse((unsafe_directory / "summary.md").exists())
-            self.assertTrue((unsafe_directory / "environment.txt").is_file())
-            self.assertTrue((unsafe_directory / "manifest.txt").is_file())
-
-            for upload in [
-                cases_missing,
-                summary_missing,
-                symlinked,
-                oversized,
-                unsafe_directory,
-            ]:
-                for path in upload.rglob("*"):
-                    self.assertFalse(path.is_symlink(), str(path))
-                    if path.is_file():
-                        self.assertLessEqual(path.stat().st_size, 100 * 1024 * 1024)
-
-    def test_collector_rejects_symlink_source_and_artifact_directories(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = pathlib.Path(temporary)
-            source_real = root / "source-real"
-            artifact_real = root / "artifact-real"
-            source_real.mkdir()
-            artifact_real.mkdir()
-            source_link = root / "source-link"
-            artifact_link = root / "artifact-link"
-            source_link.symlink_to(source_real, target_is_directory=True)
-            artifact_link.symlink_to(artifact_real, target_is_directory=True)
-
-            source_result = self.run_collector(source_link, root / "artifacts")
-            self.assertNotEqual(0, source_result.returncode)
-            artifact_result = self.run_collector(source_real, artifact_link)
-            self.assertNotEqual(0, artifact_result.returncode)
-
 
 class JobHookBehaviorTests(unittest.TestCase):
     def materialize_hook(self, root, runner_work_root):
@@ -1403,7 +941,5 @@ class JobHookBehaviorTests(unittest.TestCase):
                 [str(hook)], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE
             )
             self.assertNotEqual(0, result.returncode)
-
-
 if __name__ == "__main__":
     unittest.main()

@@ -81,7 +81,7 @@ The CI operator runbook is [docs/CI.md](../docs/CI.md). Primary entrypoints are:
 
 - `scripts/ci/host_checks.sh`: Ubuntu-compatible fast host validation.
 - `scripts/ci/control/gate.py`: sealed `blue` build, queue, hardware, cleanup,
-  and evidence controller; invoke it through the trusted workflow.
+  and result controller; invoke it through the trusted workflow.
 - `scripts/ci/provision/{account,cann,control,runner,verify}.sh`: idempotent
   `blue` provisioning and acceptance checks; each supports `--dry-run`.
 

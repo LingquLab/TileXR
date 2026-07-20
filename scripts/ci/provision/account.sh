@@ -21,8 +21,6 @@ if [[ "${DRY_RUN}" != 1 ]] && ! ci_primary_group_has_non_root_gid; then
 fi
 
 runner_work="${RUNNER_HOME}/_work"
-lock_home="${CI_HOME}/locks"
-artifact_home="${CI_HOME}/artifacts"
 toolchains_home="${CI_HOME}/toolchains"
 toolchain_parent="${toolchains_home}/cann"
 control_parent="${CI_HOME}/control"
@@ -30,8 +28,8 @@ install_work="${CI_HOME}/install-work"
 
 if [[ "${DRY_RUN}" != 1 ]]; then
     for directory in \
-        "${CI_HOME}" "${RUNNER_HOME}" "${runner_work}" "${lock_home}" \
-        "${artifact_home}" "${toolchains_home}" "${toolchain_parent}" \
+        "${CI_HOME}" "${RUNNER_HOME}" "${runner_work}" \
+        "${toolchains_home}" "${toolchain_parent}" \
         "${control_parent}" "${install_work}"; do
         if [[ -L "${directory}" || ( -e "${directory}" && ! -d "${directory}" ) ]]; then
             echo "ERROR: provisioning directory must be a real directory: ${directory}" >&2
@@ -66,7 +64,7 @@ fi
 run install -d -o root -g "${CI_PRIMARY_GROUP}" -m 0750 \
     "${CI_HOME}"
 run install -d -o "${CI_USER}" -g "${CI_PRIMARY_GROUP}" -m 0750 \
-    "${RUNNER_HOME}" "${runner_work}" "${lock_home}" "${artifact_home}"
+    "${RUNNER_HOME}" "${runner_work}"
 run install -d -o root -g "${CI_GROUP}" -m 0750 \
     "${toolchains_home}" "${toolchain_parent}"
 run install -d -o root -g "${CI_GROUP}" -m 0750 \
