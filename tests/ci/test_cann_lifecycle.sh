@@ -58,7 +58,9 @@ printf '%s\n' \
     '    printf "%s\n" package_name=Ascend-cann-toolkit version=9.1.0 > "${toolkit_info}"' \
     '    printf "%s\n" package_name=Ascend-cann-910b-ops version=9.1.0 > "${ops_info}"' \
     '    printf "%s\n" "#!/usr/bin/env bash" "exit 0" > "${compiler_dir}/bisheng-real"' \
-    '    chmod 0750 "${compiler_dir}/bisheng-real"' \
+    '    printf "%s\n" "#!/usr/bin/env bash" "exit 0" > "${compiler_dir}/setgid-helper"' \
+    '    chmod 4750 "${compiler_dir}/bisheng-real"' \
+    '    chmod 2750 "${compiler_dir}/setgid-helper"' \
     '    ln -s bisheng-real "${compiler_dir}/bisheng"' \
     '}' \
     'simulate_ancestor_permission_fix() {' \
@@ -206,6 +208,7 @@ EOF
 
 assert_failure_then_success() {
     local phase="$1"
+    local compiler_dir
     if run_phase "${phase}"; then
         echo "${phase}: expected provisioning failure" >&2
         exit 1
@@ -222,6 +225,17 @@ assert_failure_then_success() {
     fi
     [[ -d "${cann_home}" && ! -e "${cann_home}/.tilexr-ci-installing" ]] || {
         echo "${phase}: successful rerun did not finalize the CANN tree" >&2
+        exit 1
+    }
+    compiler_dir="${cann_home}/cann/compiler/ccec_compiler/bin"
+    [[ "$(entry_metadata "${compiler_dir}/bisheng-real" | awk -F: '{print $3}')" == 750 &&
+       "$(entry_metadata "${compiler_dir}/setgid-helper" | awk -F: '{print $3}')" == 750 ]] || {
+        echo "${phase}: successful sealing preserved setuid or setgid bits" >&2
+        exit 1
+    }
+    [[ -L "${compiler_dir}/bisheng" &&
+       "$(readlink "${compiler_dir}/bisheng")" == bisheng-real ]] || {
+        echo "${phase}: successful sealing changed the internal compiler symlink" >&2
         exit 1
     }
     assert_sealed_parents

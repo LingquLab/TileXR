@@ -79,6 +79,16 @@ if ! grep -F -- 'TILEXR_CI_SEALED_CANN_HOME=1' "${output_file}" >/dev/null; then
     echo "the sealed CANN installer permission switch is missing" >&2
     exit 1
 fi
+if grep -F -- 'run chmod -R u+rwX,g+rX,o-rwx,go-w "${CANN_HOME}"' \
+    "${provision_root}/cann.sh" >/dev/null; then
+    echo "CANN sealing still uses recursive chmod across symlinks" >&2
+    exit 1
+fi
+if ! grep -F -- 'run find -P "${CANN_HOME}"' \
+    "${provision_root}/cann.sh" >/dev/null; then
+    echo "CANN sealing does not use a no-follow filesystem walk" >&2
+    exit 1
+fi
 for provision_script in account cann verify; do
     if ! grep -F -- 'cann_parent_directories_are_sealed' \
         "${provision_root}/${provision_script}.sh" >/dev/null; then

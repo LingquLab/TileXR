@@ -126,8 +126,17 @@ cann_tree_has_expected_payload() {
 
 cann_entry_stat() {
     local path="$1"
-    stat -c '%U:%G:%a' "${path}" 2>/dev/null ||
-        stat -f '%Su:%Sg:%Lp' "${path}"
+    local entry owner group raw_mode mode
+
+    if entry="$(stat -c '%U:%G:%a' "${path}" 2>/dev/null)"; then
+        printf '%s\n' "${entry}"
+        return 0
+    fi
+    entry="$(stat -f '%Su:%Sg:%p' "${path}")" || return 1
+    IFS=: read -r owner group raw_mode <<< "${entry}"
+    [[ "${raw_mode}" =~ ^[0-7]+$ ]] || return 1
+    mode="$(printf '%o' "$((8#${raw_mode} & 8#7777))")"
+    printf '%s:%s:%s\n' "${owner}" "${group}" "${mode}"
 }
 
 managed_directory_matches() {
@@ -170,7 +179,7 @@ cann_tree_regular_entries_are_sealed() {
         entry="$(cann_entry_stat "${path}")" || return 1
         IFS=: read -r owner group mode <<< "${entry}"
         [[ "${owner}" == "${CANN_OWNER}" && "${group}" == "${CI_GROUP}" ]] || return 1
-        [[ "${mode}" =~ ([0-7])([0-7])([0-7])$ ]] || return 1
+        [[ "${mode}" =~ ^([0-7])([0-7])([0-7])$ ]] || return 1
         group_bits="${BASH_REMATCH[2]}"
         other_bits="${BASH_REMATCH[3]}"
         [[ "${group_bits}" =~ ^[0145]$ && "${other_bits}" =~ ^[0145]$ ]] || return 1

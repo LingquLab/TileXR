@@ -262,7 +262,8 @@ if [[ "${DRY_RUN}" != 1 ]] && ! cann_tree_has_expected_payload; then
 fi
 
 run chown -R "${CANN_OWNER}:${CI_GROUP}" "${CANN_HOME}"
-run chmod -R u+rwX,g+rX,o-rwx,go-w "${CANN_HOME}"
+run find -P "${CANN_HOME}" \( -type f -o -type d \) \
+    -exec chmod u-s,g-s,o-t,u+rwX,g+rX,o-rwx,go-w '{}' +
 if [[ "${DRY_RUN}" != 1 ]] && ! cann_tree_is_trusted; then
     echo "ERROR: installed CANN tree could not be sealed" >&2
     exit 1

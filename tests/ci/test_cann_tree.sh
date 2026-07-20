@@ -38,6 +38,25 @@ if ! cann_tree_is_trusted; then
     exit 1
 fi
 
+chmod 4750 "${compiler_dir}/bisheng-real"
+if cann_tree_is_trusted; then
+    echo "CANN tree accepted a setuid regular file" >&2
+    exit 1
+fi
+chmod 2750 "${compiler_dir}/bisheng-real"
+if cann_tree_is_trusted; then
+    echo "CANN tree accepted a setgid regular file" >&2
+    exit 1
+fi
+chmod 0750 "${compiler_dir}/bisheng-real"
+
+chmod 2750 "${compiler_dir}"
+if cann_tree_is_trusted; then
+    echo "CANN tree accepted a setgid directory" >&2
+    exit 1
+fi
+chmod 0750 "${compiler_dir}"
+
 chmod 0700 "${compiler_dir}"
 if cann_tree_is_trusted; then
     echo "CANN tree accepted a directory that the CI group cannot traverse" >&2
