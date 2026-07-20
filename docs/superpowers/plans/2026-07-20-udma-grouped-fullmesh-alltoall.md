@@ -12,7 +12,8 @@
 
 - Keep the existing 35-core big-data fullmesh kernel behavior unchanged.
 - Add grouped fullmesh as dedicated demo `testType=8`; do not add mode branches to the old big-data worker loop.
-- Support `rankSize >= 8` and `rankSize % 8 == 0` only.
+- Support `8 <= rankSize <= 128` and `rankSize % 8 == 0` only, matching the
+  current `TILEXR_MAX_RANK_SIZE` and `CommArgs` peer-array limit.
 - Use exactly 32 AIV blocks: 16 send workers and 16 receive workers.
 - Use a fixed group width of 16, with eight forward and eight backward circular distances.
 - Allocate `payloadPlane[2][rankSize][elementsPerPeer]` and `signalPlane[2][rankSize][128 bytes]` in one registered region.
@@ -145,7 +146,8 @@ Implement peer mapping without constructing vectors:
 inline int32_t AllToAllGroupPeer(
     int rank, int rankSize, uint32_t group, uint32_t lane)
 {
-    if (rankSize < 8 || rankSize % 8 != 0 || rank < 0 || rank >= rankSize || lane >= 16U) {
+    if (rankSize < 8 || rankSize > 128 || rankSize % 8 != 0 ||
+        rank < 0 || rank >= rankSize || lane >= 16U) {
         return -1;
     }
     const uint32_t index = lane < 8U ? lane : lane - 8U;

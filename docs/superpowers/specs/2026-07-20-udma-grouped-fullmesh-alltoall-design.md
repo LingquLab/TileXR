@@ -19,7 +19,8 @@ aggregation, ACK protocol, profiling stages, or experimental mode branches.
 
 The first version supports:
 
-- `rankSize >= 8` and `rankSize % 8 == 0`.
+- `8 <= rankSize <= 128` and `rankSize % 8 == 0`, matching the current
+  `TILEXR_MAX_RANK_SIZE` and `CommArgs` peer-array limit.
 - A fixed peer-group width of 16: eight forward and eight backward circular
   distances.
 - Any payload whose complete double-buffered registered receive layout,
