@@ -420,7 +420,7 @@ tmp/grouped_alltoall_route_stages_b101_2x8/secondary/loop49.json
 Require:
 
 ```text
-local same-node sends = 112, self-copy = 16
+local same-node sends = 112, self-copy task spans = 256
 primary cross-node QP0 sends = 96
 secondary cross-node QP4 sends = 32
 duplicate peers across stages = 0

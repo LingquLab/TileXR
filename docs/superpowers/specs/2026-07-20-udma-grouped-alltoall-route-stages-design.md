@@ -64,7 +64,8 @@ compatible and can extract loop49 independently for each stage.
 
 For the physical 2x8 run, loop49 must contain:
 
-- `local`: 112 same-node sends plus 16 self-copy tasks across all ranks.
+- `local`: 112 same-node sends plus 256 self-copy task spans across all ranks
+  (16 copyout workers on each of 16 ranks).
 - `primary`: 96 cross-node sends on QP0.
 - `secondary`: 32 cross-node sends on QP4.
 - no peer duplicated across stages and no invalid QP.
