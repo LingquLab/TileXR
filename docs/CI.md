@@ -64,6 +64,10 @@ root-owned runner `.env`. The hook removes children of the fixed repository
 workspace only after Actions post-job steps complete. It refuses symbolic-link
 redirection and never removes the CANN tree.
 
+The root-owned CANN parent directories and installed toolchain use the
+installer-required `0755` directory permissions. Toolchain files are readable
+and executable but remain non-writable to the CI account and other users.
+
 Host checks use `.ci-build/tilexr-host-default` by default. A
 `TILEXR_CI_BUILD_ROOT` override is accepted only as an appropriately named
 direct child of the real repository build parent or the real `RUNNER_TEMP`.

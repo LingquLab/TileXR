@@ -88,10 +88,10 @@ converge_cann_parent_directories() {
         return 0
     fi
     chown "${CANN_OWNER}:${CI_PRIMARY_GROUP}" "${CI_HOME}" || return 1
-    chmod 0750 "${CI_HOME}" || return 1
+    chmod 0755 "${CI_HOME}" || return 1
     chown "${CANN_OWNER}:${CI_GROUP}" \
         "${CI_HOME}/toolchains" "${CI_HOME}/toolchains/cann" || return 1
-    chmod 0750 "${CI_HOME}/toolchains" "${CI_HOME}/toolchains/cann" || return 1
+    chmod 0755 "${CI_HOME}/toolchains" "${CI_HOME}/toolchains/cann" || return 1
     cann_parent_directories_match_invocation &&
         cann_parent_directories_are_sealed
 }
@@ -182,9 +182,9 @@ if [[ "${DRY_RUN}" != 1 ]]; then
         exit 1
     fi
 else
-    run install -d -o "${CANN_OWNER}" -g "${CI_PRIMARY_GROUP}" -m 0750 \
+    run install -d -o "${CANN_OWNER}" -g "${CI_PRIMARY_GROUP}" -m 0755 \
         "${CI_HOME}"
-    run install -d -o "${CANN_OWNER}" -g "${CI_GROUP}" -m 0750 \
+    run install -d -o "${CANN_OWNER}" -g "${CI_GROUP}" -m 0755 \
         "${CI_HOME}/toolchains" "${CI_HOME}/toolchains/cann"
 fi
 
@@ -220,14 +220,14 @@ for source_file in cann_download_install.sh cann_local_install.sh common_env.sh 
 done
 
 if [[ "${DRY_RUN}" == 1 ]]; then
-    run mkdir -m 0750 -- "${CANN_HOME}"
+    run mkdir -m 0755 -- "${CANN_HOME}"
     run chown "${CANN_OWNER}:${CI_GROUP}" "${CANN_HOME}"
     run bash -c \
         'set -o noclobber; umask 077; printf "%s\n" "$1" > "$2"' \
         cann-marker dry-run-token "${cann_marker}"
     run chown "${CANN_OWNER}:${CI_GROUP}" "${cann_marker}"
 else
-    mkdir -m 0750 -- "${CANN_HOME}"
+    mkdir -m 0755 -- "${CANN_HOME}"
     cann_tree_identity="$(cann_path_identity "${CANN_HOME}")"
     cann_cleanup_state=directory
     chown "${CANN_OWNER}:${CI_GROUP}" "${CANN_HOME}"
@@ -256,7 +256,7 @@ fi
 
 run chown -R "${CANN_OWNER}:${CI_GROUP}" "${CANN_HOME}"
 run find -P "${CANN_HOME}" \( -type f -o -type d \) \
-    -exec chmod u-s,g-s,o-t,u+rwX,g+rX,o-rwx,go-w '{}' +
+    -exec chmod u-s,g-s,o-t,u+rwX,g+rX,o+rX,go-w '{}' +
 if [[ "${DRY_RUN}" != 1 ]] && ! cann_tree_is_trusted; then
     echo "ERROR: installed CANN tree could not be sealed" >&2
     exit 1

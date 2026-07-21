@@ -234,11 +234,11 @@ cann_parent_directories_are_real() {
 
 cann_parent_directories_are_sealed() {
     managed_directory_matches \
-        "${CI_HOME}" "${CANN_OWNER}" "${CI_PRIMARY_GROUP}" 750 &&
+        "${CI_HOME}" "${CANN_OWNER}" "${CI_PRIMARY_GROUP}" 755 &&
         managed_directory_matches \
-            "${CI_HOME}/toolchains" "${CANN_OWNER}" "${CI_GROUP}" 750 &&
+            "${CI_HOME}/toolchains" "${CANN_OWNER}" "${CI_GROUP}" 755 &&
         managed_directory_matches \
-            "${CI_HOME}/toolchains/cann" "${CANN_OWNER}" "${CI_GROUP}" 750
+            "${CI_HOME}/toolchains/cann" "${CANN_OWNER}" "${CI_GROUP}" 755
 }
 
 cann_tree_regular_entries_are_sealed() {
@@ -250,11 +250,10 @@ cann_tree_regular_entries_are_sealed() {
         [[ "${mode}" =~ ^([0-7])([0-7])([0-7])$ ]] || return 1
         group_bits="${BASH_REMATCH[2]}"
         other_bits="${BASH_REMATCH[3]}"
-        [[ "${group_bits}" =~ ^[0145]$ && "${other_bits}" =~ ^[0145]$ ]] || return 1
         if [[ -d "${path}" ]]; then
-            [[ "${group_bits}" == 5 ]] || return 1
+            [[ "${group_bits}" == 5 && "${other_bits}" == 5 ]] || return 1
         else
-            [[ "${group_bits}" == 4 || "${group_bits}" == 5 ]] || return 1
+            [[ "${group_bits}" =~ ^[45]$ && "${other_bits}" == "${group_bits}" ]] || return 1
             if [[ -x "${path}" && "${group_bits}" != 5 ]]; then
                 return 1
             fi

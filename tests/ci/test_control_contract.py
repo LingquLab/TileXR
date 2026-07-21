@@ -116,6 +116,23 @@ class ControlSourceContractTests(unittest.TestCase):
         live_host_check = text.index("    check_blue_host\n")
         self.assertLess(live_host_check, existing_tree)
 
+    def test_cann_paths_use_installer_required_permissions(self):
+        common = self.read("scripts/ci/provision/common.sh")
+        account = self.read("scripts/ci/provision/account.sh")
+        cann = self.read("scripts/ci/provision/cann.sh")
+
+        self.assertEqual(3, common.count(" 755"))
+        continuation = "\\" + "\n"
+        self.assertIn('-m 0755 ' + continuation + '    "${CI_HOME}"', account)
+        self.assertIn(
+            '-m 0755 '
+            + continuation
+            + '    "${toolchains_home}" "${toolchain_parent}"',
+            account,
+        )
+        self.assertIn('mkdir -m 0755 -- "${CANN_HOME}"', cann)
+        self.assertIn("u+rwX,g+rX,o+rX,go-w", cann)
+
     def test_manifests_never_source_pull_request_code_into_trusted_shell(self):
         for relative in [
             "scripts/ci/control/build_blue.sh",

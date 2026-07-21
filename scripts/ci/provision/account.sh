@@ -61,11 +61,11 @@ if [[ "${DRY_RUN}" != 1 ]] && ! ci_identity_is_bounded "${CI_USER}"; then
     exit 1
 fi
 
-run install -d -o root -g "${CI_PRIMARY_GROUP}" -m 0750 \
+run install -d -o root -g "${CI_PRIMARY_GROUP}" -m 0755 \
     "${CI_HOME}"
 run install -d -o "${CI_USER}" -g "${CI_PRIMARY_GROUP}" -m 0750 \
     "${RUNNER_HOME}" "${runner_work}"
-run install -d -o root -g "${CI_GROUP}" -m 0750 \
+run install -d -o root -g "${CI_GROUP}" -m 0755 \
     "${toolchains_home}" "${toolchain_parent}"
 run install -d -o root -g "${CI_GROUP}" -m 0750 \
     "${control_parent}" "${install_work}"
