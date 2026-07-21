@@ -300,12 +300,15 @@ void TestRouteStages()
 
 void TestCopyoutWorkerPolicy()
 {
+    CHECK_EQ(TileXR::Demo::kAllToAllGroupBlockDim, 48U);
     CHECK_EQ(TileXR::Demo::AllToAllGroupValidCopyoutWorkers(8U), true);
     CHECK_EQ(TileXR::Demo::AllToAllGroupValidCopyoutWorkers(16U), true);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupValidCopyoutWorkers(32U), true);
     CHECK_EQ(TileXR::Demo::AllToAllGroupValidCopyoutWorkers(4U), false);
     CHECK_EQ(TileXR::Demo::AllToAllGroupValidCopyoutWorkers(12U), false);
     CHECK_EQ(TileXR::Demo::AllToAllGroupBlockDim(8U), 24U);
     CHECK_EQ(TileXR::Demo::AllToAllGroupBlockDim(16U), 32U);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupBlockDim(32U), 48U);
     CHECK_EQ(TileXR::Demo::AllToAllGroupBlockDim(4U), 0U);
 
     std::set<int32_t> lanes;
@@ -321,6 +324,11 @@ void TestCopyoutWorkerPolicy()
     CHECK_EQ(TileXR::Demo::AllToAllGroupCopyoutLane(7U, 1U, 16U), -1);
     CHECK_EQ(TileXR::Demo::AllToAllGroupCopyoutLane(15U, 0U, 16U), 15);
     CHECK_EQ(TileXR::Demo::AllToAllGroupCopyoutLane(8U, 0U, 8U), -1);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupCopyoutLane(0U, 0U, 32U), 0);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupCopyoutLane(15U, 0U, 32U), 15);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupCopyoutLane(16U, 0U, 32U), 0);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupCopyoutLane(31U, 0U, 32U), 15);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupCopyoutLane(16U, 1U, 32U), -1);
 }
 
 void TestKernelStructure()
@@ -341,8 +349,12 @@ void TestKernelStructure()
         "if (!AllToAllGroupPeerInRouteStageDevice(rank, peer, routeStage))");
     CHECK_CONTAINS(kernel, "TILEXR_ALLTOALL_GROUP_ROUTE_STAGE_LOCAL");
     CHECK_CONTAINS(kernel, "AllToAllGroupCopyoutLaneDevice");
+    CHECK_CONTAINS(kernel, "AllToAllGroupRemoteAssistDevice");
+    CHECK_CONTAINS(kernel, "copySliceCount");
+    CHECK_CONTAINS(kernel, "copySliceIndex");
     CHECK_CONTAINS(kernel, "TILEXR_ALLTOALL_GROUP_SEND_CORES + copyoutWorkers");
-    CHECK_CONTAINS(kernel, "traceCore = TILEXR_ALLTOALL_GROUP_SEND_CORES + lane");
+    CHECK_CONTAINS(kernel, "const uint32_t traceCore = copyoutWorkers == 8U");
+    CHECK_CONTAINS(kernel, "TILEXR_ALLTOALL_GROUP_SEND_CORES + lane : blockIdx");
     CHECK_CONTAINS(kernel, "UDMAPutSignalNbiOnQp<int32_t>");
     CHECK_CONTAINS(kernel, "UDMAQuietStatusOnQp(args, peer, selectedQp)");
     CHECK_CONTAINS(kernel, "AllToAllGroupWaitTokenMte");

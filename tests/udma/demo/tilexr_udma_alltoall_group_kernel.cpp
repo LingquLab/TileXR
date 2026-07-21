@@ -11,7 +11,7 @@
 namespace {
 
 constexpr uint32_t TILEXR_ALLTOALL_GROUP_SEND_CORES = 16U;
-constexpr uint32_t TILEXR_ALLTOALL_GROUP_BLOCK_DIM = 32U;
+constexpr uint32_t TILEXR_ALLTOALL_GROUP_BLOCK_DIM = 48U;
 constexpr uint32_t TILEXR_ALLTOALL_GROUP_HALF_WIDTH = 8U;
 constexpr uint32_t TILEXR_ALLTOALL_GROUP_SIGNAL_STRIDE = 128U;
 constexpr uint32_t TILEXR_ALLTOALL_GROUP_RELAY_BYTES = 64U * 1024U;
@@ -160,9 +160,19 @@ __aicore__ inline bool AllToAllGroupReceivePeerInRouteStageDevice(
 __aicore__ inline int32_t AllToAllGroupCopyoutLaneDevice(
     uint32_t worker, uint32_t assignment, uint32_t copyoutWorkers)
 {
+    if (copyoutWorkers == 32U) {
+        return assignment == 0U ?
+            static_cast<int32_t>(worker % TILEXR_ALLTOALL_GROUP_SEND_CORES) : -1;
+    }
     const uint32_t lane = worker + assignment * copyoutWorkers;
     return lane < TILEXR_ALLTOALL_GROUP_SEND_CORES ?
         static_cast<int32_t>(lane) : -1;
+}
+
+__aicore__ inline bool AllToAllGroupRemoteAssistDevice(
+    uint32_t worker, uint32_t copyoutWorkers)
+{
+    return copyoutWorkers == 32U && worker >= TILEXR_ALLTOALL_GROUP_SEND_CORES;
 }
 
 __aicore__ inline void AllToAllGroupSelectRouteQps(
@@ -351,7 +361,7 @@ extern "C" __global__ __aicore__ void tilexr_udma_all_to_all_group_kernel(
     const int32_t rank = args->rank;
     const int32_t rankSize = args->rankSize;
 
-    if ((copyoutWorkers != 8U && copyoutWorkers != 16U) ||
+    if ((copyoutWorkers != 8U && copyoutWorkers != 16U && copyoutWorkers != 32U) ||
         routeStage > TILEXR_ALLTOALL_GROUP_ROUTE_STAGE_NO_COPY ||
         blockIdx >= TILEXR_ALLTOALL_GROUP_SEND_CORES + copyoutWorkers ||
         !TileXR::UDMARegistryEnabled(args) || rankSize < 8 ||
@@ -382,10 +392,11 @@ extern "C" __global__ __aicore__ void tilexr_udma_all_to_all_group_kernel(
             return;
         }
         const uint32_t worker = blockIdx - TILEXR_ALLTOALL_GROUP_SEND_CORES;
-        const int32_t selfBegin = static_cast<int32_t>(
-            static_cast<int64_t>(elementsPerPeer) * worker / copyoutWorkers);
-        const int32_t selfEnd = static_cast<int32_t>(
-            static_cast<int64_t>(elementsPerPeer) * (worker + 1U) / copyoutWorkers);
+        const uint32_t selfCopyWorkers = copyoutWorkers == 32U ? 16U : copyoutWorkers;
+        const int32_t selfBegin = worker < selfCopyWorkers ? static_cast<int32_t>(
+            static_cast<int64_t>(elementsPerPeer) * worker / selfCopyWorkers) : 0;
+        const int32_t selfEnd = worker < selfCopyWorkers ? static_cast<int32_t>(
+            static_cast<int64_t>(elementsPerPeer) * (worker + 1U) / selfCopyWorkers) : 0;
         if ((routeStage == TILEXR_ALLTOALL_GROUP_ROUTE_STAGE_COMBINED ||
                 routeStage == TILEXR_ALLTOALL_GROUP_ROUTE_STAGE_LOCAL ||
                 routeStage == TILEXR_ALLTOALL_GROUP_ROUTE_STAGE_LOCAL_COPY ||
@@ -420,7 +431,16 @@ extern "C" __global__ __aicore__ void tilexr_udma_all_to_all_group_kernel(
             if (!AllToAllGroupReceivePeerInRouteStageDevice(rank, peer, routeStage)) {
                 continue;
             }
-            const uint32_t traceCore = TILEXR_ALLTOALL_GROUP_SEND_CORES + lane;
+            const bool crossNode =
+                rank / static_cast<int32_t>(TileXR::Demo::kAllToAllGroupRanksPerNode) !=
+                peer / static_cast<int32_t>(TileXR::Demo::kAllToAllGroupRanksPerNode);
+            const bool remoteAssist =
+                AllToAllGroupRemoteAssistDevice(worker, copyoutWorkers);
+            if (remoteAssist && !crossNode) {
+                continue;
+            }
+            const uint32_t traceCore = copyoutWorkers == 8U ?
+                TILEXR_ALLTOALL_GROUP_SEND_CORES + lane : blockIdx;
             for (uint32_t pass = 0U; pass < passCount; ++pass) {
                 const int32_t chunkElementOffset = static_cast<int32_t>(pass) * chunkElements;
                 const int32_t remaining = elementsPerPeer - chunkElementOffset;
@@ -428,8 +448,16 @@ extern "C" __global__ __aicore__ void tilexr_udma_all_to_all_group_kernel(
                     continue;
                 }
                 const int32_t currentElements = remaining < chunkElements ? remaining : chunkElements;
-                const uint32_t chunkBytes =
-                    static_cast<uint32_t>(currentElements) * sizeof(int32_t);
+                const uint32_t copySliceCount =
+                    copyoutWorkers == 32U && crossNode ? 2U : 1U;
+                const uint32_t copySliceIndex = remoteAssist ? 1U : 0U;
+                const int32_t copyElementBegin = static_cast<int32_t>(
+                    static_cast<int64_t>(currentElements) * copySliceIndex / copySliceCount);
+                const int32_t copyElementEnd = static_cast<int32_t>(
+                    static_cast<int64_t>(currentElements) * (copySliceIndex + 1U) /
+                    copySliceCount);
+                const uint32_t copyBytes = static_cast<uint32_t>(
+                    copyElementEnd - copyElementBegin) * sizeof(int32_t);
                 const uint64_t expectedToken =
                     AllToAllGroupDeviceToken(invocationId, group, pass);
                 auto signal = reinterpret_cast<__gm__ uint64_t*>(
@@ -462,11 +490,13 @@ extern "C" __global__ __aicore__ void tilexr_udma_all_to_all_group_kernel(
                 }
                 auto relaySrc = registeredMemory + payloadOffsets[slot] +
                     static_cast<uint64_t>(peer) * bytesPerPeer +
-                    static_cast<uint64_t>(chunkElementOffset) * sizeof(int32_t);
+                    static_cast<uint64_t>(chunkElementOffset + copyElementBegin) *
+                    sizeof(int32_t);
                 auto relayDst = reinterpret_cast<__gm__ uint8_t*>(
-                    output + static_cast<uint64_t>(peer) * elementsPerPeer + chunkElementOffset);
+                    output + static_cast<uint64_t>(peer) * elementsPerPeer +
+                    chunkElementOffset + copyElementBegin);
                 const uint64_t receiveCopyBegin = AllToAllGroupTraceCycle(groupTrace);
-                AllToAllGroupCopyMte(relayDst, relaySrc, chunkBytes, relayLocal);
+                AllToAllGroupCopyMte(relayDst, relaySrc, copyBytes, relayLocal);
                 AllToAllGroupTraceRecordTask(
                     groupTrace, traceIteration, traceCore, group, pass,
                     TileXR::Demo::kAllToAllGroupTraceReceiveCopy, groupCount, passCount,
