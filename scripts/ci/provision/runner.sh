@@ -15,6 +15,7 @@ runner_work=_work
 install_work="${CI_HOME}/install-work"
 hook="${CI_HOME}/control/current/job_completed.sh"
 env_entry="ACTIONS_RUNNER_HOOK_JOB_COMPLETED=${hook}"
+preloaded_asset="${TILEXR_CI_RUNNER_ASSET:-}"
 
 IFS= read -r registration_token || true
 if [[ -z "${registration_token:-}" ]]; then
@@ -26,6 +27,12 @@ trap 'unset registration_token ACTIONS_RUNNER_INPUT_TOKEN' EXIT
 
 if [[ "${DRY_RUN}" != 1 && ( -L "${RUNNER_HOME}" || ! -d "${RUNNER_HOME}" ) ]]; then
     echo "ERROR: runner home must be a real directory: ${RUNNER_HOME}" >&2
+    exit 1
+fi
+if [[ -n "${preloaded_asset}" &&
+      ( "${preloaded_asset}" != /* || ! -f "${preloaded_asset}" ||
+        -L "${preloaded_asset}" ) ]]; then
+    echo "ERROR: TILEXR_CI_RUNNER_ASSET must be an absolute regular file" >&2
     exit 1
 fi
 
@@ -123,7 +130,12 @@ PY
 fi
 
 asset_path="${stage}/${asset_name}"
-run curl --fail --location --silent --show-error "${asset_url}" -o "${asset_path}"
+if [[ -n "${preloaded_asset}" ]]; then
+    run install -o root -g "${CI_GROUP}" -m 0640 \
+        "${preloaded_asset}" "${asset_path}"
+else
+    run curl --fail --location --silent --show-error "${asset_url}" -o "${asset_path}"
+fi
 if [[ "${DRY_RUN}" == 1 ]]; then
     run sha256sum --check "${asset_path}.sha256"
 else

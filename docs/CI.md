@@ -214,6 +214,12 @@ gh api --method POST orgs/LingquLab/actions/runners/registration-token --jq .tok
   ssh blue "cd '${BOOTSTRAP}' && sudo bash scripts/ci/provision/runner.sh"
 ```
 
+If `blue` cannot reach GitHub's release-asset CDN, download the exact ARM64
+runner asset on another trusted host and transfer it to `blue`. Set the absolute
+remote path with `sudo env TILEXR_CI_RUNNER_ASSET=...` when invoking
+`runner.sh`; the script copies it into root-owned staging and still verifies the
+SHA-256 digest published by the GitHub releases API before extraction.
+
 ## GitHub policy and runner group
 
 An active `LingquLab` organization owner configures and verifies the repository

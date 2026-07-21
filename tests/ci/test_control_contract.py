@@ -152,6 +152,18 @@ class ControlSourceContractTests(unittest.TestCase):
         self.assertIn("archive --format=tar HEAD scripts/ci/control", control)
         self.assertNotIn("safe.directory", control)
 
+    def test_runner_accepts_only_a_verified_preloaded_release_asset(self):
+        runner = self.read("scripts/ci/provision/runner.sh")
+        self.assertIn("TILEXR_CI_RUNNER_ASSET", runner)
+        preload = runner.index("TILEXR_CI_RUNNER_ASSET")
+        copy = runner.index('install -o root -g "${CI_GROUP}" -m 0640')
+        digest = runner.index("sha256sum --check -")
+
+        self.assertIn('"${preloaded_asset}" != /*', runner)
+        self.assertIn('-L "${preloaded_asset}"', runner)
+        self.assertLess(preload, copy)
+        self.assertLess(copy, digest)
+
     def test_manifests_never_source_pull_request_code_into_trusted_shell(self):
         for relative in [
             "scripts/ci/control/build_blue.sh",
