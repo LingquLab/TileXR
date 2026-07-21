@@ -12,6 +12,11 @@ ops_info="${CANN_HOME}/cann/aarch64-linux/ascend_ops_install.info"
 control_current="${CI_HOME}/control/current"
 hook="${control_current}/job_completed.sh"
 env_entry="ACTIONS_RUNNER_HOOK_JOB_COMPLETED=${hook}"
+python_pidfd_probe='import os, signal, sys
+if sys.version_info < (3, 9):
+    raise SystemExit("Python 3.9 or newer is required")
+if not hasattr(os, "pidfd_open") or not hasattr(signal, "pidfd_send_signal"):
+    raise SystemExit("Python pidfd support is required")'
 
 if [[ "${DRY_RUN}" == 1 ]]; then
     run getent passwd "${CI_USER}"
@@ -32,9 +37,12 @@ if [[ "${DRY_RUN}" == 1 ]]; then
         actions.runner.LingquLab-TileXR.blue-tilexr-npu8.service
     run systemctl is-active actions.runner.LingquLab-TileXR.blue-tilexr-npu8.service
     run df -h / /home
+    run python3 -c "${python_pidfd_probe}"
     run python3 "${CONTROL_HOME}/npu_state.py"
     exit 0
 fi
+
+python3 -c "${python_pidfd_probe}"
 
 passwd_entry="$(getent passwd "${CI_USER}")" || {
     echo "ERROR: ${CI_USER} does not exist" >&2

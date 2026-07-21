@@ -196,8 +196,6 @@ def policy_violation(
     if not state.healthy:
         raise InfrastructureFailure("npu-smi reported an unhealthy or incomplete state")
     if phase == "build":
-        if any(item.owner == ci_user for item in state.processes):
-            return "ci-npu-during-build"
         return None
     if phase == "hardware":
         if any(item.owner != ci_user for item in state.processes):
@@ -208,8 +206,6 @@ def policy_violation(
 
 def _enforce_policy(phase: str, state: npu_state.Snapshot):
     violation = policy_violation(phase, state)
-    if violation == "ci-npu-during-build":
-        raise ResourceCollision(violation)
     if violation == "foreign-npu-process":
         raise ResourceCollision(violation)
 

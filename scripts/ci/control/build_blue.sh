@@ -121,6 +121,10 @@ run_logged_step() {
     return "${status}"
 }
 
+run_ctest() {
+    (cd "$1" && ctest --output-on-failure)
+}
+
 require_executable() {
     local path="$1"
     if ! test -x "${path}"; then
@@ -257,9 +261,7 @@ run_logged_step "top-level-configure" cmake \
     -DBUILD_TESTING=ON
 run_logged_step "top-level-build" cmake \
     --build "${SOURCE_DIR}/build-ci" --target install -j"${BUILD_JOBS}"
-run_case top-level-ctest \
-    ctest --test-dir "${SOURCE_DIR}/build-ci" --output-on-failure \
-        --output-junit "${ARTIFACT_DIR}/ctest-top-level.xml"
+run_case top-level-ctest run_ctest "${SOURCE_DIR}/build-ci"
 
 run_logged_step "comm-build" bash "${SOURCE_DIR}/tests/comm/build.sh"
 run_case comm-log "${SOURCE_DIR}/tests/comm/install/bin/test_tilexr_log"

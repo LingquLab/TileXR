@@ -16,7 +16,10 @@ FIXTURES = pathlib.Path(__file__).resolve().parent / "fixtures"
 
 
 def fixture(name):
-    return (FIXTURES / name).read_text(encoding="utf-8")
+    path = FIXTURES / name
+    if not path.is_file():
+        raise FileNotFoundError("required tracked NPU fixture is missing: %s" % path)
+    return path.read_text(encoding="utf-8")
 
 
 def completed(command, stdout, returncode=0, stderr=""):
@@ -36,6 +39,10 @@ def healthy_responses(process_output):
 
 
 class ParseNpuStateTests(unittest.TestCase):
+    def test_missing_fixture_has_an_explicit_tracked_input_error(self):
+        with self.assertRaisesRegex(FileNotFoundError, "required tracked NPU fixture"):
+            fixture("missing.txt")
+
     def test_busy_process_table_returns_devices_pids_and_names(self):
         processes = npu_state.parse_process_table(fixture("npu_smi_busy.txt"))
 

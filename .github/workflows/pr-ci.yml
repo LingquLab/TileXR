@@ -3,7 +3,7 @@ name: PR CI
 "on":
   pull_request:
     branches: [main]
-    types: [opened, reopened, synchronize, ready_for_review]
+    types: [opened, reopened, synchronize, ready_for_review, converted_to_draft, closed]
 
 permissions:
   contents: read
@@ -15,6 +15,7 @@ concurrency:
 jobs:
   host_checks:
     name: Host Checks
+    if: ${{ github.event.action != 'closed' }}
     runs-on: ubuntu-24.04
     container: ubuntu:20.04
     steps:
@@ -35,14 +36,14 @@ jobs:
   npu_gate:
     name: NPU Gate
     needs: host_checks
-    if: ${{ needs.host_checks.result == 'success' && !github.event.pull_request.draft }}
+    if: ${{ github.event.action != 'closed' && needs.host_checks.result == 'success' && !github.event.pull_request.draft }}
     uses: LingquLab/TileXR/.github/workflows/npu-ci.yml@main
     permissions:
       contents: read
 
   pr_gate:
     name: PR Gate
-    if: always()
+    if: ${{ always() && github.event.action != 'closed' }}
     needs: [host_checks, npu_gate]
     runs-on: ubuntu-24.04
     steps:

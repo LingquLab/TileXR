@@ -71,7 +71,7 @@ class ControlSourceContractTests(unittest.TestCase):
             "-DTILEXR_BUILD_CHECKER=ON",
             "-DTILEXR_BUILD_TESTS=ON",
             "-DBUILD_TESTING=ON",
-            "ctest --test-dir",
+            '(cd "$1" && ctest --output-on-failure)',
             "test_tilexr_log",
             "test_tilexr_log_spdlog_compile",
             "test_tilexr_source_guards",
@@ -96,7 +96,25 @@ class ControlSourceContractTests(unittest.TestCase):
             "devlib",
         ]:
             self.assertIn(token, text)
+        self.assertNotIn("--output-junit", text)
         self.assertNotIn("run_case sdma-disabled-comm", text)
+
+    def test_live_runner_requires_python_pidfd_support(self):
+        text = self.read("scripts/ci/provision/verify.sh")
+        for token in [
+            "sys.version_info < (3, 9)",
+            'hasattr(os, "pidfd_open")',
+            'hasattr(signal, "pidfd_send_signal")',
+        ]:
+            self.assertIn(token, text)
+
+    def test_existing_cann_install_still_revalidates_blue(self):
+        text = self.read("scripts/ci/provision/cann.sh")
+        existing_tree = text.index(
+            'if [[ "${DRY_RUN}" != 1 && ( -e "${CANN_HOME}" || -L "${CANN_HOME}" ) ]]'
+        )
+        live_host_check = text.index("    check_blue_host\n")
+        self.assertLess(live_host_check, existing_tree)
 
     def test_manifests_never_source_pull_request_code_into_trusted_shell(self):
         for relative in [

@@ -188,6 +188,15 @@ else
         "${CI_HOME}/toolchains" "${CI_HOME}/toolchains/cann"
 fi
 
+if [[ "${DRY_RUN}" == 1 ]]; then
+    run grep -Fx Version=25.5.0 /usr/local/Ascend/driver/version.info
+    run npu-smi info
+    run npu-smi info -l
+    run df --output=avail -B1 /home
+else
+    check_blue_host
+fi
+
 if [[ "${DRY_RUN}" != 1 && ( -e "${CANN_HOME}" || -L "${CANN_HOME}" ) ]]; then
     if [[ ! -e "${cann_marker}" && ! -L "${cann_marker}" ]] &&
         cann_tree_is_trusted; then
@@ -196,15 +205,6 @@ if [[ "${DRY_RUN}" != 1 && ( -e "${CANN_HOME}" || -L "${CANN_HOME}" ) ]]; then
     fi
     echo "ERROR: refusing untrusted pre-existing CANN tree: ${CANN_HOME}" >&2
     exit 1
-fi
-
-if [[ "${DRY_RUN}" == 1 ]]; then
-    run grep -Fx Version=25.5.0 /usr/local/Ascend/driver/version.info
-    run npu-smi info
-    run npu-smi info -l
-    run df --output=avail -B1 /home
-else
-    check_blue_host
 fi
 
 if [[ "${DRY_RUN}" == 1 ]]; then

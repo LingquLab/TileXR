@@ -47,7 +47,7 @@ assert_equal(["pull_request"], pr.fetch("on").keys,
 pull_request = pr.fetch("on").fetch("pull_request")
 assert_equal(["main"], pull_request.fetch("branches"),
              "PR workflow must target main")
-assert_equal(%w[opened reopened synchronize ready_for_review],
+assert_equal(%w[opened reopened synchronize ready_for_review converted_to_draft closed],
              pull_request.fetch("types"), "PR event types differ")
 assert_equal({"contents" => "read"}, pr.fetch("permissions"),
              "PR workflow permissions differ")
@@ -59,10 +59,18 @@ assert_equal(true, concurrency.fetch("cancel-in-progress"),
              "obsolete PR runs must be cancelled")
 
 npu_caller = pr.fetch("jobs").fetch("npu_gate")
+assert(npu_caller.fetch("if").include?("github.event.action != 'closed'"),
+       "closed pull requests must not start an NPU gate")
 assert_equal("LingquLab/TileXR/.github/workflows/npu-ci.yml@main",
              npu_caller.fetch("uses"), "NPU reusable workflow identity differs")
 assert_equal({"contents" => "read"}, npu_caller.fetch("permissions"),
              "NPU caller permissions differ")
+assert(pr.fetch("jobs").fetch("host_checks").fetch("if").include?(
+         "github.event.action != 'closed'"),
+       "closed pull requests must not run host checks")
+assert(pr.fetch("jobs").fetch("pr_gate").fetch("if").include?(
+         "github.event.action != 'closed'"),
+       "closed pull requests must only cancel the obsolete run")
 
 assert_equal(["workflow_call"], npu.fetch("on").keys,
              "NPU workflow must use only workflow_call")

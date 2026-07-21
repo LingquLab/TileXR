@@ -19,6 +19,22 @@ import gate
 import npu_state
 
 
+def process_is_live(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    if not sys.platform.startswith("linux"):
+        return True
+    try:
+        state = pathlib.Path("/proc/%d/stat" % pid).read_text(
+            encoding="ascii"
+        ).rsplit(")", 1)[1].split()[0]
+    except (FileNotFoundError, IndexError, OSError):
+        return False
+    return state != "Z"
+
+
 def snapshot(*processes, healthy=True):
     return npu_state.Snapshot(healthy=healthy, processes=tuple(processes))
 
@@ -49,18 +65,17 @@ class MergeVerificationTests(unittest.TestCase):
 class PolicyTests(unittest.TestCase):
     def test_policy_uses_supplied_ci_owner(self):
         state = snapshot(process("ci-special"))
-        self.assertEqual(
-            gate.policy_violation("build", state, "ci-special"),
-            "ci-npu-during-build",
+        self.assertIsNone(
+            gate.policy_violation("hardware", state, "ci-special")
         )
-        self.assertIsNone(gate.policy_violation("build", state, "tilexr-ci"))
+        self.assertEqual(
+            gate.policy_violation("hardware", state, "tilexr-ci"),
+            "foreign-npu-process",
+        )
 
-    def test_build_rejects_ci_npu_process_during_build(self):
-        state = snapshot(process("tilexr-ci"))
-        self.assertEqual(gate.policy_violation("build", state), "ci-npu-during-build")
-
-    def test_build_permits_foreign_npu_process(self):
-        self.assertIsNone(gate.policy_violation("build", snapshot(process("alice"))))
+    def test_build_permits_all_npu_process_owners(self):
+        state = snapshot(process("tilexr-ci"), process("alice", pid=101))
+        self.assertIsNone(gate.policy_violation("build", state))
 
     def test_unhealthy_state_is_infrastructure_failure(self):
         for phase in ("build", "hardware"):
@@ -412,7 +427,12 @@ class TerminationTests(unittest.TestCase):
 
         self.assertIn((701, signal.SIGKILL), signals)
 
-    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux subreaper regression")
+    @unittest.skipUnless(
+        sys.platform.startswith("linux")
+        and hasattr(os, "pidfd_open")
+        and hasattr(signal, "pidfd_send_signal"),
+        "Linux pidfd/subreaper regression",
+    )
     def test_subreaper_cleans_descendant_that_escapes_session_and_process_group(self):
         with tempfile.TemporaryDirectory() as directory:
             pid_file = pathlib.Path(directory) / "escaped.pid"
@@ -494,15 +514,13 @@ class TerminationTests(unittest.TestCase):
             try:
                 leader.wait(timeout=10)
                 descendant_pid = int(pid_file.read_text(encoding="ascii"))
-                os.kill(descendant_pid, 0)
+                self.assertTrue(process_is_live(descendant_pid))
 
                 gate.terminate_group(leader)
 
                 deadline = time.monotonic() + 3
                 while time.monotonic() < deadline:
-                    try:
-                        os.kill(descendant_pid, 0)
-                    except ProcessLookupError:
+                    if not process_is_live(descendant_pid):
                         break
                     time.sleep(0.02)
                 else:
@@ -820,27 +838,27 @@ class RunPhaseTests(unittest.TestCase):
             )
         terminate.assert_called_once_with(child)
 
-    def test_build_policy_preflight_prevents_child_launch(self):
+    def test_unhealthy_build_preflight_prevents_child_launch(self):
         child = FakeProcess(polls=(None,))
         popen = mock.Mock(return_value=child)
         terminate = mock.Mock()
-        with self.assertRaises(gate.ResourceCollision) as raised:
+        with self.assertRaises(gate.InfrastructureFailure) as raised:
             gate.run_phase(
                 "build", pathlib.Path("/trusted/build_blue.sh"), pathlib.Path("/source"),
                 pathlib.Path("/artifacts"), {}, timeout_seconds=5,
-                read_snapshot=lambda: snapshot(process("tilexr-ci")), now=lambda: 0.0,
+                read_snapshot=lambda: snapshot(healthy=False), now=lambda: 0.0,
                 sleep=lambda seconds: None, cancellation=gate.CancellationState(),
                 popen=popen, terminate=terminate,
             )
-        self.assertEqual(gate.exit_code_for(raised.exception), 22)
+        self.assertEqual(gate.exit_code_for(raised.exception), 23)
         popen.assert_not_called()
         terminate.assert_not_called()
 
-    def test_build_policy_violation_after_launch_terminates_child(self):
+    def test_unhealthy_build_state_after_launch_terminates_child(self):
         child = FakeProcess(polls=(None, None))
-        states = iter((snapshot(), snapshot(process("tilexr-ci"))))
+        states = iter((snapshot(), snapshot(healthy=False)))
         terminate = mock.Mock()
-        with self.assertRaises(gate.ResourceCollision):
+        with self.assertRaises(gate.InfrastructureFailure):
             gate.run_phase(
                 "build", pathlib.Path("/trusted/build_blue.sh"), pathlib.Path("/source"),
                 pathlib.Path("/artifacts"), {}, timeout_seconds=5,
