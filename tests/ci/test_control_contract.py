@@ -804,7 +804,7 @@ class HostChecksBehaviorTests(unittest.TestCase):
             ]
             self.assertEqual(
                 expected,
-                [line.split(":", 1)[0].removeprefix("[host-check] ") for line in case_lines],
+                [line.split(":", 1)[0][len("[host-check] "):] for line in case_lines],
             )
             self.assertIn("[host-check] ep-source-only: FAIL (exit=23", result.stdout)
             self.assertIn(

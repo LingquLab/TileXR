@@ -71,6 +71,10 @@ assert(pr.fetch("jobs").fetch("host_checks").fetch("if").include?(
 assert(pr.fetch("jobs").fetch("pr_gate").fetch("if").include?(
          "github.event.action != 'closed'"),
        "closed pull requests must only cancel the obsolete run")
+safe_directory = named_step(pr, "host_checks", "Trust container checkout")
+assert_equal('git config --global --add safe.directory "$GITHUB_WORKSPACE"',
+             safe_directory.fetch("run"),
+             "container checkout must be trusted before Git-based host checks")
 
 assert_equal(["workflow_call"], npu.fetch("on").keys,
              "NPU workflow must use only workflow_call")

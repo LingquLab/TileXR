@@ -25,6 +25,8 @@ jobs:
         with:
           persist-credentials: false
           submodules: recursive
+      - name: Trust container checkout
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - name: Run host checks
         env:
           TILEXR_CI_PR_NUMBER: ${{ github.event.pull_request.number }}
