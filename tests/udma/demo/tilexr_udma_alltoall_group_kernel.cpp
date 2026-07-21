@@ -231,9 +231,20 @@ __aicore__ inline uint64_t AllToAllGroupLoadTokenMte(
     return relayLocal.ReinterpretCast<uint64_t>().GetValue(0);
 }
 
+__aicore__ inline void AllToAllGroupWaitPollDelay(uint32_t waitPollCycles)
+{
+    if (waitPollCycles == 0U) {
+        return;
+    }
+    const uint64_t begin = static_cast<uint64_t>(AscendC::GetSystemCycle());
+    while (static_cast<uint64_t>(AscendC::GetSystemCycle()) - begin < waitPollCycles) {
+    }
+}
+
 __aicore__ inline bool AllToAllGroupWaitTokenMte(
     __gm__ uint64_t* signal, uint64_t expectedToken, uint64_t timeoutCycles,
-    AscendC::LocalTensor<uint8_t> relayLocal, uint64_t& observed)
+    uint32_t waitPollCycles, AscendC::LocalTensor<uint8_t> relayLocal,
+    uint64_t& observed)
 {
     const uint64_t begin = static_cast<uint64_t>(AscendC::GetSystemCycle());
     observed = AllToAllGroupLoadTokenMte(signal, relayLocal);
@@ -241,6 +252,7 @@ __aicore__ inline bool AllToAllGroupWaitTokenMte(
         if (static_cast<uint64_t>(AscendC::GetSystemCycle()) - begin >= timeoutCycles) {
             return false;
         }
+        AllToAllGroupWaitPollDelay(waitPollCycles);
         observed = AllToAllGroupLoadTokenMte(signal, relayLocal);
     }
     return observed >= expectedToken;
@@ -337,7 +349,7 @@ extern "C" __global__ __aicore__ void tilexr_udma_all_to_all_group_kernel(
     uint64_t payloadOffset0, uint64_t payloadOffset1,
     uint64_t signalOffset0, uint64_t signalOffset1,
     GM_ADDR groupTraceGM, uint32_t traceIteration,
-    uint32_t copyoutWorkers, uint32_t routeStage)
+    uint32_t copyoutWorkers, uint32_t routeStage, uint32_t waitPollCycles)
 {
     const uint32_t blockIdx = static_cast<uint32_t>(AscendC::GetBlockIdx());
     auto groupTrace = blockIdx < TileXR::Demo::kAllToAllGroupTraceCoreCount ?
@@ -439,7 +451,8 @@ extern "C" __global__ __aicore__ void tilexr_udma_all_to_all_group_kernel(
                     uint64_t observed = 0ULL;
                     const uint64_t waitBegin = AllToAllGroupTraceCycle(groupTrace);
                     if (!AllToAllGroupWaitTokenMte(signal, expectedToken,
-                            TILEXR_ALLTOALL_GROUP_WAIT_TIMEOUT_CYCLES, relayLocal, observed)) {
+                            TILEXR_ALLTOALL_GROUP_WAIT_TIMEOUT_CYCLES, waitPollCycles,
+                            relayLocal, observed)) {
                         AllToAllGroupTraceRecordTask(
                             groupTrace, traceIteration, traceCore, group, pass,
                             TileXR::Demo::kAllToAllGroupTraceReceiveWait, groupCount, passCount,
@@ -553,11 +566,11 @@ void launch_tilexr_udma_all_to_all_group(
     uint64_t payloadOffset0, uint64_t payloadOffset1,
     uint64_t signalOffset0, uint64_t signalOffset1,
     GM_ADDR groupTrace, uint32_t traceIteration,
-    uint32_t copyoutWorkers, uint32_t routeStage)
+    uint32_t copyoutWorkers, uint32_t routeStage, uint32_t waitPollCycles)
 {
     tilexr_udma_all_to_all_group_kernel<<<blockDim, nullptr, stream>>>(
         commArgs, input, output, registeredMemory, debug, invocationId,
         elementsPerPeer, chunkElements, passCount, groupCount,
         payloadOffset0, payloadOffset1, signalOffset0, signalOffset1,
-        groupTrace, traceIteration, copyoutWorkers, routeStage);
+        groupTrace, traceIteration, copyoutWorkers, routeStage, waitPollCycles);
 }

@@ -60,7 +60,7 @@ extern void launch_tilexr_udma_all_to_all_group(
     uint64_t payloadOffset0, uint64_t payloadOffset1,
     uint64_t signalOffset0, uint64_t signalOffset1,
     GM_ADDR groupTrace, uint32_t traceIteration,
-    uint32_t copyoutWorkers, uint32_t routeStage);
+    uint32_t copyoutWorkers, uint32_t routeStage, uint32_t waitPollCycles);
 extern void launch_tilexr_udma_all_to_all_bigdata(
     uint32_t blockDim, void* stream, GM_ADDR commArgs, GM_ADDR input, GM_ADDR output,
     GM_ADDR udmaMem, GM_ADDR debug, GM_ADDR fullmeshTrace, uint32_t fullmeshTraceIteration,
@@ -665,6 +665,15 @@ bool RunGroupedAllToAll(
     }
     const uint32_t copyoutWorkers = static_cast<uint32_t>(copyoutWorkersValue);
     const uint32_t groupBlockDim = TileXR::Demo::AllToAllGroupBlockDim(copyoutWorkers);
+    const int waitPollCyclesValue = GetEnvInt(
+        "TILEXR_DEMO_ALLTOALL_GROUP_WAIT_POLL_CYCLES", 0);
+    if (waitPollCyclesValue < 0 || waitPollCyclesValue > 1000000) {
+        std::cerr << "[rank " << rank
+                  << "] ERROR: TILEXR_DEMO_ALLTOALL_GROUP_WAIT_POLL_CYCLES must be "
+                  << "between 0 and 1000000, got " << waitPollCyclesValue << std::endl;
+        return false;
+    }
+    const uint32_t waitPollCycles = static_cast<uint32_t>(waitPollCyclesValue);
     const int routeStagesValue = GetEnvInt(
         "TILEXR_DEMO_ALLTOALL_GROUP_ROUTE_STAGES", 0);
     if (routeStagesValue != 0 && routeStagesValue != 1) {
@@ -837,6 +846,7 @@ bool RunGroupedAllToAll(
     PrintStatus(rank, "grouped alltoall warmup=" + std::to_string(warmup) +
         " repeat=" + std::to_string(repeat) +
         " copyoutWorkers=" + std::to_string(copyoutWorkers) +
+        " waitPollCycles=" + std::to_string(waitPollCycles) +
         " blockDim=" + std::to_string(groupBlockDim) +
         " routeStages=" + std::to_string(routeStagesValue));
 
@@ -858,7 +868,7 @@ bool RunGroupedAllToAll(
             plan.payloadOffset[0], plan.payloadOffset[1],
             plan.signalOffset[0], plan.signalOffset[1],
             reinterpret_cast<GM_ADDR>(trace), traceIteration, copyoutWorkers,
-            static_cast<uint32_t>(routeStage));
+            static_cast<uint32_t>(routeStage), waitPollCycles);
     };
 
     double totalUs = 0.0;
