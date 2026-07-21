@@ -655,7 +655,7 @@ bool RunGroupedAllToAll(
         return false;
     }
     const int copyoutWorkersValue = GetEnvInt(
-        "TILEXR_DEMO_ALLTOALL_GROUP_COPYOUT_WORKERS", 16);
+        "TILEXR_DEMO_ALLTOALL_GROUP_COPYOUT_WORKERS", 48);
     if (copyoutWorkersValue < 0 || !TileXR::Demo::AllToAllGroupValidCopyoutWorkers(
             static_cast<uint32_t>(copyoutWorkersValue))) {
         std::cerr << "[rank " << rank
