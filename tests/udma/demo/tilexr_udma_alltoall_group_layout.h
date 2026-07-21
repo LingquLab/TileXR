@@ -21,7 +21,7 @@ constexpr uint32_t kAllToAllGroupHalfWidth = 8U;
 constexpr uint32_t kAllToAllGroupPingPongSlots = 2U;
 constexpr uint32_t kAllToAllGroupSignalSlotBytes = 128U;
 constexpr uint32_t kAllToAllGroupSendCoreCount = 16U;
-constexpr uint32_t kAllToAllGroupBlockDim = 64U;
+constexpr uint32_t kAllToAllGroupBlockDim = 48U;
 constexpr size_t kAllToAllGroupAlignment = 512U;
 constexpr size_t kAllToAllGroupControlBytes = 4096U;
 constexpr size_t kAllToAllGroupMaxRegisteredBytes = 1ULL << 30;
@@ -49,7 +49,7 @@ inline bool AllToAllGroupValidRankSize(int rankSize)
 
 inline bool AllToAllGroupValidCopyoutWorkers(uint32_t workers)
 {
-    return workers == 8U || workers == 16U || workers == 32U || workers == 48U;
+    return workers == 8U || workers == 16U || workers == 32U;
 }
 
 inline uint32_t AllToAllGroupBlockDim(uint32_t workers)
@@ -64,7 +64,7 @@ inline int32_t AllToAllGroupCopyoutLane(
     if (!AllToAllGroupValidCopyoutWorkers(workers) || worker >= workers) {
         return -1;
     }
-    if (workers >= 32U) {
+    if (workers == 32U) {
         return assignment == 0U ?
             static_cast<int32_t>(worker % kAllToAllGroupWidth) : -1;
     }

@@ -11,7 +11,7 @@
 namespace {
 
 constexpr uint32_t TILEXR_ALLTOALL_GROUP_SEND_CORES = 16U;
-constexpr uint32_t TILEXR_ALLTOALL_GROUP_BLOCK_DIM = 64U;
+constexpr uint32_t TILEXR_ALLTOALL_GROUP_BLOCK_DIM = 48U;
 constexpr uint32_t TILEXR_ALLTOALL_GROUP_HALF_WIDTH = 8U;
 constexpr uint32_t TILEXR_ALLTOALL_GROUP_SIGNAL_STRIDE = 128U;
 constexpr uint32_t TILEXR_ALLTOALL_GROUP_RELAY_BYTES = 64U * 1024U;
@@ -160,7 +160,7 @@ __aicore__ inline bool AllToAllGroupReceivePeerInRouteStageDevice(
 __aicore__ inline int32_t AllToAllGroupCopyoutLaneDevice(
     uint32_t worker, uint32_t assignment, uint32_t copyoutWorkers)
 {
-    if (copyoutWorkers >= 32U) {
+    if (copyoutWorkers == 32U) {
         return assignment == 0U ?
             static_cast<int32_t>(worker % TILEXR_ALLTOALL_GROUP_SEND_CORES) : -1;
     }
@@ -172,7 +172,7 @@ __aicore__ inline int32_t AllToAllGroupCopyoutLaneDevice(
 __aicore__ inline bool AllToAllGroupRemoteAssistDevice(
     uint32_t worker, uint32_t copyoutWorkers)
 {
-    return copyoutWorkers >= 32U && worker >= TILEXR_ALLTOALL_GROUP_SEND_CORES;
+    return copyoutWorkers == 32U && worker >= TILEXR_ALLTOALL_GROUP_SEND_CORES;
 }
 
 __aicore__ inline void AllToAllGroupSelectRouteQps(
@@ -361,8 +361,7 @@ extern "C" __global__ __aicore__ void tilexr_udma_all_to_all_group_kernel(
     const int32_t rank = args->rank;
     const int32_t rankSize = args->rankSize;
 
-    if ((copyoutWorkers != 8U && copyoutWorkers != 16U &&
-            copyoutWorkers != 32U && copyoutWorkers != 48U) ||
+    if ((copyoutWorkers != 8U && copyoutWorkers != 16U && copyoutWorkers != 32U) ||
         routeStage > TILEXR_ALLTOALL_GROUP_ROUTE_STAGE_NO_COPY ||
         blockIdx >= TILEXR_ALLTOALL_GROUP_SEND_CORES + copyoutWorkers ||
         !TileXR::UDMARegistryEnabled(args) || rankSize < 8 ||
@@ -393,7 +392,7 @@ extern "C" __global__ __aicore__ void tilexr_udma_all_to_all_group_kernel(
             return;
         }
         const uint32_t worker = blockIdx - TILEXR_ALLTOALL_GROUP_SEND_CORES;
-        const uint32_t selfCopyWorkers = copyoutWorkers >= 32U ? 16U : copyoutWorkers;
+        const uint32_t selfCopyWorkers = copyoutWorkers == 32U ? 16U : copyoutWorkers;
         const int32_t selfBegin = worker < selfCopyWorkers ? static_cast<int32_t>(
             static_cast<int64_t>(elementsPerPeer) * worker / selfCopyWorkers) : 0;
         const int32_t selfEnd = worker < selfCopyWorkers ? static_cast<int32_t>(
@@ -450,10 +449,8 @@ extern "C" __global__ __aicore__ void tilexr_udma_all_to_all_group_kernel(
                 }
                 const int32_t currentElements = remaining < chunkElements ? remaining : chunkElements;
                 const uint32_t copySliceCount =
-                    copyoutWorkers >= 32U && crossNode ?
-                    copyoutWorkers / TILEXR_ALLTOALL_GROUP_SEND_CORES : 1U;
-                const uint32_t copySliceIndex = remoteAssist ?
-                    worker / TILEXR_ALLTOALL_GROUP_SEND_CORES : 0U;
+                    copyoutWorkers == 32U && crossNode ? 2U : 1U;
+                const uint32_t copySliceIndex = remoteAssist ? 1U : 0U;
                 const int32_t copyElementBegin = static_cast<int32_t>(
                     static_cast<int64_t>(currentElements) * copySliceIndex / copySliceCount);
                 const int32_t copyElementEnd = static_cast<int32_t>(

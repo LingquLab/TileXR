@@ -30,7 +30,7 @@ class GroupTraceConverterTest(unittest.TestCase):
 
     def make_trace(
         self, path, *, rank=0, magic=None, iteration_count=1,
-        group_count=1, pass_count=1, core_count=64,
+        group_count=1, pass_count=1, core_count=48,
     ):
         data = bytearray(MODULE.TRACE_BYTES)
         struct.pack_into(
@@ -139,7 +139,7 @@ class GroupTraceConverterTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "size"):
                 MODULE.read_rank_trace(path)
 
-            self.make_trace(path, core_count=63)
+            self.make_trace(path, core_count=47)
             with self.assertRaisesRegex(ValueError, "core/phase"):
                 MODULE.read_rank_trace(path)
 

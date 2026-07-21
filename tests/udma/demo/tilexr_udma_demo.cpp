@@ -659,7 +659,7 @@ bool RunGroupedAllToAll(
     if (copyoutWorkersValue < 0 || !TileXR::Demo::AllToAllGroupValidCopyoutWorkers(
             static_cast<uint32_t>(copyoutWorkersValue))) {
         std::cerr << "[rank " << rank
-                  << "] ERROR: TILEXR_DEMO_ALLTOALL_GROUP_COPYOUT_WORKERS must be 8, 16, 32, or 48, got "
+                  << "] ERROR: TILEXR_DEMO_ALLTOALL_GROUP_COPYOUT_WORKERS must be 8, 16, or 32, got "
                   << copyoutWorkersValue << std::endl;
         return false;
     }
