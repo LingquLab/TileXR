@@ -133,6 +133,15 @@ class ControlSourceContractTests(unittest.TestCase):
         self.assertIn('mkdir -m 0755 -- "${CANN_HOME}"', cann)
         self.assertIn("u+rwX,g+rX,o+rX,go-w", cann)
 
+    def test_cann_installer_uses_home_backed_tmpdir(self):
+        cann = self.read("scripts/ci/provision/cann.sh")
+        tmpdir = 'TMPDIR="${stage}/tmp"'
+        installer = 'bash "${stage}/scripts/cann_download_install.sh"'
+
+        self.assertIn('"${stage}/scripts" "${stage}/tmp"', cann)
+        self.assertIn(tmpdir, cann)
+        self.assertLess(cann.index(tmpdir), cann.index(installer))
+
     def test_manifests_never_source_pull_request_code_into_trusted_shell(self):
         for relative in [
             "scripts/ci/control/build_blue.sh",

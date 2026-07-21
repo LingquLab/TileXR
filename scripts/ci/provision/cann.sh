@@ -213,7 +213,8 @@ else
     stage="$(mktemp -d "${install_work}/cann.XXXXXX")"
 fi
 
-run install -d -o root -g "${CI_GROUP}" -m 0750 "${install_work}" "${stage}/scripts"
+run install -d -o root -g "${CI_GROUP}" -m 0750 \
+    "${install_work}" "${stage}/scripts" "${stage}/tmp"
 for source_file in cann_download_install.sh cann_local_install.sh common_env.sh common_util.sh; do
     run install -o root -g "${CI_GROUP}" -m 0750 \
         "${repo_root}/scripts/${source_file}" "${stage}/scripts/${source_file}"
@@ -244,7 +245,8 @@ else
     fi
 fi
 
-run env TILEXR_CI_SEALED_CANN_HOME=1 TILEXR_CANN_HOME="${CANN_HOME}" \
+run env TMPDIR="${stage}/tmp" \
+    TILEXR_CI_SEALED_CANN_HOME=1 TILEXR_CANN_HOME="${CANN_HOME}" \
     bash "${stage}/scripts/cann_download_install.sh"
 run test -s "${stage}/env/temp/${toolkit_run}"
 run test -s "${stage}/env/temp/${ops_run}"
