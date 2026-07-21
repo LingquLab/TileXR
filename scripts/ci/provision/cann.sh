@@ -139,13 +139,19 @@ abort_cann_provision() {
     exit "$1"
 }
 
-check_blue_host() {
-    local driver_version total_count npu_info available
-    driver_version="$(sed -n 's/^Version=//p' /usr/local/Ascend/driver/version.info | head -n1)"
-    if [[ "${driver_version}" != 25.5.0 ]]; then
-        echo "ERROR: driver 25.5.0 is required, found ${driver_version:-unknown}" >&2
+check_driver_version() {
+    local driver_version
+    driver_version="$(awk -F= '$1 == "Version" {print $2; exit}' \
+        /usr/local/Ascend/driver/version.info 2>/dev/null)" || driver_version=""
+    if ! version_at_least "${driver_version}" 25.5.0; then
+        echo "ERROR: driver >= 25.5.0 is required, found ${driver_version:-unknown}" >&2
         return 1
     fi
+}
+
+check_blue_host() {
+    local total_count npu_info available
+    check_driver_version || return 1
 
     total_count="$(npu-smi info -l | awk -F: '/Total Count/ {gsub(/[[:space:]]/, "", $2); print $2; exit}')"
     if [[ "${total_count}" != 8 ]]; then
@@ -189,7 +195,7 @@ else
 fi
 
 if [[ "${DRY_RUN}" == 1 ]]; then
-    run grep -Fx Version=25.5.0 /usr/local/Ascend/driver/version.info
+    run check_driver_version
     run npu-smi info
     run npu-smi info -l
     run df --output=avail -B1 /home

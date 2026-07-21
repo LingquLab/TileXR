@@ -99,6 +99,26 @@ class ControlSourceContractTests(unittest.TestCase):
         self.assertNotIn("--output-junit", text)
         self.assertNotIn("run_case sdma-disabled-comm", text)
 
+    def test_top_level_only_adds_python_ci_tests_when_explicitly_enabled(self):
+        top_level = self.read("CMakeLists.txt")
+        ci_cmake = self.read("tests/ci/CMakeLists.txt")
+
+        self.assertIn(
+            "if(TILEXR_BUILD_TESTS)\n"
+            "    add_subdirectory(tests/ci)\n"
+            "endif()",
+            top_level,
+        )
+        self.assertNotIn(
+            "if(BUILD_TESTING OR TILEXR_BUILD_TESTS)\n"
+            "    add_subdirectory(tests/data_as_flag)\n"
+            "    add_subdirectory(tests/ci)",
+            top_level,
+        )
+        self.assertIn(
+            "find_package(Python3 COMPONENTS Interpreter REQUIRED)", ci_cmake
+        )
+
     def test_live_runner_requires_python_pidfd_support(self):
         text = self.read("scripts/ci/provision/verify.sh")
         for token in [
@@ -107,6 +127,48 @@ class ControlSourceContractTests(unittest.TestCase):
             'hasattr(signal, "pidfd_send_signal")',
         ]:
             self.assertIn(token, text)
+
+    def test_sealed_controller_v2_is_consistent_across_provisioning(self):
+        self.assertEqual("v2\n", self.read("scripts/ci/control/VERSION"))
+        common = self.read("scripts/ci/provision/common.sh")
+        control = self.read("scripts/ci/provision/control.sh")
+        verify = self.read("scripts/ci/provision/verify.sh")
+        workflow = self.read(".github/workflows/npu-ci.yml")
+
+        self.assertIn("CONTROL_VERSION=v2", common)
+        self.assertIn(
+            'CONTROL_HOME="${CI_HOME}/control/${CONTROL_VERSION}"', common
+        )
+        self.assertIn('stage="${control_parent}/.${CONTROL_VERSION}.new"', control)
+        self.assertIn(
+            '"$(< "${control_source}/VERSION")" != "${CONTROL_VERSION}"',
+            control,
+        )
+        self.assertIn(
+            '"$(< "${CONTROL_HOME}/VERSION")" == "${CONTROL_VERSION}"',
+            verify,
+        )
+        self.assertIn(
+            'cat /home/tilexr-ci/control/v2/VERSION)" = v2', workflow
+        )
+        self.assertIn(
+            "exec python3 /home/tilexr-ci/control/v2/gate.py", workflow
+        )
+
+    def test_controller_supports_verified_stage_only_rollout(self):
+        control = self.read("scripts/ci/provision/control.sh")
+        for token in [
+            "--stage-only",
+            "STAGE_ONLY=1",
+            'validate_control_package "${CONTROL_HOME}"',
+            'if [[ "${STAGE_ONLY}" == 1 ]]; then',
+            'echo "Staged sealed controller ${CONTROL_VERSION}; current was not changed"',
+        ]:
+            self.assertIn(token, control)
+        self.assertLess(
+            control.index('if [[ "${STAGE_ONLY}" == 1 ]]; then'),
+            control.index('run ln -s "${CONTROL_HOME}" "${current_stage}"'),
+        )
 
     def test_runner_uses_the_configured_local_github_proxy(self):
         common = self.read("scripts/ci/provision/common.sh")
@@ -126,6 +188,17 @@ class ControlSourceContractTests(unittest.TestCase):
         )
         live_host_check = text.index("    check_blue_host\n")
         self.assertLess(live_host_check, existing_tree)
+
+    def test_provisioning_enforces_the_documented_minimum_driver_version(self):
+        common = self.read("scripts/ci/provision/common.sh")
+        cann = self.read("scripts/ci/provision/cann.sh")
+        verify = self.read("scripts/ci/provision/verify.sh")
+
+        self.assertIn("version_at_least()", common)
+        for text in [cann, verify]:
+            self.assertIn('version_at_least "${driver_version}" 25.5.0', text)
+            self.assertNotIn('"${driver_version}" != 25.5.0', text)
+        self.assertNotIn("grep -Fx Version=25.5.0", cann)
 
     def test_cann_paths_use_installer_required_permissions(self):
         common = self.read("scripts/ci/provision/common.sh")
@@ -471,6 +544,40 @@ class ControlSourceContractTests(unittest.TestCase):
         rules = self.read(".gitignore").splitlines()
         self.assertIn("/.ci-build/", rules)
         self.assertNotIn("/.ci-artifacts/", rules)
+
+
+class ProvisioningHelperBehaviorTests(unittest.TestCase):
+    def test_runner_dry_run_does_not_require_registration_token_input(self):
+        result = subprocess.run(
+            ["bash", str(ROOT / "scripts/ci/provision/runner.sh"), "--dry-run"],
+            input="",
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("registration-token", result.stdout)
+        self.assertNotIn("registration token is required", result.stderr)
+
+    def test_version_at_least_compares_numeric_release_components(self):
+        common = ROOT / "scripts/ci/provision/common.sh"
+        harness = 'source "$1"; version_at_least "$2" 25.5.0'
+
+        def supported(version):
+            return subprocess.run(
+                ["bash", "-c", harness, "version-check", str(common), version],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+
+        for version in ["25.5.0", "25.5.1", "25.6.0", "26.0.0"]:
+            with self.subTest(version=version):
+                self.assertEqual(0, supported(version).returncode)
+        for version in ["25.4.99", "24.99.99", "25.5", "25.5.0.1", "25.5.RC1", ""]:
+            with self.subTest(version=version):
+                self.assertNotEqual(0, supported(version).returncode)
 
 
 class HardwareHelperBehaviorTests(unittest.TestCase):

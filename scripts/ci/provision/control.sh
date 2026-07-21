@@ -6,22 +6,63 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "${script_dir}/../../.." && pwd)"
 git_dir="${repo_root}/.git"
 source "${script_dir}/common.sh"
-parse_args "$@"
+
+STAGE_ONLY=0
+for arg in "$@"; do
+    case "${arg}" in
+        --dry-run)
+            [[ "${DRY_RUN}" == 0 ]] || {
+                echo "Usage: $0 [--dry-run] [--stage-only]" >&2
+                exit 2
+            }
+            DRY_RUN=1
+            ;;
+        --stage-only)
+            [[ "${STAGE_ONLY}" == 0 ]] || {
+                echo "Usage: $0 [--dry-run] [--stage-only]" >&2
+                exit 2
+            }
+            STAGE_ONLY=1
+            ;;
+        *)
+            echo "Usage: $0 [--dry-run] [--stage-only]" >&2
+            exit 2
+            ;;
+    esac
+done
 require_root
 
 control_source="${repo_root}/scripts/ci/control"
 control_parent="${CI_HOME}/control"
 control_current="${control_parent}/current"
-stage="${control_parent}/.v1.new"
+stage="${control_parent}/.${CONTROL_VERSION}.new"
 current_stage="${control_parent}/.current.new"
+
+validate_control_package() {
+    local package="$1"
+    local script
+
+    run test -d "${package}"
+    run grep -Fx "${CONTROL_VERSION}" "${package}/VERSION"
+    for script in build_blue.sh job_completed.sh run_hardware.sh; do
+        run test -x "${package}/${script}"
+        run bash -n "${package}/${script}"
+    done
+    for script in gate.py npu_state.py; do
+        run test -r "${package}/${script}"
+    done
+    run python3 -c \
+        'import pathlib, sys; [compile(pathlib.Path(p).read_text(encoding="utf-8"), p, "exec") for p in sys.argv[1:]]' \
+        "${package}/gate.py" "${package}/npu_state.py"
+}
 
 if ! [[ -d "${git_dir}" && ! -L "${git_dir}" ]]; then
     echo "ERROR: provisioning checkout must have a real .git directory" >&2
     exit 1
 fi
 
-if [[ "$(< "${control_source}/VERSION")" != v1 ]]; then
-    echo "ERROR: repository control package must have version v1" >&2
+if [[ "$(< "${control_source}/VERSION")" != "${CONTROL_VERSION}" ]]; then
+    echo "ERROR: repository control package must have version ${CONTROL_VERSION}" >&2
     exit 1
 fi
 
@@ -44,7 +85,7 @@ if [[ "${DRY_RUN}" == 1 ]]; then
     run mv -T "${stage}" "${CONTROL_HOME}"
 elif [[ -d "${CONTROL_HOME}" && ! -L "${CONTROL_HOME}" ]]; then
     if ! diff -qr "${stage}" "${CONTROL_HOME}" >/dev/null; then
-        echo "ERROR: installed v1 control differs; publish a new control version" >&2
+        echo "ERROR: installed ${CONTROL_VERSION} control differs; publish a new control version" >&2
         exit 1
     fi
     run rm -rf "${stage}"
@@ -56,6 +97,12 @@ else
         exit 1
     }
     run mv -T "${stage}" "${CONTROL_HOME}"
+fi
+
+validate_control_package "${CONTROL_HOME}"
+if [[ "${STAGE_ONLY}" == 1 ]]; then
+    echo "Staged sealed controller ${CONTROL_VERSION}; current was not changed"
+    exit 0
 fi
 
 run rm -f "${current_stage}"

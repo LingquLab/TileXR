@@ -116,12 +116,39 @@ def parse_config(argv=None) -> Config:
     args = parser.parse_args(argv)
     return validate_config(
         Config(
-            source=args.source.resolve(),
-            scratch=args.scratch.resolve(),
+            source=args.source.absolute(),
+            scratch=args.scratch.absolute(),
             expected_merge_sha=args.expected_merge_sha,
             repository=args.repository,
             pr_number=args.pr_number,
         )
+    )
+
+
+def prepare_work_paths(config: Config) -> Config:
+    if config.source.is_symlink():
+        raise InfrastructureFailure(
+            "source directory must not be a symbolic link: %s" % config.source
+        )
+    if not config.source.is_dir():
+        raise InfrastructureFailure(
+            "source path is not a real directory: %s" % config.source
+        )
+
+    if config.scratch.is_symlink():
+        raise InfrastructureFailure(
+            "scratch directory must not be a symbolic link: %s" % config.scratch
+        )
+    config.scratch.mkdir(parents=True, exist_ok=True)
+    if not config.scratch.is_dir() or config.scratch.is_symlink():
+        raise InfrastructureFailure(
+            "scratch path is not a real directory: %s" % config.scratch
+        )
+
+    return dataclasses.replace(
+        config,
+        source=config.source.resolve(strict=True),
+        scratch=config.scratch.resolve(strict=True),
     )
 
 
@@ -1099,7 +1126,10 @@ def exit_code_for(error: BaseException) -> int:
 
 
 def _as_gate_failure(error: BaseException) -> BaseException:
-    if isinstance(error, (GateFailure, npu_state.ResourceTimeout)):
+    if isinstance(
+        error,
+        (GateFailure, npu_state.ResourceTimeout, npu_state.UnhealthyState),
+    ):
         return error
     return InfrastructureFailure("unexpected controller failure: %s" % error)
 
@@ -1151,15 +1181,7 @@ def _run_controller_body(
     report = initial_report(config, environ)
     failure = None
     try:
-        if config.scratch.is_symlink():
-            raise InfrastructureFailure(
-                "scratch directory must not be a symbolic link: %s" % config.scratch
-            )
-        config.scratch.mkdir(parents=True, exist_ok=True)
-        if not config.scratch.is_dir() or config.scratch.is_symlink():
-            raise InfrastructureFailure(
-                "scratch path is not a real directory: %s" % config.scratch
-            )
+        config = prepare_work_paths(config)
         orchestrate(
             config,
             control_dir=control_dir,

@@ -894,6 +894,9 @@ class CancellationTests(unittest.TestCase):
         self.assertEqual(gate.exit_code_for(npu_state.ResourceTimeout("x")), 21)
         self.assertEqual(gate.exit_code_for(gate.ResourceCollision("x")), 22)
         self.assertEqual(gate.exit_code_for(gate.InfrastructureFailure("x")), 23)
+        unhealthy = npu_state.UnhealthyState("persistent unhealthy NPU state")
+        self.assertEqual(gate.exit_code_for(unhealthy), 23)
+        self.assertIs(gate._as_gate_failure(unhealthy), unhealthy)
         self.assertEqual(gate.exit_code_for(gate.Cancelled("x")), 130)
         self.assertEqual(gate.exit_code_for(gate.ObsoleteRun("x")), 130)
 
@@ -1090,6 +1093,21 @@ class ControllerTests(unittest.TestCase):
         with self.assertRaises(gate.InfrastructureFailure):
             gate.parse_config(self.argv("/scratch") + ["--github-token-fd", "3"])
 
+    def test_cli_preserves_path_identity_until_controller_validation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            source = root / "source"
+            source.mkdir()
+            source_link = root / "source-link"
+            source_link.symlink_to(source, target_is_directory=True)
+            argv = self.argv(root / "scratch")
+            argv[1] = str(source_link)
+
+            config = gate.parse_config(argv)
+
+            self.assertEqual(config.source, source_link.absolute())
+            self.assertTrue(config.source.is_symlink())
+
     def test_controller_disables_process_dumpability_before_running_body(self):
         events = []
         config = gate.Config(
@@ -1146,8 +1164,11 @@ class ControllerTests(unittest.TestCase):
 
     def test_controller_success_only_prints_result(self):
         with tempfile.TemporaryDirectory() as directory:
-            scratch = pathlib.Path(directory) / "scratch"
-            config = gate.Config(pathlib.Path("/source"), scratch, "merge", "LingquLab/TileXR", 42)
+            root = pathlib.Path(directory)
+            source = root / "source"
+            source.mkdir()
+            scratch = root / "scratch"
+            config = gate.Config(source, scratch, "merge", "LingquLab/TileXR", 42)
             output = io.StringIO()
             with mock.patch.object(gate, "orchestrate"), mock.patch.object(
                 gate, "verify_final_cleanup"
@@ -1160,10 +1181,62 @@ class ControllerTests(unittest.TestCase):
             self.assertEqual(list(scratch.iterdir()), [])
             self.assertIn("Failure class: none", output.getvalue())
 
+    def test_controller_rejects_source_symlink_before_orchestration(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            source = root / "source"
+            source.mkdir()
+            source_link = root / "source-link"
+            source_link.symlink_to(source, target_is_directory=True)
+            config = gate.Config(
+                source_link,
+                root / "scratch",
+                "merge",
+                "LingquLab/TileXR",
+                42,
+            )
+            with mock.patch.object(gate, "orchestrate") as orchestrate, mock.patch.object(
+                gate.sys, "stdout", io.StringIO()
+            ), mock.patch.object(gate.sys, "stderr", io.StringIO()):
+                result = gate._run_controller_body(
+                    config, {}, pathlib.Path("/trusted"), gate.CancellationState()
+                )
+
+        self.assertEqual(result, 23)
+        orchestrate.assert_not_called()
+
+    def test_controller_rejects_scratch_symlink_before_orchestration(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            source = root / "source"
+            source.mkdir()
+            scratch_target = root / "scratch-target"
+            scratch_target.mkdir()
+            scratch_link = root / "scratch-link"
+            scratch_link.symlink_to(scratch_target, target_is_directory=True)
+            config = gate.Config(
+                source,
+                scratch_link,
+                "merge",
+                "LingquLab/TileXR",
+                42,
+            )
+            with mock.patch.object(gate, "orchestrate") as orchestrate, mock.patch.object(
+                gate.sys, "stdout", io.StringIO()
+            ), mock.patch.object(gate.sys, "stderr", io.StringIO()):
+                result = gate._run_controller_body(
+                    config, {}, pathlib.Path("/trusted"), gate.CancellationState()
+                )
+
+        self.assertEqual(result, 23)
+        orchestrate.assert_not_called()
+
     def test_controller_preserves_code_failure_exit(self):
         with tempfile.TemporaryDirectory() as directory:
+            source = pathlib.Path(directory) / "source"
+            source.mkdir()
             config = gate.Config(
-                pathlib.Path("/source"),
+                source,
                 pathlib.Path(directory) / "scratch",
                 "merge",
                 "LingquLab/TileXR",
@@ -1183,8 +1256,10 @@ class ControllerTests(unittest.TestCase):
         cancellation = gate.CancellationState()
         cancellation.cancel()
         with tempfile.TemporaryDirectory() as directory:
+            source = pathlib.Path(directory) / "source"
+            source.mkdir()
             config = gate.Config(
-                pathlib.Path("/source"),
+                source,
                 pathlib.Path(directory) / "scratch",
                 "merge",
                 "LingquLab/TileXR",

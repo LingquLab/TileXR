@@ -27,10 +27,13 @@ runner_env_entries=(
     "${proxy_env[@]}"
 )
 
-IFS= read -r registration_token || true
-if [[ -z "${registration_token:-}" ]]; then
-    echo "ERROR: a short-lived registration token is required on standard input" >&2
-    exit 2
+registration_token=""
+if [[ "${DRY_RUN}" != 1 ]]; then
+    IFS= read -r registration_token || true
+    if [[ -z "${registration_token}" ]]; then
+        echo "ERROR: a short-lived registration token is required on standard input" >&2
+        exit 2
+    fi
 fi
 unset ACTIONS_RUNNER_INPUT_TOKEN
 trap 'unset registration_token ACTIONS_RUNNER_INPUT_TOKEN' EXIT

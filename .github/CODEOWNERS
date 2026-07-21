@@ -5,4 +5,6 @@
 /scripts/ci/provision/ @LingquLab/ci-maintainers
 /scripts/cann_download_install.sh @LingquLab/ci-maintainers
 /scripts/cann_local_install.sh @LingquLab/ci-maintainers
+/scripts/common_env.sh @LingquLab/ci-maintainers
+/scripts/common_util.sh @LingquLab/ci-maintainers
 /.gitmodules @LingquLab/ci-maintainers

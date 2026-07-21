@@ -29,6 +29,16 @@ if sys.version_info < (3, 9):
 if not hasattr(os, "pidfd_open") or not hasattr(signal, "pidfd_send_signal"):
     raise SystemExit("Python pidfd support is required")'
 
+check_driver_version() {
+    local driver_version
+    driver_version="$(awk -F= '$1 == "Version" {print $2; exit}' \
+        /usr/local/Ascend/driver/version.info 2>/dev/null)" || driver_version=""
+    if ! version_at_least "${driver_version}" 25.5.0; then
+        echo "ERROR: driver >= 25.5.0 is required, found ${driver_version:-unknown}" >&2
+        return 1
+    fi
+}
+
 if [[ "${DRY_RUN}" == 1 ]]; then
     run getent passwd "${CI_USER}"
     run id -nG "${CI_USER}"
@@ -38,6 +48,7 @@ if [[ "${DRY_RUN}" == 1 ]]; then
     run grep -Fx version=9.1.0 "${toolkit_info}"
     run grep -Fx package_name=Ascend-cann-910b-ops "${ops_info}"
     run test -x "${CANN_HOME}/cann/tools/bisheng_compiler/bin/bisheng"
+    run check_driver_version
     run npu-smi info
     run npu-smi info -l
     run readlink -f "${control_current}"
@@ -56,6 +67,7 @@ if [[ "${DRY_RUN}" == 1 ]]; then
 fi
 
 python3 -c "${python_pidfd_probe}"
+check_driver_version
 
 passwd_entry="$(getent passwd "${CI_USER}")" || {
     echo "ERROR: ${CI_USER} does not exist" >&2
@@ -113,12 +125,12 @@ if ! npu_smi_info_has_expected_devices "${npu_info}"; then
     exit 1
 fi
 
-[[ "$(< "${CONTROL_HOME}/VERSION")" == v1 ]] || {
-    echo "ERROR: sealed controller is not v1" >&2
+[[ "$(< "${CONTROL_HOME}/VERSION")" == "${CONTROL_VERSION}" ]] || {
+    echo "ERROR: sealed controller is not ${CONTROL_VERSION}" >&2
     exit 1
 }
 [[ "$(readlink -f "${control_current}")" == "${CONTROL_HOME}" ]] || {
-    echo "ERROR: current controller link does not resolve to v1" >&2
+    echo "ERROR: current controller link does not resolve to ${CONTROL_VERSION}" >&2
     exit 1
 }
 [[ "$(stat -c '%U:%G' "${CONTROL_HOME}")" == "root:${CI_GROUP}" ]] || {

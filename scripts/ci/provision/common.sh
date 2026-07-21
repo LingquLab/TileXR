@@ -8,7 +8,8 @@ CI_GROUP=HwHiAiUser
 CI_HOME=/home/tilexr-ci
 CANN_HOME=/home/tilexr-ci/toolchains/cann/9.1.0
 CANN_OWNER=root
-CONTROL_HOME=/home/tilexr-ci/control/v1
+CONTROL_VERSION=v2
+CONTROL_HOME="${CI_HOME}/control/${CONTROL_VERSION}"
 RUNNER_HOME=/home/tilexr-ci/actions-runner
 GITHUB_PROXY=http://127.0.0.1:3128
 RUNNER_NO_PROXY=localhost,127.0.0.1
@@ -40,6 +41,27 @@ require_root() {
         echo "ERROR: provisioning must run as root" >&2
         return 1
     fi
+}
+
+version_at_least() {
+    local actual="$1"
+    local minimum="$2"
+    local actual_major actual_minor actual_patch
+    local minimum_major minimum_minor minimum_patch
+
+    [[ "${actual}" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]] || return 1
+    actual_major=$((10#${BASH_REMATCH[1]}))
+    actual_minor=$((10#${BASH_REMATCH[2]}))
+    actual_patch=$((10#${BASH_REMATCH[3]}))
+    [[ "${minimum}" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]] || return 1
+    minimum_major=$((10#${BASH_REMATCH[1]}))
+    minimum_minor=$((10#${BASH_REMATCH[2]}))
+    minimum_patch=$((10#${BASH_REMATCH[3]}))
+
+    (( actual_major > minimum_major ||
+       (actual_major == minimum_major && actual_minor > minimum_minor) ||
+       (actual_major == minimum_major && actual_minor == minimum_minor &&
+        actual_patch >= minimum_patch) ))
 }
 
 ci_primary_group_has_non_root_gid() {

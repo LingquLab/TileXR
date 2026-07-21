@@ -11,10 +11,15 @@ from typing import Callable, List, Optional, Tuple
 
 
 NPU_SMI_TIMEOUT_SECONDS = 10
+MAX_CONSECUTIVE_UNHEALTHY_SAMPLES = 3
 _EXPECTED_DEVICES = frozenset(range(8))
 
 
 class ResourceTimeout(RuntimeError):
+    pass
+
+
+class UnhealthyState(RuntimeError):
     pass
 
 
@@ -101,10 +106,18 @@ def _run(
         return None
 
 
-def _owner_for_pid(pid: int) -> str:
+def _owner_for_pid(pid: int) -> Optional[str]:
     try:
         uid = os.stat("/proc/%d" % pid).st_uid
         return pwd.getpwuid(uid).pw_name
+    except (FileNotFoundError, ProcessLookupError):
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return None
+        except OSError:
+            return "unknown"
+        return "unknown"
     except (KeyError, OSError):
         return "unknown"
 
@@ -126,10 +139,12 @@ def read_snapshot(
     info = run(["npu-smi", "info"])
     process_text = info.stdout if info is not None else ""
     parsed_processes, table_recognized, covered_devices = _parse_process_table_state(process_text)
-    processes = tuple(
-        dataclasses.replace(process, owner=_owner_for_pid(process.pid))
-        for process in parsed_processes
-    )
+    processes_with_owners = []
+    for process in parsed_processes:
+        owner = _owner_for_pid(process.pid)
+        if owner is not None:
+            processes_with_owners.append(dataclasses.replace(process, owner=owner))
+    processes = tuple(processes_with_owners)
     healthy = (
         info is not None
         and info.returncode == 0
@@ -163,10 +178,12 @@ def wait_for_idle(
     max_wait_seconds: float,
     poll_seconds: float,
     stable_samples: int,
+    max_consecutive_unhealthy_samples: int = MAX_CONSECUTIVE_UNHEALTHY_SAMPLES,
 ) -> Snapshot:
     """Wait for the requested number of consecutive healthy, idle samples."""
     started = now()
     stable = 0
+    consecutive_unhealthy = 0
     while True:
         elapsed = max(0.0, now() - started)
         if elapsed >= max_wait_seconds:
@@ -175,11 +192,19 @@ def wait_for_idle(
         elapsed = max(0.0, now() - started)
         remaining = max(0.0, max_wait_seconds - elapsed)
         candidate_stable = stable + 1 if snapshot.idle else 0
+        consecutive_unhealthy = (
+            consecutive_unhealthy + 1 if not snapshot.healthy else 0
+        )
         if elapsed >= max_wait_seconds:
             emit(_status_line(snapshot, elapsed, remaining, stable, stable_samples))
             raise ResourceTimeout("NPU resources did not become idle before the deadline")
         stable = candidate_stable
         emit(_status_line(snapshot, elapsed, remaining, stable, stable_samples))
+        if consecutive_unhealthy >= max_consecutive_unhealthy_samples:
+            raise UnhealthyState(
+                "NPU state remained unhealthy for %d consecutive samples"
+                % consecutive_unhealthy
+            )
         if stable >= stable_samples:
             return snapshot
         sleep(min(poll_seconds, remaining))

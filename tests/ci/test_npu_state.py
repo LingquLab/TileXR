@@ -65,8 +65,11 @@ class WaitForIdleTests(unittest.TestCase):
         )
         unhealthy = npu_state.Snapshot(healthy=False, processes=())
         idle = npu_state.Snapshot(healthy=True, processes=())
-        snapshots = iter((idle, busy, unhealthy, idle, idle))
-        clock = iter((0.0, 0.0, 0.0, 1.0, 1.0, 2.0, 2.0, 3.0, 3.0, 4.0, 4.0))
+        snapshots = iter((idle, busy, unhealthy, unhealthy, idle, idle))
+        clock = iter((
+            0.0, 0.0, 0.0, 1.0, 1.0, 2.0, 2.0,
+            3.0, 3.0, 4.0, 4.0, 5.0, 5.0,
+        ))
         emitted = []
         sleeps = []
 
@@ -81,10 +84,11 @@ class WaitForIdleTests(unittest.TestCase):
         )
 
         self.assertIs(result, idle)
-        self.assertEqual(sleeps, [1, 1, 1, 1])
-        self.assertEqual(len(emitted), 5)
+        self.assertEqual(sleeps, [1, 1, 1, 1, 1])
+        self.assertEqual(len(emitted), 6)
         self.assertIn("device=0 pid=3558608 owner=alice", emitted[1])
         self.assertIn("healthy=false", emitted[2])
+        self.assertIn("healthy=false", emitted[3])
         self.assertIn("stable=0/2", emitted[2])
         self.assertIn("stable=2/2", emitted[-1])
 
@@ -126,6 +130,31 @@ class WaitForIdleTests(unittest.TestCase):
                 poll_seconds=1,
                 stable_samples=1,
             )
+
+    def test_waiter_raises_dedicated_error_after_three_unhealthy_samples(self):
+        unhealthy = npu_state.Snapshot(healthy=False, processes=())
+        clock = [0.0]
+        emitted = []
+        read_snapshot = mock.Mock(return_value=unhealthy)
+
+        def sleep(seconds):
+            clock[0] += seconds
+
+        with self.assertRaisesRegex(
+            npu_state.UnhealthyState, "3 consecutive samples"
+        ):
+            npu_state.wait_for_idle(
+                read_snapshot=read_snapshot,
+                sleep=sleep,
+                now=lambda: clock[0],
+                emit=emitted.append,
+                max_wait_seconds=10,
+                poll_seconds=1,
+                stable_samples=2,
+            )
+
+        self.assertEqual(read_snapshot.call_count, 3)
+        self.assertEqual(len(emitted), 3)
 
 
 class ReadSnapshotTests(unittest.TestCase):
@@ -172,6 +201,59 @@ class ReadSnapshotTests(unittest.TestCase):
             call.kwargs["timeout"] == npu_state.NPU_SMI_TIMEOUT_SECONDS
             for call in run.call_args_list
         ))
+
+    def test_read_snapshot_discards_process_row_when_pid_has_disappeared(self):
+        responses = healthy_responses(self.process_output)
+        stat_two = mock.Mock(st_uid=1002)
+
+        with mock.patch.object(npu_state.subprocess, "run", side_effect=responses), \
+             mock.patch.object(
+                 npu_state.os, "stat", side_effect=[FileNotFoundError(), stat_two]
+             ), \
+             mock.patch.object(
+                 npu_state.os, "kill", side_effect=ProcessLookupError
+             ) as kill, \
+             mock.patch.object(
+                 npu_state.pwd,
+                 "getpwuid",
+                 return_value=pwd.struct_passwd(
+                     ("bob", "x", 1002, 1002, "", "/home/bob", "/bin/bash")
+                 ),
+             ):
+            snapshot = npu_state.read_snapshot()
+
+        self.assertTrue(snapshot.healthy)
+        self.assertEqual(
+            snapshot.processes,
+            (npu_state.NpuProcess(7, 3558615, "python3.11", "bob"),),
+        )
+        kill.assert_called_once_with(3558608, 0)
+
+    def test_read_snapshot_keeps_unknown_row_when_proc_is_hidden_but_pid_exists(self):
+        responses = healthy_responses(self.process_output)
+        stat_two = mock.Mock(st_uid=1002)
+
+        with mock.patch.object(npu_state.subprocess, "run", side_effect=responses), \
+             mock.patch.object(
+                 npu_state.os, "stat", side_effect=[FileNotFoundError(), stat_two]
+             ), \
+             mock.patch.object(npu_state.os, "kill", return_value=None), \
+             mock.patch.object(
+                 npu_state.pwd,
+                 "getpwuid",
+                 return_value=pwd.struct_passwd(
+                     ("bob", "x", 1002, 1002, "", "/home/bob", "/bin/bash")
+                 ),
+             ):
+            snapshot = npu_state.read_snapshot()
+
+        self.assertEqual(
+            snapshot.processes,
+            (
+                npu_state.NpuProcess(0, 3558608, "python3.11", "unknown"),
+                npu_state.NpuProcess(7, 3558615, "python3.11", "bob"),
+            ),
+        )
 
     def test_read_snapshot_is_unhealthy_when_npu_smi_times_out(self):
         commands = [["npu-smi", "info"]] + [
@@ -238,7 +320,7 @@ class ReadSnapshotTests(unittest.TestCase):
         ]
 
         with mock.patch.object(npu_state.subprocess, "run", side_effect=responses), \
-             mock.patch.object(npu_state.os, "stat", side_effect=FileNotFoundError):
+             mock.patch.object(npu_state.os, "stat", side_effect=PermissionError):
             snapshot = npu_state.read_snapshot()
 
         self.assertFalse(snapshot.healthy)

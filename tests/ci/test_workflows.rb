@@ -118,8 +118,8 @@ assert(!npu_env.key?("TILEXR_CI_GITHUB_TOKEN"),
        "legacy controller token environment is forbidden")
 
 gate_run = named_step(npu, "hardware", "Run trusted gate").fetch("run")
-assert(gate_run.include?("exec python3 /home/tilexr-ci/control/current/gate.py"),
-       "NPU workflow must exec the sealed controller")
+assert(gate_run.include?("exec python3 /home/tilexr-ci/control/v2/gate.py"),
+       "NPU workflow must exec the pinned sealed controller version")
 assert(!gate_run.include?("GITHUB_TOKEN"),
        "controller step must not reference a GitHub token")
 assert(!gate_run.include?("github-token"),
@@ -161,6 +161,8 @@ expected_owners = {
   "/scripts/ci/provision/" => "@LingquLab/ci-maintainers",
   "/scripts/cann_download_install.sh" => "@LingquLab/ci-maintainers",
   "/scripts/cann_local_install.sh" => "@LingquLab/ci-maintainers",
+  "/scripts/common_env.sh" => "@LingquLab/ci-maintainers",
+  "/scripts/common_util.sh" => "@LingquLab/ci-maintainers",
   "/.gitmodules" => "@LingquLab/ci-maintainers",
 }
 actual_owners = File.readlines(CODEOWNERS_PATH, chomp: true).reject(&:empty?).to_h do |line|

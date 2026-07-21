@@ -49,7 +49,7 @@ foreign process collision.
 | Home | `/home/tilexr-ci` |
 | Sealed CANN 9.1 | `/home/tilexr-ci/toolchains/cann/9.1.0` |
 | Sealed Bisheng compiler | `/home/tilexr-ci/toolchains/cann/9.1.0/cann/tools/bisheng_compiler/bin/bisheng` |
-| Sealed controller | `/home/tilexr-ci/control/v1` |
+| Sealed controller | `/home/tilexr-ci/control/v2` |
 | Active controller link | `/home/tilexr-ci/control/current` |
 | Actions runner | `/home/tilexr-ci/actions-runner` |
 | Runner workspace root | `/home/tilexr-ci/actions-runner/_work` |
@@ -205,9 +205,10 @@ root for live changes:
 5. [`verify.sh`](../scripts/ci/provision/verify.sh) performs the final account,
    toolchain, service, and eight-device acceptance checks.
 
-`runner.sh` reads the short-lived registration token from standard input and
-does not log it or place it in process arguments. Generate the token just in
-time and pipe it directly to the remote script:
+For live provisioning, `runner.sh` reads the short-lived registration token
+from standard input and does not log it or place it in process arguments. A
+dry run does not require a token. Generate the token just in time and pipe it
+directly to the remote script:
 
 ```bash
 gh api --method POST orgs/LingquLab/actions/runners/registration-token --jq .token |
@@ -256,6 +257,29 @@ and required check. In particular, keep two approvals, code-owner review,
 resolved-conversation enforcement, deletion and non-fast-forward protection,
 and an empty bypass list. After saving, reopen the ruleset and verify these
 properties and the single `PR Gate` entry again.
+
+## Controller upgrade
+
+Publish every controller change under a new immutable version directory. Never
+replace an installed version and never point a workflow at `control/current`.
+Use this two-stage rollout:
+
+1. From the exact reviewed controller commit, run
+   `sudo bash scripts/ci/provision/control.sh --stage-only`. The script installs
+   and validates the new package without changing `control/current`.
+2. Merge the trusted workflow change that pins both the version check and
+   `gate.py` invocation to that immutable directory, such as `control/v2`.
+   Existing jobs keep using the previous pinned controller; new jobs use the
+   staged version.
+3. After earlier jobs drain, confirm the runner has no queued or active work,
+   stop its service, and run `control.sh` without `--stage-only` to atomically
+   update `control/current` for the job-completed hook.
+4. Restart the runner and run `verify.sh` once as the upgrade acceptance test.
+
+If the staged controller fails before activation, leave `control/current`
+unchanged and repin the trusted workflow to the previous immutable version.
+If activation has already occurred, stop the idle runner before restoring the
+previous `current` target. Do not change `current` while a job is running.
 
 ## Runner upgrade
 
