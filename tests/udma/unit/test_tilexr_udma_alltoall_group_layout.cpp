@@ -300,15 +300,17 @@ void TestRouteStages()
 
 void TestCopyoutWorkerPolicy()
 {
-    CHECK_EQ(TileXR::Demo::kAllToAllGroupBlockDim, 48U);
+    CHECK_EQ(TileXR::Demo::kAllToAllGroupBlockDim, 64U);
     CHECK_EQ(TileXR::Demo::AllToAllGroupValidCopyoutWorkers(8U), true);
     CHECK_EQ(TileXR::Demo::AllToAllGroupValidCopyoutWorkers(16U), true);
     CHECK_EQ(TileXR::Demo::AllToAllGroupValidCopyoutWorkers(32U), true);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupValidCopyoutWorkers(48U), true);
     CHECK_EQ(TileXR::Demo::AllToAllGroupValidCopyoutWorkers(4U), false);
     CHECK_EQ(TileXR::Demo::AllToAllGroupValidCopyoutWorkers(12U), false);
     CHECK_EQ(TileXR::Demo::AllToAllGroupBlockDim(8U), 24U);
     CHECK_EQ(TileXR::Demo::AllToAllGroupBlockDim(16U), 32U);
     CHECK_EQ(TileXR::Demo::AllToAllGroupBlockDim(32U), 48U);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupBlockDim(48U), 64U);
     CHECK_EQ(TileXR::Demo::AllToAllGroupBlockDim(4U), 0U);
 
     std::set<int32_t> lanes;
@@ -329,6 +331,11 @@ void TestCopyoutWorkerPolicy()
     CHECK_EQ(TileXR::Demo::AllToAllGroupCopyoutLane(16U, 0U, 32U), 0);
     CHECK_EQ(TileXR::Demo::AllToAllGroupCopyoutLane(31U, 0U, 32U), 15);
     CHECK_EQ(TileXR::Demo::AllToAllGroupCopyoutLane(16U, 1U, 32U), -1);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupCopyoutLane(0U, 0U, 48U), 0);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupCopyoutLane(16U, 0U, 48U), 0);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupCopyoutLane(32U, 0U, 48U), 0);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupCopyoutLane(47U, 0U, 48U), 15);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupCopyoutLane(32U, 1U, 48U), -1);
 }
 
 void TestKernelStructure()
