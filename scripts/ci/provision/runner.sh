@@ -44,6 +44,26 @@ run_as_ci_in_runner_home() {
     (cd "${RUNNER_HOME}" && runuser -u "${CI_USER}" -- "$@")
 }
 
+label_runner_service_entrypoint() {
+    local selinux_state
+    [[ -f "${RUNNER_HOME}/runsvc.sh" && ! -L "${RUNNER_HOME}/runsvc.sh" ]] || {
+        echo "ERROR: runner service entrypoint is missing or unsafe" >&2
+        return 1
+    }
+    if ! command -v getenforce >/dev/null 2>&1; then
+        return 0
+    fi
+    selinux_state="$(getenforce)" || return 1
+    if [[ "${selinux_state}" == Disabled ]]; then
+        return 0
+    fi
+    command -v chcon >/dev/null 2>&1 || {
+        echo "ERROR: chcon is required while SELinux is enabled" >&2
+        return 1
+    }
+    chcon -t bin_t "${RUNNER_HOME}/runsvc.sh"
+}
+
 runner_name_matches() {
     python3 - "$1" "${runner_name}" <<'PY'
 import json
@@ -62,6 +82,7 @@ if [[ "${DRY_RUN}" != 1 && -f "${RUNNER_HOME}/.service" ]]; then
         echo "ERROR: runner service name is invalid" >&2
         exit 1
     fi
+    label_runner_service_entrypoint
     if systemctl is-active --quiet -- "${service_name}"; then
         if ! runner_service_matches "${service_name}"; then
             echo "ERROR: active runner service has an unexpected user or executable" >&2
@@ -222,6 +243,7 @@ seal_runner_modes
 run install -d -o "${CI_USER}" -g "${CI_PRIMARY_GROUP}" -m 0750 \
     "${RUNNER_HOME}/_work" "${RUNNER_HOME}/_diag"
 run run_in_runner_home "${RUNNER_HOME}/svc.sh" install "${CI_USER}"
+run label_runner_service_entrypoint
 if [[ "${DRY_RUN}" == 1 ]]; then
     service_name=actions.runner.LingquLab-TileXR.blue-tilexr-npu8.service
     run env LC_ALL=C LANG=C systemctl show \
@@ -238,3 +260,8 @@ else
     fi
 fi
 run run_in_runner_home "${RUNNER_HOME}/svc.sh" start
+if [[ "${DRY_RUN}" != 1 ]] &&
+    ! systemctl is-active --quiet -- "${service_name}"; then
+    echo "ERROR: runner service failed to become active" >&2
+    exit 1
+fi

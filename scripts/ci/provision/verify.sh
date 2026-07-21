@@ -157,6 +157,21 @@ systemctl is-active --quiet -- "${service_name}" || {
     echo "ERROR: runner service is not active" >&2
     exit 1
 }
+if command -v getenforce >/dev/null 2>&1 && [[ "$(getenforce)" != Disabled ]]; then
+    runner_context="$(stat -c '%C' "${RUNNER_HOME}/runsvc.sh")" || {
+        echo "ERROR: could not read runner service SELinux type" >&2
+        exit 1
+    }
+    [[ "${runner_context}" == *:bin_t:* ]] || {
+        echo "ERROR: runner service entrypoint has an unexpected SELinux type" >&2
+        exit 1
+    }
+fi
+if ! runuser -u "${CI_USER}" -- timeout 60 \
+    git ls-remote https://github.com/LingquLab/TileXR.git HEAD >/dev/null; then
+    echo "ERROR: runner account cannot reach the GitHub repository" >&2
+    exit 1
+fi
 
 echo 'Filesystem usage before runner activation:'
 df -h / /home

@@ -180,6 +180,18 @@ class ControlSourceContractTests(unittest.TestCase):
             'run run_in_runner_home "${RUNNER_HOME}/svc.sh" start', runner
         )
 
+    def test_runner_converges_selinux_entrypoint_and_requires_active_service(self):
+        runner = self.read("scripts/ci/provision/runner.sh")
+        verify = self.read("scripts/ci/provision/verify.sh")
+
+        self.assertIn('chcon -t bin_t "${RUNNER_HOME}/runsvc.sh"', runner)
+        self.assertIn('systemctl is-active --quiet -- "${service_name}"', runner)
+        self.assertIn("runner service failed to become active", runner)
+        self.assertIn("runner service entrypoint has an unexpected SELinux type", verify)
+        self.assertIn(
+            "git ls-remote https://github.com/LingquLab/TileXR.git HEAD", verify
+        )
+
     def test_manifests_never_source_pull_request_code_into_trusted_shell(self):
         for relative in [
             "scripts/ci/control/build_blue.sh",

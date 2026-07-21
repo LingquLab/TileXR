@@ -220,6 +220,12 @@ remote path with `sudo env TILEXR_CI_RUNNER_ASSET=...` when invoking
 `runner.sh`; the script copies it into root-owned staging and still verifies the
 SHA-256 digest published by the GitHub releases API before extraction.
 
+The runner account must also resolve `github.com` to a reachable official
+GitHub frontend. `verify.sh` performs a bounded public `git ls-remote` check.
+If the host's normal resolver returns an unreachable regional address, maintain
+a single marked `github.com` route in `/etc/hosts`, validate the selected
+address with TLS enabled, and revalidate it whenever provisioning is rerun.
+
 ## GitHub policy and runner group
 
 An active `LingquLab` organization owner configures and verifies the repository
