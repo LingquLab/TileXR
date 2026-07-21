@@ -181,6 +181,8 @@ void TestDualRoutePeerPolicy()
             }
         }
     }
+    CHECK_EQ(AllToAllGroupUseSecondaryRoute(0, 14, false), false);
+    CHECK_EQ(AllToAllGroupUseSecondaryRoute(0, 14, true), true);
 }
 
 void TestDualRouteQpWeights()
@@ -346,11 +348,13 @@ void TestKernelStructure()
     CHECK_CONTAINS(kernel, "TILEXR_ALLTOALL_GROUP_SEND_CORES");
     CHECK_CONTAINS(kernel, "#include \"tilexr_udma_alltoall_group_route.h\"");
     CHECK_CONTAINS(kernel, "AllToAllGroupSelectRouteQps");
-    CHECK_CONTAINS(kernel, "AllToAllGroupUseSecondaryRouteDevice(rank, peer)");
+    CHECK_CONTAINS(kernel,
+        "AllToAllGroupUseSecondaryRouteDevice(rank, peer, useSecondaryRoute)");
     CHECK_CONTAINS(kernel, "secondaryQp");
     CHECK_CONTAINS(kernel, "selectedQp");
     CHECK_CONTAINS(kernel, "copyoutWorkers");
-    CHECK_CONTAINS(kernel, "uint32_t copyoutWorkers, uint32_t routeStage");
+    CHECK_CONTAINS(kernel,
+        "uint32_t copyoutWorkers, uint32_t routeStage, uint32_t useSecondaryRoute");
     CHECK_CONTAINS(kernel, "AllToAllGroupPeerInRouteStageDevice");
     CHECK_CONTAINS(kernel,
         "if (!AllToAllGroupPeerInRouteStageDevice(rank, peer, routeStage))");
@@ -389,6 +393,7 @@ void TestHostStructure()
     CHECK_CONTAINS(demo, "TILEXR_DEMO_ALLTOALL_GROUP_CHUNK_ELEMENTS");
     CHECK_CONTAINS(demo, "TILEXR_DEMO_ALLTOALL_GROUP_COPYOUT_WORKERS");
     CHECK_CONTAINS(demo, "TILEXR_DEMO_ALLTOALL_GROUP_ROUTE_STAGES");
+    CHECK_CONTAINS(demo, "TILEXR_DEMO_ALLTOALL_GROUP_USE_SECONDARY_ROUTE");
     CHECK_CONTAINS(demo, "AllToAllGroupValidCopyoutWorkers");
     CHECK_CONTAINS(demo, "AllToAllGroupBlockDim(copyoutWorkers)");
     CHECK_CONTAINS(demo, "grouped alltoall registeredBytes=");

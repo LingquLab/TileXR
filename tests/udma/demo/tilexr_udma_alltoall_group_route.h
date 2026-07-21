@@ -84,6 +84,12 @@ inline bool AllToAllGroupUseSecondaryRoute(int rank, int peer)
         kAllToAllGroupPrimaryPeersPerNode;
 }
 
+inline bool AllToAllGroupUseSecondaryRoute(
+    int rank, int peer, bool useSecondaryRoute)
+{
+    return useSecondaryRoute && AllToAllGroupUseSecondaryRoute(rank, peer);
+}
+
 inline bool AllToAllGroupPeerInRouteStage(
     int rank, int peer, AllToAllGroupRouteStage stage)
 {

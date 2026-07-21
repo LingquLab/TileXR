@@ -60,7 +60,7 @@ extern void launch_tilexr_udma_all_to_all_group(
     uint64_t payloadOffset0, uint64_t payloadOffset1,
     uint64_t signalOffset0, uint64_t signalOffset1,
     GM_ADDR groupTrace, uint32_t traceIteration,
-    uint32_t copyoutWorkers, uint32_t routeStage);
+    uint32_t copyoutWorkers, uint32_t routeStage, uint32_t useSecondaryRoute);
 extern void launch_tilexr_udma_all_to_all_bigdata(
     uint32_t blockDim, void* stream, GM_ADDR commArgs, GM_ADDR input, GM_ADDR output,
     GM_ADDR udmaMem, GM_ADDR debug, GM_ADDR fullmeshTrace, uint32_t fullmeshTraceIteration,
@@ -674,6 +674,15 @@ bool RunGroupedAllToAll(
         return false;
     }
     const bool routeStages = routeStagesValue == 1;
+    const int useSecondaryRouteValue = GetEnvInt(
+        "TILEXR_DEMO_ALLTOALL_GROUP_USE_SECONDARY_ROUTE", 1);
+    if (useSecondaryRouteValue != 0 && useSecondaryRouteValue != 1) {
+        std::cerr << "[rank " << rank
+                  << "] ERROR: TILEXR_DEMO_ALLTOALL_GROUP_USE_SECONDARY_ROUTE"
+                  << " must be 0 or 1, got " << useSecondaryRouteValue << std::endl;
+        return false;
+    }
+    const uint32_t useSecondaryRoute = static_cast<uint32_t>(useSecondaryRouteValue);
     constexpr size_t kRouteStageCount = 10U;
     const std::array<TileXR::Demo::AllToAllGroupRouteStage, kRouteStageCount>
         stagedRouteStages {{
@@ -838,6 +847,7 @@ bool RunGroupedAllToAll(
         " repeat=" + std::to_string(repeat) +
         " copyoutWorkers=" + std::to_string(copyoutWorkers) +
         " blockDim=" + std::to_string(groupBlockDim) +
+        " useSecondaryRoute=" + std::to_string(useSecondaryRoute) +
         " routeStages=" + std::to_string(routeStagesValue));
 
     if (routeStages &&
@@ -858,7 +868,7 @@ bool RunGroupedAllToAll(
             plan.payloadOffset[0], plan.payloadOffset[1],
             plan.signalOffset[0], plan.signalOffset[1],
             reinterpret_cast<GM_ADDR>(trace), traceIteration, copyoutWorkers,
-            static_cast<uint32_t>(routeStage));
+            static_cast<uint32_t>(routeStage), useSecondaryRoute);
     };
 
     double totalUs = 0.0;

@@ -27,6 +27,11 @@ class GroupedAllToAllLocalStageSourceTest(unittest.TestCase):
         self.assertIn("copySliceCount", kernel)
         self.assertIn("copySliceIndex", kernel)
         self.assertIn("must be 8, 16, 32, or 48", host)
+        self.assertIn("TILEXR_DEMO_ALLTOALL_GROUP_USE_SECONDARY_ROUTE", host)
+        self.assertIn(
+            "AllToAllGroupUseSecondaryRouteDevice(rank, peer, useSecondaryRoute)",
+            kernel,
+        )
         self.assertIn(
             '"local-send", "local-copy", "remote-send", "all-send", '
             '"remote-wait", "remote-copy", "no-copy", "primary", "secondary", '

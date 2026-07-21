@@ -92,6 +92,13 @@ __aicore__ inline bool AllToAllGroupUseSecondaryRouteDevice(
         TileXR::Demo::kAllToAllGroupPrimaryPeersPerNode;
 }
 
+__aicore__ inline bool AllToAllGroupUseSecondaryRouteDevice(
+    int32_t rank, int32_t peer, uint32_t useSecondaryRoute)
+{
+    return useSecondaryRoute != 0U &&
+        AllToAllGroupUseSecondaryRouteDevice(rank, peer);
+}
+
 __aicore__ inline bool AllToAllGroupPeerInRouteStageDevice(
     int32_t rank, int32_t peer, uint32_t routeStage)
 {
@@ -347,7 +354,7 @@ extern "C" __global__ __aicore__ void tilexr_udma_all_to_all_group_kernel(
     uint64_t payloadOffset0, uint64_t payloadOffset1,
     uint64_t signalOffset0, uint64_t signalOffset1,
     GM_ADDR groupTraceGM, uint32_t traceIteration,
-    uint32_t copyoutWorkers, uint32_t routeStage)
+    uint32_t copyoutWorkers, uint32_t routeStage, uint32_t useSecondaryRoute)
 {
     const uint32_t blockIdx = static_cast<uint32_t>(AscendC::GetBlockIdx());
     auto groupTrace = blockIdx < TileXR::Demo::kAllToAllGroupTraceCoreCount ?
@@ -531,7 +538,8 @@ extern "C" __global__ __aicore__ void tilexr_udma_all_to_all_group_kernel(
         uint32_t secondaryQp = 0U;
         AllToAllGroupSelectRouteQps(args, peer, primaryQp, secondaryQp);
         const uint32_t selectedQp =
-            AllToAllGroupUseSecondaryRouteDevice(rank, peer) ? secondaryQp : primaryQp;
+            AllToAllGroupUseSecondaryRouteDevice(rank, peer, useSecondaryRoute) ?
+            secondaryQp : primaryQp;
         for (uint32_t pass = 0U; pass < passCount; ++pass) {
             const int32_t chunkElementOffset = static_cast<int32_t>(pass) * chunkElements;
             const int32_t remaining = elementsPerPeer - chunkElementOffset;
@@ -586,11 +594,11 @@ void launch_tilexr_udma_all_to_all_group(
     uint64_t payloadOffset0, uint64_t payloadOffset1,
     uint64_t signalOffset0, uint64_t signalOffset1,
     GM_ADDR groupTrace, uint32_t traceIteration,
-    uint32_t copyoutWorkers, uint32_t routeStage)
+    uint32_t copyoutWorkers, uint32_t routeStage, uint32_t useSecondaryRoute)
 {
     tilexr_udma_all_to_all_group_kernel<<<blockDim, nullptr, stream>>>(
         commArgs, input, output, registeredMemory, debug, invocationId,
         elementsPerPeer, chunkElements, passCount, groupCount,
         payloadOffset0, payloadOffset1, signalOffset0, signalOffset1,
-        groupTrace, traceIteration, copyoutWorkers, routeStage);
+        groupTrace, traceIteration, copyoutWorkers, routeStage, useSecondaryRoute);
 }
