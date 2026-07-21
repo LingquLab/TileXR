@@ -18,7 +18,7 @@ jobs:
         run: test "$(cat /home/tilexr-ci/control/current/VERSION)" = v1
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with:
-          ref: refs/pull/${{ github.event.pull_request.number }}/merge
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
           path: source
           clean: true
           submodules: recursive

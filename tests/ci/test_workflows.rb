@@ -96,9 +96,9 @@ checkout_steps.each do |step|
                "checkout must disable credential persistence")
 end
 npu_checkout = steps_using(npu, CHECKOUT_ACTION).fetch(0)
-assert_equal("refs/pull/${{ github.event.pull_request.number }}/merge",
+assert_equal("${{ github.event.pull_request.merge_commit_sha }}",
              npu_checkout.fetch("with").fetch("ref"),
-             "NPU checkout must select the PR merge ref")
+             "NPU checkout must pin the event merge SHA")
 
 assert_equal([], [pr, npu].flat_map { |workflow| steps_using(workflow, UPLOAD_ACTION) },
              "CI workflows must not upload artifacts")
