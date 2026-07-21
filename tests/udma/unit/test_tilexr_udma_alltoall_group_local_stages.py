@@ -23,9 +23,6 @@ class GroupedAllToAllLocalStageSourceTest(unittest.TestCase):
         self.assertIn("AllToAllGroupReceivePeerInRouteStageDevice", kernel)
         self.assertIn("AllToAllGroupStageRunsCopyDevice(routeStage)", kernel)
         self.assertIn("AllToAllGroupStageWaitsForSignalDevice(routeStage)", kernel)
-        self.assertIn("AllToAllGroupWaitPollDelay(waitPollCycles)", kernel)
-        self.assertIn("TILEXR_DEMO_ALLTOALL_GROUP_WAIT_POLL_CYCLES", host)
-        self.assertIn("uint32_t waitPollCycles", kernel)
         self.assertIn(
             '"local-send", "local-copy", "remote-send", "all-send", '
             '"remote-wait", "remote-copy", "no-copy", "primary", "secondary", '

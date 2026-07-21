@@ -335,9 +335,7 @@ void TestKernelStructure()
     CHECK_CONTAINS(kernel, "secondaryQp");
     CHECK_CONTAINS(kernel, "selectedQp");
     CHECK_CONTAINS(kernel, "copyoutWorkers");
-    CHECK_CONTAINS(kernel,
-        "uint32_t copyoutWorkers, uint32_t routeStage, uint32_t waitPollCycles");
-    CHECK_CONTAINS(kernel, "AllToAllGroupWaitPollDelay(waitPollCycles)");
+    CHECK_CONTAINS(kernel, "uint32_t copyoutWorkers, uint32_t routeStage");
     CHECK_CONTAINS(kernel, "AllToAllGroupPeerInRouteStageDevice");
     CHECK_CONTAINS(kernel,
         "if (!AllToAllGroupPeerInRouteStageDevice(rank, peer, routeStage))");
@@ -372,7 +370,6 @@ void TestHostStructure()
     CHECK_CONTAINS(demo, "TILEXR_DEMO_ALLTOALL_GROUP_CHUNK_ELEMENTS");
     CHECK_CONTAINS(demo, "TILEXR_DEMO_ALLTOALL_GROUP_COPYOUT_WORKERS");
     CHECK_CONTAINS(demo, "TILEXR_DEMO_ALLTOALL_GROUP_ROUTE_STAGES");
-    CHECK_CONTAINS(demo, "TILEXR_DEMO_ALLTOALL_GROUP_WAIT_POLL_CYCLES");
     CHECK_CONTAINS(demo, "AllToAllGroupValidCopyoutWorkers");
     CHECK_CONTAINS(demo, "AllToAllGroupBlockDim(copyoutWorkers)");
     CHECK_CONTAINS(demo, "grouped alltoall registeredBytes=");
