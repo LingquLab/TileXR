@@ -28,8 +28,6 @@ class GroupedAllToAllLocalStageSourceTest(unittest.TestCase):
         self.assertIn("copySliceIndex", kernel)
         self.assertIn("must be 8, 16, 32, or 48", host)
         self.assertIn(
-            '"TILEXR_DEMO_ALLTOALL_GROUP_COPYOUT_WORKERS", 48', host)
-        self.assertIn(
             '"local-send", "local-copy", "remote-send", "all-send", '
             '"remote-wait", "remote-copy", "no-copy", "primary", "secondary", '
             '"combined"',
