@@ -209,8 +209,8 @@ void TestRouteStages()
 {
     using TileXR::Demo::AllToAllGroupRouteStage;
     CHECK_EQ(TileXR::Demo::AllToAllGroupValidRouteStage(0U), true);
-    CHECK_EQ(TileXR::Demo::AllToAllGroupValidRouteStage(6U), true);
-    CHECK_EQ(TileXR::Demo::AllToAllGroupValidRouteStage(7U), false);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupValidRouteStage(9U), true);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupValidRouteStage(10U), false);
     CHECK_EQ(TileXR::Demo::AllToAllGroupStageRunsSend(
         AllToAllGroupRouteStage::kLocalSend), true);
     CHECK_EQ(TileXR::Demo::AllToAllGroupStageRunsCopy(
@@ -225,6 +225,20 @@ void TestRouteStages()
         AllToAllGroupRouteStage::kRemoteSend), true);
     CHECK_EQ(TileXR::Demo::AllToAllGroupStageRunsCopy(
         AllToAllGroupRouteStage::kRemoteSend), false);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupStageRunsReceive(
+        AllToAllGroupRouteStage::kAllSend), false);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupStageRunsSend(
+        AllToAllGroupRouteStage::kAllSend), true);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupStageRunsReceive(
+        AllToAllGroupRouteStage::kRemoteWait), true);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupStageWaitsForSignal(
+        AllToAllGroupRouteStage::kRemoteWait), true);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupStageRunsCopy(
+        AllToAllGroupRouteStage::kRemoteWait), false);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupStageWaitsForSignal(
+        AllToAllGroupRouteStage::kRemoteCopy), false);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupStageRunsCopy(
+        AllToAllGroupRouteStage::kRemoteCopy), true);
 
     for (int rankSize : {8, 16, 128}) {
         for (int rank = 0; rank < rankSize; ++rank) {
@@ -248,6 +262,16 @@ void TestRouteStages()
                 CHECK_EQ(TileXR::Demo::AllToAllGroupPeerInRouteStage(
                     rank, peer, AllToAllGroupRouteStage::kRemoteSend),
                     inPrimary || inSecondary);
+                CHECK_EQ(TileXR::Demo::AllToAllGroupPeerInRouteStage(
+                    rank, peer, AllToAllGroupRouteStage::kAllSend), true);
+                CHECK_EQ(TileXR::Demo::AllToAllGroupPeerInRouteStage(
+                    rank, peer, AllToAllGroupRouteStage::kRemoteWait),
+                    inPrimary || inSecondary);
+                CHECK_EQ(TileXR::Demo::AllToAllGroupPeerInRouteStage(
+                    rank, peer, AllToAllGroupRouteStage::kRemoteCopy),
+                    inPrimary || inSecondary);
+                CHECK_EQ(TileXR::Demo::AllToAllGroupReceivePeerInRouteStage(
+                    rank, peer, AllToAllGroupRouteStage::kRemoteCopy), true);
                 CHECK_EQ(static_cast<int>(inLocal) + static_cast<int>(inPrimary) +
                     static_cast<int>(inSecondary), 1);
                 local += inLocal ? 1 : 0;
@@ -312,6 +336,8 @@ void TestKernelStructure()
     CHECK_CONTAINS(kernel, "UDMAQuietStatusOnQp(args, peer, selectedQp)");
     CHECK_CONTAINS(kernel, "AllToAllGroupWaitTokenMte");
     CHECK_CONTAINS(kernel, "AllToAllGroupStageRunsSendDevice(routeStage)");
+    CHECK_CONTAINS(kernel, "AllToAllGroupStageRunsReceiveDevice(routeStage)");
+    CHECK_CONTAINS(kernel, "AllToAllGroupReceivePeerInRouteStageDevice");
     CHECK_CONTAINS(kernel, "AllToAllGroupStageRunsCopyDevice(routeStage)");
     CHECK_CONTAINS(kernel, "AllToAllGroupStageWaitsForSignalDevice(routeStage)");
     CHECK_CONTAINS(kernel, "observed >= expectedToken");
@@ -342,7 +368,8 @@ void TestHostStructure()
     const std::string grouped = begin == std::string::npos ? std::string() :
         demo.substr(begin, end == std::string::npos ? std::string::npos : end - begin);
     CHECK_CONTAINS(grouped,
-        "\"local-send\", \"local-copy\", \"remote-send\", \"primary\", \"secondary\"");
+        "\"local-send\", \"local-copy\", \"remote-send\", \"all-send\", "
+        "\"remote-wait\", \"remote-copy\", \"primary\", \"secondary\"");
     CHECK_CONTAINS(grouped, "AllToAllGroupRouteStage::kCombined");
     CHECK_CONTAINS(grouped, "aclrtEventElapsedTime");
     CHECK_CONTAINS(grouped, "DemoBarrierAll(rank, rankSize, barrierStep)");

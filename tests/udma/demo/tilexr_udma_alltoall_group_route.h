@@ -22,11 +22,14 @@ enum class AllToAllGroupRouteStage : uint32_t {
     kLocalSend = 4U,
     kLocalCopy = 5U,
     kRemoteSend = 6U,
+    kAllSend = 7U,
+    kRemoteWait = 8U,
+    kRemoteCopy = 9U,
 };
 
 inline bool AllToAllGroupValidRouteStage(uint32_t value)
 {
-    return value <= static_cast<uint32_t>(AllToAllGroupRouteStage::kRemoteSend);
+    return value <= static_cast<uint32_t>(AllToAllGroupRouteStage::kRemoteCopy);
 }
 
 inline bool AllToAllGroupStageRunsSend(AllToAllGroupRouteStage stage)
@@ -34,16 +37,24 @@ inline bool AllToAllGroupStageRunsSend(AllToAllGroupRouteStage stage)
     return stage != AllToAllGroupRouteStage::kLocalCopy;
 }
 
-inline bool AllToAllGroupStageRunsCopy(AllToAllGroupRouteStage stage)
+inline bool AllToAllGroupStageRunsReceive(AllToAllGroupRouteStage stage)
 {
     return stage != AllToAllGroupRouteStage::kLocalSend &&
-        stage != AllToAllGroupRouteStage::kRemoteSend;
+        stage != AllToAllGroupRouteStage::kRemoteSend &&
+        stage != AllToAllGroupRouteStage::kAllSend;
+}
+
+inline bool AllToAllGroupStageRunsCopy(AllToAllGroupRouteStage stage)
+{
+    return AllToAllGroupStageRunsReceive(stage) &&
+        stage != AllToAllGroupRouteStage::kRemoteWait;
 }
 
 inline bool AllToAllGroupStageWaitsForSignal(AllToAllGroupRouteStage stage)
 {
-    return AllToAllGroupStageRunsCopy(stage) &&
-        stage != AllToAllGroupRouteStage::kLocalCopy;
+    return AllToAllGroupStageRunsReceive(stage) &&
+        stage != AllToAllGroupRouteStage::kLocalCopy &&
+        stage != AllToAllGroupRouteStage::kRemoteCopy;
 }
 
 struct AllToAllGroupRouteQps {
@@ -80,12 +91,15 @@ inline bool AllToAllGroupPeerInRouteStage(
     const bool crossNode = AllToAllGroupIsCrossNode(rank, peer);
     switch (stage) {
         case AllToAllGroupRouteStage::kCombined:
+        case AllToAllGroupRouteStage::kAllSend:
             return true;
         case AllToAllGroupRouteStage::kLocal:
         case AllToAllGroupRouteStage::kLocalSend:
         case AllToAllGroupRouteStage::kLocalCopy:
             return !crossNode;
         case AllToAllGroupRouteStage::kRemoteSend:
+        case AllToAllGroupRouteStage::kRemoteWait:
+        case AllToAllGroupRouteStage::kRemoteCopy:
             return crossNode;
         case AllToAllGroupRouteStage::kPrimary:
             return crossNode && !AllToAllGroupUseSecondaryRoute(rank, peer);
@@ -93,6 +107,15 @@ inline bool AllToAllGroupPeerInRouteStage(
             return crossNode && AllToAllGroupUseSecondaryRoute(rank, peer);
     }
     return false;
+}
+
+inline bool AllToAllGroupReceivePeerInRouteStage(
+    int rank, int peer, AllToAllGroupRouteStage stage)
+{
+    if (stage == AllToAllGroupRouteStage::kRemoteCopy) {
+        return rank >= 0 && peer >= 0 && rank != peer;
+    }
+    return AllToAllGroupPeerInRouteStage(rank, peer, stage);
 }
 
 inline AllToAllGroupRouteQps AllToAllGroupSelectRouteQps(

@@ -27,6 +27,9 @@ constexpr uint32_t TILEXR_ALLTOALL_GROUP_ROUTE_STAGE_SECONDARY = 3U;
 constexpr uint32_t TILEXR_ALLTOALL_GROUP_ROUTE_STAGE_LOCAL_SEND = 4U;
 constexpr uint32_t TILEXR_ALLTOALL_GROUP_ROUTE_STAGE_LOCAL_COPY = 5U;
 constexpr uint32_t TILEXR_ALLTOALL_GROUP_ROUTE_STAGE_REMOTE_SEND = 6U;
+constexpr uint32_t TILEXR_ALLTOALL_GROUP_ROUTE_STAGE_ALL_SEND = 7U;
+constexpr uint32_t TILEXR_ALLTOALL_GROUP_ROUTE_STAGE_REMOTE_WAIT = 8U;
+constexpr uint32_t TILEXR_ALLTOALL_GROUP_ROUTE_STAGE_REMOTE_COPY = 9U;
 
 struct AllToAllGroupDeviceError {
     uint32_t valid;
@@ -92,10 +95,11 @@ __aicore__ inline bool AllToAllGroupPeerInRouteStageDevice(
     int32_t rank, int32_t peer, uint32_t routeStage)
 {
     if (rank < 0 || peer < 0 || rank == peer ||
-        routeStage > TILEXR_ALLTOALL_GROUP_ROUTE_STAGE_REMOTE_SEND) {
+        routeStage > TILEXR_ALLTOALL_GROUP_ROUTE_STAGE_REMOTE_COPY) {
         return false;
     }
-    if (routeStage == TILEXR_ALLTOALL_GROUP_ROUTE_STAGE_COMBINED) {
+    if (routeStage == TILEXR_ALLTOALL_GROUP_ROUTE_STAGE_COMBINED ||
+        routeStage == TILEXR_ALLTOALL_GROUP_ROUTE_STAGE_ALL_SEND) {
         return true;
     }
     const bool crossNode =
@@ -106,7 +110,9 @@ __aicore__ inline bool AllToAllGroupPeerInRouteStageDevice(
         routeStage == TILEXR_ALLTOALL_GROUP_ROUTE_STAGE_LOCAL_COPY) {
         return !crossNode;
     }
-    if (routeStage == TILEXR_ALLTOALL_GROUP_ROUTE_STAGE_REMOTE_SEND) {
+    if (routeStage == TILEXR_ALLTOALL_GROUP_ROUTE_STAGE_REMOTE_SEND ||
+        routeStage == TILEXR_ALLTOALL_GROUP_ROUTE_STAGE_REMOTE_WAIT ||
+        routeStage == TILEXR_ALLTOALL_GROUP_ROUTE_STAGE_REMOTE_COPY) {
         return crossNode;
     }
     const bool secondary = AllToAllGroupUseSecondaryRouteDevice(rank, peer);
@@ -119,16 +125,33 @@ __aicore__ inline bool AllToAllGroupStageRunsSendDevice(uint32_t routeStage)
     return routeStage != TILEXR_ALLTOALL_GROUP_ROUTE_STAGE_LOCAL_COPY;
 }
 
-__aicore__ inline bool AllToAllGroupStageRunsCopyDevice(uint32_t routeStage)
+__aicore__ inline bool AllToAllGroupStageRunsReceiveDevice(uint32_t routeStage)
 {
     return routeStage != TILEXR_ALLTOALL_GROUP_ROUTE_STAGE_LOCAL_SEND &&
-        routeStage != TILEXR_ALLTOALL_GROUP_ROUTE_STAGE_REMOTE_SEND;
+        routeStage != TILEXR_ALLTOALL_GROUP_ROUTE_STAGE_REMOTE_SEND &&
+        routeStage != TILEXR_ALLTOALL_GROUP_ROUTE_STAGE_ALL_SEND;
+}
+
+__aicore__ inline bool AllToAllGroupStageRunsCopyDevice(uint32_t routeStage)
+{
+    return AllToAllGroupStageRunsReceiveDevice(routeStage) &&
+        routeStage != TILEXR_ALLTOALL_GROUP_ROUTE_STAGE_REMOTE_WAIT;
 }
 
 __aicore__ inline bool AllToAllGroupStageWaitsForSignalDevice(uint32_t routeStage)
 {
-    return AllToAllGroupStageRunsCopyDevice(routeStage) &&
-        routeStage != TILEXR_ALLTOALL_GROUP_ROUTE_STAGE_LOCAL_COPY;
+    return AllToAllGroupStageRunsReceiveDevice(routeStage) &&
+        routeStage != TILEXR_ALLTOALL_GROUP_ROUTE_STAGE_LOCAL_COPY &&
+        routeStage != TILEXR_ALLTOALL_GROUP_ROUTE_STAGE_REMOTE_COPY;
+}
+
+__aicore__ inline bool AllToAllGroupReceivePeerInRouteStageDevice(
+    int32_t rank, int32_t peer, uint32_t routeStage)
+{
+    if (routeStage == TILEXR_ALLTOALL_GROUP_ROUTE_STAGE_REMOTE_COPY) {
+        return rank >= 0 && peer >= 0 && rank != peer;
+    }
+    return AllToAllGroupPeerInRouteStageDevice(rank, peer, routeStage);
 }
 
 __aicore__ inline int32_t AllToAllGroupCopyoutLaneDevice(
@@ -326,7 +349,7 @@ extern "C" __global__ __aicore__ void tilexr_udma_all_to_all_group_kernel(
     const int32_t rankSize = args->rankSize;
 
     if ((copyoutWorkers != 8U && copyoutWorkers != 16U) ||
-        routeStage > TILEXR_ALLTOALL_GROUP_ROUTE_STAGE_REMOTE_SEND ||
+        routeStage > TILEXR_ALLTOALL_GROUP_ROUTE_STAGE_REMOTE_COPY ||
         blockIdx >= TILEXR_ALLTOALL_GROUP_SEND_CORES + copyoutWorkers ||
         !TileXR::UDMARegistryEnabled(args) || rankSize < 8 ||
         rankSize > TileXR::TILEXR_MAX_RANK_SIZE || (rankSize & 7) != 0 ||
@@ -350,7 +373,7 @@ extern "C" __global__ __aicore__ void tilexr_udma_all_to_all_group_kernel(
         static_cast<uint64_t>(elementsPerPeer) * sizeof(int32_t);
 
     if (blockIdx >= TILEXR_ALLTOALL_GROUP_SEND_CORES) {
-        if (!AllToAllGroupStageRunsCopyDevice(routeStage)) {
+        if (!AllToAllGroupStageRunsReceiveDevice(routeStage)) {
             AllToAllGroupTraceRecordKernel(groupTrace, traceIteration, blockIdx,
                 kernelBegin, AllToAllGroupTraceCycle(groupTrace));
             return;
@@ -362,7 +385,8 @@ extern "C" __global__ __aicore__ void tilexr_udma_all_to_all_group_kernel(
             static_cast<int64_t>(elementsPerPeer) * (worker + 1U) / copyoutWorkers);
         if ((routeStage == TILEXR_ALLTOALL_GROUP_ROUTE_STAGE_COMBINED ||
                 routeStage == TILEXR_ALLTOALL_GROUP_ROUTE_STAGE_LOCAL ||
-                routeStage == TILEXR_ALLTOALL_GROUP_ROUTE_STAGE_LOCAL_COPY) &&
+                routeStage == TILEXR_ALLTOALL_GROUP_ROUTE_STAGE_LOCAL_COPY ||
+                routeStage == TILEXR_ALLTOALL_GROUP_ROUTE_STAGE_REMOTE_COPY) &&
             selfEnd > selfBegin) {
             const uint64_t selfCopyBegin = AllToAllGroupTraceCycle(groupTrace);
             auto selfSrc = reinterpret_cast<__gm__ uint8_t*>(
@@ -390,7 +414,7 @@ extern "C" __global__ __aicore__ void tilexr_udma_all_to_all_group_kernel(
             if (peer < 0) {
                 continue;
             }
-            if (!AllToAllGroupPeerInRouteStageDevice(rank, peer, routeStage)) {
+            if (!AllToAllGroupReceivePeerInRouteStageDevice(rank, peer, routeStage)) {
                 continue;
             }
             const uint32_t traceCore = TILEXR_ALLTOALL_GROUP_SEND_CORES + lane;
@@ -429,6 +453,9 @@ extern "C" __global__ __aicore__ void tilexr_udma_all_to_all_group_kernel(
                         TileXR::Demo::kAllToAllGroupTraceReceiveWait, groupCount, passCount,
                         peer, TileXR::Demo::kAllToAllGroupTraceNoQp,
                         waitBegin, AllToAllGroupTraceCycle(groupTrace));
+                }
+                if (!AllToAllGroupStageRunsCopyDevice(routeStage)) {
+                    continue;
                 }
                 auto relaySrc = registeredMemory + payloadOffsets[slot] +
                     static_cast<uint64_t>(peer) * bytesPerPeer +
