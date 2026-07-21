@@ -36,12 +36,20 @@ if [[ -n "${preloaded_asset}" &&
     exit 1
 fi
 
+run_in_runner_home() {
+    (cd "${RUNNER_HOME}" && "$@")
+}
+
+run_as_ci_in_runner_home() {
+    (cd "${RUNNER_HOME}" && runuser -u "${CI_USER}" -- "$@")
+}
+
 runner_name_matches() {
     python3 - "$1" "${runner_name}" <<'PY'
 import json
 import sys
 
-with open(sys.argv[1], encoding="utf-8") as stream:
+with open(sys.argv[1], encoding="utf-8-sig") as stream:
     runner = json.load(stream)
 raise SystemExit(0 if runner.get("agentName") == sys.argv[2] else 1)
 PY
@@ -144,8 +152,8 @@ else
 fi
 
 if [[ "${DRY_RUN}" != 1 && -x "${RUNNER_HOME}/svc.sh" ]]; then
-    "${RUNNER_HOME}/svc.sh" stop || true
-    "${RUNNER_HOME}/svc.sh" uninstall || true
+    run_in_runner_home "${RUNNER_HOME}/svc.sh" stop || true
+    run_in_runner_home "${RUNNER_HOME}/svc.sh" uninstall || true
 fi
 if [[ "${DRY_RUN}" != 1 && -f "${RUNNER_HOME}/.runner" ]]; then
     if ! runner_name_matches "${RUNNER_HOME}/.runner"; then
@@ -172,13 +180,14 @@ run chown -R "${CI_USER}:${CI_PRIMARY_GROUP}" "${RUNNER_HOME}"
 
 if [[ "${DRY_RUN}" == 1 ]]; then
     printf 'export ACTIONS_RUNNER_INPUT_TOKEN=%q\n' '<registration-token>'
-    printf 'runuser -u %s -- %s --url %s --runnergroup %s --name %s --labels %s --work %s --unattended --replace --disableupdate\n' \
+    printf 'cd %q && runuser -u %s -- %s --url %s --runnergroup %s --name %s --labels %s --work %s --unattended --replace --disableupdate\n' \
+        "${RUNNER_HOME}" \
         "${CI_USER}" "${RUNNER_HOME}/config.sh" "${runner_url}" \
         "${runner_group}" "${runner_name}" "${runner_labels}" "${runner_work}"
     printf 'unset ACTIONS_RUNNER_INPUT_TOKEN\n'
 else
     if run_with_runner_registration_token "${registration_token}" \
-        runuser -u "${CI_USER}" -- "${RUNNER_HOME}/config.sh" \
+        run_as_ci_in_runner_home "${RUNNER_HOME}/config.sh" \
         --url "${runner_url}" \
         --runnergroup "${runner_group}" \
         --name "${runner_name}" \
@@ -212,7 +221,7 @@ run chown -R "${CI_USER}:${CI_PRIMARY_GROUP}" \
 seal_runner_modes
 run install -d -o "${CI_USER}" -g "${CI_PRIMARY_GROUP}" -m 0750 \
     "${RUNNER_HOME}/_work" "${RUNNER_HOME}/_diag"
-run "${RUNNER_HOME}/svc.sh" install "${CI_USER}"
+run run_in_runner_home "${RUNNER_HOME}/svc.sh" install "${CI_USER}"
 if [[ "${DRY_RUN}" == 1 ]]; then
     service_name=actions.runner.LingquLab-TileXR.blue-tilexr-npu8.service
     run env LC_ALL=C LANG=C systemctl show \
@@ -228,4 +237,4 @@ else
         exit 1
     fi
 fi
-run "${RUNNER_HOME}/svc.sh" start
+run run_in_runner_home "${RUNNER_HOME}/svc.sh" start

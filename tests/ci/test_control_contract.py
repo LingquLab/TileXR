@@ -164,6 +164,22 @@ class ControlSourceContractTests(unittest.TestCase):
         self.assertLess(preload, copy)
         self.assertLess(copy, digest)
 
+    def test_runner_tools_execute_from_runner_root_and_accept_bom_config(self):
+        runner = self.read("scripts/ci/provision/runner.sh")
+        self.assertIn('encoding="utf-8-sig"', runner)
+        self.assertIn("run_in_runner_home()", runner)
+        self.assertIn("run_as_ci_in_runner_home()", runner)
+        token_call = runner.index(
+            'run_with_runner_registration_token "${registration_token}"'
+        )
+        self.assertIn("run_as_ci_in_runner_home", runner[token_call:token_call + 200])
+        self.assertIn(
+            'run run_in_runner_home "${RUNNER_HOME}/svc.sh" install', runner
+        )
+        self.assertIn(
+            'run run_in_runner_home "${RUNNER_HOME}/svc.sh" start', runner
+        )
+
     def test_manifests_never_source_pull_request_code_into_trusted_shell(self):
         for relative in [
             "scripts/ci/control/build_blue.sh",
