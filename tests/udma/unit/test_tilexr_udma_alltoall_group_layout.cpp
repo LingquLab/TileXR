@@ -210,7 +210,8 @@ void TestRouteStages()
     using TileXR::Demo::AllToAllGroupRouteStage;
     CHECK_EQ(TileXR::Demo::AllToAllGroupValidRouteStage(0U), true);
     CHECK_EQ(TileXR::Demo::AllToAllGroupValidRouteStage(9U), true);
-    CHECK_EQ(TileXR::Demo::AllToAllGroupValidRouteStage(10U), false);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupValidRouteStage(10U), true);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupValidRouteStage(11U), false);
     CHECK_EQ(TileXR::Demo::AllToAllGroupStageRunsSend(
         AllToAllGroupRouteStage::kLocalSend), true);
     CHECK_EQ(TileXR::Demo::AllToAllGroupStageRunsCopy(
@@ -239,6 +240,14 @@ void TestRouteStages()
         AllToAllGroupRouteStage::kRemoteCopy), false);
     CHECK_EQ(TileXR::Demo::AllToAllGroupStageRunsCopy(
         AllToAllGroupRouteStage::kRemoteCopy), true);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupStageRunsSend(
+        AllToAllGroupRouteStage::kNoCopy), true);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupStageRunsReceive(
+        AllToAllGroupRouteStage::kNoCopy), true);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupStageWaitsForSignal(
+        AllToAllGroupRouteStage::kNoCopy), true);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupStageRunsCopy(
+        AllToAllGroupRouteStage::kNoCopy), false);
 
     for (int rankSize : {8, 16, 128}) {
         for (int rank = 0; rank < rankSize; ++rank) {
@@ -272,6 +281,8 @@ void TestRouteStages()
                     inPrimary || inSecondary);
                 CHECK_EQ(TileXR::Demo::AllToAllGroupReceivePeerInRouteStage(
                     rank, peer, AllToAllGroupRouteStage::kRemoteCopy), true);
+                CHECK_EQ(TileXR::Demo::AllToAllGroupPeerInRouteStage(
+                    rank, peer, AllToAllGroupRouteStage::kNoCopy), true);
                 CHECK_EQ(static_cast<int>(inLocal) + static_cast<int>(inPrimary) +
                     static_cast<int>(inSecondary), 1);
                 local += inLocal ? 1 : 0;
@@ -371,8 +382,8 @@ void TestHostStructure()
         "\"local-send\", \"local-copy\", \"remote-send\", \"all-send\", "
         "\"remote-wait\"");
     CHECK_CONTAINS(grouped,
-        "\"remote-copy\", \"primary\", \"secondary\", \"combined\"");
-    CHECK_CONTAINS(grouped, "constexpr size_t kRouteStageCount = 9U");
+        "\"remote-copy\", \"no-copy\", \"primary\", \"secondary\", \"combined\"");
+    CHECK_CONTAINS(grouped, "constexpr size_t kRouteStageCount = 10U");
     CHECK_CONTAINS(grouped, "AllToAllGroupRouteStage::kCombined");
     const size_t stageBatchBegin = grouped.find("auto runStageBatch");
     const size_t stageBatchEnd = grouped.find("for (size_t stageIndex", stageBatchBegin);

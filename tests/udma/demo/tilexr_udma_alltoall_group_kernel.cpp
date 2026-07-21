@@ -30,6 +30,7 @@ constexpr uint32_t TILEXR_ALLTOALL_GROUP_ROUTE_STAGE_REMOTE_SEND = 6U;
 constexpr uint32_t TILEXR_ALLTOALL_GROUP_ROUTE_STAGE_ALL_SEND = 7U;
 constexpr uint32_t TILEXR_ALLTOALL_GROUP_ROUTE_STAGE_REMOTE_WAIT = 8U;
 constexpr uint32_t TILEXR_ALLTOALL_GROUP_ROUTE_STAGE_REMOTE_COPY = 9U;
+constexpr uint32_t TILEXR_ALLTOALL_GROUP_ROUTE_STAGE_NO_COPY = 10U;
 
 struct AllToAllGroupDeviceError {
     uint32_t valid;
@@ -95,11 +96,12 @@ __aicore__ inline bool AllToAllGroupPeerInRouteStageDevice(
     int32_t rank, int32_t peer, uint32_t routeStage)
 {
     if (rank < 0 || peer < 0 || rank == peer ||
-        routeStage > TILEXR_ALLTOALL_GROUP_ROUTE_STAGE_REMOTE_COPY) {
+        routeStage > TILEXR_ALLTOALL_GROUP_ROUTE_STAGE_NO_COPY) {
         return false;
     }
     if (routeStage == TILEXR_ALLTOALL_GROUP_ROUTE_STAGE_COMBINED ||
-        routeStage == TILEXR_ALLTOALL_GROUP_ROUTE_STAGE_ALL_SEND) {
+        routeStage == TILEXR_ALLTOALL_GROUP_ROUTE_STAGE_ALL_SEND ||
+        routeStage == TILEXR_ALLTOALL_GROUP_ROUTE_STAGE_NO_COPY) {
         return true;
     }
     const bool crossNode =
@@ -135,7 +137,8 @@ __aicore__ inline bool AllToAllGroupStageRunsReceiveDevice(uint32_t routeStage)
 __aicore__ inline bool AllToAllGroupStageRunsCopyDevice(uint32_t routeStage)
 {
     return AllToAllGroupStageRunsReceiveDevice(routeStage) &&
-        routeStage != TILEXR_ALLTOALL_GROUP_ROUTE_STAGE_REMOTE_WAIT;
+        routeStage != TILEXR_ALLTOALL_GROUP_ROUTE_STAGE_REMOTE_WAIT &&
+        routeStage != TILEXR_ALLTOALL_GROUP_ROUTE_STAGE_NO_COPY;
 }
 
 __aicore__ inline bool AllToAllGroupStageWaitsForSignalDevice(uint32_t routeStage)
@@ -349,7 +352,7 @@ extern "C" __global__ __aicore__ void tilexr_udma_all_to_all_group_kernel(
     const int32_t rankSize = args->rankSize;
 
     if ((copyoutWorkers != 8U && copyoutWorkers != 16U) ||
-        routeStage > TILEXR_ALLTOALL_GROUP_ROUTE_STAGE_REMOTE_COPY ||
+        routeStage > TILEXR_ALLTOALL_GROUP_ROUTE_STAGE_NO_COPY ||
         blockIdx >= TILEXR_ALLTOALL_GROUP_SEND_CORES + copyoutWorkers ||
         !TileXR::UDMARegistryEnabled(args) || rankSize < 8 ||
         rankSize > TileXR::TILEXR_MAX_RANK_SIZE || (rankSize & 7) != 0 ||

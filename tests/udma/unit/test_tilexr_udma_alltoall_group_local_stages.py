@@ -17,6 +17,7 @@ class GroupedAllToAllLocalStageSourceTest(unittest.TestCase):
         self.assertIn("kAllSend", route)
         self.assertIn("kRemoteWait", route)
         self.assertIn("kRemoteCopy", route)
+        self.assertIn("kNoCopy", route)
         self.assertIn("AllToAllGroupStageRunsSendDevice(routeStage)", kernel)
         self.assertIn("AllToAllGroupStageRunsReceiveDevice(routeStage)", kernel)
         self.assertIn("AllToAllGroupReceivePeerInRouteStageDevice", kernel)
@@ -24,10 +25,11 @@ class GroupedAllToAllLocalStageSourceTest(unittest.TestCase):
         self.assertIn("AllToAllGroupStageWaitsForSignalDevice(routeStage)", kernel)
         self.assertIn(
             '"local-send", "local-copy", "remote-send", "all-send", '
-            '"remote-wait", "remote-copy", "primary", "secondary", "combined"',
+            '"remote-wait", "remote-copy", "no-copy", "primary", "secondary", '
+            '"combined"',
             " ".join(host.split()),
         )
-        self.assertIn("constexpr size_t kRouteStageCount = 9U", host)
+        self.assertIn("constexpr size_t kRouteStageCount = 10U", host)
         stage_batch = host[host.index("auto runStageBatch") : host.index(
             "for (size_t stageIndex", host.index("auto runStageBatch"))]
         self.assertNotIn("invocationId = 0U", stage_batch)
