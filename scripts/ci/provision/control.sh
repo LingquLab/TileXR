@@ -24,10 +24,11 @@ run rm -rf "${stage}"
 run install -d -o root -g "${CI_GROUP}" -m 0750 "${stage}"
 
 if [[ "${DRY_RUN}" == 1 ]]; then
-    printf 'git -C %q archive --format=tar HEAD scripts/ci/control | tar -xf - -C %q --strip-components=3\n' \
-        "${repo_root}" "${stage}"
+    printf 'git -c safe.directory=%q -C %q archive --format=tar HEAD scripts/ci/control | tar -xf - -C %q --strip-components=3\n' \
+        "${repo_root}" "${repo_root}" "${stage}"
 else
-    git -C "${repo_root}" archive --format=tar HEAD scripts/ci/control |
+    git -c safe.directory="${repo_root}" -C "${repo_root}" \
+        archive --format=tar HEAD scripts/ci/control |
         tar -xf - -C "${stage}" --strip-components=3
 fi
 run chown -R "root:${CI_GROUP}" "${stage}"
