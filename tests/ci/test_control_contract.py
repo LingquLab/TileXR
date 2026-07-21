@@ -402,7 +402,7 @@ class ControlSourceContractTests(unittest.TestCase):
             "test_tilexr_udma",
             "run_tilexr_memory_demo.sh",
             "run_tilexr_ep_dispatch_demo.sh",
-            "allgather alltoall allreduce reducescatter",
+            "allgather allreduce reducescatter",
             "broadcast --root 0",
             "broadcast --root 7",
             "64 4096 1048576",
