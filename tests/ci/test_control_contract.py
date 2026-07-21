@@ -128,14 +128,14 @@ class ControlSourceContractTests(unittest.TestCase):
         ]:
             self.assertIn(token, text)
 
-    def test_sealed_controller_v3_is_consistent_across_provisioning(self):
-        self.assertEqual("v3\n", self.read("scripts/ci/control/VERSION"))
+    def test_sealed_controller_v4_is_consistent_across_provisioning(self):
+        self.assertEqual("v4\n", self.read("scripts/ci/control/VERSION"))
         common = self.read("scripts/ci/provision/common.sh")
         control = self.read("scripts/ci/provision/control.sh")
         verify = self.read("scripts/ci/provision/verify.sh")
         workflow = self.read(".github/workflows/npu-ci.yml")
 
-        self.assertIn("CONTROL_VERSION=v3", common)
+        self.assertIn("CONTROL_VERSION=v4", common)
         self.assertIn(
             'CONTROL_HOME="${CI_HOME}/control/${CONTROL_VERSION}"', common
         )
