@@ -209,8 +209,18 @@ void TestRouteStages()
 {
     using TileXR::Demo::AllToAllGroupRouteStage;
     CHECK_EQ(TileXR::Demo::AllToAllGroupValidRouteStage(0U), true);
-    CHECK_EQ(TileXR::Demo::AllToAllGroupValidRouteStage(3U), true);
-    CHECK_EQ(TileXR::Demo::AllToAllGroupValidRouteStage(4U), false);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupValidRouteStage(5U), true);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupValidRouteStage(6U), false);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupStageRunsSend(
+        AllToAllGroupRouteStage::kLocalSend), true);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupStageRunsCopy(
+        AllToAllGroupRouteStage::kLocalSend), false);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupStageRunsSend(
+        AllToAllGroupRouteStage::kLocalCopy), false);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupStageRunsCopy(
+        AllToAllGroupRouteStage::kLocalCopy), true);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupStageWaitsForSignal(
+        AllToAllGroupRouteStage::kLocalCopy), false);
 
     for (int rankSize : {8, 16, 128}) {
         for (int rank = 0; rank < rankSize; ++rank) {
@@ -227,6 +237,10 @@ void TestRouteStages()
                     rank, peer, AllToAllGroupRouteStage::kPrimary);
                 const bool inSecondary = TileXR::Demo::AllToAllGroupPeerInRouteStage(
                     rank, peer, AllToAllGroupRouteStage::kSecondary);
+                CHECK_EQ(TileXR::Demo::AllToAllGroupPeerInRouteStage(
+                    rank, peer, AllToAllGroupRouteStage::kLocalSend), inLocal);
+                CHECK_EQ(TileXR::Demo::AllToAllGroupPeerInRouteStage(
+                    rank, peer, AllToAllGroupRouteStage::kLocalCopy), inLocal);
                 CHECK_EQ(static_cast<int>(inLocal) + static_cast<int>(inPrimary) +
                     static_cast<int>(inSecondary), 1);
                 local += inLocal ? 1 : 0;
@@ -290,6 +304,9 @@ void TestKernelStructure()
     CHECK_CONTAINS(kernel, "UDMAPutSignalNbiOnQp<int32_t>");
     CHECK_CONTAINS(kernel, "UDMAQuietStatusOnQp(args, peer, selectedQp)");
     CHECK_CONTAINS(kernel, "AllToAllGroupWaitTokenMte");
+    CHECK_CONTAINS(kernel, "AllToAllGroupStageRunsSendDevice(routeStage)");
+    CHECK_CONTAINS(kernel, "AllToAllGroupStageRunsCopyDevice(routeStage)");
+    CHECK_CONTAINS(kernel, "AllToAllGroupStageWaitsForSignalDevice(routeStage)");
     CHECK_CONTAINS(kernel, "observed >= expectedToken");
     CHECK_CONTAINS(kernel, "launch_tilexr_udma_all_to_all_group");
     CHECK_NOT_CONTAINS(kernel, "UDMAPutSignalNbi<int32_t>");
@@ -317,7 +334,8 @@ void TestHostStructure()
     const size_t end = demo.find("void Cleanup(", begin);
     const std::string grouped = begin == std::string::npos ? std::string() :
         demo.substr(begin, end == std::string::npos ? std::string::npos : end - begin);
-    CHECK_CONTAINS(grouped, "\"local\", \"primary\", \"secondary\"");
+    CHECK_CONTAINS(grouped,
+        "\"local-send\", \"local-copy\", \"primary\", \"secondary\"");
     CHECK_CONTAINS(grouped, "AllToAllGroupRouteStage::kCombined");
     CHECK_CONTAINS(grouped, "aclrtEventElapsedTime");
     CHECK_CONTAINS(grouped, "DemoBarrierAll(rank, rankSize, barrierStep)");

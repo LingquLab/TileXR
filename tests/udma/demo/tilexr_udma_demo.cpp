@@ -674,15 +674,16 @@ bool RunGroupedAllToAll(
         return false;
     }
     const bool routeStages = routeStagesValue == 1;
-    constexpr size_t kRouteStageCount = 3U;
+    constexpr size_t kRouteStageCount = 4U;
     const std::array<TileXR::Demo::AllToAllGroupRouteStage, kRouteStageCount>
         stagedRouteStages {{
-            TileXR::Demo::AllToAllGroupRouteStage::kLocal,
+            TileXR::Demo::AllToAllGroupRouteStage::kLocalSend,
+            TileXR::Demo::AllToAllGroupRouteStage::kLocalCopy,
             TileXR::Demo::AllToAllGroupRouteStage::kPrimary,
             TileXR::Demo::AllToAllGroupRouteStage::kSecondary,
         }};
     const std::array<const char*, kRouteStageCount> stageNames {{
-        "local", "primary", "secondary"
+        "local-send", "local-copy", "primary", "secondary"
     }};
     const int warmup = std::max(0, GetEnvInt("TILEXR_DEMO_ALLTOALL_WARMUP", 0));
     const int repeat = std::max(1, GetEnvInt("TILEXR_DEMO_ALLTOALL_REPEAT", 1));
@@ -711,7 +712,7 @@ bool RunGroupedAllToAll(
     int32_t* input = nullptr;
     int32_t* output = nullptr;
     void* registeredMemory = nullptr;
-    std::array<void*, kRouteStageCount> groupTraceDevices {{nullptr, nullptr, nullptr}};
+    std::array<void*, kRouteStageCount> groupTraceDevices {};
     std::array<std::vector<uint8_t>, kRouteStageCount> hostGroupTraces;
     aclrtEvent stageStartEvent = nullptr;
     aclrtEvent stageEndEvent = nullptr;
@@ -854,7 +855,7 @@ bool RunGroupedAllToAll(
     };
 
     double totalUs = 0.0;
-    std::array<double, kRouteStageCount> stageTotalUs {{0.0, 0.0, 0.0}};
+    std::array<double, kRouteStageCount> stageTotalUs {};
     if (!routeStages) {
         for (int iter = 0; iter < warmup; ++iter, ++invocationId) {
             launchGroupStage(TileXR::Demo::AllToAllGroupRouteStage::kCombined, nullptr, 0U);
