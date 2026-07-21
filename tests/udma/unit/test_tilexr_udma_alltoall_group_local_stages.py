@@ -26,7 +26,7 @@ class GroupedAllToAllLocalStageSourceTest(unittest.TestCase):
         self.assertIn("AllToAllGroupRemoteAssistDevice", kernel)
         self.assertIn("copySliceCount", kernel)
         self.assertIn("copySliceIndex", kernel)
-        self.assertIn("must be 8, 16, or 32", host)
+        self.assertIn("must be 8, 16, 32, or 48", host)
         self.assertIn(
             '"local-send", "local-copy", "remote-send", "all-send", '
             '"remote-wait", "remote-copy", "no-copy", "primary", "secondary", '
