@@ -128,14 +128,14 @@ class ControlSourceContractTests(unittest.TestCase):
         ]:
             self.assertIn(token, text)
 
-    def test_sealed_controller_v2_is_consistent_across_provisioning(self):
-        self.assertEqual("v2\n", self.read("scripts/ci/control/VERSION"))
+    def test_sealed_controller_v3_is_consistent_across_provisioning(self):
+        self.assertEqual("v3\n", self.read("scripts/ci/control/VERSION"))
         common = self.read("scripts/ci/provision/common.sh")
         control = self.read("scripts/ci/provision/control.sh")
         verify = self.read("scripts/ci/provision/verify.sh")
         workflow = self.read(".github/workflows/npu-ci.yml")
 
-        self.assertIn("CONTROL_VERSION=v2", common)
+        self.assertIn("CONTROL_VERSION=v3", common)
         self.assertIn(
             'CONTROL_HOME="${CI_HOME}/control/${CONTROL_VERSION}"', common
         )
@@ -148,9 +148,7 @@ class ControlSourceContractTests(unittest.TestCase):
             '"$(< "${CONTROL_HOME}/VERSION")" == "${CONTROL_VERSION}"',
             verify,
         )
-        self.assertIn(
-            'cat /home/tilexr-ci/control/current/VERSION)" = v2', workflow
-        )
+        self.assertNotIn("/home/tilexr-ci/control/current/VERSION", workflow)
         self.assertIn(
             "exec python3 /home/tilexr-ci/control/current/gate.py", workflow
         )

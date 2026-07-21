@@ -120,6 +120,8 @@ assert(!npu_env.key?("TILEXR_CI_GITHUB_TOKEN"),
 gate_run = named_step(npu, "hardware", "Run trusted gate").fetch("run")
 assert(gate_run.include?("exec python3 /home/tilexr-ci/control/current/gate.py"),
        "NPU workflow must exec the active sealed controller")
+assert(!File.read(NPU_WORKFLOW_PATH).include?("/control/current/VERSION"),
+       "NPU workflow must not pin the active controller version")
 assert(!gate_run.include?("GITHUB_TOKEN"),
        "controller step must not reference a GitHub token")
 assert(!gate_run.include?("github-token"),

@@ -49,7 +49,7 @@ foreign process collision.
 | Home | `/home/tilexr-ci` |
 | Sealed CANN 9.1 | `/home/tilexr-ci/toolchains/cann/9.1.0` |
 | Sealed Bisheng compiler | `/home/tilexr-ci/toolchains/cann/9.1.0/cann/tools/bisheng_compiler/bin/bisheng` |
-| Sealed controller | `/home/tilexr-ci/control/v2` |
+| Sealed controller | `/home/tilexr-ci/control/v3` |
 | Active controller link | `/home/tilexr-ci/control/current` |
 | Actions runner | `/home/tilexr-ci/actions-runner` |
 | Runner workspace root | `/home/tilexr-ci/actions-runner/_work` |
@@ -270,15 +270,14 @@ runner is stopped and has no active job:
    and validates the new package without changing `control/current`.
 2. Let queued and active jobs drain, stop the runner service, and confirm that
    no runner worker or gate process remains.
-3. Merge any trusted workflow update needed for the new expected controller
-   version, then run `control.sh` without `--stage-only` to atomically update
+3. Run `control.sh` without `--stage-only` to atomically update
    `control/current`.
 4. Restart the runner and run `verify.sh` once as the upgrade acceptance test.
 
 If the staged controller fails before activation, leave `control/current`
 unchanged. If activation has already occurred, stop the idle runner before
-restoring the previous `current` target and the workflow's expected version.
-Do not change `current` while a job is running.
+restoring the previous `current` target. Do not change `current` while a job is
+running.
 
 ## Runner upgrade
 
