@@ -11,7 +11,18 @@ toolkit_info="${CANN_HOME}/cann/aarch64-linux/ascend_toolkit_install.info"
 ops_info="${CANN_HOME}/cann/aarch64-linux/ascend_ops_install.info"
 control_current="${CI_HOME}/control/current"
 hook="${control_current}/job_completed.sh"
-env_entry="ACTIONS_RUNNER_HOOK_JOB_COMPLETED=${hook}"
+proxy_env=(
+    "http_proxy=${GITHUB_PROXY}"
+    "https_proxy=${GITHUB_PROXY}"
+    "no_proxy=${RUNNER_NO_PROXY}"
+    "GIT_CONFIG_COUNT=1"
+    "GIT_CONFIG_KEY_0=http.version"
+    "GIT_CONFIG_VALUE_0=HTTP/1.1"
+)
+runner_env_entries=(
+    "ACTIONS_RUNNER_HOOK_JOB_COMPLETED=${hook}"
+    "${proxy_env[@]}"
+)
 python_pidfd_probe='import os, signal, sys
 if sys.version_info < (3, 9):
     raise SystemExit("Python 3.9 or newer is required")
@@ -31,7 +42,9 @@ if [[ "${DRY_RUN}" == 1 ]]; then
     run npu-smi info -l
     run readlink -f "${control_current}"
     run test -x "${hook}"
-    run grep -Fx "${env_entry}" "${RUNNER_HOME}/.env"
+    for entry in "${runner_env_entries[@]}"; do
+        run grep -Fx "${entry}" "${RUNNER_HOME}/.env"
+    done
     run env LC_ALL=C LANG=C systemctl show \
         --property=User --property=ExecStart -- \
         actions.runner.LingquLab-TileXR.blue-tilexr-npu8.service
@@ -132,7 +145,9 @@ if runuser -u "${CI_USER}" -- test -w "${hook}"; then
     echo "ERROR: job-completed hook is writable by ${CI_USER}" >&2
     exit 1
 fi
-grep -Fx "${env_entry}" "${RUNNER_HOME}/.env" >/dev/null
+for entry in "${runner_env_entries[@]}"; do
+    grep -Fx "${entry}" "${RUNNER_HOME}/.env" >/dev/null
+done
 [[ "$(stat -c '%U:%G' "${RUNNER_HOME}")" == "root:${CI_PRIMARY_GROUP}" ]] || {
     echo "ERROR: runner installation is not administrator-owned" >&2
     exit 1
@@ -168,7 +183,7 @@ if command -v getenforce >/dev/null 2>&1 && [[ "$(getenforce)" != Disabled ]]; t
         exit 1
     }
 fi
-if ! runuser -u "${CI_USER}" -- timeout 60 \
+if ! runuser -u "${CI_USER}" -- env "${proxy_env[@]}" timeout 60 \
     git ls-remote https://github.com/LingquLab/TileXR.git HEAD >/dev/null; then
     echo "ERROR: runner account cannot reach the GitHub repository" >&2
     exit 1

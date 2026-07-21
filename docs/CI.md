@@ -214,17 +214,10 @@ gh api --method POST orgs/LingquLab/actions/runners/registration-token --jq .tok
   ssh blue "cd '${BOOTSTRAP}' && sudo bash scripts/ci/provision/runner.sh"
 ```
 
-If `blue` cannot reach GitHub's release-asset CDN, download the exact ARM64
-runner asset on another trusted host and transfer it to `blue`. Set the absolute
-remote path with `sudo env TILEXR_CI_RUNNER_ASSET=...` when invoking
-`runner.sh`; the script copies it into root-owned staging and still verifies the
-SHA-256 digest published by the GitHub releases API before extraction.
-
-The runner account must also resolve `github.com` to a reachable official
-GitHub frontend. `verify.sh` performs a bounded public `git ls-remote` check.
-If the host's normal resolver returns an unreachable regional address, maintain
-a single marked `github.com` route in `/etc/hosts`, validate the selected
-address with TLS enabled, and revalidate it whenever provisioning is rerun.
+GitHub downloads, runner registration, service traffic, and job Git operations
+use the local proxy at `http://127.0.0.1:3128`. The proxy and Git HTTP/1.1
+settings are stored in the root-owned runner `.env`. `verify.sh` performs a
+bounded public `git ls-remote` check through the same proxy.
 
 ## GitHub policy and runner group
 

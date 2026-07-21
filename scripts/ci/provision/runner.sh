@@ -14,8 +14,18 @@ runner_labels=tilexr,ascend910b,npu8
 runner_work=_work
 install_work="${CI_HOME}/install-work"
 hook="${CI_HOME}/control/current/job_completed.sh"
-env_entry="ACTIONS_RUNNER_HOOK_JOB_COMPLETED=${hook}"
-preloaded_asset="${TILEXR_CI_RUNNER_ASSET:-}"
+proxy_env=(
+    "http_proxy=${GITHUB_PROXY}"
+    "https_proxy=${GITHUB_PROXY}"
+    "no_proxy=${RUNNER_NO_PROXY}"
+    "GIT_CONFIG_COUNT=1"
+    "GIT_CONFIG_KEY_0=http.version"
+    "GIT_CONFIG_VALUE_0=HTTP/1.1"
+)
+runner_env_entries=(
+    "ACTIONS_RUNNER_HOOK_JOB_COMPLETED=${hook}"
+    "${proxy_env[@]}"
+)
 
 IFS= read -r registration_token || true
 if [[ -z "${registration_token:-}" ]]; then
@@ -27,12 +37,6 @@ trap 'unset registration_token ACTIONS_RUNNER_INPUT_TOKEN' EXIT
 
 if [[ "${DRY_RUN}" != 1 && ( -L "${RUNNER_HOME}" || ! -d "${RUNNER_HOME}" ) ]]; then
     echo "ERROR: runner home must be a real directory: ${RUNNER_HOME}" >&2
-    exit 1
-fi
-if [[ -n "${preloaded_asset}" &&
-      ( "${preloaded_asset}" != /* || ! -f "${preloaded_asset}" ||
-        -L "${preloaded_asset}" ) ]]; then
-    echo "ERROR: TILEXR_CI_RUNNER_ASSET must be an absolute regular file" >&2
     exit 1
 fi
 
@@ -75,6 +79,13 @@ raise SystemExit(0 if runner.get("agentName") == sys.argv[2] else 1)
 PY
 }
 
+runner_env_is_configured() {
+    local entry
+    for entry in "${runner_env_entries[@]}"; do
+        grep -Fx "${entry}" "${RUNNER_HOME}/.env" >/dev/null || return 1
+    done
+}
+
 service_name=""
 if [[ "${DRY_RUN}" != 1 && -f "${RUNNER_HOME}/.service" ]]; then
     service_name="$(< "${RUNNER_HOME}/.service")"
@@ -90,7 +101,7 @@ if [[ "${DRY_RUN}" != 1 && -f "${RUNNER_HOME}/.service" ]]; then
         fi
         if [[ "$(stat -c '%U:%G' "${RUNNER_HOME}")" != "root:${CI_PRIMARY_GROUP}" ]] ||
             [[ ! -f "${RUNNER_HOME}/.env" ]] ||
-            ! grep -Fx "${env_entry}" "${RUNNER_HOME}/.env" >/dev/null ||
+            ! runner_env_is_configured ||
             [[ "$(stat -c '%U:%G' "${RUNNER_HOME}/.env")" != "root:${CI_PRIMARY_GROUP}" ]] ||
             [[ "$(stat -c '%a' "${RUNNER_HOME}/.env")" != 440 ]]; then
             echo "ERROR: active runner has an unexpected job-completed hook" >&2
@@ -117,7 +128,7 @@ fi
 release_json="${stage}/release.json"
 
 run install -d -o root -g "${CI_GROUP}" -m 0750 "${stage}"
-run curl --fail --location --silent --show-error \
+run env "${proxy_env[@]}" curl --fail --location --silent --show-error \
     https://api.github.com/repos/actions/runner/releases/latest -o "${release_json}"
 
 if [[ "${DRY_RUN}" == 1 ]]; then
@@ -159,12 +170,8 @@ PY
 fi
 
 asset_path="${stage}/${asset_name}"
-if [[ -n "${preloaded_asset}" ]]; then
-    run install -o root -g "${CI_GROUP}" -m 0640 \
-        "${preloaded_asset}" "${asset_path}"
-else
-    run curl --fail --location --silent --show-error "${asset_url}" -o "${asset_path}"
-fi
+run env "${proxy_env[@]}" curl --fail --location --silent --show-error \
+    "${asset_url}" -o "${asset_path}"
 if [[ "${DRY_RUN}" == 1 ]]; then
     run sha256sum --check "${asset_path}.sha256"
 else
@@ -201,14 +208,16 @@ run chown -R "${CI_USER}:${CI_PRIMARY_GROUP}" "${RUNNER_HOME}"
 
 if [[ "${DRY_RUN}" == 1 ]]; then
     printf 'export ACTIONS_RUNNER_INPUT_TOKEN=%q\n' '<registration-token>'
-    printf 'cd %q && runuser -u %s -- %s --url %s --runnergroup %s --name %s --labels %s --work %s --unattended --replace --disableupdate\n' \
-        "${RUNNER_HOME}" \
-        "${CI_USER}" "${RUNNER_HOME}/config.sh" "${runner_url}" \
+    printf 'cd %q && runuser -u %s -- env' "${RUNNER_HOME}" "${CI_USER}"
+    printf ' %q' "${proxy_env[@]}"
+    printf ' %q --url %s --runnergroup %s --name %s --labels %s --work %s --unattended --replace --disableupdate\n' \
+        "${RUNNER_HOME}/config.sh" "${runner_url}" \
         "${runner_group}" "${runner_name}" "${runner_labels}" "${runner_work}"
     printf 'unset ACTIONS_RUNNER_INPUT_TOKEN\n'
 else
     if run_with_runner_registration_token "${registration_token}" \
-        run_as_ci_in_runner_home "${RUNNER_HOME}/config.sh" \
+        run_as_ci_in_runner_home env "${proxy_env[@]}" \
+        "${RUNNER_HOME}/config.sh" \
         --url "${runner_url}" \
         --runnergroup "${runner_group}" \
         --name "${runner_name}" \
@@ -226,10 +235,12 @@ else
 fi
 
 if [[ "${DRY_RUN}" == 1 ]]; then
-    printf 'printf %%s\\n %q > %q\n' "${env_entry}" "${RUNNER_HOME}/.env"
+    printf 'printf %%s\\n'
+    printf ' %q' "${runner_env_entries[@]}"
+    printf ' > %q\n' "${RUNNER_HOME}/.env"
 else
     env_stage="$(mktemp "${install_work}/runner-env.XXXXXX")"
-    printf '%s\n' "${env_entry}" > "${env_stage}"
+    printf '%s\n' "${runner_env_entries[@]}" > "${env_stage}"
     install -o root -g "${CI_PRIMARY_GROUP}" -m 0440 "${env_stage}" "${RUNNER_HOME}/.env"
     rm -f "${env_stage}"
 fi

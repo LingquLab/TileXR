@@ -10,6 +10,8 @@ CANN_HOME=/home/tilexr-ci/toolchains/cann/9.1.0
 CANN_OWNER=root
 CONTROL_HOME=/home/tilexr-ci/control/v1
 RUNNER_HOME=/home/tilexr-ci/actions-runner
+GITHUB_PROXY=http://127.0.0.1:3128
+RUNNER_NO_PROXY=localhost,127.0.0.1
 
 DRY_RUN=0
 

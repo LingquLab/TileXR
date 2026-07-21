@@ -108,6 +108,17 @@ class ControlSourceContractTests(unittest.TestCase):
         ]:
             self.assertIn(token, text)
 
+    def test_runner_uses_the_configured_local_github_proxy(self):
+        common = self.read("scripts/ci/provision/common.sh")
+        runner = self.read("scripts/ci/provision/runner.sh")
+        verify = self.read("scripts/ci/provision/verify.sh")
+
+        self.assertIn("GITHUB_PROXY=http://127.0.0.1:3128", common)
+        self.assertIn("RUNNER_NO_PROXY=localhost,127.0.0.1", common)
+        self.assertIn('env "${proxy_env[@]}" curl', runner)
+        self.assertIn('printf \'%s\\n\' "${runner_env_entries[@]}"', runner)
+        self.assertIn('for entry in "${runner_env_entries[@]}"; do', verify)
+
     def test_existing_cann_install_still_revalidates_blue(self):
         text = self.read("scripts/ci/provision/cann.sh")
         existing_tree = text.index(
@@ -152,17 +163,10 @@ class ControlSourceContractTests(unittest.TestCase):
         self.assertIn("archive --format=tar HEAD scripts/ci/control", control)
         self.assertNotIn("safe.directory", control)
 
-    def test_runner_accepts_only_a_verified_preloaded_release_asset(self):
+    def test_runner_has_no_preloaded_release_asset_fallback(self):
         runner = self.read("scripts/ci/provision/runner.sh")
-        self.assertIn("TILEXR_CI_RUNNER_ASSET", runner)
-        preload = runner.index("TILEXR_CI_RUNNER_ASSET")
-        copy = runner.index('install -o root -g "${CI_GROUP}" -m 0640')
-        digest = runner.index("sha256sum --check -")
-
-        self.assertIn('"${preloaded_asset}" != /*', runner)
-        self.assertIn('-L "${preloaded_asset}"', runner)
-        self.assertLess(preload, copy)
-        self.assertLess(copy, digest)
+        self.assertNotIn("TILEXR_CI_RUNNER_ASSET", runner)
+        self.assertNotIn("preloaded_asset", runner)
 
     def test_runner_tools_execute_from_runner_root_and_accept_bom_config(self):
         runner = self.read("scripts/ci/provision/runner.sh")
@@ -197,6 +201,18 @@ class ControlSourceContractTests(unittest.TestCase):
         self.assertIn(
             '"${password_state}" == L || "${password_state}" == LK', verify
         )
+
+    def test_runner_forces_git_http11_for_jobs_and_verification(self):
+        runner = self.read("scripts/ci/provision/runner.sh")
+        verify = self.read("scripts/ci/provision/verify.sh")
+        for entry in [
+            "GIT_CONFIG_COUNT=1",
+            "GIT_CONFIG_KEY_0=http.version",
+            "GIT_CONFIG_VALUE_0=HTTP/1.1",
+        ]:
+            self.assertIn(entry, runner)
+            self.assertIn(entry, verify)
+        self.assertIn('"${runner_env_entries[@]}"', runner)
 
     def test_manifests_never_source_pull_request_code_into_trusted_shell(self):
         for relative in [
