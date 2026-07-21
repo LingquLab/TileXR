@@ -24,9 +24,16 @@ class GroupedAllToAllLocalStageSourceTest(unittest.TestCase):
         self.assertIn("AllToAllGroupStageWaitsForSignalDevice(routeStage)", kernel)
         self.assertIn(
             '"local-send", "local-copy", "remote-send", "all-send", '
-            '"remote-wait", "remote-copy", "primary", "secondary"',
+            '"remote-wait", "remote-copy", "primary", "secondary", "combined"',
             " ".join(host.split()),
         )
+        self.assertIn("constexpr size_t kRouteStageCount = 9U", host)
+        stage_batch = host[host.index("auto runStageBatch") : host.index(
+            "for (size_t stageIndex", host.index("auto runStageBatch"))]
+        self.assertNotIn("invocationId = 0U", stage_batch)
+        self.assertNotIn("grouped stage iteration", stage_batch)
+        self.assertIn("aclrtSynchronizeStream grouped stage warmup", stage_batch)
+        self.assertIn("aclrtSynchronizeStream grouped stage measured", stage_batch)
 
 
 if __name__ == "__main__":

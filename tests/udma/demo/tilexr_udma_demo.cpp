@@ -674,7 +674,7 @@ bool RunGroupedAllToAll(
         return false;
     }
     const bool routeStages = routeStagesValue == 1;
-    constexpr size_t kRouteStageCount = 8U;
+    constexpr size_t kRouteStageCount = 9U;
     const std::array<TileXR::Demo::AllToAllGroupRouteStage, kRouteStageCount>
         stagedRouteStages {{
             TileXR::Demo::AllToAllGroupRouteStage::kLocalSend,
@@ -685,9 +685,11 @@ bool RunGroupedAllToAll(
             TileXR::Demo::AllToAllGroupRouteStage::kRemoteCopy,
             TileXR::Demo::AllToAllGroupRouteStage::kPrimary,
             TileXR::Demo::AllToAllGroupRouteStage::kSecondary,
+            TileXR::Demo::AllToAllGroupRouteStage::kCombined,
     }};
     const std::array<const char*, kRouteStageCount> stageNames {{
-        "local-send", "local-copy", "remote-send", "all-send", "remote-wait", "remote-copy", "primary", "secondary"
+        "local-send", "local-copy", "remote-send", "all-send", "remote-wait",
+        "remote-copy", "primary", "secondary", "combined"
     }};
     const int warmup = std::max(0, GetEnvInt("TILEXR_DEMO_ALLTOALL_WARMUP", 0));
     const int repeat = std::max(1, GetEnvInt("TILEXR_DEMO_ALLTOALL_REPEAT", 1));
@@ -884,34 +886,31 @@ bool RunGroupedAllToAll(
         totalUs = std::chrono::duration<double, std::micro>(end - begin).count();
     } else {
         auto runStageBatch = [&](size_t stageIndex) -> bool {
-            invocationId = 0U;
             for (int iter = 0; iter < warmup; ++iter, ++invocationId) {
                 launchGroupStage(stagedRouteStages[stageIndex], nullptr, 0U);
-                if (!CheckAcl(rank, "aclrtSynchronizeStream grouped stage iteration",
-                        aclrtSynchronizeStream(stream))) {
-                    return false;
-                }
+            }
+            if (!CheckAcl(rank, "aclrtSynchronizeStream grouped stage warmup",
+                    aclrtSynchronizeStream(stream)) ||
+                !CheckAcl(rank, "aclrtRecordEvent grouped stage start",
+                    aclrtRecordEvent(stageStartEvent, stream))) {
+                return false;
             }
             for (int iter = 0; iter < repeat; ++iter, ++invocationId) {
-                if (!CheckAcl(rank, "aclrtRecordEvent grouped stage start",
-                        aclrtRecordEvent(stageStartEvent, stream))) {
-                    return false;
-                }
                 launchGroupStage(stagedRouteStages[stageIndex],
                     groupTraceDevices[stageIndex], static_cast<uint32_t>(iter));
-                if (!CheckAcl(rank, "aclrtRecordEvent grouped stage end",
-                        aclrtRecordEvent(stageEndEvent, stream)) ||
-                    !CheckAcl(rank, "aclrtSynchronizeStream grouped stage iteration",
-                        aclrtSynchronizeStream(stream))) {
-                    return false;
-                }
-                float elapsedMs = 0.0F;
-                if (!CheckAcl(rank, "aclrtEventElapsedTime grouped stage",
-                        aclrtEventElapsedTime(&elapsedMs, stageStartEvent, stageEndEvent))) {
-                    return false;
-                }
-                stageTotalUs[stageIndex] += static_cast<double>(elapsedMs) * 1000.0;
             }
+            if (!CheckAcl(rank, "aclrtRecordEvent grouped stage end",
+                    aclrtRecordEvent(stageEndEvent, stream)) ||
+                !CheckAcl(rank, "aclrtSynchronizeStream grouped stage measured",
+                    aclrtSynchronizeStream(stream))) {
+                return false;
+            }
+            float elapsedMs = 0.0F;
+            if (!CheckAcl(rank, "aclrtEventElapsedTime grouped stage",
+                    aclrtEventElapsedTime(&elapsedMs, stageStartEvent, stageEndEvent))) {
+                return false;
+            }
+            stageTotalUs[stageIndex] = static_cast<double>(elapsedMs) * 1000.0;
             const std::string barrierStep = "grouped route stage " +
                 std::string(stageNames[stageIndex]) + " complete";
             return DemoBarrierAll(rank, rankSize, barrierStep);

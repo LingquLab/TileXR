@@ -369,12 +369,24 @@ void TestHostStructure()
         demo.substr(begin, end == std::string::npos ? std::string::npos : end - begin);
     CHECK_CONTAINS(grouped,
         "\"local-send\", \"local-copy\", \"remote-send\", \"all-send\", "
-        "\"remote-wait\", \"remote-copy\", \"primary\", \"secondary\"");
+        "\"remote-wait\"");
+    CHECK_CONTAINS(grouped,
+        "\"remote-copy\", \"primary\", \"secondary\", \"combined\"");
+    CHECK_CONTAINS(grouped, "constexpr size_t kRouteStageCount = 9U");
     CHECK_CONTAINS(grouped, "AllToAllGroupRouteStage::kCombined");
+    const size_t stageBatchBegin = grouped.find("auto runStageBatch");
+    const size_t stageBatchEnd = grouped.find("for (size_t stageIndex", stageBatchBegin);
+    const std::string stageBatch = stageBatchBegin == std::string::npos ? std::string() :
+        grouped.substr(stageBatchBegin,
+            stageBatchEnd == std::string::npos ? std::string::npos :
+                stageBatchEnd - stageBatchBegin);
+    CHECK_NOT_CONTAINS(stageBatch, "invocationId = 0U");
+    CHECK_NOT_CONTAINS(stageBatch, "grouped stage iteration");
+    CHECK_CONTAINS(stageBatch, "aclrtSynchronizeStream grouped stage warmup");
+    CHECK_CONTAINS(stageBatch, "aclrtSynchronizeStream grouped stage measured");
     CHECK_CONTAINS(grouped, "aclrtEventElapsedTime");
     CHECK_CONTAINS(grouped, "DemoBarrierAll(rank, rankSize, barrierStep)");
     CHECK_CONTAINS(grouped, "auto runStageBatch");
-    CHECK_CONTAINS(grouped, "aclrtSynchronizeStream grouped stage iteration");
     CHECK_NOT_CONTAINS(grouped, "\" warmup=\"");
     CHECK_CONTAINS(grouped, "\" complete\"");
     CHECK_CONTAINS(grouped,
