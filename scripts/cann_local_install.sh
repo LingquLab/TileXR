@@ -5,10 +5,18 @@ source ${script_path}/common_env.sh
 
 env_print
 
-mkdir -p ${TILEXR_CANN_HOME}
-mkdir -p ${TILEXR_TEMP_HOME}
-
-fix_permissions ${TILEXR_CANN_HOME}
+if [[ "${TILEXR_CI_SEALED_CANN_HOME:-0}" == 1 ]]; then
+    cann_marker="${TILEXR_CANN_HOME}/.tilexr-ci-installing"
+    if [[ ! -d "${TILEXR_CANN_HOME}" || -L "${TILEXR_CANN_HOME}" ||
+          ! -f "${cann_marker}" || -L "${cann_marker}" ]]; then
+        error "sealed CI CANN home or ownership marker is invalid: ${TILEXR_CANN_HOME}"
+        exit 1
+    fi
+else
+    mkdir -p "${TILEXR_CANN_HOME}"
+    fix_permissions "${TILEXR_CANN_HOME}"
+fi
+mkdir -p "${TILEXR_TEMP_HOME}"
 
 chmod +x ${TILEXR_TEMP_HOME}/Ascend-cann-toolkit_*${TILEXR_CANN_VER}*${TILEXR_OS_ARCH}.run
 

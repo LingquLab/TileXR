@@ -105,6 +105,8 @@ void TestMemoryDemoHostAndRunnerExist()
     const std::string runPath = "tests/memory/demo/run_tilexr_memory_demo.sh";
     const std::string runText = ReadFile(runPath);
     CheckContains(runPath, runText, "tilexr_memory_demo");
+    CheckContains(runPath, runText, "${TILEXR_ROOT}/install/lib64");
+    CheckNotContains(runPath, runText, "/usr/local/lib");
 }
 
 } // namespace

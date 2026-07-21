@@ -35,6 +35,9 @@ build_hccd/
 output/
 install/
 
+# CI-generated local build root
+/.ci-build/
+
 # binary files
 *.so
 *.a

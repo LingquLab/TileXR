@@ -5,8 +5,26 @@ source ${script_path}/common_env.sh
 
 env_print
 
-mkdir -p ${TILEXR_CANN_HOME}
-mkdir -p ${TILEXR_TEMP_HOME}
+if [[ "${TILEXR_CI_SEALED_CANN_HOME:-0}" == 1 ]]; then
+    cann_marker="${TILEXR_CANN_HOME}/.tilexr-ci-installing"
+    if [[ ! -d "${TILEXR_CANN_HOME}" || -L "${TILEXR_CANN_HOME}" ||
+          ! -f "${cann_marker}" || -L "${cann_marker}" ]]; then
+        error "sealed CANN home or ownership marker is invalid: ${TILEXR_CANN_HOME}"
+        exit 1
+    fi
+else
+    if [[ -L "${TILEXR_CANN_HOME}" ||
+          ( -e "${TILEXR_CANN_HOME}" && ! -d "${TILEXR_CANN_HOME}" ) ]]; then
+        error "TILEXR_CANN_HOME must be a real directory: ${TILEXR_CANN_HOME}"
+        exit 1
+    fi
+    mkdir -p -- "${TILEXR_CANN_HOME}"
+    if [[ ! -d "${TILEXR_CANN_HOME}" || -L "${TILEXR_CANN_HOME}" ]]; then
+        error "could not create a real TILEXR_CANN_HOME: ${TILEXR_CANN_HOME}"
+        exit 1
+    fi
+fi
+mkdir -p "${TILEXR_TEMP_HOME}"
 
 line
 
@@ -20,66 +38,54 @@ ops_url=${obs_base}/${ops_run}
 success "TILEXR_OS_ARCH = ${TILEXR_OS_ARCH}"
 success "TILEXR_CANN_VER = ${TILEXR_CANN_VER}"
 
-# 检查 PID 文件中记录的进程是否仍是 curl，决定是否接管或重新 fork
-# 用法: _ensure_curl_running <pid_file> <url> <log_file>
-# 返回: 设置全局变量 _curl_pid
-_ensure_curl_running() {
-    local pid_file=$1
-    local url=$2
-    local log_file=$3
-
-    if [ -f "${pid_file}" ]; then
-        local stored_pid
-        stored_pid=$(cat "${pid_file}")
-        if kill -0 "${stored_pid}" 2>/dev/null; then
-            local comm
-            comm=$(cat /proc/${stored_pid}/comm 2>/dev/null)
-            if [ "${comm}" = "curl" ]; then
-                success "curl already running (pid=${stored_pid}), resuming wait"
-                _curl_pid=${stored_pid}
-                return
-            else
-                warn "pid ${stored_pid} is not curl (comm=${comm}), restarting download"
-            fi
-        else
-            warn "pid ${stored_pid} no longer alive, restarting download"
-        fi
-        rm -f "${pid_file}"
-    fi
-
-    cd ${TILEXR_TEMP_HOME}
-    curl -k -C - -O ${url} > ${log_file} 2>&1 &
-    _curl_pid=$!
-    echo ${_curl_pid} > "${pid_file}"
-    cd ${TILEXR_HOME}
-}
-
-toolkit_pid_file=${TILEXR_TEMP_HOME}/cann_toolkit.pid
-ops_pid_file=${TILEXR_TEMP_HOME}/cann_ops.pid
-
 success "start download cann from ${cann_url}"
-_ensure_curl_running "${toolkit_pid_file}" "${cann_url}" "${TILEXR_TEMP_HOME}/toolkit.log"
-pid_cann=${_curl_pid}
+cd "${TILEXR_TEMP_HOME}" || exit 1
+curl --fail --location --continue-at - --remote-name "${cann_url}" \
+    > "${TILEXR_TEMP_HOME}/toolkit.log" 2>&1 &
+pid_cann=$!
 
 success "start download ops from ${ops_url}"
-_ensure_curl_running "${ops_pid_file}" "${ops_url}" "${TILEXR_TEMP_HOME}/ops.log"
-pid_ops=${_curl_pid}
+curl --fail --location --continue-at - --remote-name "${ops_url}" \
+    > "${TILEXR_TEMP_HOME}/ops.log" 2>&1 &
+pid_ops=$!
+cd "${TILEXR_HOME}" || exit 1
 
-while kill -0 ${pid_cann} 2>/dev/null; do
-    tail -n1 ${TILEXR_TEMP_HOME}/toolkit.log | awk '{printf "\r%s", $0; fflush()}'
-    sleep 1
-done
-echo ""
-rm -f "${toolkit_pid_file}"
+_cancel_downloads() {
+    trap - INT TERM HUP
+    kill "${pid_cann}" "${pid_ops}" 2>/dev/null || true
+    wait "${pid_cann}" 2>/dev/null || true
+    wait "${pid_ops}" 2>/dev/null || true
+    exit 130
+}
+trap _cancel_downloads INT TERM HUP
+
+if wait "${pid_cann}"; then
+    toolkit_status=0
+else
+    toolkit_status=$?
+fi
+if wait "${pid_ops}"; then
+    ops_status=0
+else
+    ops_status=$?
+fi
+trap - INT TERM HUP
+
+if [[ "${toolkit_status}" -ne 0 || "${ops_status}" -ne 0 ]]; then
+    error "CANN downloads failed: toolkit=${toolkit_status}, ops=${ops_status}"
+    exit 1
+fi
 success "cann downloaded."
-
-while kill -0 ${pid_ops} 2>/dev/null; do
-    tail -n1 ${TILEXR_TEMP_HOME}/ops.log | awk '{printf "\r%s", $0; fflush()}'
-    sleep 1
-done
-echo ""
-rm -f "${ops_pid_file}"
 success "ops downloaded."
+
+if [[ ! -s "${TILEXR_TEMP_HOME}/${toolkit_run}" ]]; then
+    error "downloaded toolkit is missing or empty: ${toolkit_run}"
+    exit 1
+fi
+if [[ ! -s "${TILEXR_TEMP_HOME}/${ops_run}" ]]; then
+    error "downloaded 910B Ops package is missing or empty: ${ops_run}"
+    exit 1
+fi
 
 success "begin install."
 bash ${script_path}/cann_local_install.sh

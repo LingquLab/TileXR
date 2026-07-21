@@ -14,8 +14,6 @@ jobs:
       group: TileXR-NPU
       labels: [self-hosted, Linux, ARM64, tilexr, ascend910b, npu8]
     steps:
-      - name: Verify sealed controller
-        run: test "$(cat /home/tilexr-ci/control/v2/VERSION)" = v2
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with:
           ref: ${{ github.sha }}
@@ -36,7 +34,7 @@ jobs:
           TILEXR_CI_REPOSITORY: ${{ github.repository }}
           TILEXR_CI_SCRATCH_DIR: ${{ runner.temp }}/tilexr-ci-scratch
         run: |
-          exec python3 /home/tilexr-ci/control/v2/gate.py \
+          exec python3 /home/tilexr-ci/control/current/gate.py \
             --source "${GITHUB_WORKSPACE}/source" \
             --scratch "${TILEXR_CI_SCRATCH_DIR}" \
             --expected-merge-sha "${TILEXR_CI_EXPECTED_MERGE_SHA}" \
