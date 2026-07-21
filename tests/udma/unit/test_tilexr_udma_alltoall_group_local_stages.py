@@ -13,11 +13,13 @@ class GroupedAllToAllLocalStageSourceTest(unittest.TestCase):
 
         self.assertIn("kLocalSend", route)
         self.assertIn("kLocalCopy", route)
+        self.assertIn("kRemoteSend", route)
         self.assertIn("AllToAllGroupStageRunsSendDevice(routeStage)", kernel)
         self.assertIn("AllToAllGroupStageRunsCopyDevice(routeStage)", kernel)
         self.assertIn("AllToAllGroupStageWaitsForSignalDevice(routeStage)", kernel)
         self.assertIn(
-            '"local-send", "local-copy", "primary", "secondary"', host
+            '"local-send", "local-copy", "remote-send", "primary", "secondary"',
+            host,
         )
 
 

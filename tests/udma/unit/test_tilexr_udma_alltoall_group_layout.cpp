@@ -209,8 +209,8 @@ void TestRouteStages()
 {
     using TileXR::Demo::AllToAllGroupRouteStage;
     CHECK_EQ(TileXR::Demo::AllToAllGroupValidRouteStage(0U), true);
-    CHECK_EQ(TileXR::Demo::AllToAllGroupValidRouteStage(5U), true);
-    CHECK_EQ(TileXR::Demo::AllToAllGroupValidRouteStage(6U), false);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupValidRouteStage(6U), true);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupValidRouteStage(7U), false);
     CHECK_EQ(TileXR::Demo::AllToAllGroupStageRunsSend(
         AllToAllGroupRouteStage::kLocalSend), true);
     CHECK_EQ(TileXR::Demo::AllToAllGroupStageRunsCopy(
@@ -221,6 +221,10 @@ void TestRouteStages()
         AllToAllGroupRouteStage::kLocalCopy), true);
     CHECK_EQ(TileXR::Demo::AllToAllGroupStageWaitsForSignal(
         AllToAllGroupRouteStage::kLocalCopy), false);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupStageRunsSend(
+        AllToAllGroupRouteStage::kRemoteSend), true);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupStageRunsCopy(
+        AllToAllGroupRouteStage::kRemoteSend), false);
 
     for (int rankSize : {8, 16, 128}) {
         for (int rank = 0; rank < rankSize; ++rank) {
@@ -241,6 +245,9 @@ void TestRouteStages()
                     rank, peer, AllToAllGroupRouteStage::kLocalSend), inLocal);
                 CHECK_EQ(TileXR::Demo::AllToAllGroupPeerInRouteStage(
                     rank, peer, AllToAllGroupRouteStage::kLocalCopy), inLocal);
+                CHECK_EQ(TileXR::Demo::AllToAllGroupPeerInRouteStage(
+                    rank, peer, AllToAllGroupRouteStage::kRemoteSend),
+                    inPrimary || inSecondary);
                 CHECK_EQ(static_cast<int>(inLocal) + static_cast<int>(inPrimary) +
                     static_cast<int>(inSecondary), 1);
                 local += inLocal ? 1 : 0;
@@ -335,7 +342,7 @@ void TestHostStructure()
     const std::string grouped = begin == std::string::npos ? std::string() :
         demo.substr(begin, end == std::string::npos ? std::string::npos : end - begin);
     CHECK_CONTAINS(grouped,
-        "\"local-send\", \"local-copy\", \"primary\", \"secondary\"");
+        "\"local-send\", \"local-copy\", \"remote-send\", \"primary\", \"secondary\"");
     CHECK_CONTAINS(grouped, "AllToAllGroupRouteStage::kCombined");
     CHECK_CONTAINS(grouped, "aclrtEventElapsedTime");
     CHECK_CONTAINS(grouped, "DemoBarrierAll(rank, rankSize, barrierStep)");

@@ -26,6 +26,7 @@ constexpr uint32_t TILEXR_ALLTOALL_GROUP_ROUTE_STAGE_PRIMARY = 2U;
 constexpr uint32_t TILEXR_ALLTOALL_GROUP_ROUTE_STAGE_SECONDARY = 3U;
 constexpr uint32_t TILEXR_ALLTOALL_GROUP_ROUTE_STAGE_LOCAL_SEND = 4U;
 constexpr uint32_t TILEXR_ALLTOALL_GROUP_ROUTE_STAGE_LOCAL_COPY = 5U;
+constexpr uint32_t TILEXR_ALLTOALL_GROUP_ROUTE_STAGE_REMOTE_SEND = 6U;
 
 struct AllToAllGroupDeviceError {
     uint32_t valid;
@@ -91,7 +92,7 @@ __aicore__ inline bool AllToAllGroupPeerInRouteStageDevice(
     int32_t rank, int32_t peer, uint32_t routeStage)
 {
     if (rank < 0 || peer < 0 || rank == peer ||
-        routeStage > TILEXR_ALLTOALL_GROUP_ROUTE_STAGE_LOCAL_COPY) {
+        routeStage > TILEXR_ALLTOALL_GROUP_ROUTE_STAGE_REMOTE_SEND) {
         return false;
     }
     if (routeStage == TILEXR_ALLTOALL_GROUP_ROUTE_STAGE_COMBINED) {
@@ -105,6 +106,9 @@ __aicore__ inline bool AllToAllGroupPeerInRouteStageDevice(
         routeStage == TILEXR_ALLTOALL_GROUP_ROUTE_STAGE_LOCAL_COPY) {
         return !crossNode;
     }
+    if (routeStage == TILEXR_ALLTOALL_GROUP_ROUTE_STAGE_REMOTE_SEND) {
+        return crossNode;
+    }
     const bool secondary = AllToAllGroupUseSecondaryRouteDevice(rank, peer);
     return routeStage == TILEXR_ALLTOALL_GROUP_ROUTE_STAGE_PRIMARY ?
         crossNode && !secondary : crossNode && secondary;
@@ -117,7 +121,8 @@ __aicore__ inline bool AllToAllGroupStageRunsSendDevice(uint32_t routeStage)
 
 __aicore__ inline bool AllToAllGroupStageRunsCopyDevice(uint32_t routeStage)
 {
-    return routeStage != TILEXR_ALLTOALL_GROUP_ROUTE_STAGE_LOCAL_SEND;
+    return routeStage != TILEXR_ALLTOALL_GROUP_ROUTE_STAGE_LOCAL_SEND &&
+        routeStage != TILEXR_ALLTOALL_GROUP_ROUTE_STAGE_REMOTE_SEND;
 }
 
 __aicore__ inline bool AllToAllGroupStageWaitsForSignalDevice(uint32_t routeStage)
@@ -321,7 +326,7 @@ extern "C" __global__ __aicore__ void tilexr_udma_all_to_all_group_kernel(
     const int32_t rankSize = args->rankSize;
 
     if ((copyoutWorkers != 8U && copyoutWorkers != 16U) ||
-        routeStage > TILEXR_ALLTOALL_GROUP_ROUTE_STAGE_LOCAL_COPY ||
+        routeStage > TILEXR_ALLTOALL_GROUP_ROUTE_STAGE_REMOTE_SEND ||
         blockIdx >= TILEXR_ALLTOALL_GROUP_SEND_CORES + copyoutWorkers ||
         !TileXR::UDMARegistryEnabled(args) || rankSize < 8 ||
         rankSize > TileXR::TILEXR_MAX_RANK_SIZE || (rankSize & 7) != 0 ||

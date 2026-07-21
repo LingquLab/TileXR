@@ -674,16 +674,17 @@ bool RunGroupedAllToAll(
         return false;
     }
     const bool routeStages = routeStagesValue == 1;
-    constexpr size_t kRouteStageCount = 4U;
+    constexpr size_t kRouteStageCount = 5U;
     const std::array<TileXR::Demo::AllToAllGroupRouteStage, kRouteStageCount>
         stagedRouteStages {{
             TileXR::Demo::AllToAllGroupRouteStage::kLocalSend,
             TileXR::Demo::AllToAllGroupRouteStage::kLocalCopy,
+            TileXR::Demo::AllToAllGroupRouteStage::kRemoteSend,
             TileXR::Demo::AllToAllGroupRouteStage::kPrimary,
             TileXR::Demo::AllToAllGroupRouteStage::kSecondary,
         }};
     const std::array<const char*, kRouteStageCount> stageNames {{
-        "local-send", "local-copy", "primary", "secondary"
+        "local-send", "local-copy", "remote-send", "primary", "secondary"
     }};
     const int warmup = std::max(0, GetEnvInt("TILEXR_DEMO_ALLTOALL_WARMUP", 0));
     const int repeat = std::max(1, GetEnvInt("TILEXR_DEMO_ALLTOALL_REPEAT", 1));

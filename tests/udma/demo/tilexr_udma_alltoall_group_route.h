@@ -21,11 +21,12 @@ enum class AllToAllGroupRouteStage : uint32_t {
     kSecondary = 3U,
     kLocalSend = 4U,
     kLocalCopy = 5U,
+    kRemoteSend = 6U,
 };
 
 inline bool AllToAllGroupValidRouteStage(uint32_t value)
 {
-    return value <= static_cast<uint32_t>(AllToAllGroupRouteStage::kLocalCopy);
+    return value <= static_cast<uint32_t>(AllToAllGroupRouteStage::kRemoteSend);
 }
 
 inline bool AllToAllGroupStageRunsSend(AllToAllGroupRouteStage stage)
@@ -35,7 +36,8 @@ inline bool AllToAllGroupStageRunsSend(AllToAllGroupRouteStage stage)
 
 inline bool AllToAllGroupStageRunsCopy(AllToAllGroupRouteStage stage)
 {
-    return stage != AllToAllGroupRouteStage::kLocalSend;
+    return stage != AllToAllGroupRouteStage::kLocalSend &&
+        stage != AllToAllGroupRouteStage::kRemoteSend;
 }
 
 inline bool AllToAllGroupStageWaitsForSignal(AllToAllGroupRouteStage stage)
@@ -83,6 +85,8 @@ inline bool AllToAllGroupPeerInRouteStage(
         case AllToAllGroupRouteStage::kLocalSend:
         case AllToAllGroupRouteStage::kLocalCopy:
             return !crossNode;
+        case AllToAllGroupRouteStage::kRemoteSend:
+            return crossNode;
         case AllToAllGroupRouteStage::kPrimary:
             return crossNode && !AllToAllGroupUseSecondaryRoute(rank, peer);
         case AllToAllGroupRouteStage::kSecondary:
