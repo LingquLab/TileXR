@@ -49,7 +49,7 @@ foreign process collision.
 | Home | `/home/tilexr-ci` |
 | Sealed CANN 9.1 | `/home/tilexr-ci/toolchains/cann/9.1.0` |
 | Sealed Bisheng compiler | `/home/tilexr-ci/toolchains/cann/9.1.0/cann/tools/bisheng_compiler/bin/bisheng` |
-| Sealed controller | `/home/tilexr-ci/control/v3` |
+| Sealed controller | `/home/tilexr-ci/control/v4` |
 | Active controller link | `/home/tilexr-ci/control/current` |
 | Actions runner | `/home/tilexr-ci/actions-runner` |
 | Runner workspace root | `/home/tilexr-ci/actions-runner/_work` |
@@ -133,16 +133,17 @@ phase directly.
 - SDMA-disabled communicator validation;
 - the eight-rank peer-memory DataCopy demo;
 - the eight-rank EP dispatch/combine demo;
-- eight-rank AllGather, AllToAll, AllReduce, ReduceScatter, and Broadcast
-  correctness, with Broadcast roots 0 and 7;
-- checked multi-size performance smoke for AllGather, AllToAll, AllReduce,
-  ReduceScatter, and Broadcast, from 4 bytes through 1 MiB;
+- eight-rank AllGather, AllReduce, ReduceScatter, and Broadcast correctness,
+  with Broadcast roots 0 and 7;
+- checked multi-size performance smoke for AllGather, AllReduce, ReduceScatter,
+  and Broadcast, from 4 bytes through 1 MiB;
 - the SDMA demo on every device for 64 bytes, 4096 bytes, and 1 MiB.
 
 Explicitly out of scope are A5 / Ascend950 UDMA data-plane validation,
 multi-host collectives and EP, vLLM model inference, and performance-regression
 thresholds. A 910B3 UDMA fallback pass must not be reported as UDMA data-plane
-coverage.
+coverage. AllToAll hardware validation is also out of scope on 910B3 because
+the current kernel launch path requires a `TOPO_910_93` device.
 
 ## Results and failures
 
