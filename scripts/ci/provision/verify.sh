@@ -57,7 +57,8 @@ if ! ci_identity_is_bounded "${CI_USER}"; then
     echo "ERROR: ${CI_USER} has an unexpected UID, GID, or group set" >&2
     exit 1
 fi
-[[ "$(passwd -S "${CI_USER}" | awk '{print $2}')" == L ]] || {
+password_state="$(passwd -S "${CI_USER}" | awk '{print $2}')"
+[[ "${password_state}" == L || "${password_state}" == LK ]] || {
     echo "ERROR: ${CI_USER} password is not locked" >&2
     exit 1
 }

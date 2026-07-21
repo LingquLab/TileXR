@@ -192,6 +192,12 @@ class ControlSourceContractTests(unittest.TestCase):
             "git ls-remote https://github.com/LingquLab/TileXR.git HEAD", verify
         )
 
+    def test_verify_accepts_locked_password_states_across_supported_hosts(self):
+        verify = self.read("scripts/ci/provision/verify.sh")
+        self.assertIn(
+            '"${password_state}" == L || "${password_state}" == LK', verify
+        )
+
     def test_manifests_never_source_pull_request_code_into_trusted_shell(self):
         for relative in [
             "scripts/ci/control/build_blue.sh",
