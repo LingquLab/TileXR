@@ -260,26 +260,25 @@ properties and the single `PR Gate` entry again.
 
 ## Controller upgrade
 
-Publish every controller change under a new immutable version directory. Never
-replace an installed version and never point a workflow at `control/current`.
-Use this two-stage rollout:
+Publish every controller change under a new immutable version directory and
+never replace an installed version. The workflow and job-completed hook both
+use the root-managed `control/current` link. Change that link only while the
+runner is stopped and has no active job:
 
 1. From the exact reviewed controller commit, run
    `sudo bash scripts/ci/provision/control.sh --stage-only`. The script installs
    and validates the new package without changing `control/current`.
-2. Merge the trusted workflow change that pins both the version check and
-   `gate.py` invocation to that immutable directory, such as `control/v2`.
-   Existing jobs keep using the previous pinned controller; new jobs use the
-   staged version.
-3. After earlier jobs drain, confirm the runner has no queued or active work,
-   stop its service, and run `control.sh` without `--stage-only` to atomically
-   update `control/current` for the job-completed hook.
+2. Let queued and active jobs drain, stop the runner service, and confirm that
+   no runner worker or gate process remains.
+3. Merge any trusted workflow update needed for the new expected controller
+   version, then run `control.sh` without `--stage-only` to atomically update
+   `control/current`.
 4. Restart the runner and run `verify.sh` once as the upgrade acceptance test.
 
 If the staged controller fails before activation, leave `control/current`
-unchanged and repin the trusted workflow to the previous immutable version.
-If activation has already occurred, stop the idle runner before restoring the
-previous `current` target. Do not change `current` while a job is running.
+unchanged. If activation has already occurred, stop the idle runner before
+restoring the previous `current` target and the workflow's expected version.
+Do not change `current` while a job is running.
 
 ## Runner upgrade
 

@@ -710,12 +710,59 @@ class RunPhaseTests(unittest.TestCase):
         self.assertIn("status 7", str(raised.exception))
         self.assertIn("cannot reap group", str(raised.exception))
 
-    def test_completed_hardware_child_is_classified_before_new_foreign_snapshot(self):
+    def test_completed_hardware_child_enforces_final_foreign_snapshot(self):
         child = FakeProcess(polls=(0,), returncode=0)
         reads = mock.Mock(side_effect=(snapshot(), snapshot(process("alice"))))
 
+        with self.assertRaises(gate.ResourceCollision):
+            gate.run_phase(
+                "hardware", pathlib.Path("/trusted/run_hardware.sh"), pathlib.Path("/source"),
+                pathlib.Path("/artifacts"), {}, timeout_seconds=5,
+                read_snapshot=reads, now=lambda: 0.0, sleep=lambda seconds: None,
+                cancellation=gate.CancellationState(), popen=lambda *args, **kwargs: child,
+                terminate=lambda process: None,
+            )
+
+        self.assertEqual(reads.call_count, 2)
+
+    def test_hardware_enforces_observed_state_before_exit_classification(self):
+        child = FakeProcess(polls=(None, 0), returncode=0)
+        reads = mock.Mock(side_effect=(snapshot(), snapshot(process("alice"))))
+
+        with self.assertRaises(gate.ResourceCollision):
+            gate.run_phase(
+                "hardware", pathlib.Path("/trusted/run_hardware.sh"), pathlib.Path("/source"),
+                pathlib.Path("/artifacts"), {}, timeout_seconds=5,
+                read_snapshot=reads, now=lambda: 0.0, sleep=lambda seconds: None,
+                cancellation=gate.CancellationState(), popen=lambda *args, **kwargs: child,
+                terminate=lambda process: None,
+            )
+
+        self.assertEqual(reads.call_count, 2)
+
+    def test_hardware_exit_after_clean_monitor_enforces_final_snapshot(self):
+        child = FakeProcess(polls=(None, 0), returncode=0)
+        reads = mock.Mock(
+            side_effect=(snapshot(), snapshot(), snapshot(process("alice")))
+        )
+
+        with self.assertRaises(gate.ResourceCollision):
+            gate.run_phase(
+                "hardware", pathlib.Path("/trusted/run_hardware.sh"), pathlib.Path("/source"),
+                pathlib.Path("/artifacts"), {}, timeout_seconds=5,
+                read_snapshot=reads, now=lambda: 0.0, sleep=lambda seconds: None,
+                cancellation=gate.CancellationState(), popen=lambda *args, **kwargs: child,
+                terminate=lambda process: None,
+            )
+
+        self.assertEqual(reads.call_count, 3)
+
+    def test_completed_build_does_not_take_final_snapshot(self):
+        child = FakeProcess(polls=(0,), returncode=0)
+        reads = mock.Mock(return_value=snapshot())
+
         result = gate.run_phase(
-            "hardware", pathlib.Path("/trusted/run_hardware.sh"), pathlib.Path("/source"),
+            "build", pathlib.Path("/trusted/build_blue.sh"), pathlib.Path("/source"),
             pathlib.Path("/artifacts"), {}, timeout_seconds=5,
             read_snapshot=reads, now=lambda: 0.0, sleep=lambda seconds: None,
             cancellation=gate.CancellationState(), popen=lambda *args, **kwargs: child,

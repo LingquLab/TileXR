@@ -851,6 +851,15 @@ def run_phase(
     def classify_exit(returncode):
         if returncode != 0:
             raise CodeFailure("%s phase exited with status %d" % (phase, returncode))
+        if phase == "hardware":
+            final_state = monitored_snapshot()
+            if cancellation.cancelled:
+                raise Cancelled("gate was cancelled during %s" % phase)
+            if now() >= deadline:
+                raise CodeFailure(
+                    "%s phase exceeded %.0f seconds" % (phase, timeout_seconds)
+                )
+            _enforce_policy(phase, final_state)
         return returncode
 
     primary_error = None
@@ -869,6 +878,8 @@ def run_phase(
                 raise CodeFailure("%s phase exceeded %.0f seconds" % (phase, timeout_seconds))
             returncode = child.poll()
             if returncode is not None:
+                if returncode == 0:
+                    _enforce_policy(phase, state)
                 return classify_exit(returncode)
             _enforce_policy(phase, state)
 

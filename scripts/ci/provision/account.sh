@@ -63,8 +63,10 @@ fi
 
 run install -d -o root -g "${CI_PRIMARY_GROUP}" -m 0755 \
     "${CI_HOME}"
+run install -d -o root -g "${CI_PRIMARY_GROUP}" -m 0750 \
+    "${RUNNER_HOME}"
 run install -d -o "${CI_USER}" -g "${CI_PRIMARY_GROUP}" -m 0750 \
-    "${RUNNER_HOME}" "${runner_work}"
+    "${runner_work}"
 run install -d -o root -g "${CI_GROUP}" -m 0755 \
     "${toolchains_home}" "${toolchain_parent}"
 run install -d -o root -g "${CI_GROUP}" -m 0750 \

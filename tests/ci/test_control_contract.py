@@ -149,10 +149,10 @@ class ControlSourceContractTests(unittest.TestCase):
             verify,
         )
         self.assertIn(
-            'cat /home/tilexr-ci/control/v2/VERSION)" = v2', workflow
+            'cat /home/tilexr-ci/control/current/VERSION)" = v2', workflow
         )
         self.assertIn(
-            "exec python3 /home/tilexr-ci/control/v2/gate.py", workflow
+            "exec python3 /home/tilexr-ci/control/current/gate.py", workflow
         )
 
     def test_controller_supports_verified_stage_only_rollout(self):
@@ -216,6 +216,29 @@ class ControlSourceContractTests(unittest.TestCase):
         )
         self.assertIn('mkdir -m 0755 -- "${CANN_HOME}"', cann)
         self.assertIn("u+rwX,g+rX,o+rX,go-w", cann)
+
+    def test_account_keeps_runner_installation_admin_owned(self):
+        account = self.read("scripts/ci/provision/account.sh")
+        continuation = "\\" + "\n"
+
+        self.assertIn(
+            '-o root -g "${CI_PRIMARY_GROUP}" -m 0750 '
+            + continuation
+            + '    "${RUNNER_HOME}"',
+            account,
+        )
+        self.assertIn(
+            '-o "${CI_USER}" -g "${CI_PRIMARY_GROUP}" -m 0750 '
+            + continuation
+            + '    "${runner_work}"',
+            account,
+        )
+        self.assertNotIn(
+            'run install -d -o "${CI_USER}" -g "${CI_PRIMARY_GROUP}" -m 0750 '
+            + continuation
+            + '    "${RUNNER_HOME}" "${runner_work}"',
+            account,
+        )
 
     def test_cann_installer_uses_home_backed_tmpdir(self):
         cann = self.read("scripts/ci/provision/cann.sh")
