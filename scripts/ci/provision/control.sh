@@ -4,6 +4,7 @@ set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "${script_dir}/../../.." && pwd)"
+git_dir="${repo_root}/.git"
 source "${script_dir}/common.sh"
 parse_args "$@"
 require_root
@@ -13,6 +14,11 @@ control_parent="${CI_HOME}/control"
 control_current="${control_parent}/current"
 stage="${control_parent}/.v1.new"
 current_stage="${control_parent}/.current.new"
+
+if ! [[ -d "${git_dir}" && ! -L "${git_dir}" ]]; then
+    echo "ERROR: provisioning checkout must have a real .git directory" >&2
+    exit 1
+fi
 
 if [[ "$(< "${control_source}/VERSION")" != v1 ]]; then
     echo "ERROR: repository control package must have version v1" >&2
@@ -24,11 +30,11 @@ run rm -rf "${stage}"
 run install -d -o root -g "${CI_GROUP}" -m 0750 "${stage}"
 
 if [[ "${DRY_RUN}" == 1 ]]; then
-    printf 'git -c safe.directory=%q -C %q archive --format=tar HEAD scripts/ci/control | tar -xf - -C %q --strip-components=3\n' \
-        "${repo_root}" "${repo_root}" "${stage}"
+    printf 'git --git-dir=%q archive --format=tar HEAD scripts/ci/control | tar -xf - -C %q --strip-components=3\n' \
+        "${git_dir}" "${stage}"
 else
-    git -c safe.directory="${repo_root}" -C "${repo_root}" \
-        archive --format=tar HEAD scripts/ci/control |
+    git --git-dir="${git_dir}" archive \
+        --format=tar HEAD scripts/ci/control |
         tar -xf - -C "${stage}" --strip-components=3
 fi
 run chown -R "root:${CI_GROUP}" "${stage}"

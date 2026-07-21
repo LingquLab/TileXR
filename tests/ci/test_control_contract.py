@@ -142,14 +142,15 @@ class ControlSourceContractTests(unittest.TestCase):
         self.assertIn(tmpdir, cann)
         self.assertLess(cann.index(tmpdir), cann.index(installer))
 
-    def test_control_archive_trusts_only_the_exact_bootstrap(self):
+    def test_control_archive_uses_an_explicit_real_git_directory(self):
         control = self.read("scripts/ci/provision/control.sh")
+        self.assertIn('[[ -d "${git_dir}" && ! -L "${git_dir}" ]]', control)
         self.assertIn(
-            'git -c safe.directory="${repo_root}" -C "${repo_root}"',
+            'git --git-dir="${git_dir}" archive',
             control,
         )
         self.assertIn("archive --format=tar HEAD scripts/ci/control", control)
-        self.assertNotIn("git config --global", control)
+        self.assertNotIn("safe.directory", control)
 
     def test_manifests_never_source_pull_request_code_into_trusted_shell(self):
         for relative in [
