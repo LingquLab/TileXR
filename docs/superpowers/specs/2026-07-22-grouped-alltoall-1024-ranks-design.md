@@ -50,9 +50,11 @@ The UDMA transport retains its existing O(rankSize^2) metadata exchange and
 full-mesh QP construction. Integer arithmetic used for allocation and indexing
 must use checked `size_t` multiplication where sizes are derived from rankSize.
 
-The grouped trace buffer remains 8 MiB. Large combinations of rank count,
-passes, and trace iterations may reject tracing with the existing explicit
-capacity error. Trace capacity does not limit execution when tracing is off.
+Raise the grouped trace buffer from 8 MiB to 128 MiB. This covers 1024 ranks,
+64 groups, four passes, 50 iterations, and 64 traced cores (approximately
+118 MiB with the current six-phase task-span layout). Larger combinations still
+reject tracing with the existing explicit capacity error. Trace capacity does
+not limit execution when tracing is off.
 
 ## Validation
 
@@ -66,6 +68,8 @@ Unit tests will cover rank sizes 8, 128, 256, 512, and 1024 and verify:
 - registered-memory planning remains within 1 GiB for a 128 MiB per-rank
   payload and rejects oversized layouts
 - Comm and UDMA registry structures accept rank 1023 and reject rank 1024
+- the 128 MiB trace layout accepts 64 groups, four passes, and 50 iterations
+  while rejecting the first larger unsupported layout
 
 After local and remote builds pass, the current CANN b101 physical 2x8 test will
 run with 128 MiB per rank, warmup 5, repeat 50, and a 60-second process timeout.
