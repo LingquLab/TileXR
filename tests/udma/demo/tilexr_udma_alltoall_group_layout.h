@@ -15,7 +15,7 @@ namespace TileXR {
 namespace Demo {
 
 constexpr int32_t kAllToAllGroupMinRankSize = 8;
-constexpr int32_t kAllToAllGroupMaxRankSize = 128;
+constexpr int32_t kAllToAllGroupMaxRankSize = 1024;
 constexpr uint32_t kAllToAllGroupWidth = 16U;
 constexpr uint32_t kAllToAllGroupHalfWidth = 8U;
 constexpr uint32_t kAllToAllGroupPingPongSlots = 2U;

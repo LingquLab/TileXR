@@ -15,7 +15,7 @@ namespace Demo {
 
 constexpr uint32_t kAllToAllGroupTraceMagic = 0x47545243U; // "GTRC"
 constexpr uint32_t kAllToAllGroupTraceVersion = 1U;
-constexpr size_t kAllToAllGroupTraceBytes = 8ULL * 1024ULL * 1024ULL;
+constexpr size_t kAllToAllGroupTraceBytes = 128ULL * 1024ULL * 1024ULL;
 constexpr size_t kAllToAllGroupTraceHeaderBytes = 4096ULL;
 constexpr uint32_t kAllToAllGroupTraceMaxIterations = 50U;
 constexpr uint32_t kAllToAllGroupTraceCoreCount = 64U;
@@ -148,7 +148,7 @@ static_assert(sizeof(AllToAllGroupTraceTaskSpan) == 24U,
 static_assert(sizeof(AllToAllGroupTraceHeader) <= kAllToAllGroupTraceHeaderBytes,
     "group trace header must fit its region");
 static_assert(AllToAllGroupTraceTaskSpanBaseOffset() < kAllToAllGroupTraceBytes,
-    "group trace kernel spans must fit in 8 MiB");
+    "group trace kernel spans must fit in trace storage");
 
 } // namespace Demo
 } // namespace TileXR

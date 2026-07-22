@@ -7,6 +7,7 @@
 
 #include "demo/tilexr_udma_alltoall_group_layout.h"
 #include "demo/tilexr_udma_alltoall_group_route.h"
+#include "demo/tilexr_udma_alltoall_group_trace.h"
 
 namespace {
 
@@ -78,7 +79,7 @@ void CheckSchedule(int rankSize)
 
 void TestSchedules()
 {
-    for (int rankSize : {8, 16, 24, 32, 40, 64, 128}) {
+    for (int rankSize : {8, 16, 24, 32, 40, 64, 128, 256, 512, 1024}) {
         CheckSchedule(rankSize);
     }
     CHECK_EQ(TileXR::Demo::AllToAllGroupCount(8), 1U);
@@ -86,9 +87,10 @@ void TestSchedules()
     CHECK_EQ(TileXR::Demo::AllToAllGroupCount(24), 2U);
     CHECK_EQ(TileXR::Demo::AllToAllGroupCount(64), 4U);
     CHECK_EQ(TileXR::Demo::AllToAllGroupCount(128), 8U);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupCount(1024), 64U);
     CHECK_EQ(TileXR::Demo::AllToAllGroupCount(7), 0U);
     CHECK_EQ(TileXR::Demo::AllToAllGroupCount(18), 0U);
-    CHECK_EQ(TileXR::Demo::AllToAllGroupCount(136), 0U);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupCount(1032), 0U);
 
     CHECK_EQ(TileXR::Demo::AllToAllGroupPeer(0, 64, 0, 0), 1);
     CHECK_EQ(TileXR::Demo::AllToAllGroupPeer(0, 64, 0, 7), 8);
@@ -127,13 +129,32 @@ void TestPlan()
 
     CHECK_EQ(TileXR::Demo::PlanAllToAllGroup(7, 1024, 1024).valid, false);
     CHECK_EQ(TileXR::Demo::PlanAllToAllGroup(18, 1024, 1024).valid, false);
-    CHECK_EQ(TileXR::Demo::PlanAllToAllGroup(136, 1024, 1024).valid, false);
+    CHECK_EQ(TileXR::Demo::PlanAllToAllGroup(1032, 1024, 1024).valid, false);
     CHECK_EQ(TileXR::Demo::PlanAllToAllGroup(16, 0, 1024).valid, false);
     CHECK_EQ(TileXR::Demo::PlanAllToAllGroup(16, elementsPerPeer, 0).valid, false);
 
     constexpr int32_t thirtyTwoMiBElements = 8 * 1024 * 1024;
     CHECK_EQ(TileXR::Demo::PlanAllToAllGroup(
         rankSize, thirtyTwoMiBElements, thirtyTwoMiBElements).valid, false);
+}
+
+void TestScalePlanAndTraceCapacity()
+{
+    constexpr int rankSize = 1024;
+    constexpr int32_t elementsPerPeer = 32768;
+    const auto plan = TileXR::Demo::PlanAllToAllGroup(
+        rankSize, elementsPerPeer, elementsPerPeer);
+
+    CHECK_EQ(plan.valid, true);
+    CHECK_EQ(plan.groupCount, 64U);
+    CHECK_EQ(plan.passCount, 1U);
+    CHECK_EQ(plan.payloadPlaneBytes, 128ULL * 1024ULL * 1024ULL);
+    CHECK_EQ(plan.registeredBytes <= TileXR::Demo::kAllToAllGroupMaxRegisteredBytes, true);
+
+    CHECK_EQ(TileXR::Demo::kAllToAllGroupTraceBytes,
+        128ULL * 1024ULL * 1024ULL);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupTraceLayoutFits(50U, 64U, 4U), true);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupTraceLayoutFits(50U, 64U, 5U), false);
 }
 
 void TestTokens()
@@ -435,6 +456,7 @@ int main()
 {
     TestSchedules();
     TestPlan();
+    TestScalePlanAndTraceCapacity();
     TestTokens();
     TestDualRoutePeerPolicy();
     TestDualRouteQpWeights();
