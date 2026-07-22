@@ -19,9 +19,13 @@ constexpr int32_t kAllToAllGroupMaxRankSize = 1024;
 constexpr uint32_t kAllToAllGroupWidth = 16U;
 constexpr uint32_t kAllToAllGroupHalfWidth = 8U;
 constexpr uint32_t kAllToAllGroupPingPongSlots = 2U;
-constexpr uint32_t kAllToAllGroupSignalSlotBytes = 128U;
+constexpr uint32_t kAllToAllGroupRouteSignalStride = 512U;
+constexpr uint32_t kAllToAllGroupSignalSlotBytes = 1024U;
 constexpr uint32_t kAllToAllGroupSendCoreCount = 16U;
+constexpr uint32_t kAllToAllGroupSendWorkerCount = 32U;
 constexpr uint32_t kAllToAllGroupBlockDim = 64U;
+constexpr size_t kAllToAllGroupMultiChannelThresholdBytes =
+    150ULL * 1024ULL * 1024ULL;
 constexpr size_t kAllToAllGroupAlignment = 512U;
 constexpr size_t kAllToAllGroupControlBytes = 4096U;
 constexpr size_t kAllToAllGroupMaxRegisteredBytes = 1ULL << 30;
@@ -41,6 +45,35 @@ struct AllToAllGroupPlan {
     size_t registeredBytes = 0;
 };
 
+enum class AllToAllGroupChannelMode : uint32_t {
+    kAuto = 0U,
+    kSingle = 1U,
+    kMulti = 2U,
+};
+
+inline bool AllToAllGroupValidChannelMode(uint32_t mode)
+{
+    return mode <= static_cast<uint32_t>(AllToAllGroupChannelMode::kMulti);
+}
+
+inline bool AllToAllGroupUseMultiChannel(
+    size_t perRankBytes, AllToAllGroupChannelMode mode)
+{
+    if (mode == AllToAllGroupChannelMode::kSingle) {
+        return false;
+    }
+    if (mode == AllToAllGroupChannelMode::kMulti) {
+        return true;
+    }
+    return perRankBytes > kAllToAllGroupMultiChannelThresholdBytes;
+}
+
+inline size_t AllToAllGroupSignalByteOffset(uint32_t sourceRank, uint32_t route)
+{
+    return static_cast<size_t>(sourceRank) * kAllToAllGroupSignalSlotBytes +
+        static_cast<size_t>(route) * kAllToAllGroupRouteSignalStride;
+}
+
 inline bool AllToAllGroupValidRankSize(int rankSize)
 {
     return rankSize >= kAllToAllGroupMinRankSize &&
@@ -52,10 +85,14 @@ inline bool AllToAllGroupValidCopyoutWorkers(uint32_t workers)
     return workers == 8U || workers == 16U || workers == 32U || workers == 48U;
 }
 
-inline uint32_t AllToAllGroupBlockDim(uint32_t workers)
+inline uint32_t AllToAllGroupBlockDim(uint32_t sendWorkers, uint32_t copyoutWorkers)
 {
-    return AllToAllGroupValidCopyoutWorkers(workers) ?
-        kAllToAllGroupSendCoreCount + workers : 0U;
+    if (sendWorkers != kAllToAllGroupSendWorkerCount ||
+        !AllToAllGroupValidCopyoutWorkers(copyoutWorkers) ||
+        sendWorkers + copyoutWorkers > kAllToAllGroupBlockDim) {
+        return 0U;
+    }
+    return sendWorkers + copyoutWorkers;
 }
 
 inline int32_t AllToAllGroupCopyoutLane(

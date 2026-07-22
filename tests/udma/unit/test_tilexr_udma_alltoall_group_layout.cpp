@@ -115,7 +115,11 @@ void TestPlan()
     CHECK_EQ(plan.payloadPlaneBytes, 128ULL * 1024ULL * 1024ULL);
     CHECK_EQ(plan.payloadOffset[0], 0ULL);
     CHECK_EQ(plan.payloadOffset[1] >= plan.payloadOffset[0] + plan.payloadPlaneBytes, true);
-    CHECK_EQ(plan.signalPlaneBytes, static_cast<size_t>(rankSize) * 128ULL);
+    CHECK_EQ(TileXR::Demo::kAllToAllGroupRouteSignalStride, 512U);
+    CHECK_EQ(TileXR::Demo::kAllToAllGroupSignalSlotBytes, 1024U);
+    CHECK_EQ(plan.signalPlaneBytes, static_cast<size_t>(rankSize) * 1024ULL);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupSignalByteOffset(3U, 0U), 3072ULL);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupSignalByteOffset(3U, 1U), 3584ULL);
     CHECK_EQ(plan.signalOffset[0] >= plan.payloadOffset[1] + plan.payloadPlaneBytes, true);
     CHECK_EQ(plan.signalOffset[1] >= plan.signalOffset[0] + plan.signalPlaneBytes, true);
     CHECK_EQ(plan.controlOffset >= plan.signalOffset[1] + plan.signalPlaneBytes, true);
@@ -136,6 +140,26 @@ void TestPlan()
     constexpr int32_t thirtyTwoMiBElements = 8 * 1024 * 1024;
     CHECK_EQ(TileXR::Demo::PlanAllToAllGroup(
         rankSize, thirtyTwoMiBElements, thirtyTwoMiBElements).valid, false);
+}
+
+void TestChannelPolicy()
+{
+    using TileXR::Demo::AllToAllGroupChannelMode;
+    constexpr size_t threshold = 150ULL * 1024ULL * 1024ULL;
+    CHECK_EQ(TileXR::Demo::AllToAllGroupValidChannelMode(0U), true);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupValidChannelMode(1U), true);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupValidChannelMode(2U), true);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupValidChannelMode(3U), false);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupUseMultiChannel(
+        threshold, AllToAllGroupChannelMode::kAuto), false);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupUseMultiChannel(
+        threshold + sizeof(int32_t), AllToAllGroupChannelMode::kAuto), true);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupUseMultiChannel(
+        threshold * 2U, AllToAllGroupChannelMode::kSingle), false);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupUseMultiChannel(
+        sizeof(int32_t), AllToAllGroupChannelMode::kMulti), true);
+
+    CHECK_EQ(TileXR::Demo::kAllToAllGroupSendWorkerCount, 32U);
 }
 
 void TestScalePlanAndTraceCapacity()
@@ -174,37 +198,10 @@ void TestTokens()
 void TestDualRoutePeerPolicy()
 {
     using TileXR::Demo::AllToAllGroupIsCrossNode;
-    using TileXR::Demo::AllToAllGroupUseSecondaryRoute;
     CHECK_EQ(AllToAllGroupIsCrossNode(0, 7), false);
     CHECK_EQ(AllToAllGroupIsCrossNode(0, 8), true);
     CHECK_EQ(AllToAllGroupIsCrossNode(15, 8), false);
     CHECK_EQ(AllToAllGroupIsCrossNode(15, 0), true);
-
-    for (int sourceNode = 0; sourceNode < 3; ++sourceNode) {
-        for (int targetNode = 0; targetNode < 3; ++targetNode) {
-            if (sourceNode == targetNode) {
-                continue;
-            }
-            int rowSecondary[8] = {};
-            int columnSecondary[8] = {};
-            for (int sourceLocal = 0; sourceLocal < 8; ++sourceLocal) {
-                for (int targetLocal = 0; targetLocal < 8; ++targetLocal) {
-                    const int source = sourceNode * 8 + sourceLocal;
-                    const int target = targetNode * 8 + targetLocal;
-                    if (AllToAllGroupUseSecondaryRoute(source, target)) {
-                        ++rowSecondary[sourceLocal];
-                        ++columnSecondary[targetLocal];
-                    }
-                }
-            }
-            for (int local = 0; local < 8; ++local) {
-                CHECK_EQ(rowSecondary[local], 2);
-                CHECK_EQ(columnSecondary[local], 2);
-            }
-        }
-    }
-    CHECK_EQ(AllToAllGroupUseSecondaryRoute(0, 14, false), false);
-    CHECK_EQ(AllToAllGroupUseSecondaryRoute(0, 14, true), true);
 }
 
 void TestDualRouteQpWeights()
@@ -227,6 +224,39 @@ void TestDualRouteQpWeights()
     const auto empty = TileXR::Demo::AllToAllGroupSelectRouteQps(nullptr, 0U);
     CHECK_EQ(empty.primaryQp, 0U);
     CHECK_EQ(empty.secondaryQp, 0U);
+
+    const auto automatic = TileXR::Demo::AllToAllGroupSplitByRoute(
+        10U, 6U, 2U, TileXR::Demo::kAllToAllGroupAutoPrimaryParts);
+    CHECK_EQ(automatic.primaryElements, 7U);
+    CHECK_EQ(automatic.secondaryElements, 3U);
+    const auto tiny = TileXR::Demo::AllToAllGroupSplitByRoute(
+        1U, 6U, 2U, TileXR::Demo::kAllToAllGroupAutoPrimaryParts);
+    CHECK_EQ(tiny.primaryElements, 0U);
+    CHECK_EQ(tiny.secondaryElements, 1U);
+    const auto overrideSplit = TileXR::Demo::AllToAllGroupSplitByRoute(
+        10U, 6U, 2U, 5U);
+    CHECK_EQ(overrideSplit.primaryElements, 6U);
+    CHECK_EQ(overrideSplit.secondaryElements, 4U);
+    const auto noSecondary = TileXR::Demo::AllToAllGroupSplitByRoute(
+        10U, 6U, 0U, 5U);
+    CHECK_EQ(noSecondary.primaryElements, 10U);
+    CHECK_EQ(noSecondary.secondaryElements, 0U);
+
+    const auto firstPrimary = TileXR::Demo::AllToAllGroupRouteSliceForPass(
+        10U, 0U, 5U, automatic.primaryElements, 0U);
+    const auto firstSecondary = TileXR::Demo::AllToAllGroupRouteSliceForPass(
+        10U, 0U, 5U, automatic.primaryElements, 1U);
+    const auto secondPrimary = TileXR::Demo::AllToAllGroupRouteSliceForPass(
+        10U, 5U, 5U, automatic.primaryElements, 0U);
+    const auto secondSecondary = TileXR::Demo::AllToAllGroupRouteSliceForPass(
+        10U, 5U, 5U, automatic.primaryElements, 1U);
+    CHECK_EQ(firstPrimary.elementOffset, 0U);
+    CHECK_EQ(firstPrimary.elements, 5U);
+    CHECK_EQ(firstSecondary.elements, 0U);
+    CHECK_EQ(secondPrimary.elementOffset, 5U);
+    CHECK_EQ(secondPrimary.elements, 2U);
+    CHECK_EQ(secondSecondary.elementOffset, 7U);
+    CHECK_EQ(secondSecondary.elements, 3U);
 }
 
 void TestRouteStages()
@@ -307,8 +337,8 @@ void TestRouteStages()
                     rank, peer, AllToAllGroupRouteStage::kRemoteCopy), true);
                 CHECK_EQ(TileXR::Demo::AllToAllGroupPeerInRouteStage(
                     rank, peer, AllToAllGroupRouteStage::kNoCopy), true);
-                CHECK_EQ(static_cast<int>(inLocal) + static_cast<int>(inPrimary) +
-                    static_cast<int>(inSecondary), 1);
+                CHECK_EQ(static_cast<int>(inLocal) + static_cast<int>(inPrimary), 1);
+                CHECK_EQ(inSecondary, inPrimary);
                 local += inLocal ? 1 : 0;
                 primary += inPrimary ? 1 : 0;
                 secondary += inSecondary ? 1 : 0;
@@ -316,8 +346,8 @@ void TestRouteStages()
                     rank, peer, AllToAllGroupRouteStage::kCombined), true);
             }
             CHECK_EQ(local, 7);
-            CHECK_EQ(primary + secondary, rankSize - 8);
-            CHECK_EQ(secondary, rankSize == 8 ? 0 : 2 * (rankSize / 8 - 1));
+            CHECK_EQ(primary, rankSize - 8);
+            CHECK_EQ(secondary, rankSize - 8);
         }
     }
 }
@@ -331,11 +361,9 @@ void TestCopyoutWorkerPolicy()
     CHECK_EQ(TileXR::Demo::AllToAllGroupValidCopyoutWorkers(48U), true);
     CHECK_EQ(TileXR::Demo::AllToAllGroupValidCopyoutWorkers(4U), false);
     CHECK_EQ(TileXR::Demo::AllToAllGroupValidCopyoutWorkers(12U), false);
-    CHECK_EQ(TileXR::Demo::AllToAllGroupBlockDim(8U), 24U);
-    CHECK_EQ(TileXR::Demo::AllToAllGroupBlockDim(16U), 32U);
-    CHECK_EQ(TileXR::Demo::AllToAllGroupBlockDim(32U), 48U);
-    CHECK_EQ(TileXR::Demo::AllToAllGroupBlockDim(48U), 64U);
-    CHECK_EQ(TileXR::Demo::AllToAllGroupBlockDim(4U), 0U);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupBlockDim(32U, 32U), 64U);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupBlockDim(16U, 48U), 0U);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupBlockDim(32U, 48U), 0U);
 
     std::set<int32_t> lanes;
     for (uint32_t worker = 0U; worker < 8U; ++worker) {
@@ -370,13 +398,14 @@ void TestKernelStructure()
     CHECK_CONTAINS(kernel, "TILEXR_ALLTOALL_GROUP_SEND_CORES");
     CHECK_CONTAINS(kernel, "#include \"tilexr_udma_alltoall_group_route.h\"");
     CHECK_CONTAINS(kernel, "AllToAllGroupSelectRouteQps");
-    CHECK_CONTAINS(kernel,
-        "AllToAllGroupUseSecondaryRouteDevice(rank, peer, useSecondaryRoute)");
+    CHECK_CONTAINS(kernel, "AllToAllGroupSplitByRouteDevice");
+    CHECK_CONTAINS(kernel, "TILEXR_ALLTOALL_GROUP_ROUTE_SIGNAL_STRIDE");
+    CHECK_CONTAINS(kernel, "AllToAllGroupWaitRouteTokensMte");
     CHECK_CONTAINS(kernel, "secondaryQp");
     CHECK_CONTAINS(kernel, "selectedQp");
     CHECK_CONTAINS(kernel, "copyoutWorkers");
-    CHECK_CONTAINS(kernel,
-        "uint32_t copyoutWorkers, uint32_t routeStage, uint32_t useSecondaryRoute");
+    CHECK_CONTAINS(kernel, "constexpr uint32_t copyoutWorkers = 32U");
+    CHECK_CONTAINS(kernel, "uint32_t multiChannel, uint32_t primaryRouteParts");
     CHECK_CONTAINS(kernel, "AllToAllGroupPeerInRouteStageDevice");
     CHECK_CONTAINS(kernel,
         "if (!AllToAllGroupPeerInRouteStageDevice(rank, peer, routeStage))");
@@ -385,9 +414,9 @@ void TestKernelStructure()
     CHECK_CONTAINS(kernel, "AllToAllGroupRemoteAssistDevice");
     CHECK_CONTAINS(kernel, "copySliceCount");
     CHECK_CONTAINS(kernel, "copySliceIndex");
-    CHECK_CONTAINS(kernel, "TILEXR_ALLTOALL_GROUP_SEND_CORES + copyoutWorkers");
+    CHECK_CONTAINS(kernel, "TILEXR_ALLTOALL_GROUP_SEND_WORKERS + copyoutWorkers");
     CHECK_CONTAINS(kernel, "const uint32_t traceCore = copyoutWorkers == 8U");
-    CHECK_CONTAINS(kernel, "TILEXR_ALLTOALL_GROUP_SEND_CORES + lane : blockIdx");
+    CHECK_CONTAINS(kernel, "TILEXR_ALLTOALL_GROUP_SEND_WORKERS + lane : blockIdx");
     CHECK_CONTAINS(kernel, "UDMAPutSignalNbiOnQp<int32_t>");
     CHECK_CONTAINS(kernel, "UDMAQuietStatusOnQp(args, peer, selectedQp)");
     CHECK_CONTAINS(kernel, "AllToAllGroupWaitTokenMte");
@@ -413,11 +442,11 @@ void TestHostStructure()
     CHECK_CONTAINS(demo, "PlanAllToAllGroup");
     CHECK_CONTAINS(demo, "launch_tilexr_udma_all_to_all_group");
     CHECK_CONTAINS(demo, "TILEXR_DEMO_ALLTOALL_GROUP_CHUNK_ELEMENTS");
-    CHECK_CONTAINS(demo, "TILEXR_DEMO_ALLTOALL_GROUP_COPYOUT_WORKERS");
     CHECK_CONTAINS(demo, "TILEXR_DEMO_ALLTOALL_GROUP_ROUTE_STAGES");
     CHECK_CONTAINS(demo, "TILEXR_DEMO_ALLTOALL_GROUP_USE_SECONDARY_ROUTE");
-    CHECK_CONTAINS(demo, "AllToAllGroupValidCopyoutWorkers");
-    CHECK_CONTAINS(demo, "AllToAllGroupBlockDim(copyoutWorkers)");
+    CHECK_CONTAINS(demo, "TILEXR_DEMO_ALLTOALL_GROUP_CHANNEL_MODE");
+    CHECK_CONTAINS(demo, "TILEXR_DEMO_ALLTOALL_GROUP_PRIMARY_ROUTE_PARTS");
+    CHECK_CONTAINS(demo, "kAllToAllGroupSendWorkerCount");
     CHECK_CONTAINS(demo, "grouped alltoall registeredBytes=");
     CHECK_CONTAINS(demo, "grouped alltoall warmup=");
     const size_t begin = demo.find("bool RunGroupedAllToAll(");
@@ -457,6 +486,7 @@ int main()
 {
     TestSchedules();
     TestPlan();
+    TestChannelPolicy();
     TestScalePlanAndTraceCapacity();
     TestTokens();
     TestDualRoutePeerPolicy();

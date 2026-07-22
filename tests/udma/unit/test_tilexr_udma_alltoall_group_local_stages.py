@@ -26,12 +26,13 @@ class GroupedAllToAllLocalStageSourceTest(unittest.TestCase):
         self.assertIn("AllToAllGroupRemoteAssistDevice", kernel)
         self.assertIn("copySliceCount", kernel)
         self.assertIn("copySliceIndex", kernel)
-        self.assertIn("must be 8, 16, 32, or 48", host)
         self.assertIn("TILEXR_DEMO_ALLTOALL_GROUP_USE_SECONDARY_ROUTE", host)
-        self.assertIn(
-            "AllToAllGroupUseSecondaryRouteDevice(rank, peer, useSecondaryRoute)",
-            kernel,
-        )
+        self.assertIn("TILEXR_DEMO_ALLTOALL_GROUP_CHANNEL_MODE", host)
+        self.assertIn("TILEXR_DEMO_ALLTOALL_GROUP_PRIMARY_ROUTE_PARTS", host)
+        self.assertIn("AllToAllGroupWaitRouteTokensMte", kernel)
+        self.assertIn("TILEXR_ALLTOALL_GROUP_ROUTE_SIGNAL_STRIDE", kernel)
+        self.assertIn("AllToAllGroupSplitByRouteDevice", kernel)
+        self.assertIn("AllToAllGroupSplitByRouteDevice", kernel)
         self.assertIn(
             '"local-send", "local-copy", "remote-send", "all-send", '
             '"remote-wait", "remote-copy", "no-copy", "primary", "secondary", '

@@ -60,7 +60,7 @@ extern void launch_tilexr_udma_all_to_all_group(
     uint64_t payloadOffset0, uint64_t payloadOffset1,
     uint64_t signalOffset0, uint64_t signalOffset1,
     GM_ADDR groupTrace, uint32_t traceIteration,
-    uint32_t copyoutWorkers, uint32_t routeStage, uint32_t useSecondaryRoute);
+    uint32_t routeStage, uint32_t multiChannel, uint32_t primaryRouteParts);
 extern void launch_tilexr_udma_all_to_all_bigdata(
     uint32_t blockDim, void* stream, GM_ADDR commArgs, GM_ADDR input, GM_ADDR output,
     GM_ADDR udmaMem, GM_ADDR debug, GM_ADDR fullmeshTrace, uint32_t fullmeshTraceIteration,
@@ -654,17 +654,46 @@ bool RunGroupedAllToAll(
                   << " chunkElements=" << requestedChunkElements << std::endl;
         return false;
     }
-    const int copyoutWorkersValue = GetEnvInt(
-        "TILEXR_DEMO_ALLTOALL_GROUP_COPYOUT_WORKERS", 16);
-    if (copyoutWorkersValue < 0 || !TileXR::Demo::AllToAllGroupValidCopyoutWorkers(
-            static_cast<uint32_t>(copyoutWorkersValue))) {
+    const int channelModeValue = GetEnvInt(
+        "TILEXR_DEMO_ALLTOALL_GROUP_CHANNEL_MODE", 0);
+    if (channelModeValue < 0 || !TileXR::Demo::AllToAllGroupValidChannelMode(
+            static_cast<uint32_t>(channelModeValue))) {
         std::cerr << "[rank " << rank
-                  << "] ERROR: TILEXR_DEMO_ALLTOALL_GROUP_COPYOUT_WORKERS must be 8, 16, 32, or 48, got "
-                  << copyoutWorkersValue << std::endl;
+                  << "] ERROR: TILEXR_DEMO_ALLTOALL_GROUP_CHANNEL_MODE"
+                  << " must be 0 (auto), 1 (single), or 2 (multi), got "
+                  << channelModeValue << std::endl;
         return false;
     }
-    const uint32_t copyoutWorkers = static_cast<uint32_t>(copyoutWorkersValue);
-    const uint32_t groupBlockDim = TileXR::Demo::AllToAllGroupBlockDim(copyoutWorkers);
+    const int useSecondaryRouteValue = GetEnvInt(
+        "TILEXR_DEMO_ALLTOALL_GROUP_USE_SECONDARY_ROUTE", 1);
+    if (useSecondaryRouteValue != 0 && useSecondaryRouteValue != 1) {
+        std::cerr << "[rank " << rank
+                  << "] ERROR: TILEXR_DEMO_ALLTOALL_GROUP_USE_SECONDARY_ROUTE"
+                  << " must be 0 or 1, got " << useSecondaryRouteValue << std::endl;
+        return false;
+    }
+    const auto channelMode = static_cast<TileXR::Demo::AllToAllGroupChannelMode>(
+        channelModeValue);
+    const bool multiChannel = useSecondaryRouteValue != 0 &&
+        TileXR::Demo::AllToAllGroupUseMultiChannel(plan.payloadPlaneBytes, channelMode);
+
+    const int primaryRoutePartsValue = GetEnvInt(
+        "TILEXR_DEMO_ALLTOALL_GROUP_PRIMARY_ROUTE_PARTS", -1);
+    if (primaryRoutePartsValue < -1 || primaryRoutePartsValue > 8) {
+        std::cerr << "[rank " << rank
+                  << "] ERROR: TILEXR_DEMO_ALLTOALL_GROUP_PRIMARY_ROUTE_PARTS"
+                  << " must be -1 (auto) or 0..8, got "
+                  << primaryRoutePartsValue << std::endl;
+        return false;
+    }
+    const uint32_t primaryRouteParts = primaryRoutePartsValue < 0 ?
+        TileXR::Demo::kAllToAllGroupAutoPrimaryParts :
+        static_cast<uint32_t>(primaryRoutePartsValue);
+
+    constexpr uint32_t sendWorkers = TileXR::Demo::kAllToAllGroupSendWorkerCount;
+    constexpr uint32_t copyoutWorkers = 32U;
+    const uint32_t groupBlockDim = TileXR::Demo::AllToAllGroupBlockDim(
+        sendWorkers, copyoutWorkers);
     const int routeStagesValue = GetEnvInt(
         "TILEXR_DEMO_ALLTOALL_GROUP_ROUTE_STAGES", 0);
     if (routeStagesValue != 0 && routeStagesValue != 1) {
@@ -674,15 +703,6 @@ bool RunGroupedAllToAll(
         return false;
     }
     const bool routeStages = routeStagesValue == 1;
-    const int useSecondaryRouteValue = GetEnvInt(
-        "TILEXR_DEMO_ALLTOALL_GROUP_USE_SECONDARY_ROUTE", 1);
-    if (useSecondaryRouteValue != 0 && useSecondaryRouteValue != 1) {
-        std::cerr << "[rank " << rank
-                  << "] ERROR: TILEXR_DEMO_ALLTOALL_GROUP_USE_SECONDARY_ROUTE"
-                  << " must be 0 or 1, got " << useSecondaryRouteValue << std::endl;
-        return false;
-    }
-    const uint32_t useSecondaryRoute = static_cast<uint32_t>(useSecondaryRouteValue);
     constexpr size_t kRouteStageCount = 10U;
     const std::array<TileXR::Demo::AllToAllGroupRouteStage, kRouteStageCount>
         stagedRouteStages {{
@@ -845,9 +865,13 @@ bool RunGroupedAllToAll(
         " passes=" + std::to_string(plan.passCount));
     PrintStatus(rank, "grouped alltoall warmup=" + std::to_string(warmup) +
         " repeat=" + std::to_string(repeat) +
+        " channelMode=" + std::to_string(channelModeValue) +
+        " multiChannel=" + std::to_string(multiChannel ? 1 : 0) +
+        " primaryRouteParts=" + std::to_string(primaryRoutePartsValue) +
+        " sendWorkers=" + std::to_string(sendWorkers) +
         " copyoutWorkers=" + std::to_string(copyoutWorkers) +
         " blockDim=" + std::to_string(groupBlockDim) +
-        " useSecondaryRoute=" + std::to_string(useSecondaryRoute) +
+        " useSecondaryRoute=" + std::to_string(useSecondaryRouteValue) +
         " routeStages=" + std::to_string(routeStagesValue));
 
     if (routeStages &&
@@ -867,8 +891,9 @@ bool RunGroupedAllToAll(
             plan.passCount, plan.groupCount,
             plan.payloadOffset[0], plan.payloadOffset[1],
             plan.signalOffset[0], plan.signalOffset[1],
-            reinterpret_cast<GM_ADDR>(trace), traceIteration, copyoutWorkers,
-            static_cast<uint32_t>(routeStage), useSecondaryRoute);
+            reinterpret_cast<GM_ADDR>(trace), traceIteration,
+            static_cast<uint32_t>(routeStage),
+            multiChannel ? 1U : 0U, primaryRouteParts);
     };
 
     double totalUs = 0.0;
