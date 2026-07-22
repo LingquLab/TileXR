@@ -11,6 +11,8 @@ set(CMAKE_CXX_STANDARD 14)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 option(BUILD_TILEXR_UDMA_DEMO "Build TileXR UDMA communication demo with Ascend C kernel" ON)
 set(TILEXR_UDMA_DEMO_SOC_TYPE "Ascend950" CACHE STRING "SOC type used for the TileXR UDMA demo kernel")
+set_property(CACHE TILEXR_UDMA_DEMO_SOC_TYPE PROPERTY STRINGS
+    Ascend950 Ascend950PR Ascend950DT Ascend910B)
 
 # 获取环境变量
 set(ASCEND_HOME_PATH $ENV{ASCEND_HOME_PATH})
@@ -168,14 +170,17 @@ if(BUILD_TILEXR_UDMA_DEMO)
     if(NOT BISHENG_EXECUTABLE)
         message(WARNING "bisheng not found; skip tilexr_udma_demo")
     else()
-        if(TILEXR_UDMA_DEMO_SOC_TYPE STREQUAL "Ascend950")
+        if(TILEXR_UDMA_DEMO_SOC_TYPE MATCHES "^Ascend950(PR|DT)?$")
             set(TILEXR_UDMA_NPU_ARCH "dav-3510")
             set(TILEXR_UDMA_AICORE_ARCH "--cce-aicore-arch=dav-c310-vec")
             set(TILEXR_UDMA_CATLASS_ARCH "3510")
-        else()
+        elseif(TILEXR_UDMA_DEMO_SOC_TYPE STREQUAL "Ascend910B")
             set(TILEXR_UDMA_NPU_ARCH "dav-2201")
             set(TILEXR_UDMA_AICORE_ARCH "--cce-aicore-arch=dav-c220-vec")
             set(TILEXR_UDMA_CATLASS_ARCH "2201")
+        else()
+            message(FATAL_ERROR
+                "Unsupported TILEXR_UDMA_DEMO_SOC_TYPE: ${TILEXR_UDMA_DEMO_SOC_TYPE}")
         endif()
 
         execute_process(
