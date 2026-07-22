@@ -543,13 +543,18 @@ int TileXRComm::Init()
         return TILEXR_ERROR_INTERNAL;
     }
 
-    TILEXR_LOG(DEBUG) << "Prepare to InitCommMem localRankSize_ -> " << localRankSize_ << ", localRank_ -> " << localRank_;
-    if (InitCommMem() != TILEXR_SUCCESS) {
-        TILEXR_LOG(ERROR) << "InitCommMem failed!";
-        return TILEXR_ERROR_INTERNAL;
+    if (IsEnvEnabled("TILEXR_ENABLE_IPC", true)) {
+        TILEXR_LOG(DEBUG) << "Prepare to InitCommMem localRankSize_ -> " << localRankSize_
+                          << ", localRank_ -> " << localRank_;
+        if (InitCommMem() != TILEXR_SUCCESS) {
+            TILEXR_LOG(ERROR) << "InitCommMem failed!";
+            return TILEXR_ERROR_INTERNAL;
+        }
+        TILEXR_LOG(DEBUG) << "InitCommMem " << rank_ << "/" << rankSize_ << ", localRank_ : " << localRank_
+                          << ", localRankSize_ : " << localRankSize_ << " success";
+    } else {
+        TILEXR_LOG(INFO) << "TileXR IPC memory disabled by environment";
     }
-    TILEXR_LOG(DEBUG) << "InitCommMem " << rank_ << "/" << rankSize_ << ", localRank_ : " << localRank_ <<
-            ", localRankSize_ : " << localRankSize_ << " success";
 
     // 新增：初始化 UDMA
     ret = InitUDMA();

@@ -35,6 +35,9 @@ int main()
     CHECK_CONTAINS(comm, "TILEXR_ENABLE_UDMA");
     CHECK_CONTAINS(comm, "TileXR UDMA disabled by environment");
     CHECK_CONTAINS(comm, "IsEnvEnabled(\"TILEXR_ENABLE_UDMA\", true)");
+    CHECK_CONTAINS(comm, "TILEXR_ENABLE_IPC");
+    CHECK_CONTAINS(comm, "TileXR IPC memory disabled by environment");
+    CHECK_CONTAINS(comm, "IsEnvEnabled(\"TILEXR_ENABLE_IPC\", true)");
     if (g_failures != 0) {
         std::cerr << g_failures << " UDMA env source checks failed" << std::endl;
         return 1;
