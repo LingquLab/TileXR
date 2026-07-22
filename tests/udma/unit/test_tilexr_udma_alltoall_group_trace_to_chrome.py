@@ -32,11 +32,8 @@ class GroupTraceConverterTest(unittest.TestCase):
         self, path, *, rank=0, magic=None, iteration_count=1,
         group_count=1, pass_count=1, core_count=64,
     ):
-        data = bytearray(MODULE.TRACE_BYTES)
-        struct.pack_into(
+        header = struct.pack(
             MODULE.HEADER_FORMAT,
-            data,
-            0,
             MODULE.TRACE_MAGIC if magic is None else magic,
             MODULE.TRACE_VERSION,
             rank,
@@ -50,10 +47,6 @@ class GroupTraceConverterTest(unittest.TestCase):
             MODULE.HEADER_BYTES,
             MODULE.TASK_BASE_OFFSET,
         )
-        for core in (0, 16):
-            struct.pack_into(
-                "<QQ", data, MODULE.kernel_span_offset(0, core), 1000, 3000)
-
         spans = (
             (16, 0, 0, 0, 1100, 1200, rank, MODULE.NO_QP),
             (0, 0, 0, 1, 1200, 1300, 1, 3),
@@ -61,18 +54,35 @@ class GroupTraceConverterTest(unittest.TestCase):
             (16, 0, 0, 3, 1400, 1500, 1, MODULE.NO_QP),
             (16, 0, 0, 4, 1500, 1600, 1, MODULE.NO_QP),
         )
-        for core, group, pass_index, phase, begin, end, peer, qp in spans:
-            struct.pack_into(
-                MODULE.TASK_FORMAT,
-                data,
-                MODULE.task_span_offset(
-                    0, core, group, pass_index, phase, group_count, pass_count),
-                begin,
-                end,
-                peer,
-                qp,
-            )
-        path.write_bytes(data)
+        with path.open("wb") as stream:
+            stream.truncate(MODULE.TRACE_BYTES)
+            stream.seek(0)
+            stream.write(header)
+            for core in (0, 16):
+                stream.seek(MODULE.kernel_span_offset(0, core))
+                stream.write(struct.pack("<QQ", 1000, 3000))
+            for core, group, pass_index, phase, begin, end, peer, qp in spans:
+                stream.seek(MODULE.task_span_offset(
+                    0, core, group, pass_index, phase, group_count, pass_count))
+                stream.write(struct.pack(
+                    MODULE.TASK_FORMAT, begin, end, peer, qp))
+
+    def write_at(self, path, offset, payload):
+        with path.open("r+b") as stream:
+            stream.seek(offset)
+            stream.write(payload)
+
+    def test_uses_128mib_files_and_reads_only_populated_layout(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "trace.bin"
+            self.make_trace(path)
+
+            rank_trace = MODULE.read_rank_trace(path)
+
+            self.assertEqual(MODULE.TRACE_BYTES, 128 * 1024 * 1024)
+            self.assertEqual(path.stat().st_size, MODULE.TRACE_BYTES)
+            self.assertEqual(
+                len(rank_trace["data"]), MODULE.layout_bytes(1, 1, 1))
 
     def test_converts_all_grouped_pipeline_phases(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -112,13 +122,14 @@ class GroupTraceConverterTest(unittest.TestCase):
             second = Path(directory) / "rank1.bin"
             self.make_trace(first, rank=0)
             self.make_trace(second, rank=1)
-            second_data = bytearray(second.read_bytes())
             for core in (0, 16):
-                struct.pack_into(
-                    "<QQ", second_data, MODULE.kernel_span_offset(0, core), 5000, 7000)
+                self.write_at(
+                    second, MODULE.kernel_span_offset(0, core),
+                    struct.pack("<QQ", 5000, 7000))
             offset = MODULE.task_span_offset(0, 0, 0, 0, 1, 1, 1)
-            struct.pack_into(MODULE.TASK_FORMAT, second_data, offset, 5200, 5300, 2, 3)
-            second.write_bytes(second_data)
+            self.write_at(
+                second, offset,
+                struct.pack(MODULE.TASK_FORMAT, 5200, 5300, 2, 3))
 
             trace = MODULE.build_chrome_trace([
                 MODULE.read_rank_trace(first), MODULE.read_rank_trace(second)])
@@ -151,10 +162,10 @@ class GroupTraceConverterTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "trace.bin"
             self.make_trace(path)
-            data = bytearray(path.read_bytes())
             offset = MODULE.task_span_offset(0, 0, 0, 0, 1, 1, 1)
-            struct.pack_into(MODULE.TASK_FORMAT, data, offset, 0, 1300, 1, 3)
-            path.write_bytes(data)
+            self.write_at(
+                path, offset,
+                struct.pack(MODULE.TASK_FORMAT, 0, 1300, 1, 3))
             with self.assertRaisesRegex(ValueError, "incomplete"):
                 MODULE.build_chrome_trace([MODULE.read_rank_trace(path)])
 

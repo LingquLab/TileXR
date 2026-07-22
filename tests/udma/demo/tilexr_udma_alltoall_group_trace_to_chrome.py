@@ -7,7 +7,7 @@ from pathlib import Path
 
 TRACE_MAGIC = 0x47545243
 TRACE_VERSION = 1
-TRACE_BYTES = 8 * 1024 * 1024
+TRACE_BYTES = 128 * 1024 * 1024
 HEADER_BYTES = 4096
 MAX_ITERATIONS = 50
 MAX_CORES = 64
@@ -76,10 +76,12 @@ def _read_task(data, offset, label):
 
 def read_rank_trace(path):
     path = Path(path)
-    data = path.read_bytes()
-    if len(data) != TRACE_BYTES:
-        raise ValueError(f"invalid trace size {len(data)} in {path}, expected {TRACE_BYTES}")
-    fields = struct.unpack_from(HEADER_FORMAT, data, 0)
+    file_size = path.stat().st_size
+    if file_size != TRACE_BYTES:
+        raise ValueError(f"invalid trace size {file_size} in {path}, expected {TRACE_BYTES}")
+    with path.open("rb") as stream:
+        header_data = stream.read(struct.calcsize(HEADER_FORMAT))
+    fields = struct.unpack_from(HEADER_FORMAT, header_data, 0)
     header = {
         "magic": fields[0],
         "version": fields[1],
@@ -115,6 +117,10 @@ def read_rank_trace(path):
         header["iteration_count"], header["group_count"], header["pass_count"])
     if required > TRACE_BYTES:
         raise ValueError(f"trace capacity exceeded in {path}: required={required}")
+    with path.open("rb") as stream:
+        data = stream.read(required)
+    if len(data) != required:
+        raise ValueError(f"short trace read in {path}: read={len(data)} required={required}")
     return {"path": str(path), "header": header, "data": data}
 
 
