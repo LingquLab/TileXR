@@ -49,7 +49,20 @@ void TestRemoteAddressCalculation()
 
 void TestRankScaleLimit()
 {
-    CHECK_EQ(TileXR::TILEXR_MAX_RANK_SIZE, 256);
+    CHECK_EQ(TileXR::TILEXR_MAX_RANK_SIZE, 1024);
+
+    TileXR::TileXRUDMARegistry registry = {};
+    registry.magic = TileXR::TILEXR_UDMA_REGISTRY_MAGIC;
+    registry.version = TileXR::TILEXR_UDMA_REGISTRY_VERSION;
+    registry.regionCount = 1;
+    registry.rankSize = 1024;
+    registry.regions[TileXR::TILEXR_MAX_RANK_SIZE - 1].base =
+        reinterpret_cast<GM_ADDR>(0x300000);
+    registry.regions[TileXR::TILEXR_MAX_RANK_SIZE - 1].bytes = 4096;
+
+    CHECK_TRUE(TileXR::UDMARegistryValid(&registry, 1024));
+    CHECK_TRUE(TileXR::UDMARegionContains(&registry, 1023, 2048, 2048));
+    CHECK_TRUE(!TileXR::UDMARegionContains(&registry, 1024, 0, 1));
 }
 
 } // namespace
