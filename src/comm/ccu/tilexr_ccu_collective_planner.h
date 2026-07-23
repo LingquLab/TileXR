@@ -151,6 +151,7 @@ private:
     struct DirectCcuRemoteRouteMemoryOverride {
         uint32_t syncRouteIndex = 0;
         bool allRoutes = false;
+        bool applyMemory = false;
         TileXRCcuRemoteCcuBufferInfo buffer;
     };
     std::vector<DirectCcuRemoteRouteMemoryOverride> directCcuRemoteRouteMemoryOverrides_;

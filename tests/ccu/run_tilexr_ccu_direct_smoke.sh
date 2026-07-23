@@ -37,6 +37,7 @@ endpoint_fields=(
 )
 
 resource_window_token_fields=(
+    EID
     EID_INDEX
     TOKEN_ID
     RAW_TOKEN_ID
@@ -188,11 +189,17 @@ apply_sync_xn_ping_defaults()
     export TILEXR_CCU_PROBE_MISSION_INSTRUCTION_START="${TILEXR_CCU_PROBE_MISSION_INSTRUCTION_START:-489}"
     export TILEXR_CCU_PROBE_SQE_ARG_COUNT="${TILEXR_CCU_PROBE_SQE_ARG_COUNT:-0}"
     export TILEXR_CCU_PROBE_SYNC_RESOURCE_COUNT="${TILEXR_CCU_PROBE_SYNC_RESOURCE_COUNT:-1}"
-    export TILEXR_CCU_PROBE_SYNC_INSTRUCTION_COUNT="${TILEXR_CCU_PROBE_SYNC_INSTRUCTION_COUNT:-3}"
+    export TILEXR_CCU_PROBE_SYNC_INSTRUCTION_COUNT="${TILEXR_CCU_PROBE_SYNC_INSTRUCTION_COUNT:-2}"
     export TILEXR_CCU_DIRECT_REPOSITORY_INSTALL_WINDOW="${TILEXR_CCU_DIRECT_REPOSITORY_INSTALL_WINDOW:-full_repository}"
     export TILEXR_CCU_DIRECT_REPOSITORY_DATA_LEN_MODE="${TILEXR_CCU_DIRECT_REPOSITORY_DATA_LEN_MODE:-instruction_bytes}"
     export TILEXR_CCU_DIRECT_REPOSITORY_MEMORY_ALLOC_MODE="${TILEXR_CCU_DIRECT_REPOSITORY_MEMORY_ALLOC_MODE:-acl}"
     export TILEXR_CCU_DIRECT_RESOURCE_WINDOW_REGISTRATION_MODE="${TILEXR_CCU_DIRECT_RESOURCE_WINDOW_REGISTRATION_MODE:-ra_ctx}"
+    export TILEXR_CCU_DIRECT_LOWER_LAYER_PFE_OFFSET_SOURCE="${TILEXR_CCU_DIRECT_LOWER_LAYER_PFE_OFFSET_SOURCE:-hcomm_die}"
+    export TILEXR_CCU_DIRECT_LOWER_LAYER_PFE_PARTITION="${TILEXR_CCU_DIRECT_LOWER_LAYER_PFE_PARTITION:-hcomm}"
+    export TILEXR_CCU_PROBE_XN_START="${TILEXR_CCU_PROBE_XN_START:-1961}"
+    export TILEXR_CCU_PROBE_REMOTE_XN_START="${TILEXR_CCU_PROBE_REMOTE_XN_START:-2361}"
+    export TILEXR_CCU_PROBE_LOCAL_WAIT_CKE_START="${TILEXR_CCU_PROBE_LOCAL_WAIT_CKE_START:-332}"
+    export TILEXR_CCU_PROBE_REMOTE_NOTIFY_CKE_START="${TILEXR_CCU_PROBE_REMOTE_NOTIFY_CKE_START:-364}"
     export TILEXR_CCU_PROBE_RANK0_XN_START="${TILEXR_CCU_PROBE_RANK0_XN_START:-1961}"
     export TILEXR_CCU_PROBE_RANK1_XN_START="${TILEXR_CCU_PROBE_RANK1_XN_START:-1961}"
     export TILEXR_CCU_PROBE_RANK0_REMOTE_XN_START="${TILEXR_CCU_PROBE_RANK0_REMOTE_XN_START:-2361}"
@@ -216,18 +223,28 @@ apply_alltoall_defaults()
     fi
 
     export TILEXR_CCU_DIRECT_SMOKE_DIRECT_CCU_ONLY_INIT="${TILEXR_CCU_DIRECT_SMOKE_DIRECT_CCU_ONLY_INIT:-1}"
-    export TILEXR_CCU_ALLTOALL_BYTES="${TILEXR_CCU_ALLTOALL_BYTES:-2097152}"
+    if alltoall_mesh_mode_enabled; then
+        export TILEXR_CCU_ALLTOALL_BYTES="${TILEXR_CCU_ALLTOALL_BYTES:-131072}"
+    else
+        export TILEXR_CCU_ALLTOALL_BYTES="${TILEXR_CCU_ALLTOALL_BYTES:-2097152}"
+    fi
     export TILEXR_CCU_ALLTOALL_MEM_SLICE_PER_LOOP="${TILEXR_CCU_ALLTOALL_MEM_SLICE_PER_LOOP:-8}"
     export TILEXR_CCU_ALLTOALL_LOOP_COUNT="${TILEXR_CCU_ALLTOALL_LOOP_COUNT:-1}"
     export TILEXR_CCU_PROBE_MISSION_START="${TILEXR_CCU_PROBE_MISSION_START:-6}"
     export TILEXR_CCU_PROBE_INSTRUCTION_START="${TILEXR_CCU_PROBE_INSTRUCTION_START:-475}"
     export TILEXR_CCU_PROBE_MISSION_INSTRUCTION_START="${TILEXR_CCU_PROBE_MISSION_INSTRUCTION_START:-489}"
     if alltoall_mesh_mode_enabled; then
+        export TILEXR_CCU_DIRECT_LOWER_LAYER_PFE_OFFSET_SOURCE="${TILEXR_CCU_DIRECT_LOWER_LAYER_PFE_OFFSET_SOURCE:-hcomm_die}"
+        export TILEXR_CCU_DIRECT_LOWER_LAYER_PFE_PARTITION="${TILEXR_CCU_DIRECT_LOWER_LAYER_PFE_PARTITION:-hcomm}"
         export TILEXR_CCU_PROBE_SQE_ARG_COUNT="${TILEXR_CCU_PROBE_SQE_ARG_COUNT:-0}"
-        export TILEXR_CCU_PROBE_SYNC_RESOURCE_COUNT="${TILEXR_CCU_PROBE_SYNC_RESOURCE_COUNT:-9}"
-        export TILEXR_CCU_PROBE_SYNC_INSTRUCTION_COUNT="${TILEXR_CCU_PROBE_SYNC_INSTRUCTION_COUNT:-1823}"
+        export TILEXR_CCU_PROBE_SYNC_RESOURCE_COUNT="${TILEXR_CCU_PROBE_SYNC_RESOURCE_COUNT:-3}"
+        export TILEXR_CCU_PROBE_SYNC_INSTRUCTION_COUNT="${TILEXR_CCU_PROBE_SYNC_INSTRUCTION_COUNT:-131}"
+        export TILEXR_CCU_PROBE_XN_START="${TILEXR_CCU_PROBE_XN_START:-1961}"
+        export TILEXR_CCU_PROBE_REMOTE_XN_START="${TILEXR_CCU_PROBE_REMOTE_XN_START:-2361}"
         export TILEXR_CCU_PROBE_REMOTE_XN_COUNT="${TILEXR_CCU_PROBE_REMOTE_XN_COUNT:-16}"
+        export TILEXR_CCU_PROBE_LOCAL_WAIT_CKE_START="${TILEXR_CCU_PROBE_LOCAL_WAIT_CKE_START:-332}"
         export TILEXR_CCU_PROBE_LOCAL_WAIT_CKE_COUNT="${TILEXR_CCU_PROBE_LOCAL_WAIT_CKE_COUNT:-16}"
+        export TILEXR_CCU_PROBE_REMOTE_NOTIFY_CKE_START="${TILEXR_CCU_PROBE_REMOTE_NOTIFY_CKE_START:-364}"
         export TILEXR_CCU_PROBE_REMOTE_NOTIFY_CKE_COUNT="${TILEXR_CCU_PROBE_REMOTE_NOTIFY_CKE_COUNT:-16}"
         export TILEXR_CCU_DIRECT_RESOURCE_WINDOW_EID_INDEX="${TILEXR_CCU_DIRECT_RESOURCE_WINDOW_EID_INDEX:-3}"
     elif [ "${TILEXR_CCU_DIRECT_SMOKE_ALLTOALL_LONG_MISSION:-0}" = "1" ]; then
@@ -409,22 +426,24 @@ cann_lib_dir="${cann_root}/lib64"
 driver_lib_dir="${ASCEND_DRIVER_PATH}/lib64/driver"
 probe_bin="${work_dir}/ccu_tilexr_direct_smoke_probe"
 
-c++ -std=c++14 \
-    -DTILEXR_CCU_TESTING=1 \
-    -I "${repo_root}/src/include" \
-    -I "${repo_root}/src/comm" \
-    -I "${cann_root}/pkg_inc" \
-    -I "${cann_root}/pkg_inc/runtime" \
-    -I "${cann_root}/include" \
-    "${repo_root}/tests/ccu/ccu_tilexr_direct_smoke_probe.cpp" \
-    -L "${tile_comm_dir}" \
-    -L "${cann_lib_dir}" \
-    -L "${driver_lib_dir}" \
-    -Wl,-rpath-link,"${tile_comm_dir}" \
-    -Wl,-rpath-link,"${cann_lib_dir}" \
-    -Wl,-rpath-link,"${driver_lib_dir}" \
-    -ltile-comm -lascendcl -lruntime -ldl -pthread \
-    -o "${probe_bin}"
+if [ "${TILEXR_CCU_SMOKE_REUSE_PROBE:-0}" != "1" ] || [ ! -x "${probe_bin}" ]; then
+    c++ -std=c++14 \
+        -DTILEXR_CCU_TESTING=1 \
+        -I "${repo_root}/src/include" \
+        -I "${repo_root}/src/comm" \
+        -I "${cann_root}/pkg_inc" \
+        -I "${cann_root}/pkg_inc/runtime" \
+        -I "${cann_root}/include" \
+        "${repo_root}/tests/ccu/ccu_tilexr_direct_smoke_probe.cpp" \
+        -L "${tile_comm_dir}" \
+        -L "${cann_lib_dir}" \
+        -L "${driver_lib_dir}" \
+        -Wl,-rpath-link,"${tile_comm_dir}" \
+        -Wl,-rpath-link,"${cann_lib_dir}" \
+        -Wl,-rpath-link,"${driver_lib_dir}" \
+        -ltile-comm -lascendcl -lruntime -ldl -pthread \
+        -o "${probe_bin}"
+fi
 
 if command -v npu-smi >/dev/null 2>&1; then
     npu_smi_rc=0
@@ -581,6 +600,9 @@ if [ "${TILEXR_CCU_DIRECT_SMOKE_ALLTOALL_MESH:-}" != "" ]; then
 fi
 if [ "${TILEXR_CCU_DIRECT_SMOKE_SYNC_XN_PING:-}" != "" ]; then
     common_env+=("TILEXR_CCU_DIRECT_SMOKE_SYNC_XN_PING=${TILEXR_CCU_DIRECT_SMOKE_SYNC_XN_PING}")
+fi
+if [ "${TILEXR_CCU_DIRECT_SMOKE_SYNC_XN_PING_PEER_XOR:-}" != "" ]; then
+    common_env+=("TILEXR_CCU_DIRECT_SMOKE_SYNC_XN_PING_PEER_XOR=${TILEXR_CCU_DIRECT_SMOKE_SYNC_XN_PING_PEER_XOR}")
 fi
 if [ "${TILEXR_CCU_DIRECT_SMOKE_ALLTOALL_LONG_MISSION:-}" != "" ]; then
     common_env+=("TILEXR_CCU_DIRECT_SMOKE_ALLTOALL_LONG_MISSION=${TILEXR_CCU_DIRECT_SMOKE_ALLTOALL_LONG_MISSION}")
@@ -930,16 +952,10 @@ fi
 if alltoall_mode_enabled; then
     loop_count="$(parse_int "${TILEXR_CCU_ALLTOALL_LOOP_COUNT:-1}" 1)"
     expected_results=$((rank_size * loop_count))
-    expected_marker_matches=$((rank_size * (rank_size - 1) * loop_count))
     actual_results="$(grep -h -c "tilexr_ccu_alltoall result passed=1" "${rank_logs[@]}" | awk '{ total += $1 } END { print total + 0 }')"
-    actual_marker_matches="$(grep -h -c "tilexr_ccu_alltoall peerLoopMarker .*matched=1" "${rank_logs[@]}" | awk '{ total += $1 } END { print total + 0 }')"
-    echo "tilexr_ccu_direct_smoke_runner alltoallCounts expectedResults=${expected_results} actualResults=${actual_results} expectedMarkerMatches=${expected_marker_matches} actualMarkerMatches=${actual_marker_matches}"
+    echo "tilexr_ccu_direct_smoke_runner alltoallCounts expectedResults=${expected_results} actualResults=${actual_results}"
     if [ "${actual_results}" -ne "${expected_results}" ]; then
         echo "ERROR: direct CCU alltoall result count mismatch expected=${expected_results} actual=${actual_results}" >&2
-        exit 9
-    fi
-    if alltoall_mesh_mode_enabled && [ "${actual_marker_matches}" -ne "${expected_marker_matches}" ]; then
-        echo "ERROR: direct CCU alltoall marker count mismatch expected=${expected_marker_matches} actual=${actual_marker_matches}" >&2
         exit 9
     fi
 elif signal_wait_mode_enabled; then

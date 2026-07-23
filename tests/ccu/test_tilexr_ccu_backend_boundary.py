@@ -255,8 +255,10 @@ class TileXRCcuBackendBoundaryTest(unittest.TestCase):
         self.assertEqual(1, mesh_body.count("session.AllGather("))
         self.assertIn("endpoint.rank != peerRank", mesh_body)
         self.assertIn("session.ImportRemoteMemoryBuffer", mesh_body)
-        self.assertIn("for (uint32_t routeWithinPeer = 0; routeWithinPeer < 3U", mesh_body)
-        self.assertIn("peerOrdinal * 3U + routeWithinPeer", mesh_body)
+        self.assertNotIn("routeWithinPeer", mesh_body)
+        self.assertNotIn("SetDirectCcuRemoteRouteMemoryOverrideForSyncRoute", mesh_body)
+        self.assertNotIn("peer.imported.targetSegVa", mesh_body)
+        self.assertIn("ClearDirectCcuRemoteRouteMemoryOverride", mesh_body)
         self.assertIn("TileXRCcuRunDirectAllToAllMeshInstallAttempt", mesh_body)
 
         exchange = planner[

@@ -22,6 +22,7 @@ constexpr uint16_t TILEXR_CCU_ALLTOALL_OUTPUT_XN_ID = 1U;
 constexpr uint16_t TILEXR_CCU_ALLTOALL_TOKEN_XN_ID = 2U;
 constexpr uint16_t TILEXR_CCU_ALLTOALL_LOOP_MARKER_MASK = 1U;
 constexpr uint16_t TILEXR_CCU_ALLTOALL_POST_SYNC_ID = 3U;
+constexpr uint16_t TILEXR_CCU_ALLTOALL_POST_SYNC_MASK = 0x8U;
 constexpr uint16_t TILEXR_CCU_ALLTOALL_SIGNAL_MASK = 1U;
 constexpr uint16_t TILEXR_CCU_ALLTOALL_RANK0_SIGNAL_MASK = 1U;
 constexpr uint16_t TILEXR_CCU_ALLTOALL_RANK1_SIGNAL_MASK = 2U;
@@ -50,6 +51,7 @@ struct TileXRCcuAllToAll2RankProgramSpec {
     uint16_t preSyncRemoteMarkerXn = 0;
     uint16_t preSyncMarkerArgIndex = 0;
     uint16_t channelId = 0;
+    uint16_t preSyncMarkerChannelId = 0;
     uint16_t preSyncChannelId = 0;
     uint16_t preSyncTokenChannelId = 0;
     uint16_t copyChannelId = 0;
@@ -93,6 +95,7 @@ struct TileXRCcuAllToAllMeshProgramSpec {
     uint16_t selfLengthXn = 0;
     uint16_t selfChannelId = 0;
     uint16_t selfCompletionCke = 0;
+    uint16_t remoteCompletionCke = 0;
     std::vector<TileXRCcuAllToAllMeshPeerSpec> peers;
 };
 
@@ -119,6 +122,11 @@ int TileXRCcuBuildAllToAll2RankProgram(
 int TileXRCcuBuildAllToAllMeshProgram(
     const TileXRCcuAllToAllMeshProgramSpec& spec,
     std::vector<TileXRCcuInstr>* program,
+    TileXRCcuAllToAllProgramReport* report);
+
+int TileXRCcuValidateAllToAllMeshProgramBindings(
+    const TileXRCcuAllToAllMeshProgramSpec& spec,
+    const std::vector<TileXRCcuInstr>& program,
     TileXRCcuAllToAllProgramReport* report);
 
 } // namespace TileXR

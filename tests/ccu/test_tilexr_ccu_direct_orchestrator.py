@@ -1783,6 +1783,7 @@ class TileXRCcuDirectOrchestratorTest(unittest.TestCase):
         self.assertIn("preSyncTokenChannelId = preResource.channelId", source)
         self.assertIn("preSyncLocalMarkerXn = copyResource.localXn", source)
         self.assertIn("preSyncRemoteMarkerXn = copyResource.remoteXn", source)
+        self.assertIn("preSyncMarkerChannelId = alltoallSpec.preSyncChannelId", source)
         self.assertIn("preSyncMarkerArgIndex = 0", source)
         self.assertIn("preSyncMarkerEnabled = true", source)
         self.assertNotIn("preSyncTokenChannelId = postResource.channelId", source)
@@ -1830,7 +1831,7 @@ class TileXRCcuDirectOrchestratorTest(unittest.TestCase):
             with self.subTest(needle=needle):
                 self.assertNotIn(needle, combined)
 
-    def test_direct_four_rank_mesh_builds_one_nine_route_launch_package(self):
+    def test_direct_four_rank_mesh_builds_one_three_channel_launch_package(self):
         code = textwrap.dedent(
             r'''
             #include "ccu/tilexr_ccu_direct_orchestrator.h"
@@ -1890,18 +1891,18 @@ class TileXRCcuDirectOrchestratorTest(unittest.TestCase):
                 const int ret = TileXRCcuRunDirectAllToAllMeshInstallAttempt(
                     options, mesh, &attempt, &report);
                 (void)ret;
-                if (!report.pipelineBuilt || attempt.plan.syncResources.size() != 9 ||
+                if (!report.pipelineBuilt || attempt.plan.syncResources.size() != 3 ||
                     attempt.plan.taskWindows.size() != 1 || attempt.package.tasks.size() != 1 ||
-                    attempt.package.program.sync.size() != 1823 ||
-                    attempt.plan.taskWindows[0].instCnt != 1823 ||
-                    attempt.plan.kernelLocalGsa.num != 2 || attempt.allocation.sourceCke.num != 1 ||
+                    attempt.package.program.sync.size() != 1811 ||
+                    attempt.plan.taskWindows[0].instCnt != 1811 ||
+                    attempt.plan.kernelLocalGsa.num != 2 || attempt.allocation.sourceCke.num != 2 ||
                     attempt.plan.barrierMode != TileXRCcuBarrierMode::SyncCke) {
                     std::cerr << "unexpected mesh package: " << report.message
                               << " resources=" << attempt.plan.syncResources.size()
                               << " instructions=" << attempt.package.program.sync.size() << "\n";
                     return 1;
                 }
-                basic.caps.cap0 = (7U << 24) | (11U << 16) | 1799U;
+                basic.caps.cap0 = (7U << 24) | (11U << 16) | 1599U;
                 TileXRCcuDirectInstallAttempt smallAttempt;
                 TileXRCcuDirectInstallReport smallReport;
                 if (TileXRCcuRunDirectAllToAllMeshInstallAttempt(
@@ -1962,7 +1963,7 @@ class TileXRCcuDirectOrchestratorTest(unittest.TestCase):
         self.assertIn("tilexr-comm-direct-ccu-alltoall", source)
         self.assertIn("TileXRCcuRunDirectAllToAll2RankInstallAttempt", source)
 
-    def test_direct_sync_xn_ping_uses_one_route_and_variable_bit_masks(self):
+    def test_direct_sync_xn_ping_uses_one_mission_route_and_full_4p_transport_resources(self):
         header = DIRECT_HEADER.read_text(encoding="utf-8")
         source = DIRECT_SOURCE.read_text(encoding="utf-8")
         planner_header = PLANNER_HEADER.read_text(encoding="utf-8")
@@ -1975,13 +1976,23 @@ class TileXRCcuDirectOrchestratorTest(unittest.TestCase):
         self.assertIn("BuildDirectSyncXnPingLaunchPackage", source)
         self.assertIn("TileXRCcuEncodeSyncXn", source)
         self.assertIn("defaultRemoteNotifyMask = static_cast<uint16_t>(1U << syncXnPing.localRank)", source)
-        self.assertIn("defaultLocalWaitMask = static_cast<uint16_t>(1U << syncXnPing.peerRank)", source)
-        self.assertIn("TILEXR_CCU_DIRECT_SYNC_XN_PING_INSTRUCTION_COUNT = 5U", source)
+        self.assertIn("TILEXR_CCU_DIRECT_SYNC_XN_PING_INSTRUCTION_COUNT = 2U", source)
+        self.assertIn("SyncXnPingAllocationInstructionCount(options.syncResourceCount)", source)
+        self.assertIn("syncXnPing != nullptr ? TileXRCcuBarrierMode::SyncXn", source)
+        ping_body = source[
+            source.index("int BuildDirectSyncXnPingLaunchPackage"):
+            source.index("void FillReportFromAttempt")
+        ]
+        self.assertNotIn("TileXRCcuEncodeSyncCke", ping_body)
+        self.assertNotIn("TileXRCcuEncodeSetCke", ping_body)
         self.assertIn("PrepareDirectCcuSyncXnPingInstallAttempt", planner_header)
         self.assertIn("PrepareDirectCcuSyncXnPingInstallAttempt", planner)
         self.assertIn("TILEXR_CCU_DIRECT_SMOKE_SYNC_XN_PING_NOTIFY_MASK", planner)
         self.assertIn("TILEXR_CCU_DIRECT_SMOKE_SYNC_XN_PING_WAIT_MASK", planner)
         self.assertIn("RegisterCcuResourceRmaBuffer", planner)
+        self.assertIn("next.syncResourceCount = rankSize == 4 ? 3U : 1U", planner)
+        self.assertIn("attempt->plan.syncResources.empty()", source)
+        self.assertIn("syncXnPing != nullptr ? options.syncResourceCount", source)
 
 
 if __name__ == "__main__":

@@ -28,7 +28,7 @@ namespace TileXR {
 constexpr uint32_t TILEXR_CCU_DIRECT_MEMORY_COPY_INSTRUCTION_COUNT = 7U;
 constexpr uint32_t TILEXR_CCU_DIRECT_ALLTOALL_INSTRUCTION_COUNT =
     7U + 64U * 7U;
-constexpr uint32_t TILEXR_CCU_DIRECT_SYNC_XN_PING_INSTRUCTION_COUNT = 5U;
+constexpr uint32_t TILEXR_CCU_DIRECT_SYNC_XN_PING_INSTRUCTION_COUNT = 2U;
 #endif
 constexpr uint32_t TILEXR_CCU_DIRECT_SIGNAL_INSTRUCTION_COUNT = 5U;
 constexpr uint32_t TILEXR_CCU_DIRECT_WAIT_INSTRUCTION_COUNT = 5U;
@@ -554,14 +554,29 @@ int TileXRCcuCollectivePlanner::ExchangeDirectCcuRemoteNotifyCke(
     }
     const size_t peerRouteCount = static_cast<size_t>(rankSize - 1);
     const size_t syncRouteCount = allocation.remoteXn.num;
-    const size_t routesPerPeer = syncRouteCount / peerRouteCount;
+    size_t routedPeerCount = peerRouteCount;
+    int selectedDiagnosticPeer = -1;
+#ifdef TILEXR_CCU_TESTING
+    for (const auto &override : directCcuRemoteRouteMemoryOverrides_) {
+        if (!override.allRoutes && override.syncRouteIndex == 0U &&
+            override.buffer.peerRank < static_cast<uint32_t>(rankSize) &&
+            override.buffer.peerRank != static_cast<uint32_t>(rank)) {
+            selectedDiagnosticPeer = static_cast<int>(override.buffer.peerRank);
+            if (syncRouteCount == 1U) {
+                routedPeerCount = 1U;
+            }
+            break;
+        }
+    }
+#endif
+    const size_t routesPerPeer = syncRouteCount / routedPeerCount;
     if (allocation.localXn.num == 0 ||
         allocation.localWaitCke.num == 0 ||
         allocation.remoteNotifyCke.num == 0 ||
-        allocation.remoteXn.num < static_cast<uint16_t>(rankSize - 1) ||
+        allocation.remoteXn.num < routedPeerCount ||
         allocation.localWaitCke.num < allocation.remoteXn.num ||
         allocation.remoteNotifyCke.num < allocation.remoteXn.num ||
-        allocation.channels.num == 0 || routesPerPeer == 0 || syncRouteCount % peerRouteCount != 0 ||
+        allocation.channels.num == 0 || routesPerPeer == 0 || syncRouteCount % routedPeerCount != 0 ||
         remoteCcuBuffers->size() != peerRouteCount) {
         if (report != nullptr) {
             report->message = "invalid direct CCU peer XN/CKE exchange shape";
@@ -604,18 +619,42 @@ int TileXRCcuCollectivePlanner::ExchangeDirectCcuRemoteNotifyCke(
 
     std::vector<int> peerRanks;
     peerRanks.reserve(peerRouteCount);
+    if (selectedDiagnosticPeer >= 0) {
+        peerRanks.push_back(selectedDiagnosticPeer);
+    }
     for (int peer = 0; peer < rankSize; ++peer) {
-        if (peer != rank) {
+        if (peer != rank && peer != selectedDiagnosticPeer && routedPeerCount > 1U) {
             peerRanks.push_back(peer);
         }
     }
-    if (peerRanks.size() != peerRouteCount) {
+    if (peerRanks.size() != routedPeerCount) {
         if (report != nullptr) {
             report->message = "invalid direct CCU peer XN/CKE exchange shape";
         }
         return TILEXR_ERROR_PARA_CHECK_FAIL;
     }
-    std::vector<TileXRCcuRemoteCcuBufferInfo> peerCcuBuffers = *remoteCcuBuffers;
+    const std::vector<TileXRCcuRemoteCcuBufferInfo> peerCcuBuffers = *remoteCcuBuffers;
+    std::vector<const TileXRCcuRemoteCcuBufferInfo *> peerCcuBuffersByRank(
+        static_cast<size_t>(rankSize), nullptr);
+    for (const auto &peerCcuBuffer : peerCcuBuffers) {
+        if (peerCcuBuffer.peerRank >= static_cast<uint32_t>(rankSize) ||
+            peerCcuBuffer.peerRank == static_cast<uint32_t>(rank) ||
+            peerCcuBuffersByRank[peerCcuBuffer.peerRank] != nullptr) {
+            if (report != nullptr) {
+                report->message = "invalid direct CCU peer buffer rank mapping";
+            }
+            return TILEXR_ERROR_PARA_CHECK_FAIL;
+        }
+        peerCcuBuffersByRank[peerCcuBuffer.peerRank] = &peerCcuBuffer;
+    }
+    for (const int peer : peerRanks) {
+        if (peerCcuBuffersByRank[static_cast<size_t>(peer)] == nullptr) {
+            if (report != nullptr) {
+                report->message = "incomplete direct CCU peer buffer rank mapping";
+            }
+            return TILEXR_ERROR_NOT_FOUND;
+        }
+    }
     remoteCcuBuffers->assign(syncRouteCount, TileXRCcuRemoteCcuBufferInfo{});
 
     size_t routeIndex = 0;
@@ -624,7 +663,8 @@ int TileXRCcuCollectivePlanner::ExchangeDirectCcuRemoteNotifyCke(
         const size_t routeWithinPeer = syncIndex % routesPerPeer;
         const int peer = peerRanks[peerBufferIndex];
         const PeerResourceExchange &peerResources = all[peer];
-        const size_t peerLocalIndex = static_cast<size_t>(rank < peer ? rank : rank - 1);
+        const size_t peerLocalIndex = selectedDiagnosticPeer >= 0 ?
+            0U : static_cast<size_t>(rank < peer ? rank : rank - 1);
         const uint32_t peerLocalResourceOffset = static_cast<uint32_t>(
             peerLocalIndex * routesPerPeer + routeWithinPeer);
         const uint32_t peerLocalXnOffset = peerLocalResourceOffset;
@@ -645,14 +685,14 @@ int TileXRCcuCollectivePlanner::ExchangeDirectCcuRemoteNotifyCke(
             }
             return TILEXR_ERROR_NOT_FOUND;
         }
-        uint16_t channelBoundRemoteXnId = static_cast<uint16_t>(
-            static_cast<uint32_t>(peerResources.remoteXnStartId) + peerLocalResourceOffset);
         const uint16_t peerLocalXnId =
             static_cast<uint16_t>(static_cast<uint32_t>(peerResources.localXnStartId) + peerLocalXnOffset);
+        const uint16_t channelBoundRemoteXnId = static_cast<uint16_t>(
+            static_cast<uint32_t>(peerResources.remoteXnStartId) + selectedRemoteXnOffset);
         uint16_t remoteNotifyCke =
             static_cast<uint16_t>(static_cast<uint32_t>(peerResources.localWaitCkeStartId) +
                 peerLocalWaitCkeOffset);
-        (*remoteCcuBuffers)[routeIndex] = peerCcuBuffers[peerBufferIndex];
+        (*remoteCcuBuffers)[routeIndex] = *peerCcuBuffersByRank[static_cast<size_t>(peer)];
         (*remoteCcuBuffers)[routeIndex].remoteXnId = channelBoundRemoteXnId;
         (*remoteCcuBuffers)[routeIndex].remoteNotifyCke = remoteNotifyCke;
         const bool peerLocalXnOwnerVerified =
@@ -696,6 +736,7 @@ void TileXRCcuCollectivePlanner::SetDirectCcuRemoteRouteMemoryOverride(
     directCcuRemoteRouteMemoryOverrides_.clear();
     DirectCcuRemoteRouteMemoryOverride override;
     override.allRoutes = true;
+    override.applyMemory = true;
     override.buffer.peerRank = peerRank;
     override.buffer.remoteCcuVa = remoteCcuVa;
     override.buffer.memoryTokenId = memoryTokenId;
@@ -721,9 +762,7 @@ void TileXRCcuCollectivePlanner::SetDirectCcuRemoteRouteMemoryOverrideForSyncRou
     override.buffer.memoryTokenId = memoryTokenId;
     override.buffer.rawMemoryTokenId = rawMemoryTokenId;
     override.buffer.memoryTokenValue = memoryTokenValue;
-    if (remoteCcuVa == 0 || memoryTokenId == 0 || memoryTokenValue == 0) {
-        return;
-    }
+    override.applyMemory = remoteCcuVa != 0 && memoryTokenId != 0 && memoryTokenValue != 0;
     for (auto &existing : directCcuRemoteRouteMemoryOverrides_) {
         if (!existing.allRoutes && existing.syncRouteIndex == syncRouteIndex) {
             existing = override;
@@ -750,6 +789,9 @@ void TileXRCcuCollectivePlanner::ApplyDirectCcuRemoteRouteMemoryOverride(
             if (remoteCcuBuffer.peerRank != override.buffer.peerRank ||
                 (!override.allRoutes && override.syncRouteIndex != routeIndex)) {
                 continue;
+            }
+            if (!override.applyMemory) {
+                break;
             }
             remoteCcuBuffer.remoteCcuVa = override.buffer.remoteCcuVa;
             remoteCcuBuffer.memoryTokenId = override.buffer.memoryTokenId;
@@ -1487,13 +1529,6 @@ int TileXRCcuCollectivePlanner::PrepareDirectCcuAllToAllMeshInstallAttempt(
     alltoall.localRecvAddr = localEndpoint.destinationAddr;
     alltoall.localRecvToken = localEndpoint.destinationToken;
     alltoall.chunkBytes = chunkBytes;
-    struct ImportedPeer {
-        uint32_t peerRank = 0;
-        TileXRCcuImportedRemoteMemoryBufferInfo imported;
-        TileXRCcuRemoteMemoryBufferImportRequest request;
-    };
-    std::vector<ImportedPeer> importedPeers;
-    importedPeers.reserve(3U);
     for (uint32_t peerRank = 0; peerRank < static_cast<uint32_t>(rankSize); ++peerRank) {
         if (peerRank == static_cast<uint32_t>(rank)) {
             continue;
@@ -1507,10 +1542,9 @@ int TileXRCcuCollectivePlanner::PrepareDirectCcuAllToAllMeshInstallAttempt(
             }
             return TILEXR_ERROR_PARA_CHECK_FAIL;
         }
-        ImportedPeer importedPeer;
-        importedPeer.peerRank = peerRank;
-        importedPeer.request = endpoint.destinationRemoteImport;
-        ret = session.ImportRemoteMemoryBuffer(importedPeer.request, &importedPeer.imported);
+        const TileXRCcuRemoteMemoryBufferImportRequest &remoteImport = endpoint.destinationRemoteImport;
+        TileXRCcuImportedRemoteMemoryBufferInfo imported;
+        ret = session.ImportRemoteMemoryBuffer(remoteImport, &imported);
         if (ret != TILEXR_SUCCESS) {
             if (report != nullptr) {
                 *report = TileXRCcuDirectInstallReport {};
@@ -1520,11 +1554,10 @@ int TileXRCcuCollectivePlanner::PrepareDirectCcuAllToAllMeshInstallAttempt(
         }
         TileXRCcuDirectAllToAllMeshPeerSpec peer;
         peer.peerRank = peerRank;
-        peer.remoteRecvAddr = importedPeer.request.addr;
+        peer.remoteRecvAddr = remoteImport.addr;
         peer.remoteRecvToken = TileXRCcuPackMemoryToken(
-            importedPeer.request.tokenId, importedPeer.request.tokenValue, true);
+            remoteImport.tokenId, remoteImport.tokenValue, true);
         alltoall.peers.push_back(peer);
-        importedPeers.push_back(importedPeer);
     }
 
     TileXRCcuDriverAdapter adapter;
@@ -1548,25 +1581,13 @@ int TileXRCcuCollectivePlanner::PrepareDirectCcuAllToAllMeshInstallAttempt(
     next.prepareLowerLayerPlan = &TileXRCcuCollectivePlanner::PrepareDirectCcuLowerLayerPlanCallback;
     next.lowerLayerPlanUserData = &callbackContext;
     next.sqeArgCount = 0;
-    next.syncResourceCount = 9U;
+    next.syncResourceCount = 3U;
     next.bindingsPerSyncResource = next.bindingsPerSyncResource == 0 ? 1 : next.bindingsPerSyncResource;
     if (next.provider.empty()) {
         next.provider = "tilexr-comm-direct-ccu-alltoall-mesh";
     }
 
     ClearDirectCcuRemoteRouteMemoryOverride();
-    for (uint32_t peerOrdinal = 0; peerOrdinal < importedPeers.size(); ++peerOrdinal) {
-        const ImportedPeer &peer = importedPeers[peerOrdinal];
-        for (uint32_t routeWithinPeer = 0; routeWithinPeer < 3U; ++routeWithinPeer) {
-            SetDirectCcuRemoteRouteMemoryOverrideForSyncRoute(
-                peerOrdinal * 3U + routeWithinPeer,
-                peer.peerRank,
-                peer.imported.targetSegVa,
-                peer.request.tokenId,
-                peer.request.rawTokenId,
-                peer.request.tokenValue);
-        }
-    }
     ret = TileXRCcuRunDirectAllToAllMeshInstallAttempt(next, alltoall, attempt, report);
     ClearDirectCcuRemoteRouteMemoryOverride();
     return ret;
@@ -1591,7 +1612,7 @@ int TileXRCcuCollectivePlanner::PrepareDirectCcuSyncXnPingInstallAttempt(
     }
     const int rank = session.Rank();
     const int rankSize = session.RankSize();
-    if (rankSize != 2 || localSourceAddr == 0 || localDestinationAddr == 0 || bytes == 0 ||
+    if ((rankSize != 2 && rankSize != 4) || localSourceAddr == 0 || localDestinationAddr == 0 || bytes == 0 ||
         peerRank >= static_cast<uint32_t>(rankSize) || peerRank == static_cast<uint32_t>(rank)) {
         if (report != nullptr) {
             *report = TileXRCcuDirectInstallReport {};
@@ -1674,17 +1695,6 @@ int TileXRCcuCollectivePlanner::PrepareDirectCcuSyncXnPingInstallAttempt(
         return TILEXR_ERROR_PARA_CHECK_FAIL;
     }
 
-    TileXRCcuImportedRemoteMemoryBufferInfo importedRemoteBuffer;
-    TileXRCcuRemoteMemoryBufferImportRequest remoteImportRequest = peerEndpoint.destinationRemoteImport;
-    ret = session.ImportRemoteMemoryBuffer(remoteImportRequest, &importedRemoteBuffer);
-    if (ret != TILEXR_SUCCESS) {
-        if (report != nullptr) {
-            *report = TileXRCcuDirectInstallReport {};
-            report->message = "failed to import direct CCU SyncXn ping remote endpoint buffer";
-        }
-        return ret;
-    }
-
     TileXRCcuDriverAdapter adapter;
     TileXRCcuDriverAdapterReport adapterReport;
     ret = session.CreateDriverAdapter(&adapter, &adapterReport);
@@ -1707,7 +1717,7 @@ int TileXRCcuCollectivePlanner::PrepareDirectCcuSyncXnPingInstallAttempt(
     next.prepareLowerLayerPlan = &TileXRCcuCollectivePlanner::PrepareDirectCcuLowerLayerPlanCallback;
     next.lowerLayerPlanUserData = &callbackContext;
     next.sqeArgCount = 0;
-    next.syncResourceCount = 1;
+    next.syncResourceCount = rankSize == 4 ? 3U : 1U;
     next.syncInstructionCount = std::max<uint32_t>(
         next.syncInstructionCount,
         TILEXR_CCU_DIRECT_SYNC_XN_PING_INSTRUCTION_COUNT);
@@ -1725,13 +1735,7 @@ int TileXRCcuCollectivePlanner::PrepareDirectCcuSyncXnPingInstallAttempt(
     syncXnPing.localWaitMask =
         SelectSyncXnPingMask("TILEXR_CCU_DIRECT_SMOKE_SYNC_XN_PING_WAIT_MASK");
 
-    SetDirectCcuRemoteRouteMemoryOverrideForSyncRoute(
-        0U,
-        peerRank,
-        importedRemoteBuffer.targetSegVa,
-        remoteImportRequest.tokenId,
-        remoteImportRequest.rawTokenId,
-        remoteImportRequest.tokenValue);
+    SetDirectCcuRemoteRouteMemoryOverrideForSyncRoute(0U, peerRank, 0, 0, 0, 0);
     ret = TileXRCcuRunDirectSyncXnPingInstallAttempt(next, syncXnPing, attempt, report);
     ClearDirectCcuRemoteRouteMemoryOverride();
     return ret;

@@ -87,7 +87,17 @@ class TileXRCcuDirectSmokeRunnerTest(unittest.TestCase):
         self.assertEqual(0, result.returncode, result.stdout + result.stderr)
         self.assertIn("rank=3 device=7", result.stdout)
         self.assertIn("expectedResults=40 actualResults=40", result.stdout)
-        self.assertIn("expectedMarkerMatches=120 actualMarkerMatches=120", result.stdout)
+        self.assertNotIn("expectedMarkerMatches", result.stdout)
+
+    def test_runner_mesh_defaults_cover_every_rank_resource_range(self):
+        source = RUNNER.read_text(encoding="utf-8")
+        mesh_defaults = source[source.index("if alltoall_mesh_mode_enabled;"):]
+        mesh_defaults = mesh_defaults[:mesh_defaults.index("elif")]
+
+        self.assertIn('TILEXR_CCU_PROBE_XN_START="${TILEXR_CCU_PROBE_XN_START:-1961}"', mesh_defaults)
+        self.assertIn('TILEXR_CCU_PROBE_REMOTE_XN_START="${TILEXR_CCU_PROBE_REMOTE_XN_START:-2361}"', mesh_defaults)
+        self.assertIn('TILEXR_CCU_PROBE_LOCAL_WAIT_CKE_START="${TILEXR_CCU_PROBE_LOCAL_WAIT_CKE_START:-332}"', mesh_defaults)
+        self.assertIn('TILEXR_CCU_PROBE_REMOTE_NOTIFY_CKE_START="${TILEXR_CCU_PROBE_REMOTE_NOTIFY_CKE_START:-364}"', mesh_defaults)
 
     def test_runner_rejects_mesh_device_count_mismatch_and_duplicates(self):
         missing = self.run_fake_mesh_runner(devices="4,5,6")
@@ -102,6 +112,8 @@ class TileXRCcuDirectSmokeRunnerTest(unittest.TestCase):
         source = RUNNER.read_text(encoding="utf-8")
 
         self.assertIn("TILEXR_RUN_CCU_DIRECT_SMOKE_PROBE", source)
+        self.assertIn("TILEXR_CCU_SMOKE_REUSE_PROBE", source)
+        self.assertIn('[ ! -x "${probe_bin}" ]', source)
         self.assertIn("TILEXR_CCU_DIRECT_SMOKE_ENABLE=1", source)
         self.assertIn("TILEXR_CCU_DIRECT_SMOKE_THREAD_MODE", source)
         self.assertIn("TILEXR_CCU_DIRECT_SMOKE_THREAD_MODE=1", source)
@@ -244,13 +256,18 @@ class TileXRCcuDirectSmokeRunnerTest(unittest.TestCase):
         self.assertIn("sync_xn_ping_mode_enabled", source)
         self.assertIn("apply_sync_xn_ping_defaults", source)
         self.assertIn('TILEXR_CCU_DIRECT_SMOKE_SYNC_XN_PING:-0', source)
+        self.assertIn('common_env+=("TILEXR_CCU_DIRECT_SMOKE_SYNC_XN_PING_PEER_XOR=${TILEXR_CCU_DIRECT_SMOKE_SYNC_XN_PING_PEER_XOR}")', source)
         self.assertIn('TILEXR_CCU_DIRECT_SMOKE_DIRECT_CCU_ONLY_INIT="${TILEXR_CCU_DIRECT_SMOKE_DIRECT_CCU_ONLY_INIT:-1}"', source)
         self.assertIn('TILEXR_CCU_ALLTOALL_BYTES="${TILEXR_CCU_ALLTOALL_BYTES:-2097152}"', source)
         self.assertIn('TILEXR_CCU_ALLTOALL_MEM_SLICE_PER_LOOP="${TILEXR_CCU_ALLTOALL_MEM_SLICE_PER_LOOP:-8}"', source)
         self.assertIn('TILEXR_CCU_ALLTOALL_LOOP_COUNT="${TILEXR_CCU_ALLTOALL_LOOP_COUNT:-1}"', source)
         self.assertIn('common_env+=("TILEXR_CCU_ALLTOALL_LOOP_COUNT=${TILEXR_CCU_ALLTOALL_LOOP_COUNT}")', source)
         self.assertIn('TILEXR_CCU_PROBE_SYNC_RESOURCE_COUNT="${TILEXR_CCU_PROBE_SYNC_RESOURCE_COUNT:-1}"', source)
-        self.assertIn('TILEXR_CCU_PROBE_SYNC_INSTRUCTION_COUNT="${TILEXR_CCU_PROBE_SYNC_INSTRUCTION_COUNT:-3}"', source)
+        self.assertIn('TILEXR_CCU_PROBE_SYNC_INSTRUCTION_COUNT="${TILEXR_CCU_PROBE_SYNC_INSTRUCTION_COUNT:-2}"', source)
+        self.assertIn('TILEXR_CCU_PROBE_XN_START="${TILEXR_CCU_PROBE_XN_START:-1961}"', source)
+        self.assertIn('TILEXR_CCU_PROBE_REMOTE_XN_START="${TILEXR_CCU_PROBE_REMOTE_XN_START:-2361}"', source)
+        self.assertIn('TILEXR_CCU_PROBE_LOCAL_WAIT_CKE_START="${TILEXR_CCU_PROBE_LOCAL_WAIT_CKE_START:-332}"', source)
+        self.assertIn('TILEXR_CCU_PROBE_REMOTE_NOTIFY_CKE_START="${TILEXR_CCU_PROBE_REMOTE_NOTIFY_CKE_START:-364}"', source)
         self.assertLess(source.index("apply_sync_xn_ping_defaults"), source.index("apply_alltoall_defaults"))
 
     def test_runner_allows_inactive_p2p_rank_to_skip_submit(self):
