@@ -10,6 +10,9 @@
 #ifndef TILEXR_SOCK_EXCHANGE_H
 #define TILEXR_SOCK_EXCHANGE_H
 
+#include <algorithm>
+#include <limits>
+#include <new>
 #include <vector>
 #include <string>
 #include <memory>
@@ -69,6 +72,20 @@ public:
         } else {
             return ServerRecvSend(sendBuf, sendCount, recvBuf);
         }
+    }
+
+    /* sendBuf is [destination rank][element], recvBuf is [source rank][element]. */
+    template <typename T> int AllToAll(const T *sendBuf, size_t sendCountPerRank, T *recvBuf)
+    {
+        if (!isInit_ && Prepare() != TILEXR_SUCCESS) {
+            return TILEXR_ERROR_INTERNAL;
+        }
+        isInit_ = true;
+
+        if (!IsServer()) {
+            return ClientSendRecvAllToAll(sendBuf, sendCountPerRank, recvBuf);
+        }
+        return ServerRecvSendAllToAll(sendBuf, sendCountPerRank, recvBuf);
     }
 
     int GetNodeNum();
@@ -176,6 +193,86 @@ private:
             }
         }
 
+        return TILEXR_SUCCESS;
+    }
+
+    template <typename T> bool AllToAllSizes(size_t sendCountPerRank, size_t& rowCount, size_t& totalCount) const
+    {
+        if (rankSize_ <= 0 || sendCountPerRank == 0 ||
+            sendCountPerRank > std::numeric_limits<size_t>::max() / static_cast<size_t>(rankSize_)) {
+            return false;
+        }
+        rowCount = sendCountPerRank * static_cast<size_t>(rankSize_);
+        if (rowCount > std::numeric_limits<size_t>::max() / sizeof(T) ||
+            rowCount > std::numeric_limits<size_t>::max() / static_cast<size_t>(rankSize_)) {
+            return false;
+        }
+        totalCount = rowCount * static_cast<size_t>(rankSize_);
+        return true;
+    }
+
+    template <typename T> int ClientSendRecvAllToAll(
+        const T *sendBuf, size_t sendCountPerRank, T *recvBuf)
+    {
+        size_t rowCount = 0;
+        size_t totalCount = 0;
+        if (!AllToAllSizes<T>(sendCountPerRank, rowCount, totalCount)) {
+            return TILEXR_ERROR_INTERNAL;
+        }
+        (void)totalCount;
+        const size_t rowBytes = rowCount * sizeof(T);
+        if (Send(fd_, sendBuf, rowBytes, 0) <= 0) {
+            TILEXR_LOG(ERROR) << "Client side " << rank_ << " send alltoall buffer failed";
+            return TILEXR_ERROR_INTERNAL;
+        }
+        if (Recv(fd_, recvBuf, rowBytes, MSG_WAITALL) <= 0) {
+            TILEXR_LOG(ERROR) << "Client side " << rank_ << " recv alltoall buffer failed";
+            return TILEXR_ERROR_INTERNAL;
+        }
+        return TILEXR_SUCCESS;
+    }
+
+    template <typename T> int ServerRecvSendAllToAll(
+        const T *sendBuf, size_t sendCountPerRank, T *recvBuf)
+    {
+        size_t rowCount = 0;
+        size_t totalCount = 0;
+        if (!AllToAllSizes<T>(sendCountPerRank, rowCount, totalCount)) {
+            return TILEXR_ERROR_INTERNAL;
+        }
+        const size_t rowBytes = rowCount * sizeof(T);
+        std::vector<T> gathered;
+        std::vector<T> destination;
+        try {
+            gathered.resize(totalCount);
+            destination.resize(rowCount);
+        } catch (const std::bad_alloc&) {
+            TILEXR_LOG(ERROR) << "Server side allocate alltoall exchange buffer failed";
+            return TILEXR_ERROR_INTERNAL;
+        }
+        std::copy_n(sendBuf, rowCount, gathered.data());
+        for (int source = 1; source < rankSize_; ++source) {
+            if (Recv(clientFds_[source], gathered.data() + static_cast<size_t>(source) * rowCount,
+                    rowBytes, MSG_WAITALL) <= 0) {
+                TILEXR_LOG(ERROR) << "Server side recv alltoall rank " << source << " failed";
+                return TILEXR_ERROR_INTERNAL;
+            }
+        }
+
+        for (int target = 0; target < rankSize_; ++target) {
+            for (int source = 0; source < rankSize_; ++source) {
+                const size_t sourceOffset =
+                    (static_cast<size_t>(source) * rankSize_ + target) * sendCountPerRank;
+                std::copy_n(gathered.data() + sourceOffset, sendCountPerRank,
+                    destination.data() + static_cast<size_t>(source) * sendCountPerRank);
+            }
+            if (target == 0) {
+                std::copy_n(destination.data(), rowCount, recvBuf);
+            } else if (Send(clientFds_[target], destination.data(), rowBytes, 0) <= 0) {
+                TILEXR_LOG(ERROR) << "Server side send alltoall rank " << target << " failed";
+                return TILEXR_ERROR_INTERNAL;
+            }
+        }
         return TILEXR_SUCCESS;
     }
     int rank_ = 0;

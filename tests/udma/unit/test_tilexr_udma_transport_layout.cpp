@@ -295,10 +295,23 @@ void TestTransportHasOptInSharedQpPool()
     CHECK_CONTAINS(transport, "state.sharedQueues");
     CHECK_CONTAINS(transport, "UDMASharedQpLane(options_.rank, peer");
     CHECK_CONTAINS(transport, "UDMASharedQpLane(peer, options_.rank");
-    CHECK_CONTAINS(transport, "localSharedImports");
-    CHECK_CONTAINS(transport, "allSharedImports");
+    CHECK_CONTAINS(transport, "SharedQpKeyRecord");
+    CHECK_CONTAINS(transport, "options_.exchange->AllToAll(");
+    CHECK_NOT_CONTAINS(transport, "localSharedImports");
+    CHECK_NOT_CONTAINS(transport, "allSharedImports");
+    CHECK_NOT_CONTAINS(transport, "allSharedKeys");
     CHECK_CONTAINS(transport, "state.sharedRemoteQueues.clear()");
     CHECK_CONTAINS(transport, "auto cleanupQueue = [&]()");
+}
+
+void TestSocketExchangeSupportsPersonalizedAllToAll()
+{
+    const std::string exchange =
+        ReadFile(std::string(TILEXR_SOURCE_ROOT) + "/src/comm/tools/socket/tilexr_sock_exchange.h");
+
+    CHECK_CONTAINS(exchange, "int AllToAll(const T *sendBuf, size_t sendCountPerRank, T *recvBuf)");
+    CHECK_CONTAINS(exchange, "ClientSendRecvAllToAll");
+    CHECK_CONTAINS(exchange, "ServerRecvSendAllToAll");
 }
 
 void TestRootInfoEidBytesSelectRuntimeContexts()
@@ -368,6 +381,7 @@ int main()
     TestSharedQpLanesAreUniqueWithinEveryGroup();
     TestSharedQpPoolScalesWithLanesAndEidsOnly();
     TestSharedQpLaneRejectsInvalidInputs();
+    TestSocketExchangeSupportsPersonalizedAllToAll();
     TestExplicitRouteSelectionKeepsRequestedCandidateOrder();
     TestExplicitRouteSelectionRejectsMissingInputs();
     TestCrossNodeRouteSelectionUsesAggregateRoutes();
