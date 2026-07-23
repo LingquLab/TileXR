@@ -98,6 +98,8 @@ void TestCrossNodeDispatchUsesUDMARegistry()
 
     CheckContains(path, contents, "tilexr_udma.h");
     CheckContains(path, contents, "TileXR::UDMARegistryEnabled(args)");
+    CheckContains(path, contents, "TileXR::TileXRSelectAutoTransport(args, static_cast<uint64_t>(slotBytes))");
+    CheckContains(path, contents, "TileXR::TileXRTransportKind::DIRECT_URMA");
     CheckContains(path, contents, "TileXREpUsesUdmaWindow");
     CheckContains(path, contents, "TileXR::UDMAPutNbi<uint8_t>");
     CheckContains(path, contents, "TileXR::UDMAQuiet(args, dstRank)");
@@ -116,7 +118,7 @@ void TestCrossNodeDispatchPullsRemoteSlots()
     CheckContains(path, contents, "tilexr_ep_dispatch_cross_node_kernel");
     CheckContains(path, contents, "launch_tilexr_ep_dispatch_cross_node_kernel");
     CheckContains(path, contents, "TileXREpPullUdmaSlots");
-    CheckContains(path, contents, "TileXR::UDMAGetNbi<uint8_t>");
+    CheckContains(path, contents, "TileXR::TileXRGetAutoNbi<uint8_t>");
     CheckContains(path, contents, "TileXREpNotifyUdmaReady");
     CheckContains(path, contents, "TileXREpWaitUdmaReady");
     CheckContains(path, contents, "TileXREpNotifyAllUdmaReady");
@@ -156,6 +158,8 @@ void TestHostDispatchSplitsCrossNodeKernel()
 
     CheckContains(path, contents, "launch_tilexr_ep_dispatch_cross_node_kernel");
     CheckContains(path, contents, "TileXREpUsesCrossNodeKernel");
+    CheckContains(path, contents, "TileXR::TileXRSelectAutoTransport(context.hostArgs,");
+    CheckContains(path, contents, "TileXR::TileXRTransportKind::DIRECT_URMA");
 }
 
 void TestDispatchHelpersLiveInDispatchHelperFile()
@@ -209,6 +213,7 @@ void TestCombineKernelUsesTileXRPeerMemory()
     CheckContains(path, contents, "tilexr_ep_combine_cross_node_drain_kernel");
     CheckContains(path, contents, "TileXREpNotifyRemoteUdmaReadySeparate");
     CheckContains(path, contents, "TileXREpWaitRemoteUdmaReady");
+    CheckContains(path, contents, "TileXREpUsesDirectUrmaTransport(args, slotBytes)");
     CheckNotContains(path, contents, "tilexr_ep_dispatch_kernel");
 
     std::string hostLaunch;
@@ -233,6 +238,8 @@ void TestKernelCommonHasCombineHelpers()
     CheckContains(path, contents, "UDMASecondOperationOffset");
     CheckContains(path, contents, "TileXREpNotifyRemoteUdmaReadySeparate");
     CheckContains(path, contents, "TileXREpWaitRemoteUdmaReady");
+    CheckContains(path, contents, "TileXR::TileXRSelectAutoTransport(args, static_cast<uint64_t>(slotBytes))");
+    CheckContains(path, contents, "TileXR::TileXRTransportKind::DIRECT_URMA");
     CheckContains(path, contents, "TileXREpStoreStatusValue");
     CheckContains(path, contents, "TileXREpFlushUdmaSourceWindow");
     CheckContains(path, contents, "IsValidShape");

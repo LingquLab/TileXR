@@ -186,6 +186,7 @@ extern "C" __global__ __aicore__ void tilexr_ep_combine_cross_node_kernel(GM_ADD
         const int32_t localRankSize = args->localRankSize;
         if (rankSize <= 0 || rankSize > TileXR::TILEXR_MAX_RANK_SIZE || rank < 0 || rank >= rankSize ||
             localRankSize <= 0 || localRankSize > rankSize || !TileXR::UDMARegistryEnabled(args) ||
+            !TileXREpUsesDirectUrmaTransport(args, slotBytes) ||
             !IsValidShape(bs, h, topK, moeExpertNum, dtypeBytes, maxRoutesPerSrc, rowBytes, payloadBytesPerSlot,
                 assistBytesPerSlot, slotBytes, totalBytes, rankSize) || dtype != kTileXrDataTypeFp16) {
             return;

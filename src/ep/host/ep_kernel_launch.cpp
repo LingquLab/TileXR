@@ -5,6 +5,7 @@
 #include "acl/acl_rt.h"
 #include "ep_window.h"
 #include "tilexr_api.h"
+#include "tilexr_transport.h"
 #include "tilexr_types.h"
 
 extern void launch_tilexr_ep_dispatch_kernel(uint32_t blockDim, void *stream, GM_ADDR commArgs, GM_ADDR x,
@@ -50,7 +51,9 @@ namespace {
 bool TileXREpUsesCrossNodeKernel(const EpHostLaunchContext &context)
 {
     return context.hostArgs != nullptr && context.hostArgs->localRankSize > 0 &&
-        context.hostArgs->localRankSize < context.hostArgs->rankSize;
+        context.hostArgs->localRankSize < context.hostArgs->rankSize && context.window.slotBytes > 0 &&
+        TileXR::TileXRSelectAutoTransport(context.hostArgs, static_cast<uint64_t>(context.window.slotBytes)) ==
+            TileXR::TileXRTransportKind::DIRECT_URMA;
 }
 
 int64_t TileXREpUdmaStatusOffset(int64_t totalBytes, int64_t rankSize, int64_t slotBytes)

@@ -179,6 +179,28 @@ void TestCommSourcesDoNotUseShmem()
     }
 }
 
+void TestEpKernelsUseAutoTransportForUdmaDataMovement()
+{
+    const std::vector<std::string> paths = {
+        "src/ep/kernels/tilexr_ep_dispatch_kernel.cpp",
+        "src/ep/kernels/tilexr_ep_kernel_common.h",
+    };
+    for (const auto& path : paths) {
+        const auto text = ReadFile(path);
+        CheckContains(path, text, "#include \"tilexr_transport.h\"");
+        CheckContains(path, text, "TileXR::TileXRPutAutoNbi<uint8_t>");
+    }
+}
+
+void TestEpHostLaunchUsesAutoTransportGate()
+{
+    const std::string path = "src/ep/host/ep_kernel_launch.cpp";
+    const auto text = ReadFile(path);
+    CheckContains(path, text, "#include \"tilexr_transport.h\"");
+    CheckContains(path, text, "TileXR::TileXRSelectAutoTransport(context.hostArgs,");
+    CheckContains(path, text, "TileXR::TileXRTransportKind::DIRECT_URMA");
+}
+
 } // namespace
 
 int main()
@@ -189,6 +211,8 @@ int main()
     TestUDMAReviewFeedbackGuards();
     TestPublicHeadersDoNotExposeUDMAContext();
     TestCommSourcesDoNotUseShmem();
+    TestEpKernelsUseAutoTransportForUdmaDataMovement();
+    TestEpHostLaunchUsesAutoTransportGate();
     if (g_failures != 0) {
         std::cerr << g_failures << " UDMA source guard checks failed" << std::endl;
         return 1;

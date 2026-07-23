@@ -79,6 +79,19 @@ if [ ! -r "${ASCEND_DRIVER_PATH}/kernel/inc" ] && [ -d "${ASCEND_HOME_PATH}/${TI
     export ASCEND_DRIVER_PATH=${TILEXR_DRIVER_SHIM_HOME}
 fi
 
+_tilexr_prepend_path_if_dir() {
+    if [ -d "$1" ]; then
+        case ":${PATH}:" in
+            *":$1:"*) ;;
+            *) export PATH="$1:${PATH}" ;;
+        esac
+    fi
+}
+
+_tilexr_prepend_path_if_dir "${ASCEND_HOME_PATH}/tools/bisheng_compiler/bin"
+_tilexr_prepend_path_if_dir "${ASCEND_HOME_PATH}/${TILEXR_OS_ARCH}-linux/bin"
+_tilexr_prepend_path_if_dir "/usr/local/Ascend/cann-${TILEXR_CANN_VER}/tools/bisheng_compiler/bin"
+
 export PATH=${MPI_HOME}/bin:${PATH}
 export PATH=${TILEXR_UTIL_HOME}/cmake/bin:${PATH}
 export PATH=${TILEXR_UTIL_HOME}/ccache:${TILEXR_UTIL_HOME}/ripgrep:${TILEXR_UTIL_HOME}/sshpass/bin:${PATH}

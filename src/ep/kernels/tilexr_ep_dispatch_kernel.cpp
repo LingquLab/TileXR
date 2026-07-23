@@ -2,6 +2,7 @@
 #include "ep_window.h"
 #include "kernel_operator.h"
 #include "tilexr_sync.h"
+#include "tilexr_transport.h"
 #include "tilexr_udma.h"
 
 namespace {
@@ -276,10 +277,13 @@ __aicore__ inline void ClearLocalWindow(
     AscendC::PipeBarrier<PIPE_ALL>();
 }
 
-__aicore__ inline bool TileXREpUsesUdmaWindow(const __gm__ TileXR::CommArgs *args, GM_ADDR workspaceGM)
+__aicore__ inline bool TileXREpUsesUdmaWindow(
+    const __gm__ TileXR::CommArgs *args, GM_ADDR workspaceGM, int64_t bytes)
 {
-    return workspaceGM != nullptr && args->localRankSize > 0 && args->localRankSize < args->rankSize &&
-        TileXR::UDMARegistryEnabled(args);
+    return workspaceGM != nullptr && args != nullptr && args->localRankSize > 0 &&
+        args->localRankSize < args->rankSize &&
+        TileXR::TileXRSelectAutoTransport(args, static_cast<uint64_t>(bytes)) ==
+            TileXR::TileXRTransportKind::DIRECT_URMA;
 }
 
 __aicore__ inline GM_ADDR TileXREpWindowBase(GM_ADDR *shareAddrs, int32_t rank, bool useUdmaWindow, GM_ADDR workspaceGM)
@@ -343,7 +347,7 @@ __aicore__ inline void TileXREpPublishUdmaSlots(const __gm__ TileXR::CommArgs *a
         if (dstRank == rank) {
             continue;
         }
-        TileXR::UDMAPutNbi<uint8_t>(args, dstRank,
+        TileXR::TileXRPutAutoNbi<uint8_t>(args, dstRank,
             reinterpret_cast<__gm__ uint8_t *>(localWindow + SlotOffset(dstRank, slotBytes)),
             SlotOffset(rank, slotBytes), static_cast<uint32_t>(slotBytes));
         TileXR::UDMAQuiet(args, dstRank);
@@ -357,7 +361,7 @@ __aicore__ inline void TileXREpPullUdmaSlots(
         if (srcRank == rank) {
             continue;
         }
-        TileXR::UDMAGetNbi<uint8_t>(args, srcRank,
+        TileXR::TileXRGetAutoNbi<uint8_t>(args, srcRank,
             reinterpret_cast<__gm__ uint8_t *>(localWindow + SlotOffset(srcRank, slotBytes)),
             SlotOffset(rank, slotBytes), static_cast<uint32_t>(slotBytes));
         TileXR::UDMAQuiet(args, srcRank);
@@ -401,7 +405,7 @@ __aicore__ inline void TileXREpNotifyUdmaReady(
         if (!TileXREpUsesUdmaPeer(rank, peer, localRankSize)) {
             continue;
         }
-        TileXR::UDMAPutNbi<uint8_t>(args, peer,
+        TileXR::TileXRPutAutoNbi<uint8_t>(args, peer,
             reinterpret_cast<__gm__ uint8_t *>(localWindow + SlotOffset(peer, slotBytes)),
             static_cast<uint64_t>(UDMARecvWindowOffset(totalBytes) + SlotOffset(rank, slotBytes)),
             static_cast<uint32_t>(slotBytes));
@@ -747,7 +751,7 @@ extern "C" __global__ __aicore__ void tilexr_ep_dispatch_kernel(GM_ADDR commArgs
         SyncCollectives sync;
         sync.Init(rank, rankSize, shareAddrs, tBuf);
 
-        const bool useUdmaWindow = TileXREpUsesUdmaWindow(args, workspaceGM);
+        const bool useUdmaWindow = TileXREpUsesUdmaWindow(args, workspaceGM, slotBytes);
         GM_ADDR localWindow = TileXREpWindowBase(shareAddrs, rank, useUdmaWindow, workspaceGM);
         ClearLocalWindow(localWindow, rankSize, maxRoutesPerSrc, rowBytes, slotBytes, totalBytes, tBuf);
         sync.SetInnerFlag(static_cast<int32_t>(magic), TileXREp::kEpStepWindowCleared);
@@ -866,6 +870,8 @@ extern "C" __global__ __aicore__ void tilexr_ep_dispatch_cross_node_kernel(GM_AD
             (quantMode == kEpQuantModeStatic && scalesGM == nullptr) ||
             (quantMode == kEpQuantModePerTokenDynamic && (dynamicScalesOutGM == nullptr || scalesGM != nullptr)) ||
             !TileXR::UDMARegistryEnabled(args) ||
+            TileXR::TileXRSelectAutoTransport(args, static_cast<uint64_t>(slotBytes)) !=
+                TileXR::TileXRTransportKind::DIRECT_URMA ||
             !IsValidShape(bs, h, topK, moeExpertNum, dtypeBytes, maxRoutesPerSrc, rowBytes, payloadRowBytes,
                 payloadBytesPerSlot, assistBytesPerSlot, slotBytes, totalBytes, rankSize, expertRankSize, sharedExpertNum,
                 sharedExpertRankNum, quantMode)) {

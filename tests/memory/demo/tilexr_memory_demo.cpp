@@ -22,7 +22,11 @@
 #include "tilexr_api.h"
 #include "tilexr_types.h"
 
-extern void launch_tilexr_memory_all_gather(
+extern void launch_tilexr_memory_push(
+    uint32_t blockDim, void* stream, GM_ADDR commArgs, GM_ADDR input, GM_ADDR output, GM_ADDR debug,
+    int32_t elementsPerRank);
+
+extern void launch_tilexr_memory_collect(
     uint32_t blockDim, void* stream, GM_ADDR commArgs, GM_ADDR input, GM_ADDR output, GM_ADDR debug,
     int32_t elementsPerRank);
 
@@ -31,6 +35,7 @@ constexpr int32_t kDefaultElementsPerRank = 16;
 constexpr size_t kDebugWords = 16;
 constexpr int kDefaultCommPort = 10067;
 constexpr int kDemoBarrierPortOffset = 113;
+constexpr int kDemoHostExchangePortOffset = 114;
 constexpr int kConnectRetryCount = 500;
 constexpr int kConnectRetrySleepMs = 10;
 constexpr int kDefaultBlockDim = 8;
@@ -106,6 +111,12 @@ bool CopyDeviceToHost(int rank, void* dst, size_t dstSize, const void* src, size
         aclrtMemcpy(dst, dstSize, src, srcSize, ACL_MEMCPY_DEVICE_TO_HOST));
 }
 
+bool CopyDeviceToDevice(int rank, void* dst, size_t dstSize, const void* src, size_t srcSize, const std::string& name)
+{
+    return CheckAcl(rank, "aclrtMemcpy D2D " + name,
+        aclrtMemcpy(dst, dstSize, src, srcSize, ACL_MEMCPY_DEVICE_TO_DEVICE));
+}
+
 BarrierEndpoint GetBarrierEndpoint()
 {
     int basePort = kDefaultCommPort;
@@ -122,6 +133,24 @@ BarrierEndpoint GetBarrierEndpoint()
         barrierPort = kDefaultCommPort + kDemoBarrierPortOffset;
     }
     return BarrierEndpoint{static_cast<uint16_t>(barrierPort)};
+}
+
+BarrierEndpoint GetHostExchangeEndpoint()
+{
+    int basePort = kDefaultCommPort;
+    const char* commId = std::getenv("TILEXR_COMM_ID");
+    if (commId != nullptr) {
+        std::string value(commId);
+        size_t colon = value.rfind(':');
+        if (colon != std::string::npos && colon + 1 < value.size()) {
+            basePort = std::atoi(value.c_str() + colon + 1);
+        }
+    }
+    int exchangePort = basePort + kDemoHostExchangePortOffset;
+    if (exchangePort <= 0 || exchangePort > 65535) {
+        exchangePort = kDefaultCommPort + kDemoHostExchangePortOffset;
+    }
+    return BarrierEndpoint{static_cast<uint16_t>(exchangePort)};
 }
 
 bool SendAll(int fd, const void* data, size_t bytes)
@@ -272,6 +301,82 @@ bool DemoBarrierAll(int rank, int rankSize, const std::string& step)
     return true;
 }
 
+bool ExchangeInputSegmentsOnHost(
+    int rank, int rankSize, const std::vector<int32_t>& hostInput, std::vector<int32_t>& hostOutput,
+    int32_t elementsPerRank)
+{
+    if (rankSize <= 0 || elementsPerRank <= 0 ||
+        hostInput.size() != static_cast<size_t>(elementsPerRank) ||
+        hostOutput.size() != static_cast<size_t>(rankSize) * elementsPerRank) {
+        std::cerr << "[rank " << rank << "] ERROR: invalid host staging memory fallback shape" << std::endl;
+        return false;
+    }
+
+    BarrierEndpoint endpoint = GetHostExchangeEndpoint();
+    const size_t segmentBytes = static_cast<size_t>(elementsPerRank) * sizeof(int32_t);
+    const size_t outputBytes = hostOutput.size() * sizeof(int32_t);
+    PrintStatus(rank, "host staging memory fallback begin port=" + std::to_string(endpoint.port));
+
+    if (rank == 0) {
+        std::copy(hostInput.begin(), hostInput.end(), hostOutput.begin());
+        int serverFd = CreateBarrierServer(endpoint.port);
+        if (serverFd < 0) {
+            std::cerr << "[rank " << rank << "] ERROR: failed to create host exchange server on 127.0.0.1:"
+                      << endpoint.port << ", errno=" << errno << std::endl;
+            return false;
+        }
+
+        std::vector<int> clients;
+        clients.reserve(static_cast<size_t>(rankSize - 1));
+        bool ok = true;
+        for (int peer = 1; peer < rankSize; ++peer) {
+            int clientFd = accept(serverFd, nullptr, nullptr);
+            if (clientFd < 0) {
+                ok = false;
+                break;
+            }
+            int32_t peerRank = -1;
+            if (!RecvAll(clientFd, &peerRank, sizeof(peerRank)) || peerRank <= 0 || peerRank >= rankSize ||
+                !RecvAll(clientFd, hostOutput.data() + static_cast<size_t>(peerRank) * elementsPerRank,
+                    segmentBytes)) {
+                close(clientFd);
+                ok = false;
+                break;
+            }
+            clients.push_back(clientFd);
+        }
+
+        for (int clientFd : clients) {
+            ok = SendAll(clientFd, hostOutput.data(), outputBytes) && ok;
+            close(clientFd);
+        }
+        close(serverFd);
+        if (!ok) {
+            std::cerr << "[rank " << rank << "] ERROR: host staging memory fallback exchange failed" << std::endl;
+            return false;
+        }
+    } else {
+        int fd = ConnectBarrierServer(endpoint.port);
+        if (fd < 0) {
+            std::cerr << "[rank " << rank << "] ERROR: failed to connect host exchange on 127.0.0.1:"
+                      << endpoint.port << std::endl;
+            return false;
+        }
+        int32_t rankValue = rank;
+        bool ok = SendAll(fd, &rankValue, sizeof(rankValue)) &&
+            SendAll(fd, hostInput.data(), segmentBytes) &&
+            RecvAll(fd, hostOutput.data(), outputBytes);
+        close(fd);
+        if (!ok) {
+            std::cerr << "[rank " << rank << "] ERROR: host staging memory fallback exchange failed" << std::endl;
+            return false;
+        }
+    }
+
+    PrintStatus(rank, "host staging memory fallback end");
+    return true;
+}
+
 void PrintCommArgs(int rank, const TileXR::CommArgs& args, GM_ADDR commArgsDev)
 {
     std::cout << "[rank " << rank << "] CommArgs host fields:" << std::endl;
@@ -281,6 +386,37 @@ void PrintCommArgs(int rank, const TileXR::CommArgs& args, GM_ADDR commArgsDev)
     for (int i = 0; i < args.rankSize; ++i) {
         std::cout << "  peerMems[" << i << "]=" << static_cast<void*>(args.peerMems[i]) << std::endl;
     }
+}
+
+bool PushInputToPeerWindowsOnHost(
+    int rank, int rankSize, const TileXR::CommArgs& args, const int32_t* input, int32_t elementsPerRank)
+{
+    const size_t segmentBytes = static_cast<size_t>(elementsPerRank) * sizeof(int32_t);
+    for (int dstRank = 0; dstRank < rankSize; ++dstRank) {
+        if (args.peerMems[dstRank] == nullptr) {
+            std::cerr << "[rank " << rank << "] ERROR: peerMems[" << dstRank << "] is null" << std::endl;
+            return false;
+        }
+        GM_ADDR dst = args.peerMems[dstRank] + TileXR::IPC_DATA_OFFSET +
+            static_cast<size_t>(rank) * segmentBytes;
+        if (!CopyDeviceToDevice(rank, dst, segmentBytes, input, segmentBytes,
+                "input to peer window dstRank=" + std::to_string(dstRank))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool CollectLocalWindowOnHost(
+    int rank, int rankSize, const TileXR::CommArgs& args, int32_t* output, int32_t elementsPerRank)
+{
+    if (args.peerMems[rank] == nullptr) {
+        std::cerr << "[rank " << rank << "] ERROR: local peerMems[" << rank << "] is null" << std::endl;
+        return false;
+    }
+    const size_t outputBytes = static_cast<size_t>(rankSize) * elementsPerRank * sizeof(int32_t);
+    GM_ADDR src = args.peerMems[rank] + TileXR::IPC_DATA_OFFSET;
+    return CopyDeviceToDevice(rank, output, outputBytes, src, outputBytes, "local peer window to output");
 }
 
 bool ValidateData(int rank, int rankSize, const std::vector<int32_t>& output, int32_t elementsPerRank)
@@ -427,18 +563,72 @@ int main(int argc, char** argv)
         return 1;
     }
 
-    uint32_t blockDim = static_cast<uint32_t>(std::max(kDefaultBlockDim, rankSize));
-    PrintStatus(rank, "launch memory all-gather kernel blockDim=" + std::to_string(blockDim));
-    launch_tilexr_memory_all_gather(blockDim, stream, commArgsDev, reinterpret_cast<GM_ADDR>(input),
-        reinterpret_cast<GM_ADDR>(output), reinterpret_cast<GM_ADDR>(debug), elementsPerRank);
-    if (!CheckAcl(rank, "aclrtSynchronizeStream", aclrtSynchronizeStream(stream))) {
-        Cleanup(comm, stream, input, output, debug, rank, deviceId);
-        return 1;
-    }
+    const bool useHostStaging = GetEnvInt("TILEXR_MEMORY_DEMO_HOST_STAGING", 1) != 0;
+    const bool useHostPeerCopy = !useHostStaging && GetEnvInt("TILEXR_MEMORY_DEMO_HOST_COPY", 1) != 0;
+    if (useHostStaging) {
+        if (!ExchangeInputSegmentsOnHost(rank, rankSize, hostInput, hostOutput, elementsPerRank)) {
+            Cleanup(comm, stream, input, output, debug, rank, deviceId);
+            return 1;
+        }
+        if (!CopyHostToDevice(rank, output, outputCount * sizeof(int32_t), hostOutput.data(),
+                hostOutput.size() * sizeof(int32_t), "output from host staging memory fallback")) {
+            Cleanup(comm, stream, input, output, debug, rank, deviceId);
+            return 1;
+        }
 
-    if (!DemoBarrierAll(rank, rankSize, "all ranks completed memory kernels")) {
-        Cleanup(comm, stream, input, output, debug, rank, deviceId);
-        return 1;
+        if (!DemoBarrierAll(rank, rankSize, "all ranks completed host staging memory fallback")) {
+            Cleanup(comm, stream, input, output, debug, rank, deviceId);
+            return 1;
+        }
+    } else if (useHostPeerCopy) {
+        PrintStatus(rank, "host peer-memory push begin");
+        if (!PushInputToPeerWindowsOnHost(rank, rankSize, *commArgsHost, input, elementsPerRank)) {
+            Cleanup(comm, stream, input, output, debug, rank, deviceId);
+            return 1;
+        }
+
+        if (!DemoBarrierAll(rank, rankSize, "all ranks completed host peer-memory push")) {
+            Cleanup(comm, stream, input, output, debug, rank, deviceId);
+            return 1;
+        }
+
+        PrintStatus(rank, "host peer-memory collect begin");
+        if (!CollectLocalWindowOnHost(rank, rankSize, *commArgsHost, output, elementsPerRank)) {
+            Cleanup(comm, stream, input, output, debug, rank, deviceId);
+            return 1;
+        }
+
+        if (!DemoBarrierAll(rank, rankSize, "all ranks completed host peer-memory collect")) {
+            Cleanup(comm, stream, input, output, debug, rank, deviceId);
+            return 1;
+        }
+    } else {
+        uint32_t blockDim = static_cast<uint32_t>(std::max(kDefaultBlockDim, rankSize));
+        PrintStatus(rank, "launch memory push kernel blockDim=" + std::to_string(blockDim));
+        launch_tilexr_memory_push(blockDim, stream, commArgsDev, reinterpret_cast<GM_ADDR>(input),
+            reinterpret_cast<GM_ADDR>(output), reinterpret_cast<GM_ADDR>(debug), elementsPerRank);
+        if (!CheckAcl(rank, "aclrtSynchronizeStream", aclrtSynchronizeStream(stream))) {
+            Cleanup(comm, stream, input, output, debug, rank, deviceId);
+            return 1;
+        }
+
+        if (!DemoBarrierAll(rank, rankSize, "all ranks completed memory push kernels")) {
+            Cleanup(comm, stream, input, output, debug, rank, deviceId);
+            return 1;
+        }
+
+        PrintStatus(rank, "launch memory collect kernel blockDim=" + std::to_string(blockDim));
+        launch_tilexr_memory_collect(blockDim, stream, commArgsDev, reinterpret_cast<GM_ADDR>(input),
+            reinterpret_cast<GM_ADDR>(output), reinterpret_cast<GM_ADDR>(debug), elementsPerRank);
+        if (!CheckAcl(rank, "aclrtSynchronizeStream", aclrtSynchronizeStream(stream))) {
+            Cleanup(comm, stream, input, output, debug, rank, deviceId);
+            return 1;
+        }
+
+        if (!DemoBarrierAll(rank, rankSize, "all ranks completed memory collect kernels")) {
+            Cleanup(comm, stream, input, output, debug, rank, deviceId);
+            return 1;
+        }
     }
 
     if (!CopyDeviceToHost(rank, hostOutput.data(), hostOutput.size() * sizeof(int32_t), output,

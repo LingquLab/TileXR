@@ -4,6 +4,7 @@
 #include "ep_window.h"
 #include "kernel_operator.h"
 #include "tilexr_sync.h"
+#include "tilexr_transport.h"
 #include "tilexr_udma.h"
 
 namespace {
@@ -387,6 +388,13 @@ __aicore__ inline void TileXREpWaitRelayReadyValue(GM_ADDR relayBase, int64_t to
     }
 }
 
+__aicore__ inline bool TileXREpUsesDirectUrmaTransport(const __gm__ TileXR::CommArgs *args, int64_t slotBytes)
+{
+    return args != nullptr && slotBytes > 0 &&
+        TileXR::TileXRSelectAutoTransport(args, static_cast<uint64_t>(slotBytes)) ==
+            TileXR::TileXRTransportKind::DIRECT_URMA;
+}
+
 __aicore__ inline void TileXREpNotifyRemoteUdmaReadySeparate(
     const __gm__ TileXR::CommArgs *args, GM_ADDR localWindow, int32_t rank, int32_t rankSize, int32_t localRankSize,
     int64_t totalBytes, int64_t magic, int64_t slotBytes, int32_t step, int64_t remoteRecvWindowOffset)
@@ -400,7 +408,7 @@ __aicore__ inline void TileXREpNotifyRemoteUdmaReadySeparate(
         if (peer == rank || TileXREpSameNode(peer, rank, localRankSize)) {
             continue;
         }
-        TileXR::UDMAPutNbi<uint8_t>(args, peer,
+        TileXR::TileXRPutAutoNbi<uint8_t>(args, peer,
             reinterpret_cast<__gm__ uint8_t *>(localWindow + SlotOffset(peer, slotBytes)),
             static_cast<uint64_t>(remoteRecvWindowOffset + SlotOffset(rank, slotBytes)),
             static_cast<uint32_t>(slotBytes));

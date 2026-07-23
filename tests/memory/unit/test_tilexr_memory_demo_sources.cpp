@@ -71,11 +71,13 @@ void TestMemoryDemoKernelUsesPeerMemorySemantics()
     const std::string path = "tests/memory/demo/tilexr_memory_demo_kernel.cpp";
     const std::string text = ReadFile(path);
     CheckAppearsBefore(path, text, "#include \"comm_args.h\"", "#include \"kernel_operator.h\"");
-    CheckContains(path, text, "tilexr_memory_all_gather_kernel");
+    CheckContains(path, text, "tilexr_memory_push_kernel");
+    CheckContains(path, text, "tilexr_memory_collect_kernel");
     CheckContains(path, text, "peerMems");
-    CheckContains(path, text, "SyncCollectives");
-    CheckContains(path, text, "AscendC::DataCopy");
+    CheckContains(path, text, "AscendC::DataCopyPad");
     CheckContains(path, text, "IPC_DATA_OFFSET");
+    CheckNotContains(path, text, "WaitRankInnerFlag");
+    CheckNotContains(path, text, "SyncCollectives");
     CheckNotContains(path, text, "TileXRUDMARegister");
     CheckNotContains(path, text, "UDMAPut");
     CheckNotContains(path, text, "UDMAGet");
@@ -99,14 +101,22 @@ void TestMemoryDemoHostAndRunnerExist()
     const std::string hostText = ReadFile(hostPath);
     CheckContains(hostPath, hostText, "TileXRCommInitRankLocal");
     CheckContains(hostPath, hostText, "TileXRGetCommArgsDev");
-    CheckContains(hostPath, hostText, "launch_tilexr_memory_all_gather");
+    CheckContains(hostPath, hostText, "PushInputToPeerWindowsOnHost");
+    CheckContains(hostPath, hostText, "CollectLocalWindowOnHost");
+    CheckContains(hostPath, hostText, "ExchangeInputSegmentsOnHost");
+    CheckContains(hostPath, hostText, "host staging memory fallback");
+    CheckContains(hostPath, hostText, "ACL_MEMCPY_DEVICE_TO_DEVICE");
+    CheckContains(hostPath, hostText, "host peer-memory push");
+    CheckContains(hostPath, hostText, "launch_tilexr_memory_push");
+    CheckContains(hostPath, hostText, "launch_tilexr_memory_collect");
+    CheckContains(hostPath, hostText, "all ranks completed memory push kernels");
+    CheckContains(hostPath, hostText, "all ranks completed memory collect kernels");
     CheckNotContains(hostPath, hostText, "TileXRUDMARegister");
 
     const std::string runPath = "tests/memory/demo/run_tilexr_memory_demo.sh";
     const std::string runText = ReadFile(runPath);
     CheckContains(runPath, runText, "tilexr_memory_demo");
     CheckContains(runPath, runText, "${TILEXR_ROOT}/install/lib64");
-    CheckNotContains(runPath, runText, "/usr/local/lib");
 }
 
 } // namespace

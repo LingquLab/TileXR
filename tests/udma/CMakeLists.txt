@@ -73,6 +73,14 @@ target_include_directories(test_tilexr_udma_registry PRIVATE
     ${TILEXR_ROOT}/src/include
 )
 
+add_executable(test_tilexr_transport_auto_route
+    unit/test_tilexr_transport_auto_route.cpp
+)
+
+target_include_directories(test_tilexr_transport_auto_route PRIVATE
+    ${TILEXR_ROOT}/src/include
+)
+
 add_executable(test_tilexr_udma_transport_layout
     unit/test_tilexr_udma_transport_layout.cpp
     ${TILEXR_ROOT}/src/comm/udma/tilexr_udma_layout.cpp
@@ -114,6 +122,7 @@ target_link_libraries(test_tilexr_udma
 set(INSTALL_TARGETS
     test_tilexr_udma
     test_tilexr_udma_registry
+    test_tilexr_transport_auto_route
     test_tilexr_udma_transport_layout
     test_tilexr_udma_demo_sources
     test_tilexr_udma_source_guard
