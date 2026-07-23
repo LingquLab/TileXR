@@ -49,6 +49,16 @@ std::vector<uint32_t> BuildUDMAMultiRouteQpWeights(
     const std::map<uint32_t, uint32_t>& routeWeights,
     uint32_t qpsPerRoute);
 
+uint32_t UDMASharedQpLane(
+    int rank,
+    int peer,
+    int rankSize,
+    uint32_t laneCount);
+
+size_t UDMASharedQpPoolSize(
+    uint32_t laneCount,
+    uint32_t eidCount);
+
 std::vector<uint32_t> SelectExplicitUDMARouteEids(
     const char* routeList,
     const std::vector<uint32_t>& candidateEids);

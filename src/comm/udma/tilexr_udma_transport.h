@@ -54,7 +54,10 @@ private:
     int CreateContexts();
     int CreateQueues();
     int CreatePeerQueue(PerEidState& state, int peer, uint32_t qpIdx);
+    int CreateSharedQueue(PerEidState& state, uint32_t lane);
+    int CreateQueue(PerEidState& state, int peer, uint32_t qpIdx, uint32_t queueIndex, bool shared);
     int ImportQueues();
+    int ImportSharedQueues();
     int EnsureUDMAInfoBuffer();
     int RefreshUDMAInfo();
     int RegisterMemoryOnContexts(GM_ADDR localPtr, size_t bytes);
@@ -77,6 +80,8 @@ private:
     uint32_t eidCount_ = 0;
     uint32_t qpNum_ = 1;
     uint32_t qpsPerRoute_ = 1;
+    bool sharedQpPool_ = false;
+    uint32_t sharedQpLaneCount_ = 16;
     std::map<uint32_t, void*> ctxHandleByEid_;
     std::map<uint32_t, void*> tokenHandleByEid_;
     std::map<int, uint32_t> peerLocalEid_;

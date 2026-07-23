@@ -45,6 +45,12 @@ bool UDMADiagEnabled()
     return value != nullptr && value[0] != '\0' && std::strcmp(value, "0") != 0;
 }
 
+bool EnvEnabled(const char* name)
+{
+    const char* value = std::getenv(name);
+    return value != nullptr && value[0] != '\0' && std::strcmp(value, "0") != 0;
+}
+
 uint32_t GetEnvUint(const char* name, uint32_t defaultValue, uint32_t minValue, uint32_t maxValue)
 {
     const char* value = std::getenv(name);
@@ -433,10 +439,17 @@ struct TileXRUDMATransport::PerEidState {
         UDMACQCtx localCq {};
     };
 
+    struct SharedRemoteQueueState {
+        void* remoteQpHandle = nullptr;
+        uint32_t tpn = 0;
+    };
+
     uint32_t eidIndex = 0;
     void* ctxHandle = nullptr;
     void* tokenHandle = nullptr;
     std::map<int, PeerQueueState> peerQueues;
+    std::map<uint32_t, PeerQueueState> sharedQueues;
+    std::map<int, SharedRemoteQueueState> sharedRemoteQueues;
 };
 
 TileXRUDMATransport::TileXRUDMATransport() = default;
@@ -528,7 +541,8 @@ int TileXRUDMATransport::OpenDevice()
 
 int TileXRUDMATransport::BuildRoutes()
 {
-    qpsPerRoute_ = GetEnvUint("TILEXR_UDMA_QP_NUM", 1, 1, 64);
+    sharedQpPool_ = EnvEnabled("TILEXR_UDMA_SHARED_QP_POOL");
+    qpsPerRoute_ = sharedQpPool_ ? 1 : GetEnvUint("TILEXR_UDMA_QP_NUM", 1, 1, 64);
     qpNum_ = qpsPerRoute_;
     const char* routePolicy = std::getenv("TILEXR_UDMA_ROUTE_POLICY");
     const bool useAllRoutes = routePolicy != nullptr && std::strcmp(routePolicy, "all") == 0;
@@ -860,6 +874,18 @@ int TileXRUDMATransport::CreateQueues()
         state.eidIndex = ctxEntry.first;
         state.ctxHandle = ctxEntry.second;
         state.tokenHandle = tokenHandleByEid_[ctxEntry.first];
+        states_[state.eidIndex] = state;
+        auto& activeState = states_[state.eidIndex];
+        if (sharedQpPool_) {
+            for (uint32_t lane = 0; lane < sharedQpLaneCount_; ++lane) {
+                int ret = CreateSharedQueue(activeState, lane);
+                if (ret != TILEXR_SUCCESS) {
+                    CleanupQueues();
+                    return ret;
+                }
+            }
+            continue;
+        }
         for (int peer = 0; peer < options_.rankSize; ++peer) {
             if (peer == options_.rank) {
                 continue;
@@ -870,8 +896,9 @@ int TileXRUDMATransport::CreateQueues()
                     if (qpRoutesIt->second[qpIdx] != state.eidIndex) {
                         continue;
                     }
-                    int ret = CreatePeerQueue(state, peer, qpIdx);
+                    int ret = CreatePeerQueue(activeState, peer, qpIdx);
                     if (ret != TILEXR_SUCCESS) {
+                        CleanupQueues();
                         return ret;
                     }
                 }
@@ -881,28 +908,64 @@ int TileXRUDMATransport::CreateQueues()
             if (localRouteIt == peerLocalEid_.end() || localRouteIt->second != state.eidIndex) {
                 continue;
             }
-            int ret = CreatePeerQueue(state, peer, 0);
+            int ret = CreatePeerQueue(activeState, peer, 0);
             if (ret != TILEXR_SUCCESS) {
+                CleanupQueues();
                 return ret;
             }
         }
-        states_[state.eidIndex] = state;
     }
     return states_.empty() ? TILEXR_ERROR_INTERNAL : TILEXR_SUCCESS;
 }
 
 int TileXRUDMATransport::CreatePeerQueue(PerEidState& state, int peer, uint32_t qpIdx)
 {
+    const uint32_t localQpIdx = qpsPerRoute_ == 0 ? qpIdx : qpIdx % qpsPerRoute_;
+    return CreateQueue(state, peer, qpIdx, localQpIdx, false);
+}
+
+int TileXRUDMATransport::CreateSharedQueue(PerEidState& state, uint32_t lane)
+{
+    return CreateQueue(state, -1, lane, lane, true);
+}
+
+int TileXRUDMATransport::CreateQueue(
+    PerEidState& state, int peer, uint32_t qpIdx, uint32_t queueIndex, bool shared)
+{
     const bool diag = UDMADiagEnabled();
     PerEidState::PeerQueueState queue {};
     queue.peer = peer;
     queue.qpIdx = qpIdx;
-    const uint32_t localQpIdx = qpsPerRoute_ == 0 ? qpIdx : qpIdx % qpsPerRoute_;
+    auto cleanupQueue = [&]() {
+        if (queue.remoteQpHandle != nullptr && state.ctxHandle != nullptr) {
+            loader_.RaCtxQpUnimport(state.ctxHandle, queue.remoteQpHandle);
+            queue.remoteQpHandle = nullptr;
+        }
+        if (queue.qpHandle != nullptr) {
+            loader_.RaCtxQpDestroy(queue.qpHandle);
+            queue.qpHandle = nullptr;
+        }
+        if (queue.cqHandle != nullptr && state.ctxHandle != nullptr) {
+            loader_.RaCtxCqDestroy(state.ctxHandle, queue.cqHandle);
+            queue.cqHandle = nullptr;
+        }
+        if (queue.chanHandle != nullptr && state.ctxHandle != nullptr) {
+            loader_.RaCtxChanDestroy(state.ctxHandle, queue.chanHandle);
+            queue.chanHandle = nullptr;
+        }
+        FreeDeviceScalar(queue.cqPiAddr);
+        FreeDeviceScalar(queue.cqCiAddr);
+        FreeDeviceScalar(queue.sqPiAddr);
+        FreeDeviceScalar(queue.sqCiAddr);
+        FreeDeviceScalar(queue.wqeCntAddr);
+        FreeDeviceScalar(queue.amoAddr);
+    };
 
     ChanInfoT chanInfo {};
     chanInfo.in.dataPlaneFlag.bs.poolCqCstm = 1;
     int ret = loader_.RaCtxChanCreate(state.ctxHandle, &chanInfo, &queue.chanHandle);
     if (ret != 0) {
+        cleanupQueue();
         return TILEXR_ERROR_INTERNAL;
     }
 
@@ -911,14 +974,16 @@ int TileXRUDMATransport::CreatePeerQueue(PerEidState& state, int peer, uint32_t 
     queue.cqInfo.in.ub.mode = JFC_MODE_USER_CTL_NORMAL;
     ret = loader_.RaCtxCqCreate(state.ctxHandle, &queue.cqInfo, &queue.cqHandle);
     if (ret != 0) {
+        cleanupQueue();
         return TILEXR_ERROR_INTERNAL;
     }
-    queue.localCq.cqn = localQpIdx;
+    queue.localCq.cqn = queueIndex;
     queue.localCq.bufAddr = queue.cqInfo.out.bufAddr;
     queue.localCq.baseBkShift = Log2Uint64(queue.cqInfo.out.cqeSize);
     queue.localCq.depth = queue.cqInfo.in.depth;
     if (AllocDeviceScalar(&queue.cqPiAddr, sizeof(uint32_t)) != TILEXR_SUCCESS ||
         AllocDeviceScalar(&queue.cqCiAddr, sizeof(uint32_t)) != TILEXR_SUCCESS) {
+        cleanupQueue();
         return TILEXR_ERROR_INTERNAL;
     }
     queue.localCq.headAddr = reinterpret_cast<uintptr_t>(queue.cqPiAddr);
@@ -944,9 +1009,10 @@ int TileXRUDMATransport::CreatePeerQueue(PerEidState& state, int peer, uint32_t 
     qpAttr.ub.tokenIdHandle = state.tokenHandle;
     ret = loader_.RaCtxQpCreate(state.ctxHandle, &qpAttr, &queue.qpInfo, &queue.qpHandle);
     if (ret != 0) {
+        cleanupQueue();
         return TILEXR_ERROR_INTERNAL;
     }
-    queue.localWq.wqn = localQpIdx;
+    queue.localWq.wqn = queueIndex;
     queue.localWq.bufAddr = queue.qpInfo.ub.sqBuffVa;
     queue.localWq.baseBkShift = Log2Uint64(queue.qpInfo.ub.wqebbSize);
     queue.localWq.depth = TILEXR_UDMA_SQ_BB_COUNT;
@@ -954,6 +1020,7 @@ int TileXRUDMATransport::CreatePeerQueue(PerEidState& state, int peer, uint32_t 
         AllocDeviceScalar(&queue.sqCiAddr, sizeof(uint32_t)) != TILEXR_SUCCESS ||
         AllocDeviceScalar(&queue.wqeCntAddr, sizeof(uint32_t)) != TILEXR_SUCCESS ||
         AllocDeviceScalar(&queue.amoAddr, sizeof(uint64_t)) != TILEXR_SUCCESS) {
+        cleanupQueue();
         return TILEXR_ERROR_INTERNAL;
     }
     queue.localWq.headAddr = reinterpret_cast<uintptr_t>(queue.sqPiAddr);
@@ -963,7 +1030,8 @@ int TileXRUDMATransport::CreatePeerQueue(PerEidState& state, int peer, uint32_t 
     queue.localWq.wqeCntAddr = reinterpret_cast<uintptr_t>(queue.wqeCntAddr);
     queue.localWq.amoAddr = reinterpret_cast<uintptr_t>(queue.amoAddr);
     if (diag) {
-        TILEXR_LOG(INFO) << "UDMA diag create peer queue rank " << options_.rank
+        TILEXR_LOG(INFO) << "UDMA diag create " << (shared ? "shared" : "peer")
+                         << " queue rank " << options_.rank
                          << " peer=" << peer
                          << " qpIdx=" << qpIdx
                          << " eid=" << state.eidIndex
@@ -983,7 +1051,9 @@ int TileXRUDMATransport::CreatePeerQueue(PerEidState& state, int peer, uint32_t 
                          << " wqebbSize=" << queue.qpInfo.ub.wqebbSize
                          << " cqeSize=" << queue.cqInfo.out.cqeSize;
     }
-    if (qpNum_ <= 1) {
+    if (shared) {
+        state.sharedQueues[qpIdx] = queue;
+    } else if (qpNum_ <= 1) {
         state.peerQueues[peer] = queue;
     } else {
         state.peerQueues[QueueKey(peer, qpIdx, qpNum_)] = queue;
@@ -993,6 +1063,9 @@ int TileXRUDMATransport::CreatePeerQueue(PerEidState& state, int peer, uint32_t 
 
 int TileXRUDMATransport::ImportQueues()
 {
+    if (sharedQpPool_) {
+        return ImportSharedQueues();
+    }
     const bool diag = UDMADiagEnabled();
     std::vector<QpImportInfoT> localPeerImports(options_.rankSize);
     std::vector<QpKeyT> localPeerKeys(options_.rankSize);
@@ -1071,6 +1144,109 @@ int TileXRUDMATransport::ImportQueues()
                                  << " remoteQp=" << queue.remoteQpHandle
                                  << " tpn=" << queue.tpn
                                  << " keySize=" << static_cast<uint32_t>(importInfo.in.key.size);
+            }
+        }
+    }
+    return TILEXR_SUCCESS;
+}
+
+int TileXRUDMATransport::ImportSharedQueues()
+{
+    const bool diag = UDMADiagEnabled();
+    const size_t endpointSlots = UDMASharedQpPoolSize(sharedQpLaneCount_, eidCount_);
+    if (endpointSlots == 0) {
+        return TILEXR_ERROR_INTERNAL;
+    }
+
+    std::vector<QpImportInfoT> localSharedImports(endpointSlots);
+    std::vector<QpKeyT> localSharedKeys(endpointSlots);
+    for (const auto& stateEntry : states_) {
+        const auto& state = stateEntry.second;
+        for (const auto& queueEntry : state.sharedQueues) {
+            const uint32_t lane = queueEntry.first;
+            const auto& queue = queueEntry.second;
+            const size_t slot = static_cast<size_t>(state.eidIndex) * sharedQpLaneCount_ + lane;
+            if (slot >= endpointSlots) {
+                return TILEXR_ERROR_INTERNAL;
+            }
+            auto& importInfo = localSharedImports[slot];
+            importInfo.in.ub.mode = JETTY_IMPORT_MODE_NORMAL;
+            importInfo.in.ub.tokenValue = TILEXR_UDMA_TOKEN_VALUE;
+            importInfo.in.ub.policy = JETTY_GRP_POLICY_RR;
+            importInfo.in.ub.type = TARGET_TYPE_JETTY;
+            importInfo.in.ub.flag.bs.tokenPolicy = TOKEN_POLICY_PLAIN_TEXT;
+            importInfo.in.ub.tpType = 1;
+            importInfo.in.key = queue.qpInfo.key;
+            localSharedKeys[slot] = queue.qpInfo.key;
+        }
+    }
+
+    std::vector<QpImportInfoT> allSharedImports(static_cast<size_t>(options_.rankSize) * endpointSlots);
+    int ret = options_.exchange->AllGather(
+        localSharedImports.data(), localSharedImports.size(), allSharedImports.data());
+    if (ret != TILEXR_SUCCESS) {
+        return ret;
+    }
+    std::vector<QpKeyT> allSharedKeys(static_cast<size_t>(options_.rankSize) * endpointSlots);
+    ret = options_.exchange->AllGather(
+        localSharedKeys.data(), localSharedKeys.size(), allSharedKeys.data());
+    if (ret != TILEXR_SUCCESS) {
+        return ret;
+    }
+
+    for (int peer = 0; peer < options_.rankSize; ++peer) {
+        if (peer == options_.rank) {
+            continue;
+        }
+        const uint32_t localLane = UDMASharedQpLane(options_.rank, peer,
+            options_.rankSize, sharedQpLaneCount_);
+        const uint32_t remoteLane = UDMASharedQpLane(peer, options_.rank,
+            options_.rankSize, sharedQpLaneCount_);
+        if (localLane >= sharedQpLaneCount_ || remoteLane >= sharedQpLaneCount_) {
+            return TILEXR_ERROR_INTERNAL;
+        }
+
+        const auto localRoutesIt = peerLocalEids_.find(peer);
+        const auto remoteRoutesIt = peerRemoteEids_.find(peer);
+        if (localRoutesIt == peerLocalEids_.end() || remoteRoutesIt == peerRemoteEids_.end()) {
+            return TILEXR_ERROR_INTERNAL;
+        }
+        const auto& localRoutes = localRoutesIt->second;
+        const auto& remoteRoutes = remoteRoutesIt->second;
+        const size_t routeCount = std::min(localRoutes.size(), remoteRoutes.size());
+        for (size_t route = 0; route < routeCount; ++route) {
+            const uint32_t localEid = localRoutes[route];
+            const uint32_t remoteEid = remoteRoutes[route];
+            auto stateIt = states_.find(localEid);
+            if (stateIt == states_.end() || stateIt->second.sharedQueues.count(localLane) == 0 ||
+                remoteEid >= eidCount_) {
+                return TILEXR_ERROR_INTERNAL;
+            }
+            const size_t remoteSlot = static_cast<size_t>(peer) * endpointSlots +
+                static_cast<size_t>(remoteEid) * sharedQpLaneCount_ + remoteLane;
+            if (remoteSlot >= allSharedImports.size()) {
+                return TILEXR_ERROR_INTERNAL;
+            }
+            QpImportInfoT importInfo = allSharedImports[remoteSlot];
+            importInfo.in.key = allSharedKeys[remoteSlot];
+            PerEidState::SharedRemoteQueueState remote {};
+            ret = loader_.RaCtxQpImport(stateIt->second.ctxHandle, &importInfo, &remote.remoteQpHandle);
+            if (ret != 0 || remote.remoteQpHandle == nullptr) {
+                return TILEXR_ERROR_INTERNAL;
+            }
+            remote.tpn = importInfo.out.ub.tpn;
+            const uint32_t qpIdx = static_cast<uint32_t>(route) * qpsPerRoute_;
+            stateIt->second.sharedRemoteQueues[QueueKey(peer, qpIdx, qpNum_)] = remote;
+            if (diag) {
+                TILEXR_LOG(INFO) << "UDMA diag import shared qp rank " << options_.rank
+                                 << " peer=" << peer
+                                 << " qpIdx=" << qpIdx
+                                 << " localLane=" << localLane
+                                 << " remoteLane=" << remoteLane
+                                 << " localEid=" << localEid
+                                 << " remoteEid=" << remoteEid
+                                 << " remoteQp=" << remote.remoteQpHandle
+                                 << " tpn=" << remote.tpn;
             }
         }
     }
@@ -1179,12 +1355,35 @@ int TileXRUDMATransport::RefreshUDMAInfo()
             }
             auto& state = stateIt->second;
             PerEidState::PeerQueueState* queuePtr = nullptr;
+            PerEidState::SharedRemoteQueueState* sharedRemotePtr = nullptr;
             if (rank == options_.rank) {
-                if (!state.peerQueues.empty()) {
+                if (sharedQpPool_ && !state.sharedQueues.empty()) {
+                    queuePtr = &state.sharedQueues.begin()->second;
+                } else if (sharedQpPool_ && !fallbackIt->second.sharedQueues.empty()) {
+                    queuePtr = &fallbackIt->second.sharedQueues.begin()->second;
+                } else if (!state.peerQueues.empty()) {
                     queuePtr = &state.peerQueues.begin()->second;
                 } else if (!fallbackIt->second.peerQueues.empty()) {
                     queuePtr = &fallbackIt->second.peerQueues.begin()->second;
                 }
+            } else if (sharedQpPool_) {
+                const uint32_t lane = UDMASharedQpLane(
+                    options_.rank, rank, options_.rankSize, sharedQpLaneCount_);
+                auto queueIt = state.sharedQueues.find(lane);
+                if (queueIt == state.sharedQueues.end()) {
+                    return TILEXR_ERROR_INTERNAL;
+                }
+                queuePtr = &queueIt->second;
+                const int key = QueueKey(rank, qpIdx, qpNum_);
+                auto remoteIt = state.sharedRemoteQueues.find(key);
+                if (remoteIt == state.sharedRemoteQueues.end()) {
+                    const int routeKey = QueueKey(rank, routeQpIdx, qpNum_);
+                    remoteIt = state.sharedRemoteQueues.find(routeKey);
+                }
+                if (remoteIt == state.sharedRemoteQueues.end()) {
+                    return TILEXR_ERROR_INTERNAL;
+                }
+                sharedRemotePtr = &remoteIt->second;
             } else {
                 const int key = QueueKey(rank, qpIdx, qpNum_);
                 auto queueIt = state.peerQueues.find(key);
@@ -1220,7 +1419,7 @@ int TileXRUDMATransport::RefreshUDMAInfo()
                 }
             } else {
                 mem[entryIndex] = allMem[rank * eidCount_ + remoteEid];
-                mem[entryIndex].tpn = queue.tpn;
+                mem[entryIndex].tpn = sharedRemotePtr == nullptr ? queue.tpn : sharedRemotePtr->tpn;
             }
             mem[entryIndex].eidAddr = reinterpret_cast<uint64_t>(
                 eidTableDev_ + (rank * eidCount_ + remoteEid) * sizeof(HccpEid));
@@ -1593,6 +1792,14 @@ void TileXRUDMATransport::CleanupQueues()
 {
     for (auto& stateEntry : states_) {
         auto& state = stateEntry.second;
+        for (auto& remoteEntry : state.sharedRemoteQueues) {
+            auto& remote = remoteEntry.second;
+            if (remote.remoteQpHandle != nullptr && state.ctxHandle != nullptr) {
+                loader_.RaCtxQpUnimport(state.ctxHandle, remote.remoteQpHandle);
+                remote.remoteQpHandle = nullptr;
+            }
+        }
+        state.sharedRemoteQueues.clear();
         for (auto& queueEntry : state.peerQueues) {
             auto& queue = queueEntry.second;
             if (queue.remoteQpHandle != nullptr && state.ctxHandle != nullptr) {
@@ -1619,6 +1826,28 @@ void TileXRUDMATransport::CleanupQueues()
             FreeDeviceScalar(queue.amoAddr);
         }
         state.peerQueues.clear();
+        for (auto& queueEntry : state.sharedQueues) {
+            auto& queue = queueEntry.second;
+            if (queue.qpHandle != nullptr) {
+                loader_.RaCtxQpDestroy(queue.qpHandle);
+                queue.qpHandle = nullptr;
+            }
+            if (queue.cqHandle != nullptr && state.ctxHandle != nullptr) {
+                loader_.RaCtxCqDestroy(state.ctxHandle, queue.cqHandle);
+                queue.cqHandle = nullptr;
+            }
+            if (queue.chanHandle != nullptr && state.ctxHandle != nullptr) {
+                loader_.RaCtxChanDestroy(state.ctxHandle, queue.chanHandle);
+                queue.chanHandle = nullptr;
+            }
+            FreeDeviceScalar(queue.cqPiAddr);
+            FreeDeviceScalar(queue.cqCiAddr);
+            FreeDeviceScalar(queue.sqPiAddr);
+            FreeDeviceScalar(queue.sqCiAddr);
+            FreeDeviceScalar(queue.wqeCntAddr);
+            FreeDeviceScalar(queue.amoAddr);
+        }
+        state.sharedQueues.clear();
     }
     states_.clear();
 }
@@ -1679,6 +1908,7 @@ void TileXRUDMATransport::Shutdown()
     peerQpRouteWeights_.clear();
     qpsPerRoute_ = 1;
     qpNum_ = 1;
+    sharedQpPool_ = false;
     localMemInfoByEid_.clear();
     remoteMemHandlesByPeer_.clear();
     loader_.Unload();

@@ -127,6 +127,31 @@ std::vector<uint32_t> BuildUDMAMultiRouteQpWeights(
     return qpWeights;
 }
 
+uint32_t UDMASharedQpLane(
+    int rank,
+    int peer,
+    int rankSize,
+    uint32_t laneCount)
+{
+    if (rankSize <= 1 || rank < 0 || peer < 0 || rank >= rankSize || peer >= rankSize ||
+        rank == peer || laneCount == 0 || (laneCount % 2) != 0) {
+        return laneCount;
+    }
+
+    const uint32_t lanesPerDirection = laneCount / 2;
+    const uint32_t forward = static_cast<uint32_t>((peer - rank + rankSize) % rankSize);
+    const uint32_t backward = static_cast<uint32_t>(rankSize) - forward;
+    if (forward <= backward) {
+        return (forward - 1) % lanesPerDirection;
+    }
+    return lanesPerDirection + (backward - 1) % lanesPerDirection;
+}
+
+size_t UDMASharedQpPoolSize(uint32_t laneCount, uint32_t eidCount)
+{
+    return static_cast<size_t>(laneCount) * eidCount;
+}
+
 std::vector<uint32_t> SelectExplicitUDMARouteEids(
     const char* routeList,
     const std::vector<uint32_t>& candidateEids)

@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cstdint>
 #include <fstream>
 #include <iostream>
@@ -153,6 +154,59 @@ void TestMultiRouteQpWeightsUseRouteBandwidth()
     CHECK_EQ(qpWeights[1], 2U);
 }
 
+void TestSharedQpLaneMatchesGroupedPeerOrder()
+{
+    CHECK_EQ(TileXR::UDMASharedQpLane(0, 1, 64, 16), 0U);
+    CHECK_EQ(TileXR::UDMASharedQpLane(0, 8, 64, 16), 7U);
+    CHECK_EQ(TileXR::UDMASharedQpLane(0, 9, 64, 16), 0U);
+    CHECK_EQ(TileXR::UDMASharedQpLane(0, 63, 64, 16), 8U);
+    CHECK_EQ(TileXR::UDMASharedQpLane(0, 56, 64, 16), 15U);
+    CHECK_EQ(TileXR::UDMASharedQpLane(0, 32, 64, 16), 7U);
+    CHECK_EQ(TileXR::UDMASharedQpLane(0, 0, 64, 16), 16U);
+}
+
+void TestSharedQpLanesAreUniqueWithinEveryGroup()
+{
+    for (int rankSize = 8; rankSize <= 1024; rankSize += 8) {
+        const uint32_t groupCount = static_cast<uint32_t>((rankSize - 1 + 15) / 16);
+        for (int rank = 0; rank < rankSize; ++rank) {
+            for (uint32_t group = 0; group < groupCount; ++group) {
+                bool used[16] = {};
+                for (int peer = 0; peer < rankSize; ++peer) {
+                    if (peer == rank) {
+                        continue;
+                    }
+                    const uint32_t forward = static_cast<uint32_t>((peer - rank + rankSize) % rankSize);
+                    const uint32_t backward = static_cast<uint32_t>(rankSize) - forward;
+                    const uint32_t distance = std::min(forward, backward);
+                    if ((distance - 1U) / 8U != group) {
+                        continue;
+                    }
+                    const uint32_t lane = TileXR::UDMASharedQpLane(rank, peer, rankSize, 16);
+                    CHECK_TRUE(lane < 16U);
+                    CHECK_TRUE(!used[lane]);
+                    used[lane] = true;
+                }
+            }
+        }
+    }
+}
+
+void TestSharedQpPoolScalesWithLanesAndEidsOnly()
+{
+    CHECK_EQ(TileXR::UDMASharedQpPoolSize(16, 2), static_cast<size_t>(32));
+    CHECK_EQ(TileXR::UDMASharedQpPoolSize(16, 1), static_cast<size_t>(16));
+    CHECK_EQ(TileXR::UDMASharedQpPoolSize(0, 2), static_cast<size_t>(0));
+}
+
+void TestSharedQpLaneRejectsInvalidInputs()
+{
+    CHECK_EQ(TileXR::UDMASharedQpLane(-1, 1, 64, 16), 16U);
+    CHECK_EQ(TileXR::UDMASharedQpLane(0, 64, 64, 16), 16U);
+    CHECK_EQ(TileXR::UDMASharedQpLane(0, 1, 64, 15), 15U);
+    CHECK_EQ(TileXR::UDMASharedQpLane(0, 1, 64, 0), 0U);
+}
+
 void TestExplicitRouteSelectionKeepsRequestedCandidateOrder()
 {
     const std::vector<uint32_t> candidates = {7, 8};
@@ -229,6 +283,24 @@ void TestTransportUsesPerPeerQueues()
     CHECK_NOT_CONTAINS(transport, "void* qpHandle = nullptr;\n    CqInfoT cqInfo");
 }
 
+void TestTransportHasOptInSharedQpPool()
+{
+    const std::string header =
+        ReadFile(std::string(TILEXR_SOURCE_ROOT) + "/src/comm/udma/tilexr_udma_transport.h");
+    const std::string transport =
+        ReadFile(std::string(TILEXR_SOURCE_ROOT) + "/src/comm/udma/tilexr_udma_transport.cpp");
+
+    CHECK_CONTAINS(header, "bool sharedQpPool_ = false");
+    CHECK_CONTAINS(transport, "TILEXR_UDMA_SHARED_QP_POOL");
+    CHECK_CONTAINS(transport, "state.sharedQueues");
+    CHECK_CONTAINS(transport, "UDMASharedQpLane(options_.rank, peer");
+    CHECK_CONTAINS(transport, "UDMASharedQpLane(peer, options_.rank");
+    CHECK_CONTAINS(transport, "localSharedImports");
+    CHECK_CONTAINS(transport, "allSharedImports");
+    CHECK_CONTAINS(transport, "state.sharedRemoteQueues.clear()");
+    CHECK_CONTAINS(transport, "auto cleanupQueue = [&]()");
+}
+
 void TestRootInfoEidBytesSelectRuntimeContexts()
 {
     const std::string transport =
@@ -292,6 +364,10 @@ int main()
     TestMultiRouteQpMappingRepeatsEachRoute();
     TestMultiRouteQpMappingRejectsEmptyInputs();
     TestMultiRouteQpWeightsUseRouteBandwidth();
+    TestSharedQpLaneMatchesGroupedPeerOrder();
+    TestSharedQpLanesAreUniqueWithinEveryGroup();
+    TestSharedQpPoolScalesWithLanesAndEidsOnly();
+    TestSharedQpLaneRejectsInvalidInputs();
     TestExplicitRouteSelectionKeepsRequestedCandidateOrder();
     TestExplicitRouteSelectionRejectsMissingInputs();
     TestCrossNodeRouteSelectionUsesAggregateRoutes();
@@ -299,6 +375,7 @@ int main()
     TestNodeIdentityUsesMachineIdBeforeHostname();
     TestExplicitNodeIdentityOverridesMachineId();
     TestTransportUsesPerPeerQueues();
+    TestTransportHasOptInSharedQpPool();
     TestRootInfoEidBytesSelectRuntimeContexts();
     TestMemoryRegistrationUsesOfficialUbFlags();
     TestDeviceSgeUsesPerPeerLocalTokenId();
