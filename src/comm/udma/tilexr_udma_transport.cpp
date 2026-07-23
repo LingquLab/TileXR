@@ -88,7 +88,18 @@ struct UDMANodeId {
 UDMANodeId GetLocalNodeId()
 {
     UDMANodeId node {};
-    if (gethostname(node.value, sizeof(node.value) - 1) != 0 || node.value[0] == '\0') {
+    char hostname[kUDMANodeIdBytes] = {};
+    if (gethostname(hostname, sizeof(hostname) - 1) != 0) {
+        hostname[0] = '\0';
+    }
+    std::ifstream machineIdFile("/etc/machine-id");
+    std::string machineId;
+    std::getline(machineIdFile, machineId);
+    const std::string identity = SelectUDMANodeIdentity(
+        std::getenv("TILEXR_UDMA_NODE_ID"), machineId, hostname);
+    if (!identity.empty()) {
+        std::snprintf(node.value, sizeof(node.value), "%s", identity.c_str());
+    } else {
         std::snprintf(node.value, sizeof(node.value), "pid-%ld", static_cast<long>(getpid()));
     }
     node.value[sizeof(node.value) - 1] = '\0';

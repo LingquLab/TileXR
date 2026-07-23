@@ -6,6 +6,7 @@
 #include "udma/tilexr_udma_layout.h"
 
 #include <algorithm>
+#include <cctype>
 #include <climits>
 #include <cstdlib>
 #include <cstring>
@@ -169,6 +170,28 @@ std::vector<uint32_t> SelectUDMARoutesForPeer(
         return topoRoutes;
     }
     return aggregateRoutes;
+}
+
+std::string SelectUDMANodeIdentity(
+    const char* explicitNodeId,
+    const std::string& machineId,
+    const char* hostname)
+{
+    if (explicitNodeId != nullptr && explicitNodeId[0] != '\0') {
+        return std::string("explicit:") + explicitNodeId;
+    }
+
+    const auto begin = std::find_if_not(machineId.begin(), machineId.end(),
+        [](unsigned char ch) { return std::isspace(ch) != 0; });
+    const auto end = std::find_if_not(machineId.rbegin(), machineId.rend(),
+        [](unsigned char ch) { return std::isspace(ch) != 0; }).base();
+    if (begin < end) {
+        return std::string("machine:") + std::string(begin, end);
+    }
+    if (hostname != nullptr && hostname[0] != '\0') {
+        return std::string("hostname:") + hostname;
+    }
+    return {};
 }
 
 } // namespace TileXR

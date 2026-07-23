@@ -8,6 +8,7 @@
 
 #include <cstdint>
 #include <map>
+#include <string>
 #include <vector>
 
 #include "tilexr_udma_types.h"
@@ -56,6 +57,11 @@ std::vector<uint32_t> SelectUDMARoutesForPeer(
     bool peerIsRemoteNode,
     const std::vector<uint32_t>& topoRoutes,
     const std::vector<uint32_t>& aggregateRoutes);
+
+std::string SelectUDMANodeIdentity(
+    const char* explicitNodeId,
+    const std::string& machineId,
+    const char* hostname);
 
 } // namespace TileXR
 

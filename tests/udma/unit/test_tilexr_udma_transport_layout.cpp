@@ -194,6 +194,25 @@ void TestSameNodeRouteSelectionUsesTopoRoutes()
     CHECK_EQ(selected[0], 1U);
 }
 
+void TestNodeIdentityUsesMachineIdBeforeHostname()
+{
+    const std::string first = TileXR::SelectUDMANodeIdentity(
+        nullptr, "machine-a\n", "localhost.localdomain");
+    const std::string second = TileXR::SelectUDMANodeIdentity(
+        nullptr, "machine-b\n", "localhost.localdomain");
+
+    CHECK_EQ(first, std::string("machine:machine-a"));
+    CHECK_EQ(second, std::string("machine:machine-b"));
+    CHECK_TRUE(first != second);
+}
+
+void TestExplicitNodeIdentityOverridesMachineId()
+{
+    CHECK_EQ(TileXR::SelectUDMANodeIdentity(
+                 "node-7", "machine-a\n", "localhost.localdomain"),
+        std::string("explicit:node-7"));
+}
+
 void TestTransportUsesPerPeerQueues()
 {
     const std::string transport =
@@ -277,6 +296,8 @@ int main()
     TestExplicitRouteSelectionRejectsMissingInputs();
     TestCrossNodeRouteSelectionUsesAggregateRoutes();
     TestSameNodeRouteSelectionUsesTopoRoutes();
+    TestNodeIdentityUsesMachineIdBeforeHostname();
+    TestExplicitNodeIdentityOverridesMachineId();
     TestTransportUsesPerPeerQueues();
     TestRootInfoEidBytesSelectRuntimeContexts();
     TestMemoryRegistrationUsesOfficialUbFlags();
