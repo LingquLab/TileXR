@@ -95,34 +95,50 @@ private:
         return ((ioErrno == EAGAIN) || (ioErrno == EWOULDBLOCK) || (ioErrno == EINTR));
     }
 
-    template <typename T> int Send(int fd, const T *sendBuf, size_t sendSize, int flag) const
+    template <typename T> ssize_t Send(int fd, const T *sendBuf, size_t sendSize, int flag) const
     {
-        do {
-            auto ret = send(fd, sendBuf, sendSize, flag);
+        const char *data = reinterpret_cast<const char *>(sendBuf);
+        size_t sent = 0;
+        while (sent < sendSize) {
+            auto ret = send(fd, data + sent, sendSize - sent, flag);
             if (ret < 0) {
                 if (CheckErrno(errno)) {
                     TILEXR_LOG(ERROR) << "send failed: " << strerror(errno);
                     continue;
                 }
                 TILEXR_LOG(DEBUG) << "Send failed: " << strerror(errno);
+                return ret;
             }
-            return ret;
-        } while (true);
+            if (ret == 0) {
+                TILEXR_LOG(DEBUG) << "Send returned zero before buffer completion";
+                return -1;
+            }
+            sent += static_cast<size_t>(ret);
+        }
+        return static_cast<ssize_t>(sent);
     }
 
-    template <typename T> int Recv(int fd, T *recvBuf, size_t recvSize, int flag) const
+    template <typename T> ssize_t Recv(int fd, T *recvBuf, size_t recvSize, int flag) const
     {
-        do {
-            auto ret = recv(fd, recvBuf, recvSize, flag);
+        char *data = reinterpret_cast<char *>(recvBuf);
+        size_t received = 0;
+        while (received < recvSize) {
+            auto ret = recv(fd, data + received, recvSize - received, flag);
             if (ret < 0) {
                 if (CheckErrno(errno)) {
                     TILEXR_LOG(ERROR) << "recv failed: " << strerror(errno);
                     continue;
                 }
                 TILEXR_LOG(DEBUG) << "recv failed: " << strerror(errno);
+                return ret;
             }
-            return ret;
-        } while (true);
+            if (ret == 0) {
+                TILEXR_LOG(DEBUG) << "Recv reached EOF before buffer completion";
+                return -1;
+            }
+            received += static_cast<size_t>(ret);
+        }
+        return static_cast<ssize_t>(received);
     }
 
     template <typename T> int ClientSendRecv(const T *sendBuf, size_t sendSize, T *recvBuf)
