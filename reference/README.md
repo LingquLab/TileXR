@@ -52,14 +52,14 @@ SHMEM_BRANCH=release-test bash reference/download_cann_repos.sh shmem
 ```
 
 The `asc-devkit` checkout is the expected local source for Ascend C API
-documentation and examples used by the `.claude/skills/ascendc-docs-search`
-workflow.
+documentation and examples used by the externally maintained
+[`ascendc-docs-search`](https://github.com/LingquLab/skills/tree/main/plugins/ascendc-development/skills/ascendc-docs-search) skill.
 
 ## Repository Guide
 
 | Repository | What It Contains | Read It When |
 | --- | --- | --- |
-| `asc-devkit` | Ascend C language, API headers, implementations, CMake support, docs, and examples. Important areas include `docs/`, `examples/`, `include/`, and `impl/`. | You need Ascend C API behavior, API variants, kernel examples, SIMT/SIMD migration notes, tiling references, or the source behind `.claude/skills/ascendc-docs-search`. |
+| `asc-devkit` | Ascend C language, API headers, implementations, CMake support, docs, and examples. Important areas include `docs/`, `examples/`, `include/`, and `impl/`. | You need Ascend C API behavior, API variants, kernel examples, SIMT/SIMD migration notes, tiling references, or the source used by the externally maintained [`ascendc-docs-search`](https://github.com/LingquLab/skills/tree/main/plugins/ascendc-development/skills/ascendc-docs-search) skill. |
 | `runtime` | CANN runtime and DFX components: ACL/aclrt public headers, runtime core, memory/stream/event/task management, profiling, dump, logging, examples, and runtime coding guides. | You are debugging `aclInit`, `aclrtMalloc`, stream/event/memory APIs, runtime include paths, DFX behavior, or TileXR host-side interaction with CANN runtime. |
 | `driver` | CANN driver stack source and docs, including DCMI, HAL, SDK-driver, RoCE, SVM, NDA/RDMA extension docs, device management examples, and driver/HAL packaging structure. | You need to understand driver/HAL boundaries, `libascend_hal` behavior, device management APIs, RoCE/RDMA/NDA support, SVM, or low-level device/driver diagnostics. |
 | `asc-tools` | Ascend C companion tools: CPU debug, NPU check, `msobjdump`, `show_kernel_debug_data`, docs, examples, and tool implementation sources. | You are validating or debugging Ascend C kernels without immediately running full hardware flows, inspecting compiled kernel objects, parsing kernel debug data, or checking kernel implementation issues. |

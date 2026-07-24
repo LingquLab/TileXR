@@ -139,7 +139,7 @@ When upgrading CANN versions:
 - [ ] Check for API changes in dependencies used by active targets
 - [ ] Verify current `install/lib/libtile-comm.so` does not unexpectedly link shmem
 - [ ] Test build on clean environment
-- [ ] Update CLAUDE.md with version-specific notes
+- [ ] Update AGENTS.md with version-specific notes
 - [ ] Document breaking changes in this file
 
 ### Debugging Tips
@@ -226,7 +226,7 @@ Monitor these areas for potential changes:
 
 ## Related Documents
 
-- [TileXR CLAUDE.md](../CLAUDE.md) - Build instructions and architecture
+- [TileXR AGENTS.md](../AGENTS.md) - Build instructions and architecture
 - [UDMA Integration Summary](./UDMA_INTEGRATION_SUMMARY.md) - Current TileXR UDMA architecture notes
 
 ## Changelog
