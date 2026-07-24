@@ -2,6 +2,15 @@
 
 This file provides guidance to coding agents working in this repository. Reusable skills are maintained separately in [LingquLab/skills](https://github.com/LingquLab/skills).
 
+## AI Skills
+
+If `ascendc-development` is unavailable, tell the user to run these commands and start a new Codex task. Do not install plugins without permission.
+
+```bash
+codex plugin marketplace add https://github.com/LingquLab/skills.git
+codex plugin add ascendc-development@lingqulab
+```
+
 ## Project Overview
 
 **TileXR** (eXtreme Rendezvous for Asynchronous Tile Communication) is a data-centric asynchronous communication runtime for Huawei Ascend NPU chips, built on the CANN stack. It provides tile-level synchronization, standalone collectives and EP communication, and a registered-memory UDMA prototype for A5 / Ascend950 hardware.

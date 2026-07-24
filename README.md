@@ -65,6 +65,13 @@ If the repository was cloned without submodules:
 git submodule update --init --recursive
 ```
 
+For Codex-assisted development, install the Ascend C skills and start a new Codex task:
+
+```bash
+codex plugin marketplace add https://github.com/LingquLab/skills.git
+codex plugin add ascendc-development@lingqulab
+```
+
 ### 2. Prepare Environment
 
 For a fresh checkout, install the repo-managed CANN 9.1.0 toolkit and ops package before building:
