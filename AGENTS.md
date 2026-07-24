@@ -1,15 +1,6 @@
 # AGENTS.md
 
-This file provides guidance to coding agents working in this repository. Reusable skills are maintained separately in [LingquLab/skills](https://github.com/LingquLab/skills).
-
-## AI Skills
-
-If `ascendc-development` is unavailable, tell the user to run these commands and start a new Codex task. Do not install plugins without permission.
-
-```bash
-codex plugin marketplace add https://github.com/LingquLab/skills.git
-codex plugin add ascendc-development@lingqulab
-```
+This file provides guidance to coding agents working in this repository. Ask the user to install missing `ascendc-development` or `superpowers-neo` skills from [LingquLab/skills](https://github.com/LingquLab/skills).
 
 ## Project Overview
 
