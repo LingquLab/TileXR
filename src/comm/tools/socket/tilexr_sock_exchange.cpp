@@ -15,6 +15,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <set>
+#include <array>
 #include <string>
 #include <fstream>
 #include <sstream>
@@ -96,43 +97,20 @@ string GetUUID()
 
 int TileXRSockExchange::GetNodeNum()
 {
-    if (!isInit_ && Prepare() != TILEXR_SUCCESS) {
+    constexpr size_t uuidBytes = 64;
+    std::array<char, uuidBytes> localUuid {};
+    const string uuid = GetUUID();
+    std::copy_n(uuid.data(), std::min(uuid.size(), uuidBytes - 1), localUuid.data());
+    std::vector<char> allUuids(static_cast<size_t>(rankSize_) * uuidBytes);
+    if (AllGather(localUuid.data(), uuidBytes, allUuids.data()) != TILEXR_SUCCESS) {
         return TILEXR_ERROR_INTERNAL;
     }
-    isInit_ = true;
-    string uuid = GetUUID();
-    TILEXR_LOG(DEBUG) << "rank:" << rank_ << " UUID " << uuid;
-
     set<string> uuidSet {};
-    uuidSet.insert(uuid);
-    int nodeNum = -1;
-    if (IsServer()) {
-        for (int i = 1; i < rankSize_; ++i) {
-            if (Recv(clientFds_[i], &uuid[0], uuid.size(), 0) <= 0) {
-                TILEXR_LOG(ERROR) << "Server side recv rank " << i << " buffer failed";
-                return TILEXR_ERROR_INTERNAL;
-            }
-            uuidSet.insert(uuid);
-        }
-        nodeNum = static_cast<int>(uuidSet.size());
-        TILEXR_LOG(DEBUG) << "nodeNum:" << nodeNum;
-        for (int i = 1; i < rankSize_; ++i) {
-            if (Send(clientFds_[i], &nodeNum, sizeof(int), 0) <= 0) {
-                TILEXR_LOG(ERROR) << "Server side send rank " << i << " buffer failed";
-                return TILEXR_ERROR_INTERNAL;
-            }
-        }
-    } else {
-        if (Send(fd_, uuid.data(), uuid.size(), 0) <= 0) {
-            TILEXR_LOG(ERROR) << "Client side " << rank_ << " send buffer failed";
-            return TILEXR_ERROR_INTERNAL;
-        }
-        if (Recv(fd_, &nodeNum, sizeof(int), 0) <= 0) {
-            TILEXR_LOG(ERROR) << "Client side " << rank_ << " recv buffer failed ";
-            return TILEXR_ERROR_INTERNAL;
-        }
+    for (int rank = 0; rank < rankSize_; ++rank) {
+        uuidSet.emplace(allUuids.data() + static_cast<size_t>(rank) * uuidBytes);
     }
-    return nodeNum;
+    TILEXR_LOG(DEBUG) << "nodeNum:" << uuidSet.size();
+    return static_cast<int>(uuidSet.size());
 }
 
 void TileXRSockExchange::GetIpAndPort()
@@ -150,16 +128,94 @@ void TileXRSockExchange::GetIpAndPort()
     TILEXR_LOG(DEBUG) << "curRank: " << rank_ << " commDomain: " << commDomain_ << " ip: " << ip_ << " port: " << port_;
 }
 
+int TileXRSockExchange::ConfigureHierarchy()
+{
+    hierarchical_ = false;
+    const char* enabled = std::getenv("TILEXR_SOCKET_HIERARCHICAL");
+    if (enabled == nullptr || std::strcmp(enabled, "1") != 0) {
+        return TILEXR_SUCCESS;
+    }
+    const char* groupSizeEnv = std::getenv("TILEXR_SOCKET_GROUP_SIZE");
+    const char* ranksPerHostEnv = std::getenv("TILEXR_SOCKET_RANKS_PER_HOST");
+    hierarchyGroupSize_ = groupSizeEnv == nullptr ? 64 : std::atoi(groupSizeEnv);
+    hierarchyRanksPerHost_ = ranksPerHostEnv == nullptr ? 8 : std::atoi(ranksPerHostEnv);
+    if (hierarchyGroupSize_ <= 0 || hierarchyRanksPerHost_ <= 0 ||
+        hierarchyGroupSize_ % hierarchyRanksPerHost_ != 0) {
+        TILEXR_LOG(ERROR) << "Invalid hierarchical socket group configuration";
+        return TILEXR_ERROR_INTERNAL;
+    }
+
+    const char* hostsEnv = std::getenv("TILEXR_COMM_HOSTS");
+    if (hostsEnv == nullptr || hostsEnv[0] == '\0') {
+        TILEXR_LOG(ERROR) << "TILEXR_COMM_HOSTS is required for hierarchical socket exchange";
+        return TILEXR_ERROR_INTERNAL;
+    }
+    hierarchyHosts_.clear();
+    std::stringstream hostStream(hostsEnv);
+    string host;
+    while (std::getline(hostStream, host, ',')) {
+        if (!host.empty()) {
+            hierarchyHosts_.push_back(host);
+        }
+    }
+    const size_t requiredHosts =
+        (static_cast<size_t>(rankSize_) + hierarchyRanksPerHost_ - 1) /
+        static_cast<size_t>(hierarchyRanksPerHost_);
+    if (hierarchyHosts_.size() < requiredHosts) {
+        TILEXR_LOG(ERROR) << "Hierarchical socket host list too short: "
+                          << hierarchyHosts_.size() << " < " << requiredHosts;
+        return TILEXR_ERROR_INTERNAL;
+    }
+
+    groupLayout_ = BuildSockExchangeGroupLayout(rank_, rankSize_, hierarchyGroupSize_);
+    if (groupLayout_.groupCount == 0) {
+        return TILEXR_ERROR_INTERNAL;
+    }
+    const size_t leaderHost = static_cast<size_t>(groupLayout_.groupLeader) /
+        static_cast<size_t>(hierarchyRanksPerHost_);
+    listenAddr_ = tilexrCommId_.handle.addr.sin;
+    listenAddr_.sin_addr.s_addr = inet_addr(hierarchyHosts_[leaderHost].c_str());
+    if (listenAddr_.sin_addr.s_addr == INADDR_NONE) {
+        TILEXR_LOG(ERROR) << "Invalid hierarchical leader host " << hierarchyHosts_[leaderHost];
+        return TILEXR_ERROR_INTERNAL;
+    }
+    hierarchical_ = groupLayout_.groupCount > 1;
+    TILEXR_LOG(INFO) << "Hierarchical socket exchange rank=" << rank_
+                     << " group=" << groupLayout_.groupIndex
+                     << " leader=" << groupLayout_.groupLeader
+                     << " range=[" << groupLayout_.groupBegin << ","
+                     << groupLayout_.groupEnd << ") groups=" << groupLayout_.groupCount;
+    return TILEXR_SUCCESS;
+}
+
 int TileXRSockExchange::Prepare()
 {
     if (tilexrCommId_.handle.magic != TILEXR_MAGIC) {
         GetIpAndPort();
     }
+    if (ConfigureHierarchy() != TILEXR_SUCCESS) {
+        return TILEXR_ERROR_INTERNAL;
+    }
+    clientFds_.resize(rankSize_, -1);
+    if (hierarchical_) {
+        if (!IsGroupLeader()) {
+            sockaddr_in leaderAddr = tilexrCommId_.handle.addr.sin;
+            const size_t leaderHost = static_cast<size_t>(groupLayout_.groupLeader) /
+                static_cast<size_t>(hierarchyRanksPerHost_);
+            leaderAddr.sin_addr.s_addr = inet_addr(hierarchyHosts_[leaderHost].c_str());
+            return ConnectTo(leaderAddr);
+        }
+        if (Listen() != TILEXR_SUCCESS) {
+            return TILEXR_ERROR_INTERNAL;
+        }
+        if (rank_ != 0 && Connect() != TILEXR_SUCCESS) {
+            return TILEXR_ERROR_INTERNAL;
+        }
+        return AcceptHierarchical();
+    }
     if (!IsServer()) {
         return Connect();
     }
-
-    clientFds_.resize(rankSize_, -1);
     if (Listen() != TILEXR_SUCCESS) {
         TILEXR_LOG(ERROR) << "Listen Failed!";
         return TILEXR_ERROR_INTERNAL;
@@ -175,20 +231,21 @@ int TileXRSockExchange::Prepare()
 
 int TileXRSockExchange::Listen()
 {
-    fd_ = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd_ < 0) {
+    listenFd_ = socket(AF_INET, SOCK_STREAM, 0);
+    if (listenFd_ < 0) {
         TILEXR_LOG(ERROR) << "Server side create socket failed";
         return TILEXR_ERROR_INTERNAL;
     }
 
     int reuse = 1;
-    if (setsockopt(fd_, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(int)) < 0) {
+    if (setsockopt(listenFd_, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(int)) < 0) {
         TILEXR_LOG(ERROR) << "Server side set reuseaddr failed";
         return TILEXR_ERROR_INTERNAL;
     }
 
-    struct sockaddr *addrPtr = &tilexrCommId_.handle.addr.sa;
-    if (bind(fd_, addrPtr, sizeof(struct sockaddr)) < 0) {
+    sockaddr_in bindAddr = hierarchical_ ? listenAddr_ : tilexrCommId_.handle.addr.sin;
+    struct sockaddr *addrPtr = reinterpret_cast<struct sockaddr*>(&bindAddr);
+    if (bind(listenFd_, addrPtr, sizeof(struct sockaddr)) < 0) {
         TILEXR_LOG(ERROR) << "Server side bind " << ntohs(tilexrCommId_.handle.addr.sin.sin_port) << " failed";
         return TILEXR_ERROR_INTERNAL;
     }
@@ -197,12 +254,12 @@ int TileXRSockExchange::Listen()
      * kernel would silently truncate backlog to the value defined in
      * /proc/sys/net/core/somaxconn if it is less than 65535.
      */
-    if (listen(fd_, TILEXR_MAX_BACK_LOG) < 0) {
+    if (listen(listenFd_, TILEXR_MAX_BACK_LOG) < 0) {
         TILEXR_LOG(ERROR) << "Server side listen " << ntohs(tilexrCommId_.handle.addr.sin.sin_port) << " failed";
         return TILEXR_ERROR_INTERNAL;
     }
-    TILEXR_LOG(INFO) << "The server is listening! ip: "<< inet_ntoa(tilexrCommId_.handle.addr.sin.sin_addr)
-        << " port: " << ntohs(tilexrCommId_.handle.addr.sin.sin_port);
+    TILEXR_LOG(INFO) << "The server is listening! ip: "<< inet_ntoa(bindAddr.sin_addr)
+        << " port: " << ntohs(bindAddr.sin_port);
 
     return TILEXR_SUCCESS;
 }
@@ -235,7 +292,7 @@ int TileXRSockExchange::Accept()
     socklen_t sinSize = sizeof(struct sockaddr_in);
 
     for (int i = 1; i < rankSize_; ++i) {
-        int fd = AcceptConnection(fd_, clientAddr, &sinSize);
+        int fd = AcceptConnection(listenFd_, clientAddr, &sinSize);
         if (fd < 0) {
             TILEXR_LOG(ERROR) << "AcceptConnection failed";
             return TILEXR_ERROR_INTERNAL;
@@ -259,6 +316,34 @@ int TileXRSockExchange::Accept()
     return TILEXR_SUCCESS;
 }
 
+int TileXRSockExchange::AcceptHierarchical()
+{
+    const int localMembers = groupLayout_.groupEnd - groupLayout_.groupBegin - 1;
+    const int childLeaders = rank_ == 0 ? groupLayout_.groupCount - 1 : 0;
+    const int expected = localMembers + childLeaders;
+    struct sockaddr_in clientAddr {};
+    socklen_t sinSize = sizeof(clientAddr);
+    for (int accepted = 0; accepted < expected; ++accepted) {
+        int clientFd = AcceptConnection(listenFd_, clientAddr, &sinSize);
+        int peerRank = -1;
+        if (clientFd < 0 || Recv(clientFd, &peerRank, sizeof(peerRank), 0) <= 0) {
+            TILEXR_LOG(ERROR) << "Hierarchical accept rank handshake failed";
+            return TILEXR_ERROR_INTERNAL;
+        }
+        const bool localMember = peerRank >= groupLayout_.groupBegin &&
+            peerRank < groupLayout_.groupEnd && peerRank != rank_;
+        const bool childLeader = rank_ == 0 && peerRank > 0 &&
+            peerRank < rankSize_ && peerRank % hierarchyGroupSize_ == 0;
+        if ((!localMember && !childLeader) || clientFds_[peerRank] >= 0) {
+            TILEXR_LOG(ERROR) << "Hierarchical accept invalid peer rank " << peerRank;
+            Close(clientFd);
+            return TILEXR_ERROR_INTERNAL;
+        }
+        clientFds_[peerRank] = clientFd;
+    }
+    return TILEXR_SUCCESS;
+}
+
 void TileXRSockExchange::Close(int &fd) const
 {
     if (fd == -1) {
@@ -275,6 +360,11 @@ void TileXRSockExchange::Close(int &fd) const
 
 int TileXRSockExchange::Connect()
 {
+    return ConnectTo(tilexrCommId_.handle.addr.sin);
+}
+
+int TileXRSockExchange::ConnectTo(const sockaddr_in &serverAddr)
+{
     TILEXR_LOG(DEBUG) << "Client side " << rank_ << " begin to connect";
 
     fd_ = socket(AF_INET, SOCK_STREAM, 0);
@@ -287,7 +377,7 @@ int TileXRSockExchange::Connect()
     int maxRetryCount = 180;
     int retryCount = 0;
     bool success = false;
-    struct sockaddr *addrPtr = &tilexrCommId_.handle.addr.sa;
+    const struct sockaddr *addrPtr = reinterpret_cast<const struct sockaddr*>(&serverAddr);
     while (retryCount < maxRetryCount) {
         if (connect(fd_, addrPtr, sizeof(struct sockaddr)) < 0) {
             if (errno == ECONNREFUSED) {
@@ -330,6 +420,9 @@ void TileXRSockExchange::Cleanup()
     if (fd_ >= 0) {
         Close(fd_);
         fd_ = -1;
+    }
+    if (listenFd_ >= 0) {
+        Close(listenFd_);
     }
 
     if (clientFds_.empty()) {

@@ -26,6 +26,7 @@
 
 #include "tilexr_types.h"
 #include "tilexr_api.h"
+#include "tilexr_sock_exchange_layout.h"
 
 namespace TileXR {
 /* Common socket address storage structure for IPv4/IPv6 */
@@ -67,6 +68,9 @@ public:
         }
         isInit_ = true;
 
+        if (hierarchical_) {
+            return HierarchicalAllGather(sendBuf, sendCount, recvBuf);
+        }
         if (!IsServer()) {
             return ClientSendRecv(sendBuf, sendCount, recvBuf);
         } else {
@@ -82,6 +86,9 @@ public:
         }
         isInit_ = true;
 
+        if (hierarchical_) {
+            return HierarchicalAllToAll(sendBuf, sendCountPerRank, recvBuf);
+        }
         if (!IsServer()) {
             return ClientSendRecvAllToAll(sendBuf, sendCountPerRank, recvBuf);
         }
@@ -99,14 +106,21 @@ public:
 
 private:
     void GetIpAndPort();
+    int ConfigureHierarchy();
     int Prepare();
     int Listen();
     int Accept();
+    int AcceptHierarchical();
     void Close(int &fd) const;
     int Connect();
+    int ConnectTo(const sockaddr_in &serverAddr);
     int AcceptConnection(int fd, sockaddr_in &clientAddr, socklen_t *sinSize) const;
     void Cleanup();
     bool IsServer() const;
+    bool IsGroupLeader() const
+    {
+        return hierarchical_ && rank_ == groupLayout_.groupLeader;
+    }
     static bool CheckErrno(int ioErrno)
     {
         return ((ioErrno == EAGAIN) || (ioErrno == EWOULDBLOCK) || (ioErrno == EINTR));
@@ -275,15 +289,201 @@ private:
         }
         return TILEXR_SUCCESS;
     }
+
+    template <typename T> int HierarchicalAllGather(
+        const T *sendBuf, size_t sendCount, T *recvBuf)
+    {
+        if (sendCount == 0 || sendCount > std::numeric_limits<size_t>::max() /
+                static_cast<size_t>(rankSize_)) {
+            return TILEXR_ERROR_INTERNAL;
+        }
+        const size_t fullCount = sendCount * static_cast<size_t>(rankSize_);
+        const size_t fullBytes = fullCount * sizeof(T);
+        if (!IsGroupLeader()) {
+            if (Send(fd_, sendBuf, sendCount * sizeof(T), 0) <= 0 ||
+                Recv(fd_, recvBuf, fullBytes, MSG_WAITALL) <= 0) {
+                TILEXR_LOG(ERROR) << "Hierarchical allgather member rank " << rank_ << " failed";
+                return TILEXR_ERROR_INTERNAL;
+            }
+            return TILEXR_SUCCESS;
+        }
+
+        std::copy_n(sendBuf, sendCount,
+            recvBuf + static_cast<size_t>(rank_) * sendCount);
+        for (int member = groupLayout_.groupBegin; member < groupLayout_.groupEnd; ++member) {
+            if (member == rank_) {
+                continue;
+            }
+            if (Recv(clientFds_[member],
+                    recvBuf + static_cast<size_t>(member) * sendCount,
+                    sendCount * sizeof(T), MSG_WAITALL) <= 0) {
+                TILEXR_LOG(ERROR) << "Hierarchical allgather leader " << rank_
+                                  << " recv member " << member << " failed";
+                return TILEXR_ERROR_INTERNAL;
+            }
+        }
+
+        if (rank_ != 0) {
+            const size_t groupCount = static_cast<size_t>(
+                groupLayout_.groupEnd - groupLayout_.groupBegin) * sendCount;
+            if (Send(fd_, recvBuf + static_cast<size_t>(groupLayout_.groupBegin) * sendCount,
+                    groupCount * sizeof(T), 0) <= 0 ||
+                Recv(fd_, recvBuf, fullBytes, MSG_WAITALL) <= 0) {
+                TILEXR_LOG(ERROR) << "Hierarchical allgather leader " << rank_
+                                  << " parent exchange failed";
+                return TILEXR_ERROR_INTERNAL;
+            }
+        } else {
+            for (int group = 1; group < groupLayout_.groupCount; ++group) {
+                const int leader = group * hierarchyGroupSize_;
+                const int groupEnd = std::min(rankSize_, leader + hierarchyGroupSize_);
+                const size_t groupCount = static_cast<size_t>(groupEnd - leader) * sendCount;
+                if (Recv(clientFds_[leader],
+                        recvBuf + static_cast<size_t>(leader) * sendCount,
+                        groupCount * sizeof(T), MSG_WAITALL) <= 0) {
+                    TILEXR_LOG(ERROR) << "Hierarchical allgather root recv leader "
+                                      << leader << " failed";
+                    return TILEXR_ERROR_INTERNAL;
+                }
+            }
+            for (int group = 1; group < groupLayout_.groupCount; ++group) {
+                const int leader = group * hierarchyGroupSize_;
+                if (Send(clientFds_[leader], recvBuf, fullBytes, 0) <= 0) {
+                    TILEXR_LOG(ERROR) << "Hierarchical allgather root send leader "
+                                      << leader << " failed";
+                    return TILEXR_ERROR_INTERNAL;
+                }
+            }
+        }
+
+        for (int member = groupLayout_.groupBegin; member < groupLayout_.groupEnd; ++member) {
+            if (member != rank_ && Send(clientFds_[member], recvBuf, fullBytes, 0) <= 0) {
+                TILEXR_LOG(ERROR) << "Hierarchical allgather leader " << rank_
+                                  << " send member " << member << " failed";
+                return TILEXR_ERROR_INTERNAL;
+            }
+        }
+        return TILEXR_SUCCESS;
+    }
+
+    template <typename T> int HierarchicalAllToAll(
+        const T *sendBuf, size_t sendCountPerRank, T *recvBuf)
+    {
+        size_t rowCount = 0;
+        size_t totalCount = 0;
+        if (!AllToAllSizes<T>(sendCountPerRank, rowCount, totalCount)) {
+            return TILEXR_ERROR_INTERNAL;
+        }
+        const size_t rowBytes = rowCount * sizeof(T);
+        if (!IsGroupLeader()) {
+            if (Send(fd_, sendBuf, rowBytes, 0) <= 0 ||
+                Recv(fd_, recvBuf, rowBytes, MSG_WAITALL) <= 0) {
+                TILEXR_LOG(ERROR) << "Hierarchical alltoall member rank " << rank_ << " failed";
+                return TILEXR_ERROR_INTERNAL;
+            }
+            return TILEXR_SUCCESS;
+        }
+
+        const size_t localGroupRanks = static_cast<size_t>(
+            groupLayout_.groupEnd - groupLayout_.groupBegin);
+        std::vector<T> groupRows(localGroupRanks * rowCount);
+        std::copy_n(sendBuf, rowCount,
+            groupRows.data() + static_cast<size_t>(rank_ - groupLayout_.groupBegin) * rowCount);
+        for (int member = groupLayout_.groupBegin; member < groupLayout_.groupEnd; ++member) {
+            if (member == rank_) {
+                continue;
+            }
+            if (Recv(clientFds_[member],
+                    groupRows.data() + static_cast<size_t>(member - groupLayout_.groupBegin) * rowCount,
+                    rowBytes, MSG_WAITALL) <= 0) {
+                TILEXR_LOG(ERROR) << "Hierarchical alltoall leader " << rank_
+                                  << " recv member " << member << " failed";
+                return TILEXR_ERROR_INTERNAL;
+            }
+        }
+
+        std::vector<T> groupResults(localGroupRanks * rowCount);
+        if (rank_ != 0) {
+            const size_t groupBytes = groupRows.size() * sizeof(T);
+            if (Send(fd_, groupRows.data(), groupBytes, 0) <= 0 ||
+                Recv(fd_, groupResults.data(), groupBytes, MSG_WAITALL) <= 0) {
+                TILEXR_LOG(ERROR) << "Hierarchical alltoall leader " << rank_
+                                  << " parent exchange failed";
+                return TILEXR_ERROR_INTERNAL;
+            }
+        } else {
+            std::vector<T> gathered(totalCount);
+            std::copy(groupRows.begin(), groupRows.end(), gathered.begin());
+            for (int group = 1; group < groupLayout_.groupCount; ++group) {
+                const int leader = group * hierarchyGroupSize_;
+                const int groupEnd = std::min(rankSize_, leader + hierarchyGroupSize_);
+                const size_t groupRowsCount = static_cast<size_t>(groupEnd - leader) * rowCount;
+                if (Recv(clientFds_[leader],
+                        gathered.data() + static_cast<size_t>(leader) * rowCount,
+                        groupRowsCount * sizeof(T), MSG_WAITALL) <= 0) {
+                    TILEXR_LOG(ERROR) << "Hierarchical alltoall root recv leader "
+                                      << leader << " failed";
+                    return TILEXR_ERROR_INTERNAL;
+                }
+            }
+
+            for (int group = 0; group < groupLayout_.groupCount; ++group) {
+                const int leader = group * hierarchyGroupSize_;
+                const int groupEnd = std::min(rankSize_, leader + hierarchyGroupSize_);
+                const size_t targetRanks = static_cast<size_t>(groupEnd - leader);
+                std::vector<T> results(targetRanks * rowCount);
+                for (int target = leader; target < groupEnd; ++target) {
+                    T *targetResult = results.data() +
+                        static_cast<size_t>(target - leader) * rowCount;
+                    for (int source = 0; source < rankSize_; ++source) {
+                        const T *sourceData = gathered.data() +
+                            static_cast<size_t>(source) * rowCount +
+                            static_cast<size_t>(target) * sendCountPerRank;
+                        std::copy_n(sourceData, sendCountPerRank,
+                            targetResult + static_cast<size_t>(source) * sendCountPerRank);
+                    }
+                }
+                if (leader == 0) {
+                    groupResults.swap(results);
+                } else if (Send(clientFds_[leader], results.data(),
+                               results.size() * sizeof(T), 0) <= 0) {
+                    TILEXR_LOG(ERROR) << "Hierarchical alltoall root send leader "
+                                      << leader << " failed";
+                    return TILEXR_ERROR_INTERNAL;
+                }
+            }
+        }
+
+        for (int member = groupLayout_.groupBegin; member < groupLayout_.groupEnd; ++member) {
+            const T *memberResult = groupResults.data() +
+                static_cast<size_t>(member - groupLayout_.groupBegin) * rowCount;
+            if (member == rank_) {
+                std::copy_n(memberResult, rowCount, recvBuf);
+            } else if (Send(clientFds_[member], memberResult, rowBytes, 0) <= 0) {
+                TILEXR_LOG(ERROR) << "Hierarchical alltoall leader " << rank_
+                                  << " send member " << member << " failed";
+                return TILEXR_ERROR_INTERNAL;
+            }
+        }
+        return TILEXR_SUCCESS;
+    }
+
     int rank_ = 0;
     int rankSize_ = 0;
     int fd_ = -1;
+    int listenFd_ = -1;
     std::vector<int> clientFds_ = {};
     bool isInit_ = false;
     int commDomain_ = -1;
     std::string ip_;
     uint16_t port_ = 0;
     TileXRBootstrap tilexrCommId_ = {};
+    bool hierarchical_ = false;
+    int hierarchyGroupSize_ = 64;
+    int hierarchyRanksPerHost_ = 8;
+    SockExchangeGroupLayout groupLayout_ {};
+    std::vector<std::string> hierarchyHosts_;
+    sockaddr_in listenAddr_ {};
 };
 } // namespace TileXR
 

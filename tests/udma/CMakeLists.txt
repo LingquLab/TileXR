@@ -133,6 +133,14 @@ add_executable(test_tilexr_udma_transport_layout
     ${TILEXR_ROOT}/src/comm/udma/tilexr_udma_layout.cpp
 )
 
+add_executable(test_tilexr_sock_exchange_layout
+    unit/test_tilexr_sock_exchange_layout.cpp
+)
+
+target_include_directories(test_tilexr_sock_exchange_layout PRIVATE
+    ${TILEXR_ROOT}/src/comm
+)
+
 target_include_directories(test_tilexr_udma_transport_layout PRIVATE
     ${TILEXR_ROOT}/src/include
     ${TILEXR_ROOT}/src/comm
@@ -163,6 +171,7 @@ set(INSTALL_TARGETS
     test_tilexr_chip_map_sources
     test_tilexr_ipc_pid_mode_sources
     test_tilexr_udma_transport_layout
+    test_tilexr_sock_exchange_layout
 )
 
 if(BUILD_TILEXR_UDMA_DEMO)
