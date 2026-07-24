@@ -51,6 +51,10 @@ MANIFEST.in
 .codemate
 .agents/
 .agnet/
+.claude/.DS_Store
+.claude/memory/
+.claude/scheduled_tasks.json
+.claude/settings.local.json
 
 # custom
 .worktrees/
