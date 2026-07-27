@@ -60,7 +60,8 @@ extern void launch_tilexr_udma_all_to_all_group(
     uint64_t payloadOffset0, uint64_t payloadOffset1,
     uint64_t signalOffset0, uint64_t signalOffset1,
     GM_ADDR groupTrace, uint32_t traceIteration,
-    uint32_t routeStage, uint32_t multiChannel, uint32_t primaryRouteParts);
+    uint32_t routeStage, uint32_t multiChannel, uint32_t primaryRouteParts,
+    uint32_t groupWidth, uint32_t quietBatch);
 extern void launch_tilexr_udma_all_to_all_bigdata(
     uint32_t blockDim, void* stream, GM_ADDR commArgs, GM_ADDR input, GM_ADDR output,
     GM_ADDR udmaMem, GM_ADDR debug, GM_ADDR fullmeshTrace, uint32_t fullmeshTraceIteration,
@@ -643,10 +644,31 @@ bool RunGroupedAllToAll(
 {
     constexpr uint32_t kErrorWordsPerCore = 12U;
     constexpr uint32_t kErrorCoreCount = TileXR::Demo::kAllToAllGroupBlockDim;
+    const int groupWidthValue = GetEnvInt(
+        "TILEXR_DEMO_ALLTOALL_GROUP_WIDTH",
+        static_cast<int>(TileXR::Demo::kAllToAllGroupWidth));
+    if (groupWidthValue <= 0 || !TileXR::Demo::AllToAllGroupValidWidth(
+            static_cast<uint32_t>(groupWidthValue))) {
+        std::cerr << "[rank " << rank
+                  << "] ERROR: TILEXR_DEMO_ALLTOALL_GROUP_WIDTH"
+                  << " must be 4 or 16, got " << groupWidthValue << std::endl;
+        return false;
+    }
+    const uint32_t groupWidth = static_cast<uint32_t>(groupWidthValue);
+    const int quietBatchValue = GetEnvInt(
+        "TILEXR_DEMO_ALLTOALL_GROUP_QUIET_BATCH", 1);
+    if (quietBatchValue <= 0 || !TileXR::Demo::AllToAllGroupValidQuietBatch(
+            static_cast<uint32_t>(quietBatchValue))) {
+        std::cerr << "[rank " << rank
+                  << "] ERROR: TILEXR_DEMO_ALLTOALL_GROUP_QUIET_BATCH"
+                  << " must be 1, 2, or 4, got " << quietBatchValue << std::endl;
+        return false;
+    }
+    const uint32_t quietBatch = static_cast<uint32_t>(quietBatchValue);
     const int32_t requestedChunkElements = std::max(
         1, GetEnvInt("TILEXR_DEMO_ALLTOALL_GROUP_CHUNK_ELEMENTS", elementsPerPeer));
     const auto plan = TileXR::Demo::PlanAllToAllGroup(
-        rankSize, elementsPerPeer, requestedChunkElements);
+        rankSize, elementsPerPeer, requestedChunkElements, groupWidth);
     if (!plan.valid) {
         std::cerr << "[rank " << rank << "] ERROR: invalid grouped alltoall plan"
                   << " rankSize=" << rankSize
@@ -861,6 +883,7 @@ bool RunGroupedAllToAll(
         " signalOffset0=" + std::to_string(plan.signalOffset[0]) +
         " signalOffset1=" + std::to_string(plan.signalOffset[1]) +
         " controlOffset=" + std::to_string(plan.controlOffset) +
+        " groupWidth=" + std::to_string(plan.groupWidth) +
         " groups=" + std::to_string(plan.groupCount) +
         " passes=" + std::to_string(plan.passCount));
     PrintStatus(rank, "grouped alltoall warmup=" + std::to_string(warmup) +
@@ -872,6 +895,7 @@ bool RunGroupedAllToAll(
         " copyoutWorkers=" + std::to_string(copyoutWorkers) +
         " blockDim=" + std::to_string(groupBlockDim) +
         " useSecondaryRoute=" + std::to_string(useSecondaryRouteValue) +
+        " quietBatch=" + std::to_string(quietBatch) +
         " routeStages=" + std::to_string(routeStagesValue));
 
     if (routeStages &&
@@ -893,7 +917,8 @@ bool RunGroupedAllToAll(
             plan.signalOffset[0], plan.signalOffset[1],
             reinterpret_cast<GM_ADDR>(trace), traceIteration,
             static_cast<uint32_t>(routeStage),
-            multiChannel ? 1U : 0U, primaryRouteParts);
+            multiChannel ? 1U : 0U, primaryRouteParts,
+            groupWidth, quietBatch);
     };
 
     double totalUs = 0.0;

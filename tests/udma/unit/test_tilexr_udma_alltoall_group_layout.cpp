@@ -52,23 +52,25 @@ std::string ReadFile(const std::string& path)
     return out.str();
 }
 
-void CheckSchedule(int rankSize)
+void CheckSchedule(int rankSize, uint32_t groupWidth = TileXR::Demo::kAllToAllGroupWidth)
 {
     for (int rank = 0; rank < rankSize; ++rank) {
         std::set<int> peers;
-        for (uint32_t group = 0; group < TileXR::Demo::AllToAllGroupCount(rankSize); ++group) {
-            for (uint32_t lane = 0; lane < TileXR::Demo::kAllToAllGroupWidth; ++lane) {
-                const int peer = TileXR::Demo::AllToAllGroupPeer(rank, rankSize, group, lane);
+        for (uint32_t group = 0;
+             group < TileXR::Demo::AllToAllGroupCount(rankSize, groupWidth); ++group) {
+            for (uint32_t lane = 0; lane < groupWidth; ++lane) {
+                const int peer = TileXR::Demo::AllToAllGroupPeer(
+                    rank, rankSize, group, lane, groupWidth);
                 if (peer < 0) {
                     continue;
                 }
                 CHECK_EQ(peer == rank, false);
                 CHECK_EQ(peers.insert(peer).second, true);
                 bool symmetric = false;
-                for (uint32_t remoteLane = 0; remoteLane < TileXR::Demo::kAllToAllGroupWidth;
-                     ++remoteLane) {
+                for (uint32_t remoteLane = 0; remoteLane < groupWidth; ++remoteLane) {
                     symmetric = symmetric ||
-                        TileXR::Demo::AllToAllGroupPeer(peer, rankSize, group, remoteLane) == rank;
+                        TileXR::Demo::AllToAllGroupPeer(
+                            peer, rankSize, group, remoteLane, groupWidth) == rank;
                 }
                 CHECK_EQ(symmetric, true);
             }
@@ -81,6 +83,7 @@ void TestSchedules()
 {
     for (int rankSize : {8, 16, 24, 32, 40, 64, 128, 256, 512, 1024}) {
         CheckSchedule(rankSize);
+        CheckSchedule(rankSize, TileXR::Demo::kAllToAllGroupExperimentalWidth);
     }
     CHECK_EQ(TileXR::Demo::AllToAllGroupCount(8), 1U);
     CHECK_EQ(TileXR::Demo::AllToAllGroupCount(16), 1U);
@@ -98,6 +101,23 @@ void TestSchedules()
     CHECK_EQ(TileXR::Demo::AllToAllGroupPeer(0, 64, 0, 15), 56);
     CHECK_EQ(TileXR::Demo::AllToAllGroupPeer(0, 64, 3, 7), 32);
     CHECK_EQ(TileXR::Demo::AllToAllGroupPeer(0, 64, 3, 15), -1);
+
+    constexpr uint32_t width = TileXR::Demo::kAllToAllGroupExperimentalWidth;
+    CHECK_EQ(TileXR::Demo::AllToAllGroupCount(16, width), 4U);
+    const int expected[4][4] = {
+        {1, 2, 15, 14},
+        {3, 4, 13, 12},
+        {5, 6, 11, 10},
+        {7, 8, 9, -1},
+    };
+    for (uint32_t group = 0U; group < 4U; ++group) {
+        for (uint32_t lane = 0U; lane < width; ++lane) {
+            CHECK_EQ(TileXR::Demo::AllToAllGroupPeer(
+                0, 16, group, lane, width), expected[group][lane]);
+        }
+    }
+    CHECK_EQ(TileXR::Demo::AllToAllGroupCount(16, 8U), 0U);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupPeer(0, 16, 0, 4, width), -1);
 }
 
 void TestPlan()
@@ -131,6 +151,13 @@ void TestPlan()
     CHECK_EQ(chunked.passCount, 4U);
     CHECK_EQ(chunked.payloadPlaneBytes, plan.payloadPlaneBytes);
 
+    const auto widthFour = TileXR::Demo::PlanAllToAllGroup(
+        rankSize, elementsPerPeer, elementsPerPeer,
+        TileXR::Demo::kAllToAllGroupExperimentalWidth);
+    CHECK_EQ(widthFour.valid, true);
+    CHECK_EQ(widthFour.groupWidth, 4U);
+    CHECK_EQ(widthFour.groupCount, 4U);
+
     CHECK_EQ(TileXR::Demo::PlanAllToAllGroup(7, 1024, 1024).valid, false);
     CHECK_EQ(TileXR::Demo::PlanAllToAllGroup(18, 1024, 1024).valid, false);
     CHECK_EQ(TileXR::Demo::PlanAllToAllGroup(1032, 1024, 1024).valid, false);
@@ -160,6 +187,13 @@ void TestChannelPolicy()
         sizeof(int32_t), AllToAllGroupChannelMode::kMulti), true);
 
     CHECK_EQ(TileXR::Demo::kAllToAllGroupSendWorkerCount, 32U);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupValidWidth(4U), true);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupValidWidth(16U), true);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupValidWidth(8U), false);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupValidQuietBatch(1U), true);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupValidQuietBatch(2U), true);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupValidQuietBatch(4U), true);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupValidQuietBatch(3U), false);
 }
 
 void TestScalePlanAndTraceCapacity()
@@ -418,7 +452,12 @@ void TestKernelStructure()
     CHECK_CONTAINS(kernel, "const uint32_t traceCore = copyoutWorkers == 8U");
     CHECK_CONTAINS(kernel, "TILEXR_ALLTOALL_GROUP_SEND_WORKERS + lane : blockIdx");
     CHECK_CONTAINS(kernel, "UDMAPutSignalNbiOnQp<int32_t>");
-    CHECK_CONTAINS(kernel, "UDMAQuietStatusOnQp(args, peer, selectedQp)");
+    CHECK_CONTAINS(kernel, "AllToAllGroupPendingQuiet");
+    CHECK_CONTAINS(kernel, "AllToAllGroupFlushQuiet");
+    CHECK_CONTAINS(kernel,
+        "UDMAQuietStatusOnQp(args, request.peer, request.qpIdx)");
+    CHECK_CONTAINS(kernel, "pendingCount == quietBatch");
+    CHECK_CONTAINS(kernel, "uint32_t groupWidth, uint32_t quietBatch");
     CHECK_CONTAINS(kernel, "AllToAllGroupWaitTokenMte");
     CHECK_CONTAINS(kernel, "AllToAllGroupStageRunsSendDevice(routeStage)");
     CHECK_CONTAINS(kernel, "AllToAllGroupStageRunsReceiveDevice(routeStage)");
@@ -445,6 +484,8 @@ void TestHostStructure()
     CHECK_CONTAINS(demo, "TILEXR_DEMO_ALLTOALL_GROUP_ROUTE_STAGES");
     CHECK_CONTAINS(demo, "TILEXR_DEMO_ALLTOALL_GROUP_USE_SECONDARY_ROUTE");
     CHECK_CONTAINS(demo, "TILEXR_DEMO_ALLTOALL_GROUP_CHANNEL_MODE");
+    CHECK_CONTAINS(demo, "TILEXR_DEMO_ALLTOALL_GROUP_WIDTH");
+    CHECK_CONTAINS(demo, "TILEXR_DEMO_ALLTOALL_GROUP_QUIET_BATCH");
     CHECK_CONTAINS(demo, "TILEXR_DEMO_ALLTOALL_GROUP_PRIMARY_ROUTE_PARTS");
     CHECK_CONTAINS(demo, "kAllToAllGroupSendWorkerCount");
     CHECK_CONTAINS(demo, "grouped alltoall registeredBytes=");
