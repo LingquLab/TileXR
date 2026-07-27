@@ -126,13 +126,4 @@ else
     warn "${pkg_name} already installed, skip."
 fi
 
-warn "install ops-transformer deps begin"
-colorful_time python3 -m pip install -r ${TILEXR_OPS_HOME}/requirements.txt
-
-if [ $? -eq 0 ]; then
-    success "install ops-transformer deps success"
-else
-    error "install ops-transformer deps failed"
-fi
-
 cd ${TILEXR_HOME}

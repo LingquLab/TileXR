@@ -368,9 +368,9 @@ install(TARGETS
 
 install(PROGRAMS
     run_collectives_correctness.sh
-    run_collective_perf.sh
-    run_collective_perf_multihost.sh
-    run_collective_perf_multihost_suite.sh
-    tilexr_collective_profile_report.py
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../tools/collectives/run_collective_perf.sh
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../tools/collectives/run_collective_perf_multihost.sh
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../tools/collectives/run_collective_perf_multihost_suite.sh
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../tools/collectives/tilexr_collective_profile_report.py
     DESTINATION ${CMAKE_INSTALL_BINDIR}
 )

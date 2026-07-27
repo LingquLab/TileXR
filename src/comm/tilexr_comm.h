@@ -25,7 +25,8 @@ namespace TileXR {
 constexpr int IPC_NAME_SIZE = 65;
 
 class TileXRSockExchange;
-class TileXRUDMATransport;
+class TileXRUDMAContext;
+struct TileXRUDMACommArgsState;
 class TileXRSDMATransport;
 class TileXRCcuBackend;
 class TileXRComm {
@@ -80,10 +81,11 @@ private:
     int SyncCommArgs();
     int InitDumpAddr();
     int InitUDMA();
+    int ApplyUDMACommArgsState(const TileXRUDMACommArgsState &state);
+    static int ApplyUDMACommArgsStateCallback(const TileXRUDMACommArgsState &state, void *userData);
     int InitCcuBackendIfEnabled();
     int InitSDMA();
     int UpdateCommArgsDev();
-    void FreeUDMARegistry();
     void ResetSDMAState();
 
 private:
@@ -109,11 +111,7 @@ private:
     TileXRUniqueId commId_ = {};
     TileXRSockExchange *socketExchange_ = nullptr;
     bool isEnableMsprofOp_ = false;
-    GM_ADDR udmaInfoDev_ = nullptr;
-    GM_ADDR udmaRegistryDev_ = nullptr;
-    GM_ADDR udmaRegisteredPtr_ = nullptr;
-    TileXRUDMARegistry udmaRegistry_ = {};
-    std::unique_ptr<TileXRUDMATransport> udmaTransport_;
+    std::unique_ptr<TileXRUDMAContext> udmaContext_;
     std::unique_ptr<TileXRCcuBackend> ccuBackend_;
     GM_ADDR sdmaWorkspaceDev_ = nullptr;
     SDMAInitStatus sdmaInitStatus_ = SDMAInitStatus::DISABLED_BY_ENV;

@@ -53,7 +53,7 @@ or the timeout expires, the script kills remaining ranks and tails each rank log
 
 ```bash
 cd tests/collectives
-./run_collective_perf.sh 2 0 ../../build/tests/collectives \
+../../tools/collectives/run_collective_perf.sh 2 0 ../../build/tests/collectives \
   --op allgather --min-bytes 4 --max-bytes 4096 --step-factor 2 \
   --iters 20 --warmup-iters 5 --datatype int32 --check 1
 ```
@@ -90,7 +90,7 @@ cmake --build build-profile --target tilexr_collective_perf -j"$(nproc)"
 Run the perf tool with profiling:
 
 ```bash
-./run_collective_perf.sh 2 0 ../../build-profile/tests/collectives \
+../../tools/collectives/run_collective_perf.sh 2 0 ../../build-profile/tests/collectives \
   --op allgather --min-bytes 67108864 --max-bytes 67108864 \
   --profile 1 --profile-dir run/prof/collectives --profile-ai-prompt 1
 ```
@@ -118,7 +118,7 @@ The per-launch `rank<N>/launch<M>/report.html` files remain available for drilld
 To regenerate the aggregate report from an existing profile directory:
 
 ```bash
-python3 tilexr_collective_profile_report.py run/prof/collectives \
+python3 ../../tools/collectives/tilexr_collective_profile_report.py run/prof/collectives \
   --warmup-iters 5 --iters 20 --profile-sample-every 1 --emit-ai-prompt
 ```
 
@@ -144,7 +144,7 @@ cd tests/collectives
 TILEXR_MULTIHOST_PEERS="0,root@192.0.2.10,192.0.2.10,0;1,root@192.0.2.11,192.0.2.11,0" \
 TILEXR_COMM_ID=192.0.2.10:10067 \
 TILEXR_COLLECTIVES_RUN_TIMEOUT_SEC=300 \
-bash ./run_collective_perf_multihost.sh /path/to/TileXR/run/prof/collectives-2host-profile-probe \
+bash ../../tools/collectives/run_collective_perf_multihost.sh /path/to/TileXR/run/prof/collectives-2host-profile-probe \
   /path/to/TileXR/build-profile-950/tests/collectives \
   --op profile-probe --min-bytes 4096 --max-bytes 4096 \
   --iters 2 --warmup-iters 1 --datatype int32 --check 0 \

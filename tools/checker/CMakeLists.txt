@@ -1,3 +1,5 @@
+include(GNUInstallDirs)
+
 add_library(tilexr-checker-core STATIC
   src/status.cpp
   src/event.cpp
@@ -32,3 +34,8 @@ add_executable(tilexr_checker
 )
 
 target_link_libraries(tilexr_checker PRIVATE tilexr-checker-core)
+
+install(TARGETS tilexr_checker tilexr-checker-core
+  RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+  ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+)

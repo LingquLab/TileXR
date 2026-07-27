@@ -8,8 +8,10 @@ import unittest
 from pathlib import Path
 
 
-COLLECTIVES_DIR = Path(__file__).resolve().parents[1]
-HELPER = COLLECTIVES_DIR / "tilexr_collective_profile_report.py"
+REPO_ROOT = Path(__file__).resolve().parents[3]
+COLLECTIVES_DIR = REPO_ROOT / "tests" / "collectives"
+HELPER = REPO_ROOT / "tools" / "collectives" / "tilexr_collective_profile_report.py"
+OLD_HELPER = COLLECTIVES_DIR / "tilexr_collective_profile_report.py"
 SINGLE_HOST_KERNEL_STAGES = [
     ("kernel_total", 0),
     ("chunk_total", 1),
@@ -51,7 +53,8 @@ def write_trace(root, rank, launch, message_bytes=1024, schema="tilexr_perf_trac
     stats = [
         make_stat(rank, 0, "kernel_total", 0, base, 1000 + launch * 100 + rank * 10),
         make_stat(rank, 0, "flag_poll_wait", 4, base + 100, 320 + rank * 20, count=8, raw_cycles=160 + rank * 10, max_cycles=44),
-        make_stat(rank, 0, "peer_ipc_to_output", 5, base + 450, 420 + launch * 30, count=2, raw_cycles=400 + launch * 20, max_cycles=260),
+        make_stat(rank, 0, "local_input_to_ipc", 3, base + 250, 160 + launch * 20, count=2, raw_cycles=160 + launch * 20, max_cycles=100),
+        make_stat(rank, 0, "peer_ipc_to_output", 5, base + 450, 400 + launch * 30, count=2, raw_cycles=400 + launch * 20, max_cycles=260),
         make_stat(rank, 1, "kernel_total", 0, base + 25, 900 + launch * 80 + rank * 12),
     ]
     trace = {
@@ -125,6 +128,10 @@ def run_helper(root, *args):
 
 
 class CollectiveProfileReportTest(unittest.TestCase):
+    def test_profile_report_tool_lives_under_tools(self):
+        self.assertTrue(HELPER.exists(), HELPER)
+        self.assertFalse(OLD_HELPER.exists(), OLD_HELPER)
+
     def test_writes_chronological_multi_rank_report(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -204,6 +211,100 @@ class CollectiveProfileReportTest(unittest.TestCase):
             self.assertEqual(kernel["args"]["source"], "rank0/launch0/trace.json")
             self.assertEqual(kernel["args"]["message_bytes"], 1024)
             self.assertEqual(kernel["args"]["rank_size"], 2)
+            self.assertEqual(kernel["args"]["transport type"], "UNKNOWN")
+            self.assertEqual(kernel["args"]["size(Byte)"], 0)
+            self.assertEqual(kernel["args"]["bandwidth(GB/s)"], 0.0)
+
+            local_copy = next(
+                event
+                for event in perfetto["traceEvents"]
+                if event.get("ph") == "X" and event.get("name") == "launch0/rank0/local_input_to_ipc" and
+                event.get("pid") == 0 and event.get("tid") == 0
+            )
+            self.assertEqual(local_copy["args"]["src rank"], 0)
+            self.assertEqual(local_copy["args"]["dst rank"], -1)
+            self.assertEqual(local_copy["args"]["transport type"], "MEMORY")
+            self.assertEqual(local_copy["args"]["size(Byte)"], 1024)
+            self.assertAlmostEqual(local_copy["args"]["bandwidth(GB/s)"], 0.32)
+
+            peer_copy = next(
+                event
+                for event in perfetto["traceEvents"]
+                if event.get("ph") == "X" and event.get("name") == "launch0/rank0/peer_ipc_to_output" and
+                event.get("pid") == 0 and event.get("tid") == 0
+            )
+            self.assertEqual(peer_copy["args"]["src rank"], -1)
+            self.assertEqual(peer_copy["args"]["dst rank"], 0)
+            self.assertEqual(peer_copy["args"]["transport type"], "MEMORY")
+            self.assertEqual(peer_copy["args"]["size(Byte)"], 1024)
+            self.assertAlmostEqual(peer_copy["args"]["bandwidth(GB/s)"], 0.128)
+            self.assertEqual(peer_copy["args"]["communication_metrics_source"], "tilexr_profile_inferred")
+
+            flag_wait = next(
+                event
+                for event in perfetto["traceEvents"]
+                if event.get("ph") == "X" and event.get("name") == "launch0/rank0/flag_poll_wait" and
+                event.get("pid") == 0 and event.get("tid") == 0
+            )
+            self.assertEqual(flag_wait["args"]["src rank"], 0)
+            self.assertEqual(flag_wait["args"]["dst rank"], -1)
+            self.assertEqual(flag_wait["args"]["transport type"], "UNKNOWN")
+            self.assertEqual(flag_wait["args"]["size(Byte)"], 0)
+            self.assertEqual(flag_wait["args"]["bandwidth(GB/s)"], 0.0)
+
+    def test_allgather_peer_copy_size_scales_by_peer_count(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for rank in range(4):
+                write_trace(root, rank, 0, message_bytes=1024, rank_size=4)
+
+            result = run_helper(root, "--warmup-iters", "0", "--iters", "1", "--profile-sample-every", "1")
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+            perfetto = json.loads((root / "perfetto_trace.json").read_text(encoding="utf-8"))
+            peer_copy = next(
+                event
+                for event in perfetto["traceEvents"]
+                if event.get("ph") == "X" and event.get("name") == "launch0/rank0/peer_ipc_to_output" and
+                event.get("pid") == 0 and event.get("tid") == 0
+            )
+            self.assertEqual(peer_copy["args"]["src rank"], -1)
+            self.assertEqual(peer_copy["args"]["dst rank"], 0)
+            self.assertEqual(peer_copy["args"]["size(Byte)"], 3072)
+            self.assertAlmostEqual(peer_copy["args"]["bandwidth(GB/s)"], 0.384)
+
+    def test_copy_bandwidth_uses_accumulated_stage_time(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            base = 1000000
+            trace = {
+                "schema": "tilexr_perf_trace_report.v1",
+                "op_type": 3,
+                "op_name": "TileXRAllGather",
+                "rank_size": 2,
+                "max_core_count": 1,
+                "block_dim": 1,
+                "stage_count": 2,
+                "cycle_to_us_divisor": 50,
+                "message_bytes": 10000,
+                "stats": [
+                    make_stat(0, 0, "kernel_total", 0, base, 2000),
+                    make_stat(0, 0, "local_input_to_ipc", 3, base + 100, 1000, count=2, raw_cycles=250),
+                ],
+            }
+            write_custom_trace(root, 0, 0, trace)
+
+            result = run_helper(root, "--warmup-iters", "0", "--iters", "1", "--profile-sample-every", "1")
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+            perfetto = json.loads((root / "perfetto_trace.json").read_text(encoding="utf-8"))
+            local_copy = next(
+                event
+                for event in perfetto["traceEvents"]
+                if event.get("ph") == "X" and event.get("name") == "launch0/rank0/local_input_to_ipc"
+            )
+            self.assertEqual(local_copy["args"]["size(Byte)"], 10000)
+            self.assertAlmostEqual(local_copy["args"]["bandwidth(GB/s)"], 2.0)
 
     def test_rank_level_summary_highlights_slowest_rank(self):
         with tempfile.TemporaryDirectory() as tmp:

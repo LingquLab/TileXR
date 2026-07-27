@@ -90,7 +90,7 @@ Run the scripted profile build and guard checks on every peer host before profil
 ```bash
 cd "$REPO"
 TILEXR_PROFILE_BUILD_DIR="$BUILD" \
-bash tests/collectives/run_collective_perf_multihost_suite.sh prepare
+bash tools/collectives/run_collective_perf_multihost_suite.sh prepare
 ```
 
 The helper uses `cmake` from `PATH` by default. To select a different executable without hardcoding paths in this
@@ -100,7 +100,7 @@ runbook, set `CMAKE` before invoking the helper. If the host needs extra environ
 ```bash
 CMAKE=cmake TILEXR_PROFILE_ENV_SCRIPT=/path/to/env.sh \
 TILEXR_PROFILE_BUILD_DIR="$BUILD" \
-bash tests/collectives/run_collective_perf_multihost_suite.sh prepare
+bash tools/collectives/run_collective_perf_multihost_suite.sh prepare
 ```
 
 ## Run One Profile Case
@@ -108,7 +108,7 @@ bash tests/collectives/run_collective_perf_multihost_suite.sh prepare
 Launch from rank 0 host with the same scripted helper:
 
 ```bash
-cd "$REPO/tests/collectives"
+cd "$REPO/tools/collectives"
 
 export TILEXR_MULTIHOST_REMOTE_REPO_DIR="$REPO"
 export TILEXR_MULTIHOST_PEERS="$PEERS"
@@ -124,7 +124,7 @@ bash ./run_collective_perf_multihost_suite.sh case allgather-16m allgather 16777
 Use one profile directory per op. Multi-host runs should be serial because `TILEXR_COMM_ID` owns a fixed socket port.
 
 ```bash
-cd "$REPO/tests/collectives"
+cd "$REPO/tools/collectives"
 TILEXR_PROFILE_BUILD_DIR="$BUILD" TILEXR_PROFILE_DIR="$PROF" \
 bash ./run_collective_perf_multihost_suite.sh suite
 ```
@@ -158,7 +158,7 @@ Some stages may be absent for a specific rank role if a kernel path does not exe
 Run this on the host that owns the aggregated profile directory:
 
 ```bash
-bash "$REPO/tests/collectives/run_collective_perf_multihost_suite.sh" verify "$PROF/allgather-16m"
+bash "$REPO/tools/collectives/run_collective_perf_multihost_suite.sh" verify "$PROF/allgather-16m"
 ```
 
 Expected result:
@@ -233,7 +233,7 @@ D:\TileXR\run\prof\collectives-2host\<case>\report.html
 If `rank*/launch*/trace.json` already exists:
 
 ```bash
-python3 "$REPO/tests/collectives/tilexr_collective_profile_report.py" "$PROF/allgather-16m" \
+python3 "$REPO/tools/collectives/tilexr_collective_profile_report.py" "$PROF/allgather-16m" \
   --warmup-iters 1 \
   --iters 2 \
   --profile-sample-every 1 \
@@ -303,4 +303,4 @@ Rebuild from a clean build directory or ensure CMake tracks included CCE/header 
 
 No root-level `trace.json`
 
-Check that all ranks finished successfully and that the report helper ran. If rank launch traces exist, regenerate the aggregate report with `tilexr_collective_profile_report.py`.
+Check that all ranks finished successfully and that the report helper ran. If rank launch traces exist, regenerate the aggregate report with `tools/collectives/tilexr_collective_profile_report.py`.

@@ -84,8 +84,6 @@ sync_local_submodule() {
   rsync -a --delete --exclude='.git' "${src}/" "${dst}/"
 }
 
-sync_local_submodule "3rdparty/hcomm"
-sync_local_submodule "3rdparty/ops-transformer"
 sync_local_submodule "3rdparty/spdlog"
 
 remote_prepare=$(cat <<EOF

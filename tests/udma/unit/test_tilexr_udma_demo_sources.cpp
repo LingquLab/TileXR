@@ -51,31 +51,26 @@ void CheckNotContains(const std::string &path, const std::string &text, const st
 int main()
 {
     const std::string demoPath = "tests/udma/demo/tilexr_udma_demo.cpp";
-    const std::string scriptPath = "tests/udma/demo/run_tilexr_udma_data_channel_probe_mpi.sh";
     const std::string hccpDefsPath = "src/comm/udma/tilexr_hccp_defs.h";
     const std::string demo = ReadFile(demoPath);
-    const std::string script = ReadFile(scriptPath);
     const std::string hccpDefs = ReadFile(hccpDefsPath);
-
-    CheckContains(demoPath, demo, "TILEXR_DEMO_BARRIER_ADDR");
-    CheckContains(demoPath, demo, "INADDR_ANY");
-    CheckContains(demoPath, demo, "TileXRSDMAAvailable");
-    CheckContains(demoPath, demo, "TileXRGetSDMAWorkspaceDev");
-    CheckContains(demoPath, demo, "TILEXR_DEMO_REQUIRE_SDMA");
-    CheckContains(demoPath, demo, "launch_tilexr_udma_slot_signal_get_probe");
-    CheckContains(demoPath, demo, "testType == 2");
+    CheckContains(demoPath, demo, "TileXRUDMARegister");
+    CheckContains(demoPath, demo, "TileXRUDMAUnregister");
+    CheckContains(demoPath, demo, "ExtraFlag::UDMA");
+    CheckContains(demoPath, demo, "launch_tilexr_udma_all_gather");
+    CheckContains(demoPath, demo, "launch_tilexr_udma_put_signal");
+    CheckContains(demoPath, demo, "DemoBarrierAll");
+    CheckNotContains(demoPath, demo, "aclshmem");
+    CheckNotContains(demoPath, demo, "shmem_");
 
     const std::string kernelPath = "tests/udma/demo/tilexr_udma_demo_kernel.cpp";
     const std::string kernel = ReadFile(kernelPath);
-    CheckContains(kernelPath, kernel, "tilexr_udma_slot_signal_get_probe_kernel");
+    CheckContains(kernelPath, kernel, "UDMARegistryEnabled");
+    CheckContains(kernelPath, kernel, "UDMAPutNbi<int32_t>");
     CheckContains(kernelPath, kernel, "UDMAPutSignalNbi<int32_t>");
-    CheckContains(kernelPath, kernel, "UDMAGetNbi<int32_t>");
-
-    CheckContains(scriptPath, script, "mpirun");
-    CheckContains(scriptPath, script, "--hosts");
-    CheckContains(scriptPath, script, "TILEXR_COMM_ID");
-    CheckContains(scriptPath, script, "TILEXR_DEMO_BARRIER_ADDR");
-    CheckContains(scriptPath, script, "--require-sdma");
+    CheckContains(kernelPath, kernel, "UDMAQuiet");
+    CheckNotContains(kernelPath, kernel, "aclshmem");
+    CheckNotContains(kernelPath, kernel, "shmem_");
 
     CheckContains(hccpDefsPath, hccpDefs, "MEM_SEG_ACCESS_LOCAL_ONLY = 1");
     CheckContains(hccpDefsPath, hccpDefs, "MEM_SEG_ACCESS_READ = (1 << 1)");
@@ -86,17 +81,7 @@ int main()
 
     const std::string transportPath = "src/comm/udma/tilexr_udma_transport.cpp";
     const std::string transport = ReadFile(transportPath);
-    CheckContains(transportPath, transport, "TILEXR_UDMA_TOPO_ROUTE");
-    CheckContains(transportPath, transport, "const bool useTopoRoutes");
     CheckContains(transportPath, transport, "ResolveLocalEidRoute(rootInfo, topoEdges, localId, allLocalIds[peer], localEid)");
-    CheckContains(transportPath, transport, "queuesImported_");
-    CheckContains(transportPath, transport, "if (!queuesImported_) {\n        ret = ImportQueues();");
-    CheckContains(transportPath, transport, "queuesImported_ = true;\n    }\n    ret = ExchangeAndImportMemory();");
-    CheckNotContains(transportPath, transport,
-        "ret = ImportQueues();\n    if (ret != TILEXR_SUCCESS) {\n        Shutdown();\n        return ret;\n    }\n    ret = RefreshUDMAInfo();");
-    CheckContains(transportPath, transport, "mrInfo.in.ub.flags.bs.cacheable = 0");
-    CheckContains(transportPath, transport, "mrInfo.in.ub.flags.bs.nonPin = 0");
-    CheckContains(transportPath, transport, "mrInfo.in.ub.flags.bs.userIova = 0");
 
     if (g_failures == 0) {
         std::cout << "TileXR UDMA demo source checks passed" << std::endl;

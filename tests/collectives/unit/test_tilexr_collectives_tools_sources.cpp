@@ -264,7 +264,7 @@ void TestLauncherScripts()
     CheckContains(correctnessPath, correctness, "tail -n");
     CheckContains(correctnessPath, correctness, "test_tilexr_collectives_correctness");
 
-    const std::string perfPath = "tests/collectives/run_collective_perf.sh";
+    const std::string perfPath = "tools/collectives/run_collective_perf.sh";
     CheckFileExists(perfPath);
     const auto perf = ReadFile(perfPath);
     CheckContains(perfPath, perf, "tilexr_collective_perf");
@@ -286,18 +286,25 @@ void TestLauncherScripts()
     CheckContains(perfPath, perf, "parse_profile_args");
     CheckContains(perfPath, perf, "write_profile_report_if_enabled");
     CheckContains(perfPath, perf, "tilexr_collective_profile_report.py");
+    CheckContains(perfPath, perf, "tools/collectives");
     CheckContains(perfPath, perf, "--warmup-iters");
     CheckContains(perfPath, perf, "--profile-sample-every");
     CheckContains(perfPath, perf, "is_true_bool");
     CheckContains(perfPath, perf, "yes");
 
-    const std::string multiHostPerfPath = "tests/collectives/run_collective_perf_multihost.sh";
+    CheckFileExists("tools/collectives/tilexr_collective_profile_report.py");
+    CheckFileExists("tools/collectives/run_collective_perf.sh");
+    CheckFileExists("tools/collectives/run_collective_perf_multihost.sh");
+    CheckFileExists("tools/collectives/run_collective_perf_multihost_suite.sh");
+
+    const std::string multiHostPerfPath = "tools/collectives/run_collective_perf_multihost.sh";
     CheckFileExists(multiHostPerfPath);
     const auto multiHostPerf = ReadFile(multiHostPerfPath);
     CheckContains(multiHostPerfPath, multiHostPerf, "TILEXR_MULTIHOST_PEERS");
     CheckContains(multiHostPerfPath, multiHostPerf, "TILEXR_COMM_ID");
     CheckContains(multiHostPerfPath, multiHostPerf, "--comm-mode socket");
     CheckContains(multiHostPerfPath, multiHostPerf, "tilexr_collective_profile_report.py");
+    CheckContains(multiHostPerfPath, multiHostPerf, "tools/collectives");
     CheckContains(multiHostPerfPath, multiHostPerf, "copy_rank_profile");
     CheckContains(multiHostPerfPath, multiHostPerf, "test -d '${profile_dir}/rank${rank}'");
     CheckContains(multiHostPerfPath, multiHostPerf, "remote_epoch_ns");
@@ -336,12 +343,13 @@ void TestCMakeWiring()
     CheckContains(path, text, "LINKER:-rpath-link,${ASCEND_DRIVER_PATH}/lib64/driver");
     CheckContains(path, text, "test_tilexr_collectives_tools_sources");
     CheckContains(path, text, "run_collectives_correctness.sh");
-    CheckContains(path, text, "run_collective_perf.sh");
-    CheckContains(path, text, "run_collective_perf_multihost.sh");
-    CheckContains(path, text, "run_collective_perf_multihost_suite.sh");
+    CheckContains(path, text, "../../tools/collectives/run_collective_perf.sh");
+    CheckContains(path, text, "../../tools/collectives/run_collective_perf_multihost.sh");
+    CheckContains(path, text, "../../tools/collectives/run_collective_perf_multihost_suite.sh");
     CheckContains(path, text, "find_package(Python3 COMPONENTS Interpreter)");
     CheckContains(path, text, "test_collective_profile_report");
     CheckContains(path, text, "tilexr_collective_profile_report.py");
+    CheckContains(path, text, "../../tools/collectives/tilexr_collective_profile_report.py");
     CheckDoesNotContain(path, text, "add_test(NAME test_tilexr_collectives_correctness");
     CheckDoesNotContain(path, text, "add_test(NAME tilexr_collective_perf");
 }
@@ -386,6 +394,7 @@ void TestReadmeDocumentsManualRuns()
     CheckContains(path, text, "--comm-mode socket");
     CheckContains(path, text, "--op profile-probe");
     CheckContains(path, text, "tilexr_collective_profile_report.py");
+    CheckContains(path, text, "../../tools/collectives/tilexr_collective_profile_report.py");
     CheckContains(path, text, "zoomable chronological timeline");
     CheckContains(path, text, "warmup launches are not profiled");
     CheckContains(path, text, "TILEXR_COLLECTIVES_RUN_TIMEOUT_SEC");

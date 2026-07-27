@@ -122,27 +122,10 @@ TileXR::CommArgs* get_host_comm_args(TileXRCommPtr comm)
     return commArgs;
 }
 
-void test_tilexr_basic_init()
-{
-    TEST_CASE("TileXR Basic Initialization");
-
-    int rank = get_rank_from_env();
-    int rankSize = get_rank_size_from_env();
-
-    cout << "Rank: " << rank << "/" << rankSize << endl;
-
-    TileXRCommPtr comm = init_comm(rank, rankSize);
-    destroy_comm(comm);
-}
-
-void test_comm_args_initialization()
+void test_comm_args_initialization(TileXRCommPtr comm, int rank, int rankSize)
 {
     TEST_CASE("CommArgs Initialization");
 
-    int rank = get_rank_from_env();
-    int rankSize = get_rank_size_from_env();
-
-    TileXRCommPtr comm = init_comm(rank, rankSize);
     TileXR::CommArgs* commArgs = get_host_comm_args(comm);
 
     if (commArgs != nullptr) {
@@ -161,41 +144,28 @@ void test_comm_args_initialization()
         cout << "Local peer memory: " << static_cast<void*>(commArgs->peerMems[rank]) << endl;
         cout << "UDMA info pointer: " << static_cast<void*>(commArgs->udmaInfoPtr) << endl;
     }
-
-    destroy_comm(comm);
 }
 
-void test_comm_args_device_pointer()
+void test_comm_args_device_pointer(TileXRCommPtr comm)
 {
     TEST_CASE("CommArgs Device Pointer");
-
-    int rank = get_rank_from_env();
-    int rankSize = get_rank_size_from_env();
-
-    TileXRCommPtr comm = init_comm(rank, rankSize);
 
     GM_ADDR commArgsDev = nullptr;
     int ret = TileXRGetCommArgsDev(comm, commArgsDev);
     TEST_ASSERT(ret == TileXR::TILEXR_SUCCESS, "TileXRGetCommArgsDev should succeed");
     TEST_ASSERT(commArgsDev != nullptr, "Device CommArgs pointer should not be NULL");
     cout << "CommArgs device pointer: " << static_cast<void*>(commArgsDev) << endl;
-
-    destroy_comm(comm);
 }
 
-void test_multi_rank_init()
+void test_multi_rank_peer_visibility(TileXRCommPtr comm, int rankSize)
 {
-    TEST_CASE("Multi-Rank Initialization");
-
-    int rank = get_rank_from_env();
-    int rankSize = get_rank_size_from_env();
+    TEST_CASE("Multi-Rank Peer Visibility");
 
     if (rankSize < 2) {
         cout << "[SKIP] This test requires at least 2 ranks" << endl;
         return;
     }
 
-    TileXRCommPtr comm = init_comm(rank, rankSize);
     TileXR::CommArgs* commArgs = get_host_comm_args(comm);
 
     if (commArgs != nullptr) {
@@ -207,8 +177,6 @@ void test_multi_rank_init()
         }
         TEST_ASSERT(nonNullPeerCount == rankSize, "All rank peer memories should be visible");
     }
-
-    destroy_comm(comm);
 }
 
 int main(int argc, char** argv)
@@ -241,10 +209,15 @@ int main(int argc, char** argv)
 
     cout << "Using device: " << deviceId << endl;
 
-    test_tilexr_basic_init();
-    test_comm_args_initialization();
-    test_comm_args_device_pointer();
-    test_multi_rank_init();
+    TEST_CASE("TileXR Basic Initialization");
+    cout << "Rank: " << rank << "/" << rankSize << endl;
+    TileXRCommPtr comm = init_comm(rank, rankSize);
+    if (comm != nullptr) {
+        test_comm_args_initialization(comm, rank, rankSize);
+        test_comm_args_device_pointer(comm);
+        test_multi_rank_peer_visibility(comm, rankSize);
+    }
+    destroy_comm(comm);
 
     aclrtResetDevice(deviceId);
     aclFinalize();
