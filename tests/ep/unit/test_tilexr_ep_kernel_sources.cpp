@@ -341,6 +341,58 @@ void TestDispatchDemoExercisesV2OptionalInputs()
     CheckContains(path, contents, "expertTokenNumsType");
 }
 
+void TestDispatchDemoUsesRuntimeShapeConfig()
+{
+    const std::string path = "tests/ep/demo/tilexr_ep_dispatch_demo.cpp";
+    std::string contents;
+    if (!ReadFile(path, &contents)) {
+        return;
+    }
+
+    CheckContains(path, contents, "TILEXR_EP_DEMO_BS");
+    CheckContains(path, contents, "TILEXR_EP_DEMO_H");
+    CheckContains(path, contents, "TILEXR_EP_DEMO_TOPK");
+    CheckContains(path, contents, "config.bs");
+    CheckContains(path, contents, "config.h");
+    CheckContains(path, contents, "config.topK");
+    CheckNotContains(path, contents, "constexpr int64_t kBs");
+    CheckNotContains(path, contents, "constexpr int64_t kH");
+    CheckNotContains(path, contents, "constexpr int64_t kTopK");
+}
+
+void TestDispatchDemoSupportsCombineOnlyMode()
+{
+    const std::string path = "tests/ep/demo/tilexr_ep_dispatch_demo.cpp";
+    std::string contents;
+    if (!ReadFile(path, &contents)) {
+        return;
+    }
+
+    CheckContains(path, contents, "TILEXR_EP_DEMO_MODE");
+    CheckContains(path, contents, "combine-only");
+    CheckContains(path, contents, "SeedCombineInputs");
+    CheckContains(path, contents, "ValidateCombineOutputs");
+    CheckContains(path, contents, "dispatch validation");
+}
+
+void TestDemoRunnerAcceptsNamedShapeArgs()
+{
+    const std::string path = "tests/ep/demo/run_tilexr_ep_dispatch_demo.sh";
+    std::string contents;
+    if (!ReadFile(path, &contents)) {
+        return;
+    }
+
+    CheckContains(path, contents, "--bs");
+    CheckContains(path, contents, "--h");
+    CheckContains(path, contents, "--k");
+    CheckContains(path, contents, "--mode");
+    CheckContains(path, contents, "TILEXR_EP_DEMO_BS");
+    CheckContains(path, contents, "TILEXR_EP_DEMO_H");
+    CheckContains(path, contents, "TILEXR_EP_DEMO_TOPK");
+    CheckContains(path, contents, "TILEXR_EP_DEMO_MODE");
+}
+
 void TestKernelForwardsSharedExpertConfig()
 {
     std::string hostLaunch;
@@ -464,6 +516,9 @@ int main()
     TestKernelForwardsExpertTokenNumsType();
     TestKernelForwardsTpRecvCountsOut();
     TestDispatchDemoExercisesV2OptionalInputs();
+    TestDispatchDemoUsesRuntimeShapeConfig();
+    TestDispatchDemoSupportsCombineOnlyMode();
+    TestDemoRunnerAcceptsNamedShapeArgs();
     TestKernelForwardsSharedExpertConfig();
     TestKernelForwardsStaticQuantConfig();
     TestKernelForwardsPerTokenDynamicQuantConfig();

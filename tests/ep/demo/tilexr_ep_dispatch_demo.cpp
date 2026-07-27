@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <limits>
 #include <string>
 #include <thread>
 #include <vector>
@@ -22,30 +23,43 @@
 
 namespace {
 
-constexpr int64_t kBs = 4;
-constexpr int64_t kH = 8;
-constexpr int64_t kTopK = 2;
-constexpr int64_t kRoutes = kBs * kTopK;
-constexpr int64_t kXElements = kBs * kH;
 constexpr int64_t kAssistInts = 4;
 constexpr uint16_t kFp16One = 0x3c00;
-constexpr uint16_t kFp16Two = 0x4000;
 constexpr std::size_t kUdmaCacheLineBytes = 64;
 constexpr std::size_t kUdmaRegistrationAlignment = 2 * 1024 * 1024;
 
 TileXRUDMAMemHandle g_workspaceHandle = 0;
 bool g_workspaceRegistered = false;
 
+enum class DemoMode {
+    kDispatchCombine,
+    kDispatchOnly,
+    kCombineOnly,
+};
+
 struct DemoConfig {
+    int64_t bs = 4;
+    int64_t h = 8;
+    int64_t topK = 2;
     int64_t moeExpertNum = 8;
     int64_t sharedExpertNum = 0;
     int64_t sharedExpertRankNum = 0;
     int64_t tpWorldSize = 0;
     int64_t tpRankId = 0;
 
+    int64_t routes() const
+    {
+        return bs * topK;
+    }
+
+    int64_t xElements() const
+    {
+        return bs * h;
+    }
+
     int64_t maxRoutesPerRank() const
     {
-        return kBs * (kTopK + sharedExpertNum);
+        return bs * (topK + sharedExpertNum);
     }
 
     int64_t effectiveTpWorldSize() const
@@ -55,7 +69,7 @@ struct DemoConfig {
 
     int64_t expandedElements() const
     {
-        return maxRoutesPerRank() * effectiveTpWorldSize() * kH;
+        return maxRoutesPerRank() * effectiveTpWorldSize() * h;
     }
 };
 
@@ -70,13 +84,66 @@ bool EnvEnabled(const char *name)
     return value != nullptr && value[0] != '\0' && std::string(value) != "0";
 }
 
-int GetEnvInt(const char *name, int fallback)
+bool ParseInt64(const std::string &label, const char *text, int64_t *out)
 {
-    const char *value = std::getenv(name);
-    if (value == nullptr || value[0] == '\0') {
-        return fallback;
+    if (text == nullptr || text[0] == '\0' || out == nullptr) {
+        std::cerr << "missing integer value for " << label << std::endl;
+        return false;
     }
-    return std::atoi(value);
+    errno = 0;
+    char *end = nullptr;
+    const long long value = std::strtoll(text, &end, 10);
+    if (errno != 0 || end == text || *end != '\0') {
+        std::cerr << "invalid " << label << ": " << text << std::endl;
+        return false;
+    }
+    *out = static_cast<int64_t>(value);
+    return true;
+}
+
+bool LoadEnvInt64(const char *name, int64_t *value)
+{
+    const char *text = std::getenv(name);
+    if (text == nullptr || text[0] == '\0') {
+        return true;
+    }
+    return ParseInt64(name, text, value);
+}
+
+bool ParseDemoMode(const std::string &text, DemoMode *mode)
+{
+    if (mode == nullptr) {
+        return false;
+    }
+    if (text == "dispatch-combine") {
+        *mode = DemoMode::kDispatchCombine;
+        return true;
+    }
+    if (text == "dispatch-only") {
+        *mode = DemoMode::kDispatchOnly;
+        return true;
+    }
+    if (text == "combine-only") {
+        *mode = DemoMode::kCombineOnly;
+        return true;
+    }
+    return false;
+}
+
+bool LoadEnvDemoMode(DemoMode *mode)
+{
+    const char *text = std::getenv("TILEXR_EP_DEMO_MODE");
+    if (text == nullptr || text[0] == '\0') {
+        if (EnvEnabled("TILEXR_DEMO_DISPATCH_ONLY")) {
+            *mode = DemoMode::kDispatchOnly;
+        }
+        return true;
+    }
+    if (!ParseDemoMode(text, mode)) {
+        std::cerr << "invalid TILEXR_EP_DEMO_MODE: " << text << std::endl;
+        return false;
+    }
+    return true;
 }
 
 bool ParseHostPort(const std::string &text, HostPort *out)
@@ -85,12 +152,13 @@ bool ParseHostPort(const std::string &text, HostPort *out)
     if (out == nullptr || pos == std::string::npos || pos == 0 || pos + 1 >= text.size()) {
         return false;
     }
-    const int port = std::atoi(text.substr(pos + 1).c_str());
-    if (port <= 0 || port > 65535) {
+    int64_t portValue = 0;
+    const std::string portText = text.substr(pos + 1);
+    if (!ParseInt64("port", portText.c_str(), &portValue) || portValue <= 0 || portValue > 65535) {
         return false;
     }
     out->host = text.substr(0, pos);
-    out->port = port;
+    out->port = static_cast<int>(portValue);
     return true;
 }
 
@@ -394,36 +462,36 @@ int8_t QuantizedXValue(int rank, int64_t token, int64_t h, float scale)
     return static_cast<int8_t>(rounded);
 }
 
-float DynamicScaleForXValue(int rank, int64_t token)
+float DynamicScaleForXValue(const DemoConfig &config, int rank, int64_t token)
 {
     float maxAbs = 0.0f;
-    for (int64_t h = 0; h < kH; ++h) {
+    for (int64_t h = 0; h < config.h; ++h) {
         const float value = std::fabs(HalfBitsToFloat(XValue(rank, token, h)));
         maxAbs = std::max(maxAbs, value);
     }
     return maxAbs > 0.0f ? maxAbs / 127.0f : 1.0f;
 }
 
-int8_t DynamicQuantizedXValue(int rank, int64_t token, int64_t h)
+int8_t DynamicQuantizedXValue(const DemoConfig &config, int rank, int64_t token, int64_t h)
 {
-    const float scale = DynamicScaleForXValue(rank, token);
+    const float scale = DynamicScaleForXValue(config, rank, token);
     return QuantizedXValue(rank, token, h, scale > 0.0f ? 1.0f / scale : 1.0f);
 }
 
 std::vector<int32_t> ExpertIds(const DemoConfig &config)
 {
-    std::vector<int32_t> expertIds(kRoutes);
-    for (int64_t route = 0; route < kRoutes; ++route) {
+    std::vector<int32_t> expertIds(static_cast<std::size_t>(config.routes()));
+    for (int64_t route = 0; route < config.routes(); ++route) {
         expertIds[route] = static_cast<int32_t>(route % config.moeExpertNum);
     }
     return expertIds;
 }
 
-std::vector<uint8_t> ActiveMask(bool enabled)
+std::vector<uint8_t> ActiveMask(const DemoConfig &config, bool enabled)
 {
-    std::vector<uint8_t> mask(kBs, 1);
-    if (enabled && kBs > 0) {
-        mask[kBs - 1] = 0;
+    std::vector<uint8_t> mask(static_cast<std::size_t>(config.bs), 1);
+    if (enabled && config.bs > 0) {
+        mask[static_cast<std::size_t>(config.bs - 1)] = 0;
     }
     return mask;
 }
@@ -493,18 +561,18 @@ std::vector<ExpectedRoute> BuildExpectedRoutes(
         if (effectiveTpWorldSize > 1 && srcRank % effectiveTpWorldSize != targetTpRankId) {
             continue;
         }
-        for (int64_t token = 0; token < kBs; ++token) {
+        for (int64_t token = 0; token < config.bs; ++token) {
             if (!activeMask.empty() && activeMask[token] == 0) {
                 continue;
             }
             for (int64_t sharedExpertId = 0; sharedExpertId < config.sharedExpertNum; ++sharedExpertId) {
                 if (RouteBelongsToRank(static_cast<int32_t>(sharedExpertId), rank, rankSize, config)) {
                     expected.push_back(ExpectedRoute {srcRank, static_cast<int32_t>(token),
-                        static_cast<int32_t>(kTopK + sharedExpertId), static_cast<int32_t>(sharedExpertId)});
+                        static_cast<int32_t>(config.topK + sharedExpertId), static_cast<int32_t>(sharedExpertId)});
                 }
             }
-            for (int64_t topKId = 0; topKId < kTopK; ++topKId) {
-                const int64_t route = token * kTopK + topKId;
+            for (int64_t topKId = 0; topKId < config.topK; ++topKId) {
+                const int64_t route = token * config.topK + topKId;
                 const int32_t expertId = static_cast<int32_t>(config.sharedExpertNum) + expertIds[route];
                 if (RouteBelongsToRank(expertId, rank, rankSize, config)) {
                     expected.push_back(ExpectedRoute {srcRank, static_cast<int32_t>(token),
@@ -592,7 +660,7 @@ bool ValidateOutputs(int rank, int rankSize, const DemoConfig &config, const std
         }
 
         if (usePerTokenDynamicQuant) {
-            const float expectedScale = DynamicScaleForXValue(route.srcRank, route.tokenId);
+            const float expectedScale = DynamicScaleForXValue(config, route.srcRank, route.tokenId);
             const float actualScale = dynamicScalesOut[row];
             if (std::fabs(actualScale - expectedScale) > 1.0e-5f) {
                 std::cerr << "rank " << rank << " dynamicScalesOut[" << row << "] expected "
@@ -601,14 +669,15 @@ bool ValidateOutputs(int rank, int rankSize, const DemoConfig &config, const std
             }
         }
 
-        for (int64_t h = 0; h < kH; ++h) {
+        for (int64_t h = 0; h < config.h; ++h) {
             const bool useInt8Output = useStaticQuant || usePerTokenDynamicQuant;
-            const std::size_t byteOffset = row * kH * (useInt8Output ? sizeof(int8_t) : sizeof(uint16_t)) +
+            const std::size_t byteOffset = row * static_cast<std::size_t>(config.h) *
+                (useInt8Output ? sizeof(int8_t) : sizeof(uint16_t)) +
                 h * (useInt8Output ? sizeof(int8_t) : sizeof(uint16_t));
             const int expectedValue = useStaticQuant ?
                 static_cast<int>(QuantizedXValue(route.srcRank, route.tokenId, h, staticQuantScale)) :
                 (usePerTokenDynamicQuant ?
-                    static_cast<int>(DynamicQuantizedXValue(route.srcRank, route.tokenId, h)) :
+                    static_cast<int>(DynamicQuantizedXValue(config, route.srcRank, route.tokenId, h)) :
                     static_cast<int>(XValue(route.srcRank, route.tokenId, h)));
             const int actualValue = useInt8Output ?
                 static_cast<int>(*reinterpret_cast<const int8_t *>(&expandX[byteOffset])) :
@@ -624,14 +693,69 @@ bool ValidateOutputs(int rank, int rankSize, const DemoConfig &config, const std
     return true;
 }
 
-bool ValidateCombineOutputs(int rank, const std::vector<uint16_t> &yOut)
+uint16_t HalfBitsForSmallPositiveInteger(int64_t value)
 {
-    for (int64_t token = 0; token < kBs; ++token) {
-        for (int64_t h = 0; h < kH; ++h) {
-            const uint16_t actualValue = yOut[token * kH + h];
-            if (actualValue != kFp16Two) {
+    if (value <= 0 || value > 2048) {
+        return 0;
+    }
+    int exponent = 0;
+    int64_t base = 1;
+    while ((base << 1) <= value) {
+        base <<= 1;
+        ++exponent;
+    }
+    const int64_t mantissa = ((value - base) * 1024) / base;
+    return static_cast<uint16_t>(((exponent + 15) << 10) | mantissa);
+}
+
+bool SeedCombineInputs(int rank, int rankSize, const DemoConfig &config, const std::vector<uint8_t> &activeMask,
+    std::vector<uint16_t> *expertOut, std::vector<int32_t> *recvCounts, std::vector<int32_t> *assist)
+{
+    if (expertOut == nullptr || recvCounts == nullptr || assist == nullptr) {
+        return false;
+    }
+    std::fill(expertOut->begin(), expertOut->end(), kFp16One);
+    std::fill(recvCounts->begin(), recvCounts->end(), 0);
+    std::fill(assist->begin(), assist->end(), 0);
+
+    const std::vector<ExpectedRoute> expected = BuildExpectedTpRoutes(rank, rankSize, config, activeMask);
+    if (assist->size() < expected.size() * static_cast<std::size_t>(kAssistInts)) {
+        std::cerr << "rank " << rank << " assist buffer is too small for combine-only seed" << std::endl;
+        return false;
+    }
+    for (std::size_t row = 0; row < expected.size(); ++row) {
+        const ExpectedRoute &route = expected[row];
+        if (route.srcRank < 0 || route.srcRank >= rankSize) {
+            std::cerr << "rank " << rank << " invalid seeded src rank " << route.srcRank << std::endl;
+            return false;
+        }
+        (*recvCounts)[static_cast<std::size_t>(route.srcRank)] += 1;
+        const std::size_t offset = row * static_cast<std::size_t>(kAssistInts);
+        (*assist)[offset] = route.srcRank;
+        (*assist)[offset + 1] = route.tokenId;
+        (*assist)[offset + 2] = route.topKId;
+        (*assist)[offset + 3] = route.expertId;
+    }
+    return true;
+}
+
+bool ValidateCombineOutputs(int rank, const DemoConfig &config, const std::vector<uint8_t> &activeMask,
+    const std::vector<uint16_t> &yOut)
+{
+    const uint16_t activeExpected = HalfBitsForSmallPositiveInteger(config.topK);
+    if (activeExpected == 0) {
+        std::cerr << "rank " << rank << " unsupported combine validation topK=" << config.topK
+                  << " (supported range: 1..2048)" << std::endl;
+        return false;
+    }
+    for (int64_t token = 0; token < config.bs; ++token) {
+        const uint16_t expected = (!activeMask.empty() && activeMask[static_cast<std::size_t>(token)] == 0) ?
+            0 : activeExpected;
+        for (int64_t h = 0; h < config.h; ++h) {
+            const uint16_t actualValue = yOut[static_cast<std::size_t>(token * config.h + h)];
+            if (actualValue != expected) {
                 std::cerr << "rank " << rank << " yOut[" << token << "][" << h << "] expected 0x"
-                          << std::hex << kFp16Two << " got 0x" << actualValue << std::dec << std::endl;
+                          << std::hex << expected << " got 0x" << actualValue << std::dec << std::endl;
                 return false;
             }
         }
@@ -706,30 +830,182 @@ void Cleanup(TileXRCommPtr comm, aclrtStream stream, int deviceId, bool deviceSe
 
 int main(int argc, char **argv)
 {
-    const int rankSize = argc > 1 ? std::atoi(argv[1]) : GetEnvInt("RANK_SIZE", 2);
-    const int rank = argc > 2 ? std::atoi(argv[2]) : GetEnvInt("RANK", 0);
-    const int npuCount = argc > 3 ? std::atoi(argv[3]) : GetEnvInt("TILEXR_DEMO_NPUS", rankSize);
-    const int firstNpu = argc > 4 ? std::atoi(argv[4]) : GetEnvInt("TILEXR_DEMO_FIRST_NPU", 0);
-    const bool dispatchOnly = argc > 5 ? std::atoi(argv[5]) != 0 : GetEnvInt("TILEXR_DEMO_DISPATCH_ONLY", 0) != 0;
-    const bool useActiveMask = EnvEnabled("TILEXR_EP_DEMO_ACTIVE_MASK");
-    const bool requestedTpRecvCounts = EnvEnabled("TILEXR_EP_DEMO_TP_RECV_COUNTS");
-    const int expertTokenNumsType = GetEnvInt("TILEXR_EP_DEMO_EXPERT_TOKEN_NUMS_TYPE", 1);
-    const int quantMode = GetEnvInt("TILEXR_EP_DEMO_QUANT_MODE", 0);
+    int64_t rankSizeValue = 2;
+    int64_t rankValue = 0;
+    int64_t npuCountValue = 0;
+    int64_t firstNpuValue = 0;
+    if (!LoadEnvInt64("RANK_SIZE", &rankSizeValue) ||
+        !LoadEnvInt64("RANK", &rankValue) ||
+        !LoadEnvInt64("TILEXR_DEMO_NPUS", &npuCountValue) ||
+        !LoadEnvInt64("TILEXR_DEMO_FIRST_NPU", &firstNpuValue)) {
+        return 2;
+    }
+    if (argc > 1 && !ParseInt64("rank_size", argv[1], &rankSizeValue)) {
+        return 2;
+    }
+    if (argc > 2 && !ParseInt64("rank", argv[2], &rankValue)) {
+        return 2;
+    }
+    if (argc > 3 && !ParseInt64("npu_count", argv[3], &npuCountValue)) {
+        return 2;
+    }
+    if (argc > 4 && !ParseInt64("first_npu", argv[4], &firstNpuValue)) {
+        return 2;
+    }
+
+    DemoMode mode = DemoMode::kDispatchCombine;
+    if (!LoadEnvDemoMode(&mode)) {
+        return 2;
+    }
+    bool useActiveMask = EnvEnabled("TILEXR_EP_DEMO_ACTIVE_MASK");
+    bool requestedTpRecvCounts = EnvEnabled("TILEXR_EP_DEMO_TP_RECV_COUNTS");
+    int64_t expertTokenNumsType = 1;
+    int64_t quantMode = 0;
+    int64_t staticQuantScaleValue = 1;
+    bool dumpWindow = EnvEnabled("TILEXR_EP_DEMO_DUMP_WINDOW");
+    bool tpRankIdExplicit = std::getenv("TILEXR_EP_DEMO_TP_RANK_ID") != nullptr;
+    DemoConfig config {};
+    config.tpRankId = 0;
+    if (!LoadEnvInt64("TILEXR_EP_DEMO_BS", &config.bs) ||
+        !LoadEnvInt64("TILEXR_EP_DEMO_H", &config.h) ||
+        !LoadEnvInt64("TILEXR_EP_DEMO_TOPK", &config.topK) ||
+        !LoadEnvInt64("TILEXR_EP_DEMO_MOE_EXPERT_NUM", &config.moeExpertNum) ||
+        !LoadEnvInt64("TILEXR_EP_DEMO_SHARED_EXPERT_NUM", &config.sharedExpertNum) ||
+        !LoadEnvInt64("TILEXR_EP_DEMO_SHARED_EXPERT_RANK_NUM", &config.sharedExpertRankNum) ||
+        !LoadEnvInt64("TILEXR_EP_DEMO_TP_WORLD_SIZE", &config.tpWorldSize) ||
+        !LoadEnvInt64("TILEXR_EP_DEMO_TP_RANK_ID", &config.tpRankId) ||
+        !LoadEnvInt64("TILEXR_EP_DEMO_EXPERT_TOKEN_NUMS_TYPE", &expertTokenNumsType) ||
+        !LoadEnvInt64("TILEXR_EP_DEMO_QUANT_MODE", &quantMode) ||
+        !LoadEnvInt64("TILEXR_EP_DEMO_STATIC_QUANT_SCALE", &staticQuantScaleValue)) {
+        return 2;
+    }
+
+    int optionIndex = 5;
+    if (argc > optionIndex && std::string(argv[optionIndex]).find("--") != 0) {
+        int64_t legacyDispatchOnly = 0;
+        if (!ParseInt64("dispatch_only", argv[optionIndex], &legacyDispatchOnly)) {
+            return 2;
+        }
+        if (legacyDispatchOnly != 0) {
+            mode = DemoMode::kDispatchOnly;
+        }
+        ++optionIndex;
+    }
+    for (int index = optionIndex; index < argc; ++index) {
+        const std::string option(argv[index]);
+        auto requireValue = [&](const std::string &name) -> const char * {
+            if (index + 1 >= argc) {
+                std::cerr << "missing value for " << name << std::endl;
+                return nullptr;
+            }
+            return argv[++index];
+        };
+        if (option == "--mode") {
+            const char *value = requireValue(option);
+            if (value == nullptr || !ParseDemoMode(value, &mode)) {
+                std::cerr << "invalid --mode: " << (value == nullptr ? "" : value) << std::endl;
+                return 2;
+            }
+        } else if (option == "--bs") {
+            const char *value = requireValue(option);
+            if (value == nullptr || !ParseInt64(option, value, &config.bs)) {
+                return 2;
+            }
+        } else if (option == "--h") {
+            const char *value = requireValue(option);
+            if (value == nullptr || !ParseInt64(option, value, &config.h)) {
+                return 2;
+            }
+        } else if (option == "--k") {
+            const char *value = requireValue(option);
+            if (value == nullptr || !ParseInt64(option, value, &config.topK)) {
+                return 2;
+            }
+        } else if (option == "--moe-expert-num") {
+            const char *value = requireValue(option);
+            if (value == nullptr || !ParseInt64(option, value, &config.moeExpertNum)) {
+                return 2;
+            }
+        } else if (option == "--expert-token-nums-type") {
+            const char *value = requireValue(option);
+            if (value == nullptr || !ParseInt64(option, value, &expertTokenNumsType)) {
+                return 2;
+            }
+        } else if (option == "--active-mask") {
+            useActiveMask = true;
+        } else if (option == "--tp-world-size") {
+            const char *value = requireValue(option);
+            if (value == nullptr || !ParseInt64(option, value, &config.tpWorldSize)) {
+                return 2;
+            }
+        } else if (option == "--tp-rank-id") {
+            const char *value = requireValue(option);
+            if (value == nullptr || !ParseInt64(option, value, &config.tpRankId)) {
+                return 2;
+            }
+            tpRankIdExplicit = true;
+        } else if (option == "--tp-recv-counts") {
+            requestedTpRecvCounts = true;
+        } else if (option == "--shared-expert-num") {
+            const char *value = requireValue(option);
+            if (value == nullptr || !ParseInt64(option, value, &config.sharedExpertNum)) {
+                return 2;
+            }
+        } else if (option == "--shared-expert-rank-num") {
+            const char *value = requireValue(option);
+            if (value == nullptr || !ParseInt64(option, value, &config.sharedExpertRankNum)) {
+                return 2;
+            }
+        } else if (option == "--quant-mode") {
+            const char *value = requireValue(option);
+            if (value == nullptr || !ParseInt64(option, value, &quantMode)) {
+                return 2;
+            }
+        } else if (option == "--static-quant-scale") {
+            const char *value = requireValue(option);
+            if (value == nullptr || !ParseInt64(option, value, &staticQuantScaleValue)) {
+                return 2;
+            }
+        } else if (option == "--dump-window") {
+            dumpWindow = true;
+        } else {
+            std::cerr << "unknown option: " << option << std::endl;
+            return 2;
+        }
+    }
+
+    if (config.effectiveTpWorldSize() > 1 && !tpRankIdExplicit) {
+        config.tpRankId = rankValue % config.effectiveTpWorldSize();
+    }
+    if (npuCountValue == 0) {
+        npuCountValue = rankSizeValue;
+    }
+    if (rankSizeValue <= 0 || rankSizeValue > std::numeric_limits<int>::max() ||
+        rankValue < 0 || rankValue > std::numeric_limits<int>::max() ||
+        npuCountValue <= 0 || npuCountValue > std::numeric_limits<int>::max() ||
+        firstNpuValue < 0 || firstNpuValue > std::numeric_limits<int>::max()) {
+        std::cerr << "invalid rank/device arguments: rankSize=" << rankSizeValue
+                  << " rank=" << rankValue << " npuCount=" << npuCountValue
+                  << " firstNpu=" << firstNpuValue << std::endl;
+        return 2;
+    }
+    const int rankSize = static_cast<int>(rankSizeValue);
+    const int rank = static_cast<int>(rankValue);
+    const int npuCount = static_cast<int>(npuCountValue);
+    const int firstNpu = static_cast<int>(firstNpuValue);
+    const bool dispatchOnly = mode == DemoMode::kDispatchOnly;
+    const bool combineOnly = mode == DemoMode::kCombineOnly;
+    const bool runDispatch = !combineOnly;
+    const bool runCombine = !dispatchOnly;
     const bool useStaticQuant = quantMode == 1;
     const bool usePerTokenDynamicQuant = quantMode == 2;
-    const float staticQuantScale = static_cast<float>(GetEnvInt("TILEXR_EP_DEMO_STATIC_QUANT_SCALE", 1));
-    DemoConfig config {};
-    config.moeExpertNum = GetEnvInt("TILEXR_EP_DEMO_MOE_EXPERT_NUM", static_cast<int>(config.moeExpertNum));
-    config.sharedExpertNum = GetEnvInt("TILEXR_EP_DEMO_SHARED_EXPERT_NUM", 0);
-    config.sharedExpertRankNum = GetEnvInt("TILEXR_EP_DEMO_SHARED_EXPERT_RANK_NUM", 0);
-    config.tpWorldSize = GetEnvInt("TILEXR_EP_DEMO_TP_WORLD_SIZE", 0);
-    config.tpRankId = GetEnvInt("TILEXR_EP_DEMO_TP_RANK_ID",
-        config.effectiveTpWorldSize() > 1 ? rank % config.effectiveTpWorldSize() : 0);
+    const float staticQuantScale = static_cast<float>(staticQuantScaleValue);
     const bool useTpRecvCounts = requestedTpRecvCounts || config.effectiveTpWorldSize() != 1;
 
     const int64_t expertRankSize = static_cast<int64_t>(rankSize) / config.effectiveTpWorldSize();
     const int64_t moeRankNum = expertRankSize - config.sharedExpertRankNum;
-    if (rankSize <= 0 || rank < 0 || rank >= rankSize || config.effectiveTpWorldSize() <= 0 ||
+    if (rankSize <= 0 || rank < 0 || rank >= rankSize || config.bs <= 0 || config.h <= 0 || config.topK <= 0 ||
+        config.routes() <= 0 || config.xElements() <= 0 || config.effectiveTpWorldSize() <= 0 ||
         rankSize % config.effectiveTpWorldSize() != 0 || moeRankNum <= 0 ||
         config.moeExpertNum <= 0 || config.moeExpertNum % moeRankNum != 0 ||
         config.sharedExpertNum < 0 || config.sharedExpertRankNum < 0 ||
@@ -740,6 +1016,9 @@ int main(int argc, char **argv)
         ((useStaticQuant || usePerTokenDynamicQuant) && !dispatchOnly)) {
         std::cerr << "This demo expects a valid rank and moeExpertNum divisible by MoE rank num, got moeExpertNum="
                   << config.moeExpertNum << " rankSize=" << rankSize
+                  << " bs=" << config.bs
+                  << " h=" << config.h
+                  << " topK=" << config.topK
                   << " sharedExpertNum=" << config.sharedExpertNum
                   << " sharedExpertRankNum=" << config.sharedExpertRankNum
                   << " tpWorldSize=" << config.tpWorldSize
@@ -747,6 +1026,10 @@ int main(int argc, char **argv)
                   << ", and expertTokenNumsType 0 or 1, got rankSize=" << rankSize << " rank=" << rank
                   << " expertTokenNumsType=" << expertTokenNumsType
                   << " quantMode=" << quantMode << std::endl;
+        return 2;
+    }
+    if (combineOnly && (useStaticQuant || usePerTokenDynamicQuant)) {
+        std::cerr << "combine-only does not support quantMode=" << quantMode << std::endl;
         return 2;
     }
 
@@ -777,14 +1060,14 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    std::vector<uint16_t> hostX(kXElements);
-    for (int64_t token = 0; token < kBs; ++token) {
-        for (int64_t h = 0; h < kH; ++h) {
-            hostX[token * kH + h] = XValue(rank, token, h);
+    std::vector<uint16_t> hostX(static_cast<std::size_t>(config.xElements()));
+    for (int64_t token = 0; token < config.bs; ++token) {
+        for (int64_t h = 0; h < config.h; ++h) {
+            hostX[static_cast<std::size_t>(token * config.h + h)] = XValue(rank, token, h);
         }
     }
     const std::vector<int32_t> hostExpertIds = ExpertIds(config);
-    const std::vector<uint8_t> hostActiveMask = ActiveMask(useActiveMask);
+    const std::vector<uint8_t> hostActiveMask = ActiveMask(config, useActiveMask);
     const std::size_t expectedRouteCount =
         BuildExpectedTpRoutes(rank, rankSize, config, hostActiveMask).size();
 
@@ -809,19 +1092,19 @@ int main(int argc, char **argv)
     const std::size_t expertIdsBytes = hostExpertIds.size() * sizeof(int32_t);
     const std::size_t xActiveMaskBytes = hostActiveMask.size() * sizeof(uint8_t);
     const std::size_t expandedElements = std::max(static_cast<std::size_t>(config.expandedElements()),
-        expectedRouteCount * static_cast<std::size_t>(kH));
+        expectedRouteCount * static_cast<std::size_t>(config.h));
     const std::size_t maxRoutesPerRank = static_cast<std::size_t>(config.maxRoutesPerRank());
     const std::size_t expandElementBytes =
         (useStaticQuant || usePerTokenDynamicQuant) ? sizeof(int8_t) : sizeof(uint16_t);
     const std::size_t expandXBytes = expandedElements * expandElementBytes;
-    const std::size_t expandedRows = expandedElements / kH;
+    const std::size_t expandedRows = expandedElements / static_cast<std::size_t>(config.h);
     const std::size_t dynamicScalesBytes = expandedRows * sizeof(float);
     const std::size_t expertTokenNumsBytes = localExpertNum * sizeof(int64_t);
     const std::size_t recvCountsBytes = rankSize * sizeof(int32_t);
     const std::size_t tpRecvCountsBytes = recvCountsBytes;
-    const std::size_t assistBytes = (expandedElements / kH) * kAssistInts * sizeof(int32_t);
-    const std::size_t yOutBytes = kXElements * sizeof(uint16_t);
-    const std::size_t payloadRowBytes = kH * expandElementBytes;
+    const std::size_t assistBytes = expandedRows * kAssistInts * sizeof(int32_t);
+    const std::size_t yOutBytes = static_cast<std::size_t>(config.xElements()) * sizeof(uint16_t);
+    const std::size_t payloadRowBytes = static_cast<std::size_t>(config.h) * expandElementBytes;
     const std::size_t dispatchWindowBytes = EpWindowBytes(rankSize, config, payloadRowBytes, usePerTokenDynamicQuant);
     const std::size_t dispatchPayloadBytes = AlignSize(dispatchWindowBytes, 32) *
         static_cast<std::size_t>(config.effectiveTpWorldSize() + 2);
@@ -899,31 +1182,51 @@ int main(int argc, char **argv)
         g_workspaceRegistered = true;
     }
 
-    const std::vector<uint16_t> hostExpertOut(expandedElements, kFp16One);
+    std::vector<uint16_t> hostExpertOut(expandedElements, kFp16One);
+    if (combineOnly) {
+        std::vector<int32_t> seededRecvCounts(rankSize);
+        std::vector<int32_t> seededAssist(expandedRows * static_cast<std::size_t>(kAssistInts));
+        if (!SeedCombineInputs(rank, rankSize, config, hostActiveMask, &hostExpertOut,
+                &seededRecvCounts, &seededAssist)) {
+            Cleanup(comm, stream, deviceId, deviceSet, aclReady, buffers);
+            return 1;
+        }
+        if (!CheckAcl(aclrtMemcpy(recvCountsDev, recvCountsBytes, seededRecvCounts.data(), recvCountsBytes,
+                ACL_MEMCPY_HOST_TO_DEVICE), "copy seeded recvCounts") ||
+            !CheckAcl(aclrtMemcpy(assistDev, assistBytes, seededAssist.data(), assistBytes,
+                ACL_MEMCPY_HOST_TO_DEVICE), "copy seeded assist")) {
+            Cleanup(comm, stream, deviceId, deviceSet, aclReady, buffers);
+            return 1;
+        }
+    }
     if (!CheckAcl(aclrtMemcpy(expertOutDev, expandXBytes, hostExpertOut.data(), expandXBytes,
             ACL_MEMCPY_HOST_TO_DEVICE), "copy expertOut")) {
         Cleanup(comm, stream, deviceId, deviceSet, aclReady, buffers);
         return 1;
     }
 
+    if (runDispatch) {
     const bool useSharedExperts = config.sharedExpertNum != 0 || config.sharedExpertRankNum != 0;
     const bool useTp = config.effectiveTpWorldSize() != 1;
     const bool useDispatchV2 = crossNode || useActiveMask || useTpRecvCounts || expertTokenNumsType != 1 ||
         useSharedExperts || useTp || useStaticQuant || usePerTokenDynamicQuant;
     const int dispatchRet = useDispatchV2 ?
         TileXRMoeEpDispatchV2(xDev, static_cast<int32_t *>(expertIdsDev), scalesDev,
-            static_cast<bool *>(xActiveMaskDev), nullptr, comm, kBs, kH, kTopK, config.moeExpertNum,
+            static_cast<bool *>(xActiveMaskDev), nullptr, comm, config.bs, config.h, config.topK,
+            config.moeExpertNum,
             expertRankSize, ExpertRankForRank(rank, config), config.tpWorldSize, config.tpRankId, 0,
-            config.sharedExpertNum, config.sharedExpertRankNum, quantMode, kBs * rankSize, expertTokenNumsType,
+            config.sharedExpertNum, config.sharedExpertRankNum, quantMode, config.bs * rankSize,
+            expertTokenNumsType,
             expandXDev, dynamicScalesDev,
             static_cast<int32_t *>(assistDev), static_cast<int64_t *>(expertTokenNumsDev),
             static_cast<int32_t *>(recvCountsDev), static_cast<int32_t *>(tpRecvCountsDev), nullptr, workspaceDev,
             (useStaticQuant || usePerTokenDynamicQuant) ? TileXR::TILEXR_DATA_TYPE_INT8 :
                 TileXR::TILEXR_DATA_TYPE_FP16,
             stream) :
-        TileXRMoeEpDispatch(xDev, static_cast<int32_t *>(expertIdsDev), comm, kBs, kH, kTopK, config.moeExpertNum,
-            expandXDev, static_cast<int64_t *>(expertTokenNumsDev), static_cast<int32_t *>(recvCountsDev),
-            static_cast<int32_t *>(assistDev), TileXR::TILEXR_DATA_TYPE_FP16, stream);
+        TileXRMoeEpDispatch(xDev, static_cast<int32_t *>(expertIdsDev), comm, config.bs, config.h, config.topK,
+            config.moeExpertNum, expandXDev, static_cast<int64_t *>(expertTokenNumsDev),
+            static_cast<int32_t *>(recvCountsDev), static_cast<int32_t *>(assistDev),
+            TileXR::TILEXR_DATA_TYPE_FP16, stream);
     if (!CheckTileXR(dispatchRet, "TileXRMoeEpDispatch") ||
         !CheckAcl(aclrtSynchronizeStream(stream), "aclrtSynchronizeStream")) {
         Cleanup(comm, stream, deviceId, deviceSet, aclReady, buffers);
@@ -934,8 +1237,8 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    if (EnvEnabled("TILEXR_EP_DEMO_DUMP_WINDOW") && commArgsHost != nullptr) {
-        const std::size_t rowBytes = kH * expandElementBytes;
+    if (dumpWindow && commArgsHost != nullptr) {
+        const std::size_t rowBytes = static_cast<std::size_t>(config.h) * expandElementBytes;
         const std::size_t payloadBytes = AlignSize(maxRoutesPerRank * rowBytes +
             (usePerTokenDynamicQuant ? maxRoutesPerRank * sizeof(float) : 0), 32);
         const std::size_t assistWindowBytes = AlignSize(maxRoutesPerRank * kAssistInts * sizeof(int32_t), 32);
@@ -981,7 +1284,7 @@ int main(int argc, char **argv)
     std::vector<int64_t> hostExpertTokenNums(localExpertNum);
     std::vector<int32_t> hostRecvCounts(rankSize);
     std::vector<int32_t> hostTpRecvCounts(rankSize);
-    std::vector<int32_t> hostAssist((expandedElements / kH) * kAssistInts);
+    std::vector<int32_t> hostAssist(expandedRows * static_cast<std::size_t>(kAssistInts));
     std::vector<float> hostDynamicScales(expandedRows);
 
     if (!CheckAcl(aclrtMemcpy(hostExpandX.data(), expandXBytes, expandXDev, expandXBytes,
@@ -1007,23 +1310,27 @@ int main(int argc, char **argv)
     }
 
     const bool dispatchOk = ValidateOutputs(rank, rankSize, config, hostExpandX, hostExpertTokenNums, hostRecvCounts,
-        hostAssist, hostDynamicScales, hostActiveMask, expertTokenNumsType, useStaticQuant,
+        hostAssist, hostDynamicScales, hostActiveMask, static_cast<int>(expertTokenNumsType), useStaticQuant,
         usePerTokenDynamicQuant, staticQuantScale) &&
         (!useTpRecvCounts || ValidateTpRecvCounts(rank, rankSize, config, hostActiveMask, hostRecvCounts,
             hostTpRecvCounts));
-    std::cout << "rank " << rank << " validation " << (dispatchOk ? "PASS" : "FAIL") << std::endl;
-    if (!dispatchOk || dispatchOnly) {
+    std::cout << "rank " << rank << " dispatch validation " << (dispatchOk ? "PASS" : "FAIL") << std::endl;
+    if (!dispatchOk || !runCombine) {
         Cleanup(comm, stream, deviceId, deviceSet, aclReady, buffers);
         return dispatchOk ? 0 : 1;
+    }
+    } else if (!DemoBarrierAll(rank, rankSize, "combine inputs seeded")) {
+        Cleanup(comm, stream, deviceId, deviceSet, aclReady, buffers);
+        return 1;
     }
 
     const int combineRet = crossNode ?
         TileXRMoeEpCombineV2(expertOutDev, static_cast<int32_t *>(assistDev),
-            static_cast<int32_t *>(recvCountsDev), comm, kBs, kH, kTopK, config.moeExpertNum, yOutDev, workspaceDev,
-            TileXR::TILEXR_DATA_TYPE_FP16, stream) :
+            static_cast<int32_t *>(recvCountsDev), comm, config.bs, config.h, config.topK, config.moeExpertNum,
+            yOutDev, workspaceDev, TileXR::TILEXR_DATA_TYPE_FP16, stream) :
         TileXRMoeEpCombine(expertOutDev, static_cast<int32_t *>(assistDev),
-            static_cast<int32_t *>(recvCountsDev), comm, kBs, kH, kTopK, config.moeExpertNum, yOutDev,
-            TileXR::TILEXR_DATA_TYPE_FP16, stream);
+            static_cast<int32_t *>(recvCountsDev), comm, config.bs, config.h, config.topK, config.moeExpertNum,
+            yOutDev, TileXR::TILEXR_DATA_TYPE_FP16, stream);
     if (!CheckTileXR(combineRet, "TileXRMoeEpCombine") ||
         !CheckAcl(aclrtSynchronizeStream(stream), "aclrtSynchronizeStream combine")) {
         Cleanup(comm, stream, deviceId, deviceSet, aclReady, buffers);
@@ -1034,14 +1341,14 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    std::vector<uint16_t> hostYOut(kXElements);
+    std::vector<uint16_t> hostYOut(static_cast<std::size_t>(config.xElements()));
     if (!CheckAcl(aclrtMemcpy(hostYOut.data(), yOutBytes, yOutDev, yOutBytes,
             ACL_MEMCPY_DEVICE_TO_HOST), "copy yOut")) {
         Cleanup(comm, stream, deviceId, deviceSet, aclReady, buffers);
         return 1;
     }
 
-    const bool combineOk = ValidateCombineOutputs(rank, hostYOut);
+    const bool combineOk = ValidateCombineOutputs(rank, config, hostActiveMask, hostYOut);
     std::cout << "rank " << rank << " combine validation " << (combineOk ? "PASS" : "FAIL") << std::endl;
     Cleanup(comm, stream, deviceId, deviceSet, aclReady, buffers);
     return combineOk ? 0 : 1;
