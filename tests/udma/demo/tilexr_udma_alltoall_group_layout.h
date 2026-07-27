@@ -19,7 +19,7 @@ constexpr int32_t kAllToAllGroupMaxRankSize = 1024;
 constexpr uint32_t kAllToAllGroupWidth = 16U;
 constexpr uint32_t kAllToAllGroupHalfWidth = 8U;
 constexpr uint32_t kAllToAllGroupExperimentalWidth = 4U;
-constexpr uint32_t kAllToAllGroupMaxQuietBatch = 4U;
+constexpr uint32_t kAllToAllGroupMaxQuietBatch = 64U;
 constexpr uint32_t kAllToAllGroupPingPongSlots = 2U;
 constexpr uint32_t kAllToAllGroupRouteSignalStride = 512U;
 constexpr uint32_t kAllToAllGroupSignalSlotBytes = 1024U;
@@ -56,8 +56,8 @@ inline bool AllToAllGroupValidWidth(uint32_t groupWidth)
 
 inline bool AllToAllGroupValidQuietBatch(uint32_t quietBatch)
 {
-    return quietBatch == 1U || quietBatch == 2U ||
-        quietBatch == kAllToAllGroupMaxQuietBatch;
+    return quietBatch != 0U && quietBatch <= kAllToAllGroupMaxQuietBatch &&
+        (quietBatch & (quietBatch - 1U)) == 0U;
 }
 
 enum class AllToAllGroupChannelMode : uint32_t {

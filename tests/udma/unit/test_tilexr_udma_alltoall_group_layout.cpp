@@ -193,7 +193,13 @@ void TestChannelPolicy()
     CHECK_EQ(TileXR::Demo::AllToAllGroupValidQuietBatch(1U), true);
     CHECK_EQ(TileXR::Demo::AllToAllGroupValidQuietBatch(2U), true);
     CHECK_EQ(TileXR::Demo::AllToAllGroupValidQuietBatch(4U), true);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupValidQuietBatch(8U), true);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupValidQuietBatch(16U), true);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupValidQuietBatch(32U), true);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupValidQuietBatch(64U), true);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupValidQuietBatch(0U), false);
     CHECK_EQ(TileXR::Demo::AllToAllGroupValidQuietBatch(3U), false);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupValidQuietBatch(65U), false);
 }
 
 void TestScalePlanAndTraceCapacity()

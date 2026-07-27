@@ -15,7 +15,7 @@ constexpr uint32_t TILEXR_ALLTOALL_GROUP_SEND_WORKERS = 32U;
 constexpr uint32_t TILEXR_ALLTOALL_GROUP_BLOCK_DIM = 64U;
 constexpr uint32_t TILEXR_ALLTOALL_GROUP_DEFAULT_WIDTH = 16U;
 constexpr uint32_t TILEXR_ALLTOALL_GROUP_EXPERIMENTAL_WIDTH = 4U;
-constexpr uint32_t TILEXR_ALLTOALL_GROUP_MAX_QUIET_BATCH = 4U;
+constexpr uint32_t TILEXR_ALLTOALL_GROUP_MAX_QUIET_BATCH = 64U;
 constexpr uint32_t TILEXR_ALLTOALL_GROUP_ROUTE_SIGNAL_STRIDE = 512U;
 constexpr uint32_t TILEXR_ALLTOALL_GROUP_SIGNAL_STRIDE = 1024U;
 constexpr uint32_t TILEXR_ALLTOALL_GROUP_RELAY_BYTES = 64U * 1024U;
@@ -480,8 +480,9 @@ extern "C" __global__ __aicore__ void tilexr_udma_all_to_all_group_kernel(
         multiChannel > 1U ||
         (groupWidth != TILEXR_ALLTOALL_GROUP_DEFAULT_WIDTH &&
             groupWidth != TILEXR_ALLTOALL_GROUP_EXPERIMENTAL_WIDTH) ||
-        (quietBatch != 1U && quietBatch != 2U &&
-            quietBatch != TILEXR_ALLTOALL_GROUP_MAX_QUIET_BATCH) ||
+        quietBatch == 0U ||
+        quietBatch > TILEXR_ALLTOALL_GROUP_MAX_QUIET_BATCH ||
+        (quietBatch & (quietBatch - 1U)) != 0U ||
         (primaryRouteParts > TileXR::Demo::kAllToAllGroupRouteParts &&
             primaryRouteParts != TileXR::Demo::kAllToAllGroupAutoPrimaryParts) ||
         TILEXR_ALLTOALL_GROUP_SEND_WORKERS + copyoutWorkers >

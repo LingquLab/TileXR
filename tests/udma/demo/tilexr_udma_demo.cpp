@@ -661,7 +661,8 @@ bool RunGroupedAllToAll(
             static_cast<uint32_t>(quietBatchValue))) {
         std::cerr << "[rank " << rank
                   << "] ERROR: TILEXR_DEMO_ALLTOALL_GROUP_QUIET_BATCH"
-                  << " must be 1, 2, or 4, got " << quietBatchValue << std::endl;
+                  << " must be a power of two from 1 through 64, got "
+                  << quietBatchValue << std::endl;
         return false;
     }
     const uint32_t quietBatch = static_cast<uint32_t>(quietBatchValue);
