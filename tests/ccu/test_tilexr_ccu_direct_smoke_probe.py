@@ -738,7 +738,9 @@ class TileXRCcuDirectSmokeProbeTest(unittest.TestCase):
             source.index("int RunAllToAllLongMissionSmokeForRank")
         ]
         loop = "for (int loopIndex = 0; loopIndex < loopCount; ++loopIndex)"
-        self.assertIn("rankSize != 4", body)
+        self.assertIn("rankSize < 2", body)
+        self.assertIn("rankSize > 64", body)
+        self.assertIn("rankSize - 1", body)
         self.assertIn("PrepareDirectCcuAllToAllMeshInstallAttempt", body)
         self.assertIn("aclrtCreateStream", body)
         self.assertIn(loop, body)
@@ -751,7 +753,7 @@ class TileXRCcuDirectSmokeProbeTest(unittest.TestCase):
         self.assertNotIn("ReadAndValidatePeerLoopMarker", body)
         self.assertIn("CheckAllToAllState(&alltoall)", body)
         self.assertIn("PrintCcuResourceState", body)
-        self.assertIn("resourceCount=3", body)
+        self.assertIn('" resourceCount=" << (rankSize - 1)', body)
 
         pattern = source[
             source.index("uint8_t BuildAllToAllMeshByte"):
@@ -837,7 +839,7 @@ class TileXRCcuDirectSmokeProbeTest(unittest.TestCase):
         self.assertIn("TILEXR_CCU_ALLTOALL_MEM_SLICE_PER_LOOP", runner)
         self.assertIn("TILEXR_CCU_ALLTOALL_LOOP_COUNT", runner)
         self.assertIn('if [ "${TILEXR_CCU_DIRECT_SMOKE_ALLTOALL_LONG_MISSION:-0}" = "1" ]; then', runner)
-        self.assertIn("TILEXR_CCU_PROBE_SYNC_INSTRUCTION_COUNT:-453", runner)
+        self.assertIn("long_mission_instruction_count=$((7 + long_mission_block_count * 7))", runner)
         self.assertNotIn("TILEXR_CCU_PROBE_SYNC_INSTRUCTION_COUNT:-451", runner)
         self.assertNotIn("TILEXR_CCU_PROBE_SYNC_INSTRUCTION_COUNT:-452", runner)
         self.assertNotIn("TILEXR_CCU_PROBE_SYNC_INSTRUCTION_COUNT:-458", runner)
