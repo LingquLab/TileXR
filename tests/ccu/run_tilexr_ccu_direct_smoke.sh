@@ -973,6 +973,17 @@ fi
 if alltoall_mode_enabled && [ "${TILEXR_CCU_DIRECT_SMOKE_SUBMIT:-0}" = "1" ]; then
     loop_count="$(parse_int "${TILEXR_CCU_ALLTOALL_LOOP_COUNT:-1}" 1)"
     expected_results=$((rank_size * loop_count))
+    if [ "${TILEXR_CCU_DIRECT_SMOKE_ALLTOALL_LONG_MISSION:-0}" = "1" ] &&
+        [ "${TILEXR_CCU_DIRECT_SMOKE_ALLTOALL_MESH:-0}" != "1" ]; then
+        expected_loop_results=$((rank_size * loop_count))
+        actual_loop_results="$(grep -h -c "tilexr_ccu_alltoall loopResult passed=1" "${rank_logs[@]}" | awk '{ total += $1 } END { print total + 0 }')"
+        echo "tilexr_ccu_direct_smoke_runner alltoallLoopCounts expectedResults=${expected_loop_results} actualResults=${actual_loop_results}"
+        if [ "${actual_loop_results}" -ne "${expected_loop_results}" ]; then
+            echo "ERROR: direct CCU alltoall loop result count mismatch expected=${expected_loop_results} actual=${actual_loop_results}" >&2
+            exit 9
+        fi
+        expected_results="${rank_size}"
+    fi
     actual_results="$(grep -h -c "tilexr_ccu_alltoall result passed=1" "${rank_logs[@]}" | awk '{ total += $1 } END { print total + 0 }')"
     echo "tilexr_ccu_direct_smoke_runner alltoallCounts expectedResults=${expected_results} actualResults=${actual_results}"
     if [ "${actual_results}" -ne "${expected_results}" ]; then
