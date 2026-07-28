@@ -221,7 +221,7 @@ int TileXRCcuBuildBarrierProgram(
             TileXRCcuSyncCkeSpec post;
             post.remoteCke = spec.remoteNotifyCke;
             post.localCke = spec.sourceCke;
-            post.localCkeMask = spec.remoteNotifyMask;
+            post.localCkeMask = spec.sourceCkeMask;
             post.channelId = spec.channelId;
             if (TileXRCcuEncodeSyncCke(post, &instr) != TILEXR_SUCCESS) {
                 return Fail(program, report, "failed to encode CCU barrier SyncCKE post instruction");
