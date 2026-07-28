@@ -41,6 +41,7 @@ COMM_DIR = REPO_ROOT / "src" / "comm"
 class TileXRCcuLowerLayerPlanBuilderTest(unittest.TestCase):
     def setUp(self):
         runtime_integration_prefixes = (
+            "test_plan_builder_surface_",
             "test_tilexr_comm_",
             "test_direct_ccu_runtime_",
             "test_remote_xn_",
