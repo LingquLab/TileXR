@@ -370,6 +370,34 @@ int TileXRCcuResourceAllocator::Release(uint64_t receiptId)
     if (it == active_.end()) {
         return TILEXR_ERROR_PARA_CHECK_FAIL;
     }
+    const auto latest = active_.rbegin();
+    if (latest == active_.rend() || latest->first != receiptId) {
+        return TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    const ActiveAllocation& active = it->second;
+    if (mission_.used < active.missionUsed ||
+        repository_.used < active.repositoryUsed ||
+        xn_.used < active.localXnUsed ||
+        gsa_.used < active.localGsaUsed ||
+        localWaitCke_.used < static_cast<uint16_t>(active.localWaitCkeUsed + active.sourceCkeUsed) ||
+        remoteNotifyCke_.used < active.remoteNotifyCkeUsed ||
+        channel_.used < active.channelUsed ||
+        (remoteXn_.count != 0 && remoteXn_.used < active.remoteXnUsed)) {
+        return TILEXR_ERROR_INTERNAL;
+    }
+    mission_.used = static_cast<uint16_t>(mission_.used - active.missionUsed);
+    repository_.used = static_cast<uint16_t>(repository_.used - active.repositoryUsed);
+    xn_.used = static_cast<uint16_t>(xn_.used - active.localXnUsed);
+    if (remoteXn_.count == 0) {
+        xn_.used = static_cast<uint16_t>(xn_.used - active.remoteXnUsed);
+    } else {
+        remoteXn_.used = static_cast<uint16_t>(remoteXn_.used - active.remoteXnUsed);
+    }
+    gsa_.used = static_cast<uint16_t>(gsa_.used - active.localGsaUsed);
+    localWaitCke_.used = static_cast<uint16_t>(
+        localWaitCke_.used - active.localWaitCkeUsed - active.sourceCkeUsed);
+    remoteNotifyCke_.used = static_cast<uint16_t>(remoteNotifyCke_.used - active.remoteNotifyCkeUsed);
+    channel_.used = static_cast<uint16_t>(channel_.used - active.channelUsed);
     active_.erase(it);
     return TILEXR_SUCCESS;
 }

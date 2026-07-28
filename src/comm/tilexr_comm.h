@@ -83,6 +83,7 @@ private:
     int InitUDMA();
     int ApplyUDMACommArgsState(const TileXRUDMACommArgsState &state);
     static int ApplyUDMACommArgsStateCallback(const TileXRUDMACommArgsState &state, void *userData);
+    int InitCcuBackendIfEnabled();
     int InitSDMA();
     int UpdateCommArgsDev();
     void ResetSDMAState();
