@@ -10,10 +10,18 @@
 #ifndef TILEXR_API_H
 #define TILEXR_API_H
 
+#ifdef __cplusplus
 #include <cstddef>
-#include <string>
+#include <cstdint>
 #include "comm_args.h"
 #include "tilexr_udma_reg.h"
+#else
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+typedef uint8_t *GM_ADDR;
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif // __cplusplus
@@ -33,9 +41,11 @@ int TileXRCommInitRankWithCustDomainSize(int commDomain, int bufferSize, int ran
 
 int TileXRCommInitRankWithDomain(int commDomain, int rankSize, int rank, TileXRCommPtr *comm);
 
+#ifdef __cplusplus
 int TileXRGetCommArgsDev(TileXRCommPtr comm, GM_ADDR &commArgsPtr);
 
 int TileXRGetCommArgsHost(TileXRCommPtr comm, TileXR::CommArgs *&commArgsPtr);
+#endif
 
 int TileXRCommNextMagic(TileXRCommPtr comm, int64_t *magic);
 
@@ -43,9 +53,11 @@ int TileXRUDMARegister(TileXRCommPtr comm, GM_ADDR localPtr, size_t bytes, TileX
 
 int TileXRUDMAUnregister(TileXRCommPtr comm, TileXRUDMAMemHandle handle);
 
+#ifdef __cplusplus
 int TileXRGetUDMARegistryDev(TileXRCommPtr comm, GM_ADDR &registryPtr);
 
 int TileXRGetUDMARegistryHost(TileXRCommPtr comm, const TileXR::TileXRUDMARegistry **registry);
+#endif
 
 int TileXRSDMAAvailable(TileXRCommPtr comm, bool *available);
 

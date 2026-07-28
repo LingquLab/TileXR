@@ -9,6 +9,7 @@
  */
 #include "tilexr_comm.h"
 #include "tilexr_internal.h"
+#include "ccu/tilexr_ccu_backend.h"
 #include "sdma/tilexr_sdma_transport.h"
 #include "udma/tilexr_udma_context.h"
 
@@ -22,13 +23,14 @@
 #include <thread>
 #include <sstream>
 #include <iomanip>
+#include <cstring>
 
 #include "tilexr_log.h"
 #include "tools/socket/tilexr_sock_exchange.h"
 
-#include "runtime/kernel.h"
 #include "runtime/mem.h"
 #include "runtime/dev.h"
+#include "runtime/rts/rts_device.h"
 #include "runtime/rt_ffts.h"
 
 enum TopologyType : int {
@@ -188,6 +190,39 @@ int TileXRComm::ApplyUDMACommArgsStateCallback(const TileXRUDMACommArgsState &st
         return TILEXR_ERROR_PARA_CHECK_FAIL;
     }
     return static_cast<TileXRComm *>(userData)->ApplyUDMACommArgsState(state);
+}
+
+int TileXRComm::InitCcuBackend()
+{
+    if (ccuBackend_ == nullptr) {
+        ccuBackend_.reset(new (nothrow) TileXRCcuBackend());
+        if (ccuBackend_ == nullptr) {
+            return TILEXR_ERROR_INTERNAL;
+        }
+    }
+
+    TileXRCcuBackendOptions options {};
+    options.rank = rank_;
+    options.rankSize = rankSize_;
+    options.devId = devId_;
+    options.uid = uid_;
+    options.exchange = socketExchange_;
+    return ccuBackend_->Init(options);
+}
+
+TileXRCcuBackend *TileXRComm::GetCcuBackendForCollectives()
+{
+    return ccuBackend_.get();
+}
+
+const TileXRCcuBackend *TileXRComm::GetCcuBackendForCollectives() const
+{
+    return ccuBackend_.get();
+}
+
+int TileXRComm::EnableCcuBackendForTest()
+{
+    return InitCcuBackend();
 }
 
 int TileXRComm::InitSDMA()
@@ -358,6 +393,11 @@ GM_ADDR TileXRComm::GetUDMARegistryPtr() const
 const TileXRUDMARegistry* TileXRComm::GetUDMARegistryHost() const
 {
     return udmaContext_ == nullptr ? nullptr : udmaContext_->GetRegistryHost();
+}
+
+bool TileXRComm::IsUdmaAvailableForCollectives() const
+{
+    return udmaContext_ != nullptr && udmaContext_->IsAvailable();
 }
 
 int TileXRComm::InitCommon()
@@ -815,6 +855,9 @@ int TileXRComm::OpenIpcMem(const char names[TILEXR_MAX_RANK_SIZE][IPC_NAME_SIZE]
         if (ret != RT_ERROR_NONE) {
             CloseIpcMem();
             TILEXR_LOG(ERROR) << "rank : " << rank_ << " localRank : " << localRank_ << " peerMem: " << i <<
+                " devId : " << devId_ << " peerDevId : " << (i < static_cast<int>(devList_.size()) ? devList_[i] : -1) <<
+                " localRankSize : " << localRankSize_ << " ipcNameLen : " << std::strlen(names[i]) <<
+                " ipcNamePrefix : " << std::string(names[i], std::min<size_t>(std::strlen(names[i]), 16U)) <<
                 " IpcOpenMemory err " << ret;
             return TILEXR_ERROR_INTERNAL;
         }
@@ -887,6 +930,10 @@ TileXRComm::~TileXRComm()
     FreePeerMem(commArgs_.dumpAddr);
     FreePeerMem(peerMem_[rank_]);
     FreePeerMem(commArgsPtr_);
+    if (ccuBackend_ != nullptr) {
+        ccuBackend_->Shutdown();
+        ccuBackend_.reset();
+    }
     ResetSDMAState();
 }
 
