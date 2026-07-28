@@ -182,6 +182,12 @@ class TileXRCcuProducerPlanTest(unittest.TestCase):
                     std::cerr << "unexpected sync wait microcode\n";
                     return 11;
                 }
+                plan.taskWindows[0].instCnt = 1;
+                if (TileXRCcuValidateProducerPlan(plan, &report) != TILEXR_ERROR_PARA_CHECK_FAIL ||
+                    report.message.find("SQE load task") == std::string::npos) {
+                    std::cerr << "partial SQE load task accepted: " << report.message << "\n";
+                    return 13;
+                }
                 return 0;
             }
             '''
@@ -439,7 +445,7 @@ class TileXRCcuProducerPlanTest(unittest.TestCase):
                     return 2;
                 }
                 if (program.sync[0].words[0] != 0xffff022100010802ULL ||
-                    program.sync[1].words[0] != 0x000102210330100bULL ||
+                    program.sync[1].words[0] != 0xffff02210330100bULL ||
                     program.sync[1].words[1] != 0x0000000000000002ULL ||
                     program.sync[2].words[0] != 0x0000000000010804ULL ||
                     program.sync[2].words[1] != 0x0000000000010220ULL) {

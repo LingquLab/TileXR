@@ -277,6 +277,15 @@ class TileXRCcuMemoryProgramTest(unittest.TestCase):
                     std::cerr << "zero length accepted or weak diagnostic: " << report.message << "\n";
                     return 4;
                 }
+
+                spec.lengthBytes = 128;
+                spec.direction = static_cast<TileXRCcuMemoryCopyDirection>(99);
+                if (TileXRCcuBuildMemoryCopyProgram(spec, &program, &report) !=
+                    TILEXR_ERROR_PARA_CHECK_FAIL ||
+                    !program.empty() || report.message.find("direction") == std::string::npos) {
+                    std::cerr << "invalid direction accepted or weak diagnostic: " << report.message << "\n";
+                    return 5;
+                }
                 return 0;
             }
             '''

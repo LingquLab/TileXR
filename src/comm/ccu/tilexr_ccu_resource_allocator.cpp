@@ -130,7 +130,7 @@ int TileXRCcuResourceAllocator::Init(const TileXRCcuResourceSpec& spec)
     const bool splitRemoteXn = spec.remoteXnCount != 0;
 
     if (spec.missionKey == 0 || spec.missionCount == 0 || spec.instructionCount == 0 ||
-        spec.xnCount == 0 || localWaitCkeCount == 0 || remoteNotifyCkeCount == 0 ||
+        localWaitCkeCount == 0 || remoteNotifyCkeCount == 0 ||
         spec.channelCount == 0 ||
         AddWouldOverflow(spec.missionStartId, spec.missionCount) ||
         AddWouldOverflow(spec.instructionStartId, spec.instructionCount) ||
@@ -176,12 +176,15 @@ int TileXRCcuResourceAllocator::Allocate(
     *plan = TileXRCcuProducerPlan{};
     *allocation = TileXRCcuResourceAllocation{};
 
-    if (request.sqeArgCount > TILEXR_CCU_SQE_ARGS_LEN) {
+    if (request.sqeArgCount != 0 && request.sqeArgCount != TILEXR_CCU_SQE_ARGS_LEN) {
         return Fail(report, "invalid SQE argument count");
     }
     if (request.syncResourceCount == 0 || request.syncInstructionCount == 0 ||
         request.bindingsPerSyncResource == 0) {
         return Fail(report, "invalid CCU sync resource request");
+    }
+    if (request.bindingsPerSyncResource > std::numeric_limits<uint16_t>::max()) {
+        return Fail(report, "channel binding count exceeds CCU plan encoding width");
     }
     if (request.syncResourceCount > std::numeric_limits<uint32_t>::max() / 2U) {
         return Fail(report, "barrier sync instruction window is too small for CCU post and wait microcode");
@@ -190,6 +193,7 @@ int TileXRCcuResourceAllocator::Allocate(
         request.barrierMode == TileXRCcuBarrierMode::SyncCkeSetWait ||
         request.barrierMode == TileXRCcuBarrierMode::SyncCkePostOnly;
     const bool hcommStyleTask1Prelude = request.sqeArgCount != 0 && SyncXnMode(request.barrierMode);
+    const bool syncXnMode = SyncXnMode(request.barrierMode);
     const bool postOnly = request.barrierMode == TileXRCcuBarrierMode::SyncXnPostOnly ||
         request.barrierMode == TileXRCcuBarrierMode::SyncCkePostOnly ||
         request.barrierMode == TileXRCcuBarrierMode::LocalCkePostOnly;
@@ -209,8 +213,8 @@ int TileXRCcuResourceAllocator::Allocate(
     }
 
     const uint32_t localSqeXnCount = RequiredSqeLoadXnCount(request.sqeArgCount, hcommStyleTask1Prelude);
-    const uint32_t localXnCount = std::max(localSqeXnCount, request.syncResourceCount);
-    const uint32_t remoteXnCount = request.syncResourceCount;
+    const uint32_t localXnCount = std::max(localSqeXnCount, syncXnMode ? request.syncResourceCount : 0U);
+    const uint32_t remoteXnCount = syncXnMode ? request.syncResourceCount : 0U;
     const uint32_t localGsaCount = hcommStyleTask1Prelude && spec_.gsaCount != 0 ? 1U : 0U;
     const uint32_t totalXnCount = localXnCount + remoteXnCount;
     const uint32_t localWaitCkeCount = request.syncResourceCount;
@@ -297,8 +301,10 @@ int TileXRCcuResourceAllocator::Allocate(
     for (uint32_t i = 0; i < request.syncResourceCount; ++i) {
         TileXRCcuSyncResource resource;
         resource.dieId = spec_.dieId;
-        resource.localXn = static_cast<uint16_t>(result.localXn.startId + i);
-        resource.remoteXn = static_cast<uint16_t>(static_cast<uint32_t>(result.remoteXn.startId) + i);
+        if (syncXnMode) {
+            resource.localXn = static_cast<uint16_t>(result.localXn.startId + i);
+            resource.remoteXn = static_cast<uint16_t>(static_cast<uint32_t>(result.remoteXn.startId) + i);
+        }
         resource.notifyCke = static_cast<uint16_t>(static_cast<uint32_t>(result.remoteNotifyCke.startId) + i);
         resource.channelId = static_cast<uint16_t>(static_cast<uint32_t>(result.channels.startId) + i);
         resource.bindingCount = CheckedU16(request.bindingsPerSyncResource);
@@ -370,6 +376,35 @@ int TileXRCcuResourceAllocator::Release(uint64_t receiptId)
     if (it == active_.end()) {
         return TILEXR_ERROR_PARA_CHECK_FAIL;
     }
+    const auto latest = active_.rbegin();
+    if (latest == active_.rend() || latest->first != receiptId) {
+        return TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    const ActiveAllocation& active = it->second;
+    const uint32_t xnUsed = static_cast<uint32_t>(active.localXnUsed) +
+        (remoteXn_.count == 0 ? active.remoteXnUsed : 0U);
+    const uint32_t localCkeUsed =
+        static_cast<uint32_t>(active.localWaitCkeUsed) + active.sourceCkeUsed;
+    if (mission_.used < active.missionUsed ||
+        repository_.used < active.repositoryUsed ||
+        xn_.used < xnUsed ||
+        gsa_.used < active.localGsaUsed ||
+        localWaitCke_.used < localCkeUsed ||
+        remoteNotifyCke_.used < active.remoteNotifyCkeUsed ||
+        channel_.used < active.channelUsed ||
+        (remoteXn_.count != 0 && remoteXn_.used < active.remoteXnUsed)) {
+        return TILEXR_ERROR_INTERNAL;
+    }
+    mission_.used = static_cast<uint16_t>(mission_.used - active.missionUsed);
+    repository_.used = static_cast<uint16_t>(repository_.used - active.repositoryUsed);
+    xn_.used = static_cast<uint16_t>(xn_.used - xnUsed);
+    if (remoteXn_.count != 0) {
+        remoteXn_.used = static_cast<uint16_t>(remoteXn_.used - active.remoteXnUsed);
+    }
+    gsa_.used = static_cast<uint16_t>(gsa_.used - active.localGsaUsed);
+    localWaitCke_.used = static_cast<uint16_t>(localWaitCke_.used - localCkeUsed);
+    remoteNotifyCke_.used = static_cast<uint16_t>(remoteNotifyCke_.used - active.remoteNotifyCkeUsed);
+    channel_.used = static_cast<uint16_t>(channel_.used - active.channelUsed);
     active_.erase(it);
     return TILEXR_SUCCESS;
 }

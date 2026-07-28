@@ -175,7 +175,9 @@ int ValidateInstructionWindow(const TileXRCcuProducerPlan& plan, TileXRCcuProduc
 
 int ValidateKernelLocalRepositories(const TileXRCcuProducerPlan& plan, TileXRCcuProducerPlanReport* report)
 {
-    if (plan.kernelLocalXn.dieId != plan.mission.dieId || plan.kernelLocalXn.num == 0) {
+    const bool needsLocalXn = SyncXnMode(plan.barrierMode) || plan.taskWindows.size() > 1;
+    if (needsLocalXn &&
+        (plan.kernelLocalXn.dieId != plan.mission.dieId || plan.kernelLocalXn.num == 0)) {
         return Fail(report, "missing kernel-local XN repository range");
     }
     if (plan.kernelLocalCke.dieId != plan.mission.dieId || plan.kernelLocalCke.num == 0) {
@@ -200,11 +202,13 @@ int ValidateSyncResources(const TileXRCcuProducerPlan& plan, TileXRCcuProducerPl
         if (!channelIds.insert(resource.channelId).second) {
             return Fail(report, "duplicate channel id for sync resource");
         }
-        if (!ContainsId(plan.kernelLocalXn, resource.dieId, resource.localXn)) {
-            return Fail(report, "local XN is outside the kernel-local XN repository range");
-        }
-        if (resource.remoteXn == 0) {
-            return Fail(report, "missing channel-bound remote XN");
+        if (SyncXnMode(plan.barrierMode)) {
+            if (!ContainsId(plan.kernelLocalXn, resource.dieId, resource.localXn)) {
+                return Fail(report, "local XN is outside the kernel-local XN repository range");
+            }
+            if (resource.remoteXn == 0) {
+                return Fail(report, "missing channel-bound remote XN");
+            }
         }
         if (resource.notifyCke == 0) {
             return Fail(report, "missing remote notify CKE resource");
@@ -244,6 +248,10 @@ int ValidateTasks(const TileXRCcuProducerPlan& plan, TileXRCcuProducerPlanReport
 {
     if (plan.taskWindows.empty()) {
         return Fail(report, "missing CCU task windows");
+    }
+    if (plan.taskWindows.size() > 1 &&
+        plan.taskWindows.front().instCnt != TILEXR_CCU_SQE_ARGS_LEN) {
+        return Fail(report, "SQE load task must contain the complete CCU SQE argument window");
     }
     for (const auto& window : plan.taskWindows) {
         if (window.dieId != plan.mission.dieId) {
@@ -412,7 +420,7 @@ int TileXRCcuBuildMicrocode(
     program->sqeLoad.clear();
     program->sync.clear();
     if (plan.taskWindows.size() > 1) {
-        if (AppendSqeLoadProgram(plan, TILEXR_CCU_SQE_ARGS_LEN, &program->sqeLoad, report) != TILEXR_SUCCESS) {
+        if (AppendSqeLoadProgram(plan, plan.taskWindows.front().instCnt, &program->sqeLoad, report) != TILEXR_SUCCESS) {
             return TILEXR_ERROR_PARA_CHECK_FAIL;
         }
     }

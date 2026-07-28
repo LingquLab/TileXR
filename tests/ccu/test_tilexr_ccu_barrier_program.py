@@ -242,7 +242,7 @@ class TileXRCcuBarrierProgramTest(unittest.TestCase):
                     std::cerr << "source CKE init mismatch\n";
                     return 3;
                 }
-                if (program[1].words[0] != 0x000102210330100bULL ||
+                if (program[1].words[0] != 0xffff02210330100bULL ||
                     program[1].words[1] != 0x0000000000000002ULL ||
                     program[1].words[2] != 0x0001000000000000ULL ||
                     program[1].words[3] != 0) {
@@ -255,6 +255,21 @@ class TileXRCcuBarrierProgramTest(unittest.TestCase):
                     program[2].words[3] != 0) {
                     std::cerr << "ClearCKE wait mismatch\n";
                     return 5;
+                }
+
+                TileXRCcuBarrierSyncSpec conflicting = spec;
+                conflicting.channelId = 3;
+                conflicting.remoteNotifyCke = 0x331;
+                conflicting.localWaitCke = 0x222;
+                conflicting.sourceCkeMask = 1;
+                if (TileXRCcuBuildBarrierProgram(
+                        std::vector<TileXRCcuBarrierSyncSpec>{spec, conflicting},
+                        &program,
+                        &report,
+                        TileXRCcuBarrierMode::SyncCke) != TILEXR_ERROR_PARA_CHECK_FAIL ||
+                    !program.empty() || report.message.find("conflicting source CKE masks") == std::string::npos) {
+                    std::cerr << "conflicting source CKE masks accepted: " << report.message << "\n";
+                    return 6;
                 }
                 return 0;
             }
@@ -309,7 +324,7 @@ class TileXRCcuBarrierProgramTest(unittest.TestCase):
                     std::cerr << "source CKE init mismatch\n";
                     return 3;
                 }
-                if (program[1].words[0] != 0x000102210330100bULL ||
+                if (program[1].words[0] != 0xffff02210330100bULL ||
                     program[1].words[1] != 0x0000000000000002ULL ||
                     program[1].words[2] != 0x0001000000000000ULL ||
                     program[1].words[3] != 0) {
@@ -374,7 +389,7 @@ class TileXRCcuBarrierProgramTest(unittest.TestCase):
                     std::cerr << "source CKE init mismatch\n";
                     return 3;
                 }
-                if (program[1].words[0] != 0x000102210330100bULL ||
+                if (program[1].words[0] != 0xffff02210330100bULL ||
                     program[1].words[1] != 0x0000000000000002ULL ||
                     program[1].words[2] != 0x0001000000000000ULL ||
                     program[1].words[3] != 0) {

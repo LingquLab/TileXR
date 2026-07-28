@@ -77,6 +77,11 @@ int ValidateTransferSpec(const TileXRCcuMemTransferSpec& spec)
     return TILEXR_SUCCESS;
 }
 
+bool CompleteOrAbsentCkePair(uint16_t ckeId, uint16_t mask)
+{
+    return (ckeId == 0) == (mask == 0);
+}
+
 void WriteLe16(uint8_t* bytes, size_t offset, uint16_t value)
 {
     bytes[offset] = static_cast<uint8_t>(value & 0xffU);
@@ -196,7 +201,9 @@ int TileXRCcuEncodeSetCke(const TileXRCcuCkeSpec& spec, TileXRCcuInstr* instr)
     if (ValidateInstrOutput(instr) != TILEXR_SUCCESS) {
         return TILEXR_ERROR_PARA_CHECK_FAIL;
     }
-    if ((spec.ckeId == 0 || spec.mask == 0) && (spec.waitCkeId == 0 || spec.waitMask == 0)) {
+    if (!CompleteOrAbsentCkePair(spec.ckeId, spec.mask) ||
+        !CompleteOrAbsentCkePair(spec.waitCkeId, spec.waitMask) ||
+        (spec.ckeId == 0 && spec.waitCkeId == 0)) {
         return TILEXR_ERROR_PARA_CHECK_FAIL;
     }
 
@@ -211,7 +218,9 @@ int TileXRCcuEncodeClearCke(const TileXRCcuCkeSpec& spec, TileXRCcuInstr* instr)
     if (ValidateInstrOutput(instr) != TILEXR_SUCCESS) {
         return TILEXR_ERROR_PARA_CHECK_FAIL;
     }
-    if ((spec.ckeId == 0 || spec.mask == 0) && (spec.waitCkeId == 0 || spec.waitMask == 0)) {
+    if (!CompleteOrAbsentCkePair(spec.ckeId, spec.mask) ||
+        !CompleteOrAbsentCkePair(spec.waitCkeId, spec.waitMask) ||
+        (spec.ckeId == 0 && spec.waitCkeId == 0)) {
         return TILEXR_ERROR_PARA_CHECK_FAIL;
     }
 

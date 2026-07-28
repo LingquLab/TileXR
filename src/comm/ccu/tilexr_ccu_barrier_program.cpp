@@ -86,6 +86,19 @@ bool SyncCkeSetWaitMode(TileXRCcuBarrierMode mode)
     return mode == TileXRCcuBarrierMode::SyncCkeSetWait;
 }
 
+bool HasConflictingSourceCkeMasks(const std::vector<TileXRCcuBarrierSyncSpec>& specs)
+{
+    for (size_t i = 0; i < specs.size(); ++i) {
+        for (size_t j = i + 1; j < specs.size(); ++j) {
+            if (specs[i].sourceCke == specs[j].sourceCke &&
+                specs[i].sourceCkeMask != specs[j].sourceCkeMask) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 void AddSourceCkeInitInstructions(
     const std::vector<TileXRCcuBarrierSyncSpec>& specs,
     std::vector<TileXRCcuInstr>* program)
@@ -193,6 +206,9 @@ int TileXRCcuBuildBarrierProgram(
             return Fail(program, report, "missing local wait CKE resource for CCU barrier program");
         }
     }
+    if (SyncCkeMode(mode) && HasConflictingSourceCkeMasks(specs)) {
+        return Fail(program, report, "conflicting source CKE masks for CCU barrier program");
+    }
 
     program->reserve(specs.size() * (SyncCkeMode(mode) ? 3U : 2U));
     if (mode == TileXRCcuBarrierMode::LocalCke) {
@@ -221,7 +237,7 @@ int TileXRCcuBuildBarrierProgram(
             TileXRCcuSyncCkeSpec post;
             post.remoteCke = spec.remoteNotifyCke;
             post.localCke = spec.sourceCke;
-            post.localCkeMask = spec.remoteNotifyMask;
+            post.localCkeMask = spec.sourceCkeMask;
             post.channelId = spec.channelId;
             if (TileXRCcuEncodeSyncCke(post, &instr) != TILEXR_SUCCESS) {
                 return Fail(program, report, "failed to encode CCU barrier SyncCKE post instruction");

@@ -42,6 +42,10 @@ int ValidateSpec(
     if (program == nullptr) {
         return Fail(program, report, "missing output CCU memory copy program");
     }
+    if (spec.direction != TileXRCcuMemoryCopyDirection::RemoteToLocal &&
+        spec.direction != TileXRCcuMemoryCopyDirection::LocalToRemote) {
+        return Fail(program, report, "invalid CCU memory copy direction");
+    }
     if (spec.localGsa == 0 || spec.localXn == 0 || spec.remoteGsa == 0 || spec.remoteXn == 0 ||
         spec.lengthXn == 0) {
         return Fail(program, report, "missing CCU memory copy GSA/XN resources");

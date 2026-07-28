@@ -602,6 +602,96 @@ class TileXRCcuResourceAllocatorTest(unittest.TestCase):
         self.assertEqual("", result.stderr)
         self.assertEqual(0, result.returncode, result.stdout + result.stderr)
 
+    def test_allocator_builds_all_cke_only_modes_without_xn_resources(self):
+        code = textwrap.dedent(
+            r'''
+            #include "ccu/tilexr_ccu_resource_allocator.h"
+
+            #include <iostream>
+
+            using namespace TileXR;
+
+            int main()
+            {
+                TileXRCcuResourceSpec spec;
+                spec.dieId = 1;
+                spec.missionKey = 0x059b0f03U;
+                spec.missionStartId = 6;
+                spec.missionCount = 1;
+                spec.instructionStartId = 475;
+                spec.instructionCount = 16;
+                spec.xnStartId = 0;
+                spec.xnCount = 0;
+                spec.ckeStartId = 0x220;
+                spec.ckeCount = 16;
+                spec.localWaitCkeStartId = 0x220;
+                spec.localWaitCkeCount = 8;
+                spec.remoteNotifyCkeStartId = 0x330;
+                spec.remoteNotifyCkeCount = 8;
+                spec.channelStartId = 2;
+                spec.channelCount = 4;
+
+                struct ModeCase {
+                    TileXRCcuBarrierMode mode;
+                    uint32_t instructionCount;
+                };
+                const ModeCase cases[] = {
+                    {TileXRCcuBarrierMode::SyncCke, 3},
+                    {TileXRCcuBarrierMode::SyncCkeSetWait, 3},
+                    {TileXRCcuBarrierMode::SyncCkePostOnly, 2},
+                    {TileXRCcuBarrierMode::LocalCke, 2},
+                    {TileXRCcuBarrierMode::LocalCkePostOnly, 1},
+                };
+
+                for (const auto& modeCase : cases) {
+                    TileXRCcuResourceRequest request;
+                    request.sqeArgCount = 0;
+                    request.syncResourceCount = 1;
+                    request.syncInstructionCount = modeCase.instructionCount;
+                    request.bindingsPerSyncResource = 1;
+                    request.barrierMode = modeCase.mode;
+
+                    TileXRCcuResourceAllocator allocator;
+                    if (allocator.Init(spec) != TILEXR_SUCCESS) {
+                        std::cerr << "allocator init failed\n";
+                        return 1;
+                    }
+
+                    TileXRCcuProducerPlan plan;
+                    TileXRCcuResourceAllocation allocation;
+                    TileXRCcuResourceAllocatorReport report;
+                    if (allocator.Allocate(request, &plan, &allocation, &report) != TILEXR_SUCCESS) {
+                        std::cerr << "CKE-only allocate failed: " << report.message << "\n";
+                        return 2;
+                    }
+                    if (allocation.localXn.num != 0 || allocation.remoteXn.num != 0 ||
+                        plan.kernelLocalXn.num != 0) {
+                        std::cerr << "CKE-only mode allocated XN resources\n";
+                        return 3;
+                    }
+
+                    TileXRCcuProducerPlanReport planReport;
+                    TileXRCcuProgram program;
+                    if (TileXRCcuValidateProducerPlan(plan, &planReport) != TILEXR_SUCCESS ||
+                        TileXRCcuBuildMicrocode(plan, &program, &planReport) != TILEXR_SUCCESS) {
+                        std::cerr << "CKE-only plan failed: " << planReport.message << "\n";
+                        return 4;
+                    }
+                    if (!program.sqeLoad.empty() || program.sync.size() != modeCase.instructionCount) {
+                        std::cerr << "CKE-only microcode size mismatch\n";
+                        return 5;
+                    }
+                }
+                return 0;
+            }
+            '''
+        )
+
+        result = self.compile_and_run(code)
+
+        self.assertEqual("", result.stderr)
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+
     def test_allocator_accepts_local_cke_post_only_with_one_instruction(self):
         code = textwrap.dedent(
             r'''
@@ -620,8 +710,8 @@ class TileXRCcuResourceAllocatorTest(unittest.TestCase):
                 spec.missionCount = 2;
                 spec.instructionStartId = 475;
                 spec.instructionCount = 170;
-                spec.xnStartId = 1961;
-                spec.xnCount = 62;
+                spec.xnStartId = 0;
+                spec.xnCount = 0;
                 spec.ckeStartId = 0x220;
                 spec.ckeCount = 16;
                 spec.localWaitCkeStartId = 0x220;
@@ -655,6 +745,7 @@ class TileXRCcuResourceAllocatorTest(unittest.TestCase):
                 if (plan.barrierMode != TileXRCcuBarrierMode::LocalCkePostOnly ||
                     plan.taskWindows.size() != 1 ||
                     plan.taskWindows[0].instCnt != 1 ||
+                    allocation.localXn.num != 0 || allocation.remoteXn.num != 0 ||
                     plan.instructionWindow.repositoryCount != 1) {
                     std::cerr << "local_cke_post_only allocation mismatch\n";
                     return 3;
@@ -714,6 +805,20 @@ class TileXRCcuResourceAllocatorTest(unittest.TestCase):
                 TileXRCcuProducerPlan plan;
                 TileXRCcuResourceAllocation allocation;
                 TileXRCcuResourceAllocatorReport report;
+                request.sqeArgCount = 1;
+                if (allocator.Allocate(request, &plan, &allocation, &report) != TILEXR_ERROR_PARA_CHECK_FAIL ||
+                    report.message.find("SQE argument count") == std::string::npos) {
+                    std::cerr << "partial SQE load request accepted: " << report.message << "\n";
+                    return 8;
+                }
+                request.sqeArgCount = TILEXR_CCU_SQE_ARGS_LEN;
+                request.bindingsPerSyncResource = 65536;
+                if (allocator.Allocate(request, &plan, &allocation, &report) != TILEXR_ERROR_PARA_CHECK_FAIL ||
+                    report.message.find("binding count") == std::string::npos) {
+                    std::cerr << "oversized binding count accepted: " << report.message << "\n";
+                    return 9;
+                }
+                request.bindingsPerSyncResource = 1;
                 if (allocator.Allocate(request, &plan, &allocation, &report) != TILEXR_ERROR_PARA_CHECK_FAIL) {
                     std::cerr << "resource exhaustion was accepted\n";
                     return 2;
@@ -733,13 +838,94 @@ class TileXRCcuResourceAllocatorTest(unittest.TestCase):
                     std::cerr << "second allocate failed: " << report.message << "\n";
                     return 5;
                 }
+                const TileXRCcuResourceAllocation released = allocation;
                 if (allocator.Release(allocation.receiptId) != TILEXR_SUCCESS) {
                     std::cerr << "release failed\n";
                     return 6;
                 }
-                if (allocator.Release(allocation.receiptId) != TILEXR_ERROR_PARA_CHECK_FAIL) {
-                    std::cerr << "double release was accepted\n";
+                if (allocator.Allocate(request, &plan, &allocation, &report) != TILEXR_SUCCESS ||
+                    allocation.mission.startId != released.mission.startId ||
+                    allocation.repository.startId != released.repository.startId ||
+                    allocation.localXn.startId != released.localXn.startId ||
+                    allocation.remoteXn.startId != released.remoteXn.startId ||
+                    allocation.localWaitCke.startId != released.localWaitCke.startId ||
+                    allocation.remoteNotifyCke.startId != released.remoteNotifyCke.startId ||
+                    allocation.channels.startId != released.channels.startId) {
+                    std::cerr << "released resources were not reused: " << report.message << "\n";
                     return 7;
+                }
+                if (allocator.Release(released.receiptId) != TILEXR_ERROR_PARA_CHECK_FAIL) {
+                    std::cerr << "double release was accepted\n";
+                    return 10;
+                }
+                if (allocator.Release(allocation.receiptId) != TILEXR_SUCCESS) {
+                    std::cerr << "replacement release failed\n";
+                    return 11;
+                }
+                return 0;
+            }
+            '''
+        )
+
+        result = self.compile_and_run(code)
+
+        self.assertEqual("", result.stderr)
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+
+    def test_allocator_rejects_non_lifo_release(self):
+        code = textwrap.dedent(
+            r'''
+            #include "ccu/tilexr_ccu_resource_allocator.h"
+
+            #include <iostream>
+
+            using namespace TileXR;
+
+            int main()
+            {
+                TileXRCcuResourceSpec spec;
+                spec.dieId = 0;
+                spec.missionKey = 0x12345678U;
+                spec.missionStartId = 10;
+                spec.missionCount = 2;
+                spec.instructionStartId = 100;
+                spec.instructionCount = 8;
+                spec.xnStartId = 200;
+                spec.xnCount = 4;
+                spec.ckeStartId = 300;
+                spec.ckeCount = 4;
+                spec.channelStartId = 20;
+                spec.channelCount = 2;
+
+                TileXRCcuResourceRequest request;
+                request.sqeArgCount = 0;
+                request.syncResourceCount = 1;
+                request.syncInstructionCount = 2;
+                request.bindingsPerSyncResource = 1;
+
+                TileXRCcuResourceAllocator allocator;
+                if (allocator.Init(spec) != TILEXR_SUCCESS) {
+                    std::cerr << "init failed\n";
+                    return 1;
+                }
+
+                TileXRCcuProducerPlan plan;
+                TileXRCcuResourceAllocation first;
+                TileXRCcuResourceAllocation second;
+                TileXRCcuResourceAllocatorReport report;
+                if (allocator.Allocate(request, &plan, &first, &report) != TILEXR_SUCCESS ||
+                    allocator.Allocate(request, &plan, &second, &report) != TILEXR_SUCCESS) {
+                    std::cerr << "allocate failed: " << report.message << "\n";
+                    return 2;
+                }
+                if (allocator.Release(first.receiptId) != TILEXR_ERROR_PARA_CHECK_FAIL) {
+                    std::cerr << "non-LIFO release was accepted\n";
+                    return 3;
+                }
+                if (allocator.Release(second.receiptId) != TILEXR_SUCCESS ||
+                    allocator.Release(first.receiptId) != TILEXR_SUCCESS) {
+                    std::cerr << "tail releases failed\n";
+                    return 4;
                 }
                 return 0;
             }

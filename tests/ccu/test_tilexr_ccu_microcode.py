@@ -401,6 +401,26 @@ class TileXRCcuMicrocodeTest(unittest.TestCase):
                     std::cerr << "empty cke operation accepted\n";
                     return 5;
                 }
+
+                TileXRCcuCkeSpec partialSet;
+                partialSet.ckeId = 332;
+                partialSet.waitCkeId = 364;
+                partialSet.waitMask = 1;
+                if (TileXRCcuEncodeSetCke(partialSet, &setInstr) != TILEXR_ERROR_PARA_CHECK_FAIL ||
+                    TileXRCcuEncodeClearCke(partialSet, &clearInstr) != TILEXR_ERROR_PARA_CHECK_FAIL) {
+                    std::cerr << "partial set CKE pair accepted\n";
+                    return 6;
+                }
+
+                TileXRCcuCkeSpec partialWait;
+                partialWait.ckeId = 332;
+                partialWait.mask = 1;
+                partialWait.waitCkeId = 364;
+                if (TileXRCcuEncodeSetCke(partialWait, &setInstr) != TILEXR_ERROR_PARA_CHECK_FAIL ||
+                    TileXRCcuEncodeClearCke(partialWait, &clearInstr) != TILEXR_ERROR_PARA_CHECK_FAIL) {
+                    std::cerr << "partial wait CKE pair accepted\n";
+                    return 7;
+                }
                 return 0;
             }
             '''
