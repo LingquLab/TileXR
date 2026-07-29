@@ -85,10 +85,17 @@ add_executable(test_tilexr_ep_api_sources
 
 add_executable(test_tilexr_ep_kernel_sources unit/test_tilexr_ep_kernel_sources.cpp)
 
+add_executable(test_tilexr_ep_transport_route
+    unit/test_tilexr_ep_transport_route.cpp
+    ${TILEXR_ROOT}/src/ep/host/ep_transport_route.cpp
+)
+
 add_executable(test_tilexr_ep_host_validation
     unit/test_tilexr_ep_host_validation.cpp
     ${TILEXR_ROOT}/src/ep/host/ep_layout.cpp
     ${TILEXR_ROOT}/src/ep/host/ep_dispatch_host.cpp
+    ${TILEXR_ROOT}/src/ep/host/ep_transport_route.cpp
+    ${TILEXR_ROOT}/src/ep/host/ep_launch_context.cpp
 )
 
 target_include_directories(test_tilexr_ep_layout PRIVATE
@@ -99,18 +106,24 @@ target_include_directories(test_tilexr_ep_host_validation PRIVATE
     ${TILEXR_EP_TEST_INCLUDE_DIRS}
 )
 
+target_include_directories(test_tilexr_ep_transport_route PRIVATE
+    ${TILEXR_EP_TEST_INCLUDE_DIRS}
+)
+
 target_compile_definitions(test_tilexr_ep_api_sources PRIVATE TILEXR_SOURCE_ROOT="${TILEXR_ROOT}")
 target_compile_definitions(test_tilexr_ep_kernel_sources PRIVATE TILEXR_SOURCE_ROOT="${TILEXR_ROOT}")
 
 add_test(NAME test_tilexr_ep_layout COMMAND test_tilexr_ep_layout)
 add_test(NAME test_tilexr_ep_api_sources COMMAND test_tilexr_ep_api_sources)
 add_test(NAME test_tilexr_ep_kernel_sources COMMAND test_tilexr_ep_kernel_sources)
+add_test(NAME test_tilexr_ep_transport_route COMMAND test_tilexr_ep_transport_route)
 add_test(NAME test_tilexr_ep_host_validation COMMAND test_tilexr_ep_host_validation)
 
 install(TARGETS
     test_tilexr_ep_layout
     test_tilexr_ep_api_sources
     test_tilexr_ep_kernel_sources
+    test_tilexr_ep_transport_route
     test_tilexr_ep_host_validation
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
@@ -134,6 +147,7 @@ if(BUILD_TILEXR_EP_DEMO)
 
     target_include_directories(tilexr_ep_dispatch_demo PRIVATE
         "${TILEXR_INSTALL_INCLUDE_SEARCH_DIR}"
+        "${TILEXR_ROOT}/src/ep/host"
         "${ASCEND_HOME_PATH}/${ARCH}-linux/include"
         "${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc"
         "${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc/runtime"
@@ -142,7 +156,6 @@ if(BUILD_TILEXR_EP_DEMO)
     target_link_directories(tilexr_ep_dispatch_demo PRIVATE
         "${TILEXR_INSTALL_LIB_SEARCH_DIR}"
         "${ASCEND_HOME_PATH}/${ARCH}-linux/lib64"
-        "${ASCEND_HOME_PATH}/${ARCH}-linux/devlib"
         "${ASCEND_DRIVER_PATH}/lib64/driver"
     )
 

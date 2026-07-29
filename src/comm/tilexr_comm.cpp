@@ -137,6 +137,7 @@ int TileXRComm::InitUDMA()
     TileXRUDMAContextOptions options {};
     options.rank = rank_;
     options.rankSize = rankSize_;
+    options.localRankSize = static_cast<int>(localRankSize_);
     options.devId = devId_;
     options.exchange = socketExchange_;
     options.threadMode = !uid_.empty();

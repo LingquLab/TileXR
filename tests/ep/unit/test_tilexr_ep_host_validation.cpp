@@ -1,13 +1,57 @@
+#include <cstdlib>
 #include <cstdint>
 #include <iostream>
 
 #include "comm_args.h"
 #include "ep_dispatch_host.h"
+#include "ep_window.h"
+#include "tilexr_udma_reg.h"
 #include "tilexr_types.h"
 
 namespace {
 
+TileXR::CommArgs *g_commArgs = nullptr;
+GM_ADDR g_devArgs = reinterpret_cast<GM_ADDR>(0x70000000);
+const TileXR::TileXRUDMARegistry *g_registry = nullptr;
+int g_registryCalls = 0;
+
+} // namespace
+
+extern "C" int TileXRGetCommArgsHost(TileXRCommPtr, TileXR::CommArgs *&commArgsPtr)
+{
+    commArgsPtr = g_commArgs;
+    return TileXR::TILEXR_SUCCESS;
+}
+
+extern "C" int TileXRGetCommArgsDev(TileXRCommPtr, GM_ADDR &commArgsPtr)
+{
+    commArgsPtr = g_devArgs;
+    return TileXR::TILEXR_SUCCESS;
+}
+
+extern "C" int TileXRGetUDMARegistryHost(TileXRCommPtr, const TileXR::TileXRUDMARegistry **registry)
+{
+    ++g_registryCalls;
+    *registry = g_registry;
+    return TileXR::TILEXR_SUCCESS;
+}
+
+namespace {
+
 int g_failures = 0;
+
+void SetTransportMode(const char *value)
+{
+#ifdef _WIN32
+    _putenv_s("TILEXR_TRANSPORT_MODE", value == nullptr ? "" : value);
+#else
+    if (value == nullptr) {
+        unsetenv("TILEXR_TRANSPORT_MODE");
+    } else {
+        setenv("TILEXR_TRANSPORT_MODE", value, 1);
+    }
+#endif
+}
 
 void CheckInt(const char *label, int actual, int expected)
 {
@@ -127,7 +171,8 @@ TileXR::CommArgs CrossNodeCommArgs()
     args.rankSize = 8;
     args.localRankSize = 4;
     for (int rank = 0; rank < args.rankSize; ++rank) {
-        args.peerMems[rank] = reinterpret_cast<GM_ADDR>(0x10000000 + rank * 0x10000000);
+        args.peerMems[rank] = reinterpret_cast<GM_ADDR>(
+            static_cast<uintptr_t>(0x10000000ULL + static_cast<uint64_t>(rank) * 0x10000000ULL));
     }
     return args;
 }
@@ -182,12 +227,12 @@ void TestCommValidation()
 
     commArgs = ValidCommArgs();
     commArgs.peerMems[1] = nullptr;
-    CheckInt("missing peer mem", TileXREp::TileXREpValidateDispatchConfig(params, commArgs, &window),
-        TileXR::TILEXR_ERROR_NOT_INITIALIZED);
+    CheckInt("dispatch shape validation is transport independent",
+        TileXREp::TileXREpValidateDispatchConfig(params, commArgs, &window), TileXR::TILEXR_SUCCESS);
 
     commArgs = CrossNodeCommArgs();
-    CheckInt("cross-node dispatch needs udma registry", TileXREp::TileXREpValidateDispatchConfig(params, commArgs, &window),
-        TileXR::TILEXR_ERROR_NOT_INITIALIZED);
+    CheckInt("cross-node dispatch supports peer memory without udma",
+        TileXREp::TileXREpValidateDispatchConfig(params, commArgs, &window), TileXR::TILEXR_SUCCESS);
 
     commArgs = CrossNodeUdmaCommArgs();
     params = ValidParams();
@@ -237,20 +282,184 @@ void TestCombineValidation()
 
     commArgs = ValidCommArgs();
     commArgs.peerMems[1] = nullptr;
-    CheckInt("combine missing peer mem", TileXREp::TileXREpValidateCombineConfig(params, commArgs, &window),
-        TileXR::TILEXR_ERROR_NOT_INITIALIZED);
+    CheckInt("combine shape validation is transport independent",
+        TileXREp::TileXREpValidateCombineConfig(params, commArgs, &window), TileXR::TILEXR_SUCCESS);
 
     commArgs = CrossNodeCommArgs();
-    CheckInt("cross-node combine needs udma registry", TileXREp::TileXREpValidateCombineConfig(params, commArgs,
-        &window), TileXR::TILEXR_ERROR_NOT_INITIALIZED);
+    CheckInt("cross-node combine supports peer memory without udma",
+        TileXREp::TileXREpValidateCombineConfig(params, commArgs, &window), TileXR::TILEXR_SUCCESS);
 
     commArgs = CrossNodeUdmaCommArgs();
-    CheckInt("cross-node combine needs workspace", TileXREp::TileXREpValidateCombineConfig(params, commArgs, &window),
-        TileXR::TILEXR_ERROR_NOT_INITIALIZED);
+    CheckInt("cross-node combine shape validation is transport independent",
+        TileXREp::TileXREpValidateCombineConfig(params, commArgs, &window), TileXR::TILEXR_SUCCESS);
 
     params.workspace = reinterpret_cast<void *>(0x50000000);
     CheckInt("cross-node combine config", TileXREp::TileXREpValidateCombineConfig(params, commArgs, &window),
         TileXR::TILEXR_SUCCESS);
+}
+
+void FillRegistry(TileXR::TileXRUDMARegistry *registry, const TileXR::CommArgs &args, void *localWorkspace)
+{
+    *registry = TileXR::TileXRUDMARegistry {};
+    registry->rankSize = static_cast<uint32_t>(args.rankSize);
+    registry->regionCount = 1;
+    for (int rank = 0; rank < args.rankSize; ++rank) {
+        registry->regions[rank].base = rank == args.rank ? static_cast<GM_ADDR>(localWorkspace) :
+            reinterpret_cast<GM_ADDR>(
+                static_cast<uintptr_t>(0x80000000ULL + static_cast<uint64_t>(rank) * 0x10000000ULL));
+        registry->regions[rank].bytes = 1024ULL * 1024ULL * 1024ULL;
+    }
+}
+
+void TestLaunchContextUsesResolvedTransport()
+{
+    TileXREp::EpDispatchParams params = ValidParams();
+    TileXR::CommArgs args = CrossNodeUdmaCommArgs();
+    g_commArgs = &args;
+    g_registry = nullptr;
+    g_registryCalls = 0;
+    SetTransportMode("memory");
+
+    TileXREp::EpHostLaunchContext context {};
+    CheckInt("forced memory launch context", TileXREp::TileXREpPrepareLaunchContext(params, &context),
+        TileXR::TILEXR_SUCCESS);
+    CheckInt("forced memory saved route", static_cast<int>(context.transport),
+        static_cast<int>(TileXR::TileXRTransportKind::MEMORY));
+    CheckInt("forced memory skips registry", g_registryCalls, 0);
+
+    args.peerMems[7] = nullptr;
+    CheckInt("forced memory requires every peer mapping", TileXREp::TileXREpPrepareLaunchContext(params, &context),
+        TileXR::TILEXR_ERROR_NOT_INITIALIZED);
+    args.peerMems[7] = reinterpret_cast<GM_ADDR>(0x80000000);
+
+    SetTransportMode("direct_urma");
+    args = CrossNodeCommArgs();
+    g_commArgs = &args;
+    CheckInt("forced direct requires capability", TileXREp::TileXREpPrepareLaunchContext(params, &context),
+        TileXR::TILEXR_ERROR_NOT_INITIALIZED);
+    CheckInt("missing capability skips registry", g_registryCalls, 0);
+
+    args = CrossNodeUdmaCommArgs();
+    args.peerMems[4] = nullptr;
+    g_commArgs = &args;
+    static uint8_t workspace[1024] = {};
+    params.workspace = workspace;
+    TileXR::TileXRUDMARegistry registry {};
+    FillRegistry(&registry, args, workspace);
+    g_registry = &registry;
+    TileXREp::EpWindowConfig directWindow {};
+    CheckInt("build direct dispatch window", TileXREp::TileXREpValidateDispatchConfig(params, args, &directWindow),
+        TileXR::TILEXR_SUCCESS);
+    const uint64_t legacyDispatchBytes = static_cast<uint64_t>(
+        TileXREp::TileXREpAlignUp(directWindow.totalBytes, TileXREp::kEpWindowAlignmentBytes) * 3);
+    for (int rank = 0; rank < args.rankSize; ++rank) {
+        registry.regions[rank].bytes = legacyDispatchBytes;
+    }
+    CheckInt("direct dispatch rejects workspace without relay and status area",
+        TileXREp::TileXREpPrepareLaunchContext(params, &context), TileXR::TILEXR_ERROR_PARA_CHECK_FAIL);
+
+    FillRegistry(&registry, args, workspace);
+    g_registryCalls = 0;
+    CheckInt("forced direct launch context", TileXREp::TileXREpPrepareLaunchContext(params, &context),
+        TileXR::TILEXR_SUCCESS);
+    CheckInt("forced direct saved route", static_cast<int>(context.transport),
+        static_cast<int>(TileXR::TileXRTransportKind::DIRECT_URMA));
+    CheckInt("forced direct checks registry", g_registryCalls, 1);
+
+    args.peerMems[1] = nullptr;
+    g_registryCalls = 0;
+    CheckInt("forced direct requires local peer mapping", TileXREp::TileXREpPrepareLaunchContext(params, &context),
+        TileXR::TILEXR_ERROR_NOT_INITIALIZED);
+    CheckInt("missing local peer skips registry", g_registryCalls, 0);
+
+    SetTransportMode("invalid");
+    CheckInt("invalid transport mode", TileXREp::TileXREpPrepareLaunchContext(params, &context),
+        TileXR::TILEXR_ERROR_PARA_CHECK_FAIL);
+    SetTransportMode(nullptr);
+}
+
+void TestCombineContextUsesRouteAwarePeerMappings()
+{
+    TileXREp::EpCombineParams params = ValidCombineParams();
+    static uint8_t workspace[1024] = {};
+    params.workspace = workspace;
+    TileXR::CommArgs args = CrossNodeUdmaCommArgs();
+    args.peerMems[4] = nullptr;
+    g_commArgs = &args;
+    TileXR::TileXRUDMARegistry registry {};
+    FillRegistry(&registry, args, workspace);
+    g_registry = &registry;
+    g_registryCalls = 0;
+    SetTransportMode("direct_urma");
+
+    TileXREp::EpHostLaunchContext context {};
+    CheckInt("direct combine ignores remote peer mapping",
+        TileXREp::TileXREpPrepareCombineLaunchContext(params, &context), TileXR::TILEXR_SUCCESS);
+    CheckInt("direct combine checks registry", g_registryCalls, 1);
+
+    SetTransportMode("memory");
+    g_registryCalls = 0;
+    CheckInt("memory combine requires remote peer mapping",
+        TileXREp::TileXREpPrepareCombineLaunchContext(params, &context), TileXR::TILEXR_ERROR_NOT_INITIALIZED);
+    CheckInt("memory combine skips registry", g_registryCalls, 0);
+    SetTransportMode(nullptr);
+}
+
+void TestDirectTransportChecksRegistryOnSameNode()
+{
+    TileXREp::EpDispatchParams params = ValidParams();
+    static uint8_t workspace[1024] = {};
+    params.workspace = workspace;
+    TileXR::CommArgs args = ValidCommArgs();
+    args.extraFlag |= TileXR::ExtraFlag::UDMA;
+    args.udmaInfoPtr = reinterpret_cast<GM_ADDR>(0x30000000);
+    args.udmaRegistryPtr = reinterpret_cast<GM_ADDR>(0x40000000);
+    g_commArgs = &args;
+    TileXR::TileXRUDMARegistry registry {};
+    FillRegistry(&registry, args, workspace);
+    g_registry = &registry;
+    g_registryCalls = 0;
+    SetTransportMode("direct_urma");
+
+    TileXREp::EpHostLaunchContext context {};
+    CheckInt("same-node direct launch context", TileXREp::TileXREpPrepareLaunchContext(params, &context),
+        TileXR::TILEXR_SUCCESS);
+    CheckInt("same-node direct checks registry", g_registryCalls, 1);
+    CheckInt("same-node direct saved route", static_cast<int>(context.transport),
+        static_cast<int>(TileXR::TileXRTransportKind::DIRECT_URMA));
+    SetTransportMode(nullptr);
+}
+
+void TestAutoWithoutWorkspaceStaysOnMemory()
+{
+    TileXREp::EpDispatchParams params = ValidParams();
+    params.bs = 64;
+    params.h = 128;
+    params.workspace = nullptr;
+    TileXR::CommArgs args = CrossNodeUdmaCommArgs();
+    g_commArgs = &args;
+    g_registry = nullptr;
+    g_registryCalls = 0;
+    SetTransportMode("auto");
+
+    TileXREp::EpHostLaunchContext context {};
+    CheckInt("auto without workspace uses memory",
+        TileXREp::TileXREpPrepareLaunchContext(params, &context), TileXR::TILEXR_SUCCESS);
+    CheckInt("auto without workspace saves memory route", static_cast<int>(context.transport),
+        static_cast<int>(TileXR::TileXRTransportKind::MEMORY));
+    CheckInt("auto without workspace skips registry", g_registryCalls, 0);
+
+    TileXREp::EpCombineParams combineParams = ValidCombineParams();
+    combineParams.bs = 64;
+    combineParams.h = 128;
+    combineParams.workspace = nullptr;
+    g_registryCalls = 0;
+    CheckInt("auto combine without workspace uses memory",
+        TileXREp::TileXREpPrepareCombineLaunchContext(combineParams, &context), TileXR::TILEXR_SUCCESS);
+    CheckInt("auto combine without workspace saves memory route", static_cast<int>(context.transport),
+        static_cast<int>(TileXR::TileXRTransportKind::MEMORY));
+    CheckInt("auto combine without workspace skips registry", g_registryCalls, 0);
+    SetTransportMode(nullptr);
 }
 
 void TestV2CapabilityValidation()
@@ -377,7 +586,8 @@ void TestV2CapabilityValidation()
     commArgs.rankSize = 8;
     commArgs.localRankSize = 8;
     for (int rank = 0; rank < commArgs.rankSize; ++rank) {
-        commArgs.peerMems[rank] = reinterpret_cast<GM_ADDR>(0x10000000 + rank * 0x10000000);
+        commArgs.peerMems[rank] = reinterpret_cast<GM_ADDR>(
+            static_cast<uintptr_t>(0x10000000ULL + static_cast<uint64_t>(rank) * 0x10000000ULL));
     }
     CheckInt("v2 supports tp with shared expert",
         TileXREp::TileXREpValidateDispatchV2Config(params, commArgs), TileXR::TILEXR_SUCCESS);
@@ -405,6 +615,10 @@ int main()
     TestBasicValidation();
     TestCommValidation();
     TestCombineValidation();
+    TestLaunchContextUsesResolvedTransport();
+    TestCombineContextUsesRouteAwarePeerMappings();
+    TestDirectTransportChecksRegistryOnSameNode();
+    TestAutoWithoutWorkspaceStaysOnMemory();
     TestV2CapabilityValidation();
     return g_failures == 0 ? 0 : 1;
 }

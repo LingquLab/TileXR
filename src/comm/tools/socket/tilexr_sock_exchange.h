@@ -10,6 +10,7 @@
 #ifndef TILEXR_SOCK_EXCHANGE_H
 #define TILEXR_SOCK_EXCHANGE_H
 
+#include <cstdint>
 #include <vector>
 #include <string>
 #include <memory>
@@ -97,8 +98,14 @@ private:
 
     template <typename T> int Send(int fd, const T *sendBuf, size_t sendSize, int flag) const
     {
-        do {
-            auto ret = send(fd, sendBuf, sendSize, flag);
+        const auto *sendBytes = reinterpret_cast<const uint8_t *>(sendBuf);
+        size_t sentBytes = 0;
+        while (sentBytes < sendSize) {
+            auto ret = send(fd, sendBytes + sentBytes, sendSize - sentBytes, flag);
+            if (ret > 0) {
+                sentBytes += static_cast<size_t>(ret);
+                continue;
+            }
             if (ret < 0) {
                 if (CheckErrno(errno)) {
                     TILEXR_LOG(ERROR) << "send failed: " << strerror(errno);
@@ -107,13 +114,20 @@ private:
                 TILEXR_LOG(DEBUG) << "Send failed: " << strerror(errno);
             }
             return ret;
-        } while (true);
+        }
+        return static_cast<int>(sentBytes);
     }
 
     template <typename T> int Recv(int fd, T *recvBuf, size_t recvSize, int flag) const
     {
-        do {
-            auto ret = recv(fd, recvBuf, recvSize, flag);
+        auto *recvBytes = reinterpret_cast<uint8_t *>(recvBuf);
+        size_t receivedBytes = 0;
+        while (receivedBytes < recvSize) {
+            auto ret = recv(fd, recvBytes + receivedBytes, recvSize - receivedBytes, flag);
+            if (ret > 0) {
+                receivedBytes += static_cast<size_t>(ret);
+                continue;
+            }
             if (ret < 0) {
                 if (CheckErrno(errno)) {
                     TILEXR_LOG(ERROR) << "recv failed: " << strerror(errno);
@@ -122,7 +136,8 @@ private:
                 TILEXR_LOG(DEBUG) << "recv failed: " << strerror(errno);
             }
             return ret;
-        } while (true);
+        }
+        return static_cast<int>(receivedBytes);
     }
 
     template <typename T> int ClientSendRecv(const T *sendBuf, size_t sendSize, T *recvBuf)

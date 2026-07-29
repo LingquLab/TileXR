@@ -36,12 +36,19 @@ __aicore__ inline int32_t TileXREpGetCombineTopKId(const TileXREp::EpAssistTuple
 __aicore__ inline int32_t TileXREpWaitDispatchSlotReady(
     GM_ADDR slotGM, int32_t srcRank, int64_t magic, AscendC::TBuf<AscendC::QuePosition::VECCALC> &tBuf)
 {
+    int64_t retries = 0;
     while (true) {
+        TileXREpInvalidateLocalCacheLines(slotGM, TileXREp::kEpSrcSlotHeaderBytes);
         const uint64_t packed = LoadUint64FromGm(slotGM, tBuf);
         const int32_t slotSrcRank = static_cast<int32_t>((packed >> 32) & 0xffffffffULL);
         const uint64_t slotMagic = LoadUint64FromGm(slotGM + 3 * static_cast<int64_t>(sizeof(uint64_t)), tBuf);
         if (slotSrcRank == srcRank && slotMagic == static_cast<uint64_t>(magic)) {
             return static_cast<int32_t>(packed & 0xffffffffULL);
+        }
+        ++retries;
+        if (retries >= static_cast<int64_t>(TileXR::TILEXR_UDMA_MAX_RETRY_TIMES)) {
+            AscendC::printf("tilexr_ep_dispatch_slot_ready timeout src %d\n", srcRank);
+            return -1;
         }
     }
 }
@@ -85,10 +92,13 @@ __aicore__ inline int64_t TileXREpDrainSourceWindow(GM_ADDR sourceWindow, int32_
     int64_t sharedExpertRankNum, GM_ADDR expandXOutGM, GM_ADDR dynamicScalesOutGM, GM_ADDR expertTokenNumsOutGM,
     int64_t expertTokenNumsType, int64_t magic, __gm__ int32_t *epRecvCountsOut, __gm__ int32_t *tpRecvCountsOut,
     __gm__ TileXREp::EpAssistTuple *localAssistBase, int64_t outRecord, GM_ADDR tpPublishWindow,
-    int32_t tpPublishRank, AscendC::TBuf<AscendC::QuePosition::VECCALC> &tBuf)
+    int32_t tpPublishRank, int32_t *sourceCountOut, AscendC::TBuf<AscendC::QuePosition::VECCALC> &tBuf)
 {
     const int64_t count = TileXREpWaitDispatchSlotReady(sourceWindow + SlotOffset(slotRank, slotBytes), srcRank,
         magic, tBuf);
+    if (sourceCountOut != nullptr) {
+        *sourceCountOut = static_cast<int32_t>(count);
+    }
     epRecvCountsOut[srcRank] = static_cast<int32_t>(count);
     if (tpRecvCountsOut != nullptr) {
         tpRecvCountsOut[srcRank] = static_cast<int32_t>(count);

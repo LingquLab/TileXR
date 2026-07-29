@@ -184,6 +184,8 @@ extern "C" __global__ __aicore__ void tilexr_ep_combine_cross_node_kernel(GM_ADD
         const int32_t rank = args->rank;
         const int32_t rankSize = args->rankSize;
         const int32_t localRankSize = args->localRankSize;
+        const bool useUdmaForAllPeers = localRankSize == rankSize;
+        const int32_t effectiveLocalRankSize = useUdmaForAllPeers ? 1 : localRankSize;
         if (rankSize <= 0 || rankSize > TileXR::TILEXR_MAX_RANK_SIZE || rank < 0 || rank >= rankSize ||
             localRankSize <= 0 || localRankSize > rankSize || !TileXR::UDMARegistryEnabled(args) ||
             !IsValidShape(bs, h, topK, moeExpertNum, dtypeBytes, maxRoutesPerSrc, rowBytes, payloadBytesPerSlot,
@@ -192,13 +194,8 @@ extern "C" __global__ __aicore__ void tilexr_ep_combine_cross_node_kernel(GM_ADD
         }
 
         GM_ADDR shareAddrs[TileXR::TILEXR_MAX_RANK_SIZE];
-        AscendC::GlobalTensor<GM_ADDR> peerMems;
-        peerMems.SetGlobalBuffer(&(args->peerMems[0]), TileXR::TILEXR_MAX_RANK_SIZE);
-        for (int32_t peer = 0; peer < rankSize; ++peer) {
-            shareAddrs[peer] = peerMems.GetValue(peer);
-            if (shareAddrs[peer] == nullptr) {
-                return;
-            }
+        if (!TileXREpLoadLocalPeerMems(args, shareAddrs, rank, rankSize, localRankSize)) {
+            return;
         }
 
         AscendC::TPipe pipe;
@@ -217,8 +214,8 @@ extern "C" __global__ __aicore__ void tilexr_ep_combine_cross_node_kernel(GM_ADD
         ClearLocalWindow(sendWindow, rankSize, maxRoutesPerSrc, rowBytes, slotBytes, totalBytes, tBuf);
         ClearLocalWindow(recvWindow, rankSize, maxRoutesPerSrc, rowBytes, slotBytes, totalBytes, tBuf);
 
-        const int32_t localNodeStart = TileXREpNodeStart(rank, localRankSize);
-        const int32_t localNodeEnd = TileXREpNodeEnd(rank, localRankSize, rankSize);
+        const int32_t localNodeStart = TileXREpNodeStart(rank, effectiveLocalRankSize);
+        const int32_t localNodeEnd = TileXREpNodeEnd(rank, effectiveLocalRankSize, rankSize);
         sync.SetInnerFlag(static_cast<int32_t>(magic), TileXREp::kEpStepCombineWindowCleared);
         for (int32_t peer = localNodeStart; peer < localNodeEnd; ++peer) {
             sync.WaitRankInnerFlag(static_cast<int32_t>(magic), TileXREp::kEpStepCombineWindowCleared, peer);
@@ -227,7 +224,10 @@ extern "C" __global__ __aicore__ void tilexr_ep_combine_cross_node_kernel(GM_ADD
         ScatterCombineRows(sendWindow, expertOutGM, assistInfoForCombineGM, epRecvCountsGM, rankSize,
             maxRoutesPerSrc, rowBytes, slotBytes, payloadBytesPerSlot, tBuf);
         for (int32_t dstRank = 0; dstRank < rankSize; ++dstRank) {
-            if (TileXREpSameNode(dstRank, rank, localRankSize)) {
+            if (useUdmaForAllPeers && dstRank == rank) {
+                CopyBytesGmToGm(recvWindow + SlotOffset(rank, slotBytes),
+                    sendWindow + SlotOffset(rank, slotBytes), tBuf, slotBytes);
+            } else if (TileXREpSameNode(dstRank, rank, effectiveLocalRankSize)) {
                 CopyBytesGmToGm(shareAddrs[dstRank] + TileXR::IPC_DATA_OFFSET + SlotOffset(rank, slotBytes),
                     sendWindow + SlotOffset(dstRank, slotBytes), tBuf, slotBytes);
             }
@@ -241,14 +241,15 @@ extern "C" __global__ __aicore__ void tilexr_ep_combine_cross_node_kernel(GM_ADD
             sync.WaitRankInnerFlag(static_cast<int32_t>(magic), TileXREp::kEpStepCombineReady, peer);
         }
 
-        TileXREpNotifyRemoteUdmaReadySeparate(args, sendWindow, rank, rankSize, localRankSize, totalBytes, magic,
-            slotBytes, TileXREp::kEpStepCombineReady, combineWindowOffset + UDMARecvWindowOffset(totalBytes));
+        TileXREpNotifyRemoteUdmaReadySeparate(args, sendWindow, rank, rankSize, effectiveLocalRankSize, totalBytes,
+            magic, slotBytes, TileXREp::kEpStepCombineReady,
+            combineWindowOffset + UDMARecvWindowOffset(totalBytes));
         sync.SetInnerFlag(static_cast<int32_t>(magic), TileXREp::kEpStepCombineGatewayReady);
         for (int32_t peer = localNodeStart; peer < localNodeEnd; ++peer) {
             sync.WaitRankInnerFlag(static_cast<int32_t>(magic), TileXREp::kEpStepCombineGatewayReady, peer);
         }
-        const bool remoteReady = TileXREpWaitRemoteUdmaReady(sendWindow, rank, rankSize, localRankSize, totalBytes,
-            magic, TileXREp::kEpStepCombineReady, tBuf);
+        const bool remoteReady = TileXREpWaitRemoteUdmaReady(sendWindow, rank, rankSize, effectiveLocalRankSize,
+            totalBytes, magic, TileXREp::kEpStepCombineReady, tBuf);
         if (!remoteReady) {
             TileXREpStoreStatusValue(workspaceGM, totalBytes, rankSize, slotBytes,
                 TileXREp::kEpStatusRemoteReadyTimeout);
@@ -277,6 +278,7 @@ extern "C" __global__ __aicore__ void tilexr_ep_combine_cross_node_drain_kernel(
         const int32_t rank = args->rank;
         const int32_t rankSize = args->rankSize;
         const int32_t localRankSize = args->localRankSize;
+        const bool useUdmaForAllPeers = localRankSize == rankSize;
         if (rankSize <= 0 || rankSize > TileXR::TILEXR_MAX_RANK_SIZE || rank < 0 || rank >= rankSize ||
             localRankSize <= 0 || localRankSize > rankSize ||
             !IsValidShape(bs, h, topK, moeExpertNum, dtypeBytes, maxRoutesPerSrc, rowBytes, payloadBytesPerSlot,
@@ -300,7 +302,7 @@ extern "C" __global__ __aicore__ void tilexr_ep_combine_cross_node_drain_kernel(
         ZeroRows<float16_t>(yOutGM, bs, h);
         for (int32_t expertRank = 0; expertRank < rankSize; ++expertRank) {
             GM_ADDR sourceWindow = recvWindow;
-            if (TileXREpSameNode(expertRank, rank, localRankSize)) {
+            if (!useUdmaForAllPeers && TileXREpSameNode(expertRank, rank, localRankSize)) {
                 sourceWindow = localIpcWindow;
             } else {
                 GM_ADDR slotBase = recvWindow + SlotOffset(expertRank, slotBytes);

@@ -2,7 +2,9 @@
 
 This directory contains a small memory-semantics example modeled after the reference-only `ascend-transformer-boost/src/kernels/lcal/src/kernels/lcal_allgather.cce` source.
 
-The example uses TileXR `CommArgs::peerMems[]` as shared peer-memory windows and moves data through UB with Ascend C `DataCopy`. It intentionally does not use `TileXRUDMARegister`, `tilexr_udma.h`, or UDMA put/get APIs.
+The default path uses TileXR `CommArgs::peerMems[]` as shared peer-memory windows and moves data through UB with Ascend C `DataCopyPad`. It intentionally does not use `TileXRUDMARegister`, `tilexr_udma.h`, or UDMA put/get APIs.
+
+TCP sockets are used only for communicator rendezvous and demo barriers. They do not carry payload on the default path.
 
 ## Build
 
@@ -42,3 +44,21 @@ run_tilexr_memory_demo.sh <rank_size> <elements_per_rank> <npu_count> <first_npu
 `elements_per_rank` is the number of `int32_t` values per rank. Keep each segment 32-byte aligned for this simple `DataCopy` example, for example `16`.
 
 Each run writes per-rank logs under `tests/memory/logs/tilexr_memory_demo_*`.
+
+The default environment is equivalent to:
+
+```bash
+export TILEXR_MEMORY_DEMO_HOST_STAGING=0
+export TILEXR_MEMORY_DEMO_HOST_COPY=0
+```
+
+A transport PASS requires both ranks to log `launch memory push kernel`, `launch memory collect kernel`, the expected segments, and `TileXR peer memory DataCopy demo success`.
+
+Two explicit Host diagnostics remain available for troubleshooting:
+
+```bash
+TILEXR_MEMORY_DEMO_HOST_STAGING=1  # Exchanges payload through TCP and copies it back to device.
+TILEXR_MEMORY_DEMO_HOST_COPY=1     # Uses Host-initiated D2D copies through peer mappings.
+```
+
+Neither diagnostic path proves the AICore peer-memory transport and neither counts as a Memory transport PASS.

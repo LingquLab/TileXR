@@ -17,6 +17,9 @@ constexpr int64_t kEpQuantModeNone = 0;
 constexpr int64_t kEpQuantModeStatic = 1;
 constexpr int64_t kEpQuantModePerTokenDynamic = 2;
 
+static_assert(TileXREp::kEpUdmaReadyStrideBytes == TileXR::TILEXR_UDMA_CACHE_LINE_SIZE,
+    "EP UDMA ready slots must match the UDMA cache-line size");
+
 __aicore__ inline int64_t AlignUp(int64_t value, int64_t alignment)
 {
     if (alignment <= 0) {
@@ -44,12 +47,27 @@ __aicore__ inline int64_t AssistOffset(int64_t srcRank, int64_t slotBytes, int64
 __aicore__ inline int64_t UDMAReadyOffset(int64_t totalBytes, int32_t rank)
 {
     return AlignUp(totalBytes, TileXREp::kEpWindowAlignmentBytes) * 2 +
-        static_cast<int64_t>(rank) * static_cast<int64_t>(sizeof(uint64_t));
+        static_cast<int64_t>(rank) * TileXREp::kEpUdmaReadyStrideBytes;
 }
 
 __aicore__ inline int64_t UDMARecvWindowOffset(int64_t totalBytes)
 {
     return AlignUp(totalBytes, TileXREp::kEpWindowAlignmentBytes);
+}
+
+__aicore__ inline int64_t UDMAOperationBytes(int64_t totalBytes, int32_t rankSize, int64_t slotBytes)
+{
+    const int64_t readyEnd = UDMAReadyOffset(totalBytes, rankSize);
+    const int64_t relaySlotsOffset = AlignUp(readyEnd, TileXR::TILEXR_UDMA_CACHE_LINE_SIZE);
+    const int64_t relayBytes = static_cast<int64_t>(rankSize) * static_cast<int64_t>(rankSize) * slotBytes;
+    const int64_t relayReadyBase = AlignUp(relaySlotsOffset + relayBytes, TileXR::TILEXR_UDMA_CACHE_LINE_SIZE);
+    const int64_t relayReadyBytes = static_cast<int64_t>(rankSize) * TileXREp::kEpUdmaReadyStrideBytes;
+    return AlignUp(relayReadyBase + relayReadyBytes, TileXR::TILEXR_UDMA_CACHE_LINE_SIZE);
+}
+
+__aicore__ inline int64_t UDMAStatusOffset(int64_t totalBytes, int32_t rankSize, int64_t slotBytes)
+{
+    return UDMAOperationBytes(totalBytes, rankSize, slotBytes) * 2;
 }
 
 __aicore__ inline int64_t TileXREpTpWindowOffset(int64_t totalBytes)
@@ -86,6 +104,40 @@ __aicore__ inline void CopyBytesGmToGm(
         AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
         AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
     }
+    AscendC::PipeBarrier<PIPE_ALL>();
+}
+
+__aicore__ inline void TileXREpInvalidateLocalCacheLines(GM_ADDR localGM, int64_t bytes)
+{
+    if (localGM == nullptr || bytes <= 0) {
+        return;
+    }
+    __gm__ uint8_t *start = reinterpret_cast<__gm__ uint8_t *>(
+        reinterpret_cast<uint64_t>(localGM) / TileXR::TILEXR_UDMA_CACHE_LINE_SIZE *
+        TileXR::TILEXR_UDMA_CACHE_LINE_SIZE);
+    __gm__ uint8_t *end = reinterpret_cast<__gm__ uint8_t *>(
+        (reinterpret_cast<uint64_t>(localGM) + static_cast<uint64_t>(bytes) - 1) /
+        TileXR::TILEXR_UDMA_CACHE_LINE_SIZE * TileXR::TILEXR_UDMA_CACHE_LINE_SIZE);
+    AscendC::GlobalTensor<uint8_t> global;
+    global.SetGlobalBuffer(start);
+    for (uint64_t offset = 0; offset <= static_cast<uint64_t>(end - start);
+        offset += TileXR::TILEXR_UDMA_CACHE_LINE_SIZE) {
+        __asm__ __volatile__("");
+        AscendC::DataCacheCleanAndInvalid<uint8_t,
+            AscendC::CacheLine::SINGLE_CACHE_LINE, AscendC::DcciDst::CACHELINE_OUT>(global[offset]);
+        __asm__ __volatile__("");
+    }
+    AscendC::PipeBarrier<PIPE_ALL>();
+}
+
+__aicore__ inline void TileXREpStoreStatusValue(GM_ADDR workspaceGM, int64_t totalBytes, int32_t rankSize,
+    int64_t slotBytes, uint64_t status)
+{
+    GM_ADDR statusAddr = workspaceGM + UDMAStatusOffset(totalBytes, rankSize, slotBytes);
+    auto statusGM = reinterpret_cast<__gm__ uint64_t *>(statusAddr);
+    statusGM[0] = status;
+    AscendC::PipeBarrier<PIPE_ALL>();
+    TileXR::UDMACleanCacheLines(reinterpret_cast<__gm__ uint8_t *>(statusAddr), sizeof(uint64_t));
     AscendC::PipeBarrier<PIPE_ALL>();
 }
 
@@ -276,10 +328,11 @@ __aicore__ inline void ClearLocalWindow(
     AscendC::PipeBarrier<PIPE_ALL>();
 }
 
-__aicore__ inline bool TileXREpUsesUdmaWindow(const __gm__ TileXR::CommArgs *args, GM_ADDR workspaceGM)
+__aicore__ inline bool TileXREpUsesUdmaWindow(
+    const __gm__ TileXR::CommArgs *args, GM_ADDR workspaceGM, int64_t bytes)
 {
-    return workspaceGM != nullptr && args->localRankSize > 0 && args->localRankSize < args->rankSize &&
-        TileXR::UDMARegistryEnabled(args);
+    return workspaceGM != nullptr && args != nullptr && args->localRankSize > 0 &&
+        args->localRankSize < args->rankSize && bytes > 0 && TileXR::UDMARegistryEnabled(args);
 }
 
 __aicore__ inline GM_ADDR TileXREpWindowBase(GM_ADDR *shareAddrs, int32_t rank, bool useUdmaWindow, GM_ADDR workspaceGM)
@@ -306,6 +359,31 @@ __aicore__ inline bool TileXREpUsesUdmaPeer(int32_t rank, int32_t peer, int32_t 
         return true;
     }
     return TileXREpIsRemotePeer(rank, peer, localRankSize);
+}
+
+__aicore__ inline bool TileXREpLoadLocalPeerMems(__gm__ TileXR::CommArgs *args, GM_ADDR *shareAddrs,
+    int32_t rank, int32_t rankSize, int32_t localRankSize)
+{
+    if (args == nullptr || shareAddrs == nullptr || localRankSize <= 0) {
+        return false;
+    }
+    for (int32_t peer = 0; peer < rankSize; ++peer) {
+        shareAddrs[peer] = nullptr;
+    }
+    const int32_t localNodeStart = (rank / localRankSize) * localRankSize;
+    int32_t localNodeEnd = localNodeStart + localRankSize;
+    if (localNodeEnd > rankSize) {
+        localNodeEnd = rankSize;
+    }
+    AscendC::GlobalTensor<GM_ADDR> peerMems;
+    peerMems.SetGlobalBuffer(&(args->peerMems[0]), TileXR::TILEXR_MAX_RANK_SIZE);
+    for (int32_t peer = localNodeStart; peer < localNodeEnd; ++peer) {
+        shareAddrs[peer] = peerMems.GetValue(peer);
+        if (shareAddrs[peer] == nullptr) {
+            return false;
+        }
+    }
+    return true;
 }
 
 __aicore__ inline void TileXREpPublishLocalUdmaSlot(GM_ADDR localWindow, GM_ADDR sendWindow, int32_t dstRank,
@@ -367,6 +445,20 @@ __aicore__ inline void TileXREpPullUdmaSlots(
 __aicore__ inline uint64_t TileXREpReadyValue(int64_t magic)
 {
     return (static_cast<uint64_t>(magic) << 32) | static_cast<uint64_t>(TileXREp::kEpStepDispatchReady);
+}
+
+__aicore__ inline void TileXREpStoreDispatchDebugMark(GM_ADDR localWindow, int64_t totalBytes, int32_t rank,
+    uint64_t mark)
+{
+    if (localWindow == nullptr || rank < 0) {
+        return;
+    }
+    GM_ADDR markAddr = localWindow + UDMAReadyOffset(totalBytes, rank);
+    auto markGM = reinterpret_cast<__gm__ uint64_t *>(markAddr);
+    markGM[0] = mark;
+    AscendC::PipeBarrier<PIPE_ALL>();
+    TileXR::UDMACleanCacheLines(reinterpret_cast<__gm__ uint8_t *>(markAddr), sizeof(uint64_t));
+    AscendC::PipeBarrier<PIPE_ALL>();
 }
 
 __aicore__ inline int32_t TileXREpTpGroupStartRank(int32_t rank, int32_t tpWorldSize)
@@ -431,7 +523,7 @@ __aicore__ inline void TileXREpNotifyAllUdmaReady(
     }
 }
 
-__aicore__ inline void TileXREpWaitUdmaReady(GM_ADDR localWindow, int32_t rank, int32_t rankSize,
+__aicore__ inline bool TileXREpWaitUdmaReady(GM_ADDR localWindow, int32_t rank, int32_t rankSize,
     int32_t localRankSize, int64_t totalBytes, int64_t magic, AscendC::TBuf<AscendC::QuePosition::VECCALC> &tBuf)
 {
     const uint64_t ready = TileXREpReadyValue(magic);
@@ -439,12 +531,24 @@ __aicore__ inline void TileXREpWaitUdmaReady(GM_ADDR localWindow, int32_t rank, 
         if (!TileXREpUsesUdmaPeer(rank, peer, localRankSize)) {
             continue;
         }
-        while (LoadUint64FromGm(localWindow + UDMAReadyOffset(totalBytes, peer), tBuf) != ready) {
+        GM_ADDR readyAddr = localWindow + UDMAReadyOffset(totalBytes, peer);
+        int64_t retries = 0;
+        while (true) {
+            TileXREpInvalidateLocalCacheLines(readyAddr, static_cast<int64_t>(sizeof(uint64_t)));
+            if (LoadUint64FromGm(readyAddr, tBuf) == ready) {
+                break;
+            }
+            ++retries;
+            if (retries >= static_cast<int64_t>(TileXR::TILEXR_UDMA_MAX_RETRY_TIMES)) {
+                AscendC::printf("tilexr_ep_udma_ready timeout rank %d peer %d\n", rank, peer);
+                return false;
+            }
         }
     }
+    return true;
 }
 
-__aicore__ inline void TileXREpWaitAllUdmaReady(GM_ADDR localWindow, int32_t rank, int32_t rankSize,
+__aicore__ inline bool TileXREpWaitAllUdmaReady(GM_ADDR localWindow, int32_t rank, int32_t rankSize,
     int64_t totalBytes, int64_t magic, AscendC::TBuf<AscendC::QuePosition::VECCALC> &tBuf)
 {
     const uint64_t ready = TileXREpReadyValue(magic);
@@ -452,9 +556,21 @@ __aicore__ inline void TileXREpWaitAllUdmaReady(GM_ADDR localWindow, int32_t ran
         if (peer == rank) {
             continue;
         }
-        while (LoadUint64FromGm(localWindow + UDMAReadyOffset(totalBytes, peer), tBuf) != ready) {
+        GM_ADDR readyAddr = localWindow + UDMAReadyOffset(totalBytes, peer);
+        int64_t retries = 0;
+        while (true) {
+            TileXREpInvalidateLocalCacheLines(readyAddr, static_cast<int64_t>(sizeof(uint64_t)));
+            if (LoadUint64FromGm(readyAddr, tBuf) == ready) {
+                break;
+            }
+            ++retries;
+            if (retries >= static_cast<int64_t>(TileXR::TILEXR_UDMA_MAX_RETRY_TIMES)) {
+                AscendC::printf("tilexr_ep_udma_all_ready timeout rank %d peer %d\n", rank, peer);
+                return false;
+            }
         }
     }
+    return true;
 }
 
 __aicore__ inline void TileXREpFlushDispatchSlotHeaders(
@@ -660,9 +776,12 @@ __aicore__ inline int64_t TileXREpAppendTpGroupRows(GM_ADDR *shareAddrs, GM_ADDR
     int64_t outRecord, int64_t maxRoutesPerSrc, int64_t rowBytes, int64_t payloadRowBytes, int64_t slotBytes,
     int64_t payloadBytesPerSlot, int64_t totalBytes, int64_t quantMode, int64_t localExpertNum,
     int64_t sharedExpertNum, int64_t sharedExpertRankNum, GM_ADDR dynamicScalesOutGM, GM_ADDR expertTokenNumsOutGM,
-    int64_t expertTokenNumsType, int64_t magic, __gm__ int32_t *tpRecvCountsOut,
+    int64_t expertTokenNumsType, int64_t magic, __gm__ int32_t *tpRecvCountsOut, bool *timedOut,
     AscendC::TBuf<AscendC::QuePosition::VECCALC> &tBuf)
 {
+    if (timedOut != nullptr) {
+        *timedOut = false;
+    }
     const int32_t tpGroupStartRank = TileXREpTpGroupStartRank(rank, tpWorldSize);
     if (tpGroupStartRank < 0 || expertRankSize <= 0) {
         return outRecord;
@@ -682,6 +801,12 @@ __aicore__ inline int64_t TileXREpAppendTpGroupRows(GM_ADDR *shareAddrs, GM_ADDR
                 outRecord, maxRoutesPerSrc, rowBytes, payloadRowBytes, slotBytes, payloadBytesPerSlot, quantMode,
                 localExpertNum, sharedExpertNum, sharedExpertRankNum, dynamicScalesOutGM, expertTokenNumsOutGM,
                 expertTokenNumsType, magic, &sourceCount, tBuf);
+            if (sourceCount < 0) {
+                if (timedOut != nullptr) {
+                    *timedOut = true;
+                }
+                return outRecord;
+            }
             peerTpCount += sourceCount > 0 ? sourceCount : 0;
         }
         if (tpRecvCountsOut != nullptr) {
@@ -747,7 +872,7 @@ extern "C" __global__ __aicore__ void tilexr_ep_dispatch_kernel(GM_ADDR commArgs
         SyncCollectives sync;
         sync.Init(rank, rankSize, shareAddrs, tBuf);
 
-        const bool useUdmaWindow = TileXREpUsesUdmaWindow(args, workspaceGM);
+        const bool useUdmaWindow = TileXREpUsesUdmaWindow(args, workspaceGM, slotBytes);
         GM_ADDR localWindow = TileXREpWindowBase(shareAddrs, rank, useUdmaWindow, workspaceGM);
         ClearLocalWindow(localWindow, rankSize, maxRoutesPerSrc, rowBytes, slotBytes, totalBytes, tBuf);
         sync.SetInnerFlag(static_cast<int32_t>(magic), TileXREp::kEpStepWindowCleared);
@@ -806,7 +931,8 @@ extern "C" __global__ __aicore__ void tilexr_ep_dispatch_kernel(GM_ADDR commArgs
             outRecord = TileXREpDrainSourceWindow(sourceWindow, slotRank, srcRank, slotBytes, payloadBytesPerSlot,
                 maxRoutesPerSrc, rowBytes, payloadRowBytes, quantMode, localExpertNum64, sharedExpertNum,
                 sharedExpertRankNum, expandXOutGM, dynamicScalesOutGM, expertTokenNumsOutGM, expertTokenNumsType,
-                magic, epRecvCountsOut, tpRecvCountsOut, localAssistBase, outRecord, tpPublishWindow, rank, tBuf);
+                magic, epRecvCountsOut, tpRecvCountsOut, localAssistBase, outRecord, tpPublishWindow, rank, nullptr,
+                tBuf);
         }
         if (tpPublishWindow != nullptr) {
             const int32_t localTpCount = static_cast<int32_t>(outRecord);
@@ -816,7 +942,7 @@ extern "C" __global__ __aicore__ void tilexr_ep_dispatch_kernel(GM_ADDR commArgs
                 expertRankSize, effectiveTpWorldSize, outRecord, maxRoutesPerSrc, rowBytes, payloadRowBytes,
                 slotBytes, payloadBytesPerSlot, totalBytes, quantMode, localExpertNum64, sharedExpertNum,
                 sharedExpertRankNum, dynamicScalesOutGM, expertTokenNumsOutGM, expertTokenNumsType, magic,
-                tpRecvCountsOut, tBuf);
+                tpRecvCountsOut, nullptr, tBuf);
         }
         TileXREpFinalizeExpertTokenNums(expertTokenNumsOutGM, localExpertNum64, expertTokenNumsType);
         if (!useUdmaWindow) {
@@ -854,11 +980,14 @@ extern "C" __global__ __aicore__ void tilexr_ep_dispatch_cross_node_kernel(GM_AD
         const int32_t rank = args->rank;
         const int32_t rankSize = args->rankSize;
         const int32_t localRankSize = args->localRankSize;
+        const bool useUdmaForAllPeers = localRankSize == rankSize;
+        const int32_t effectiveLocalRankSize = useUdmaForAllPeers ? 1 : localRankSize;
+        TileXREpStoreDispatchDebugMark(workspaceGM, totalBytes, rank, 0xd1500001ULL);
         const int32_t effectiveTpWorldSize = tpWorldSize == 0 ? 1 : static_cast<int32_t>(tpWorldSize);
         const int32_t effectiveTpRankId = static_cast<int32_t>(tpRankId);
         const int32_t expertRankSize = effectiveTpWorldSize > 0 ? rankSize / effectiveTpWorldSize : 0;
         if (rankSize <= 0 || rankSize > TileXR::TILEXR_MAX_RANK_SIZE || rank < 0 || rank >= rankSize ||
-            localRankSize <= 0 || localRankSize >= rankSize ||
+            localRankSize <= 0 || localRankSize > rankSize ||
             effectiveTpWorldSize <= 0 || effectiveTpRankId < 0 || effectiveTpRankId >= effectiveTpWorldSize ||
             expertRankSize <= 0 || expertRankSize * effectiveTpWorldSize != rankSize ||
             (quantMode != kEpQuantModeNone && quantMode != kEpQuantModeStatic &&
@@ -873,28 +1002,28 @@ extern "C" __global__ __aicore__ void tilexr_ep_dispatch_cross_node_kernel(GM_AD
         }
 
         GM_ADDR shareAddrs[TileXR::TILEXR_MAX_RANK_SIZE];
-        if (localRankSize > 1) {
-            AscendC::GlobalTensor<GM_ADDR> peerMems;
-            peerMems.SetGlobalBuffer(&(args->peerMems[0]), TileXR::TILEXR_MAX_RANK_SIZE);
-            for (int32_t peer = 0; peer < rankSize; ++peer) {
-                shareAddrs[peer] = peerMems.GetValue(peer);
-                if (shareAddrs[peer] == nullptr) {
-                    return;
-                }
-            }
+        if (localRankSize > 1 &&
+            !TileXREpLoadLocalPeerMems(args, shareAddrs, rank, rankSize, localRankSize)) {
+            return;
         }
 
         AscendC::TPipe pipe;
         AscendC::TBuf<AscendC::QuePosition::VECCALC> tBuf;
         pipe.InitBuffer(tBuf, kEpUbBytes);
+        TileXREpStoreStatusValue(workspaceGM, totalBytes, rankSize, slotBytes, TileXREp::kEpStatusOk);
+        TileXREpStoreDispatchDebugMark(workspaceGM, totalBytes, rank, 0xd1500002ULL);
 
         GM_ADDR sendWindow = workspaceGM;
         GM_ADDR recvWindow = workspaceGM + UDMARecvWindowOffset(totalBytes);
         GM_ADDR localIpcWindow = localRankSize > 1 ? shareAddrs[rank] + TileXR::IPC_DATA_OFFSET : nullptr;
+        GM_ADDR dispatchIpcWindow = useUdmaForAllPeers ? nullptr : localIpcWindow;
         ClearLocalWindow(sendWindow, rankSize, maxRoutesPerSrc, rowBytes, slotBytes, totalBytes, tBuf);
+        TileXREpStoreDispatchDebugMark(workspaceGM, totalBytes, rank, 0xd1500003ULL);
         ClearLocalWindow(recvWindow, rankSize, maxRoutesPerSrc, rowBytes, slotBytes, totalBytes, tBuf);
+        TileXREpStoreDispatchDebugMark(workspaceGM, totalBytes, rank, 0xd1500004ULL);
         if (localRankSize > 1) {
             ClearLocalWindow(localIpcWindow, rankSize, maxRoutesPerSrc, rowBytes, slotBytes, totalBytes, tBuf);
+            TileXREpStoreDispatchDebugMark(workspaceGM, totalBytes, rank, 0xd1500005ULL);
         }
 
         int64_t dstCounts[TileXR::TILEXR_MAX_RANK_SIZE];
@@ -906,14 +1035,16 @@ extern "C" __global__ __aicore__ void tilexr_ep_dispatch_cross_node_kernel(GM_AD
         if (localExpertNum <= 0) {
             return;
         }
+        TileXREpStoreDispatchDebugMark(workspaceGM, totalBytes, rank, 0xd1500006ULL);
         const int64_t inputRowBytes = h * static_cast<int64_t>(sizeof(uint16_t));
-        TileXREpRouteLocalTokens(sendWindow, localIpcWindow, rank, rankSize, expertRankSize, effectiveTpWorldSize,
+        TileXREpRouteLocalTokens(sendWindow, dispatchIpcWindow, rank, rankSize, expertRankSize, effectiveTpWorldSize,
             effectiveTpRankId, localRankSize, xGM, expertIdsGM, scalesGM, xActiveMaskGM, bs, h, topK, moeExpertNum,
             sharedExpertNum, sharedExpertRankNum, localExpertNum, maxRoutesPerSrc, inputRowBytes, rowBytes,
             payloadRowBytes, slotBytes, payloadBytesPerSlot, quantMode, dstCounts, tBuf);
+        TileXREpStoreDispatchDebugMark(workspaceGM, totalBytes, rank, 0xd1500007ULL);
 
         for (int32_t dstRank = 0; dstRank < rankSize; ++dstRank) {
-            GM_ADDR targetWindow = TileXREpDispatchWriteWindow(sendWindow, localIpcWindow, rank, dstRank,
+            GM_ADDR targetWindow = TileXREpDispatchWriteWindow(sendWindow, dispatchIpcWindow, rank, dstRank,
                 localRankSize);
             const int64_t payloadBytes = dstCounts[dstRank] * payloadRowBytes +
                 (quantMode == kEpQuantModePerTokenDynamic ?
@@ -922,19 +1053,36 @@ extern "C" __global__ __aicore__ void tilexr_ep_dispatch_cross_node_kernel(GM_AD
                 rank, payloadBytes, dstCounts[dstRank] * static_cast<int64_t>(sizeof(TileXREp::EpAssistTuple)),
                 magic, tBuf);
         }
+        TileXREpStoreDispatchDebugMark(workspaceGM, totalBytes, rank, 0xd1500008ULL);
         CopyBytesGmToGm(recvWindow + SlotOffset(rank, slotBytes), sendWindow + SlotOffset(rank, slotBytes), tBuf,
             slotBytes);
+        TileXREpStoreDispatchDebugMark(workspaceGM, totalBytes, rank, 0xd1500009ULL);
         TileXREpFlushDispatchSlotHeaders(sendWindow, rankSize, slotBytes, tBuf);
         if (localRankSize > 1) {
             TileXREpFlushDispatchSlotHeaders(localIpcWindow, rankSize, slotBytes, tBuf);
         }
+        TileXREpStoreDispatchDebugMark(workspaceGM, totalBytes, rank, 0xd150000aULL);
 
-        if (localRankSize <= 1) {
+        if (effectiveLocalRankSize <= 1) {
             TileXREpNotifyAllUdmaReady(args, sendWindow, rank, rankSize, totalBytes, magic, slotBytes);
-            TileXREpWaitAllUdmaReady(workspaceGM, rank, rankSize, totalBytes, magic, tBuf);
+            TileXREpStoreDispatchDebugMark(workspaceGM, totalBytes, rank, 0xd150000bULL);
+            if (!TileXREpWaitAllUdmaReady(workspaceGM, rank, rankSize, totalBytes, magic, tBuf)) {
+                TileXREpStoreStatusValue(workspaceGM, totalBytes, rankSize, slotBytes,
+                    TileXREp::kEpStatusDispatchReadyTimeout);
+                return;
+            }
+            TileXREpStoreDispatchDebugMark(workspaceGM, totalBytes, rank, 0xd150000cULL);
         } else {
-            TileXREpNotifyUdmaReady(args, sendWindow, rank, rankSize, localRankSize, totalBytes, magic, slotBytes,
-                tBuf);
+            TileXREpNotifyUdmaReady(args, sendWindow, rank, rankSize, effectiveLocalRankSize, totalBytes, magic,
+                slotBytes, tBuf);
+            TileXREpStoreDispatchDebugMark(workspaceGM, totalBytes, rank, 0xd150000dULL);
+            if (!TileXREpWaitUdmaReady(
+                    workspaceGM, rank, rankSize, effectiveLocalRankSize, totalBytes, magic, tBuf)) {
+                TileXREpStoreStatusValue(workspaceGM, totalBytes, rankSize, slotBytes,
+                    TileXREp::kEpStatusDispatchReadyTimeout);
+                return;
+            }
+            TileXREpStoreDispatchDebugMark(workspaceGM, totalBytes, rank, 0xd150000eULL);
         }
 
         auto epRecvCountsOut = reinterpret_cast<__gm__ int32_t *>(epRecvCountsOutGM);
@@ -949,24 +1097,37 @@ extern "C" __global__ __aicore__ void tilexr_ep_dispatch_cross_node_kernel(GM_AD
         }
         for (int32_t expertSrcRank = 0; expertSrcRank < expertRankSize; ++expertSrcRank) {
             const int32_t srcRank = expertSrcRank * effectiveTpWorldSize + effectiveTpRankId;
-            const bool sameNodeSource = localRankSize > 1 && srcRank != rank &&
-                TileXREpIsSameNodePeer(rank, srcRank, localRankSize);
+            const bool sameNodeSource = effectiveLocalRankSize > 1 && srcRank != rank &&
+                TileXREpIsSameNodePeer(rank, srcRank, effectiveLocalRankSize);
             GM_ADDR sourceWindow = sameNodeSource ? shareAddrs[srcRank] + TileXR::IPC_DATA_OFFSET : recvWindow;
             const int32_t slotRank = sameNodeSource ? rank : srcRank;
+            int32_t sourceCount = 0;
             outRecord = TileXREpDrainSourceWindow(sourceWindow, slotRank, srcRank, slotBytes, payloadBytesPerSlot,
                 maxRoutesPerSrc, rowBytes, payloadRowBytes, quantMode, localExpertNum, sharedExpertNum,
                 sharedExpertRankNum, expandXOutGM, dynamicScalesOutGM, expertTokenNumsOutGM, expertTokenNumsType,
-                magic, epRecvCountsOut, tpRecvCountsOut, localAssistBase, outRecord, tpPublishWindow, rank, tBuf);
+                magic, epRecvCountsOut, tpRecvCountsOut, localAssistBase, outRecord, tpPublishWindow, rank,
+                &sourceCount, tBuf);
+            if (sourceCount < 0) {
+                TileXREpStoreStatusValue(workspaceGM, totalBytes, rankSize, slotBytes,
+                    TileXREp::kEpStatusDispatchSlotTimeout);
+                return;
+            }
         }
         if (tpPublishWindow != nullptr) {
             const int32_t localTpCount = static_cast<int32_t>(outRecord);
             tpRecvCountsOut[tpRankId] = localTpCount;
             AscendC::PipeBarrier<PIPE_ALL>();
+            bool tpSlotTimedOut = false;
             outRecord = TileXREpAppendTpGroupRows(shareAddrs, expandXOutGM, localAssistBase, rank,
                 expertRankSize, effectiveTpWorldSize, outRecord, maxRoutesPerSrc, rowBytes, payloadRowBytes,
                 slotBytes, payloadBytesPerSlot, totalBytes, quantMode, localExpertNum, sharedExpertNum,
                 sharedExpertRankNum, dynamicScalesOutGM, expertTokenNumsOutGM, expertTokenNumsType, magic,
-                tpRecvCountsOut, tBuf);
+                tpRecvCountsOut, &tpSlotTimedOut, tBuf);
+            if (tpSlotTimedOut) {
+                TileXREpStoreStatusValue(workspaceGM, totalBytes, rankSize, slotBytes,
+                    TileXREp::kEpStatusDispatchSlotTimeout);
+                return;
+            }
         }
         TileXREpFinalizeExpertTokenNums(expertTokenNumsOutGM, localExpertNum, expertTokenNumsType);
     }

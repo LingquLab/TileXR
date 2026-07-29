@@ -27,6 +27,7 @@ class TileXRSockExchange;
 struct TileXRUDMATransportOptions {
     int rank = 0;
     int rankSize = 0;
+    int localRankSize = 1;
     int devId = 0;
     TileXRSockExchange* exchange = nullptr;
 };
@@ -63,6 +64,7 @@ private:
     void CleanupMemory();
     void CleanupContexts();
     uint32_t FallbackLocalEid() const;
+    bool UsesUDMAPeer(int peer) const;
 
     TileXRHccpLoader loader_;
     TileXRUDMATransportOptions options_ {};

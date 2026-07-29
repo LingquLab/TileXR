@@ -109,7 +109,22 @@ if [[ ! -x "${bin}" ]]; then
 fi
 
 export TILEXR_COMM_ID="${COMM_ID}"
-export TILEXR_DEMO_BARRIER_ADDR="${COMM_ID}"
+COMM_HOST="${COMM_ID%:*}"
+COMM_PORT="${COMM_ID##*:}"
+if [[ -z "${COMM_HOST}" || -z "${COMM_PORT}" || "${COMM_HOST}" == "${COMM_PORT}" ||
+    ! "${COMM_PORT}" =~ ^[0-9]+$ ]]; then
+    echo "invalid --comm-id, expected host:port: ${COMM_ID}" >&2
+    exit 2
+fi
+BARRIER_PORT=$((COMM_PORT + 97))
+if (( BARRIER_PORT > 65535 )); then
+    BARRIER_PORT=$((COMM_PORT - 97))
+fi
+if (( BARRIER_PORT <= 0 )); then
+    echo "cannot derive demo barrier port from --comm-id: ${COMM_ID}" >&2
+    exit 2
+fi
+export TILEXR_DEMO_BARRIER_ADDR="${COMM_HOST}:${BARRIER_PORT}"
 export TILEXR_DEMO_TEST_TYPE="${TEST_TYPE}"
 export TILEXR_DEMO_ELEMENTS_PER_RANK="${ELEMENTS}"
 export TILEXR_DEMO_NPUS="${NPU_COUNT}"

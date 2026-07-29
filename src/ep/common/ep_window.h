@@ -6,6 +6,7 @@
 namespace TileXREp {
 
 constexpr int64_t kEpWindowAlignmentBytes = 32;
+constexpr int64_t kEpUdmaReadyStrideBytes = 64;
 constexpr int64_t kEpAssistTupleInts = 4;
 constexpr int64_t kEpWindowHeaderBytes = 64;
 constexpr int64_t kEpSrcSlotHeaderBytes = 64;
@@ -18,6 +19,8 @@ constexpr int32_t kEpStepCombineGatewayReady = 76;
 constexpr int32_t kEpStepCombineRelayReady = 77;
 constexpr int64_t kEpStatusOk = 0;
 constexpr int64_t kEpStatusRemoteReadyTimeout = 1;
+constexpr int64_t kEpStatusDispatchReadyTimeout = 2;
+constexpr int64_t kEpStatusDispatchSlotTimeout = 3;
 constexpr uint32_t kEpWindowMagic = 0x54584550U;
 
 struct EpWindowHeader {

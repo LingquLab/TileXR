@@ -8,6 +8,7 @@
 
 #include "kernel_operator.h"
 #include "comm_args.h"
+#include "tilexr_transport.h"
 #include "tilexr_udma_reg.h"
 #include "tilexr_udma_types.h"
 
@@ -43,6 +44,24 @@ __aicore__ inline bool UDMAEnabled(const __gm__ CommArgs* args)
 __aicore__ inline bool UDMARegistryEnabled(const __gm__ CommArgs* args)
 {
     return UDMAEnabled(args) && args->udmaRegistryPtr != nullptr;
+}
+
+__aicore__ inline bool UDMAPeerEnabled(const __gm__ CommArgs* args, int targetRank)
+{
+    return UDMARegistryEnabled(args) && TileXRDirectUrmaPeerRoutable(args, targetRank);
+}
+
+__aicore__ inline bool UDMAAllPeersEnabled(const __gm__ CommArgs* args)
+{
+    if (!UDMARegistryEnabled(args) || args->rank < 0 || args->rank >= args->rankSize) {
+        return false;
+    }
+    for (int peer = 0; peer < args->rankSize; ++peer) {
+        if (peer != args->rank && !UDMAPeerEnabled(args, peer)) {
+            return false;
+        }
+    }
+    return true;
 }
 
 __aicore__ inline __gm__ UDMAInfo* GetUDMAInfo(const __gm__ CommArgs* args)
@@ -296,7 +315,7 @@ template <typename T>
 __aicore__ inline void UDMAPutNbi(
     const __gm__ CommArgs* args, int targetRank, const __gm__ T* localSrc, uint64_t byteOffset, uint32_t byteCount)
 {
-    if (!UDMARegistryEnabled(args)) return;
+    if (!UDMAPeerEnabled(args, targetRank)) return;
 
     auto registry = GetUDMARegistry(args);
     if (!UDMARegisteredRangeValid(registry, targetRank, byteOffset, byteCount)) return;
@@ -317,7 +336,7 @@ template <typename T>
 __aicore__ inline void UDMAGetNbi(
     const __gm__ CommArgs* args, int sourceRank, __gm__ T* localDst, uint64_t byteOffset, uint32_t byteCount)
 {
-    if (!UDMARegistryEnabled(args)) return;
+    if (!UDMAPeerEnabled(args, sourceRank)) return;
 
     auto registry = GetUDMARegistry(args);
     if (!UDMARegisteredRangeValid(registry, sourceRank, byteOffset, byteCount)) return;
@@ -338,7 +357,7 @@ __aicore__ inline void UDMAPutSignalNbi(
     const __gm__ CommArgs* args, int targetRank, const __gm__ T* localSrc, uint64_t byteOffset,
     uint32_t byteCount, uint64_t signalByteOffset, uint64_t signal)
 {
-    if (!UDMARegistryEnabled(args)) return;
+    if (!UDMAPeerEnabled(args, targetRank)) return;
 
     auto registry = GetUDMARegistry(args);
     if (!UDMARegisteredRangeValid(registry, targetRank, byteOffset, byteCount) ||
@@ -365,7 +384,7 @@ __aicore__ inline void UDMAPutRegisteredSignalNbi(
 
 __aicore__ inline void UDMAQuiet(const __gm__ CommArgs* args, int targetRank)
 {
-    if (!UDMAEnabled(args)) return;
+    if (!TileXRDirectUrmaPeerRoutable(args, targetRank)) return;
     __gm__ UDMAInfo* udmaInfo = GetUDMAInfo(args);
     __gm__ UDMAWQCtx* qpCtxEntry = UDMAGetWQCtx(udmaInfo, targetRank, 0);
     uint32_t wqeCnt = ld_dev(reinterpret_cast<__gm__ uint32_t*>(qpCtxEntry->wqeCntAddr), 0);

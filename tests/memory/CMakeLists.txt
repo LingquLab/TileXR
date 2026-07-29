@@ -56,7 +56,6 @@ include_directories(
 link_directories(
     ${ASCEND_DRIVER_PATH}/lib64/driver
     ${ASCEND_HOME_PATH}/${ARCH}-linux/lib64
-    ${ASCEND_HOME_PATH}/${ARCH}-linux/devlib
 )
 
 add_executable(test_tilexr_memory_demo_sources

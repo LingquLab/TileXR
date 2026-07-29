@@ -9,6 +9,9 @@
 namespace TileXREp {
 namespace {
 
+static_assert(kEpUdmaReadyStrideBytes == TileXR::TILEXR_UDMA_CACHE_LINE_SIZE,
+    "EP UDMA ready slots must match the UDMA cache-line size");
+
 bool MulInt64(int64_t lhs, int64_t rhs, int64_t *out)
 {
     if (out == nullptr || lhs < 0 || rhs < 0) {
@@ -84,7 +87,7 @@ int64_t TileXREpUdmaOperationBytes(int64_t totalBytes, int64_t rankSize, int64_t
     int64_t readyBytes = 0;
     int64_t doubleTotal = 0;
     int64_t readyOffset = 0;
-    if (!MulInt64(static_cast<int64_t>(rankSize), static_cast<int64_t>(sizeof(uint64_t)), &readyBytes) ||
+    if (!MulInt64(static_cast<int64_t>(rankSize), kEpUdmaReadyStrideBytes, &readyBytes) ||
         !MulInt64(alignedTotal, 2, &doubleTotal) ||
         !AddInt64(doubleTotal, readyBytes, &readyOffset)) {
         return TileXR::TILEXR_INVALID_VALUE;

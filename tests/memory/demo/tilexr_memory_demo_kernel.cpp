@@ -5,11 +5,11 @@
 
 #include "comm_args.h"
 #include "kernel_operator.h"
-#include "tilexr_sync.h"
 
 namespace {
 constexpr int32_t TILEXR_MEMORY_DEMO_MAGIC = 0x544d454d; // "TMEM"
-constexpr int32_t TILEXR_MEMORY_DEMO_STEP_READY = 1;
+constexpr int32_t TILEXR_MEMORY_DEMO_STEP_PUSH = 1;
+constexpr int32_t TILEXR_MEMORY_DEMO_STEP_COLLECT = 2;
 constexpr uint32_t TILEXR_MEMORY_DEMO_UB_BYTES = 64 * 1024;
 constexpr uint32_t TILEXR_MEMORY_DEMO_SYNC_UB_BYTES = 4 * 1024;
 
@@ -64,100 +64,145 @@ __aicore__ inline void CopyGmToGm(
         if (tile > kTileElements) {
             tile = kTileElements;
         }
-        AscendC::DataCopy(local, src[copied], static_cast<uint32_t>(tile));
+        const uint32_t tileBytes = static_cast<uint32_t>(tile * static_cast<int64_t>(sizeof(T)));
+        AscendC::DataCopyParams copyParams {1, static_cast<uint16_t>(tileBytes), 0, 0};
+        AscendC::DataCopyPadParams padParams {false, 0, 0, 0};
+        AscendC::DataCopyPad(local, src[copied], copyParams, padParams);
         AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE3>(EVENT_ID0);
         AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE3>(EVENT_ID0);
-        AscendC::DataCopy(dst[copied], local, static_cast<uint32_t>(tile));
+        AscendC::DataCopyPad(dst[copied], local, copyParams);
         AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
         AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
     }
     AscendC::PipeBarrier<PIPE_ALL>();
 }
+
+__aicore__ inline bool LoadMemoryDemoArgs(
+    GM_ADDR commArgsGM, int32_t elementsPerRank, int32_t& rank, int32_t& rankSize, GM_ADDR* shareAddrs)
+{
+    auto args = reinterpret_cast<__gm__ TileXR::CommArgs*>(commArgsGM);
+    rank = args->rank;
+    rankSize = args->rankSize;
+    if (elementsPerRank <= 0 || rankSize <= 0 || rank < 0 || rank >= rankSize ||
+        rankSize > TileXR::TILEXR_MAX_RANK_SIZE) {
+        return false;
+    }
+
+    AscendC::GlobalTensor<GM_ADDR> peerMems;
+    peerMems.SetGlobalBuffer(&(args->peerMems[0]), TileXR::TILEXR_MAX_RANK_SIZE);
+    for (int32_t peer = 0; peer < rankSize; ++peer) {
+        shareAddrs[peer] = peerMems.GetValue(peer);
+        if (shareAddrs[peer] == nullptr) {
+            return false;
+        }
+    }
+    return true;
+}
+
+__aicore__ inline void WriteMemoryDemoDebug(
+    __gm__ int32_t* debug, int32_t rank, int32_t rankSize, int32_t elementsPerRank, int32_t blockNum,
+    int32_t step)
+{
+    if (debug == nullptr || AscendC::GetBlockIdx() != 0) {
+        return;
+    }
+    debug[0] = TILEXR_MEMORY_DEMO_MAGIC;
+    debug[1] = rank;
+    debug[2] = rankSize;
+    debug[3] = elementsPerRank;
+    debug[4] = blockNum;
+    debug[5] = step;
+}
 } // namespace
 
-extern "C" __global__ __aicore__ void tilexr_memory_all_gather_kernel(
+extern "C" __global__ __aicore__ void tilexr_memory_push_kernel(
     GM_ADDR commArgsGM, GM_ADDR inputGM, GM_ADDR outputGM, GM_ADDR debugGM, int32_t elementsPerRank)
 {
     if constexpr (g_coreType == AscendC::AIV) {
-        auto args = reinterpret_cast<__gm__ TileXR::CommArgs*>(commArgsGM);
         auto input = reinterpret_cast<__gm__ int32_t*>(inputGM);
-        auto output = reinterpret_cast<__gm__ int32_t*>(outputGM);
         auto debug = reinterpret_cast<__gm__ int32_t*>(debugGM);
 
-        int32_t rank = args->rank;
-        int32_t rankSize = args->rankSize;
         int32_t blockIdx = AscendC::GetBlockIdx();
         int32_t blockNum = AscendC::GetBlockNum();
-        if (debug != nullptr && blockIdx == 0) {
-            debug[0] = TILEXR_MEMORY_DEMO_MAGIC;
-            debug[1] = rank;
-            debug[2] = rankSize;
-            debug[3] = elementsPerRank;
-            debug[4] = blockNum;
-        }
-        if (elementsPerRank <= 0 || rankSize <= 0 || rank < 0 || rank >= rankSize) {
+        int32_t rank = 0;
+        int32_t rankSize = 0;
+        GM_ADDR shareAddrs[TileXR::TILEXR_MAX_RANK_SIZE];
+        if (!LoadMemoryDemoArgs(commArgsGM, elementsPerRank, rank, rankSize, shareAddrs)) {
             return;
         }
+        WriteMemoryDemoDebug(debug, rank, rankSize, elementsPerRank, blockNum, TILEXR_MEMORY_DEMO_STEP_PUSH);
 
         AscendC::TPipe pipe;
         AscendC::TBuf<AscendC::QuePosition::VECCALC> tBuf;
         pipe.InitBuffer(tBuf, TILEXR_MEMORY_DEMO_UB_BYTES);
-
-        GM_ADDR shareAddrs[TileXR::TILEXR_MAX_RANK_SIZE];
-        AscendC::GlobalTensor<GM_ADDR> peerMems;
-        peerMems.SetGlobalBuffer(&(args->peerMems[0]), TileXR::TILEXR_MAX_RANK_SIZE);
-        for (int32_t peer = 0; peer < rankSize; ++peer) {
-            shareAddrs[peer] = peerMems.GetValue(peer);
-        }
 
         int64_t localOffset = 0;
         int64_t localCount = 0;
         GetBlockSlice<int32_t>(elementsPerRank, blockNum, blockIdx, localOffset, localCount);
 
         AscendC::GlobalTensor<int32_t> inputTensor;
-        AscendC::GlobalTensor<int32_t> shareTensor;
         inputTensor.SetGlobalBuffer(input + localOffset, localCount);
-        shareTensor.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t*>(shareAddrs[rank] + TileXR::IPC_DATA_OFFSET) +
-                                        localOffset,
-            localCount);
-        CopyGmToGm<int32_t>(shareTensor, inputTensor, tBuf, localCount);
-
-        SyncCollectives sync;
-        sync.Init(rank, rankSize, shareAddrs, tBuf);
-        sync.SetInnerFlag(TILEXR_MEMORY_DEMO_MAGIC, TILEXR_MEMORY_DEMO_STEP_READY);
-
-        int32_t blocksPerRank = blockNum / rankSize;
-        if (blocksPerRank <= 0) {
-            blocksPerRank = 1;
+        for (int32_t dstRank = 0; dstRank < rankSize; ++dstRank) {
+            AscendC::GlobalTensor<int32_t> shareTensor;
+            shareTensor.SetGlobalBuffer(
+                reinterpret_cast<__gm__ int32_t*>(shareAddrs[dstRank] + TileXR::IPC_DATA_OFFSET) +
+                    static_cast<int64_t>(rank) * elementsPerRank + localOffset,
+                localCount);
+            CopyGmToGm<int32_t>(shareTensor, inputTensor, tBuf, localCount);
         }
-        int32_t activeBlocks = blocksPerRank * rankSize;
-        if (blockIdx >= activeBlocks) {
-            return;
-        }
-
-        int32_t sourceRank = blockIdx / blocksPerRank;
-        int32_t sourceBlockIdx = blockIdx - sourceRank * blocksPerRank;
-        int64_t remoteOffset = 0;
-        int64_t remoteCount = 0;
-        GetBlockSlice<int32_t>(elementsPerRank, blocksPerRank, sourceBlockIdx, remoteOffset, remoteCount);
-
-        sync.WaitRankInnerFlag(TILEXR_MEMORY_DEMO_MAGIC, TILEXR_MEMORY_DEMO_STEP_READY, sourceRank);
-
-        AscendC::GlobalTensor<int32_t> remoteTensor;
-        AscendC::GlobalTensor<int32_t> outputTensor;
-        remoteTensor.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t*>(shareAddrs[sourceRank] + TileXR::IPC_DATA_OFFSET) +
-                                         remoteOffset,
-            remoteCount);
-        outputTensor.SetGlobalBuffer(output + static_cast<int64_t>(sourceRank) * elementsPerRank + remoteOffset,
-            remoteCount);
-        CopyGmToGm<int32_t>(outputTensor, remoteTensor, tBuf, remoteCount);
     }
 }
 
-void launch_tilexr_memory_all_gather(
+extern "C" __global__ __aicore__ void tilexr_memory_collect_kernel(
+    GM_ADDR commArgsGM, GM_ADDR inputGM, GM_ADDR outputGM, GM_ADDR debugGM, int32_t elementsPerRank)
+{
+    if constexpr (g_coreType == AscendC::AIV) {
+        auto output = reinterpret_cast<__gm__ int32_t*>(outputGM);
+        auto debug = reinterpret_cast<__gm__ int32_t*>(debugGM);
+
+        int32_t blockIdx = AscendC::GetBlockIdx();
+        int32_t blockNum = AscendC::GetBlockNum();
+        int32_t rank = 0;
+        int32_t rankSize = 0;
+        GM_ADDR shareAddrs[TileXR::TILEXR_MAX_RANK_SIZE];
+        if (!LoadMemoryDemoArgs(commArgsGM, elementsPerRank, rank, rankSize, shareAddrs)) {
+            return;
+        }
+        WriteMemoryDemoDebug(debug, rank, rankSize, elementsPerRank, blockNum, TILEXR_MEMORY_DEMO_STEP_COLLECT);
+
+        AscendC::TPipe pipe;
+        AscendC::TBuf<AscendC::QuePosition::VECCALC> tBuf;
+        pipe.InitBuffer(tBuf, TILEXR_MEMORY_DEMO_UB_BYTES);
+
+        const int64_t totalElements = static_cast<int64_t>(rankSize) * elementsPerRank;
+        int64_t localOffset = 0;
+        int64_t localCount = 0;
+        GetBlockSlice<int32_t>(totalElements, blockNum, blockIdx, localOffset, localCount);
+        if (localCount <= 0) {
+            return;
+        }
+
+        AscendC::GlobalTensor<int32_t> shareTensor;
+        AscendC::GlobalTensor<int32_t> outputTensor;
+        shareTensor.SetGlobalBuffer(
+            reinterpret_cast<__gm__ int32_t*>(shareAddrs[rank] + TileXR::IPC_DATA_OFFSET) + localOffset, localCount);
+        outputTensor.SetGlobalBuffer(output + localOffset, localCount);
+        CopyGmToGm<int32_t>(outputTensor, shareTensor, tBuf, localCount);
+    }
+}
+
+void launch_tilexr_memory_push(
     uint32_t blockDim, void* stream, GM_ADDR commArgs, GM_ADDR input, GM_ADDR output, GM_ADDR debug,
     int32_t elementsPerRank)
 {
-    tilexr_memory_all_gather_kernel<<<blockDim, nullptr, stream>>>(
+    tilexr_memory_push_kernel<<<blockDim, nullptr, stream>>>(
+        commArgs, input, output, debug, elementsPerRank);
+}
+
+void launch_tilexr_memory_collect(
+    uint32_t blockDim, void* stream, GM_ADDR commArgs, GM_ADDR input, GM_ADDR output, GM_ADDR debug,
+    int32_t elementsPerRank)
+{
+    tilexr_memory_collect_kernel<<<blockDim, nullptr, stream>>>(
         commArgs, input, output, debug, elementsPerRank);
 }

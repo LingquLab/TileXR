@@ -138,6 +138,7 @@ add_custom_target(tilexr_ep_combine_kernel ALL DEPENDS "${TILEXR_EP_COMBINE_KERN
 add_library(tilexr-ep SHARED
     host/ep_layout.cpp
     host/ep_dispatch_host.cpp
+    host/ep_transport_route.cpp
     host/ep_launch_context.cpp
     host/ep_kernel_launch.cpp
     host/tilexr_ep_dispatch.cpp
@@ -158,7 +159,6 @@ target_link_directories(tilexr-ep
         ${CMAKE_CURRENT_BINARY_DIR}
         ${ASCEND_DRIVER_PATH}/lib64/driver
         ${ASCEND_HOME_PATH}/${ARCH}-linux/lib64
-        ${ASCEND_HOME_PATH}/${ARCH}-linux/devlib
 )
 
 target_link_libraries(tilexr-ep

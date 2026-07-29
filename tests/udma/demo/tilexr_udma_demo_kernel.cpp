@@ -17,7 +17,7 @@ extern "C" __global__ __aicore__ void tilexr_udma_all_gather_kernel(
 
     int32_t rank = args->rank;
     int32_t rankSize = args->rankSize;
-    bool enabled = TileXR::UDMARegistryEnabled(args);
+    bool enabled = TileXR::UDMAAllPeersEnabled(args);
 
     if (debug != nullptr) {
         debug[0] = TILEXR_UDMA_DEMO_MAGIC;
@@ -53,7 +53,7 @@ extern "C" __global__ __aicore__ void tilexr_udma_put_signal_kernel(
 
     int32_t rank = args->rank;
     int32_t rankSize = args->rankSize;
-    bool enabled = TileXR::UDMARegistryEnabled(args);
+    bool enabled = TileXR::UDMAAllPeersEnabled(args);
 
     if (debug != nullptr) {
         debug[0] = TILEXR_UDMA_DEMO_MAGIC;
@@ -91,7 +91,7 @@ extern "C" __global__ __aicore__ void tilexr_udma_slot_signal_get_probe_kernel(
 
     int32_t rank = args->rank;
     int32_t rankSize = args->rankSize;
-    bool enabled = TileXR::UDMARegistryEnabled(args);
+    bool enabled = TileXR::UDMAAllPeersEnabled(args);
 
     if (debug != nullptr) {
         debug[0] = TILEXR_UDMA_DEMO_MAGIC;
@@ -136,7 +136,7 @@ extern "C" __global__ __aicore__ void tilexr_udma_registered_smoke_kernel(
     auto local = reinterpret_cast<__gm__ uint8_t*>(localGM);
     auto debug = reinterpret_cast<__gm__ int32_t*>(debugGM);
 
-    bool enabled = TileXR::UDMARegistryEnabled(args);
+    bool enabled = TileXR::UDMAAllPeersEnabled(args);
     if (debug != nullptr) {
         debug[0] = TILEXR_UDMA_DEMO_MAGIC;
         debug[1] = enabled ? 1 : 0;

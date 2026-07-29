@@ -15,6 +15,9 @@ constexpr uint32_t kEpScalarUbBytes = 64;
 constexpr uint32_t kEpScalarUbOffset = kEpSyncUbBytes - kEpScalarUbBytes;
 constexpr int64_t kTileXrDataTypeFp16 = 3;
 
+static_assert(TileXREp::kEpUdmaReadyStrideBytes == TileXR::TILEXR_UDMA_CACHE_LINE_SIZE,
+    "EP UDMA ready slots must match the UDMA cache-line size");
+
 __aicore__ inline int64_t AlignUp(int64_t value, int64_t alignment)
 {
     if (alignment <= 0) {
@@ -42,7 +45,7 @@ __aicore__ inline int64_t AssistOffset(int64_t srcRank, int64_t slotBytes, int64
 __aicore__ inline int64_t UDMAReadyOffset(int64_t totalBytes, int32_t rank)
 {
     return AlignUp(totalBytes, TileXREp::kEpWindowAlignmentBytes) * 2 +
-        static_cast<int64_t>(rank) * static_cast<int64_t>(sizeof(uint64_t));
+        static_cast<int64_t>(rank) * TileXREp::kEpUdmaReadyStrideBytes;
 }
 
 __aicore__ inline int64_t UDMARecvWindowOffset(int64_t totalBytes)
@@ -73,12 +76,12 @@ __aicore__ inline int64_t UDMARelayReadyOffset(
     int64_t totalBytes, int32_t rankSize, int64_t slotBytes, int32_t srcRank)
 {
     return UDMARelayReadyBaseOffset(totalBytes, rankSize, slotBytes) +
-        static_cast<int64_t>(srcRank) * static_cast<int64_t>(sizeof(uint64_t));
+        static_cast<int64_t>(srcRank) * TileXREp::kEpUdmaReadyStrideBytes;
 }
 
 __aicore__ inline int64_t UDMAOperationBytes(int64_t totalBytes, int32_t rankSize, int64_t slotBytes)
 {
-    const int64_t relayReadyBytes = static_cast<int64_t>(rankSize) * static_cast<int64_t>(sizeof(uint64_t));
+    const int64_t relayReadyBytes = static_cast<int64_t>(rankSize) * TileXREp::kEpUdmaReadyStrideBytes;
     return AlignUp(UDMARelayReadyBaseOffset(totalBytes, rankSize, slotBytes) + relayReadyBytes,
         TileXR::TILEXR_UDMA_CACHE_LINE_SIZE);
 }
@@ -345,6 +348,28 @@ __aicore__ inline int32_t TileXREpNodeEnd(int32_t rank, int32_t localRankSize, i
 {
     int32_t end = TileXREpNodeStart(rank, localRankSize) + localRankSize;
     return end > rankSize ? rankSize : end;
+}
+
+__aicore__ inline bool TileXREpLoadLocalPeerMems(__gm__ TileXR::CommArgs *args, GM_ADDR *shareAddrs,
+    int32_t rank, int32_t rankSize, int32_t localRankSize)
+{
+    if (args == nullptr || shareAddrs == nullptr || localRankSize <= 0) {
+        return false;
+    }
+    for (int32_t peer = 0; peer < rankSize; ++peer) {
+        shareAddrs[peer] = nullptr;
+    }
+    AscendC::GlobalTensor<GM_ADDR> peerMems;
+    peerMems.SetGlobalBuffer(&(args->peerMems[0]), TileXR::TILEXR_MAX_RANK_SIZE);
+    const int32_t localNodeStart = TileXREpNodeStart(rank, localRankSize);
+    const int32_t localNodeEnd = TileXREpNodeEnd(rank, localRankSize, rankSize);
+    for (int32_t peer = localNodeStart; peer < localNodeEnd; ++peer) {
+        shareAddrs[peer] = peerMems.GetValue(peer);
+        if (shareAddrs[peer] == nullptr) {
+            return false;
+        }
+    }
+    return true;
 }
 
 __aicore__ inline void TileXREpStoreLocalReadyValue(GM_ADDR localWindow, int64_t totalBytes, int32_t rank,

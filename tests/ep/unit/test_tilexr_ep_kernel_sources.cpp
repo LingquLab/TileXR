@@ -99,6 +99,7 @@ void TestCrossNodeDispatchUsesUDMARegistry()
     CheckContains(path, contents, "tilexr_udma.h");
     CheckContains(path, contents, "TileXR::UDMARegistryEnabled(args)");
     CheckContains(path, contents, "TileXREpUsesUdmaWindow");
+    CheckContains(path, contents, "TileXREpLoadLocalPeerMems");
     CheckContains(path, contents, "TileXR::UDMAPutNbi<uint8_t>");
     CheckContains(path, contents, "TileXR::UDMAQuiet(args, dstRank)");
     CheckContains(path, contents, "TileXREpFlushDispatchSlotHeaders");
@@ -115,12 +116,22 @@ void TestCrossNodeDispatchPullsRemoteSlots()
 
     CheckContains(path, contents, "tilexr_ep_dispatch_cross_node_kernel");
     CheckContains(path, contents, "launch_tilexr_ep_dispatch_cross_node_kernel");
+    CheckNotContains(path, contents, "tilexr_ep_dispatch_cross_node_smoke_kernel");
+    CheckNotContains(path, contents, "launch_tilexr_ep_dispatch_cross_node_smoke_kernel");
     CheckContains(path, contents, "TileXREpPullUdmaSlots");
     CheckContains(path, contents, "TileXR::UDMAGetNbi<uint8_t>");
     CheckContains(path, contents, "TileXREpNotifyUdmaReady");
-    CheckContains(path, contents, "TileXREpWaitUdmaReady");
+    CheckContains(path, contents, "bool TileXREpWaitUdmaReady");
     CheckContains(path, contents, "TileXREpNotifyAllUdmaReady");
-    CheckContains(path, contents, "TileXREpWaitAllUdmaReady");
+    CheckContains(path, contents, "bool TileXREpWaitAllUdmaReady");
+    CheckContains(path, contents, "TileXREpInvalidateLocalCacheLines");
+    CheckContains(path, contents, "TileXR::TILEXR_UDMA_MAX_RETRY_TIMES");
+    CheckContains(path, contents, "tilexr_ep_udma_ready timeout");
+    CheckContains(path, contents, "tilexr_ep_udma_all_ready timeout");
+    CheckContains(path, contents, "if (!TileXREpWaitAllUdmaReady");
+    CheckContains(path, contents, "kEpStatusDispatchReadyTimeout");
+    CheckContains(path, contents, "kEpStatusDispatchSlotTimeout");
+    CheckContains(path, contents, "TileXREpStoreStatusValue(workspaceGM");
     CheckContains(path, contents, "TileXR::UDMAPutSignalNbi<uint8_t>");
 }
 
@@ -141,7 +152,7 @@ void TestCrossNodeDispatchSeparatesLocalAndRemotePeers()
     CheckContains(path, contents, "if (localRankSize > 1)");
     CheckContains(path, contents, "dstRank != rank && TileXREpIsSameNodePeer(rank, dstRank, localRankSize)");
     CheckContains(path, contents, "srcRank != rank &&");
-    CheckContains(path, contents, "TileXREpIsSameNodePeer(rank, srcRank, localRankSize)");
+    CheckContains(path, contents, "TileXREpIsSameNodePeer(rank, srcRank, effectiveLocalRankSize)");
     CheckContains(path, contents, "sameNodeSource ? rank : srcRank");
     CheckContains(path, contents, "!TileXREpIsSameNodePeer(rank, peer, localRankSize)");
 }
@@ -155,7 +166,45 @@ void TestHostDispatchSplitsCrossNodeKernel()
     }
 
     CheckContains(path, contents, "launch_tilexr_ep_dispatch_cross_node_kernel");
-    CheckContains(path, contents, "TileXREpUsesCrossNodeKernel");
+    CheckContains(path, contents, "TileXREpUsesDirectUdmaKernel");
+    CheckContains(path, contents, "context.transport ==");
+    CheckContains(path, contents, "TileXR::TileXRTransportKind::DIRECT_URMA");
+    CheckContains(path, contents, "GM_ADDR memoryWorkspace = nullptr;");
+    CheckContains(path, contents, "TileXREpCheckUdmaStatus(params.stream, params.workspace, context.window)");
+    CheckNotContains(path, contents, "TileXRSelectAutoTransport");
+    CheckNotContains(path, contents, "TILEXR_EP_DISPATCH_CROSS_NODE_SMOKE");
+    CheckNotContains(path, contents, "launch_tilexr_ep_dispatch_cross_node_smoke_kernel");
+    CheckNotContains(path, contents, "return TileXR::TILEXR_SUCCESS;\n        launch_tilexr_ep_dispatch_cross_node_kernel");
+}
+
+void TestSameNodeDirectUrmaUsesRegisteredWorkspace()
+{
+    std::string dispatch;
+    if (ReadFile("src/ep/kernels/tilexr_ep_dispatch_kernel.cpp", &dispatch)) {
+        CheckContains("src/ep/kernels/tilexr_ep_dispatch_kernel.cpp", dispatch, "useUdmaForAllPeers");
+        CheckContains("src/ep/kernels/tilexr_ep_dispatch_kernel.cpp", dispatch, "effectiveLocalRankSize");
+        CheckContains("src/ep/kernels/tilexr_ep_dispatch_kernel.cpp", dispatch,
+            "useUdmaForAllPeers ? nullptr : localIpcWindow");
+    }
+
+    std::string combine;
+    if (ReadFile("src/ep/kernels/tilexr_ep_combine_kernel.cpp", &combine)) {
+        CheckContains("src/ep/kernels/tilexr_ep_combine_kernel.cpp", combine, "useUdmaForAllPeers");
+        CheckContains("src/ep/kernels/tilexr_ep_combine_kernel.cpp", combine, "effectiveLocalRankSize");
+        CheckContains("src/ep/kernels/tilexr_ep_combine_kernel.cpp", combine,
+            "if (useUdmaForAllPeers && dstRank == rank)");
+    }
+}
+
+void TestCrossNodeDispatchHasNoTemporaryEarlyReturn()
+{
+    const std::string path = "src/ep/kernels/tilexr_ep_dispatch_kernel.cpp";
+    std::string contents;
+    if (!ReadFile(path, &contents)) {
+        return;
+    }
+
+    CheckNotContains(path, contents, "const int32_t localRankSize = args->localRankSize;\n        return;");
 }
 
 void TestDispatchHelpersLiveInDispatchHelperFile()
@@ -188,6 +237,9 @@ void TestCombineHelpersLiveInCombineHelperFile()
     CheckContains(path, contents, "TileXREpGetCombineTokenId");
     CheckContains(path, contents, "TileXREpGetCombineTopKId");
     CheckContains(path, contents, "sourceWindow + SlotOffset(slotRank, slotBytes)");
+    CheckContains(path, contents, "TileXREpInvalidateLocalCacheLines(slotGM, TileXREp::kEpSrcSlotHeaderBytes)");
+    CheckContains(path, contents, "TileXR::TILEXR_UDMA_MAX_RETRY_TIMES");
+    CheckContains(path, contents, "tilexr_ep_dispatch_slot_ready timeout");
 }
 
 void TestCombineKernelUsesTileXRPeerMemory()
@@ -209,6 +261,9 @@ void TestCombineKernelUsesTileXRPeerMemory()
     CheckContains(path, contents, "tilexr_ep_combine_cross_node_drain_kernel");
     CheckContains(path, contents, "TileXREpNotifyRemoteUdmaReadySeparate");
     CheckContains(path, contents, "TileXREpWaitRemoteUdmaReady");
+    CheckContains(path, contents, "TileXREpLoadLocalPeerMems");
+    CheckContains(path, contents, "TileXR::UDMARegistryEnabled(args)");
+    CheckNotContains(path, contents, "TileXREpUsesDirectUrmaTransport");
     CheckNotContains(path, contents, "tilexr_ep_dispatch_kernel");
 
     std::string hostLaunch;
@@ -233,6 +288,9 @@ void TestKernelCommonHasCombineHelpers()
     CheckContains(path, contents, "UDMASecondOperationOffset");
     CheckContains(path, contents, "TileXREpNotifyRemoteUdmaReadySeparate");
     CheckContains(path, contents, "TileXREpWaitRemoteUdmaReady");
+    CheckContains(path, contents, "TileXR::UDMAPutNbi<uint8_t>");
+    CheckNotContains(path, contents, "TileXRPutAutoNbi");
+    CheckNotContains(path, contents, "TileXRSelectAutoTransport");
     CheckContains(path, contents, "TileXREpStoreStatusValue");
     CheckContains(path, contents, "TileXREpFlushUdmaSourceWindow");
     CheckContains(path, contents, "IsValidShape");
@@ -254,6 +312,7 @@ void TestDispatchDemoRunsCombine()
     CheckContains(path, contents, "TileXRMoeEpCombine");
     CheckContains(path, contents, "ValidateCombineOutputs");
     CheckContains(path, contents, "combine validation");
+    CheckContains(path, contents, "TILEXR_EP_DEMO_BS");
 }
 
 void TestKernelForwardsActiveMask()
@@ -417,6 +476,34 @@ void TestClearLocalWindowDoesNotPreclearSlotHeaders()
         "    }");
 }
 
+void TestUdmaReadyFlagsUseCacheLineStride()
+{
+    const std::vector<std::string> kernelPaths = {
+        "src/ep/kernels/tilexr_ep_kernel_common.h",
+        "src/ep/kernels/tilexr_ep_dispatch_kernel.cpp",
+    };
+    for (std::vector<std::string>::const_iterator path = kernelPaths.begin(); path != kernelPaths.end(); ++path) {
+        std::string contents;
+        if (!ReadFile(*path, &contents)) {
+            continue;
+        }
+        CheckContains(*path, contents,
+            "static_cast<int64_t>(rank) * TileXREp::kEpUdmaReadyStrideBytes");
+    }
+
+    std::string common;
+    if (ReadFile("src/ep/kernels/tilexr_ep_kernel_common.h", &common)) {
+        CheckContains("src/ep/kernels/tilexr_ep_kernel_common.h", common,
+            "static_cast<int64_t>(srcRank) * TileXREp::kEpUdmaReadyStrideBytes");
+    }
+
+    std::string demo;
+    if (ReadFile("tests/ep/demo/tilexr_ep_dispatch_demo.cpp", &demo)) {
+        CheckContains("tests/ep/demo/tilexr_ep_dispatch_demo.cpp", demo,
+            "static_cast<std::size_t>(rankSize) * kUdmaReadyStrideBytes");
+    }
+}
+
 void TestNoForbiddenDependencies()
 {
     const std::vector<std::string> paths = {
@@ -455,6 +542,8 @@ int main()
     TestCrossNodeDispatchPullsRemoteSlots();
     TestCrossNodeDispatchSeparatesLocalAndRemotePeers();
     TestHostDispatchSplitsCrossNodeKernel();
+    TestSameNodeDirectUrmaUsesRegisteredWorkspace();
+    TestCrossNodeDispatchHasNoTemporaryEarlyReturn();
     TestDispatchHelpersLiveInDispatchHelperFile();
     TestCombineHelpersLiveInCombineHelperFile();
     TestCombineKernelUsesTileXRPeerMemory();
@@ -468,6 +557,7 @@ int main()
     TestKernelForwardsStaticQuantConfig();
     TestKernelForwardsPerTokenDynamicQuantConfig();
     TestClearLocalWindowDoesNotPreclearSlotHeaders();
+    TestUdmaReadyFlagsUseCacheLineStride();
     TestNoForbiddenDependencies();
     if (g_failures != 0) {
         std::cerr << g_failures << " TileXR EP kernel source checks failed" << std::endl;

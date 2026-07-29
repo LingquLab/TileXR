@@ -62,7 +62,6 @@ include_directories(
 link_directories(
     ${ASCEND_DRIVER_PATH}/lib64/driver
     ${ASCEND_HOME_PATH}/${ARCH}-linux/lib64
-    ${ASCEND_HOME_PATH}/${ARCH}-linux/devlib
 )
 
 add_executable(test_tilexr_udma_registry
@@ -70,6 +69,14 @@ add_executable(test_tilexr_udma_registry
 )
 
 target_include_directories(test_tilexr_udma_registry PRIVATE
+    ${TILEXR_ROOT}/src/include
+)
+
+add_executable(test_tilexr_transport_auto_route
+    unit/test_tilexr_transport_auto_route.cpp
+)
+
+target_include_directories(test_tilexr_transport_auto_route PRIVATE
     ${TILEXR_ROOT}/src/include
 )
 
@@ -114,6 +121,7 @@ target_link_libraries(test_tilexr_udma
 set(INSTALL_TARGETS
     test_tilexr_udma
     test_tilexr_udma_registry
+    test_tilexr_transport_auto_route
     test_tilexr_udma_transport_layout
     test_tilexr_udma_demo_sources
     test_tilexr_udma_source_guard

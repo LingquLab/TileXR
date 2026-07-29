@@ -16,27 +16,29 @@
 #include <unistd.h>
 
 #include "acl/acl.h"
+#include "ep_transport_route.h"
 #include "tilexr_api.h"
 #include "tilexr_ep.h"
+#include "tilexr_transport.h"
 #include "tilexr_types.h"
 
 namespace {
 
-constexpr int64_t kBs = 4;
+constexpr int64_t kDefaultBs = 4;
 constexpr int64_t kH = 8;
 constexpr int64_t kTopK = 2;
-constexpr int64_t kRoutes = kBs * kTopK;
-constexpr int64_t kXElements = kBs * kH;
 constexpr int64_t kAssistInts = 4;
 constexpr uint16_t kFp16One = 0x3c00;
 constexpr uint16_t kFp16Two = 0x4000;
 constexpr std::size_t kUdmaCacheLineBytes = 64;
+constexpr std::size_t kUdmaReadyStrideBytes = kUdmaCacheLineBytes;
 constexpr std::size_t kUdmaRegistrationAlignment = 2 * 1024 * 1024;
 
 TileXRUDMAMemHandle g_workspaceHandle = 0;
 bool g_workspaceRegistered = false;
 
 struct DemoConfig {
+    int64_t bs = kDefaultBs;
     int64_t moeExpertNum = 8;
     int64_t sharedExpertNum = 0;
     int64_t sharedExpertRankNum = 0;
@@ -45,7 +47,7 @@ struct DemoConfig {
 
     int64_t maxRoutesPerRank() const
     {
-        return kBs * (kTopK + sharedExpertNum);
+        return bs * (kTopK + sharedExpertNum);
     }
 
     int64_t effectiveTpWorldSize() const
@@ -332,12 +334,13 @@ std::size_t EpOperationBytes(int rankSize, const DemoConfig &config, std::size_t
     bool usePerTokenDynamicQuant)
 {
     const std::size_t windowBytes = EpWindowBytes(rankSize, config, payloadRowBytes, usePerTokenDynamicQuant);
-    const std::size_t readyOffset = windowBytes * 2 + static_cast<std::size_t>(rankSize) * sizeof(uint64_t);
+    const std::size_t readyOffset = windowBytes * 2 +
+        static_cast<std::size_t>(rankSize) * kUdmaReadyStrideBytes;
     const std::size_t relayOffset = AlignSize(readyOffset, kUdmaCacheLineBytes);
     const std::size_t relayBytes = static_cast<std::size_t>(rankSize) * static_cast<std::size_t>(rankSize) *
         EpSlotBytes(config, payloadRowBytes, usePerTokenDynamicQuant);
     const std::size_t relayReadyOffset = AlignSize(relayOffset + relayBytes, kUdmaCacheLineBytes);
-    const std::size_t relayReadyBytes = static_cast<std::size_t>(rankSize) * sizeof(uint64_t);
+    const std::size_t relayReadyBytes = static_cast<std::size_t>(rankSize) * kUdmaReadyStrideBytes;
     return AlignSize(relayReadyOffset + relayReadyBytes, kUdmaCacheLineBytes);
 }
 
@@ -346,6 +349,51 @@ std::size_t EpRequiredWorkspaceBytes(int rankSize, const DemoConfig &config, std
 {
     const std::size_t operationBytes = EpOperationBytes(rankSize, config, payloadRowBytes, usePerTokenDynamicQuant);
     return AlignSize(operationBytes * 2 + sizeof(uint64_t), kUdmaCacheLineBytes);
+}
+
+void DumpCrossNodeWindowSlots(int rank, int rankSize, void *workspaceDev, std::size_t baseOffset,
+    std::size_t slotBytes, const char *label)
+{
+    for (int slotRank = 0; slotRank < rankSize; ++slotRank) {
+        uint64_t slotHeader[8] = {};
+        const GM_ADDR slotAddr = static_cast<GM_ADDR>(workspaceDev) + baseOffset + 64 +
+            static_cast<std::size_t>(slotRank) * slotBytes;
+        if (CheckAcl(aclrtMemcpy(slotHeader, sizeof(slotHeader), slotAddr, sizeof(slotHeader),
+                ACL_MEMCPY_DEVICE_TO_HOST), "dump dispatch slot header")) {
+            const uint32_t count = static_cast<uint32_t>(slotHeader[0] & 0xffffffffULL);
+            const uint32_t slotSrc = static_cast<uint32_t>((slotHeader[0] >> 32) & 0xffffffffULL);
+            std::cerr << "rank " << rank << " dump " << label << " slotRank " << slotRank
+                      << " count " << count << " slotSrc " << slotSrc
+                      << " payloadBytes " << slotHeader[1] << " assistBytes " << slotHeader[2]
+                      << " magic " << slotHeader[3] << std::endl;
+        }
+    }
+}
+
+void DumpCrossNodeReadyFlags(int rank, int rankSize, void *workspaceDev, std::size_t windowBytes)
+{
+    const std::size_t readyBase = windowBytes * 2;
+    for (int peer = 0; peer < rankSize; ++peer) {
+        uint64_t ready = 0;
+        const GM_ADDR readyAddr = static_cast<GM_ADDR>(workspaceDev) + readyBase +
+            static_cast<std::size_t>(peer) * kUdmaReadyStrideBytes;
+        if (CheckAcl(aclrtMemcpy(&ready, sizeof(ready), readyAddr, sizeof(ready),
+                ACL_MEMCPY_DEVICE_TO_HOST), "dump dispatch ready")) {
+            std::cerr << "rank " << rank << " dump ready peer " << peer << " value " << ready << std::endl;
+        }
+    }
+}
+
+void DumpCrossNodeDispatchWindow(int rank, int rankSize, void *workspaceDev, std::size_t windowBytes,
+    std::size_t slotBytes, const char *reason)
+{
+    if (!EnvEnabled("TILEXR_EP_DEMO_DUMP_WINDOW") || workspaceDev == nullptr) {
+        return;
+    }
+    std::cerr << "rank " << rank << " dump dispatch window reason " << reason << std::endl;
+    DumpCrossNodeReadyFlags(rank, rankSize, workspaceDev, windowBytes);
+    DumpCrossNodeWindowSlots(rank, rankSize, workspaceDev, 0, slotBytes, "send window");
+    DumpCrossNodeWindowSlots(rank, rankSize, workspaceDev, windowBytes, slotBytes, "recv window");
 }
 
 uint16_t XValue(int rank, int64_t token, int64_t h)
@@ -412,18 +460,19 @@ int8_t DynamicQuantizedXValue(int rank, int64_t token, int64_t h)
 
 std::vector<int32_t> ExpertIds(const DemoConfig &config)
 {
-    std::vector<int32_t> expertIds(kRoutes);
-    for (int64_t route = 0; route < kRoutes; ++route) {
+    const int64_t routes = config.bs * kTopK;
+    std::vector<int32_t> expertIds(routes);
+    for (int64_t route = 0; route < routes; ++route) {
         expertIds[route] = static_cast<int32_t>(route % config.moeExpertNum);
     }
     return expertIds;
 }
 
-std::vector<uint8_t> ActiveMask(bool enabled)
+std::vector<uint8_t> ActiveMask(const DemoConfig &config, bool enabled)
 {
-    std::vector<uint8_t> mask(kBs, 1);
-    if (enabled && kBs > 0) {
-        mask[kBs - 1] = 0;
+    std::vector<uint8_t> mask(config.bs, 1);
+    if (enabled && config.bs > 0) {
+        mask[config.bs - 1] = 0;
     }
     return mask;
 }
@@ -493,7 +542,7 @@ std::vector<ExpectedRoute> BuildExpectedRoutes(
         if (effectiveTpWorldSize > 1 && srcRank % effectiveTpWorldSize != targetTpRankId) {
             continue;
         }
-        for (int64_t token = 0; token < kBs; ++token) {
+        for (int64_t token = 0; token < config.bs; ++token) {
             if (!activeMask.empty() && activeMask[token] == 0) {
                 continue;
             }
@@ -624,9 +673,9 @@ bool ValidateOutputs(int rank, int rankSize, const DemoConfig &config, const std
     return true;
 }
 
-bool ValidateCombineOutputs(int rank, const std::vector<uint16_t> &yOut)
+bool ValidateCombineOutputs(int rank, const DemoConfig &config, const std::vector<uint16_t> &yOut)
 {
-    for (int64_t token = 0; token < kBs; ++token) {
+    for (int64_t token = 0; token < config.bs; ++token) {
         for (int64_t h = 0; h < kH; ++h) {
             const uint16_t actualValue = yOut[token * kH + h];
             if (actualValue != kFp16Two) {
@@ -719,6 +768,7 @@ int main(int argc, char **argv)
     const bool usePerTokenDynamicQuant = quantMode == 2;
     const float staticQuantScale = static_cast<float>(GetEnvInt("TILEXR_EP_DEMO_STATIC_QUANT_SCALE", 1));
     DemoConfig config {};
+    config.bs = GetEnvInt("TILEXR_EP_DEMO_BS", static_cast<int>(config.bs));
     config.moeExpertNum = GetEnvInt("TILEXR_EP_DEMO_MOE_EXPERT_NUM", static_cast<int>(config.moeExpertNum));
     config.sharedExpertNum = GetEnvInt("TILEXR_EP_DEMO_SHARED_EXPERT_NUM", 0);
     config.sharedExpertRankNum = GetEnvInt("TILEXR_EP_DEMO_SHARED_EXPERT_RANK_NUM", 0);
@@ -729,7 +779,8 @@ int main(int argc, char **argv)
 
     const int64_t expertRankSize = static_cast<int64_t>(rankSize) / config.effectiveTpWorldSize();
     const int64_t moeRankNum = expertRankSize - config.sharedExpertRankNum;
-    if (rankSize <= 0 || rank < 0 || rank >= rankSize || config.effectiveTpWorldSize() <= 0 ||
+    if (rankSize <= 0 || rank < 0 || rank >= rankSize || config.bs <= 0 ||
+        config.effectiveTpWorldSize() <= 0 ||
         rankSize % config.effectiveTpWorldSize() != 0 || moeRankNum <= 0 ||
         config.moeExpertNum <= 0 || config.moeExpertNum % moeRankNum != 0 ||
         config.sharedExpertNum < 0 || config.sharedExpertRankNum < 0 ||
@@ -739,7 +790,7 @@ int main(int argc, char **argv)
         (quantMode != 0 && quantMode != 1 && quantMode != 2) ||
         ((useStaticQuant || usePerTokenDynamicQuant) && !dispatchOnly)) {
         std::cerr << "This demo expects a valid rank and moeExpertNum divisible by MoE rank num, got moeExpertNum="
-                  << config.moeExpertNum << " rankSize=" << rankSize
+                  << config.moeExpertNum << " rankSize=" << rankSize << " bs=" << config.bs
                   << " sharedExpertNum=" << config.sharedExpertNum
                   << " sharedExpertRankNum=" << config.sharedExpertRankNum
                   << " tpWorldSize=" << config.tpWorldSize
@@ -777,14 +828,14 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    std::vector<uint16_t> hostX(kXElements);
-    for (int64_t token = 0; token < kBs; ++token) {
+    std::vector<uint16_t> hostX(config.bs * kH);
+    for (int64_t token = 0; token < config.bs; ++token) {
         for (int64_t h = 0; h < kH; ++h) {
             hostX[token * kH + h] = XValue(rank, token, h);
         }
     }
     const std::vector<int32_t> hostExpertIds = ExpertIds(config);
-    const std::vector<uint8_t> hostActiveMask = ActiveMask(useActiveMask);
+    const std::vector<uint8_t> hostActiveMask = ActiveMask(config, useActiveMask);
     const std::size_t expectedRouteCount =
         BuildExpectedTpRoutes(rank, rankSize, config, hostActiveMask).size();
 
@@ -820,8 +871,9 @@ int main(int argc, char **argv)
     const std::size_t recvCountsBytes = rankSize * sizeof(int32_t);
     const std::size_t tpRecvCountsBytes = recvCountsBytes;
     const std::size_t assistBytes = (expandedElements / kH) * kAssistInts * sizeof(int32_t);
-    const std::size_t yOutBytes = kXElements * sizeof(uint16_t);
+    const std::size_t yOutBytes = static_cast<std::size_t>(config.bs * kH) * sizeof(uint16_t);
     const std::size_t payloadRowBytes = kH * expandElementBytes;
+    const std::size_t dispatchSlotBytes = EpSlotBytes(config, payloadRowBytes, usePerTokenDynamicQuant);
     const std::size_t dispatchWindowBytes = EpWindowBytes(rankSize, config, payloadRowBytes, usePerTokenDynamicQuant);
     const std::size_t dispatchPayloadBytes = AlignSize(dispatchWindowBytes, 32) *
         static_cast<std::size_t>(config.effectiveTpWorldSize() + 2);
@@ -887,17 +939,44 @@ int main(int argc, char **argv)
         Cleanup(comm, stream, deviceId, deviceSet, aclReady, buffers);
         return 1;
     }
-    const bool crossNode = commArgsHost != nullptr && commArgsHost->localRankSize > 0 &&
+    if (commArgsHost == nullptr) {
+        std::cerr << "TileXRGetCommArgsHost returned null communicator arguments" << std::endl;
+        Cleanup(comm, stream, deviceId, deviceSet, aclReady, buffers);
+        return 1;
+    }
+
+    const bool crossNode = commArgsHost->localRankSize > 0 &&
         commArgsHost->localRankSize < commArgsHost->rankSize;
-    if (crossNode && !CheckTileXR(TileXRUDMARegister(comm, static_cast<GM_ADDR>(workspaceDev), workspaceBytes,
+    TileXREp::EpTransportMode requestedTransport = TileXREp::EpTransportMode::AUTO;
+    if (!CheckTileXR(TileXREp::TileXREpParseTransportMode(
+            std::getenv("TILEXR_TRANSPORT_MODE"), &requestedTransport), "TileXREpParseTransportMode")) {
+        Cleanup(comm, stream, deviceId, deviceSet, aclReady, buffers);
+        return 1;
+    }
+    const bool registerWorkspace =
+        TileXREp::TileXREpShouldRegisterWorkspace(requestedTransport, *commArgsHost);
+    if (registerWorkspace &&
+        !CheckTileXR(TileXRUDMARegister(comm, static_cast<GM_ADDR>(workspaceDev), workspaceBytes,
             &workspaceHandle), "TileXRUDMARegister workspace")) {
         Cleanup(comm, stream, deviceId, deviceSet, aclReady, buffers);
         return 1;
     }
-    if (crossNode) {
+    if (registerWorkspace) {
         g_workspaceHandle = workspaceHandle;
         g_workspaceRegistered = true;
     }
+    TileXR::TileXRTransportKind resolvedTransport = TileXR::TileXRTransportKind::MEMORY;
+    if (!CheckTileXR(TileXREp::TileXREpResolveTransport(requestedTransport, *commArgsHost,
+            static_cast<uint64_t>(dispatchWindowBytes), &resolvedTransport), "TileXREpResolveTransport")) {
+        Cleanup(comm, stream, deviceId, deviceSet, aclReady, buffers);
+        return 1;
+    }
+    const bool useRegisteredWorkspace =
+        resolvedTransport == TileXR::TileXRTransportKind::DIRECT_URMA;
+    std::cout << "rank " << rank << " bs=" << config.bs
+              << " dispatchWindowBytes=" << dispatchWindowBytes
+              << " transport=" << (resolvedTransport == TileXR::TileXRTransportKind::DIRECT_URMA ?
+                    "direct_urma" : "memory") << std::endl;
 
     const std::vector<uint16_t> hostExpertOut(expandedElements, kFp16One);
     if (!CheckAcl(aclrtMemcpy(expertOutDev, expandXBytes, hostExpertOut.data(), expandXBytes,
@@ -908,24 +987,31 @@ int main(int argc, char **argv)
 
     const bool useSharedExperts = config.sharedExpertNum != 0 || config.sharedExpertRankNum != 0;
     const bool useTp = config.effectiveTpWorldSize() != 1;
-    const bool useDispatchV2 = crossNode || useActiveMask || useTpRecvCounts || expertTokenNumsType != 1 ||
-        useSharedExperts || useTp || useStaticQuant || usePerTokenDynamicQuant;
+    const bool useDispatchV2 = crossNode || useRegisteredWorkspace || useActiveMask || useTpRecvCounts ||
+        expertTokenNumsType != 1 || useSharedExperts || useTp || useStaticQuant || usePerTokenDynamicQuant;
     const int dispatchRet = useDispatchV2 ?
         TileXRMoeEpDispatchV2(xDev, static_cast<int32_t *>(expertIdsDev), scalesDev,
-            static_cast<bool *>(xActiveMaskDev), nullptr, comm, kBs, kH, kTopK, config.moeExpertNum,
+            static_cast<bool *>(xActiveMaskDev), nullptr, comm, config.bs, kH, kTopK, config.moeExpertNum,
             expertRankSize, ExpertRankForRank(rank, config), config.tpWorldSize, config.tpRankId, 0,
-            config.sharedExpertNum, config.sharedExpertRankNum, quantMode, kBs * rankSize, expertTokenNumsType,
+            config.sharedExpertNum, config.sharedExpertRankNum, quantMode, config.bs * rankSize, expertTokenNumsType,
             expandXDev, dynamicScalesDev,
             static_cast<int32_t *>(assistDev), static_cast<int64_t *>(expertTokenNumsDev),
             static_cast<int32_t *>(recvCountsDev), static_cast<int32_t *>(tpRecvCountsDev), nullptr, workspaceDev,
             (useStaticQuant || usePerTokenDynamicQuant) ? TileXR::TILEXR_DATA_TYPE_INT8 :
                 TileXR::TILEXR_DATA_TYPE_FP16,
             stream) :
-        TileXRMoeEpDispatch(xDev, static_cast<int32_t *>(expertIdsDev), comm, kBs, kH, kTopK, config.moeExpertNum,
+        TileXRMoeEpDispatch(xDev, static_cast<int32_t *>(expertIdsDev), comm, config.bs, kH, kTopK,
+            config.moeExpertNum,
             expandXDev, static_cast<int64_t *>(expertTokenNumsDev), static_cast<int32_t *>(recvCountsDev),
             static_cast<int32_t *>(assistDev), TileXR::TILEXR_DATA_TYPE_FP16, stream);
-    if (!CheckTileXR(dispatchRet, "TileXRMoeEpDispatch") ||
-        !CheckAcl(aclrtSynchronizeStream(stream), "aclrtSynchronizeStream")) {
+    const bool dispatchLaunchOk = CheckTileXR(dispatchRet, "TileXRMoeEpDispatch");
+    const bool dispatchSyncOk = dispatchLaunchOk &&
+        CheckAcl(aclrtSynchronizeStream(stream), "aclrtSynchronizeStream");
+    if (!dispatchLaunchOk || !dispatchSyncOk) {
+        if (crossNode) {
+            DumpCrossNodeDispatchWindow(rank, rankSize, workspaceDev, dispatchWindowBytes, dispatchSlotBytes,
+                "dispatch failure");
+        }
         Cleanup(comm, stream, deviceId, deviceSet, aclReady, buffers);
         return 1;
     }
@@ -1017,12 +1103,13 @@ int main(int argc, char **argv)
         return dispatchOk ? 0 : 1;
     }
 
-    const int combineRet = crossNode ?
+    const int combineRet = (crossNode || useRegisteredWorkspace) ?
         TileXRMoeEpCombineV2(expertOutDev, static_cast<int32_t *>(assistDev),
-            static_cast<int32_t *>(recvCountsDev), comm, kBs, kH, kTopK, config.moeExpertNum, yOutDev, workspaceDev,
+            static_cast<int32_t *>(recvCountsDev), comm, config.bs, kH, kTopK, config.moeExpertNum, yOutDev,
+            workspaceDev,
             TileXR::TILEXR_DATA_TYPE_FP16, stream) :
         TileXRMoeEpCombine(expertOutDev, static_cast<int32_t *>(assistDev),
-            static_cast<int32_t *>(recvCountsDev), comm, kBs, kH, kTopK, config.moeExpertNum, yOutDev,
+            static_cast<int32_t *>(recvCountsDev), comm, config.bs, kH, kTopK, config.moeExpertNum, yOutDev,
             TileXR::TILEXR_DATA_TYPE_FP16, stream);
     if (!CheckTileXR(combineRet, "TileXRMoeEpCombine") ||
         !CheckAcl(aclrtSynchronizeStream(stream), "aclrtSynchronizeStream combine")) {
@@ -1034,14 +1121,14 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    std::vector<uint16_t> hostYOut(kXElements);
+    std::vector<uint16_t> hostYOut(config.bs * kH);
     if (!CheckAcl(aclrtMemcpy(hostYOut.data(), yOutBytes, yOutDev, yOutBytes,
             ACL_MEMCPY_DEVICE_TO_HOST), "copy yOut")) {
         Cleanup(comm, stream, deviceId, deviceSet, aclReady, buffers);
         return 1;
     }
 
-    const bool combineOk = ValidateCombineOutputs(rank, hostYOut);
+    const bool combineOk = ValidateCombineOutputs(rank, config, hostYOut);
     std::cout << "rank " << rank << " combine validation " << (combineOk ? "PASS" : "FAIL") << std::endl;
     Cleanup(comm, stream, deviceId, deviceSet, aclReady, buffers);
     return combineOk ? 0 : 1;

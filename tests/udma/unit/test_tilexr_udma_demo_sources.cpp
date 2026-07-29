@@ -60,12 +60,23 @@ int main()
     CheckContains(demoPath, demo, "launch_tilexr_udma_all_gather");
     CheckContains(demoPath, demo, "launch_tilexr_udma_put_signal");
     CheckContains(demoPath, demo, "DemoBarrierAll");
+    CheckContains(demoPath, demo, "TILEXR_DEMO_BARRIER_ADDR");
+    CheckContains(demoPath, demo, "GetEnvInt(\"TILEXR_DEMO_TEST_TYPE\"");
+    CheckContains(demoPath, demo, "GetEnvInt(\"TILEXR_DEMO_ELEMENTS_PER_RANK\"");
+    CheckContains(demoPath, demo, "INADDR_ANY");
+    CheckContains(demoPath, demo, "inet_pton");
     CheckNotContains(demoPath, demo, "aclshmem");
     CheckNotContains(demoPath, demo, "shmem_");
 
+    const std::string mpiRunnerPath = "tests/udma/demo/run_tilexr_udma_data_channel_probe_mpi.sh";
+    const std::string mpiRunner = ReadFile(mpiRunnerPath);
+    CheckContains(mpiRunnerPath, mpiRunner, "BARRIER_PORT=$((COMM_PORT + 97))");
+    CheckContains(mpiRunnerPath, mpiRunner, "TILEXR_DEMO_BARRIER_ADDR=\"${COMM_HOST}:${BARRIER_PORT}\"");
+    CheckNotContains(mpiRunnerPath, mpiRunner, "TILEXR_DEMO_BARRIER_ADDR=\"${COMM_ID}\"");
+
     const std::string kernelPath = "tests/udma/demo/tilexr_udma_demo_kernel.cpp";
     const std::string kernel = ReadFile(kernelPath);
-    CheckContains(kernelPath, kernel, "UDMARegistryEnabled");
+    CheckContains(kernelPath, kernel, "UDMAAllPeersEnabled");
     CheckContains(kernelPath, kernel, "UDMAPutNbi<int32_t>");
     CheckContains(kernelPath, kernel, "UDMAPutSignalNbi<int32_t>");
     CheckContains(kernelPath, kernel, "UDMAQuiet");

@@ -47,10 +47,10 @@ namespace TileXREp {
 
 namespace {
 
-bool TileXREpUsesCrossNodeKernel(const EpHostLaunchContext &context)
+bool TileXREpUsesDirectUdmaKernel(const EpHostLaunchContext &context)
 {
-    return context.hostArgs != nullptr && context.hostArgs->localRankSize > 0 &&
-        context.hostArgs->localRankSize < context.hostArgs->rankSize;
+    return context.transport == TileXR::TileXRTransportKind::DIRECT_URMA && context.hostArgs != nullptr &&
+        context.hostArgs->rankSize > 1 && context.window.slotBytes > 0;
 }
 
 int64_t TileXREpUdmaStatusOffset(int64_t totalBytes, int64_t rankSize, int64_t slotBytes)
@@ -60,6 +60,29 @@ int64_t TileXREpUdmaStatusOffset(int64_t totalBytes, int64_t rankSize, int64_t s
         return TileXR::TILEXR_INVALID_VALUE;
     }
     return operationBytes * 2;
+}
+
+int TileXREpCheckUdmaStatus(aclrtStream stream, void *workspace, const EpWindowConfig &window)
+{
+    if (workspace == nullptr) {
+        return TileXR::TILEXR_ERROR_NOT_INITIALIZED;
+    }
+    aclError aclRet = aclrtSynchronizeStream(stream);
+    if (aclRet != ACL_SUCCESS) {
+        return TileXR::TILEXR_ERROR_INTERNAL;
+    }
+
+    const int64_t statusOffset = TileXREpUdmaStatusOffset(window.totalBytes, window.rankSize, window.slotBytes);
+    if (statusOffset == TileXR::TILEXR_INVALID_VALUE) {
+        return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    uint64_t status = TileXREp::kEpStatusOk;
+    aclRet = aclrtMemcpy(&status, sizeof(status), static_cast<GM_ADDR>(workspace) + statusOffset,
+        sizeof(status), ACL_MEMCPY_DEVICE_TO_HOST);
+    if (aclRet != ACL_SUCCESS) {
+        return TileXR::TILEXR_ERROR_INTERNAL;
+    }
+    return status == TileXREp::kEpStatusOk ? TileXR::TILEXR_SUCCESS : TileXR::TILEXR_ERROR_TIMEOUT;
 }
 
 } // namespace
@@ -73,7 +96,7 @@ int TileXREpLaunchDispatchKernel(const EpDispatchParams &params, const EpHostLau
     }
 
     constexpr uint32_t kMvpBlockDim = 1;
-    if (TileXREpUsesCrossNodeKernel(context)) {
+    if (TileXREpUsesDirectUdmaKernel(context)) {
         launch_tilexr_ep_dispatch_cross_node_kernel(kMvpBlockDim, params.stream, context.devArgs,
             static_cast<GM_ADDR>(params.x), reinterpret_cast<GM_ADDR>(params.expertIds),
             static_cast<GM_ADDR>(params.scales), reinterpret_cast<GM_ADDR>(params.xActiveMask),
@@ -87,14 +110,16 @@ int TileXREpLaunchDispatchKernel(const EpDispatchParams &params, const EpHostLau
             context.window.assistBytesPerSlot, context.window.slotBytes, context.window.totalBytes,
             params.expertTokenNumsType, params.sharedExpertNum, params.sharedExpertRankNum, params.quantMode,
             params.tpWorldSize, params.tpRankId, magic);
+        return TileXREpCheckUdmaStatus(params.stream, params.workspace, context.window);
     } else {
+        GM_ADDR memoryWorkspace = nullptr;
         launch_tilexr_ep_dispatch_kernel(kMvpBlockDim, params.stream, context.devArgs, static_cast<GM_ADDR>(params.x),
             reinterpret_cast<GM_ADDR>(params.expertIds), static_cast<GM_ADDR>(params.scales),
             reinterpret_cast<GM_ADDR>(params.xActiveMask), static_cast<GM_ADDR>(params.expandXOut),
             static_cast<GM_ADDR>(params.dynamicScalesOut), reinterpret_cast<GM_ADDR>(params.expertTokenNumsOut),
             reinterpret_cast<GM_ADDR>(params.epRecvCountsOut),
             reinterpret_cast<GM_ADDR>(params.tpRecvCountsOut), reinterpret_cast<GM_ADDR>(params.assistInfoForCombineOut),
-            static_cast<GM_ADDR>(params.workspace), params.bs, params.h, params.topK, params.moeExpertNum, context.window.dtypeBytes,
+            memoryWorkspace, params.bs, params.h, params.topK, params.moeExpertNum, context.window.dtypeBytes,
             context.window.maxRoutesPerSrc, context.window.rowBytes, context.window.payloadRowBytes,
             context.window.payloadBytesPerSlot, context.window.assistBytesPerSlot, context.window.slotBytes,
             context.window.totalBytes, params.expertTokenNumsType, params.sharedExpertNum, params.sharedExpertRankNum,
@@ -112,7 +137,7 @@ int TileXREpLaunchCombineKernel(const EpCombineParams &params, const EpHostLaunc
     }
 
     constexpr uint32_t kMvpBlockDim = 1;
-    if (TileXREpUsesCrossNodeKernel(context)) {
+    if (TileXREpUsesDirectUdmaKernel(context)) {
         launch_tilexr_ep_combine_cross_node_kernel(kMvpBlockDim, params.stream, context.devArgs,
             static_cast<GM_ADDR>(params.expertOut), reinterpret_cast<GM_ADDR>(params.assistInfoForCombine),
             reinterpret_cast<GM_ADDR>(params.epRecvCounts), static_cast<GM_ADDR>(params.yOut),
@@ -120,23 +145,9 @@ int TileXREpLaunchCombineKernel(const EpCombineParams &params, const EpHostLaunc
             static_cast<int64_t>(params.dtype), context.window.dtypeBytes, context.window.maxRoutesPerSrc,
             context.window.rowBytes, context.window.payloadBytesPerSlot, context.window.assistBytesPerSlot,
             context.window.slotBytes, context.window.totalBytes, magic);
-        aclError aclRet = aclrtSynchronizeStream(params.stream);
-        if (aclRet != ACL_SUCCESS) {
-            return TileXR::TILEXR_ERROR_INTERNAL;
-        }
-        uint64_t status = TileXREp::kEpStatusOk;
-        const int64_t statusOffset = TileXREpUdmaStatusOffset(
-            context.window.totalBytes, context.window.rankSize, context.window.slotBytes);
-        if (statusOffset == TileXR::TILEXR_INVALID_VALUE) {
-            return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
-        }
-        aclRet = aclrtMemcpy(&status, sizeof(status), static_cast<GM_ADDR>(params.workspace) + statusOffset,
-            sizeof(status), ACL_MEMCPY_DEVICE_TO_HOST);
-        if (aclRet != ACL_SUCCESS) {
-            return TileXR::TILEXR_ERROR_INTERNAL;
-        }
-        if (status != TileXREp::kEpStatusOk) {
-            return TileXR::TILEXR_ERROR_TIMEOUT;
+        const int statusRet = TileXREpCheckUdmaStatus(params.stream, params.workspace, context.window);
+        if (statusRet != TileXR::TILEXR_SUCCESS) {
+            return statusRet;
         }
         launch_tilexr_ep_combine_cross_node_drain_kernel(kMvpBlockDim, params.stream, context.devArgs,
             static_cast<GM_ADDR>(params.yOut), static_cast<GM_ADDR>(params.workspace), params.bs, params.h,

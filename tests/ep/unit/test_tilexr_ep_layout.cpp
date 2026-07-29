@@ -79,6 +79,15 @@ void TestWindowConfig()
     CheckInt64("total bytes", config.totalBytes, 704);
 }
 
+void TestUdmaWorkspaceUsesCacheLineReadySlots()
+{
+    CheckInt64("2-rank operation bytes", TileXREp::TileXREpUdmaOperationBytes(704, 2, 320), 2944);
+    CheckInt64("2-rank workspace bytes", TileXREp::TileXREpUdmaRequiredWorkspaceBytes(704, 2, 320), 5952);
+    CheckInt64("4-rank operation bytes", TileXREp::TileXREpUdmaOperationBytes(131392, 4, 32832), 788608);
+    CheckInt64("4-rank workspace bytes",
+        TileXREp::TileXREpUdmaRequiredWorkspaceBytes(131392, 4, 32832), 1577280);
+}
+
 void TestRejectsInvalidConfig()
 {
     TileXREp::EpWindowConfig config {};
@@ -107,6 +116,7 @@ int main()
     TestExpertMapping();
     TestDataTypes();
     TestWindowConfig();
+    TestUdmaWorkspaceUsesCacheLineReadySlots();
     TestRejectsInvalidConfig();
     return g_failures == 0 ? 0 : 1;
 }

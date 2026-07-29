@@ -58,6 +58,7 @@ int TileXRUDMAContext::Init(const TileXRUDMAContextOptions& options)
     TileXRUDMATransportOptions transportOptions {};
     transportOptions.rank = options_.rank;
     transportOptions.rankSize = options_.rankSize;
+    transportOptions.localRankSize = options_.localRankSize;
     transportOptions.devId = options_.devId;
     transportOptions.exchange = options_.exchange;
     int ret = transport_->Init(transportOptions);

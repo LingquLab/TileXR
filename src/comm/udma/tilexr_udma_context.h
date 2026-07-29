@@ -30,6 +30,7 @@ using TileXRUDMACommArgsUpdateFn = int (*)(const TileXRUDMACommArgsState& state,
 struct TileXRUDMAContextOptions {
     int rank = 0;
     int rankSize = 0;
+    int localRankSize = 1;
     int devId = 0;
     bool threadMode = false;
     TileXRSockExchange* exchange = nullptr;

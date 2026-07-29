@@ -5,6 +5,7 @@
 
 #include "acl/acl_base.h"
 #include "ep_layout.h"
+#include "ep_transport_route.h"
 #include "tilexr_api.h"
 
 namespace TileXREp {
@@ -64,6 +65,7 @@ struct EpHostLaunchContext {
     TileXR::CommArgs *hostArgs = nullptr;
     GM_ADDR devArgs = nullptr;
     EpWindowConfig window {};
+    TileXR::TileXRTransportKind transport = TileXR::TileXRTransportKind::MEMORY;
 };
 
 int TileXREpValidateBasicDispatchParams(const EpDispatchParams &params);

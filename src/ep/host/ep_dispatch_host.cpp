@@ -7,11 +7,6 @@
 namespace TileXREp {
 namespace {
 
-bool TileXREpUsesCrossNodeComm(const TileXR::CommArgs &commArgs)
-{
-    return commArgs.localRankSize > 0 && commArgs.localRankSize < commArgs.rankSize;
-}
-
 int64_t TileXREpEffectiveTpWorldSize(int64_t tpWorldSize)
 {
     return tpWorldSize == 0 ? 1 : tpWorldSize;
@@ -118,18 +113,6 @@ int TileXREpValidateDispatchConfig(const EpDispatchParams &params, const TileXR:
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
 
-    for (int rank = 0; rank < commArgs.rankSize; ++rank) {
-        if (commArgs.peerMems[rank] == nullptr) {
-            return TileXR::TILEXR_ERROR_NOT_INITIALIZED;
-        }
-    }
-
-    if (TileXREpUsesCrossNodeComm(commArgs) &&
-        (params.workspace == nullptr || (commArgs.extraFlag & TileXR::ExtraFlag::UDMA) == 0 ||
-            commArgs.udmaInfoPtr == nullptr || commArgs.udmaRegistryPtr == nullptr)) {
-        return TileXR::TILEXR_ERROR_NOT_INITIALIZED;
-    }
-
     int ret = TileXREpValidateDispatchV2Config(params, commArgs);
     if (ret != TileXR::TILEXR_SUCCESS) {
         return ret;
@@ -169,18 +152,6 @@ int TileXREpValidateCombineConfig(const EpCombineParams &params, const TileXR::C
         commArgs.rank < 0 || commArgs.rank >= commArgs.rankSize) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
-    if (TileXREpUsesCrossNodeComm(commArgs) &&
-        (params.workspace == nullptr || (commArgs.extraFlag & TileXR::ExtraFlag::UDMA) == 0 ||
-            commArgs.udmaInfoPtr == nullptr || commArgs.udmaRegistryPtr == nullptr)) {
-        return TileXR::TILEXR_ERROR_NOT_INITIALIZED;
-    }
-
-    for (int rank = 0; rank < commArgs.rankSize; ++rank) {
-        if (commArgs.peerMems[rank] == nullptr) {
-            return TileXR::TILEXR_ERROR_NOT_INITIALIZED;
-        }
-    }
-
     return TileXREpBuildWindowConfig(commArgs.rankSize, params.bs, params.h, params.topK, params.moeExpertNum,
         params.dtype, window);
 }

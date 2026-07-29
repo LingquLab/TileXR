@@ -324,7 +324,8 @@ int TileXRUDMATransport::Init(const TileXRUDMATransportOptions& options)
     if (options.rankSize <= 1) {
         return TILEXR_SUCCESS;
     }
-    if (options.rank < 0 || options.rank >= options.rankSize || options.exchange == nullptr) {
+    if (options.rank < 0 || options.rank >= options.rankSize || options.localRankSize <= 0 ||
+        options.localRankSize > options.rankSize || options.exchange == nullptr) {
         return TILEXR_ERROR_PARA_CHECK_FAIL;
     }
     options_ = options;
@@ -459,7 +460,7 @@ int TileXRUDMATransport::BuildRoutes()
 
     std::vector<int32_t> localRouteByPeer(options_.rankSize, -1);
     for (int peer = 0; peer < options_.rankSize; ++peer) {
-        if (peer == options_.rank) {
+        if (!UsesUDMAPeer(peer)) {
             continue;
         }
         uint32_t localEid = devEids[0].eidIndex;
@@ -480,7 +481,7 @@ int TileXRUDMATransport::BuildRoutes()
     }
 
     for (int peer = 0; peer < options_.rankSize; ++peer) {
-        if (peer == options_.rank) {
+        if (!UsesUDMAPeer(peer)) {
             continue;
         }
         int32_t remoteEid = allRouteByPeer[peer * options_.rankSize + options_.rank];
@@ -720,6 +721,17 @@ uint32_t TileXRUDMATransport::FallbackLocalEid() const
     return 0;
 }
 
+bool TileXRUDMATransport::UsesUDMAPeer(int peer) const
+{
+    if (peer < 0 || peer >= options_.rankSize || peer == options_.rank) {
+        return false;
+    }
+    if (options_.localRankSize >= options_.rankSize) {
+        return true;
+    }
+    return peer / options_.localRankSize != options_.rank / options_.localRankSize;
+}
+
 int TileXRUDMATransport::RefreshUDMAInfo()
 {
     if (eidCount_ == 0 || states_.empty()) {
@@ -777,7 +789,8 @@ int TileXRUDMATransport::RefreshUDMAInfo()
     for (int rank = 0; rank < options_.rankSize; ++rank) {
         uint32_t localEid = fallbackEid;
         uint32_t remoteEid = fallbackEid;
-        if (rank != options_.rank) {
+        const bool usesUDMA = UsesUDMAPeer(rank);
+        if (usesUDMA) {
             localEid = peerLocalEid_[rank];
             remoteEid = peerRemoteEid_[rank];
         }
@@ -795,7 +808,7 @@ int TileXRUDMATransport::RefreshUDMAInfo()
             if (localMemIt != localMemInfoByEid_.end()) {
                 mem[rank] = localMemIt->second;
             }
-        } else {
+        } else if (usesUDMA) {
             mem[rank] = allMem[rank * eidCount_ + remoteEid];
             mem[rank].tpn = state.tpnList[rank];
         }
@@ -832,14 +845,23 @@ int TileXRUDMATransport::RegisterMemory(GM_ADDR localPtr, size_t bytes)
     }
     int ret = RegisterMemoryOnContexts(localPtr, bytes);
     if (ret != TILEXR_SUCCESS) {
+        TILEXR_LOG(ERROR) << "TileXR UDMA local memory registration failed, rank=" << options_.rank
+                          << ", bytes=" << bytes << ", ret=" << ret;
         return ret;
     }
     registeredPtr_ = localPtr;
     ret = ExchangeAndImportMemory();
     if (ret != TILEXR_SUCCESS) {
+        TILEXR_LOG(ERROR) << "TileXR UDMA remote memory exchange/import failed, rank=" << options_.rank
+                          << ", bytes=" << bytes << ", ret=" << ret;
         return ret;
     }
-    return RefreshUDMAInfo();
+    ret = RefreshUDMAInfo();
+    if (ret != TILEXR_SUCCESS) {
+        TILEXR_LOG(ERROR) << "TileXR UDMA info refresh failed after memory registration, rank=" << options_.rank
+                          << ", bytes=" << bytes << ", ret=" << ret;
+    }
+    return ret;
 }
 
 int TileXRUDMATransport::RegisterMemoryOnContexts(GM_ADDR localPtr, size_t bytes)
@@ -863,6 +885,9 @@ int TileXRUDMATransport::RegisterMemoryOnContexts(GM_ADDR localPtr, size_t bytes
         void* lmemHandle = nullptr;
         int ret = loader_.RaCtxLmemRegister(ctxEntry.second, &mrInfo, &lmemHandle);
         if (ret != 0 || lmemHandle == nullptr) {
+            TILEXR_LOG(ERROR) << "TileXR UDMA RaCtxLmemRegister failed, rank=" << options_.rank
+                              << ", eid=" << eidIndex << ", bytes=" << bytes << ", ret=" << ret
+                              << ", handle=" << lmemHandle;
             return TILEXR_ERROR_INTERNAL;
         }
 
@@ -903,6 +928,8 @@ int TileXRUDMATransport::ExchangeAndImportMemory()
     std::vector<uint32_t> allCounts(options_.rankSize);
     int ret = options_.exchange->AllGather(&localCount, 1, allCounts.data());
     if (ret != TILEXR_SUCCESS) {
+        TILEXR_LOG(ERROR) << "TileXR UDMA memory-count AllGather failed, rank=" << options_.rank
+                          << ", localCount=" << localCount << ", ret=" << ret;
         return ret;
     }
     const uint32_t maxCount = *std::max_element(allCounts.begin(), allCounts.end());
@@ -927,12 +954,14 @@ int TileXRUDMATransport::ExchangeAndImportMemory()
     std::vector<ExchangedMrInfo> all(options_.rankSize * maxCount);
     ret = options_.exchange->AllGather(local.data(), local.size(), all.data());
     if (ret != TILEXR_SUCCESS) {
+        TILEXR_LOG(ERROR) << "TileXR UDMA memory-info AllGather failed, rank=" << options_.rank
+                          << ", maxCount=" << maxCount << ", ret=" << ret;
         return ret;
     }
 
     remoteMemHandles_.assign(options_.rankSize, nullptr);
     for (int peer = 0; peer < options_.rankSize; ++peer) {
-        if (peer == options_.rank) {
+        if (!UsesUDMAPeer(peer)) {
             continue;
         }
         const uint32_t remoteEid = peerRemoteEid_[peer];
@@ -945,6 +974,9 @@ int TileXRUDMATransport::ExchangeAndImportMemory()
             }
         }
         if (remote == nullptr) {
+            TILEXR_LOG(ERROR) << "TileXR UDMA remote memory info missing, rank=" << options_.rank
+                              << ", peer=" << peer << ", remoteEid=" << remoteEid
+                              << ", peerCount=" << allCounts[peer];
             return TILEXR_ERROR_INTERNAL;
         }
         const uint32_t localEid = peerLocalEid_[peer];
@@ -956,6 +988,10 @@ int TileXRUDMATransport::ExchangeAndImportMemory()
         void* remoteHandle = nullptr;
         ret = loader_.RaCtxRmemImport(ctxHandleByEid_[localEid], &importInfo, &remoteHandle);
         if (ret != 0 || remoteHandle == nullptr) {
+            TILEXR_LOG(ERROR) << "TileXR UDMA RaCtxRmemImport failed, rank=" << options_.rank
+                              << ", peer=" << peer << ", localEid=" << localEid
+                              << ", remoteEid=" << remoteEid << ", ret=" << ret
+                              << ", handle=" << remoteHandle;
             return TILEXR_ERROR_INTERNAL;
         }
         remoteMemHandles_[peer] = remoteHandle;

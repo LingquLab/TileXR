@@ -39,8 +39,28 @@ constexpr int kConnectRetryCount = 500;
 constexpr int kConnectRetrySleepMs = 10;
 
 struct BarrierEndpoint {
+    std::string host = "127.0.0.1";
     uint16_t port;
 };
+
+bool ParseHostPort(const char* value, BarrierEndpoint* endpoint)
+{
+    if (value == nullptr || value[0] == '\0' || endpoint == nullptr) {
+        return false;
+    }
+    const std::string text(value);
+    const size_t colon = text.rfind(':');
+    if (colon == std::string::npos || colon == 0 || colon + 1 >= text.size()) {
+        return false;
+    }
+    const int port = std::atoi(text.c_str() + colon + 1);
+    if (port <= 0 || port > 65535) {
+        return false;
+    }
+    endpoint->host = text.substr(0, colon);
+    endpoint->port = static_cast<uint16_t>(port);
+    return true;
+}
 
 int GetEnvInt(const char* name, int defaultValue)
 {
@@ -151,12 +171,19 @@ bool CopyDeviceToHost(int rank, void* dst, size_t dstSize, const void* src, size
 
 BarrierEndpoint GetBarrierEndpoint()
 {
+    BarrierEndpoint endpoint{};
+    const char* barrier = std::getenv("TILEXR_DEMO_BARRIER_ADDR");
+    if (ParseHostPort(barrier, &endpoint)) {
+        return endpoint;
+    }
+
     int basePort = kDefaultCommPort;
     const char* commId = std::getenv("TILEXR_COMM_ID");
     if (commId != nullptr) {
         std::string value(commId);
         size_t colon = value.rfind(':');
         if (colon != std::string::npos && colon + 1 < value.size()) {
+            endpoint.host = value.substr(0, colon);
             basePort = std::atoi(value.c_str() + colon + 1);
         }
     }
@@ -164,7 +191,8 @@ BarrierEndpoint GetBarrierEndpoint()
     if (barrierPort <= 0 || barrierPort > 65535) {
         barrierPort = kDefaultCommPort + kDemoBarrierPortOffset;
     }
-    return BarrierEndpoint{static_cast<uint16_t>(barrierPort)};
+    endpoint.port = static_cast<uint16_t>(barrierPort);
+    return endpoint;
 }
 
 bool SendAll(int fd, const void* data, size_t bytes)
@@ -220,7 +248,7 @@ int CreateBarrierServer(uint16_t port)
     }
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_addr.s_addr = htonl(INADDR_ANY);
     addr.sin_port = htons(port);
     if (bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0 ||
         listen(fd, SOMAXCONN) != 0) {
@@ -230,12 +258,14 @@ int CreateBarrierServer(uint16_t port)
     return fd;
 }
 
-int ConnectBarrierServer(uint16_t port)
+int ConnectBarrierServer(const BarrierEndpoint& endpoint)
 {
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    addr.sin_port = htons(port);
+    addr.sin_port = htons(endpoint.port);
+    if (inet_pton(AF_INET, endpoint.host.c_str(), &addr.sin_addr) != 1) {
+        return -1;
+    }
 
     for (int attempt = 0; attempt < kConnectRetryCount; ++attempt) {
         int fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -258,14 +288,15 @@ bool DemoBarrierAll(int rank, int rankSize, const std::string& step)
     }
 
     BarrierEndpoint endpoint = GetBarrierEndpoint();
-    PrintStatus(rank, "demo tcp barrier begin: " + step + " port=" + std::to_string(endpoint.port));
+    PrintStatus(rank, "demo tcp barrier begin: " + step + " endpoint=" + endpoint.host + ":" +
+        std::to_string(endpoint.port));
     constexpr uint8_t kArrive = 1;
     constexpr uint8_t kRelease = 2;
 
     if (rank == 0) {
         int serverFd = CreateBarrierServer(endpoint.port);
         if (serverFd < 0) {
-            std::cerr << "[rank " << rank << "] ERROR: failed to create demo barrier server on 127.0.0.1:"
+            std::cerr << "[rank " << rank << "] ERROR: failed to create demo barrier server on 0.0.0.0:"
                       << endpoint.port << ", errno=" << errno << std::endl;
             return false;
         }
@@ -296,10 +327,10 @@ bool DemoBarrierAll(int rank, int rankSize, const std::string& step)
             return false;
         }
     } else {
-        int fd = ConnectBarrierServer(endpoint.port);
+        int fd = ConnectBarrierServer(endpoint);
         if (fd < 0) {
-            std::cerr << "[rank " << rank << "] ERROR: failed to connect demo barrier on 127.0.0.1:"
-                      << endpoint.port << std::endl;
+            std::cerr << "[rank " << rank << "] ERROR: failed to connect demo barrier on " << endpoint.host
+                      << ":" << endpoint.port << std::endl;
             return false;
         }
         uint8_t release = 0;
@@ -386,8 +417,9 @@ int main(int argc, char** argv)
     int argIndex = 1;
     int rankSize = argc > argIndex ? std::atoi(argv[argIndex++]) : GetRankSizeFromEnv();
     int rank = argc > argIndex ? std::atoi(argv[argIndex++]) : GetRankFromEnv();
-    int testType = argc > argIndex ? std::atoi(argv[argIndex++]) : 0;
-    int32_t elementsPerRank = argc > argIndex ? std::atoi(argv[argIndex++]) : kDefaultElementsPerRank;
+    int testType = argc > argIndex ? std::atoi(argv[argIndex++]) : GetEnvInt("TILEXR_DEMO_TEST_TYPE", 0);
+    int32_t elementsPerRank = argc > argIndex ? std::atoi(argv[argIndex++]) :
+        GetEnvInt("TILEXR_DEMO_ELEMENTS_PER_RANK", kDefaultElementsPerRank);
     int npuCount = argc > argIndex ? std::atoi(argv[argIndex++]) : GetEnvInt("TILEXR_DEMO_NPUS", 8);
     int firstNpu = argc > argIndex ? std::atoi(argv[argIndex++]) : GetEnvInt("TILEXR_DEMO_FIRST_NPU", 0);
     int deviceId = GetDeviceIdFromEnv(rank, npuCount, firstNpu);

@@ -56,6 +56,19 @@ void CheckNoNeedles(const std::string& path, const std::vector<std::string>& nee
     }
 }
 
+void CheckBlockNotContains(const std::string& path, const std::string& text, const std::string& start,
+    const std::string& end, const std::string& needle)
+{
+    const auto startPos = text.find(start);
+    const auto endPos = startPos == std::string::npos ? std::string::npos : text.find(end, startPos);
+    if (startPos == std::string::npos || endPos == std::string::npos) {
+        std::cerr << path << " missing block: " << start << std::endl;
+        ++g_failures;
+        return;
+    }
+    CheckNotContains(path, text.substr(startPos, endPos - startPos), needle);
+}
+
 void TestTileXRCommUsesUDMAContextBoundary()
 {
     const std::string headerPath = "src/comm/tilexr_comm.h";
@@ -179,6 +192,92 @@ void TestCommSourcesDoNotUseShmem()
     }
 }
 
+void TestEpKernelsUseExplicitUdmaPrimitives()
+{
+    const std::vector<std::string> paths = {
+        "src/ep/kernels/tilexr_ep_dispatch_kernel.cpp",
+        "src/ep/kernels/tilexr_ep_kernel_common.h",
+    };
+    for (const auto& path : paths) {
+        const auto text = ReadFile(path);
+        CheckContains(path, text, "TileXR::UDMAPutNbi<uint8_t>");
+        CheckNotContains(path, text, "TileXRPutAutoNbi");
+        CheckNotContains(path, text, "TileXRGetAutoNbi");
+    }
+
+    const std::string transportPath = "src/include/tilexr_transport.h";
+    const auto transportText = ReadFile(transportPath);
+    CheckNotContains(transportPath, transportText, "TileXRPutAutoNbi");
+    CheckNotContains(transportPath, transportText, "TileXRGetAutoNbi");
+}
+
+void TestEpHostLaunchUsesResolvedTransportGate()
+{
+    const std::string path = "src/ep/host/ep_kernel_launch.cpp";
+    const auto text = ReadFile(path);
+    CheckContains(path, text, "context.transport ==");
+    CheckContains(path, text, "TileXR::TileXRTransportKind::DIRECT_URMA");
+    CheckContains(path, text, "GM_ADDR memoryWorkspace = nullptr;");
+    CheckNotContains(path, text, "TileXRSelectAutoTransport");
+}
+
+void TestUdmaHostTargetsExcludeCannDevlib()
+{
+    const std::string path = "tests/udma/CMakeLists.txt";
+    const auto text = ReadFile(path);
+    CheckBlockNotContains(path, text, "link_directories(", "add_executable(test_tilexr_udma_registry",
+        "-linux/devlib");
+}
+
+void TestSocketExchangeHandlesPartialIo()
+{
+    const std::string path = "src/comm/tools/socket/tilexr_sock_exchange.h";
+    const auto text = ReadFile(path);
+    CheckContains(path, text, "while (sentBytes < sendSize)");
+    CheckContains(path, text, "sendBytes + sentBytes");
+    CheckContains(path, text, "sendSize - sentBytes");
+    CheckContains(path, text, "while (receivedBytes < recvSize)");
+    CheckContains(path, text, "recvBytes + receivedBytes");
+    CheckContains(path, text, "recvSize - receivedBytes");
+}
+
+void TestHybridUdmaOnlyBuildsRemotePeerResources()
+{
+    const std::string contextHeaderPath = "src/comm/udma/tilexr_udma_context.h";
+    const auto contextHeader = ReadFile(contextHeaderPath);
+    CheckContains(contextHeaderPath, contextHeader, "int localRankSize = 1;");
+
+    const std::string transportHeaderPath = "src/comm/udma/tilexr_udma_transport.h";
+    const auto transportHeader = ReadFile(transportHeaderPath);
+    CheckContains(transportHeaderPath, transportHeader, "bool UsesUDMAPeer(int peer) const;");
+
+    const std::string contextPath = "src/comm/udma/tilexr_udma_context.cpp";
+    const auto context = ReadFile(contextPath);
+    CheckContains(contextPath, context, "transportOptions.localRankSize = options_.localRankSize;");
+
+    const std::string commPath = "src/comm/tilexr_comm.cpp";
+    const auto comm = ReadFile(commPath);
+    CheckContains(commPath, comm, "options.localRankSize = static_cast<int>(localRankSize_);");
+
+    const std::string transportPath = "src/comm/udma/tilexr_udma_transport.cpp";
+    const auto transport = ReadFile(transportPath);
+    CheckContains(transportPath, transport, "if (!UsesUDMAPeer(peer))");
+    CheckContains(transportPath, transport,
+        "peer / options_.localRankSize != options_.rank / options_.localRankSize");
+}
+
+void TestPublicUdmaWrappersRejectUnroutablePeers()
+{
+    const std::string path = "src/include/tilexr_udma.h";
+    const auto text = ReadFile(path);
+    CheckContains(path, text, "UDMAPeerEnabled(args, targetRank)");
+    CheckContains(path, text, "UDMAPeerEnabled(args, sourceRank)");
+
+    const std::string demoPath = "tests/udma/demo/tilexr_udma_demo_kernel.cpp";
+    const auto demo = ReadFile(demoPath);
+    CheckContains(demoPath, demo, "bool enabled = TileXR::UDMAAllPeersEnabled(args);");
+}
+
 } // namespace
 
 int main()
@@ -189,6 +288,12 @@ int main()
     TestUDMAReviewFeedbackGuards();
     TestPublicHeadersDoNotExposeUDMAContext();
     TestCommSourcesDoNotUseShmem();
+    TestEpKernelsUseExplicitUdmaPrimitives();
+    TestEpHostLaunchUsesResolvedTransportGate();
+    TestUdmaHostTargetsExcludeCannDevlib();
+    TestSocketExchangeHandlesPartialIo();
+    TestHybridUdmaOnlyBuildsRemotePeerResources();
+    TestPublicUdmaWrappersRejectUnroutablePeers();
     if (g_failures != 0) {
         std::cerr << g_failures << " UDMA source guard checks failed" << std::endl;
         return 1;

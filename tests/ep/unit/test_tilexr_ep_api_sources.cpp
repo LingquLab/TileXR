@@ -54,6 +54,19 @@ void CheckNotContains(const std::string &label, const std::string &contents, con
     }
 }
 
+void CheckBlockNotContains(const std::string &label, const std::string &contents, const std::string &start,
+    const std::string &end, const std::string &needle)
+{
+    const std::size_t startPos = contents.find(start);
+    const std::size_t endPos = startPos == std::string::npos ? std::string::npos : contents.find(end, startPos);
+    if (startPos == std::string::npos || endPos == std::string::npos) {
+        std::cerr << label << " missing block: " << start << std::endl;
+        ++g_failures;
+        return;
+    }
+    CheckNotContains(label, contents.substr(startPos, endPos - startPos), needle);
+}
+
 void TestPublicHeader()
 {
     std::string contents;
@@ -104,6 +117,22 @@ void TestBuildPlacement()
     }
 }
 
+void TestEpHostTargetsExcludeCannDevlib()
+{
+    std::string epCmake;
+    if (ReadFile("src/ep/CMakeLists.txt", &epCmake)) {
+        CheckBlockNotContains("src/ep/CMakeLists.txt tilexr-ep link directories", epCmake,
+            "target_link_directories(tilexr-ep", "target_link_libraries(tilexr-ep", "-linux/devlib");
+    }
+
+    std::string testCmake;
+    if (ReadFile("tests/ep/CMakeLists.txt", &testCmake)) {
+        CheckBlockNotContains("tests/ep/CMakeLists.txt demo link directories", testCmake,
+            "target_link_directories(tilexr_ep_dispatch_demo", "target_link_libraries(tilexr_ep_dispatch_demo",
+            "-linux/devlib");
+    }
+}
+
 void TestEpHostChecksRegisteredWorkspace()
 {
     std::string launchContext;
@@ -115,6 +144,8 @@ void TestEpHostChecksRegisteredWorkspace()
     CheckContains("src/ep/host/ep_launch_context.cpp", launchContext, "TileXRGetUDMARegistryHost");
     CheckContains("src/ep/host/ep_launch_context.cpp", launchContext, "UDMARegionContains");
     CheckContains("src/ep/host/ep_launch_context.cpp", launchContext, "TileXREpUdmaRequiredWorkspaceBytes");
+    CheckNotContains("src/ep/host/ep_launch_context.cpp", launchContext,
+        "TileXREpDispatchWorkspaceBytes(context->window, params.tpWorldSize)");
 }
 
 void TestEpSocDefaultFollowsEnvironment()
@@ -242,6 +273,15 @@ void TestDispatchDemoRegistersAlignedUdmaWorkspace()
         "workspaceDev = reinterpret_cast<void *>(AlignAddress(");
     CheckContains("tests/ep/demo/tilexr_ep_dispatch_demo.cpp", demo,
         "TileXRUDMARegister(comm, static_cast<GM_ADDR>(workspaceDev), workspaceBytes");
+    CheckContains("tests/ep/demo/tilexr_ep_dispatch_demo.cpp", demo, "#include \"ep_transport_route.h\"");
+    CheckContains("tests/ep/demo/tilexr_ep_dispatch_demo.cpp", demo,
+        "TileXREp::TileXREpShouldRegisterWorkspace(requestedTransport, *commArgsHost)");
+    CheckContains("tests/ep/demo/tilexr_ep_dispatch_demo.cpp", demo,
+        "TileXREp::TileXREpResolveTransport(requestedTransport, *commArgsHost,");
+    CheckContains("tests/ep/demo/tilexr_ep_dispatch_demo.cpp", demo,
+        "resolvedTransport == TileXR::TileXRTransportKind::DIRECT_URMA");
+    CheckNotContains("tests/ep/demo/tilexr_ep_dispatch_demo.cpp", demo,
+        "TransportNeedsUdmaRegistration");
     CheckContains("tests/ep/demo/tilexr_ep_dispatch_demo.cpp", demo, "EpRequiredWorkspaceBytes");
 }
 
@@ -255,6 +295,8 @@ void TestDispatchDemoUsesHostBarrierBeforeValidation()
     CheckContains("tests/ep/demo/tilexr_ep_dispatch_demo.cpp", demo, "DemoBarrierAll");
     CheckContains("tests/ep/demo/tilexr_ep_dispatch_demo.cpp", demo, "TILEXR_DEMO_BARRIER_ADDR");
     CheckContains("tests/ep/demo/tilexr_ep_dispatch_demo.cpp", demo, "dispatch synchronized");
+    CheckContains("tests/ep/demo/tilexr_ep_dispatch_demo.cpp", demo, "DumpCrossNodeDispatchWindow");
+    CheckContains("tests/ep/demo/tilexr_ep_dispatch_demo.cpp", demo, "dispatch failure");
 }
 
 void TestNoForbiddenDependencies()
@@ -290,6 +332,7 @@ int main()
 {
     TestPublicHeader();
     TestBuildPlacement();
+    TestEpHostTargetsExcludeCannDevlib();
     TestEpHostChecksRegisteredWorkspace();
     TestEpSocDefaultFollowsEnvironment();
     TestChipMapRecognizesAscend950Dt9582();
