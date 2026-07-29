@@ -1,6 +1,6 @@
 # TileXR Build Verification
 
-**Updated:** 2026-05-29
+**Updated:** 2026-07-28
 
 This checklist reflects the current TileXR codebase. The core runtime builds `libtile-comm.so` without a compile-time or link-time shmem dependency.
 
@@ -16,7 +16,7 @@ Expected:
 
 - CANN 9.1.0 environment is visible through `ASCEND_HOME_PATH`.
 - `scripts/common_env.sh` detects architecture and SOC information.
-- NPU driver version is 25.5.0 or later.
+- NPU driver version is 25.1.rc1 or later.
 
 ## Build Core Runtime
 
@@ -37,12 +37,33 @@ Check dynamic dependencies:
 ```bash
 ldd install/lib/libtile-comm.so | grep -E "ascendcl|runtime|ascend_hal|profapi"
 ldd install/lib/libtile-comm.so | grep -i shmem || true
+readelf -d install/lib/libtile-comm.so | grep -E "RPATH|RUNPATH" || true
 ```
 
 Expected:
 
 - CANN runtime libraries are resolved.
-- The shmem grep prints nothing for the current TileXR UDMA implementation.
+- The shmem grep prints nothing; A5 SDMA dynamically invokes the CANN built-in
+  query and does not add a shmem or custom OPP link dependency.
+- Any RPATH/RUNPATH output does not contain a CANN `devlib` directory.
+
+## Build And Run SDMA Checks
+
+```bash
+cd /path/to/TileXR
+bash tests/sdma/build.sh "$ASCEND_HOME_PATH" Ascend950
+bash tests/sdma/run_tests.sh "$ASCEND_HOME_PATH"
+```
+
+Use the default `Ascend910B` target to compile-check the preserved PTO path:
+
+```bash
+bash tests/sdma/build.sh "$ASCEND_HOME_PATH"
+```
+
+On A5 / Ascend950 hardware, run the direct data-plane matrix documented in
+[SDMA_TRANSPORT.md](SDMA_TRANSPORT.md). The A5 kernel must retain the repository's
+`-O2` compile option, and no custom OPP environment setting is required.
 
 ## Build UDMA Tests
 
@@ -119,7 +140,7 @@ The final grep should print nothing for a clean run.
 | Symptom | Likely Cause | Action |
 | --- | --- | --- |
 | Missing CANN headers | `common_env.sh` not sourced or CANN path mismatch | Source the environment and confirm CANN 9.1.0 layout |
-| Cannot find `ascend_hal` | `devlib` path missing | Use the current top-level CMake configuration |
+| Cannot find `ascend_hal` | Driver HAL path missing | Add `/usr/local/Ascend/driver/lib64/driver` to `LD_LIBRARY_PATH`; do not use CANN `devlib` |
 | Demo target skipped | `bisheng` unavailable | Install/compiler configure `bisheng`, or run host-only tests |
 | UDMA disabled in demo | Unsupported hardware or HCCP/RA runtime unavailable | Use A5 / Ascend950 / 950 and check CANN driver/runtime libraries |
 | shmem appears in `ldd libtile-comm.so` | Unexpected dependency regression | Inspect `src/comm/CMakeLists.txt` and source includes |
@@ -139,6 +160,8 @@ ldd shmem check:
 UDMA host tests:
 UDMA all-gather demo:
 UDMA put-signal demo:
+SDMA unit/build checks:
+SDMA A5 data-plane matrix:
 Log directory:
 
 Errors or warnings:

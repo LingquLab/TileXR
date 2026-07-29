@@ -52,8 +52,6 @@ constexpr int TILEXR_INIT_TIMEOUT = 600;
 static map<string, GM_ADDR [TILEXR_MAX_RANK_SIZE]> g_localPeerMemMap;
 static map<string, int[TILEXR_MAX_RANK_SIZE]> g_devList;
 static std::mutex g_mtx;
-static std::mutex g_sdmaMtx;
-static bool g_sdmaUnavailable = false;
 
 constexpr const char* TILEXR_ENABLE_CCU_BACKEND_ENV = "TILEXR_ENABLE_CCU_BACKEND";
 
@@ -258,15 +256,14 @@ int TileXRComm::EnableCcuBackendForTest()
 
 int TileXRComm::InitSDMA()
 {
-    {
-        lock_guard<mutex> lock(g_sdmaMtx);
-        if (g_sdmaUnavailable) {
-            TILEXR_LOG(INFO) << "InitSDMA skipped after previous SDMA init failure";
-            sdmaInitStatus_ = SDMAInitStatus::PTO_UNAVAILABLE;
+    if (sdmaTransport_ != nullptr) {
+        if (!sdmaTransport_->Shutdown()) {
+            TILEXR_LOG(WARN) << "TileXR previous SDMA resources are still pending cleanup";
+            sdmaInitStatus_ = SDMAInitStatus::INIT_FAILED;
             return TILEXR_SUCCESS;
         }
+        sdmaTransport_.reset();
     }
-
     sdmaTransport_.reset(new (nothrow) TileXRSDMATransport());
     if (sdmaTransport_ == nullptr) {
         TILEXR_LOG(WARN) << "TileXRSDMATransport allocation failed, SDMA disabled";
@@ -281,10 +278,10 @@ int TileXRComm::InitSDMA()
     if (ret != TILEXR_SUCCESS || !sdmaTransport_->IsAvailable()) {
         if (sdmaInitStatus_ != SDMAInitStatus::DISABLED_BY_ENV) {
             TILEXR_LOG(WARN) << "TileXR SDMA init unavailable, status " << static_cast<int>(sdmaInitStatus_);
-            lock_guard<mutex> lock(g_sdmaMtx);
-            g_sdmaUnavailable = true;
         }
-        sdmaTransport_.reset();
+        if (sdmaTransport_->Shutdown()) {
+            sdmaTransport_.reset();
+        }
         sdmaWorkspaceDev_ = nullptr;
         commArgs_.sdmaWorkspacePtr = nullptr;
         return TILEXR_SUCCESS;
@@ -297,7 +294,9 @@ int TileXRComm::InitSDMA()
         commArgs_.extraFlag &= ~ExtraFlag::SDMA;
         commArgs_.sdmaWorkspacePtr = nullptr;
         sdmaWorkspaceDev_ = nullptr;
-        sdmaTransport_.reset();
+        if (sdmaTransport_->Shutdown()) {
+            sdmaTransport_.reset();
+        }
         return TILEXR_SUCCESS;
     }
 
@@ -308,16 +307,24 @@ int TileXRComm::InitSDMA()
     return TILEXR_SUCCESS;
 }
 
-void TileXRComm::ResetSDMAState()
+bool TileXRComm::ResetSDMAState()
 {
     commArgs_.extraFlag &= ~ExtraFlag::SDMA;
     commArgs_.sdmaWorkspacePtr = nullptr;
     sdmaWorkspaceDev_ = nullptr;
     sdmaInitStatus_ = SDMAInitStatus::DISABLED_BY_ENV;
     if (sdmaTransport_ != nullptr) {
-        sdmaTransport_->Shutdown();
+        if (!sdmaTransport_->Shutdown()) {
+            return false;
+        }
         sdmaTransport_.reset();
     }
+    return true;
+}
+
+bool TileXRComm::PrepareDestroy()
+{
+    return ResetSDMAState();
 }
 
 bool TileXRComm::IsSDMAAvailable() const
@@ -973,7 +980,7 @@ TileXRComm::~TileXRComm()
         ccuBackend_->Shutdown();
         ccuBackend_.reset();
     }
-    ResetSDMAState();
+    (void)ResetSDMAState();
 }
 
 TileXRComm::TileXRComm(int rank, int rankSize) : rank_(rank), rankSize_(rankSize)

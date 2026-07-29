@@ -246,6 +246,8 @@ rm -rf \
     "${SOURCE_DIR}/tests/udma/install" \
     "${SOURCE_DIR}/tests/sdma/build" \
     "${SOURCE_DIR}/tests/sdma/install" \
+    "${SOURCE_DIR}/tests/sdma/build-a5" \
+    "${SOURCE_DIR}/tests/sdma/install-a5" \
     "${SOURCE_DIR}/tests/ep/build" \
     "${SOURCE_DIR}/tests/ep/install" \
     "${SOURCE_DIR}/tests/memory/build" \
@@ -278,11 +280,21 @@ run_case udma-source-guard "${SOURCE_DIR}/tests/udma/install/bin/test_tilexr_udm
 run_logged_step "sdma-build" bash \
     "${SOURCE_DIR}/tests/sdma/build.sh" "${ASCEND_HOME_PATH}"
 run_case sdma-metadata "${SOURCE_DIR}/tests/sdma/install/bin/test_tilexr_sdma_metadata"
+run_case sdma-a5-validation "${SOURCE_DIR}/tests/sdma/install/bin/test_tilexr_sdma_a5_validation"
 run_case sdma-api-invalid "${SOURCE_DIR}/tests/sdma/install/bin/test_tilexr_sdma_api_invalid"
 run_case sdma-transport-disabled "${SOURCE_DIR}/tests/sdma/install/bin/test_tilexr_sdma_transport_disabled"
 run_case sdma-comm-wiring "${SOURCE_DIR}/tests/sdma/install/bin/test_tilexr_sdma_comm_wiring"
 run_case sdma-source-guard "${SOURCE_DIR}/tests/sdma/install/bin/test_tilexr_sdma_source_guard"
 run_case sdma-header-compile "${SOURCE_DIR}/tests/sdma/install/bin/test_tilexr_sdma_header_compile"
+
+run_logged_step "sdma-a5-configure" cmake \
+    -S "${SOURCE_DIR}/tests/sdma" -B "${SOURCE_DIR}/tests/sdma/build-a5" \
+    -DCMAKE_INSTALL_PREFIX="${SOURCE_DIR}/tests/sdma/install-a5" \
+    -DBUILD_TILEXR_SDMA_DEMO=ON \
+    -DTILEXR_SDMA_DEMO_SOC_TYPE=Ascend950
+run_logged_step "sdma-a5-build" cmake \
+    --build "${SOURCE_DIR}/tests/sdma/build-a5" \
+    --target tilexr_sdma_demo_kernel -j"${BUILD_JOBS}"
 
 run_logged_step "ep-build" bash "${SOURCE_DIR}/tests/ep/build.sh" full
 run_case ep-layout "${SOURCE_DIR}/tests/ep/install/bin/test_tilexr_ep_layout"
@@ -319,7 +331,7 @@ for required_header in \
     tilexr_api.h tilexr_types.h comm_args.h tilexr_sync.h \
     tilexr_data_as_flag.h tilexr_perf_trace.h \
     tilexr_udma.h tilexr_udma_reg.h tilexr_udma_types.h \
-    tilexr_sdma_config.h tilexr_sdma_types.h tilexr_sdma.h tilexr_sdma_compat.h \
+    tilexr_sdma_config.h tilexr_sdma_types.h tilexr_sdma_a5_types.h tilexr_sdma_a5.h tilexr_sdma.h tilexr_sdma_compat.h \
     tilexr_ep.h tilexr_collectives.h tilexr_collectives_perf.h
 do
     require_regular_file "${SOURCE_DIR}/install/include/${required_header}"

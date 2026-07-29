@@ -108,12 +108,73 @@ void TestOnlyCompatIncludesSdmaIntrinsics()
     }
 }
 
+void TestBuildSelectsExplicitSoc()
+{
+    const std::string buildPath = "tests/sdma/build.sh";
+    const auto buildText = ReadFile(buildPath);
+    CheckNeedle(buildPath, buildText,
+        "SDMA_SOC_TYPE=\"${2:-${TILEXR_SDMA_DEMO_SOC_TYPE:-Ascend910B}}\"");
+    CheckNeedle(buildPath, buildText,
+        "-DTILEXR_SDMA_DEMO_SOC_TYPE=\"${SDMA_SOC_TYPE}\"");
+
+    const std::string cmakePath = "tests/sdma/CMakeLists.txt";
+    const auto cmakeText = ReadFile(cmakePath);
+    CheckNeedle(cmakePath, cmakeText,
+        "TILEXR_SDMA_DEMO_SOC_TYPE STREQUAL \"Ascend950\"");
+    CheckNeedle(cmakePath, cmakeText,
+        "TILEXR_SDMA_NPU_ARCH \"dav-3510\"");
+    CheckNeedle(cmakePath, cmakeText,
+        "TILEXR_SDMA_AICORE_ARCH \"--cce-aicore-arch=dav-c310-vec\"");
+    CheckNeedle(cmakePath, cmakeText,
+        "Unsupported TILEXR_SDMA_DEMO_SOC_TYPE=");
+}
+
+void TestAscend950UsesOwnedDirectBackend()
+{
+    const std::string transportPath = "src/comm/sdma/tilexr_sdma_transport.cpp";
+    const auto transport = ReadFile(transportPath);
+    CheckNeedle(transportPath, transport, "TileXRA5SDMABackend");
+    CheckNeedle(transportPath, transport, "ClassifySDMABackend(socName)");
+
+    const std::string backendPath = "src/comm/sdma/tilexr_sdma_a5_backend.cpp";
+    const auto backend = ReadFile(backendPath);
+    CheckNeedle(backendPath, backend, "aclnnShmemSdmaStarsQuery");
+    CheckNeedle(backendPath, backend, "RES_ADDR_TYPE_STARS_RTSQ");
+    CheckNeedle(backendPath, backend, "TILEXR_SDMA_A5_CHANNEL_COUNT");
+    CheckNeedle(backendPath, backend, "kExpectedAicpuQueryFailure");
+
+    const std::string devicePath = "src/include/tilexr_sdma_a5.h";
+    const auto device = ReadFile(devicePath);
+    CheckNeedle(devicePath, device, "TILEXR_SDMA_A5_WAIT_MAX_POLLS");
+
+    const std::string demoPath = "tests/sdma/demo/tilexr_sdma_demo.cpp";
+    const auto demo = ReadFile(demoPath);
+    CheckNeedle(demoPath, demo, "aclrtSynchronizeStreamWithTimeout");
+}
+
+void TestSdmaFailureIsScopedToOneCommunicator()
+{
+    const std::string commPath = "src/comm/tilexr_comm.cpp";
+    const auto comm = ReadFile(commPath);
+    CheckNoNeedle(commPath, comm, "g_sdmaUnavailable");
+    CheckNeedle(commPath, comm, "sdmaTransport_->Init(options)");
+    CheckNeedle(commPath, comm, "bool TileXRComm::PrepareDestroy()");
+
+    const std::string wrapPath = "src/comm/comm_wrap.cpp";
+    const auto wrap = ReadFile(wrapPath);
+    CheckNeedle(wrapPath, wrap, "if (!c->PrepareDestroy())");
+    CheckNeedle(wrapPath, wrap, "return TILEXR_ERROR_INTERNAL;");
+}
+
 } // namespace
 
 int main()
 {
     TestCommSourcesDoNotUseShmem();
     TestOnlyCompatIncludesSdmaIntrinsics();
+    TestBuildSelectsExplicitSoc();
+    TestAscend950UsesOwnedDirectBackend();
+    TestSdmaFailureIsScopedToOneCommunicator();
     if (g_failures != 0) {
         std::cerr << g_failures << " SDMA source guard checks failed" << std::endl;
         return 1;

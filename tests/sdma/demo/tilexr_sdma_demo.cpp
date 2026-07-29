@@ -15,6 +15,7 @@
 
 #include "acl/acl.h"
 #include "tilexr_api.h"
+#include "tilexr_sdma_a5_types.h"
 #include "tilexr_sdma_types.h"
 #include "tilexr_types.h"
 
@@ -25,13 +26,20 @@ extern "C" void launch_tilexr_sdma_copy(
     GM_ADDR dst,
     GM_ADDR src,
     GM_ADDR debug,
-    uint32_t bytes);
+    uint32_t bytes,
+    uint32_t firstChannel,
+    uint32_t iterations);
 
 namespace {
 constexpr uint32_t kDefaultBytes = 4096;
 constexpr uint32_t kAlignmentBytes = 64;
-constexpr size_t kDebugWords = 6;
+constexpr size_t kDebugWordsPerBlock = 16;
 constexpr int kDeviceId = 0;
+constexpr int32_t kStreamTimeoutMs = 60000;
+
+#ifndef TILEXR_SDMA_DEMO_A5
+#define TILEXR_SDMA_DEMO_A5 0
+#endif
 
 bool CheckAcl(const std::string& label, aclError ret)
 {
@@ -66,6 +74,22 @@ bool ParseBytes(const char* text, uint32_t* bytes)
         return false;
     }
     *bytes = static_cast<uint32_t>(value);
+    return true;
+}
+
+bool ParseUint32(const char* text, uint32_t* value)
+{
+    if (text == nullptr || value == nullptr || text[0] == '\0') {
+        return false;
+    }
+    errno = 0;
+    char* end = nullptr;
+    const unsigned long long parsed = std::strtoull(text, &end, 10);
+    if (errno != 0 || end == text || *end != '\0' ||
+        parsed > std::numeric_limits<uint32_t>::max()) {
+        return false;
+    }
+    *value = static_cast<uint32_t>(parsed);
     return true;
 }
 
@@ -120,28 +144,24 @@ bool CopyDeviceToHost(void* dst, size_t dstSize, const void* src, size_t srcSize
         aclrtMemcpy(dst, dstSize, src, srcSize, ACL_MEMCPY_DEVICE_TO_HOST));
 }
 
-bool VerifyDebug(const std::vector<int32_t>& debug, uint32_t bytes)
+bool VerifyDebug(const std::vector<int32_t>& debug, uint32_t bytes,
+                 uint32_t firstChannel, uint32_t blocks, uint32_t iterations)
 {
     bool ok = true;
-    if (debug[0] != TileXR::TILEXR_SDMA_DEMO_MAGIC) {
-        std::cerr << "ERROR: debug magic mismatch: got " << debug[0] << std::endl;
-        ok = false;
-    }
-    if (debug[2] != static_cast<int32_t>(bytes)) {
-        std::cerr << "ERROR: debug bytes mismatch: got " << debug[2] << std::endl;
-        ok = false;
-    }
-    if (debug[3] != 1) {
-        std::cerr << "ERROR: SDMA was not enabled in kernel debug word" << std::endl;
-        ok = false;
-    }
-    if (debug[4] != 1) {
-        std::cerr << "ERROR: SDMA event was not posted" << std::endl;
-        ok = false;
-    }
-    if (debug[5] != 1) {
-        std::cerr << "ERROR: SDMA wait did not report success" << std::endl;
-        ok = false;
+    for (uint32_t block = 0U; block < blocks; ++block) {
+        const size_t base = static_cast<size_t>(block) * kDebugWordsPerBlock;
+        if (debug[base] != TileXR::TILEXR_SDMA_DEMO_MAGIC ||
+            debug[base + 1U] != static_cast<int32_t>(block) ||
+            debug[base + 2U] != static_cast<int32_t>(bytes) ||
+            debug[base + 3U] != 1 || debug[base + 4U] != 1 ||
+            debug[base + 5U] != 1 ||
+            debug[base + 6U] != static_cast<int32_t>(firstChannel + block) ||
+            debug[base + 7U] != static_cast<int32_t>(iterations) ||
+            debug[base + 8U] != (TILEXR_SDMA_DEMO_A5 ? 1 : -1) ||
+            debug[base + 9U] != static_cast<int32_t>(iterations)) {
+            std::cerr << "ERROR: SDMA debug validation failed for block " << block << std::endl;
+            ok = false;
+        }
     }
     return ok;
 }
@@ -150,10 +170,22 @@ bool VerifyDebug(const std::vector<int32_t>& debug, uint32_t bytes)
 int main(int argc, char** argv)
 {
     uint32_t bytes = kDefaultBytes;
-    if (argc > 2 || (argc == 2 && !ParseBytes(argv[1], &bytes))) {
-        std::cerr << "ERROR: bytes must be a non-zero 64-byte aligned unsigned integer" << std::endl;
+    uint32_t firstChannel = 0U;
+    uint32_t blocks = 1U;
+    uint32_t iterations = 1U;
+    if (argc > 5 || (argc >= 2 && !ParseBytes(argv[1], &bytes)) ||
+        (argc >= 3 && !ParseUint32(argv[2], &firstChannel)) ||
+        (argc >= 4 && !ParseUint32(argv[3], &blocks)) ||
+        (argc == 5 && !ParseUint32(argv[4], &iterations)) ||
+        blocks == 0U || iterations == 0U ||
+        firstChannel >= TileXR::detail::TILEXR_SDMA_A5_CHANNEL_COUNT ||
+        blocks > TileXR::detail::TILEXR_SDMA_A5_CHANNEL_COUNT - firstChannel) {
+        std::cerr << "ERROR: usage: tilexr_sdma_demo "
+                     "[aligned-bytes [first-channel [blocks [iterations]]]]" << std::endl;
         return 1;
     }
+    const size_t totalBytes = static_cast<size_t>(bytes) * blocks;
+    const size_t debugWords = static_cast<size_t>(blocks) * kDebugWordsPerBlock;
 
     (void)setenv("TILEXR_ENABLE_SDMA", "1", 1);
 
@@ -207,48 +239,63 @@ int main(int argc, char** argv)
     }
 
     if (!CheckAcl("aclrtMalloc src",
-            aclrtMalloc(reinterpret_cast<void**>(&src), bytes, ACL_MEM_MALLOC_HUGE_FIRST)) ||
+            aclrtMalloc(reinterpret_cast<void**>(&src), totalBytes, ACL_MEM_MALLOC_HUGE_FIRST)) ||
         !CheckAcl("aclrtMalloc dst",
-            aclrtMalloc(reinterpret_cast<void**>(&dst), bytes, ACL_MEM_MALLOC_HUGE_FIRST)) ||
+            aclrtMalloc(reinterpret_cast<void**>(&dst), totalBytes, ACL_MEM_MALLOC_HUGE_FIRST)) ||
         !CheckAcl("aclrtMalloc debug",
-            aclrtMalloc(reinterpret_cast<void**>(&debug), kDebugWords * sizeof(int32_t), ACL_MEM_MALLOC_HUGE_FIRST))) {
+            aclrtMalloc(reinterpret_cast<void**>(&debug), debugWords * sizeof(int32_t), ACL_MEM_MALLOC_HUGE_FIRST))) {
         Cleanup(src, dst, debug, comm, stream, deviceSet, aclInitialized);
         return 1;
     }
 
-    std::vector<uint8_t> hostSrc(bytes);
-    std::vector<uint8_t> hostDst(bytes, 0);
-    std::vector<int32_t> hostDebug(kDebugWords, 0);
+    std::vector<uint8_t> hostSrc(totalBytes);
+    std::vector<uint8_t> hostDst(totalBytes, 0);
+    std::vector<int32_t> hostDebug(debugWords, 0);
     FillPattern(hostSrc);
 
-    if (!CopyHostToDevice(src, bytes, hostSrc.data(), hostSrc.size(), "src") ||
-        !CopyHostToDevice(dst, bytes, hostDst.data(), hostDst.size(), "dst") ||
-        !CopyHostToDevice(debug, kDebugWords * sizeof(int32_t), hostDebug.data(),
+    if (!CopyHostToDevice(src, totalBytes, hostSrc.data(), hostSrc.size(), "src") ||
+        !CopyHostToDevice(dst, totalBytes, hostDst.data(), hostDst.size(), "dst") ||
+        !CopyHostToDevice(debug, debugWords * sizeof(int32_t), hostDebug.data(),
             hostDebug.size() * sizeof(int32_t), "debug")) {
         Cleanup(src, dst, debug, comm, stream, deviceSet, aclInitialized);
         return 1;
     }
 
     launch_tilexr_sdma_copy(
-        1, stream, commArgsDev, reinterpret_cast<GM_ADDR>(dst), reinterpret_cast<GM_ADDR>(src),
-        reinterpret_cast<GM_ADDR>(debug), bytes);
-    if (!CheckAcl("aclrtSynchronizeStream", aclrtSynchronizeStream(stream))) {
+        blocks, stream, commArgsDev, reinterpret_cast<GM_ADDR>(dst), reinterpret_cast<GM_ADDR>(src),
+        reinterpret_cast<GM_ADDR>(debug), bytes, firstChannel, iterations);
+    if (!CheckAcl("aclrtSynchronizeStreamWithTimeout",
+                  aclrtSynchronizeStreamWithTimeout(stream, kStreamTimeoutMs))) {
         Cleanup(src, dst, debug, comm, stream, deviceSet, aclInitialized);
         return 1;
     }
 
-    if (!CopyDeviceToHost(hostDst.data(), hostDst.size(), dst, bytes, "dst") ||
+    if (!CopyDeviceToHost(hostDst.data(), hostDst.size(), dst, totalBytes, "dst") ||
         !CopyDeviceToHost(hostDebug.data(), hostDebug.size() * sizeof(int32_t), debug,
-            kDebugWords * sizeof(int32_t), "debug")) {
+            debugWords * sizeof(int32_t), "debug")) {
         Cleanup(src, dst, debug, comm, stream, deviceSet, aclInitialized);
         return 1;
     }
 
-    std::cout << "debug words:";
-    for (size_t i = 0; i < hostDebug.size(); ++i) {
-        std::cout << " d" << i << "=" << hostDebug[i];
+    for (uint32_t block = 0U; block < blocks; ++block) {
+        const size_t base = static_cast<size_t>(block) * kDebugWordsPerBlock;
+        std::cout << "block=" << block
+                  << " channel=" << hostDebug[base + 6U]
+                  << " generation=" << hostDebug[base + 7U]
+#if TILEXR_SDMA_DEMO_A5
+                  << " busy_rejected=" << hostDebug[base + 8U]
+#else
+                  << " busy_check=skipped"
+#endif
+                  << " event=" << hostDebug[base + 4U]
+                  << " wait=" << hostDebug[base + 5U]
+                  << " workspace_valid=" << hostDebug[base + 10U]
+                  << " sq_valid=" << hostDebug[base + 11U]
+                  << " rtsq_valid=" << hostDebug[base + 12U]
+                  << " queue_valid=" << hostDebug[base + 13U]
+                  << " stream_valid=" << hostDebug[base + 14U]
+                  << " first_wait_or_claim=" << hostDebug[base + 15U] << std::endl;
     }
-    std::cout << std::endl;
 
     const bool dataOk = (hostDst == hostSrc);
     if (!dataOk) {
@@ -258,7 +305,7 @@ int main(int argc, char** argv)
                   << " dst=" << static_cast<int>(*mismatch.first)
                   << " src=" << static_cast<int>(*mismatch.second) << std::endl;
     }
-    const bool debugOk = VerifyDebug(hostDebug, bytes);
+    const bool debugOk = VerifyDebug(hostDebug, bytes, firstChannel, blocks, iterations);
 
     Cleanup(src, dst, debug, comm, stream, deviceSet, aclInitialized);
     if (!dataOk || !debugOk) {
@@ -266,6 +313,8 @@ int main(int argc, char** argv)
         return 1;
     }
 
-    std::cout << "PASS TileXR SDMA copied " << bytes << " bytes correctly" << std::endl;
+    std::cout << "PASS TileXR SDMA copied " << bytes << " bytes on " << blocks
+              << " block(s), channels " << firstChannel << ".."
+              << (firstChannel + blocks - 1U) << ", iterations " << iterations << std::endl;
     return 0;
 }

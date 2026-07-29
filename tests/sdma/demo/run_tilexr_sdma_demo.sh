@@ -11,6 +11,10 @@ DEVICE_ID="${2:-0}"
 shift $(( $# > 0 ? 1 : 0 )) || true
 shift $(( $# > 0 ? 1 : 0 )) || true
 SIZES=("$@")
+FIRST_CHANNEL="${TILEXR_SDMA_DEMO_CHANNEL:-0}"
+BLOCKS="${TILEXR_SDMA_DEMO_BLOCKS:-1}"
+ITERATIONS="${TILEXR_SDMA_DEMO_ITERATIONS:-1}"
+REPEATS="${TILEXR_SDMA_DEMO_REPEATS:-1}"
 if [ ${#SIZES[@]} -eq 0 ]; then
     SIZES=(64 4096 1048576)
 fi
@@ -80,11 +84,17 @@ echo "  TileXR SDMA Demo"
 echo "=========================================="
 echo "CANN_HOME: ${CANN_HOME}"
 echo "DEVICE_ID: ${DEVICE_ID}"
+echo "FIRST_CHANNEL: ${FIRST_CHANNEL}"
+echo "BLOCKS: ${BLOCKS}"
+echo "ITERATIONS: ${ITERATIONS}"
+echo "REPEATS: ${REPEATS}"
 echo "Sizes: ${SIZES[*]}"
 echo "Binary: ${bin}"
 echo "=========================================="
 
-for bytes in "${SIZES[@]}"; do
-    echo "---- bytes=${bytes} ----"
-    "${bin}" "${bytes}"
+for ((repeat = 1; repeat <= REPEATS; ++repeat)); do
+    for bytes in "${SIZES[@]}"; do
+        echo "---- repeat=${repeat} bytes=${bytes} ----"
+        "${bin}" "${bytes}" "${FIRST_CHANNEL}" "${BLOCKS}" "${ITERATIONS}"
+    done
 done

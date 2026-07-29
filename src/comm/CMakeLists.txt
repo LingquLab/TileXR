@@ -170,6 +170,8 @@ set(TILEXR_SOURCE_FILE tilexr_comm.cpp
         udma/tilexr_udma_transport.cpp
         sdma/tilexr_sdma_transport.h
         sdma/tilexr_sdma_transport.cpp
+        sdma/tilexr_sdma_a5_backend.h
+        sdma/tilexr_sdma_a5_backend.cpp
 )
 
 add_library(tile-comm SHARED ${TILEXR_SOURCE_FILE})
@@ -237,6 +239,8 @@ install(FILES
         ${CMAKE_CURRENT_SOURCE_DIR}/../include/tilexr_udma_reg.h
         ${CMAKE_CURRENT_SOURCE_DIR}/../include/tilexr_udma_types.h
         ${CMAKE_CURRENT_SOURCE_DIR}/../include/tilexr_sdma_types.h
+        ${CMAKE_CURRENT_SOURCE_DIR}/../include/tilexr_sdma_a5_types.h
+        ${CMAKE_CURRENT_SOURCE_DIR}/../include/tilexr_sdma_a5.h
         ${CMAKE_CURRENT_SOURCE_DIR}/../include/tilexr_sdma.h
         ${CMAKE_CURRENT_SOURCE_DIR}/../include/tilexr_sdma_compat.h
         DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})

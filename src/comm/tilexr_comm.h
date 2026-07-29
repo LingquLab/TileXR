@@ -58,6 +58,7 @@ public:
     bool IsSDMAAvailable() const;
     GM_ADDR GetSDMAWorkspacePtr() const;
     SDMAInitStatus GetSDMAInitStatus() const;
+    bool PrepareDestroy();
     std::string PrintDFX();
     friend class Lccl;
     friend class Lcoc;
@@ -86,7 +87,7 @@ private:
     int InitCcuBackendIfEnabled();
     int InitSDMA();
     int UpdateCommArgsDev();
-    void ResetSDMAState();
+    bool ResetSDMAState();
 
 private:
     int rank_ = 0;  // global rank id

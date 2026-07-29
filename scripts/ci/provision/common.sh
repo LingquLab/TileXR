@@ -46,22 +46,45 @@ require_root() {
 version_at_least() {
     local actual="$1"
     local minimum="$2"
-    local actual_major actual_minor actual_patch
-    local minimum_major minimum_minor minimum_patch
+    local actual_major actual_minor actual_release actual_stage
+    local minimum_major minimum_minor minimum_release minimum_stage
 
-    [[ "${actual}" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]] || return 1
-    actual_major=$((10#${BASH_REMATCH[1]}))
-    actual_minor=$((10#${BASH_REMATCH[2]}))
-    actual_patch=$((10#${BASH_REMATCH[3]}))
-    [[ "${minimum}" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]] || return 1
-    minimum_major=$((10#${BASH_REMATCH[1]}))
-    minimum_minor=$((10#${BASH_REMATCH[2]}))
-    minimum_patch=$((10#${BASH_REMATCH[3]}))
+    if [[ "${actual}" =~ ^([0-9]+)\.([0-9]+)\.[rR][cC]([0-9]+)(\.b([0-9]+))?$ ]]; then
+        [[ "${BASH_REMATCH[3]}" != 0 ]] || return 1
+        actual_major=$((10#${BASH_REMATCH[1]}))
+        actual_minor=$((10#${BASH_REMATCH[2]}))
+        actual_release=$((10#${BASH_REMATCH[3]}))
+        actual_stage=0
+    elif [[ "${actual}" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)(\.b([0-9]+))?$ ]]; then
+        actual_major=$((10#${BASH_REMATCH[1]}))
+        actual_minor=$((10#${BASH_REMATCH[2]}))
+        actual_release=$((10#${BASH_REMATCH[3]}))
+        actual_stage=1
+    else
+        return 1
+    fi
+
+    if [[ "${minimum}" =~ ^([0-9]+)\.([0-9]+)\.[rR][cC]([0-9]+)(\.b([0-9]+))?$ ]]; then
+        [[ "${BASH_REMATCH[3]}" != 0 ]] || return 1
+        minimum_major=$((10#${BASH_REMATCH[1]}))
+        minimum_minor=$((10#${BASH_REMATCH[2]}))
+        minimum_release=$((10#${BASH_REMATCH[3]}))
+        minimum_stage=0
+    elif [[ "${minimum}" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)(\.b([0-9]+))?$ ]]; then
+        minimum_major=$((10#${BASH_REMATCH[1]}))
+        minimum_minor=$((10#${BASH_REMATCH[2]}))
+        minimum_release=$((10#${BASH_REMATCH[3]}))
+        minimum_stage=1
+    else
+        return 1
+    fi
 
     (( actual_major > minimum_major ||
        (actual_major == minimum_major && actual_minor > minimum_minor) ||
        (actual_major == minimum_major && actual_minor == minimum_minor &&
-        actual_patch >= minimum_patch) ))
+        actual_stage > minimum_stage) ||
+       (actual_major == minimum_major && actual_minor == minimum_minor &&
+        actual_stage == minimum_stage && actual_release >= minimum_release) ))
 }
 
 ci_primary_group_has_non_root_gid() {
