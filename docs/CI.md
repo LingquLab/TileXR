@@ -49,7 +49,7 @@ foreign process collision.
 | Home | `/home/tilexr-ci` |
 | Sealed CANN 9.1 | `/home/tilexr-ci/toolchains/cann/9.1.0` |
 | Sealed Bisheng compiler | `/home/tilexr-ci/toolchains/cann/9.1.0/cann/tools/bisheng_compiler/bin/bisheng` |
-| Sealed controller | `/home/tilexr-ci/control/v4` |
+| Sealed controller | `/home/tilexr-ci/control/v5` |
 | Active controller link | `/home/tilexr-ci/control/current` |
 | Actions runner | `/home/tilexr-ci/actions-runner` |
 | Runner workspace root | `/home/tilexr-ci/actions-runner/_work` |
