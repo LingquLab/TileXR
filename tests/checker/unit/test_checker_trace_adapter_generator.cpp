@@ -1054,7 +1054,7 @@ void TestRenderTraceOnboardingPlanDocumentsExecutorWork() {
     ExpectContains(output, "git diff -- src/collectives src/ep",
                    "onboarding plan source preservation check");
     ExpectContains(output, "Do not edit production sources",
-                   "onboarding plan production source guard");
+                   "onboarding plan production source boundary");
 }
 
 void TestRenderTraceOnboardingPlanIncludesManualReviewActions() {

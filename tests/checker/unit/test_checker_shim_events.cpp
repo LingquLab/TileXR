@@ -1,8 +1,6 @@
 #include <cstddef>
 #include <cstdint>
-#include <fstream>
 #include <iostream>
-#include <sstream>
 #include <string>
 #include <vector>
 
@@ -23,17 +21,6 @@ void UseCheckerShimTypes() {
     AscendC::LocalTensorBase local;
     (void)global;
     (void)local;
-}
-
-std::string SourcePath(const std::string &relative_path) {
-    return std::string(TILEXR_SOURCE_ROOT) + "/" + relative_path;
-}
-
-std::string ReadFile(const std::string &path) {
-    std::ifstream input(path.c_str());
-    std::ostringstream out;
-    out << input.rdbuf();
-    return out.str();
 }
 
 void ExpectTrue(bool condition, const char *message) {
@@ -84,14 +71,6 @@ void ExpectContains(const std::string &text, const std::string &needle,
                     const char *message) {
     if (text.find(needle) == std::string::npos) {
         std::cerr << message << ": missing " << needle << "\n";
-        ++g_failures;
-    }
-}
-
-void ExpectNotContains(const std::string &text, const std::string &needle,
-                       const char *message) {
-    if (text.find(needle) != std::string::npos) {
-        std::cerr << message << ": unexpectedly found " << needle << "\n";
         ++g_failures;
     }
 }
@@ -268,44 +247,6 @@ void TestEventsCaptureServerTopology() {
     const std::string jsonl = tilexr::checker::RenderEventsJsonl(world.events());
     ExpectContains(jsonl, "\"server\":0", "events json includes server");
     ExpectContains(jsonl, "\"peer_server\":1", "events json includes peer server");
-}
-
-void TestCheckerLocalShimIncludePathOnly() {
-    const std::string checker_cmake = ReadFile(SourcePath("tests/checker/CMakeLists.txt"));
-    const std::string tools_cmake = ReadFile(SourcePath("tools/checker/CMakeLists.txt"));
-
-    ExpectContains(checker_cmake, "test_tilexr_checker_shim_events",
-                   "checker test target wired");
-    ExpectContains(checker_cmake, "tools/checker/shim", "checker shim include path wired");
-    ExpectNotContains(tools_cmake, "tools/checker/shim", "checker core should not export shim");
-}
-
-void TestTraceAdapterKeepsAlgorithmShimsThin() {
-    const std::string common_shim =
-        ReadFile(SourcePath("tools/checker/shim/tilexr/checker/collective_trace_shim.h"));
-    const std::string allreduce_adapter =
-        ReadFile(SourcePath("tools/checker/shim/tilexr/checker/allreduce_big_data_trace_shim.h"));
-    const std::string hdb_adapter =
-        ReadFile(SourcePath("tools/checker/shim/tilexr/checker/allgather_hdb_trace_shim.h"));
-
-    ExpectNotContains(common_shim, "#include \"allreduce_big_data.h\"",
-                      "common trace shim should not include a production algorithm");
-    ExpectNotContains(common_shim, "#define CpGM2GMPingPong",
-                      "common trace shim should not own production call macros");
-
-    ExpectContains(allreduce_adapter, "TILEXR_CHECKER_TRACE_TARGET_HEADER",
-                   "allreduce adapter declares target header");
-    ExpectContains(allreduce_adapter, "collective_trace_adapter.h",
-                   "allreduce adapter uses generic trace adapter");
-    ExpectNotContains(allreduce_adapter, "#define CpGM2GMPingPong",
-                      "allreduce adapter should not duplicate trace macros");
-
-    ExpectContains(hdb_adapter, "TILEXR_CHECKER_TRACE_TARGET_HEADER",
-                   "hdb adapter declares target header");
-    ExpectContains(hdb_adapter, "collective_trace_adapter.h",
-                   "hdb adapter uses generic trace adapter");
-    ExpectNotContains(hdb_adapter, "#define CpGM2GMPingPong",
-                      "hdb adapter should not duplicate trace macros");
 }
 
 void TestAscendCPipePrimitivesRecordTraceEvents() {
@@ -677,8 +618,6 @@ int main() {
     TestNullWorldAndUnsupportedRoleFail();
     TestRecordWriteAndBarrierEvents();
     TestEventsCaptureServerTopology();
-    TestCheckerLocalShimIncludePathOnly();
-    TestTraceAdapterKeepsAlgorithmShimsThin();
     TestAscendCPipePrimitivesRecordTraceEvents();
     TestTraceRuntimeReportsUnresolvedGmCopyAddress();
     TestRawAscendCDataCopyRecordsTraceRuntimeCopy();

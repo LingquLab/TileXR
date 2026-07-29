@@ -3,7 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TILEXR_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-MODE="${1:-source-only}"
+MODE="${1:-host-only}"
 
 : "${ASCEND_HOME_PATH:=}"
 : "${LD_LIBRARY_PATH:=}"
@@ -19,11 +19,11 @@ case "${MODE}" in
         cmake --build "${ROOT_BUILD_DIR}" --target install -j"$(nproc)"
         DEMO_OPTION="-DBUILD_TILEXR_EP_DEMO=ON"
         ;;
-    source-only)
+    host-only)
         DEMO_OPTION="-DBUILD_TILEXR_EP_DEMO=OFF"
         ;;
     *)
-        echo "Usage: $0 [source-only|full]" >&2
+        echo "Usage: $0 [host-only|full]" >&2
         exit 2
         ;;
 esac
