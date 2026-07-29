@@ -245,6 +245,9 @@ bool TileXRComm::ResetSDMAState()
 {
     commArgs_.extraFlag &= ~ExtraFlag::SDMA;
     commArgs_.sdmaWorkspacePtr = nullptr;
+    if (UpdateCommArgsDev() != TILEXR_SUCCESS) {
+        return false;
+    }
     sdmaWorkspaceDev_ = nullptr;
     sdmaInitStatus_ = SDMAInitStatus::DISABLED_BY_ENV;
     if (sdmaTransport_ != nullptr) {
@@ -893,8 +896,8 @@ TileXRComm::~TileXRComm()
     }
     FreePeerMem(commArgs_.dumpAddr);
     FreePeerMem(peerMem_[rank_]);
-    FreePeerMem(commArgsPtr_);
     (void)ResetSDMAState();
+    FreePeerMem(commArgsPtr_);
 }
 
 TileXRComm::TileXRComm(int rank, int rankSize) : rank_(rank), rankSize_(rankSize)

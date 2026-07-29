@@ -92,9 +92,8 @@ During communicator initialization, the Host backend:
 The AIV backend atomically claims a channel, writes a data-copy SQE followed by a
 64-byte completion-copy SQE, cleans the touched cache lines, orders the stores,
 and updates the mapped RTSQ tail. `SDMAWait` validates the event generation,
-polls the completion record with a fixed upper bound, and releases the channel
-only after completion. A timed-out channel remains busy so later submissions
-cannot reuse an uncertain queue.
+waits for the matching completion record, and releases the channel only after
+completion.
 
 No TileXR target builds or installs a custom OPP, and this feature needs no
 custom OPP environment setting. `reference/` remains comparison-only and is not

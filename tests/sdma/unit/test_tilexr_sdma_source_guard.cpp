@@ -150,11 +150,11 @@ void TestAscend950UsesOwnedDirectBackend()
 
     const std::string devicePath = "src/include/tilexr_sdma_a5.h";
     const auto device = ReadFile(devicePath);
-    CheckNeedle(devicePath, device, "TILEXR_SDMA_A5_WAIT_MAX_POLLS");
+    CheckNeedle(devicePath, device, "while (A5SdmaReadCompletion(completion) != generation)");
 
     const std::string demoPath = "tests/sdma/demo/tilexr_sdma_demo.cpp";
     const auto demo = ReadFile(demoPath);
-    CheckNeedle(demoPath, demo, "aclrtSynchronizeStreamWithTimeout");
+    CheckNeedle(demoPath, demo, "aclrtSynchronizeStream(stream)");
 }
 
 void TestSdmaFailureIsScopedToOneCommunicator()
@@ -164,6 +164,7 @@ void TestSdmaFailureIsScopedToOneCommunicator()
     CheckNoNeedle(commPath, comm, "g_sdmaUnavailable");
     CheckNeedle(commPath, comm, "sdmaTransport_->Init(options)");
     CheckNeedle(commPath, comm, "bool TileXRComm::PrepareDestroy()");
+    CheckNeedle(commPath, comm, "if (UpdateCommArgsDev() != TILEXR_SUCCESS)");
 
     const std::string wrapPath = "src/comm/comm_wrap.cpp";
     const auto wrap = ReadFile(wrapPath);

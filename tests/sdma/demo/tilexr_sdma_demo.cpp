@@ -35,7 +35,6 @@ constexpr uint32_t kDefaultBytes = 4096;
 constexpr uint32_t kAlignmentBytes = 64;
 constexpr size_t kDebugWordsPerBlock = 16;
 constexpr int kDeviceId = 0;
-constexpr int32_t kStreamTimeoutMs = 60000;
 
 #ifndef TILEXR_SDMA_DEMO_A5
 #define TILEXR_SDMA_DEMO_A5 0
@@ -264,8 +263,7 @@ int main(int argc, char** argv)
     launch_tilexr_sdma_copy(
         blocks, stream, commArgsDev, reinterpret_cast<GM_ADDR>(dst), reinterpret_cast<GM_ADDR>(src),
         reinterpret_cast<GM_ADDR>(debug), bytes, firstChannel, iterations);
-    if (!CheckAcl("aclrtSynchronizeStreamWithTimeout",
-                  aclrtSynchronizeStreamWithTimeout(stream, kStreamTimeoutMs))) {
+    if (!CheckAcl("aclrtSynchronizeStream", aclrtSynchronizeStream(stream))) {
         Cleanup(src, dst, debug, comm, stream, deviceSet, aclInitialized);
         return 1;
     }

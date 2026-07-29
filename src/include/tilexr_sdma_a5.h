@@ -175,15 +175,7 @@ __aicore__ inline bool A5SdmaWaitEvent(__gm__ uint8_t* workspaceAddress,
     }
     __gm__ A5SdmaCompletionLine* completion = reinterpret_cast<__gm__ A5SdmaCompletionLine*>(
         channel->completionRecordAddress);
-    bool completed = false;
-    for (uint32_t poll = 0U; poll < TILEXR_SDMA_A5_WAIT_MAX_POLLS; ++poll) {
-        if (A5SdmaReadCompletion(completion) == generation) {
-            completed = true;
-            break;
-        }
-    }
-    if (!completed) {
-        return false;
+    while (A5SdmaReadCompletion(completion) != generation) {
     }
     dsb(DSB_DDR);
     if (channel->generation != generation) {

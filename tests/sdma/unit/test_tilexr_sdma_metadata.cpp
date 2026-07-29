@@ -56,7 +56,6 @@ void TestA5WorkspaceAbi()
 {
     using namespace TileXR::detail;
     CHECK_EQ(TILEXR_SDMA_A5_CHANNEL_COUNT, 48U);
-    CHECK_TRUE(TILEXR_SDMA_A5_WAIT_MAX_POLLS > 0U);
     CHECK_EQ(sizeof(A5SdmaWorkspaceHeader), 64U);
     CHECK_EQ(sizeof(A5SdmaChannel), 192U);
     CHECK_EQ(sizeof(A5SdmaCompletionLine), 64U);
