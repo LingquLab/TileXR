@@ -374,7 +374,7 @@ The standalone EP checks live under `tests/ep/` and can be built without externa
 
 ```bash
 source scripts/common_env.sh
-bash tests/ep/build.sh source-only
+bash tests/ep/build.sh host-only
 ctest --test-dir tests/ep/build --output-on-failure
 ```
 

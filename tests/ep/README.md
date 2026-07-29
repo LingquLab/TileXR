@@ -2,20 +2,18 @@
 
 This tree tests the standalone TileXR EP module under `src/ep`. It is independent from hcomm, HCCL window helpers, and `ops-transformer`; the same-node route uses TileXR IPC peer-memory windows and `SyncCollectives`, while cross-node dispatch/combine use TileXR-registered UDMA workspaces.
 
-## Source-Only Tests
+## Host Tests
 
 From `tests/ep`:
 
 ```bash
 source ../../scripts/common_env.sh
-bash build.sh source-only
+bash build.sh host-only
 ./install/bin/test_tilexr_ep_layout
-./install/bin/test_tilexr_ep_api_sources
 ./install/bin/test_tilexr_ep_host_validation
-./install/bin/test_tilexr_ep_kernel_sources
 ```
 
-`source-only` mode builds and installs the source-layout, API source, host validation, and kernel source tests without building the hardware demo.
+`host-only` mode builds and installs the layout and host validation tests without building the hardware demo.
 
 ## Full Hardware Demo
 

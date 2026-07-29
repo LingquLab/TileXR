@@ -34,24 +34,20 @@ fi
 
 cmake -DCMAKE_INSTALL_PREFIX="${INSTALL_DIR}" ${DEMO_OPTION} ..
 make -j$(nproc)
-make install
+cmake --install .
 
 echo ""
 echo "=========================================="
 echo "  Build Complete"
 echo "=========================================="
-echo "Test binaries installed to: ${INSTALL_DIR}/bin"
+echo "Binaries installed to: ${INSTALL_DIR}/bin"
 echo ""
-echo "Available tests:"
-echo "  - test_tilexr_memory_demo_sources : peer-memory DataCopy demo source checks"
 if [ -f "${INSTALL_DIR}/bin/tilexr_memory_demo" ]; then
     echo "  - tilexr_memory_demo   : TileXR peer-memory DataCopy communication demo"
 else
     echo "  - tilexr_memory_demo   : skipped (requires bisheng/AICore toolchain)"
 fi
 echo ""
-echo "Run source checks with:"
-echo "  ./install/bin/test_tilexr_memory_demo_sources"
 echo "Run demo with:"
 echo "  bash demo/run_tilexr_memory_demo.sh 2 16"
 echo "=========================================="
