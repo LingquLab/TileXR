@@ -118,6 +118,7 @@ set(TILEXR_SOURCE_FILE tilexr_comm.cpp
         udma/tilexr_udma_transport.cpp
         sdma/tilexr_sdma_transport.h
         sdma/tilexr_sdma_transport.cpp
+        sdma/tilexr_sdma_a5_cleanup.h
         sdma/tilexr_sdma_a5_backend.h
         sdma/tilexr_sdma_a5_backend.cpp
 )

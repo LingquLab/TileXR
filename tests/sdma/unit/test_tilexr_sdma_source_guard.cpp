@@ -142,6 +142,11 @@ void TestAscend950UsesOwnedDirectBackend()
     CheckNeedle(backendPath, backend, "RES_ADDR_TYPE_STARS_RTSQ");
     CheckNeedle(backendPath, backend, "TILEXR_SDMA_A5_CHANNEL_COUNT");
     CheckNeedle(backendPath, backend, "kExpectedAicpuQueryFailure");
+    CheckNeedle(backendPath, backend,
+        "LoadSymbol(RTLD_DEFAULT, \"halResAddrMap\", mapResource)");
+    CheckNeedle(backendPath, backend, "pendingQueries");
+    CheckNoNeedle(backendPath, backend, "halResAddrMap(");
+    CheckNoNeedle(backendPath, backend, "halResAddrUnmap(");
 
     const std::string devicePath = "src/include/tilexr_sdma_a5.h";
     const auto device = ReadFile(devicePath);

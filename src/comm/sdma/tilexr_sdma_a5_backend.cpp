@@ -10,11 +10,13 @@
 #include <dlfcn.h>
 #include <limits>
 #include <new>
+#include <utility>
 #include <vector>
 
 #include "acl/acl.h"
 #include "aclnn/aclnn_base.h"
 #include "driver/ascend_hal.h"
+#include "sdma/tilexr_sdma_a5_cleanup.h"
 #include "tilexr_log.h"
 
 #ifndef ACL_STREAM_DEVICE_USE_ONLY
@@ -34,6 +36,9 @@ using RtGetDevicePhyIdByIndexFn = int32_t (*)(uint32_t, uint32_t*);
 using RtStreamGetSqidFn = int32_t (*)(const void*, uint32_t*);
 using RtStreamGetCqidFn = int32_t (*)(const void*, uint32_t*, uint32_t*);
 using RtGetDeviceInfoFn = int32_t (*)(uint32_t, int32_t, int32_t, int64_t*);
+using HalResAddrMapFn = drvError_t (*)(unsigned int, res_addr_info*,
+                                       unsigned long*, unsigned int*);
+using HalResAddrUnmapFn = drvError_t (*)(unsigned int, res_addr_info*);
 using AclCreateTensorFn = aclTensor* (*)(const int64_t*, uint64_t, aclDataType,
                                          const int64_t*, int64_t, aclFormat,
                                          const int64_t*, uint64_t, void*);
@@ -89,6 +94,12 @@ public:
             Close();
             return false;
         }
+
+        if (!LoadSymbol(RTLD_DEFAULT, "halResAddrMap", mapResource) ||
+            !LoadSymbol(RTLD_DEFAULT, "halResAddrUnmap", unmapResource)) {
+            Close();
+            return false;
+        }
         return true;
     }
 
@@ -102,6 +113,8 @@ public:
         destroyTensor = nullptr;
         prepareQuery = nullptr;
         executeQuery = nullptr;
+        mapResource = nullptr;
+        unmapResource = nullptr;
         if (opapiHandle_ != nullptr) {
             (void)dlclose(opapiHandle_);
             opapiHandle_ = nullptr;
@@ -120,82 +133,12 @@ public:
     AclDestroyTensorFn destroyTensor = nullptr;
     AclnnQueryWorkspaceFn prepareQuery = nullptr;
     AclnnQueryFn executeQuery = nullptr;
+    HalResAddrMapFn mapResource = nullptr;
+    HalResAddrUnmapFn unmapResource = nullptr;
 
 private:
     void* runtimeHandle_ = nullptr;
     void* opapiHandle_ = nullptr;
-};
-
-class DeviceBuffer {
-public:
-    ~DeviceBuffer()
-    {
-        Reset();
-    }
-
-    bool Allocate(size_t bytes, bool zero = false)
-    {
-        Reset();
-        if (aclrtMalloc(&address_, bytes, ACL_MEM_MALLOC_HUGE_FIRST) != ACL_SUCCESS) {
-            return false;
-        }
-        bytes_ = bytes;
-        if (zero && aclrtMemset(address_, bytes_, 0, bytes_) != ACL_SUCCESS) {
-            Reset();
-            return false;
-        }
-        return true;
-    }
-
-    void Reset()
-    {
-        if (address_ != nullptr) {
-            (void)aclrtFree(address_);
-            address_ = nullptr;
-            bytes_ = 0U;
-        }
-    }
-
-    void* Get() const
-    {
-        return address_;
-    }
-
-private:
-    void* address_ = nullptr;
-    size_t bytes_ = 0U;
-};
-
-class TensorHandle {
-public:
-    explicit TensorHandle(AclDestroyTensorFn destroy) : destroy_(destroy) {}
-
-    ~TensorHandle()
-    {
-        Reset();
-    }
-
-    void Reset()
-    {
-        if (tensor_ != nullptr) {
-            (void)destroy_(tensor_);
-            tensor_ = nullptr;
-        }
-    }
-
-    aclTensor*& Ref()
-    {
-        return tensor_;
-    }
-
-    aclTensor* Get() const
-    {
-        return tensor_;
-    }
-
-private:
-    AclDestroyTensorFn destroy_;
-    aclTensor* tensor_ = nullptr;
 };
 
 struct QuerySnapshot {
@@ -205,122 +148,196 @@ struct QuerySnapshot {
     std::vector<detail::A5BuiltinChannelInfo> channels;
 };
 
-bool CreateUint64Tensor(A5RuntimeApi& api, void* address, int64_t elements,
-                        TensorHandle& tensor)
+int CleanupSetCurrentContext(void*, void* context)
+{
+    return static_cast<int>(
+        aclrtSetCurrentContext(static_cast<aclrtContext>(context)));
+}
+
+int CleanupDestroyStream(void*, void* stream)
+{
+    return static_cast<int>(aclrtDestroyStream(static_cast<aclrtStream>(stream)));
+}
+
+int CleanupDestroyContext(void*, void* context)
+{
+    return static_cast<int>(aclrtDestroyContext(static_cast<aclrtContext>(context)));
+}
+
+int CleanupFreeDevice(void*, void* address)
+{
+    return static_cast<int>(aclrtFree(address));
+}
+
+int CleanupDestroyTensor(void* opaque, const void* tensor)
+{
+    A5RuntimeApi* api = static_cast<A5RuntimeApi*>(opaque);
+    return api == nullptr || api->destroyTensor == nullptr
+        ? -1
+        : api->destroyTensor(static_cast<const aclTensor*>(tensor));
+}
+
+detail::A5QueryCleanupOps MakeQueryCleanupOps(A5RuntimeApi& api)
+{
+    detail::A5QueryCleanupOps ops;
+    ops.opaque = &api;
+    ops.setCurrentContext = CleanupSetCurrentContext;
+    ops.destroyStream = CleanupDestroyStream;
+    ops.destroyContext = CleanupDestroyContext;
+    ops.freeDevice = CleanupFreeDevice;
+    ops.destroyTensor = CleanupDestroyTensor;
+    return ops;
+}
+
+bool AllocateTrackedBuffer(std::vector<void*>& buffers, size_t bytes,
+                           bool zero, void*& address)
+{
+    address = nullptr;
+    if (aclrtMalloc(&address, bytes, ACL_MEM_MALLOC_HUGE_FIRST) != ACL_SUCCESS) {
+        return false;
+    }
+    buffers.push_back(address);
+    return !zero || aclrtMemset(address, bytes, 0, bytes) == ACL_SUCCESS;
+}
+
+bool CreateTrackedUint64Tensor(A5RuntimeApi& api,
+                               detail::A5PendingQueryCleanup& cleanup,
+                               void* address, int64_t elements,
+                               aclTensor*& tensor)
 {
     const int64_t shape[] = {elements};
     const int64_t strides[] = {1};
-    tensor.Ref() = api.createTensor(shape, 1U, ACL_UINT64, strides, 0,
-                                    ACL_FORMAT_ND, shape, 1U, address);
-    return tensor.Get() != nullptr;
-}
-
-bool RestoreQueryContext(aclrtContext previous, aclrtContext& isolated)
-{
-    const aclError destroyStatus = isolated == nullptr
-        ? ACL_SUCCESS
-        : aclrtDestroyContext(isolated);
-    isolated = nullptr;
-    const aclError restoreStatus = aclrtSetCurrentContext(previous);
-    if (destroyStatus != ACL_SUCCESS || restoreStatus != ACL_SUCCESS) {
-        TILEXR_LOG(WARN) << "TileXR A5 SDMA query context restore failed, destroy "
-                         << destroyStatus << ", restore " << restoreStatus;
+    tensor = api.createTensor(shape, 1U, ACL_UINT64, strides, 0,
+                              ACL_FORMAT_ND, shape, 1U, address);
+    if (tensor == nullptr) {
         return false;
     }
+    cleanup.tensors.push_back(tensor);
     return true;
 }
 
-bool CheckRuntimeHealth(DeviceBuffer& scratch)
+bool CheckRuntimeHealth(detail::A5PendingQueryCleanup& cleanup, void* scratch)
 {
     aclrtStream stream = nullptr;
-    if (aclrtCreateStream(&stream) != ACL_SUCCESS) {
+    const aclError createStatus = aclrtCreateStream(&stream);
+    cleanup.healthStream = stream;
+    if (createStatus != ACL_SUCCESS || stream == nullptr) {
         return false;
     }
     const aclError memsetStatus = aclrtMemsetAsync(
-        scratch.Get(), sizeof(uint64_t), 0xA5, sizeof(uint64_t), stream);
+        scratch, sizeof(uint64_t), 0xA5, sizeof(uint64_t), stream);
     const aclError syncStatus = memsetStatus == ACL_SUCCESS
         ? aclrtSynchronizeStream(stream)
         : memsetStatus;
     uint64_t value = 0U;
     const aclError copyStatus = syncStatus == ACL_SUCCESS
-        ? aclrtMemcpy(&value, sizeof(value), scratch.Get(), sizeof(value), ACL_MEMCPY_DEVICE_TO_HOST)
+        ? aclrtMemcpy(&value, sizeof(value), scratch, sizeof(value),
+                      ACL_MEMCPY_DEVICE_TO_HOST)
         : syncStatus;
-    const aclError destroyStatus = aclrtDestroyStream(stream);
     return memsetStatus == ACL_SUCCESS && syncStatus == ACL_SUCCESS &&
-        copyStatus == ACL_SUCCESS && destroyStatus == ACL_SUCCESS &&
-        value == 0xA5A5A5A5A5A5A5A5ULL;
+        copyStatus == ACL_SUCCESS && value == 0xA5A5A5A5A5A5A5A5ULL;
+}
+
+bool FinishQuery(A5RuntimeApi& api,
+                 detail::A5PendingQueryCleanup& cleanup,
+                 std::vector<detail::A5PendingQueryCleanup>& pending,
+                 bool result)
+{
+    const bool released = detail::CleanupA5QueryResources(
+        cleanup, MakeQueryCleanupOps(api), cleanup.ownerContext);
+    if (!cleanup.Empty()) {
+        pending.push_back(std::move(cleanup));
+    }
+    return result && released;
 }
 
 bool RunBuiltinQuery(A5RuntimeApi& api,
                      int32_t logicalDevice,
                      const std::vector<detail::A5BuiltinStreamInfo>& streams,
+                     std::vector<detail::A5PendingQueryCleanup>& pending,
                      QuerySnapshot& snapshot)
 {
     if (streams.empty() || streams.size() > detail::TILEXR_SDMA_A5_CHANNEL_COUNT) {
         return false;
     }
 
+    detail::A5PendingQueryCleanup cleanup;
+    aclrtContext ownerContext = nullptr;
+    if (aclrtGetCurrentContext(&ownerContext) != ACL_SUCCESS ||
+        ownerContext == nullptr) {
+        TILEXR_LOG(WARN) << "TileXR A5 SDMA query requires an active owner context";
+        return false;
+    }
+    cleanup.ownerContext = ownerContext;
+
     const size_t streamsBytes = streams.size() * sizeof(detail::A5BuiltinStreamInfo);
-    DeviceBuffer streamsDev;
-    DeviceBuffer resourceDev;
-    DeviceBuffer builtinWorkspaceDev;
-    DeviceBuffer inputDev;
-    DeviceBuffer outputDev;
-    DeviceBuffer opWorkspaceDev;
-    if (!streamsDev.Allocate(streamsBytes) ||
-        !resourceDev.Allocate(sizeof(detail::A5BuiltinOpResource), true) ||
-        !builtinWorkspaceDev.Allocate(kBuiltinWorkspaceBytes, true) ||
-        !inputDev.Allocate(2U * sizeof(uint64_t)) ||
-        !outputDev.Allocate(sizeof(uint64_t), true) ||
-        aclrtMemcpy(streamsDev.Get(), streamsBytes, streams.data(), streamsBytes,
+    void* streamsDev = nullptr;
+    void* resourceDev = nullptr;
+    void* builtinWorkspaceDev = nullptr;
+    void* inputDev = nullptr;
+    void* outputDev = nullptr;
+    void* opWorkspaceDev = nullptr;
+    if (!AllocateTrackedBuffer(cleanup.ownerBuffers, streamsBytes, false, streamsDev) ||
+        !AllocateTrackedBuffer(cleanup.ownerBuffers,
+                               sizeof(detail::A5BuiltinOpResource), true, resourceDev) ||
+        !AllocateTrackedBuffer(cleanup.ownerBuffers,
+                               kBuiltinWorkspaceBytes, true, builtinWorkspaceDev) ||
+        !AllocateTrackedBuffer(cleanup.ownerBuffers,
+                               2U * sizeof(uint64_t), false, inputDev) ||
+        !AllocateTrackedBuffer(cleanup.ownerBuffers,
+                               sizeof(uint64_t), true, outputDev) ||
+        aclrtMemcpy(streamsDev, streamsBytes, streams.data(), streamsBytes,
                     ACL_MEMCPY_HOST_TO_DEVICE) != ACL_SUCCESS) {
         TILEXR_LOG(WARN) << "TileXR A5 SDMA query buffer setup failed";
-        return false;
+        return FinishQuery(api, cleanup, pending, false);
     }
 
     detail::A5BuiltinOpResource resource {};
     resource.size = streams.size();
-    resource.streamsAddress = reinterpret_cast<uint64_t>(streamsDev.Get());
-    resource.workspaceAddress = reinterpret_cast<uint64_t>(builtinWorkspaceDev.Get());
+    resource.streamsAddress = reinterpret_cast<uint64_t>(streamsDev);
+    resource.workspaceAddress = reinterpret_cast<uint64_t>(builtinWorkspaceDev);
     const uint64_t inputs[] = {
-        reinterpret_cast<uint64_t>(resourceDev.Get()),
-        reinterpret_cast<uint64_t>(builtinWorkspaceDev.Get()),
+        reinterpret_cast<uint64_t>(resourceDev),
+        reinterpret_cast<uint64_t>(builtinWorkspaceDev),
     };
-    if (aclrtMemcpy(resourceDev.Get(), sizeof(resource), &resource, sizeof(resource),
+    if (aclrtMemcpy(resourceDev, sizeof(resource), &resource, sizeof(resource),
                     ACL_MEMCPY_HOST_TO_DEVICE) != ACL_SUCCESS ||
-        aclrtMemcpy(inputDev.Get(), sizeof(inputs), inputs, sizeof(inputs),
+        aclrtMemcpy(inputDev, sizeof(inputs), inputs, sizeof(inputs),
                     ACL_MEMCPY_HOST_TO_DEVICE) != ACL_SUCCESS) {
         TILEXR_LOG(WARN) << "TileXR A5 SDMA query resource upload failed";
-        return false;
+        return FinishQuery(api, cleanup, pending, false);
     }
 
-    aclrtContext previous = nullptr;
     aclrtContext isolated = nullptr;
-    if (aclrtGetCurrentContext(&previous) != ACL_SUCCESS ||
-        aclrtCreateContext(&isolated, logicalDevice) != ACL_SUCCESS) {
+    const aclError createContextStatus = aclrtCreateContext(&isolated, logicalDevice);
+    cleanup.isolatedContext = isolated;
+    if (createContextStatus != ACL_SUCCESS || isolated == nullptr) {
         TILEXR_LOG(WARN) << "TileXR A5 SDMA isolated query context creation failed";
-        if (isolated != nullptr) {
-            (void)RestoreQueryContext(previous, isolated);
-        }
-        return false;
+        return FinishQuery(api, cleanup, pending, false);
     }
 
-    TensorHandle inputTensor(api.destroyTensor);
-    TensorHandle outputTensor(api.destroyTensor);
+    aclTensor* inputTensor = nullptr;
+    aclTensor* outputTensor = nullptr;
     aclrtStream queryStream = nullptr;
     bool queryLaunched = false;
     aclError syncStatus = ACL_SUCCESS;
     uint64_t opWorkspaceBytes = 0U;
     aclOpExecutor* executor = nullptr;
-    bool ok = CreateUint64Tensor(api, inputDev.Get(), 2, inputTensor) &&
-        CreateUint64Tensor(api, outputDev.Get(), 1, outputTensor) &&
-        api.prepareQuery(inputTensor.Get(), outputTensor.Get(), &opWorkspaceBytes, &executor) == ACL_SUCCESS;
+    bool ok = CreateTrackedUint64Tensor(
+        api, cleanup, inputDev, 2, inputTensor) &&
+        CreateTrackedUint64Tensor(api, cleanup, outputDev, 1, outputTensor) &&
+        api.prepareQuery(inputTensor, outputTensor,
+                         &opWorkspaceBytes, &executor) == ACL_SUCCESS;
     if (ok && opWorkspaceBytes != 0U) {
-        ok = opWorkspaceDev.Allocate(static_cast<size_t>(opWorkspaceBytes));
+        ok = AllocateTrackedBuffer(cleanup.isolatedBuffers,
+                                   static_cast<size_t>(opWorkspaceBytes), false,
+                                   opWorkspaceDev);
     }
     if (ok) {
-        ok = aclrtCreateStreamWithConfig(
-            &queryStream, 0, ACL_STREAM_FAST_LAUNCH | ACL_STREAM_FAST_SYNC) == ACL_SUCCESS;
+        const aclError createStreamStatus = aclrtCreateStreamWithConfig(
+            &queryStream, 0, ACL_STREAM_FAST_LAUNCH | ACL_STREAM_FAST_SYNC);
+        cleanup.queryStream = queryStream;
+        ok = createStreamStatus == ACL_SUCCESS && queryStream != nullptr;
     }
     if (ok) {
         aclrtStreamAttrValue failureMode {};
@@ -330,7 +347,7 @@ bool RunBuiltinQuery(A5RuntimeApi& api,
     }
     if (ok) {
         const aclnnStatus launchStatus = api.executeQuery(
-            opWorkspaceDev.Get(), opWorkspaceBytes, executor, queryStream);
+            opWorkspaceDev, opWorkspaceBytes, executor, queryStream);
         queryLaunched = launchStatus == ACL_SUCCESS;
         ok = queryLaunched;
         if (queryLaunched) {
@@ -338,26 +355,22 @@ bool RunBuiltinQuery(A5RuntimeApi& api,
         }
     }
 
-    aclError streamDestroyStatus = ACL_SUCCESS;
-    if (queryStream != nullptr) {
-        streamDestroyStatus = aclrtDestroyStream(queryStream);
-        queryStream = nullptr;
+    if (aclrtSetCurrentContext(ownerContext) != ACL_SUCCESS) {
+        TILEXR_LOG(WARN) << "TileXR A5 SDMA could not restore query owner context";
+        return FinishQuery(api, cleanup, pending, false);
     }
-    inputTensor.Reset();
-    outputTensor.Reset();
-    const bool contextRestored = RestoreQueryContext(previous, isolated);
-    if (!ok || !queryLaunched || streamDestroyStatus != ACL_SUCCESS || !contextRestored) {
-        TILEXR_LOG(WARN) << "TileXR A5 SDMA built-in query launch or cleanup failed";
-        return false;
+    if (!ok || !queryLaunched) {
+        TILEXR_LOG(WARN) << "TileXR A5 SDMA built-in query launch failed";
+        return FinishQuery(api, cleanup, pending, false);
     }
 
     const size_t snapshotBytes = sizeof(detail::A5BuiltinWorkspaceHeader) +
         streams.size() * sizeof(detail::A5BuiltinChannelInfo);
     std::vector<uint8_t> bytes(snapshotBytes, 0U);
-    if (aclrtMemcpy(bytes.data(), bytes.size(), builtinWorkspaceDev.Get(), bytes.size(),
+    if (aclrtMemcpy(bytes.data(), bytes.size(), builtinWorkspaceDev, bytes.size(),
                     ACL_MEMCPY_DEVICE_TO_HOST) != ACL_SUCCESS) {
         TILEXR_LOG(WARN) << "TileXR A5 SDMA query workspace download failed";
-        return false;
+        return FinishQuery(api, cleanup, pending, false);
     }
     detail::A5BuiltinWorkspaceHeader header {};
     std::memcpy(&header, bytes.data(), sizeof(header));
@@ -368,11 +381,12 @@ bool RunBuiltinQuery(A5RuntimeApi& api,
     std::memcpy(snapshot.channels.data(), bytes.data() + sizeof(header),
                 snapshot.channels.size() * sizeof(snapshot.channels[0]));
 
-    if (syncStatus == kExpectedAicpuQueryFailure && !CheckRuntimeHealth(outputDev)) {
+    if (syncStatus == kExpectedAicpuQueryFailure &&
+        !CheckRuntimeHealth(cleanup, outputDev)) {
         TILEXR_LOG(WARN) << "TileXR A5 SDMA context health check failed after expected AICPU error";
-        return false;
+        return FinishQuery(api, cleanup, pending, false);
     }
-    return true;
+    return FinishQuery(api, cleanup, pending, true);
 }
 
 int32_t QueryHostSq(uint32_t physicalDevice, uint32_t sqId,
@@ -407,15 +421,17 @@ struct TileXRA5SDMABackend::Impl {
     int32_t logicalDevice = -1;
     uint32_t physicalDevice = 0U;
     uint32_t physicalDieId = 0U;
+    A5RuntimeApi api;
     aclrtContext ownerContext = nullptr;
     aclrtContext restoreContext = nullptr;
     bool restorePending = false;
     void* workspaceDev = nullptr;
+    std::vector<detail::A5PendingQueryCleanup> pendingQueries;
     std::array<OwnedChannel, detail::TILEXR_SDMA_A5_CHANNEL_COUNT> channels {};
 
     bool HasOwnedResources() const
     {
-        if (workspaceDev != nullptr) {
+        if (workspaceDev != nullptr || !pendingQueries.empty()) {
             return true;
         }
         for (const OwnedChannel& channel : channels) {
@@ -424,6 +440,18 @@ struct TileXRA5SDMABackend::Impl {
             }
         }
         return false;
+    }
+
+    void EraseCompletedQueries()
+    {
+        auto query = pendingQueries.begin();
+        while (query != pendingQueries.end()) {
+            if (query->Empty()) {
+                query = pendingQueries.erase(query);
+            } else {
+                ++query;
+            }
+        }
     }
 };
 
@@ -451,15 +479,16 @@ bool TileXRA5SDMABackend::Init(int32_t deviceId)
         return false;
     }
 
-    A5RuntimeApi api;
-    if (!api.Load() ||
-        api.getPhysicalDevice(static_cast<uint32_t>(deviceId), &state->physicalDevice) != 0) {
+    if (!state->api.Load() ||
+        state->api.getPhysicalDevice(
+            static_cast<uint32_t>(deviceId), &state->physicalDevice) != 0) {
         TILEXR_LOG(WARN) << "TileXR A5 SDMA runtime discovery failed";
         return false;
     }
     int64_t physicalDie = -1;
-    if (api.getDeviceInfo(static_cast<uint32_t>(deviceId), kDeviceInfoModuleType,
-                          kPhysicalDieInfoType, &physicalDie) != 0 ||
+    if (state->api.getDeviceInfo(
+            static_cast<uint32_t>(deviceId), kDeviceInfoModuleType,
+            kPhysicalDieInfoType, &physicalDie) != 0 ||
         physicalDie < 0 || static_cast<uint64_t>(physicalDie) >
             static_cast<uint64_t>(std::numeric_limits<uint32_t>::max())) {
         TILEXR_LOG(WARN) << "TileXR A5 SDMA physical die discovery failed";
@@ -467,6 +496,7 @@ bool TileXRA5SDMABackend::Init(int32_t deviceId)
     }
     state->physicalDieId = static_cast<uint32_t>(physicalDie);
     impl_ = std::move(state);
+    A5RuntimeApi& api = impl_->api;
 
     std::vector<detail::A5BuiltinStreamInfo> streamInfos;
     streamInfos.reserve(detail::TILEXR_SDMA_A5_CHANNEL_COUNT);
@@ -498,7 +528,7 @@ bool TileXRA5SDMABackend::Init(int32_t deviceId)
         owned.mapInfo.res_id = sqId;
         unsigned long mappedAddress = 0UL;
         unsigned int mappedLength = 0U;
-        const drvError_t mapStatus = halResAddrMap(
+        const drvError_t mapStatus = api.mapResource(
             impl_->physicalDevice, &owned.mapInfo, &mappedAddress, &mappedLength);
         owned.mapped = mapStatus == DRV_ERROR_NONE;
         if (mapStatus != DRV_ERROR_NONE || mappedAddress == 0UL ||
@@ -523,7 +553,8 @@ bool TileXRA5SDMABackend::Init(int32_t deviceId)
     }
 
     QuerySnapshot batch;
-    if (!RunBuiltinQuery(api, deviceId, streamInfos, batch)) {
+    if (!RunBuiltinQuery(
+            api, deviceId, streamInfos, impl_->pendingQueries, batch)) {
         Shutdown();
         return false;
     }
@@ -551,7 +582,8 @@ bool TileXRA5SDMABackend::Init(int32_t deviceId)
         for (uint32_t index = 1U; index < detail::TILEXR_SDMA_A5_CHANNEL_COUNT; ++index) {
             std::vector<detail::A5BuiltinStreamInfo> oneStream(1U, streamInfos[index]);
             QuerySnapshot isolated;
-            if (!RunBuiltinQuery(api, deviceId, oneStream, isolated) ||
+            if (!RunBuiltinQuery(
+                    api, deviceId, oneStream, impl_->pendingQueries, isolated) ||
                 isolated.channels.size() != 1U ||
                 detail::ClassifyA5QueryResult(
                     static_cast<int32_t>(isolated.syncStatus), isolated.flag,
@@ -654,11 +686,34 @@ bool TileXRA5SDMABackend::Shutdown()
         }
     }
 
+    const detail::A5QueryCleanupOps queryCleanupOps =
+        MakeQueryCleanupOps(impl_->api);
+    for (size_t reverse = impl_->pendingQueries.size(); reverse > 0U; --reverse) {
+        detail::A5PendingQueryCleanup& query = impl_->pendingQueries[reverse - 1U];
+        if (query.restorePending &&
+            !detail::CleanupA5QueryResources(
+                query, queryCleanupOps, query.restoreContext)) {
+            TILEXR_LOG(WARN) << "TileXR A5 SDMA query context restore remains pending";
+            return false;
+        }
+    }
+    impl_->EraseCompletedQueries();
+
     aclrtContext previous = nullptr;
     if (aclrtGetCurrentContext(&previous) != ACL_SUCCESS) {
         TILEXR_LOG(WARN) << "TileXR A5 SDMA could not capture current context for cleanup";
         return false;
     }
+    for (size_t reverse = impl_->pendingQueries.size(); reverse > 0U; --reverse) {
+        detail::A5PendingQueryCleanup& query = impl_->pendingQueries[reverse - 1U];
+        if (!detail::CleanupA5QueryResources(query, queryCleanupOps, previous)) {
+            impl_->EraseCompletedQueries();
+            TILEXR_LOG(WARN) << "TileXR A5 SDMA query cleanup incomplete; retained for retry";
+            return false;
+        }
+    }
+    impl_->EraseCompletedQueries();
+
     if (impl_->ownerContext == nullptr ||
         aclrtSetCurrentContext(impl_->ownerContext) != ACL_SUCCESS) {
         TILEXR_LOG(WARN) << "TileXR A5 SDMA could not switch to owner context for cleanup";
@@ -675,7 +730,8 @@ bool TileXRA5SDMABackend::Shutdown()
             Impl::OwnedChannel& owned = impl_->channels[reverse - 1U];
             bool mappingReleased = true;
             if (owned.mapped) {
-                if (halResAddrUnmap(impl_->physicalDevice, &owned.mapInfo) == DRV_ERROR_NONE) {
+                if (impl_->api.unmapResource(
+                        impl_->physicalDevice, &owned.mapInfo) == DRV_ERROR_NONE) {
                     owned.mapped = false;
                 } else {
                     mappingReleased = false;

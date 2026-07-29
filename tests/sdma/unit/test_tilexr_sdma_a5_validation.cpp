@@ -1,6 +1,9 @@
 #include <cstdint>
 #include <iostream>
+#include <string>
+#include <vector>
 
+#include "sdma/tilexr_sdma_a5_cleanup.h"
 #include "sdma/tilexr_sdma_a5_backend.h"
 
 namespace {
@@ -34,6 +37,105 @@ TileXR::detail::A5BuiltinChannelInfo ValidChannel()
 TileXR::detail::A5HostChannelIdentity ValidIdentity()
 {
     return {6U, 3U, 4U, 5U, 7U};
+}
+
+void* Handle(uintptr_t value)
+{
+    return reinterpret_cast<void*>(value);
+}
+
+struct FakeCleanupRuntime {
+    std::string failedOperation;
+    void* failedHandle = nullptr;
+    bool failureConsumed = false;
+    std::vector<std::string> calls;
+
+    int Call(const char* operation, void* handle)
+    {
+        calls.push_back(operation);
+        if (!failureConsumed && failedOperation == operation &&
+            failedHandle == handle) {
+            failureConsumed = true;
+            return 1;
+        }
+        return 0;
+    }
+};
+
+int FakeSetContext(void* opaque, void* handle)
+{
+    return static_cast<FakeCleanupRuntime*>(opaque)->Call("set", handle);
+}
+
+int FakeDestroyStream(void* opaque, void* handle)
+{
+    return static_cast<FakeCleanupRuntime*>(opaque)->Call("stream", handle);
+}
+
+int FakeDestroyContext(void* opaque, void* handle)
+{
+    return static_cast<FakeCleanupRuntime*>(opaque)->Call("context", handle);
+}
+
+int FakeFreeDevice(void* opaque, void* handle)
+{
+    return static_cast<FakeCleanupRuntime*>(opaque)->Call("free", handle);
+}
+
+int FakeDestroyTensor(void* opaque, const void* handle)
+{
+    return static_cast<FakeCleanupRuntime*>(opaque)->Call(
+        "tensor", const_cast<void*>(handle));
+}
+
+TileXR::detail::A5QueryCleanupOps FakeCleanupOps(FakeCleanupRuntime& runtime)
+{
+    TileXR::detail::A5QueryCleanupOps ops;
+    ops.opaque = &runtime;
+    ops.setCurrentContext = FakeSetContext;
+    ops.destroyStream = FakeDestroyStream;
+    ops.destroyContext = FakeDestroyContext;
+    ops.freeDevice = FakeFreeDevice;
+    ops.destroyTensor = FakeDestroyTensor;
+    return ops;
+}
+
+TileXR::detail::A5PendingQueryCleanup FullCleanupState()
+{
+    TileXR::detail::A5PendingQueryCleanup state;
+    state.ownerContext = Handle(1U);
+    state.isolatedContext = Handle(2U);
+    state.queryStream = Handle(3U);
+    state.healthStream = Handle(4U);
+    state.ownerBuffers = {Handle(5U), Handle(6U)};
+    state.isolatedBuffers = {Handle(7U)};
+    state.tensors = {Handle(8U), Handle(9U)};
+    return state;
+}
+
+bool ContainsHandle(const TileXR::detail::A5PendingQueryCleanup& state,
+                    void* handle)
+{
+    if (state.isolatedContext == handle || state.queryStream == handle ||
+        state.healthStream == handle || state.restoreContext == handle) {
+        return true;
+    }
+    for (void* buffer : state.ownerBuffers) {
+        if (buffer == handle) {
+            return true;
+        }
+    }
+    for (void* buffer : state.isolatedBuffers) {
+        if (buffer == handle) {
+            return true;
+        }
+    }
+    for (const void* tensor : state.tensors) {
+        if (tensor == handle) {
+            return true;
+        }
+    }
+    return false;
 }
 
 void TestCompleteAndExpectedPartialClassification()
@@ -90,6 +192,61 @@ void TestCompleteClassificationRequiresFinishedHeader()
                A5QueryResultKind::INVALID);
 }
 
+void TestCleanupFailuresRetainHandlesForRetry()
+{
+    struct FailureCase {
+        const char* operation;
+        void* handle;
+    };
+    const std::vector<FailureCase> failures = {
+        {"set", Handle(2U)},
+        {"stream", Handle(4U)},
+        {"stream", Handle(3U)},
+        {"free", Handle(7U)},
+        {"tensor", Handle(9U)},
+        {"context", Handle(2U)},
+        {"free", Handle(6U)},
+    };
+    for (const FailureCase& failure : failures) {
+        FakeCleanupRuntime runtime;
+        runtime.failedOperation = failure.operation;
+        runtime.failedHandle = failure.handle;
+        TileXR::detail::A5PendingQueryCleanup state = FullCleanupState();
+        const TileXR::detail::A5QueryCleanupOps ops = FakeCleanupOps(runtime);
+        CHECK_TRUE(!TileXR::detail::CleanupA5QueryResources(
+            state, ops, state.ownerContext));
+        CHECK_TRUE(runtime.failureConsumed);
+        CHECK_TRUE(ContainsHandle(state, failure.handle));
+        CHECK_TRUE(!state.Empty());
+
+        CHECK_TRUE(TileXR::detail::CleanupA5QueryResources(
+            state, ops, state.ownerContext));
+        CHECK_TRUE(state.Empty());
+    }
+}
+
+void TestCleanupRestoreFailureIsRetryable()
+{
+    FakeCleanupRuntime runtime;
+    runtime.failedOperation = "set";
+    runtime.failedHandle = Handle(1U);
+    TileXR::detail::A5PendingQueryCleanup state;
+    state.ownerContext = Handle(1U);
+    state.isolatedContext = Handle(2U);
+    state.queryStream = Handle(3U);
+    const TileXR::detail::A5QueryCleanupOps ops = FakeCleanupOps(runtime);
+
+    CHECK_TRUE(!TileXR::detail::CleanupA5QueryResources(
+        state, ops, state.ownerContext));
+    CHECK_TRUE(state.restorePending);
+    CHECK_TRUE(state.restoreContext == state.ownerContext);
+    CHECK_TRUE(!state.Empty());
+
+    CHECK_TRUE(TileXR::detail::CleanupA5QueryResources(
+        state, ops, state.restoreContext));
+    CHECK_TRUE(state.Empty());
+}
+
 } // namespace
 
 int main()
@@ -97,6 +254,8 @@ int main()
     TestCompleteAndExpectedPartialClassification();
     TestPartialClassificationFailsClosed();
     TestCompleteClassificationRequiresFinishedHeader();
+    TestCleanupFailuresRetainHandlesForRetry();
+    TestCleanupRestoreFailureIsRetryable();
     if (g_failures != 0) {
         std::cerr << g_failures << " A5 SDMA validation checks failed" << std::endl;
         return 1;
