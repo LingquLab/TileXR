@@ -80,11 +80,14 @@ class ControlSourceContractTests(unittest.TestCase):
             "test_tilexr_udma_demo_sources",
             "test_tilexr_udma_source_guard",
             "test_tilexr_sdma_metadata",
+            "test_tilexr_sdma_a5_validation",
             "test_tilexr_sdma_api_invalid",
             "test_tilexr_sdma_transport_disabled",
             "test_tilexr_sdma_comm_wiring",
             "test_tilexr_sdma_source_guard",
             "test_tilexr_sdma_header_compile",
+            "-DTILEXR_SDMA_DEMO_SOC_TYPE=Ascend950",
+            "--target tilexr_sdma_demo_kernel",
             "test_tilexr_memory_demo_sources",
             "test_tilexr_ep_layout",
             "test_tilexr_ep_api_sources",
@@ -194,9 +197,9 @@ class ControlSourceContractTests(unittest.TestCase):
 
         self.assertIn("version_at_least()", common)
         for text in [cann, verify]:
-            self.assertIn('version_at_least "${driver_version}" 25.5.0', text)
-            self.assertNotIn('"${driver_version}" != 25.5.0', text)
-        self.assertNotIn("grep -Fx Version=25.5.0", cann)
+            self.assertIn('version_at_least "${driver_version}" 25.1.rc1', text)
+            self.assertNotIn('"${driver_version}" != 25.1.rc1', text)
+        self.assertNotIn("grep -Fx Version=25.1.rc1", cann)
 
     def test_cann_paths_use_installer_required_permissions(self):
         common = self.read("scripts/ci/provision/common.sh")
@@ -493,6 +496,8 @@ class ControlSourceContractTests(unittest.TestCase):
             "comm-build",
             "udma-build",
             "sdma-build",
+            "sdma-a5-configure",
+            "sdma-a5-build",
             "ep-build",
             "memory-configure",
             "memory-build",
@@ -583,7 +588,7 @@ class ProvisioningHelperBehaviorTests(unittest.TestCase):
 
     def test_version_at_least_compares_numeric_release_components(self):
         common = ROOT / "scripts/ci/provision/common.sh"
-        harness = 'source "$1"; version_at_least "$2" 25.5.0'
+        harness = 'source "$1"; version_at_least "$2" 25.1.rc1'
 
         def supported(version):
             return subprocess.run(
@@ -593,10 +598,16 @@ class ProvisioningHelperBehaviorTests(unittest.TestCase):
                 stderr=subprocess.PIPE,
             )
 
-        for version in ["25.5.0", "25.5.1", "25.6.0", "26.0.0"]:
+        for version in [
+            "25.1.rc1", "25.1.RC1", "25.1.rc1.b188", "25.1.rc2",
+            "25.1.0", "25.2.rc1", "25.5.0", "26.0.0",
+        ]:
             with self.subTest(version=version):
                 self.assertEqual(0, supported(version).returncode)
-        for version in ["25.4.99", "24.99.99", "25.5", "25.5.0.1", "25.5.RC1", ""]:
+        for version in [
+            "25.1.rc0", "25.0.99", "24.99.99", "25.1", "25.1.rc",
+            "25.1.rc1.bad", "25.1.0.1", "",
+        ]:
             with self.subTest(version=version):
                 self.assertNotEqual(0, supported(version).returncode)
 

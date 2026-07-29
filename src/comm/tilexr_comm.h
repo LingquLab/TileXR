@@ -51,6 +51,7 @@ public:
     bool IsSDMAAvailable() const;
     GM_ADDR GetSDMAWorkspacePtr() const;
     SDMAInitStatus GetSDMAInitStatus() const;
+    bool PrepareDestroy();
     std::string PrintDFX();
     friend class Lccl;
     friend class Lcoc;
@@ -78,7 +79,7 @@ private:
     static int ApplyUDMACommArgsStateCallback(const TileXRUDMACommArgsState &state, void *userData);
     int InitSDMA();
     int UpdateCommArgsDev();
-    void ResetSDMAState();
+    bool ResetSDMAState();
 
 private:
     int rank_ = 0;  // global rank id

@@ -27,13 +27,13 @@ Instead of stalling every rank at coarse barriers, TileXR splits a phase into ti
 - **Standalone EP dispatch/combine MVP**: `libtilexr-ep.so`, `libtilexr_ep_dispatch_kernel.so`, and `libtilexr_ep_combine_kernel.so` provide TileXR-native MoE EP dispatch/combine routes under `src/ep`, independent from HCCL window helpers, `ops-transformer`, and shmem. Same-node paths use IPC peer-memory windows; cross-node dispatch/combine use TileXR-registered UDMA workspaces.
 - **Tile-level synchronization**: device-side flag regions and magic values support reusable fine-grained synchronization rounds.
 - **Registered-memory UDMA path**: host code registers ordinary `aclrtMalloc` device memory with `TileXRUDMARegister`; device kernels use `tilexr_udma.h` wrappers for put/get/signal.
-- **On-card SDMA transport**: an opt-in (`TILEXR_ENABLE_SDMA=1`) local GM-to-GM copy path. Host code queries it with `TileXRSDMAAvailable` / `TileXRGetSDMAWorkspaceDev`; device kernels use `tilexr_sdma.h` (`SDMACopyNbi`, `SDMAWait`). Separate from UDMA: SDMA is local to one device, UDMA targets registered remote memory.
+- **On-card SDMA transport**: an opt-in (`TILEXR_ENABLE_SDMA=1`) local GM-to-GM copy path. A2/A3 use the PTO backend; A5 / Ascend950 uses TileXR's direct STARS SQ backend initialized through CANN's built-in `ShmemSdmaStarsQuery`. Host code queries it with `TileXRSDMAAvailable` / `TileXRGetSDMAWorkspaceDev`; device kernels use `tilexr_sdma.h` (`SDMACopyNbi`, `SDMAWait`).
 - **Operator simulator**: `op-simulator/` supports functional/performance simulation for selected AICore kernels without physical hardware.
 
 ## System Requirements
 
 - **User**: root access or membership in the Ascend driver user group is typically required for CANN runfile installation and NPU device operations
-- **NPU driver**: 25.5.0 or later, check with `npu-smi info`
+- **NPU driver**: 25.1.rc1 or later, check with `npu-smi info`
 - **CANN**: current build scripts and CMake are aligned to CANN 9.1.0
 - **Core supported chips**: Ascend 910B, 910A5
 - **UDMA runtime validation target**: A5 / Ascend950 / 950 only
@@ -147,7 +147,7 @@ TileXR/
 |-- src/
 |   |-- comm/                 # Core communication runtime
 |   |   |-- udma/             # TileXR-owned HCCP/RA UDMA transport
-|   |   `-- sdma/             # On-card PTO SDMA local copy transport
+|   |   `-- sdma/             # On-card PTO and A5 direct SDMA backends
 |   |-- collectives/          # Optional TileXR collectives library
 |   |-- ep/                   # Standalone TileXR EP dispatch MVP
 |   `-- include/              # Public C/C++ and device headers
@@ -246,12 +246,13 @@ If UDMA is unavailable, communicator initialization continues without setting `E
 
 SDMA is a first-class local on-card GM-to-GM copy path, separate from UDMA. It is disabled by default and enabled with `TILEXR_ENABLE_SDMA=1`.
 
-- `TileXRComm::InitSDMA()` owns a `TileXRSDMATransport` beside the UDMA transport. When enabled, it creates a PTO `pto::comm::sdma::SdmaWorkspaceManager`, stores its device workspace address in `CommArgs::sdmaWorkspacePtr`, and sets `ExtraFlag::SDMA`.
+- `TileXRComm::InitSDMA()` owns a `TileXRSDMATransport` beside the UDMA transport. Runtime SoC selection keeps PTO `SdmaWorkspaceManager` on A2/A3 and selects TileXR's 48-channel direct backend on A5 / Ascend950.
 - Host queries: `TileXRSDMAAvailable(comm, &available)` and `TileXRGetSDMAWorkspaceDev(comm, &workspace)`. The workspace pointer is owned by `TileXRComm` and must not be freed.
 - Device API: `src/include/tilexr_sdma.h` provides `TileXR::SDMACopyNbi` and `TileXR::SDMAWait`, accepting raw same-device GM pointers. It does not register memory or validate buffer ownership.
-- PTO SDMA header differences across CANN 9.0.0 / 9.1.0 are isolated in `src/include/tilexr_sdma_compat.h`.
+- A5 initialization calls CANN's built-in `ShmemSdmaStarsQuery`, maps RTSQ doorbells on Host, and lets AIV write the two-SQE data/completion sequence. TileXR does not ship a custom AICPU kernel or OPP package for SDMA.
+- PTO-specific compatibility remains isolated in `src/include/tilexr_sdma_compat.h`; A5 uses the installed `tilexr_sdma_a5.h` and `tilexr_sdma_a5_types.h` headers.
 
-Enabled initialization is best-effort: if PTO SDMA headers or runtime resources are unavailable, communicator initialization continues without setting `ExtraFlag::SDMA`, and `SDMACopyNbi` returns event handle `0` while `SDMAWait` reports completion. See [docs/SDMA_TRANSPORT.md](docs/SDMA_TRANSPORT.md) for the full transport guide.
+Enabled initialization is best-effort: if the selected backend or runtime resources are unavailable, communicator initialization continues without setting `ExtraFlag::SDMA`, and `SDMACopyNbi` returns event handle `0` while `SDMAWait` reports completion. See [docs/SDMA_TRANSPORT.md](docs/SDMA_TRANSPORT.md) for the full transport guide.
 
 ## Dependencies
 
@@ -296,7 +297,8 @@ See:
 Build and run the SDMA unit tests against a selected CANN install, then run the data-plane demo on a device:
 
 ```bash
-bash tests/sdma/build.sh /path/to/cann
+bash tests/sdma/build.sh /path/to/cann                # Ascend910B default
+bash tests/sdma/build.sh /path/to/cann Ascend950      # A5 / Ascend950
 bash tests/sdma/run_tests.sh /path/to/cann
 bash tests/sdma/demo/run_tilexr_sdma_demo.sh /path/to/cann 0 64 4096 1048576
 ```
@@ -304,10 +306,10 @@ bash tests/sdma/demo/run_tilexr_sdma_demo.sh /path/to/cann 0 64 4096 1048576
 Expected demo success line:
 
 ```text
-PASS TileXR SDMA copied <bytes> bytes correctly
+PASS TileXR SDMA copied <bytes> bytes on <blocks> block(s), channels <first>..<last>, iterations <count>
 ```
 
-The unit tests are hardware-free; the demo requires a usable driver HAL/device runtime and resolves `libascend_hal.so` from `/usr/local/Ascend/driver/lib64/driver`. See [docs/SDMA_TRANSPORT.md](docs/SDMA_TRANSPORT.md) for enablement, the host/device API, CANN 9.0.0 / 9.1.0 acceptance steps, and current validation status.
+The unit tests are hardware-free; the demo requires a usable driver HAL/device runtime and resolves `libascend_hal.so` from `/usr/local/Ascend/driver/lib64/driver`. A5 kernels are built with `-O2`, need no custom OPP, and do not link PTO's `libnnopbase.so`; the shared Host library retains PTO support for A2/A3. See [docs/SDMA_TRANSPORT.md](docs/SDMA_TRANSPORT.md) for enablement, APIs, backend details, and the hardware acceptance matrix.
 
 ## Collectives Validation
 

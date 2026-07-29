@@ -4,6 +4,7 @@ set -euo pipefail
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 TILEXR_ROOT=$(cd "${SCRIPT_DIR}/../.." && pwd)
 CANN_HOME="${1:-${ASCEND_HOME_PATH:-}}"
+SDMA_SOC_TYPE="${2:-${TILEXR_SDMA_DEMO_SOC_TYPE:-Ascend910B}}"
 
 if [ -z "${CANN_HOME}" ]; then
     set +u
@@ -39,7 +40,7 @@ cmake -S "${TILEXR_ROOT}" -B "${ROOT_BUILD}" \
     -DTILEXR_BUILD_TESTS=OFF
 cmake --build "${ROOT_BUILD}" --target install -j"$(nproc)"
 
-for header in comm_args.h tilexr_sdma_types.h tilexr_sdma_config.h; do
+for header in comm_args.h tilexr_sdma_types.h tilexr_sdma_a5_types.h tilexr_sdma_a5.h tilexr_sdma_config.h; do
     if [ ! -f "${ROOT_INSTALL}/include/${header}" ]; then
         echo "ERROR: expected installed header missing: ${ROOT_INSTALL}/include/${header}" >&2
         exit 1
@@ -55,7 +56,9 @@ fi
 
 cmake -S "${SCRIPT_DIR}" -B "${TEST_BUILD}" \
     -DCMAKE_INSTALL_PREFIX="${TEST_INSTALL}" \
+    -DTILEXR_SDMA_DEMO_SOC_TYPE="${SDMA_SOC_TYPE}" \
     ${DEMO_OPTION}
 cmake --build "${TEST_BUILD}" --target install -j"$(nproc)"
 
+echo "SDMA demo SOC type: ${SDMA_SOC_TYPE}"
 echo "SDMA tests installed to ${TEST_INSTALL}/bin"
