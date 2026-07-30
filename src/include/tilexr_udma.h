@@ -167,23 +167,20 @@ __aicore__ inline uint32_t UDMAGetQpWeight(__gm__ UDMAInfo* udmaInfo, uint32_t p
         return 1;
     }
     auto weights = reinterpret_cast<__gm__ uint32_t*>(udmaInfo->qpWeightPtr);
-    uint32_t regionCount = udmaInfo->regionCount == 0 ? 1 : udmaInfo->regionCount;
-    uint32_t weight = weights[pe * qpNum + qpIdx * regionCount];
+    uint32_t weight = weights[pe * qpNum + qpIdx];
     return weight == 0 ? 1 : weight;
 }
 
 __aicore__ inline uint32_t UDMAGetLogicalQpNum(const __gm__ UDMAInfo* udmaInfo)
 {
-    uint32_t regionCount = udmaInfo->regionCount == 0 ? 1 : udmaInfo->regionCount;
-    uint32_t logicalQpNum = udmaInfo->qpNum / regionCount;
-    return logicalQpNum == 0 ? 1 : logicalQpNum;
+    return udmaInfo->qpNum == 0 ? 1 : udmaInfo->qpNum;
 }
 
 __aicore__ inline uint32_t UDMAGetRegionQpIndex(
     const __gm__ UDMAInfo* udmaInfo, uint32_t logicalQpIdx, uint32_t regionIndex)
 {
     uint32_t regionCount = udmaInfo->regionCount == 0 ? 1 : udmaInfo->regionCount;
-    return logicalQpIdx * regionCount + regionIndex;
+    return regionIndex < regionCount ? logicalQpIdx : udmaInfo->qpNum;
 }
 
 __aicore__ inline void UDMAPollCQUpdateInfo(
@@ -536,45 +533,38 @@ __aicore__ inline void UDMAPutRegisteredSignalNbi(
     UDMAPutSignalNbi<T>(args, targetRank, localSrc, byteOffset, byteCount, signalByteOffset, signal);
 }
 
-__aicore__ inline uint32_t UDMAPollLogicalQpRegions(
+__aicore__ inline uint32_t UDMAPollLogicalQp(
     const __gm__ CommArgs* args, int targetRank, uint32_t logicalQpIdx)
 {
     __gm__ UDMAInfo* udmaInfo = GetUDMAInfo(args);
-    uint32_t regionCount = udmaInfo->regionCount == 0 ? 1 : udmaInfo->regionCount;
-    uint32_t status = 0;
-    for (uint32_t regionIndex = 0; regionIndex < regionCount; ++regionIndex) {
-        uint32_t physicalQpIdx = UDMAGetRegionQpIndex(udmaInfo, logicalQpIdx, regionIndex);
-        if (physicalQpIdx >= udmaInfo->qpNum) return 0xFFFFFFFFU;
-        __gm__ UDMAWQCtx* qpCtxEntry = UDMAGetWQCtx(udmaInfo, targetRank, physicalQpIdx);
-        uint32_t wqeCnt = ld_dev(reinterpret_cast<__gm__ uint32_t*>(qpCtxEntry->wqeCntAddr), 0);
-        uint32_t current = UDMAPollCQ(udmaInfo, targetRank, physicalQpIdx, wqeCnt);
-        if (status == 0 && current != 0) status = current;
-    }
-    return status;
+    if (logicalQpIdx >= udmaInfo->qpNum) return 0xFFFFFFFFU;
+    __gm__ UDMAWQCtx* qpCtxEntry = UDMAGetWQCtx(udmaInfo, targetRank, logicalQpIdx);
+    uint32_t wqeCnt = ld_dev(reinterpret_cast<__gm__ uint32_t*>(qpCtxEntry->wqeCntAddr), 0);
+    return UDMAPollCQ(udmaInfo, targetRank, logicalQpIdx, wqeCnt);
 }
 
 __aicore__ inline void UDMAQuiet(const __gm__ CommArgs* args, int targetRank)
 {
     if (!UDMAEnabled(args)) return;
-    (void)UDMAPollLogicalQpRegions(args, targetRank, 0);
+    (void)UDMAPollLogicalQp(args, targetRank, 0);
 }
 
 __aicore__ inline void UDMAQuietOnQp(const __gm__ CommArgs* args, int targetRank, uint32_t qpIdx)
 {
     if (!UDMAEnabled(args)) return;
-    (void)UDMAPollLogicalQpRegions(args, targetRank, qpIdx);
+    (void)UDMAPollLogicalQp(args, targetRank, qpIdx);
 }
 
 __aicore__ inline uint32_t UDMAQuietStatus(const __gm__ CommArgs* args, int targetRank)
 {
     if (!UDMAEnabled(args)) return 0xFFFFFFFFU;
-    return UDMAPollLogicalQpRegions(args, targetRank, 0);
+    return UDMAPollLogicalQp(args, targetRank, 0);
 }
 
 __aicore__ inline uint32_t UDMAQuietStatusOnQp(const __gm__ CommArgs* args, int targetRank, uint32_t qpIdx)
 {
     if (!UDMAEnabled(args)) return 0xFFFFFFFFU;
-    return UDMAPollLogicalQpRegions(args, targetRank, qpIdx);
+    return UDMAPollLogicalQp(args, targetRank, qpIdx);
 }
 
 } // namespace TileXR

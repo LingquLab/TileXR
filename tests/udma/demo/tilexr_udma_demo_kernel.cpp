@@ -2576,6 +2576,17 @@ extern "C" __global__ __aicore__ void tilexr_udma_vmm_regions_probe_kernel(
         TileXR::UDMAQuiet(args, targetRank);
     }
 
+    constexpr uint64_t notifySourceOffset = 8192;
+    constexpr uint64_t notifyDestinationOffset = 16384;
+    auto notifySource = localBase + notifySourceOffset;
+    const uint64_t notifySignalOffset = regionBytes + notifyDestinationOffset;
+    const uint64_t notifySignal =
+        (static_cast<uint64_t>(args->rank) << 32) | 0xC7000000ULL;
+    TileXR::UDMAPutSignalNbiOnQp<uint8_t>(
+        args, targetRank, 0, notifySource, notifyDestinationOffset,
+        sizeof(uint64_t), notifySignalOffset, notifySignal);
+    TileXR::UDMAQuiet(args, targetRank);
+
     constexpr uint32_t boundaryBytes = 64;
     auto boundarySource = localBase + 4096;
     const uint64_t boundaryDestinationOffset = regionBytes - boundaryBytes / 2;

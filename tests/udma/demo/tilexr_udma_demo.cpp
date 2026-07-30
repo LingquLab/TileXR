@@ -117,6 +117,8 @@ constexpr uint64_t kVmmProbeRegionBytes = 1ULL << 30;
 constexpr uint64_t kVmmProbeMarkerDstOffset = 64;
 constexpr uint64_t kVmmProbeMarkerSrcOffset = 128;
 constexpr uint64_t kVmmProbeBoundaryBytes = 64;
+constexpr uint64_t kVmmProbeNotifySrcOffset = 8192;
+constexpr uint64_t kVmmProbeNotifyDstOffset = 16384;
 
 struct BarrierEndpoint {
     std::string host;
@@ -617,6 +619,18 @@ bool RunVmmMultiRegionProbe(
             aclrtMemcpy(regions[i].base + kVmmProbeMarkerDstOffset, sizeof(zero),
                         &zero, sizeof(zero), ACL_MEMCPY_HOST_TO_DEVICE)) && ok;
     }
+    const uint64_t notifyPayload = (static_cast<uint64_t>(rank) << 32) | 0xB6000000ULL;
+    const uint64_t zero = 0;
+    ok = CheckAcl(rank, "init cross-MR notify source",
+        aclrtMemcpy(static_cast<GM_ADDR>(base) + kVmmProbeNotifySrcOffset,
+                    sizeof(notifyPayload), &notifyPayload, sizeof(notifyPayload),
+                    ACL_MEMCPY_HOST_TO_DEVICE)) && ok;
+    ok = CheckAcl(rank, "clear cross-MR notify payload",
+        aclrtMemcpy(static_cast<GM_ADDR>(base) + kVmmProbeNotifyDstOffset,
+                    sizeof(zero), &zero, sizeof(zero), ACL_MEMCPY_HOST_TO_DEVICE)) && ok;
+    ok = CheckAcl(rank, "clear cross-MR notify signal",
+        aclrtMemcpy(static_cast<GM_ADDR>(base) + regionBytes + kVmmProbeNotifyDstOffset,
+                    sizeof(zero), &zero, sizeof(zero), ACL_MEMCPY_HOST_TO_DEVICE)) && ok;
     std::array<uint8_t, kVmmProbeBoundaryBytes> boundarySource {};
     for (uint32_t i = 0; i < boundarySource.size(); ++i) {
         boundarySource[i] = static_cast<uint8_t>((rank * 17 + i) & 0xFF);
@@ -650,6 +664,27 @@ bool RunVmmMultiRegionProbe(
             ok = false;
         }
     }
+    uint64_t notifyPayloadActual = 0;
+    uint64_t notifySignalActual = 0;
+    const uint64_t notifyPayloadExpected =
+        (static_cast<uint64_t>(predecessor) << 32) | 0xB6000000ULL;
+    const uint64_t notifySignalExpected =
+        (static_cast<uint64_t>(predecessor) << 32) | 0xC7000000ULL;
+    ok = CheckAcl(rank, "read cross-MR notify payload",
+        aclrtMemcpy(&notifyPayloadActual, sizeof(notifyPayloadActual),
+                    static_cast<GM_ADDR>(base) + kVmmProbeNotifyDstOffset,
+                    sizeof(notifyPayloadActual), ACL_MEMCPY_DEVICE_TO_HOST)) && ok;
+    ok = CheckAcl(rank, "read cross-MR notify signal",
+        aclrtMemcpy(&notifySignalActual, sizeof(notifySignalActual),
+                    static_cast<GM_ADDR>(base) + regionBytes + kVmmProbeNotifyDstOffset,
+                    sizeof(notifySignalActual), ACL_MEMCPY_DEVICE_TO_HOST)) && ok;
+    if (notifyPayloadActual != notifyPayloadExpected || notifySignalActual != notifySignalExpected) {
+        std::cerr << "[rank " << rank << "] ERROR: cross-MR notify payload="
+                  << notifyPayloadActual << " expectedPayload=" << notifyPayloadExpected
+                  << " signal=" << notifySignalActual
+                  << " expectedSignal=" << notifySignalExpected << std::endl;
+        ok = false;
+    }
     std::array<uint8_t, kVmmProbeBoundaryBytes> boundaryActual {};
     ok = CheckAcl(rank, "read cross-region boundary",
         aclrtMemcpy(boundaryActual.data(), boundaryActual.size(), boundaryDestinationAddr, boundaryActual.size(),
@@ -670,7 +705,8 @@ bool RunVmmMultiRegionProbe(
     releaseVmm();
     if (ok) {
         std::cout << "[rank " << rank
-                  << "] VMM 4GiB / ping+pong 2GiB each / 4x1GiB MR probe success" << std::endl;
+                  << "] VMM 4GiB / shared QP cross-MR payload+notify / 4x1GiB MR probe success"
+                  << std::endl;
     }
     return ok;
 }

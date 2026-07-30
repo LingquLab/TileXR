@@ -167,26 +167,21 @@ uint32_t UDMASharedQpLane(
     return lanesPerDirection + (backward - 1) % lanesPerDirection;
 }
 
-uint32_t UDMASharedQpIndex(uint32_t regionIndex, uint32_t lane, uint32_t laneCount)
+uint32_t UDMASharedQpIndex(uint32_t lane, uint32_t laneCount)
 {
-    if (laneCount == 0 || lane >= laneCount ||
-        regionIndex > (std::numeric_limits<uint32_t>::max() - lane) / laneCount) {
+    if (laneCount == 0 || lane >= laneCount) {
         return std::numeric_limits<uint32_t>::max();
     }
-    return regionIndex * laneCount + lane;
+    return lane;
 }
 
-size_t UDMASharedQpPoolSize(uint32_t laneCount, uint32_t eidCount, uint32_t regionCount)
+size_t UDMASharedQpPoolSize(uint32_t laneCount, uint32_t eidCount)
 {
-    if (laneCount == 0 || eidCount == 0 || regionCount == 0 ||
+    if (laneCount == 0 || eidCount == 0 ||
         static_cast<size_t>(eidCount) > std::numeric_limits<size_t>::max() / laneCount) {
         return 0;
     }
-    const size_t lanesPerRegion = static_cast<size_t>(laneCount) * eidCount;
-    if (static_cast<size_t>(regionCount) > std::numeric_limits<size_t>::max() / lanesPerRegion) {
-        return 0;
-    }
-    return lanesPerRegion * regionCount;
+    return static_cast<size_t>(laneCount) * eidCount;
 }
 
 std::vector<uint32_t> SelectExplicitUDMARouteEids(

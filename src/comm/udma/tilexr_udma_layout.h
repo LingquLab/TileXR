@@ -69,14 +69,12 @@ uint32_t UDMASharedQpLane(
     uint32_t laneCount);
 
 uint32_t UDMASharedQpIndex(
-    uint32_t regionIndex,
     uint32_t lane,
     uint32_t laneCount);
 
 size_t UDMASharedQpPoolSize(
     uint32_t laneCount,
-    uint32_t eidCount,
-    uint32_t regionCount = 1U);
+    uint32_t eidCount);
 
 std::vector<uint32_t> SelectExplicitUDMARouteEids(
     const char* routeList,

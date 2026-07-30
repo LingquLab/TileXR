@@ -216,21 +216,19 @@ void TestSharedQpLanesAreUniqueWithinEveryGroup()
     }
 }
 
-void TestSharedQpPoolScalesWithRegions()
+void TestSharedQpPoolIsIndependentOfRegions()
 {
     CHECK_EQ(TileXR::UDMASharedQpPoolSize(16, 2), static_cast<size_t>(32));
     CHECK_EQ(TileXR::UDMASharedQpPoolSize(16, 1), static_cast<size_t>(16));
-    CHECK_EQ(TileXR::UDMASharedQpPoolSize(16, 2, 4), static_cast<size_t>(128));
     CHECK_EQ(TileXR::UDMASharedQpPoolSize(0, 2), static_cast<size_t>(0));
-    CHECK_EQ(TileXR::UDMASharedQpPoolSize(16, 2, 0), static_cast<size_t>(0));
+    CHECK_EQ(TileXR::UDMASharedQpPoolSize(16, 0), static_cast<size_t>(0));
 }
 
-void TestSharedQpIndexAddsRegionDimension()
+void TestSharedQpIndexUsesLaneOnly()
 {
-    CHECK_EQ(TileXR::UDMASharedQpIndex(0, 3, 16), 3U);
-    CHECK_EQ(TileXR::UDMASharedQpIndex(1, 3, 16), 19U);
-    CHECK_EQ(TileXR::UDMASharedQpIndex(3, 15, 16), 63U);
-    CHECK_EQ(TileXR::UDMASharedQpIndex(0, 16, 16), UINT32_MAX);
+    CHECK_EQ(TileXR::UDMASharedQpIndex(3, 16), 3U);
+    CHECK_EQ(TileXR::UDMASharedQpIndex(15, 16), 15U);
+    CHECK_EQ(TileXR::UDMASharedQpIndex(16, 16), UINT32_MAX);
 }
 
 void TestSharedQpLaneRejectsInvalidInputs()
@@ -336,6 +334,21 @@ void TestTransportHasOptInSharedQpPool()
     CHECK_NOT_CONTAINS(transport, "allSharedKeys");
     CHECK_CONTAINS(transport, "state.sharedRemoteQueues.clear()");
     CHECK_CONTAINS(transport, "auto cleanupQueue = [&]()");
+    CHECK_CONTAINS(transport, "qpsPerRoute_ = logicalQpsPerRoute_");
+    CHECK_CONTAINS(transport, "qpNum_ = logicalQpNum_");
+    CHECK_NOT_CONTAINS(transport, "logicalQpsPerRoute_ * regionCount");
+    CHECK_NOT_CONTAINS(transport, "logicalQpNum_ * regionCount");
+}
+
+void TestDeviceReusesLogicalQpAcrossRegions()
+{
+    const std::string device =
+        ReadFile(std::string(TILEXR_SOURCE_ROOT) + "/src/include/tilexr_udma.h");
+
+    CHECK_CONTAINS(device, "return regionIndex < regionCount ? logicalQpIdx : udmaInfo->qpNum");
+    CHECK_CONTAINS(device, "return udmaInfo->qpNum == 0 ? 1 : udmaInfo->qpNum");
+    CHECK_NOT_CONTAINS(device, "logicalQpIdx * regionCount + regionIndex");
+    CHECK_NOT_CONTAINS(device, "qpIdx * regionCount");
 }
 
 void TestSocketExchangeSupportsPersonalizedAllToAll()
@@ -422,8 +435,8 @@ int main()
     TestMultiRouteQpWeightsUseRouteBandwidth();
     TestSharedQpLaneMatchesGroupedPeerOrder();
     TestSharedQpLanesAreUniqueWithinEveryGroup();
-    TestSharedQpPoolScalesWithRegions();
-    TestSharedQpIndexAddsRegionDimension();
+    TestSharedQpPoolIsIndependentOfRegions();
+    TestSharedQpIndexUsesLaneOnly();
     TestSharedQpLaneRejectsInvalidInputs();
     TestSocketExchangeSupportsPersonalizedAllToAll();
     TestExplicitRouteSelectionKeepsRequestedCandidateOrder();
@@ -434,6 +447,7 @@ int main()
     TestExplicitNodeIdentityOverridesMachineId();
     TestTransportUsesPerPeerQueues();
     TestTransportHasOptInSharedQpPool();
+    TestDeviceReusesLogicalQpAcrossRegions();
     TestRootInfoEidBytesSelectRuntimeContexts();
     TestRootInfoDeviceOffsetDoesNotDependOnEntryOrder();
     TestMemoryRegistrationUsesOfficialUbFlags();
