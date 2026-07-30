@@ -464,8 +464,8 @@ TileXRA5SDMABackend::~TileXRA5SDMABackend()
 
 bool TileXRA5SDMABackend::Init(int32_t deviceId)
 {
-    if (!Shutdown()) {
-        TILEXR_LOG(WARN) << "TileXR A5 SDMA previous resources could not be released";
+    if (impl_ != nullptr) {
+        TILEXR_LOG(ERROR) << "TileXR A5 SDMA backend contains state before initialization";
         return false;
     }
     std::unique_ptr<Impl> state(new (std::nothrow) Impl());

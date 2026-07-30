@@ -47,9 +47,10 @@ bool TileXRSDMATransport::EnvEnabled()
 
 int TileXRSDMATransport::Init(const TileXRSDMATransportOptions& options)
 {
-    if (!Shutdown()) {
+    if (impl_ != nullptr) {
+        TILEXR_LOG(ERROR) << "TileXR SDMA transport contains state before initialization";
         lastStatus_ = SDMAInitStatus::INIT_FAILED;
-        return TILEXR_SUCCESS;
+        return TILEXR_ERROR_INTERNAL;
     }
     options_ = options;
     available_ = false;

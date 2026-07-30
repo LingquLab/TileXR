@@ -174,6 +174,8 @@ void TestSdmaFailureIsScopedToOneCommunicator()
     const auto comm = ReadFile(commPath);
     CheckNoNeedle(commPath, comm, "g_sdmaUnavailable");
     CheckNeedle(commPath, comm, "sdmaTransport_->Init(options)");
+    CheckNeedle(commPath, comm, "TileXR SDMA transport exists before initialization");
+    CheckNoNeedle(commPath, comm, "TileXR previous SDMA resources are still pending cleanup");
     CheckNeedle(commPath, comm, "bool TileXRComm::PrepareDestroy()");
     CheckNeedle(commPath, comm, "if (UpdateCommArgsDev() != TILEXR_SUCCESS)");
 
