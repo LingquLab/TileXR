@@ -126,7 +126,14 @@ TILEXR_SDMA_A5_HOST_DEVICE_INLINE bool A5SdmaQueueStateValid(uint32_t tail, uint
 
 TILEXR_SDMA_A5_HOST_DEVICE_INLINE uint32_t A5SdmaAdvanceTail(uint32_t tail, uint32_t depth)
 {
-    return (tail + 2U) % depth;
+    return static_cast<uint32_t>((static_cast<uint64_t>(tail) + 2U) % depth);
+}
+
+TILEXR_SDMA_A5_HOST_DEVICE_INLINE uint32_t A5SdmaAdvanceTailBy(
+    uint32_t tail, uint32_t entries, uint32_t depth)
+{
+    return static_cast<uint32_t>(
+        (static_cast<uint64_t>(tail) + static_cast<uint64_t>(entries)) % depth);
 }
 
 TILEXR_SDMA_A5_HOST_DEVICE_INLINE uint32_t A5SdmaQueueDistance(
@@ -135,18 +142,59 @@ TILEXR_SDMA_A5_HOST_DEVICE_INLINE uint32_t A5SdmaQueueDistance(
     return (tail + depth - head) % depth;
 }
 
-TILEXR_SDMA_A5_HOST_DEVICE_INLINE bool A5SdmaQueueHasCapacity(
-    uint32_t head, uint32_t tail, uint32_t depth)
+TILEXR_SDMA_A5_HOST_DEVICE_INLINE bool A5SdmaQueueHasEntriesCapacity(
+    uint32_t head, uint32_t tail, uint32_t depth, uint32_t requiredEntries)
 {
     if (depth < 3U || head >= depth || tail >= depth) {
         return false;
     }
-    return A5SdmaQueueDistance(head, tail, depth) <= depth - 3U;
+    if (requiredEntries == 0U || requiredEntries >= depth) {
+        return false;
+    }
+    const uint32_t used = A5SdmaQueueDistance(head, tail, depth);
+    return requiredEntries <= depth - used - 1U;
+}
+
+TILEXR_SDMA_A5_HOST_DEVICE_INLINE bool A5SdmaQueueHasCapacity(
+    uint32_t head, uint32_t tail, uint32_t depth)
+{
+    return A5SdmaQueueHasEntriesCapacity(head, tail, depth, 2U);
 }
 
 TILEXR_SDMA_A5_HOST_DEVICE_INLINE uint32_t A5SdmaAdvanceTaskId(uint32_t taskId)
 {
     return (taskId + 2U) & 0xFFFFU;
+}
+
+TILEXR_SDMA_A5_HOST_DEVICE_INLINE uint32_t A5SdmaAdvanceTaskIdBy(
+    uint32_t taskId, uint32_t entries)
+{
+    return static_cast<uint32_t>(
+        (static_cast<uint64_t>(taskId) + static_cast<uint64_t>(entries)) & 0xFFFFULL);
+}
+
+TILEXR_SDMA_A5_HOST_DEVICE_INLINE bool A5SdmaStridedRangeValid(
+    uint64_t address, uint64_t bytes, uint32_t copyCount, uint64_t strideBytes)
+{
+    if (address == 0U || bytes == 0U || copyCount == 0U) {
+        return false;
+    }
+    if (copyCount == 1U) {
+        return bytes - 1U <= 0xFFFFFFFFFFFFFFFFULL - address;
+    }
+    if (strideBytes < bytes) {
+        return false;
+    }
+    const uint64_t lastIndex = static_cast<uint64_t>(copyCount - 1U);
+    if (strideBytes > 0xFFFFFFFFFFFFFFFFULL / lastIndex) {
+        return false;
+    }
+    const uint64_t lastOffset = strideBytes * lastIndex;
+    if (lastOffset > 0xFFFFFFFFFFFFFFFFULL - address) {
+        return false;
+    }
+    const uint64_t lastAddress = address + lastOffset;
+    return bytes - 1U <= 0xFFFFFFFFFFFFFFFFULL - lastAddress;
 }
 
 TILEXR_SDMA_A5_HOST_DEVICE_INLINE uint32_t A5SdmaNextGeneration(uint32_t generation)

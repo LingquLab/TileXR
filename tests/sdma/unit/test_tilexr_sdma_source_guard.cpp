@@ -127,6 +127,7 @@ void TestBuildSelectsExplicitSoc()
         "TILEXR_SDMA_AICORE_ARCH \"--cce-aicore-arch=dav-c310-vec\"");
     CheckNeedle(cmakePath, cmakeText,
         "Unsupported TILEXR_SDMA_DEMO_SOC_TYPE=");
+    CheckNeedle(cmakePath, cmakeText, "set(CMAKE_SKIP_BUILD_RPATH TRUE)");
 }
 
 void TestAscend950UsesOwnedDirectBackend()
@@ -150,7 +151,17 @@ void TestAscend950UsesOwnedDirectBackend()
 
     const std::string devicePath = "src/include/tilexr_sdma_a5.h";
     const auto device = ReadFile(devicePath);
+    CheckNeedle(devicePath, device, "A5SdmaCopyStridedNbi");
     CheckNeedle(devicePath, device, "while (A5SdmaReadCompletion(completion) != generation)");
+
+    const std::string publicPath = "src/include/tilexr_sdma.h";
+    const auto publicHeader = ReadFile(publicPath);
+    CheckNeedle(publicPath, publicHeader, "SDMACopyStridedNbi");
+
+    const std::string benchmarkKernelPath = "tests/sdma/demo/tilexr_sdma_demo_kernel.cpp";
+    const auto benchmarkKernel = ReadFile(benchmarkKernelPath);
+    CheckNeedle(benchmarkKernelPath, benchmarkKernel, "SDMACopyStridedNbi");
+    CheckNoNeedle(benchmarkKernelPath, benchmarkKernel, "BenchmarkBatchCopyNbi");
 
     const std::string demoPath = "tests/sdma/demo/tilexr_sdma_demo.cpp";
     const auto demo = ReadFile(demoPath);

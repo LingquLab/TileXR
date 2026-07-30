@@ -76,12 +76,20 @@ void TestA5QueueAndTransferHelpers()
     CHECK_TRUE(!A5SdmaQueueStateValid(3U, 3U));
     CHECK_EQ(A5SdmaAdvanceTail(0U, 3U), 2U);
     CHECK_EQ(A5SdmaAdvanceTail(2U, 3U), 1U);
+    CHECK_EQ(A5SdmaAdvanceTailBy(7U, 3U, 8U), 2U);
+    CHECK_EQ(A5SdmaAdvanceTailBy(0xFFFFFFFEU, 3U, 0xFFFFFFFFU), 2U);
     CHECK_EQ(A5SdmaQueueDistance(2U, 1U, 3U), 2U);
     CHECK_TRUE(A5SdmaQueueHasCapacity(0U, 0U, 3U));
     CHECK_TRUE(A5SdmaQueueHasCapacity(1U, 2U, 8U));
     CHECK_TRUE(!A5SdmaQueueHasCapacity(0U, 2U, 3U));
     CHECK_TRUE(!A5SdmaQueueHasCapacity(3U, 0U, 3U));
+    CHECK_TRUE(A5SdmaQueueHasEntriesCapacity(0U, 0U, 8U, 7U));
+    CHECK_TRUE(!A5SdmaQueueHasEntriesCapacity(0U, 0U, 8U, 8U));
+    CHECK_TRUE(A5SdmaQueueHasEntriesCapacity(2U, 6U, 8U, 3U));
+    CHECK_TRUE(!A5SdmaQueueHasEntriesCapacity(2U, 6U, 8U, 4U));
+    CHECK_TRUE(!A5SdmaQueueHasEntriesCapacity(0U, 0U, 8U, 0U));
     CHECK_EQ(A5SdmaAdvanceTaskId(0xFFFFU), 1U);
+    CHECK_EQ(A5SdmaAdvanceTaskIdBy(0xFFFFU, 17U), 16U);
     CHECK_TRUE(!A5SdmaTransferLengthValid(0U));
     CHECK_TRUE(A5SdmaTransferLengthValid(1U));
     CHECK_TRUE(A5SdmaTransferLengthValid(TILEXR_SDMA_A5_MAX_TRANSFER_BYTES));
@@ -89,6 +97,16 @@ void TestA5QueueAndTransferHelpers()
     CHECK_EQ(A5SdmaNextGeneration(0U), 1U);
     CHECK_EQ(A5SdmaNextGeneration(1U), 2U);
     CHECK_EQ(A5SdmaNextGeneration(0xFFFFFFFFU), 1U);
+
+    constexpr uint64_t maxAddress = 0xFFFFFFFFFFFFFFFFULL;
+    CHECK_TRUE(A5SdmaStridedRangeValid(0x1000U, 64U, 16U, 64U));
+    CHECK_TRUE(!A5SdmaStridedRangeValid(0x1000U, 64U, 16U, 63U));
+    CHECK_TRUE(!A5SdmaStridedRangeValid(0x1000U, 64U, 0U, 64U));
+    CHECK_TRUE(!A5SdmaStridedRangeValid(0U, 64U, 1U, 0U));
+    CHECK_TRUE(A5SdmaStridedRangeValid(maxAddress - 63U, 64U, 1U, 0U));
+    CHECK_TRUE(!A5SdmaStridedRangeValid(maxAddress - 62U, 64U, 1U, 0U));
+    CHECK_TRUE(A5SdmaStridedRangeValid(maxAddress - 127U, 64U, 2U, 64U));
+    CHECK_TRUE(!A5SdmaStridedRangeValid(maxAddress - 126U, 64U, 2U, 64U));
 }
 
 void TestA5EventHelpers()

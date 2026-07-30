@@ -3,6 +3,7 @@
 Date: 2026-07-28
 Status: Approved for execution
 Design: `docs/specs/2026-07-28-a5-direct-sdma-design.md`
+Updated: 2026-07-29 (Task 9 adds approved strided batch submission)
 
 ## Goal
 
@@ -10,7 +11,7 @@ Implement the approved Ascend950/A5 direct-SDMA backend inside TileXR while
 preserving the existing A2/A3 PTO backend and public API. The production path
 must use CANN's built-in system AICPU `ShmemSdmaStarsQuery`, map Host RTSQ
 doorbells, publish a TileXR-owned 48-channel workspace, and let AIV submit the
-two-SQE data/completion sequence directly.
+single-copy two-SQE or strided-batch `N + 1` sequence directly.
 
 The project-wide supported baseline becomes CANN 9.1.0 with driver
 `25.1.rc1` or later. The validated hardware baseline is
@@ -22,8 +23,9 @@ The project-wide supported baseline becomes CANN 9.1.0 with driver
 - Add a production A5 Host backend to `libtile-comm.so`, including dynamic
   built-in-op loading, 48 STARS streams, query compatibility, RTSQ mappings,
   workspace publication, and complete failure cleanup.
-- Dispatch `SDMACopyNbi` and `SDMAWait` to A5 direct submission for dav-3510
-  kernels while keeping PTO behavior on A2/A3.
+- Dispatch `SDMACopyNbi`, `SDMACopyStridedNbi`, and `SDMAWait` to A5 direct
+  submission for dav-3510 kernels while keeping PTO single-copy behavior on
+  A2/A3.
 - Extend SDMA unit, integration, build, demo, dependency, and hardware checks.
 - Change requirements and CI provisioning from driver `25.5.0+` to
   `25.1.rc1+`, including Huawei RC/build-suffix comparison.
@@ -37,7 +39,7 @@ The project-wide supported baseline becomes CANN 9.1.0 with driver
 - Do not include or link any source under `reference/`; it remains evidence
   only.
 - Do not change `CommArgs`, public Host API signatures, the opt-in environment
-  variable, or event-zero semantics.
+  variable, workspace ABI, or event-zero semantics.
 - Do not replace PTO SDMA on A2/A3, make SDMA mandatory for communicator init,
   add more than one outstanding event per channel, or claim Host/simulator
   checks prove the A5 data plane.
@@ -67,8 +69,10 @@ paths, sources, or link inputs.
 Tasks 1 and 2 establish contracts needed by Tasks 3 and 4. Task 5 depends on
 the production Host and device paths. Task 6 is independent of Tasks 2-5 at the
 file level but must land before final validation. Task 7 follows functional
-implementation and baseline migration. Task 8 is the final acceptance gate;
-PoC removal is not considered complete until its evidence is covered there.
+implementation and baseline migration. Task 8 is the original backend
+acceptance gate. Task 9 depends on Tasks 1, 4, 5, and 8 and is the final batch
+extension gate; PoC removal is not considered complete until its evidence is
+covered there.
 
 ## Task 1: Define The A5 ABI And Test Seams
 
@@ -197,7 +201,7 @@ wiring, and dav-3510 compile tests. Keep PTO-specific code in
 **Constraints and non-goals:** Validate workspace magic/version/backend,
 addresses, byte length, channel, depth, and queue capacity before writes.
 Atomically claim the channel; a busy channel returns 0. Advance a nonzero
-generation, clear completion, build data and 64-byte completion-copy SQEs with
+generation, update the completion payload, build data and 64-byte completion-copy SQEs with
 type 11, `wrCqe=0`, credit 254, flush all touched cache lines, issue ordering,
 and ring RTSQ only after both SQEs are ready. `SDMAWait(0)` succeeds; other
 waits reject bad channel/generation/stale events, poll matching completion, and
@@ -343,6 +347,47 @@ iterations in `docs/SDMA_TRANSPORT.md`.
 validation documentation, and a final diff/status review demonstrating that
 only scoped production, test, baseline, diagram, and cleanup files changed.
 
+## Task 9: Promote Strided Batch Submission
+
+**Objective and role:** Move the hardware-proven batch prototype into the
+installed TileXR device API so multiple independent same-sized copies can share
+one A5 doorbell and one completion event.
+
+**Background and prerequisites:** Representative A5 measurements show
+3.4-4.0x amortized improvement for 4-64 KiB, 2.2x at 1 MiB, and 1.39x at
+4 MiB. The accepted design adds `SDMACopyStridedNbi` without changing Host or
+workspace ABI. One batch uses `N` data SQEs plus one completion-copy SQE and
+retains one outstanding event per channel.
+
+**Modification scope:** Update `src/include/tilexr_sdma_a5_types.h` with pure
+multi-entry queue helpers, implement the A5 strided batch in
+`src/include/tilexr_sdma_a5.h`, expose the architecture-routed wrapper in
+`src/include/tilexr_sdma.h`, and replace the private implementation in
+`tests/sdma/demo/tilexr_sdma_demo_kernel.cpp`. Extend metadata, header/source,
+benchmark, and transport documentation tests as appropriate.
+
+**Constraints and non-goals:** Preserve C++14 and CANN 9.1, the A5 workspace
+layout/version, Host APIs, event format, existing single-copy behavior, A2/A3
+PTO behavior, and one outstanding event per channel. Validate all inputs before
+claiming a channel. Require non-overlapping strides for multi-copy batches,
+reject address arithmetic overflow and insufficient queue capacity, leave one
+SQ entry unused, and ring exactly one doorbell. Do not add descriptor arrays,
+begin/append/commit state, CQE polling, broadcast/overlap semantics, or a
+multi-copy PTO implementation.
+
+**Acceptance and verification:** Unit-test arbitrary-entry capacity, tail and
+task-ID wrap, invalid count/stride/overflow inputs, and unchanged two-entry
+single-copy helpers. Compile the installed header and benchmark kernel for
+dav-3510. On A5 run counts 1, 2, 4, 8, 16, and 32 across queue/task-ID wraps,
+verify every destination slice, repeat init/use/destroy, and rerun 4 KiB,
+64 KiB, 1 MiB, and 4 MiB representative timings with equal 64 MiB backing and
+a rotating working set. Run the eight focused SDMA test executables and inspect
+the final dependency/RPATH state.
+
+**Artifacts and interfaces:** Installed `SDMACopyStridedNbi`, reusable A5
+multi-entry queue helpers, benchmark coverage using only the production API,
+and recorded hardware semantics/performance evidence.
+
 ## Key Risks And Controls
 
 - **Expected AICPU failure corrupts the active context:** every query runs in a
@@ -351,11 +396,11 @@ only scoped production, test, baseline, diagram, and cleanup files changed.
 - **Partial workspace is accidentally trusted:** acceptance requires the exact
   status and every independent field/ID/HAL/mapping cross-check; all other
   partial states fail closed.
-- **Queue overwrite or cross-block race:** reserve two slots, permit one
-  outstanding event per channel, atomically claim it, and assign distinct
-  channels to concurrent blocks.
-- **Cache/order mismatch:** flush payload, completion record, and both SQEs;
-  issue the validated barrier sequence before the RTSQ tail write.
+- **Queue overwrite or cross-block race:** reserve `N + 1` slots while leaving
+  one unused, permit one outstanding event per channel, atomically claim it,
+  and assign distinct channels to concurrent blocks.
+- **Cache/order mismatch:** flush the payload and every written SQE; issue the
+  validated barrier sequence before the RTSQ tail write.
 - **ABI drift between Host and AIV:** one installed fixed-width header and
   static assertions are compiled in both modes.
 - **Optional runtime becomes a hard dependency:** dynamically resolve the
@@ -367,7 +412,7 @@ only scoped production, test, baseline, diagram, and cleanup files changed.
 
 ## Completion Gate
 
-The change is complete only when all eight tasks pass, A2/A3 PTO selection is
+The change is complete only when all nine tasks pass, A2/A3 PTO selection is
 preserved, A5 device 5 passes the full hardware matrix with 48 live channels,
 driver `25.1.rc1.b188` is accepted by the shared comparator, dependency checks
 are clean, and the repository contains neither the PoC nor a TileXR OPP path.

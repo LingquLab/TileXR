@@ -89,6 +89,41 @@ __aicore__ inline uint64_t SDMACopyNbi(
 #endif
 }
 
+__aicore__ inline uint64_t SDMACopyStridedNbi(
+    const __gm__ CommArgs* args,
+    __gm__ uint8_t* dst,
+    __gm__ uint8_t* src,
+    uint64_t bytes,
+    uint32_t copyCount,
+    uint64_t dstStrideBytes,
+    uint64_t srcStrideBytes,
+    uint32_t channelGroupIdx = TILEXR_SDMA_AUTO_CHANNEL_GROUP)
+{
+    if (copyCount == 1U) {
+        return SDMACopyNbi(args, dst, src, bytes, channelGroupIdx);
+    }
+#if TILEXR_SDMA_A5_AICORE_COMPILE
+    if (!SDMAEnabled(args) || dst == nullptr || src == nullptr || bytes == 0U ||
+        copyCount == 0U) {
+        return 0ULL;
+    }
+    const uint32_t resolvedGroup = SDMAResolveChannelGroup(channelGroupIdx);
+    return detail::A5SdmaCopyStridedNbi(
+        reinterpret_cast<__gm__ uint8_t*>(args->sdmaWorkspacePtr),
+        dst, src, bytes, copyCount, dstStrideBytes, srcStrideBytes, resolvedGroup);
+#else
+    (void)args;
+    (void)dst;
+    (void)src;
+    (void)bytes;
+    (void)copyCount;
+    (void)dstStrideBytes;
+    (void)srcStrideBytes;
+    (void)channelGroupIdx;
+    return 0ULL;
+#endif
+}
+
 __aicore__ inline bool SDMAWait(
     const __gm__ CommArgs* args,
     uint64_t eventHandle,

@@ -65,13 +65,7 @@ __aicore__ inline void A5SdmaRingDoorbell(uint64_t address, uint32_t tail)
 
 __aicore__ inline uint32_t A5SdmaReadCompletion(__gm__ A5SdmaCompletionLine* completion)
 {
-    __ubuf__ uint32_t line[TILEXR_SDMA_A5_COMPLETION_BYTES / sizeof(uint32_t)];
-    copy_gm_to_ubuf_align_v2(
-        line, reinterpret_cast<__gm__ uint32_t*>(completion),
-        0, 1, TILEXR_SDMA_A5_COMPLETION_BYTES, 0, 0, false, 0, 0, 0);
-    set_flag(PIPE_MTE2, PIPE_S, static_cast<event_t>(0));
-    wait_flag(PIPE_MTE2, PIPE_S, static_cast<event_t>(0));
-    return line[0];
+    return AscendC::ReadGmByPassDCache<uint32_t>(&completion->generation);
 }
 
 __aicore__ inline bool A5SdmaWorkspaceValid(const __gm__ A5SdmaWorkspace* workspace)
@@ -86,24 +80,40 @@ __aicore__ inline bool A5SdmaWorkspaceValid(const __gm__ A5SdmaWorkspace* worksp
         workspace->header.workspaceSize == sizeof(A5SdmaWorkspace);
 }
 
-__aicore__ inline uint64_t A5SdmaCopyNbi(__gm__ uint8_t* workspaceAddress,
-                                         __gm__ uint8_t* destination,
-                                         __gm__ uint8_t* source,
-                                         uint64_t bytes,
-                                         uint32_t channelIndex)
+__aicore__ inline uint64_t A5SdmaCopyStridedNbi(
+    __gm__ uint8_t* workspaceAddress,
+    __gm__ uint8_t* destination,
+    __gm__ uint8_t* source,
+    uint64_t bytes,
+    uint32_t copyCount,
+    uint64_t destinationStrideBytes,
+    uint64_t sourceStrideBytes,
+    uint32_t channelIndex)
 {
     __gm__ A5SdmaWorkspace* workspace =
         reinterpret_cast<__gm__ A5SdmaWorkspace*>(workspaceAddress);
     if (!A5SdmaWorkspaceValid(workspace) || destination == nullptr || source == nullptr ||
-        !A5SdmaTransferLengthValid(bytes) || !A5SdmaChannelValid(channelIndex)) {
+        !A5SdmaTransferLengthValid(bytes) || !A5SdmaChannelValid(channelIndex) ||
+        copyCount == 0U || copyCount == 0xFFFFFFFFU) {
+        return 0ULL;
+    }
+    const uint64_t destinationAddress = reinterpret_cast<uint64_t>(destination);
+    const uint64_t sourceAddress = reinterpret_cast<uint64_t>(source);
+    if (copyCount > 1U &&
+        (!A5SdmaStridedRangeValid(
+             destinationAddress, bytes, copyCount, destinationStrideBytes) ||
+         !A5SdmaStridedRangeValid(
+             sourceAddress, bytes, copyCount, sourceStrideBytes))) {
         return 0ULL;
     }
 
     __gm__ A5SdmaChannel* channel = &workspace->channels[channelIndex];
+    const uint32_t requiredEntries = copyCount + 1U;
     if (channel->sqBase == 0U || channel->rtsqAddress == 0U ||
         channel->completionPayloadAddress == 0U || channel->completionRecordAddress == 0U ||
         channel->rtsqLength < sizeof(uint32_t) ||
-        !A5SdmaQueueHasCapacity(channel->head, channel->tail, channel->depth) ||
+        !A5SdmaQueueHasEntriesCapacity(
+            channel->head, channel->tail, channel->depth, requiredEntries) ||
         channel->streamId > 0xFFFFU) {
         return 0ULL;
     }
@@ -112,45 +122,59 @@ __aicore__ inline uint64_t A5SdmaCopyNbi(__gm__ uint8_t* workspaceAddress,
     }
 
     const uint32_t generation = A5SdmaNextGeneration(channel->generation);
-    const uint32_t dataIndex = channel->tail;
-    const uint32_t completionIndex = (dataIndex + 1U) % channel->depth;
-    const uint32_t newTail = A5SdmaAdvanceTail(dataIndex, channel->depth);
+    const uint32_t firstIndex = channel->tail;
     __gm__ A5SdmaCompletionLine* payload = reinterpret_cast<__gm__ A5SdmaCompletionLine*>(
         channel->completionPayloadAddress);
-    __gm__ A5SdmaCompletionLine* completion = reinterpret_cast<__gm__ A5SdmaCompletionLine*>(
-        channel->completionRecordAddress);
-    __gm__ uint32_t* payloadWords = reinterpret_cast<__gm__ uint32_t*>(payload);
-    __gm__ uint32_t* completionWords = reinterpret_cast<__gm__ uint32_t*>(completion);
-    for (uint32_t index = 0U; index < TILEXR_SDMA_A5_COMPLETION_BYTES / sizeof(uint32_t); ++index) {
-        payloadWords[index] = 0U;
-        completionWords[index] = 0U;
-    }
     payload->generation = generation;
 
     __gm__ A5SdmaSqe* sqBase = reinterpret_cast<__gm__ A5SdmaSqe*>(channel->sqBase);
-    A5SdmaBuildSqe(sqBase + dataIndex, channel->streamId, channel->taskId,
-                   reinterpret_cast<uint64_t>(source),
-                   reinterpret_cast<uint64_t>(destination),
-                   static_cast<uint32_t>(bytes));
-    A5SdmaBuildSqe(sqBase + completionIndex, channel->streamId, channel->taskId + 1U,
-                   channel->completionPayloadAddress,
-                   channel->completionRecordAddress,
-                   TILEXR_SDMA_A5_COMPLETION_BYTES);
+    for (uint32_t copy = 0U; copy < copyCount; ++copy) {
+        const uint32_t sqeIndex = A5SdmaAdvanceTailBy(firstIndex, copy, channel->depth);
+        const uint64_t sourceOffset = static_cast<uint64_t>(copy) * sourceStrideBytes;
+        const uint64_t destinationOffset =
+            static_cast<uint64_t>(copy) * destinationStrideBytes;
+        A5SdmaBuildSqe(
+            sqBase + sqeIndex, channel->streamId,
+            A5SdmaAdvanceTaskIdBy(channel->taskId, copy),
+            sourceAddress + sourceOffset, destinationAddress + destinationOffset,
+            static_cast<uint32_t>(bytes));
+    }
+    const uint32_t completionIndex =
+        A5SdmaAdvanceTailBy(firstIndex, copyCount, channel->depth);
+    A5SdmaBuildSqe(
+        sqBase + completionIndex, channel->streamId,
+        A5SdmaAdvanceTaskIdBy(channel->taskId, copyCount),
+        channel->completionPayloadAddress,
+        channel->completionRecordAddress,
+        TILEXR_SDMA_A5_COMPLETION_BYTES);
+    const uint32_t newTail =
+        A5SdmaAdvanceTailBy(firstIndex, requiredEntries, channel->depth);
 
     channel->generation = generation;
     channel->tail = newTail;
-    channel->taskId = A5SdmaAdvanceTaskId(channel->taskId);
+    channel->taskId = A5SdmaAdvanceTaskIdBy(channel->taskId, requiredEntries);
     pipe_barrier(PIPE_ALL);
     A5SdmaCleanCacheLine(reinterpret_cast<__gm__ uint8_t*>(payload));
-    A5SdmaCleanCacheLine(reinterpret_cast<__gm__ uint8_t*>(completion));
-    A5SdmaCleanCacheLine(reinterpret_cast<__gm__ uint8_t*>(sqBase + dataIndex));
-    A5SdmaCleanCacheLine(reinterpret_cast<__gm__ uint8_t*>(sqBase + completionIndex));
+    for (uint32_t entry = 0U; entry < requiredEntries; ++entry) {
+        const uint32_t sqeIndex = A5SdmaAdvanceTailBy(firstIndex, entry, channel->depth);
+        A5SdmaCleanCacheLine(reinterpret_cast<__gm__ uint8_t*>(sqBase + sqeIndex));
+    }
     A5SdmaCleanCacheLine(reinterpret_cast<__gm__ uint8_t*>(channel));
     A5SdmaCleanCacheLine(reinterpret_cast<__gm__ uint8_t*>(channel) + 64U);
     pipe_barrier(PIPE_ALL);
     dsb(DSB_DDR);
     A5SdmaRingDoorbell(channel->rtsqAddress, newTail);
     return A5SdmaEncodeEvent(channelIndex, generation);
+}
+
+__aicore__ inline uint64_t A5SdmaCopyNbi(__gm__ uint8_t* workspaceAddress,
+                                         __gm__ uint8_t* destination,
+                                         __gm__ uint8_t* source,
+                                         uint64_t bytes,
+                                         uint32_t channelIndex)
+{
+    return A5SdmaCopyStridedNbi(
+        workspaceAddress, destination, source, bytes, 1U, 0U, 0U, channelIndex);
 }
 
 __aicore__ inline bool A5SdmaWaitEvent(__gm__ uint8_t* workspaceAddress,

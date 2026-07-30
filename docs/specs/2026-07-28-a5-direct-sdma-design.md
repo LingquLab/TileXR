@@ -2,6 +2,7 @@
 
 Date: 2026-07-28
 Status: Approved on 2026-07-28
+Updated: 2026-07-29 (strided batch submission approved for implementation)
 
 ## Goal
 
@@ -12,7 +13,8 @@ RTSQ doorbells on Host, and lets AIV write and submit A5 SDMA SQEs directly.
 The implementation must:
 
 - support CANN 9.1.0 and NPU driver `25.1.rc1` or later;
-- preserve the existing A2/A3 PTO backend and public API;
+- preserve the existing A2/A3 PTO backend and existing API behavior;
+- add an A5 strided batch device API without changing Host or workspace ABI;
 - remain best-effort when any A5 capability is unavailable;
 - ship no TileXR OPP package and require no custom OPP environment variable;
 - keep `reference/` comparison-only.
@@ -48,6 +50,32 @@ The following contracts remain unchanged:
 - `TileXRSDMAAvailable` and `TileXRGetSDMAWorkspaceDev`;
 - device calls `SDMACopyNbi` and `SDMAWait`;
 - event handle 0 as the unavailable or invalid no-op result.
+
+The installed device header additionally exposes:
+
+```cpp
+uint64_t SDMACopyStridedNbi(
+    const __gm__ CommArgs* args,
+    __gm__ uint8_t* dst,
+    __gm__ uint8_t* src,
+    uint64_t bytes,
+    uint32_t copyCount,
+    uint64_t dstStrideBytes,
+    uint64_t srcStrideBytes,
+    uint32_t channelGroupIdx = TILEXR_SDMA_AUTO_CHANNEL_GROUP);
+```
+
+For copy `i`, the source and destination are `src + i * srcStrideBytes` and
+`dst + i * dstStrideBytes`. `copyCount == 1` delegates to `SDMACopyNbi` and
+preserves its behavior. On A5, `copyCount > 1` submits one ordered batch. On
+A2/A3, multi-copy batch submission is unavailable and returns event 0; the
+existing PTO single-copy path is unchanged.
+
+For `copyCount > 1`, both strides must be at least `bytes`, every individual
+length must fit the A5 SQE, address arithmetic must not overflow, and the
+channel must have room for `copyCount + 1` SQEs. These conservative rules keep
+all source and destination slices distinct. The API does not promise broadcast
+or overlapping-copy semantics.
 
 Host selects the backend by runtime SoC:
 
@@ -138,14 +166,15 @@ range rule.
 1. Validate the workspace ABI, pointers, byte count, and channel group.
 2. Atomically claim the channel's outstanding state and advance its nonzero
    generation. A busy channel returns event 0.
-3. Clear the completion record and write the generation into the channel's
-   completion payload.
+3. Write the generation into the channel's completion payload. The completion
+   record is not cleared because generations are monotonic and the completion
+   SQE overwrites the full record before it can match the new generation.
 4. Build two consecutive 64-byte A5 SQEs at the current tail: one data copy and
    one 64-byte copy from the payload to the completion record.
 5. Set SQE type 11, `wrCqe=0`, kernel credit 254, and the validated A5 address,
    substream, length, and task fields.
-6. Clean the written payload, completion record, and SQE cache lines, execute the
-   required store-ordering barrier, then write the new tail to the mapped RTSQ.
+6. Clean the written payload and SQE cache lines, execute the required
+   store-ordering barrier, then write the new tail to the mapped RTSQ.
 7. Return an event encoding the channel and generation.
 
 The tail advances modulo the queried depth. Completion of the second SQE makes
@@ -153,8 +182,59 @@ the channel safe for reuse. Transfer length handling must respect the A5 SQE
 field width; unsupported lengths return event 0 instead of truncating.
 
 `SDMAWait` rejects malformed or stale events, polls the channel completion
-record for the matching generation, then releases the outstanding state. A
-zero event remains an immediate successful no-op.
+generation through `ReadGmByPassDCache`, then releases the outstanding state.
+A zero event remains an immediate successful no-op.
+
+### Strided batch submission
+
+`SDMACopyStridedNbi` uses the same channel claim, event encoding, completion
+record, and wait path. After all validation succeeds, it:
+
+1. reserves `copyCount + 1` entries while leaving one SQ slot unused;
+2. writes `copyCount` ordered data SQEs with consecutive task IDs;
+3. appends one 64-byte completion-copy SQE;
+4. cleans the payload and every written SQE cache line;
+5. advances the tail and task ID by `copyCount + 1` modulo their hardware
+   widths;
+6. rings one doorbell and returns one event for the complete batch.
+
+No validation failure after the channel claim is allowed. All pointer, stride,
+length, count, queue-capacity, and workspace checks therefore occur before the
+atomic claim. `SDMAWait` releases the channel only after the final completion
+SQE, so every data SQE in the batch is complete when the event becomes visible.
+
+The returned event represents the whole batch. Reported per-copy latency is
+total submit-through-wait time divided by `copyCount`; callers cannot observe
+or wait for an individual copy through this event.
+
+## Batch Performance Evidence
+
+The batch decision was validated on `Ascend950PR_9589`, CANN 9.1.0, driver
+`25.1.rc1.b188`, physical device 5. The benchmark used AIV
+`GetSystemCycle()` at 1000 cycles/us, a rotating 64 MiB source/destination
+working set with the same allocation policy for single and batch runs, device
+warmup before sampling, ten samples, and full working-set byte comparison.
+Host launch, initialization, allocation, H2D/D2H, and stream synchronization
+were outside the timed region. SQE construction, cache maintenance, doorbell,
+device completion, and channel release were included.
+
+| Bytes per copy | Single completion | Batch 16 amortized | Speedup |
+| ---: | ---: | ---: | ---: |
+| 4 KiB | 3.351 us | 0.954 us | 3.51x |
+| 8 KiB | 3.372 us | 0.975 us | 3.46x |
+| 16 KiB | 3.415 us | 0.972 us | 3.51x |
+| 32 KiB | 4.133 us | 1.031 us | 4.01x |
+| 64 KiB | 3.453 us | 1.012 us | 3.41x |
+| 1 MiB | 4.314 us | 1.962 us | 2.20x |
+| 4 MiB | 8.752 us | 6.313 us | 1.39x |
+
+For 4-64 KiB, callers should batch naturally available copies because fixed
+submission and completion costs dominate. From 64 KiB through 1 MiB, batching
+still materially improves throughput but callers must not delay an otherwise
+ready copy merely to fill a batch. Above 1 MiB, batching is optional: use it
+for already-available parallel work, while latency-sensitive isolated copies
+should remain single submissions. For example, 16 copies at an amortized
+0.954 us still expose one batch completion after roughly 15.3 us.
 
 ## Failure and Cleanup
 
@@ -169,8 +249,8 @@ initialization. It never resets a device or destroys an application-owned
 stream or context.
 
 Device submission failures are contained to the SDMA call. They must not write
-a doorbell after failed validation or expose a nonzero event before both SQEs
-are ready.
+a doorbell after failed validation or expose a nonzero event before every SQE
+in the submission is ready.
 
 ## Driver Baseline Migration
 
@@ -198,6 +278,10 @@ Implementation acceptance requires:
 - no TileXR OPP artifact, vendor install directory, or custom OPP environment;
 - 48 distinct, simultaneously live, validated channels on the baseline host;
 - direct copies of 64 B, 4 KiB, and 1 MiB on channel 0 and channel 47;
+- strided batches with counts 1, 2, 4, 8, 16, and 32, including SQ/tail/task-ID
+  wraparound and full comparison of every destination slice;
+- representative 4 KiB through 4 MiB batch performance using equal backing
+  allocation and a rotating working set;
 - a concurrent multi-block run using distinct channels, followed by full byte
   comparisons and matching completion generations;
 - repeated init/use/shutdown loops with a healthy communicator context;
