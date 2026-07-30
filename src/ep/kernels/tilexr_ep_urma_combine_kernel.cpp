@@ -1913,19 +1913,9 @@ __aicore__ TILEXR_EP_LOCAL_FUNCTION bool WaitDeferredRoundCredit(
     const int32_t rankSize = args->rankSize;
     const int64_t creditLaneCount = rankSize < TileXREp::kEpUrmaCombineSendLaneCount ?
         rankSize : TileXREp::kEpUrmaCombineSendLaneCount;
-    const uint64_t expectedReady = EncodeControlValue(
-        magic, TileXREp::kEpUrmaCombineCreditExpectedReady);
-    if (senderId == 0) {
-        StoreControlValue(workspaceGM + roundCreditOffset, expectedReady,
-            finePerfTrace, perfStats);
-    }
     uint64_t pollLoads = 0;
     uint32_t expectedGeneration = 0;
     if (senderId < creditLaneCount) {
-        if (!WaitLocalLines(workspaceGM + roundCreditOffset, 1, expectedReady,
-                finePerfTrace, perfStats)) {
-            return false;
-        }
         const uint64_t previousRelease = LoadControlValue(workspaceGM + roundDoneOffset +
             rank * TileXREp::kEpUrmaCombineCacheLineBytes, finePerfTrace, perfStats);
         const uint32_t previousStep = static_cast<uint32_t>(previousRelease);
@@ -1938,6 +1928,10 @@ __aicore__ TILEXR_EP_LOCAL_FUNCTION bool WaitDeferredRoundCredit(
             if (peer == rank || previousRelease == 0) {
                 continue;
             }
+            // The same-parity roundDone line is the previous release source. Complete its
+            // QP before this launch can eventually overwrite that line with the next release.
+            (void)TileXREp::EpUrmaUDMAQuiet(
+                args, peer, static_cast<uint32_t>(senderId));
             GM_ADDR peerRelease = workspaceGM + roundDoneOffset +
                 peer * TileXREp::kEpUrmaCombineCacheLineBytes;
             while (true) {
@@ -2176,6 +2170,7 @@ __aicore__ TILEXR_EP_LOCAL_FUNCTION uint64_t PublishRoundShard(
             static_cast<uint32_t>(TileXREp::kEpUrmaCombineCacheLineBytes), qpIdx);
         ++publishCount;
     }
+#if !TILEXR_EP_URMA_DEFERRED_ROUND_CREDIT
     for (int32_t peer = static_cast<int32_t>(senderId); peer < rankSize;
          peer += static_cast<int32_t>(TileXREp::kEpUrmaCombineSendLaneCount)) {
         if (peer == rank) {
@@ -2183,10 +2178,10 @@ __aicore__ TILEXR_EP_LOCAL_FUNCTION uint64_t PublishRoundShard(
         }
         (void)TileXREp::EpUrmaUDMAQuiet(args, peer, qpIdx);
     }
-
     StoreControlValue(workspaceGM + senderDoneOffset +
         senderId * TileXREp::kEpUrmaCombineCacheLineBytes,
         EncodeControlValue(magic, TileXREp::kEpUrmaCombinePublishDone), finePerfTrace, perfStats);
+#endif
     if (senderId != 0) {
         ProfileEnd(perfTrace, perfStats, PerfStage::ROUND_PUBLISH, shardStart);
         RecordRoundPublishCounters(perfTrace, perfStats, publishCount);
@@ -2200,10 +2195,18 @@ __aicore__ TILEXR_EP_LOCAL_FUNCTION bool FinishParallelRoundPublish(
     uint64_t publishStart, uint64_t sender0PublishCount,
     GM_ADDR perfTrace, GM_ADDR finePerfTrace, __ubuf__ PerfStats *perfStats)
 {
+#if TILEXR_EP_URMA_DEFERRED_ROUND_CREDIT
+    (void)workspaceGM;
+    (void)magic;
+    (void)senderDoneOffset;
+    (void)publisherCount;
+    (void)finePerfTrace;
+#else
     if (!WaitLocalLines(workspaceGM + senderDoneOffset, publisherCount,
             EncodeControlValue(magic, TileXREp::kEpUrmaCombinePublishDone), finePerfTrace, perfStats)) {
         return false;
     }
+#endif
     ProfileEnd(perfTrace, perfStats, PerfStage::ROUND_PUBLISH, publishStart);
     RecordRoundPublishCounters(perfTrace, perfStats, sender0PublishCount);
     return true;
