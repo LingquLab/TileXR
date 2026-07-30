@@ -81,6 +81,28 @@ void TestLogicalOffsetsAcrossRegions()
              static_cast<uintptr_t>(0x200000));
 }
 
+void TestMaximumRegionCount()
+{
+    CHECK_EQ(TileXR::TILEXR_UDMA_MAX_REGIONS, 33U);
+
+    TileXR::TileXRUDMARegistry registry = {};
+    registry.rankSize = 1;
+    registry.regionCount = TileXR::TILEXR_UDMA_MAX_REGIONS;
+    for (uint32_t region = 0; region < registry.regionCount; ++region) {
+        registry.regions[0][region] = {
+            reinterpret_cast<GM_ADDR>(0x100000 + static_cast<uintptr_t>(region) * 0x1000),
+            1024};
+    }
+
+    const uint64_t lastOffset =
+        static_cast<uint64_t>(TileXR::TILEXR_UDMA_MAX_REGIONS - 1U) * 1024U;
+    CHECK_TRUE(TileXR::UDMARegistryValid(&registry, 1));
+    CHECK_TRUE(TileXR::UDMARegionContains(&registry, 0, lastOffset, 1024));
+    CHECK_EQ(reinterpret_cast<uintptr_t>(
+        TileXR::UDMARemoteAddr(&registry, 0, lastOffset)),
+        static_cast<uintptr_t>(0x120000));
+}
+
 } // namespace
 
 int main()
@@ -88,6 +110,7 @@ int main()
     TestRemoteAddressCalculation();
     TestRankScaleLimit();
     TestLogicalOffsetsAcrossRegions();
+    TestMaximumRegionCount();
     if (g_failures != 0) {
         std::cerr << g_failures << " registry checks failed" << std::endl;
         return 1;

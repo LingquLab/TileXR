@@ -14,8 +14,8 @@
 namespace TileXR {
 
 constexpr uint32_t TILEXR_UDMA_REGISTRY_MAGIC = 0x54585255U; // TXRU
-constexpr uint32_t TILEXR_UDMA_REGISTRY_VERSION = 2U;
-constexpr uint32_t TILEXR_UDMA_MAX_REGIONS = 4U;
+constexpr uint32_t TILEXR_UDMA_REGISTRY_VERSION = 3U;
+constexpr uint32_t TILEXR_UDMA_MAX_REGIONS = 33U;
 
 struct TileXRUDMARegionDesc {
     GM_ADDR base = nullptr;
@@ -23,8 +23,8 @@ struct TileXRUDMARegionDesc {
 };
 
 // Region descriptors are concatenated in array order for device-side offsets.
-// A 4 GiB ping/pong workspace can use four 1 GiB MRs while exposing ping at
-// offset 0 and pong at offset 2 GiB in one continuous VMM reservation.
+// A 16 GiB ping/pong workspace plus control data can use 33 one-GiB MRs while
+// exposing them as one continuous logical registered-memory reservation.
 
 struct TileXRUDMARegistry {
     uint32_t magic = TILEXR_UDMA_REGISTRY_MAGIC;

@@ -458,8 +458,8 @@ struct VmmMultiRegionAllocation {
     size_t regionBytes = 0;
     uint32_t regionCount = 0;
     uint32_t mappedCount = 0;
-    std::array<aclrtDrvMemHandle, kVmmProbeRegionCount> physical {};
-    std::array<TileXR::TileXRUDMARegionDesc, kVmmProbeRegionCount> regions {};
+    std::vector<aclrtDrvMemHandle> physical;
+    std::vector<TileXR::TileXRUDMARegionDesc> regions;
 };
 
 VmmMultiRegionAllocation gRegisteredVmm;
@@ -487,7 +487,7 @@ bool AllocateVmmMultiRegion(
     int rank, int deviceId, size_t regionBytes, uint32_t regionCount,
     VmmMultiRegionAllocation& allocation)
 {
-    if (regionCount == 0 || regionCount > allocation.regions.size()) {
+    if (regionCount == 0 || regionCount > TileXR::TILEXR_UDMA_MAX_REGIONS) {
         return false;
     }
     aclrtPhysicalMemProp prop {};
@@ -509,6 +509,8 @@ bool AllocateVmmMultiRegion(
 
     allocation.regionBytes = regionBytes;
     allocation.regionCount = regionCount;
+    allocation.physical.assign(regionCount, nullptr);
+    allocation.regions.resize(regionCount);
     const size_t totalBytes = regionBytes * regionCount;
     if (!CheckAcl(rank, "aclrtReserveMemAddress multi-region",
             aclrtReserveMemAddress(&allocation.base, totalBytes, 0, nullptr, 1))) {

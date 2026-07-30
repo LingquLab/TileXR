@@ -78,6 +78,7 @@ __aicore__ inline bool UDMARegisteredRangeValid(
 {
     if (registry == nullptr || registry->magic != TILEXR_UDMA_REGISTRY_MAGIC ||
         registry->version != TILEXR_UDMA_REGISTRY_VERSION || registry->regionCount == 0 ||
+        registry->regionCount > TILEXR_UDMA_MAX_REGIONS ||
         registry->rankSize > TILEXR_MAX_RANK_SIZE || targetRank < 0 ||
         static_cast<uint32_t>(targetRank) >= registry->rankSize) {
         return false;
