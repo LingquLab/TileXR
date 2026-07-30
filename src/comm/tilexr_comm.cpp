@@ -244,6 +244,9 @@ int TileXRComm::InitSDMA()
 
 bool TileXRComm::ResetSDMAState()
 {
+    if (sdmaTransport_ == nullptr) {
+        return true;
+    }
     commArgs_.extraFlag &= ~ExtraFlag::SDMA;
     commArgs_.sdmaWorkspacePtr = nullptr;
     if (UpdateCommArgsDev() != TILEXR_SUCCESS) {

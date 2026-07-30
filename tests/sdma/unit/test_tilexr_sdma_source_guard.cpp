@@ -177,6 +177,7 @@ void TestSdmaFailureIsScopedToOneCommunicator()
     CheckNeedle(commPath, comm, "TileXR SDMA transport exists before initialization");
     CheckNoNeedle(commPath, comm, "TileXR previous SDMA resources are still pending cleanup");
     CheckNeedle(commPath, comm, "bool TileXRComm::PrepareDestroy()");
+    CheckNeedle(commPath, comm, "bool TileXRComm::ResetSDMAState()\n{\n    if (sdmaTransport_ == nullptr)");
     CheckNeedle(commPath, comm, "if (UpdateCommArgsDev() != TILEXR_SUCCESS)");
 
     const std::string wrapPath = "src/comm/comm_wrap.cpp";
