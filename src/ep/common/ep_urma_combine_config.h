@@ -5,8 +5,10 @@
 
 namespace TileXREp {
 
-// Fixed Ascend 950 S22 production configuration.
+// Fixed Ascend 950 production defaults. CMake may override the Send AIV count.
+#ifndef TILEXR_EP_URMA_COMBINE_SEND_CORE_COUNT
 #define TILEXR_EP_URMA_COMBINE_SEND_CORE_COUNT 22
+#endif
 #define TILEXR_EP_URMA_DOORBELL_BATCH_SIZE 1
 #define TILEXR_EP_URMA_TX_READY_BATCH_SIZE 1
 #define TILEXR_EP_URMA_TX_READY_SHARED_FLAG 0

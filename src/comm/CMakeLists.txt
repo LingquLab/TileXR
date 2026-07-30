@@ -122,23 +122,8 @@ set(TILEXR_SOURCE_FILE tilexr_comm.cpp
 
 add_library(tile-comm SHARED ${TILEXR_SOURCE_FILE})
 
-# S22 maps each of its 22 Send AIVs to an independent UDMA QP. Keep the
-# transport default unchanged for builds that do not target the A5 EP path.
-set(_tilexr_udma_qp_count 1)
-set(_tilexr_ep_soc_type "${TILEXR_EP_SOC_TYPE}")
-if(NOT _tilexr_ep_soc_type)
-    set(_tilexr_ep_soc_type "$ENV{TILEXR_SOC_NAME}")
-endif()
-string(TOLOWER "${_tilexr_ep_soc_type}" _tilexr_ep_soc_type_lower)
-if(TILEXR_BUILD_EP AND
-        _tilexr_ep_soc_type_lower MATCHES "ascend950|ascend910_9|ascend910-9|a5")
-    set(_tilexr_udma_qp_count 22)
-endif()
 target_compile_definitions(tile-comm PRIVATE
-        TILEXR_UDMA_QP_COUNT_VALUE=${_tilexr_udma_qp_count})
-unset(_tilexr_udma_qp_count)
-unset(_tilexr_ep_soc_type)
-unset(_tilexr_ep_soc_type_lower)
+        TILEXR_UDMA_QP_COUNT_VALUE=${TILEXR_UDMA_EFFECTIVE_QP_COUNT})
 
 if(TILEXR_HAVE_PTO_SDMA)
     target_compile_definitions(tile-comm PRIVATE TILEXR_HAVE_PTO_SDMA=1)

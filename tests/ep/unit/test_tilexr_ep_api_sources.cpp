@@ -91,6 +91,10 @@ void TestBuildPlacement()
     if (ReadFile("CMakeLists.txt", &rootCmake)) {
         CheckContains("CMakeLists.txt", rootCmake,
             "option(TILEXR_BUILD_EP \"Build TileXR EP communication library\" OFF)");
+        CheckContains("CMakeLists.txt", rootCmake,
+            "option(TILEXR_EP_BUILD_URMA_COMBINE \"Build the Ascend950 URMA EP combine operator\" OFF)");
+        CheckContains("CMakeLists.txt", rootCmake,
+            "TILEXR_EP_URMA_COMBINE_SEND_CORE_COUNT \"22\"");
         CheckContains("CMakeLists.txt", rootCmake, "add_subdirectory(src/ep)");
     }
 
@@ -99,6 +103,8 @@ void TestBuildPlacement()
         CheckContains("src/ep/CMakeLists.txt", epCmake, "add_library(tilexr-ep SHARED");
         CheckContains("src/ep/CMakeLists.txt", epCmake, "tile-comm");
         CheckContains("src/ep/CMakeLists.txt", epCmake, "libtilexr_ep_combine_kernel.so");
+        CheckContains("src/ep/CMakeLists.txt", epCmake,
+            "TILEXR_EP_URMA_COMBINE_SEND_CORE_COUNT=${TILEXR_EP_URMA_COMBINE_SEND_CORE_COUNT}");
         CheckContains("src/ep/CMakeLists.txt", epCmake, "tilexr_ep.h");
         CheckContains("src/ep/CMakeLists.txt", epCmake, "install(TARGETS tilexr-ep");
     }

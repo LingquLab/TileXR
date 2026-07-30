@@ -22,6 +22,7 @@ Configure and build through CMake. No variant or wrapper script is required.
 ```bash
 cmake -S . -B build-s22 \
   -DTILEXR_BUILD_EP=ON \
+  -DTILEXR_EP_BUILD_URMA_COMBINE=ON \
   -DTILEXR_EP_SOC_TYPE=ascend950 \
   -DBUILD_TESTING=OFF \
   -DCMAKE_INSTALL_PREFIX="$PWD/install-s22"
@@ -33,6 +34,13 @@ cmake --install build-s22
 toolkit and driver before configuration. A profiling build is available only
 when explicitly requested with `-DTILEXR_EP_ENABLE_PROFILING=ON`; it is not the
 production default.
+
+The URMA Combine target is opt-in. A Dispatch-only EP build leaves
+`TILEXR_EP_BUILD_URMA_COMBINE=OFF` and uses the generic UDMA default of one QP
+per EID. When URMA Combine is enabled, CMake raises the effective QP count to
+the configured Send AIV count; `comm/udma` does not contain an Ascend950- or
+operator-specific QP constant. The validated default is 22 Send AIVs and can
+be changed with `-DTILEXR_EP_URMA_COMBINE_SEND_CORE_COUNT=<count>`.
 
 ## API
 
