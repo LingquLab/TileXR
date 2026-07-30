@@ -538,7 +538,6 @@ __aicore__ TILEXR_EP_LOCAL_FUNCTION void PublishTxReadyBatch(
     GM_ADDR firstLineAddr = workspaceGM + txReadyOffset +
         firstRoute * TileXREp::kEpUrmaCombineCacheLineBytes;
 #if TILEXR_EP_URMA_CACHELESS
-    AscendC::PipeBarrier<PIPE_ALL>();
     for (int64_t index = 0; index < publishedRouteCount; ++index) {
         AscendC::WriteGmByPassDCache(
             reinterpret_cast<__gm__ uint64_t *>(firstLineAddr +
