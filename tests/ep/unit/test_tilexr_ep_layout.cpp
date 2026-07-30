@@ -170,7 +170,7 @@ void TestUrmaCombineStartGateLayout()
 void TestParallelRoundPublishPeerShards()
 {
     constexpr int64_t kParallelSendLanes = TileXREp::kEpUrmaCombineSendLaneCount;
-    const int64_t rankSizes[] = {1, 2, 8, 15, 16, 17, 64};
+    const int64_t rankSizes[] = {1, 2, 8, 15, 16, 17, 22, 23, 64, 128};
     for (int64_t rankSize : rankSizes) {
         for (int64_t rank = 0; rank < rankSize; ++rank) {
             std::vector<int> visits(static_cast<std::size_t>(rankSize), 0);
@@ -197,6 +197,29 @@ void TestParallelRoundPublishPeerShards()
     CheckInt("parallel publish control step follows release",
         static_cast<int>(TileXREp::kEpUrmaCombinePublishDone),
         static_cast<int>(TileXREp::kEpUrmaCombineRxBufferReleased + 1));
+}
+
+void TestDeferredRoundCreditRxCompletionShards()
+{
+    const int64_t rankSizes[] = {1, 2, 8, 15, 16, 17, 22, 23, 64, 128};
+    for (int64_t rankSize : rankSizes) {
+        const int64_t publisherCount = rankSize < TileXREp::kEpUrmaCombineSendLaneCount ?
+            rankSize : TileXREp::kEpUrmaCombineSendLaneCount;
+        std::vector<int> visits(
+            static_cast<std::size_t>(TileXREp::kEpUrmaCombinePackLaneCount), 0);
+        for (int64_t senderId = 0; senderId < publisherCount; ++senderId) {
+            for (int64_t lane = senderId; lane < TileXREp::kEpUrmaCombinePackLaneCount;
+                 lane += publisherCount) {
+                ++visits[static_cast<std::size_t>(lane)];
+            }
+        }
+        CheckInt64("RX completion publisher count", publisherCount,
+            rankSize < TileXREp::kEpUrmaCombineSendLaneCount ?
+                rankSize : TileXREp::kEpUrmaCombineSendLaneCount);
+        for (int visitsForLane : visits) {
+            CheckInt("RX completion lane owned once", visitsForLane, 1);
+        }
+    }
 }
 
 void TestUrmaCombineWorkspaceRejectsInvalidConfig()
@@ -255,6 +278,7 @@ int main()
     TestUrmaCombineWorkspaceConfig();
     TestUrmaCombineStartGateLayout();
     TestParallelRoundPublishPeerShards();
+    TestDeferredRoundCreditRxCompletionShards();
     TestUrmaCombineWorkspaceRejectsInvalidConfig();
     TestUrmaCombineDataAsFlagPayloadBoundary();
     TestUrmaCombineDynamicTxDoesNotMoveRemoteRegions();

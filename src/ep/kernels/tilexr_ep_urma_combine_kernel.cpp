@@ -2383,37 +2383,39 @@ extern "C" __global__ __aicore__ void tilexr_ep_urma_combine_kernel(GM_ADDR comm
         ProfileEnd(perfTrace, perfStats, PerfStage::SEND_TOTAL, sendStart);
 #if TILEXR_EP_URMA_PARALLEL_ROUND_PUBLISH
 #if TILEXR_EP_URMA_DEFERRED_ROUND_CREDIT
-        const uint64_t receiveWaitStart = ProfileBegin(perfTrace);
-        if (!WaitLocalLineShard(workspaceGM + rxLaneDoneOffset,
-                TileXREp::kEpUrmaCombinePackLaneCount, senderId,
-                TileXREp::kEpUrmaCombineSendLaneCount,
-                EncodeControlValue(magic, TileXREp::kEpUrmaCombineRxLaneDone),
-                finePerfTrace, perfStats)) {
-            return;
-        }
-        StoreControlValue(workspaceGM + senderDoneOffset +
-            senderId * TileXREp::kEpUrmaCombineCacheLineBytes,
-            EncodeControlValue(magic, TileXREp::kEpUrmaCombineRxReleaseShardDone),
-            finePerfTrace, perfStats);
+        const int64_t publisherCount = args->rankSize < TileXREp::kEpUrmaCombineSendLaneCount ?
+            args->rankSize : TileXREp::kEpUrmaCombineSendLaneCount;
         uint64_t publishStart = 0;
-        if (senderId == 0) {
-            if (!WaitLocalLines(workspaceGM + senderDoneOffset,
-                    TileXREp::kEpUrmaCombineSendLaneCount,
-                    EncodeControlValue(magic, TileXREp::kEpUrmaCombineRxReleaseShardDone),
+        if (senderId < publisherCount) {
+            // Only release publishers participate, reducing sender0's serial fan-in while
+            // preserving complete coverage of every RX lane.
+            const uint64_t receiveWaitStart = ProfileBegin(perfTrace);
+            if (!WaitLocalLineShard(workspaceGM + rxLaneDoneOffset,
+                    TileXREp::kEpUrmaCombinePackLaneCount, senderId, publisherCount,
+                    EncodeControlValue(magic, TileXREp::kEpUrmaCombineRxLaneDone),
                     finePerfTrace, perfStats)) {
                 return;
             }
-            ProfileEnd(perfTrace, perfStats, PerfStage::LOCAL_RX_WAIT, receiveWaitStart);
-            ProfileAux(perfTrace, perfStats, PerfStage::LOCAL_RX_WAIT, 0,
-                static_cast<uint64_t>(TileXREp::kEpUrmaCombinePackLaneCount));
-            publishStart = StartParallelRoundPublish(args, workspaceGM, magic,
-                roundDoneOffset, roundPublishOffset, perfTrace, finePerfTrace, perfStats);
-        } else {
-            ProfileEnd(perfTrace, perfStats, PerfStage::LOCAL_RX_WAIT, receiveWaitStart);
+            StoreControlValue(workspaceGM + senderDoneOffset +
+                senderId * TileXREp::kEpUrmaCombineCacheLineBytes,
+                EncodeControlValue(magic, TileXREp::kEpUrmaCombineRxReleaseShardDone),
+                finePerfTrace, perfStats);
+            if (senderId == 0) {
+                if (!WaitLocalLines(workspaceGM + senderDoneOffset, publisherCount,
+                        EncodeControlValue(magic, TileXREp::kEpUrmaCombineRxReleaseShardDone),
+                        finePerfTrace, perfStats)) {
+                    return;
+                }
+                ProfileEnd(perfTrace, perfStats, PerfStage::LOCAL_RX_WAIT, receiveWaitStart);
+                ProfileAux(perfTrace, perfStats, PerfStage::LOCAL_RX_WAIT, 0,
+                    static_cast<uint64_t>(TileXREp::kEpUrmaCombinePackLaneCount));
+                publishStart = StartParallelRoundPublish(args, workspaceGM, magic,
+                    roundDoneOffset, roundPublishOffset, perfTrace, finePerfTrace, perfStats);
+            } else {
+                ProfileEnd(perfTrace, perfStats, PerfStage::LOCAL_RX_WAIT, receiveWaitStart);
+            }
         }
 
-        const int64_t publisherCount = args->rankSize < TileXREp::kEpUrmaCombineSendLaneCount ?
-            args->rankSize : TileXREp::kEpUrmaCombineSendLaneCount;
         uint64_t publishCount = 0;
         if (senderId < publisherCount) {
             publishCount = PublishRoundShard(args, workspaceGM, magic,
