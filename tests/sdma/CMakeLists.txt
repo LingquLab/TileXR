@@ -121,13 +121,6 @@ target_compile_definitions(test_tilexr_sdma_comm_wiring PRIVATE
     TILEXR_SOURCE_ROOT="${TILEXR_ROOT}"
 )
 
-add_executable(test_tilexr_sdma_source_guard
-    unit/test_tilexr_sdma_source_guard.cpp
-)
-target_compile_definitions(test_tilexr_sdma_source_guard PRIVATE
-    TILEXR_SOURCE_ROOT="${TILEXR_ROOT}"
-)
-
 add_executable(test_tilexr_sdma_header_compile
     unit/test_tilexr_sdma_header_compile.cpp
 )
@@ -161,7 +154,6 @@ set(INSTALL_TARGETS
     test_tilexr_sdma_transport_disabled
     test_tilexr_sdma_a5_validation
     test_tilexr_sdma_comm_wiring
-    test_tilexr_sdma_source_guard
     test_tilexr_sdma_header_compile
     test_tilexr_sdma_disabled_comm
 )

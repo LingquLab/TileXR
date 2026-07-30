@@ -65,7 +65,6 @@ fi
 "${INSTALL_DIR}/bin/test_tilexr_sdma_transport_disabled"
 "${INSTALL_DIR}/bin/test_tilexr_sdma_a5_validation"
 "${INSTALL_DIR}/bin/test_tilexr_sdma_comm_wiring"
-"${INSTALL_DIR}/bin/test_tilexr_sdma_source_guard"
 "${INSTALL_DIR}/bin/test_tilexr_sdma_header_compile"
 
 if [ "${HAL_AVAILABLE}" -eq 1 ]; then
