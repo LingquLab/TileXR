@@ -54,6 +54,14 @@ launches. For BS128, H=5120, top-k=6, rank-size=8 and enqueue-window=1, S22
 measured 94,889 cycles (94.889 us using 1000 cycles/us).
 
 The single retained detailed report is
-[BS128 S22 profile](performance/tilexr_ep_urma_combine_s22_bs128.html). The
-default proportional timeline excludes the start-gate bar and rebases the axis
-to steady-state work; start-gate measurements remain in report metadata.
+[BS128 S22 profile](performance/tilexr_ep_urma_combine_s22_bs128.html). Its
+charts, stage maxima, heatmaps and kernel KPIs exclude the first-launch start
+gate and rebase the axis to steady-state device work. The raw embedded capture
+retains the gate samples only for provenance.
+
+This boundary explains the large host/device timing difference. The host round
+starts before launch and ends after stream synchronization, so it includes the
+start-gate wait, API launch/synchronization overhead and cross-rank scheduling
+skew. Device `kernel_total` begins after the gate releases. The values therefore
+describe different intervals and must not be subtracted to infer kernel work;
+production comparisons use steady-state `strictKernelCycles`.
