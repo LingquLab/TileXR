@@ -14,20 +14,24 @@
 namespace TileXR {
 
 constexpr uint32_t TILEXR_UDMA_REGISTRY_MAGIC = 0x54585255U; // TXRU
-constexpr uint32_t TILEXR_UDMA_REGISTRY_VERSION = 1U;
-constexpr uint32_t TILEXR_UDMA_MAX_REGIONS = 1U;
+constexpr uint32_t TILEXR_UDMA_REGISTRY_VERSION = 2U;
+constexpr uint32_t TILEXR_UDMA_MAX_REGIONS = 4U;
 
 struct TileXRUDMARegionDesc {
     GM_ADDR base = nullptr;
     uint64_t bytes = 0;
 };
 
+// Region descriptors are concatenated in array order for device-side offsets.
+// A 4 GiB ping/pong workspace can use four 1 GiB MRs while exposing ping at
+// offset 0 and pong at offset 2 GiB in one continuous VMM reservation.
+
 struct TileXRUDMARegistry {
     uint32_t magic = TILEXR_UDMA_REGISTRY_MAGIC;
     uint32_t version = TILEXR_UDMA_REGISTRY_VERSION;
     uint32_t rankSize = 0;
     uint32_t regionCount = 0;
-    TileXRUDMARegionDesc regions[TILEXR_MAX_RANK_SIZE] = {};
+    TileXRUDMARegionDesc regions[TILEXR_MAX_RANK_SIZE][TILEXR_UDMA_MAX_REGIONS] = {};
 };
 
 inline bool UDMARegistryValid(const TileXRUDMARegistry *registry, int expectedRankSize)
@@ -50,11 +54,15 @@ inline bool UDMARegionContains(const TileXRUDMARegistry *registry, int rank, uin
     if (rank < 0 || static_cast<uint32_t>(rank) >= registry->rankSize) {
         return false;
     }
-    const auto &region = registry->regions[rank];
-    if (region.base == nullptr || byteOffset > region.bytes) {
-        return false;
+    uint64_t totalBytes = 0;
+    for (uint32_t regionIndex = 0; regionIndex < registry->regionCount; ++regionIndex) {
+        const auto &region = registry->regions[rank][regionIndex];
+        if (region.base == nullptr || region.bytes == 0 || totalBytes > UINT64_MAX - region.bytes) {
+            return false;
+        }
+        totalBytes += region.bytes;
     }
-    return byteCount <= region.bytes - byteOffset;
+    return byteOffset <= totalBytes && byteCount <= totalBytes - byteOffset;
 }
 
 inline GM_ADDR UDMARemoteAddr(const TileXRUDMARegistry *registry, int rank, uint64_t byteOffset)
@@ -62,7 +70,18 @@ inline GM_ADDR UDMARemoteAddr(const TileXRUDMARegistry *registry, int rank, uint
     if (registry == nullptr || rank < 0 || static_cast<uint32_t>(rank) >= registry->rankSize) {
         return nullptr;
     }
-    return registry->regions[rank].base + byteOffset;
+    uint64_t cursor = 0;
+    for (uint32_t regionIndex = 0; regionIndex < registry->regionCount; ++regionIndex) {
+        const auto &region = registry->regions[rank][regionIndex];
+        if (region.base == nullptr || region.bytes == 0 || cursor > UINT64_MAX - region.bytes) {
+            return nullptr;
+        }
+        if (byteOffset >= cursor && byteOffset - cursor < region.bytes) {
+            return region.base + (byteOffset - cursor);
+        }
+        cursor += region.bytes;
+    }
+    return nullptr;
 }
 
 } // namespace TileXR

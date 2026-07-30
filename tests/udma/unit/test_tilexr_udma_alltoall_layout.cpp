@@ -179,8 +179,8 @@ void TestAllToAllBigDataPlan()
     const auto plan = TileXR::Demo::PlanAllToAllBigDataUdma(rankSize, elementsPerPeer);
 
     CHECK_EQ(TileXR::Demo::kAllToAllBigDataMaxRegisteredBytes, 128ULL * 1024ULL * 1024ULL);
-    CHECK_EQ(TileXR::Demo::kAllToAllBigDataMultiNodeRegisteredBytes, 1024ULL * 1024ULL * 1024ULL);
-    CHECK_EQ(TileXR::Demo::kAllToAllBigDataMultiNodePeerSlotBytes, 16ULL * 1024ULL * 1024ULL);
+    CHECK_EQ(TileXR::Demo::kAllToAllBigDataMultiNodeRegisteredBytes, 4ULL * 1024ULL * 1024ULL * 1024ULL);
+    CHECK_EQ(TileXR::Demo::kAllToAllBigDataMultiNodePeerSlotBytes, 64ULL * 1024ULL * 1024ULL);
     CHECK_EQ(TileXR::Demo::kAllToAllBigDataControlSlotBytes, 128ULL);
     CHECK_EQ(TileXR::Demo::kAllToAllBigDataCoresPerPeer, 5U);
     CHECK_EQ(TileXR::Demo::kAllToAllBigDataSingleNodeShards, 2U);
@@ -244,6 +244,20 @@ void TestAllToAllBigDataMultiNodePlanUses16ShardsAndRemoteSendDone()
     CHECK_EQ(plan.dataBytes,
              static_cast<size_t>(rankSize - 1) * static_cast<size_t>(plan.passCount) * 2ULL *
              static_cast<size_t>(elementsPerPeer) * sizeof(int32_t));
+}
+
+void TestAllToAllBigData16PRankPayload1GiBPlan()
+{
+    constexpr int rankSize = 16;
+    constexpr int32_t elementsPerPeer = 16 * 1024 * 1024;
+    const auto plan = TileXR::Demo::PlanAllToAllBigDataUdma(rankSize, elementsPerPeer);
+
+    CHECK_EQ(plan.registeredBytes, 4ULL * 1024ULL * 1024ULL * 1024ULL);
+    CHECK_EQ(plan.passCount, 1U);
+    CHECK_EQ(plan.chunkElements, elementsPerPeer);
+    CHECK_EQ(plan.chunkBytesPerPeer, 64ULL * 1024ULL * 1024ULL);
+    CHECK_EQ(plan.dataBytes > 0, true);
+    CHECK_EQ(plan.dataBytes + plan.controlBytes + plan.signalBytes <= plan.registeredBytes, true);
 }
 
 void TestAllToAllBigDataMultiNodeSmallPayloadUsesPayloadSlot()
@@ -462,6 +476,9 @@ void TestAllToAllBigDataSource()
         ReadFile(std::string(TILEXR_SOURCE_ROOT) + "/tests/udma/demo/tilexr_udma_demo.cpp");
     const std::string kernel =
         ReadFile(std::string(TILEXR_SOURCE_ROOT) + "/tests/udma/demo/tilexr_udma_demo_kernel.cpp");
+    const std::string constants =
+        ReadFile(std::string(TILEXR_SOURCE_ROOT) +
+            "/tests/udma/demo/tilexr_udma_alltoall_constants.h");
     const std::string udma =
         ReadFile(std::string(TILEXR_SOURCE_ROOT) + "/src/include/tilexr_udma.h");
 
@@ -523,7 +540,10 @@ void TestAllToAllBigDataSource()
     CHECK_CONTAINS(kernel, "TILEXR_UDMA_DEMO_BIGDATA_SINGLE_NODE_SHARDS = 2U");
     CHECK_CONTAINS(kernel, "TILEXR_UDMA_DEMO_BIGDATA_LOCAL_COPY_SHARDS");
     CHECK_CONTAINS(kernel, "TILEXR_UDMA_DEMO_BIGDATA_PINGPONG_SLOTS = 2U");
-    CHECK_CONTAINS(kernel, "TILEXR_UDMA_DEMO_BIGDATA_MULTINODE_PEER_SLOT_BYTES = 16ULL * 1024ULL * 1024ULL");
+    CHECK_CONTAINS(kernel, "#include \"tilexr_udma_alltoall_constants.h\"");
+    CHECK_CONTAINS(kernel, "TileXR::Demo::kAllToAllBigDataMultiNodePeerSlotBytes");
+    CHECK_CONTAINS(constants,
+        "kAllToAllBigDataMultiNodePeerSlotBytes = 64ULL * 1024ULL * 1024ULL");
     CHECK_CONTAINS(kernel, "TILEXR_UDMA_DEMO_BIGDATA_RANKS_PER_NODE = 8");
     CHECK_CONTAINS(kernel, "TILEXR_UDMA_DEMO_BIGDATA_MULTINODE_CONTROL_SHARDS = 32U");
     CHECK_CONTAINS(kernel, "TILEXR_UDMA_DEMO_BIGDATA_MULTINODE_BLOCK_DIM =");
@@ -769,6 +789,7 @@ int main()
     TestAllToAllMaxRank256With64MiBPerRank();
     TestAllToAllBigDataPlan();
     TestAllToAllBigDataMultiNodePlanUses16ShardsAndRemoteSendDone();
+    TestAllToAllBigData16PRankPayload1GiBPlan();
     TestAllToAllBigDataMultiNodeSmallPayloadUsesPayloadSlot();
     TestAllToAllBigDataForce35CorePlanFor8P();
     TestAllToAllBigDataBlockDim();

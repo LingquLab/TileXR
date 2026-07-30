@@ -13,6 +13,7 @@
 #include <cstddef>
 #include <string>
 #include "comm_args.h"
+#include "tilexr_udma_reg.h"
 #ifdef __cplusplus
 extern "C" {
 #endif // __cplusplus
@@ -39,6 +40,12 @@ int TileXRGetCommArgsHost(TileXRCommPtr comm, TileXR::CommArgs *&commArgsPtr);
 int TileXRCommNextMagic(TileXRCommPtr comm, int64_t *magic);
 
 int TileXRUDMARegister(TileXRCommPtr comm, GM_ADDR localPtr, size_t bytes, TileXRUDMAMemHandle *handle);
+
+// Registers up to four independent MRs as one logical, offset-addressed space.
+// Adjacent VMM mappings remain contiguous to kernels; each MR gets a dedicated
+// physical QP lane because this UDMA data plane cannot switch MRs on one QP.
+int TileXRUDMARegisterRegions(TileXRCommPtr comm, const TileXR::TileXRUDMARegionDesc *regions,
+                              uint32_t regionCount, TileXRUDMAMemHandle *handle);
 
 int TileXRUDMAUnregister(TileXRCommPtr comm, TileXRUDMAMemHandle handle);
 

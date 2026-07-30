@@ -40,6 +40,7 @@ public:
 
     int Init(const TileXRUDMATransportOptions& options);
     int RegisterMemory(GM_ADDR localPtr, size_t bytes);
+    int RegisterMemoryRegions(const TileXRUDMARegionDesc* regions, uint32_t regionCount);
     int UnregisterMemory(GM_ADDR localPtr);
     void Shutdown();
 
@@ -60,7 +61,8 @@ private:
     int ImportSharedQueues();
     int EnsureUDMAInfoBuffer();
     int RefreshUDMAInfo();
-    int RegisterMemoryOnContexts(GM_ADDR localPtr, size_t bytes);
+    int ConfigureRegionQueues(uint32_t regionCount);
+    int RegisterMemoryOnContexts(const TileXRUDMARegionDesc& region, uint32_t regionIndex);
     int ExchangeAndImportMemory();
     int AllocDeviceScalar(void** ptr, size_t bytes) const;
     void FreeDeviceScalar(void*& ptr) const;
@@ -80,6 +82,8 @@ private:
     uint32_t eidCount_ = 0;
     uint32_t qpNum_ = 1;
     uint32_t qpsPerRoute_ = 1;
+    uint32_t logicalQpNum_ = 1;
+    uint32_t logicalQpsPerRoute_ = 1;
     bool sharedQpPool_ = false;
     uint32_t sharedQpLaneCount_ = 16;
     std::map<uint32_t, void*> ctxHandleByEid_;
@@ -90,11 +94,14 @@ private:
     std::map<int, std::vector<uint32_t>> peerRemoteEids_;
     std::map<int, std::vector<uint32_t>> peerQpRouteEids_;
     std::map<int, std::vector<uint32_t>> peerQpRouteWeights_;
+    std::map<int, std::vector<uint32_t>> logicalPeerQpRouteEids_;
+    std::map<int, std::vector<uint32_t>> logicalPeerQpRouteWeights_;
     std::map<uint32_t, PerEidState> states_;
     std::map<uint32_t, HccpEid> localEidByEid_;
     MemoryRegionMap registeredMem_;
-    std::map<int, std::vector<void*>> remoteMemHandlesByPeer_;
-    std::map<uint32_t, UDMAMemInfo> localMemInfoByEid_;
+    std::map<int, std::vector<std::vector<void*>>> remoteMemHandlesByPeer_;
+    std::vector<std::map<uint32_t, UDMAMemInfo>> localMemInfoByRegion_;
+    std::vector<TileXRUDMARegionDesc> registeredRegions_;
     GM_ADDR udmaInfoDev_ = nullptr;
     GM_ADDR eidTableDev_ = nullptr;
     uint32_t udmaInfoSize_ = 0;

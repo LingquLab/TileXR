@@ -70,6 +70,7 @@ struct UDMACQCtx {
 
 struct UDMAInfo {
     uint32_t qpNum;
+    uint32_t regionCount;
     uint64_t sqPtr;
     uint64_t rqPtr;
     uint64_t scqPtr;

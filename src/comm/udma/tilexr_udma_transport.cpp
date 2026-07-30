@@ -751,6 +751,10 @@ int TileXRUDMATransport::BuildRoutes()
         maxRouteCount = std::max(maxRouteCount, entry.second.size());
     }
     qpNum_ = static_cast<uint32_t>(maxRouteCount);
+    logicalQpNum_ = qpNum_;
+    logicalQpsPerRoute_ = qpsPerRoute_;
+    logicalPeerQpRouteEids_ = peerQpRouteEids_;
+    logicalPeerQpRouteWeights_ = peerQpRouteWeights_;
     return TILEXR_SUCCESS;
 }
 
@@ -1316,10 +1320,16 @@ int TileXRUDMATransport::RefreshUDMAInfo()
         }
     }
 
-    std::vector<UDMAMemInfo> localMemByEid(eidCount_);
-    for (const auto& memEntry : localMemInfoByEid_) {
-        if (memEntry.first < eidCount_) {
-            localMemByEid[memEntry.first] = memEntry.second;
+    const uint32_t regionCount = static_cast<uint32_t>(localMemInfoByRegion_.size());
+    if (regionCount == 0) {
+        return TILEXR_ERROR_NOT_FOUND;
+    }
+    std::vector<UDMAMemInfo> localMemByRegionEid(static_cast<size_t>(regionCount) * eidCount_);
+    for (uint32_t regionIndex = 0; regionIndex < regionCount; ++regionIndex) {
+        for (const auto& memEntry : localMemInfoByRegion_[regionIndex]) {
+            if (memEntry.first < eidCount_) {
+                localMemByRegionEid[static_cast<size_t>(regionIndex) * eidCount_ + memEntry.first] = memEntry.second;
+            }
         }
     }
     std::vector<HccpEid> localEids(eidCount_);
@@ -1329,8 +1339,9 @@ int TileXRUDMATransport::RefreshUDMAInfo()
         }
     }
 
-    std::vector<UDMAMemInfo> allMem(options_.rankSize * eidCount_);
-    int ret = options_.exchange->AllGather(localMemByEid.data(), localMemByEid.size(), allMem.data());
+    std::vector<UDMAMemInfo> allMem(static_cast<size_t>(options_.rankSize) * regionCount * eidCount_);
+    int ret = options_.exchange->AllGather(
+        localMemByRegionEid.data(), localMemByRegionEid.size(), allMem.data());
     if (ret != TILEXR_SUCCESS) {
         return ret;
     }
@@ -1356,7 +1367,7 @@ int TileXRUDMATransport::RefreshUDMAInfo()
     std::vector<UDMAWQCtx> rq(queueEntries);
     std::vector<UDMACQCtx> scq(queueEntries);
     std::vector<UDMACQCtx> rcq(queueEntries);
-    std::vector<UDMAMemInfo> mem(queueEntries);
+    std::vector<UDMAMemInfo> mem(queueEntries * regionCount);
     std::vector<uint32_t> qpWeights(queueEntries, 1);
 
     for (int rank = 0; rank < options_.rankSize; ++rank) {
@@ -1441,8 +1452,10 @@ int TileXRUDMATransport::RefreshUDMAInfo()
                 return TILEXR_ERROR_INTERNAL;
             }
             auto& queue = *queuePtr;
-            if (!registeredMem_.empty()) {
-                const auto& localMrs = registeredMem_.begin()->second;
+            if (!registeredRegions_.empty()) {
+                const auto localMrsIt = registeredMem_.find(
+                    reinterpret_cast<uint64_t>(registeredRegions_.front().base));
+                const auto& localMrs = localMrsIt->second;
                 const auto localMrIt = localMrs.find(localEid);
                 if (localMrIt != localMrs.end()) {
                     queue.localWq.localTokenId = localMrIt->second.tokenId;
@@ -1453,17 +1466,21 @@ int TileXRUDMATransport::RefreshUDMAInfo()
             rq[entryIndex] = queue.localWq;
             scq[entryIndex] = queue.localCq;
             rcq[entryIndex] = queue.localCq;
-            if (rank == options_.rank) {
-                const auto localMemIt = localMemInfoByEid_.find(localEid);
-                if (localMemIt != localMemInfoByEid_.end()) {
-                    mem[entryIndex] = localMemIt->second;
+            for (uint32_t regionIndex = 0; regionIndex < regionCount; ++regionIndex) {
+                const size_t memIndex = entryIndex * regionCount + regionIndex;
+                if (rank == options_.rank) {
+                    const auto localMemIt = localMemInfoByRegion_[regionIndex].find(localEid);
+                    if (localMemIt != localMemInfoByRegion_[regionIndex].end()) {
+                        mem[memIndex] = localMemIt->second;
+                    }
+                } else {
+                    const size_t allIndex = (static_cast<size_t>(rank) * regionCount + regionIndex) * eidCount_ + remoteEid;
+                    mem[memIndex] = allMem[allIndex];
+                    mem[memIndex].tpn = sharedRemotePtr == nullptr ? queue.tpn : sharedRemotePtr->tpn;
                 }
-            } else {
-                mem[entryIndex] = allMem[rank * eidCount_ + remoteEid];
-                mem[entryIndex].tpn = sharedRemotePtr == nullptr ? queue.tpn : sharedRemotePtr->tpn;
+                mem[memIndex].eidAddr = reinterpret_cast<uint64_t>(
+                    eidTableDev_ + (rank * eidCount_ + remoteEid) * sizeof(HccpEid));
             }
-            mem[entryIndex].eidAddr = reinterpret_cast<uint64_t>(
-                eidTableDev_ + (rank * eidCount_ + remoteEid) * sizeof(HccpEid));
             if (rank != options_.rank) {
                 const auto weightIt = peerQpRouteWeights_.find(rank);
                 if (weightIt != peerQpRouteWeights_.end() && qpIdx < weightIt->second.size()) {
@@ -1484,16 +1501,18 @@ int TileXRUDMATransport::RefreshUDMAInfo()
                                  << " wqeCnt=" << PtrToHex(sq[entryIndex].wqeCntAddr)
                                  << " cqBuf=" << PtrToHex(scq[entryIndex].bufAddr)
                                  << " cqTail=" << PtrToHex(scq[entryIndex].tailAddr)
-                                 << " memAddr=" << PtrToHex(mem[entryIndex].addr)
-                                 << " memLen=" << mem[entryIndex].len
-                                 << " memTid=" << mem[entryIndex].tid
-                                 << " memTpn=" << mem[entryIndex].tpn
-                                 << " memEidAddr=" << PtrToHex(mem[entryIndex].eidAddr);
+                                 << " regionCount=" << regionCount
+                                 << " memAddr=" << PtrToHex(mem[entryIndex * regionCount].addr)
+                                 << " memLen=" << mem[entryIndex * regionCount].len
+                                 << " memTid=" << mem[entryIndex * regionCount].tid
+                                 << " memTpn=" << mem[entryIndex * regionCount].tpn
+                                 << " memEidAddr=" << PtrToHex(mem[entryIndex * regionCount].eidAddr);
             }
         }
     }
 
-    const size_t oneRankSize = 2 * sizeof(UDMAWQCtx) + 2 * sizeof(UDMACQCtx) + sizeof(UDMAMemInfo) + sizeof(uint32_t);
+    const size_t oneRankSize = 2 * sizeof(UDMAWQCtx) + 2 * sizeof(UDMACQCtx) +
+        regionCount * sizeof(UDMAMemInfo) + sizeof(uint32_t);
     const uint32_t requiredInfoSize =
         static_cast<uint32_t>(sizeof(UDMAInfo) + oneRankSize * options_.rankSize * qpNum_);
     if (udmaInfoDev_ == nullptr || udmaInfoSize_ < requiredInfoSize) {
@@ -1512,7 +1531,8 @@ int TileXRUDMATransport::RefreshUDMAInfo()
     UDMAInfo info {};
     std::vector<uint8_t> image;
     ret = BuildUDMAInfoImage(
-        reinterpret_cast<uintptr_t>(udmaInfoDev_), qpNum_, sq, rq, scq, rcq, mem, qpWeights, info, image);
+        reinterpret_cast<uintptr_t>(udmaInfoDev_), qpNum_, regionCount,
+        sq, rq, scq, rcq, mem, qpWeights, info, image);
     if (ret != TILEXR_UDMA_LAYOUT_SUCCESS) {
         return TILEXR_ERROR_PARA_CHECK_FAIL;
     }
@@ -1530,6 +1550,7 @@ int TileXRUDMATransport::EnsureUDMAInfoBuffer()
     }
     UDMAInfo info {};
     info.qpNum = 1;
+    info.regionCount = 1;
     udmaInfoSize_ = static_cast<uint32_t>(sizeof(UDMAInfo));
     int ret = aclrtMalloc(reinterpret_cast<void**>(&udmaInfoDev_), udmaInfoSize_, ACL_MEM_MALLOC_HUGE_FIRST);
     if (ret != ACL_SUCCESS) {
@@ -1547,65 +1568,138 @@ int TileXRUDMATransport::EnsureUDMAInfoBuffer()
 
 int TileXRUDMATransport::RegisterMemory(GM_ADDR localPtr, size_t bytes)
 {
-    if (!available_ || localPtr == nullptr || bytes == 0) {
+    TileXRUDMARegionDesc region {};
+    region.base = localPtr;
+    region.bytes = bytes;
+    return RegisterMemoryRegions(&region, 1);
+}
+
+int TileXRUDMATransport::ConfigureRegionQueues(uint32_t regionCount)
+{
+    if (regionCount == 0 || logicalQpNum_ == 0 || logicalQpsPerRoute_ == 0) {
+        return TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    if (sharedQpPool_ && regionCount > 1) {
+        TILEXR_LOG(WARN) << "UDMA multi-region registration is incompatible with shared QP pool";
         return TILEXR_ERROR_NOT_FOUND;
+    }
+    constexpr uint32_t maxQpsPerRoute = 64;
+    if (logicalQpsPerRoute_ > maxQpsPerRoute / regionCount ||
+        logicalQpNum_ > UINT32_MAX / regionCount) {
+        TILEXR_LOG(WARN) << "UDMA region QP expansion exceeds limit: logicalQpsPerRoute="
+                         << logicalQpsPerRoute_ << " regionCount=" << regionCount;
+        return TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+
+    qpsPerRoute_ = logicalQpsPerRoute_ * regionCount;
+    qpNum_ = logicalQpNum_ * regionCount;
+    peerQpRouteEids_.clear();
+    peerQpRouteWeights_.clear();
+    for (const auto& entry : logicalPeerQpRouteEids_) {
+        auto& expanded = peerQpRouteEids_[entry.first];
+        for (uint32_t eid : entry.second) {
+            expanded.insert(expanded.end(), regionCount, eid);
+        }
+    }
+    for (const auto& entry : logicalPeerQpRouteWeights_) {
+        auto& expanded = peerQpRouteWeights_[entry.first];
+        for (uint32_t weight : entry.second) {
+            expanded.insert(expanded.end(), regionCount, weight);
+        }
+    }
+    return TILEXR_SUCCESS;
+}
+
+int TileXRUDMATransport::RegisterMemoryRegions(
+    const TileXRUDMARegionDesc* regions, uint32_t regionCount)
+{
+    if (!available_ || regions == nullptr || regionCount == 0 ||
+        regionCount > TILEXR_UDMA_MAX_REGIONS) {
+        return TILEXR_ERROR_NOT_FOUND;
+    }
+    for (uint32_t i = 0; i < regionCount; ++i) {
+        if (regions[i].base == nullptr || regions[i].bytes == 0 || regions[i].bytes > UINT32_MAX) {
+            return TILEXR_ERROR_PARA_CHECK_FAIL;
+        }
     }
     const bool diag = UDMADiagEnabled();
     if (diag) {
-        TILEXR_LOG(INFO) << "UDMA diag register memory begin rank " << options_.rank
-                         << " ptr=" << PtrToHex(reinterpret_cast<uint64_t>(localPtr))
-                         << " bytes=" << bytes;
+        TILEXR_LOG(INFO) << "UDMA diag register regions begin rank " << options_.rank
+                         << " regionCount=" << regionCount;
     }
     CleanupMemory();
     CleanupQueues();
-    registeredPtr_ = nullptr;
-    int ret = RegisterMemoryOnContexts(localPtr, bytes);
+    int ret = ConfigureRegionQueues(regionCount);
     if (ret != TILEXR_SUCCESS) {
-        TILEXR_LOG(WARN) << "UDMA register memory on contexts failed rank " << options_.rank
-                         << " ret=" << ret;
         return ret;
     }
-    registeredPtr_ = localPtr;
+    registeredPtr_ = nullptr;
+    registeredRegions_.assign(regions, regions + regionCount);
+    localMemInfoByRegion_.resize(regionCount);
+    ret = TILEXR_SUCCESS;
+    for (uint32_t regionIndex = 0; regionIndex < regionCount; ++regionIndex) {
+        ret = RegisterMemoryOnContexts(regions[regionIndex], regionIndex);
+        if (ret != TILEXR_SUCCESS) {
+            TILEXR_LOG(WARN) << "UDMA register memory region failed rank " << options_.rank
+                             << " region=" << regionIndex << " ret=" << ret;
+            CleanupMemory();
+            return ret;
+        }
+    }
+    registeredPtr_ = regions[0].base;
     ret = CreateQueues();
     if (ret != TILEXR_SUCCESS) {
         TILEXR_LOG(WARN) << "UDMA create queues after memory register failed rank " << options_.rank
                          << " ret=" << ret;
+        CleanupQueues();
+        CleanupMemory();
+        registeredPtr_ = nullptr;
         return ret;
     }
     ret = ImportQueues();
     if (ret != TILEXR_SUCCESS) {
         TILEXR_LOG(WARN) << "UDMA import queues after memory register failed rank " << options_.rank
                          << " ret=" << ret;
+        CleanupQueues();
+        CleanupMemory();
+        registeredPtr_ = nullptr;
         return ret;
     }
     ret = ExchangeAndImportMemory();
     if (ret != TILEXR_SUCCESS) {
         TILEXR_LOG(WARN) << "UDMA exchange/import memory failed rank " << options_.rank
                          << " ret=" << ret;
+        CleanupMemory();
+        CleanupQueues();
+        registeredPtr_ = nullptr;
         return ret;
     }
     ret = RefreshUDMAInfo();
     if (ret != TILEXR_SUCCESS) {
         TILEXR_LOG(WARN) << "UDMA refresh info after memory register failed rank " << options_.rank
                          << " ret=" << ret;
+        CleanupMemory();
+        CleanupQueues();
+        registeredPtr_ = nullptr;
         return ret;
     }
     if (diag) {
-        TILEXR_LOG(INFO) << "UDMA diag register memory end rank " << options_.rank;
+        TILEXR_LOG(INFO) << "UDMA diag register regions end rank " << options_.rank
+                         << " regionCount=" << regionCount;
     }
     return TILEXR_SUCCESS;
 }
 
-int TileXRUDMATransport::RegisterMemoryOnContexts(GM_ADDR localPtr, size_t bytes)
+int TileXRUDMATransport::RegisterMemoryOnContexts(
+    const TileXRUDMARegionDesc& region, uint32_t regionIndex)
 {
     std::map<uint32_t, RegMemResultInfo> byEid;
-    localMemInfoByEid_.clear();
     for (const auto& ctxEntry : ctxHandleByEid_) {
         const uint32_t eidIndex = ctxEntry.first;
         void* tokenHandle = tokenHandleByEid_[eidIndex];
         MrRegInfoT mrInfo {};
-        mrInfo.in.mem.addr = reinterpret_cast<uint64_t>(localPtr);
-        mrInfo.in.mem.size = bytes;
+        mrInfo.in.mem.addr = reinterpret_cast<uint64_t>(region.base);
+        mrInfo.in.mem.size = region.bytes;
         mrInfo.in.ub.tokenValue = TILEXR_UDMA_TOKEN_VALUE;
         mrInfo.in.ub.tokenIdHandle = tokenHandle;
         mrInfo.in.ub.flags.bs.cacheable = 0;
@@ -1620,16 +1714,17 @@ int TileXRUDMATransport::RegisterMemoryOnContexts(GM_ADDR localPtr, size_t bytes
             TILEXR_LOG(WARN) << "UDMA RaCtxLmemRegister failed rank " << options_.rank
                              << " eid=" << eidIndex
                              << " ctx=" << ctxEntry.second
-                             << " ptr=" << PtrToHex(reinterpret_cast<uint64_t>(localPtr))
-                             << " bytes=" << bytes
+                             << " region=" << regionIndex
+                             << " ptr=" << PtrToHex(reinterpret_cast<uint64_t>(region.base))
+                             << " bytes=" << region.bytes
                              << " ret=" << ret
                              << " handle=" << lmemHandle;
             return TILEXR_ERROR_INTERNAL;
         }
 
         RegMemResultInfo result {};
-        result.address = reinterpret_cast<uint64_t>(localPtr);
-        result.size = bytes;
+        result.address = reinterpret_cast<uint64_t>(region.base);
+        result.size = region.bytes;
         result.lmemHandle = lmemHandle;
         result.key = mrInfo.out.key;
         result.tokenId = mrInfo.out.ub.tokenId;
@@ -1644,14 +1739,17 @@ int TileXRUDMATransport::RegisterMemoryOnContexts(GM_ADDR localPtr, size_t bytes
         memInfo.rmtJettyType = 1;
         memInfo.targetHint = 0;
         memInfo.tpn = 0;
+        // A QP is bound to the context token allocated during CreateContexts.
+        // Multiple independent MRs on that context must reuse the same token.
         memInfo.tid = mrInfo.out.ub.tokenId >> 8;
         memInfo.rmtTokenValue = TILEXR_UDMA_TOKEN_VALUE;
-        memInfo.len = static_cast<uint32_t>(std::min<size_t>(bytes, UINT32_MAX));
-        memInfo.addr = reinterpret_cast<uint64_t>(localPtr);
-        localMemInfoByEid_[eidIndex] = memInfo;
+        memInfo.len = static_cast<uint32_t>(region.bytes);
+        memInfo.addr = reinterpret_cast<uint64_t>(region.base);
+        localMemInfoByRegion_[regionIndex][eidIndex] = memInfo;
         if (UDMADiagEnabled()) {
             TILEXR_LOG(INFO) << "UDMA diag lmem registered rank " << options_.rank
                              << " eid=" << eidIndex
+                             << " region=" << regionIndex
                              << " lmem=" << lmemHandle
                              << " tokenId=" << result.tokenId
                              << " tid=" << memInfo.tid
@@ -1659,17 +1757,23 @@ int TileXRUDMATransport::RegisterMemoryOnContexts(GM_ADDR localPtr, size_t bytes
                              << " keySize=" << static_cast<uint32_t>(result.key.size);
         }
     }
-    registeredMem_[reinterpret_cast<uint64_t>(localPtr)] = byEid;
+    registeredMem_[reinterpret_cast<uint64_t>(region.base)] = byEid;
     return TILEXR_SUCCESS;
 }
 
 int TileXRUDMATransport::ExchangeAndImportMemory()
 {
-    if (registeredMem_.empty()) {
+    if (registeredMem_.empty() || registeredRegions_.empty()) {
         return TILEXR_ERROR_NOT_FOUND;
     }
-    const auto& localByEid = registeredMem_.begin()->second;
-    uint32_t localCount = static_cast<uint32_t>(localByEid.size());
+    uint32_t localCount = 0;
+    for (const auto& region : registeredRegions_) {
+        const auto regionIt = registeredMem_.find(reinterpret_cast<uint64_t>(region.base));
+        if (regionIt == registeredMem_.end()) {
+            return TILEXR_ERROR_INTERNAL;
+        }
+        localCount += static_cast<uint32_t>(regionIt->second.size());
+    }
     std::vector<uint32_t> allCounts(options_.rankSize);
     int ret = options_.exchange->AllGather(&localCount, 1, allCounts.data());
     if (ret != TILEXR_SUCCESS) {
@@ -1684,6 +1788,7 @@ int TileXRUDMATransport::ExchangeAndImportMemory()
     }
 
     struct ExchangedMrInfo {
+        uint32_t regionIndex;
         uint32_t eidIndex;
         uint32_t valid;
         RegMemResultInfo mr;
@@ -1691,11 +1796,16 @@ int TileXRUDMATransport::ExchangeAndImportMemory()
 
     std::vector<ExchangedMrInfo> local(maxCount);
     uint32_t idx = 0;
-    for (const auto& entry : localByEid) {
-        local[idx].eidIndex = entry.first;
-        local[idx].valid = 1;
-        local[idx].mr = entry.second;
-        ++idx;
+    for (uint32_t regionIndex = 0; regionIndex < registeredRegions_.size(); ++regionIndex) {
+        const auto& byEid = registeredMem_.find(
+            reinterpret_cast<uint64_t>(registeredRegions_[regionIndex].base))->second;
+        for (const auto& entry : byEid) {
+            local[idx].regionIndex = regionIndex;
+            local[idx].eidIndex = entry.first;
+            local[idx].valid = 1;
+            local[idx].mr = entry.second;
+            ++idx;
+        }
     }
     std::vector<ExchangedMrInfo> all(options_.rankSize * maxCount);
     ret = options_.exchange->AllGather(local.data(), local.size(), all.data());
@@ -1725,54 +1835,48 @@ int TileXRUDMATransport::ExchangeAndImportMemory()
         if (localRoutes.empty() || localRoutes.size() != remoteRoutes.size()) {
             return TILEXR_ERROR_INTERNAL;
         }
-        std::vector<void*> remoteHandles(localRoutes.size(), nullptr);
-        for (size_t routeIdx = 0; routeIdx < localRoutes.size(); ++routeIdx) {
-            const uint32_t localEid = localRoutes[routeIdx];
-            const uint32_t remoteEid = remoteRoutes[routeIdx];
-            const ExchangedMrInfo* remote = nullptr;
-            for (uint32_t i = 0; i < allCounts[peer]; ++i) {
-                const auto& candidate = all[peer * maxCount + i];
-                if (candidate.valid != 0 && candidate.eidIndex == remoteEid) {
-                    remote = &candidate;
-                    break;
+        std::vector<std::vector<void*>> remoteHandles(
+            registeredRegions_.size(), std::vector<void*>(localRoutes.size(), nullptr));
+        for (uint32_t regionIndex = 0; regionIndex < registeredRegions_.size(); ++regionIndex) {
+            for (size_t routeIdx = 0; routeIdx < localRoutes.size(); ++routeIdx) {
+                const uint32_t localEid = localRoutes[routeIdx];
+                const uint32_t remoteEid = remoteRoutes[routeIdx];
+                const ExchangedMrInfo* remote = nullptr;
+                for (uint32_t i = 0; i < allCounts[peer]; ++i) {
+                    const auto& candidate = all[peer * maxCount + i];
+                    if (candidate.valid != 0 && candidate.regionIndex == regionIndex &&
+                        candidate.eidIndex == remoteEid) {
+                        remote = &candidate;
+                        break;
+                    }
                 }
-            }
-            if (remote == nullptr || ctxHandleByEid_.count(localEid) == 0) {
-                TILEXR_LOG(WARN) << "UDMA remote memory info missing rank " << options_.rank
-                                 << " peer=" << peer
-                                 << " localEid=" << localEid
-                                 << " remoteEid=" << remoteEid
-                                 << " peerCount=" << allCounts[peer]
-                                 << " maxCount=" << maxCount;
-                return TILEXR_ERROR_INTERNAL;
-            }
-            MrImportInfoT importInfo {};
-            importInfo.in.key = remote->mr.key;
-            importInfo.in.ub.tokenValue = remote->mr.tokenValue;
-            importInfo.in.ub.flags.bs.cacheable = remote->mr.cacheable;
-            importInfo.in.ub.flags.bs.access = remote->mr.access;
-            void* remoteHandle = nullptr;
-            ret = loader_.RaCtxRmemImport(ctxHandleByEid_[localEid], &importInfo, &remoteHandle);
-            if (ret != 0 || remoteHandle == nullptr) {
-                TILEXR_LOG(WARN) << "UDMA RaCtxRmemImport failed rank " << options_.rank
-                                 << " peer=" << peer
-                                 << " localEid=" << localEid
-                                 << " remoteEid=" << remoteEid
-                                 << " ctx=" << ctxHandleByEid_[localEid]
-                                 << " ret=" << ret
-                                 << " handle=" << remoteHandle
-                                 << " remoteToken=" << remote->mr.tokenValue
-                                 << " remoteTokenId=" << remote->mr.tokenId
-                                 << " remoteKeySize=" << static_cast<uint32_t>(remote->mr.key.size);
-                return TILEXR_ERROR_INTERNAL;
-            }
-            remoteHandles[routeIdx] = remoteHandle;
-            if (UDMADiagEnabled()) {
-                TILEXR_LOG(INFO) << "UDMA diag rmem imported rank " << options_.rank
-                                 << " peer=" << peer
-                                 << " localEid=" << localEid
-                                 << " remoteEid=" << remoteEid
-                                 << " remoteHandle=" << remoteHandle;
+                if (remote == nullptr || ctxHandleByEid_.count(localEid) == 0) {
+                    TILEXR_LOG(WARN) << "UDMA remote memory info missing rank " << options_.rank
+                                     << " peer=" << peer << " region=" << regionIndex
+                                     << " localEid=" << localEid << " remoteEid=" << remoteEid;
+                    return TILEXR_ERROR_INTERNAL;
+                }
+                MrImportInfoT importInfo {};
+                importInfo.in.key = remote->mr.key;
+                importInfo.in.ub.tokenValue = remote->mr.tokenValue;
+                importInfo.in.ub.flags.bs.cacheable = remote->mr.cacheable;
+                importInfo.in.ub.flags.bs.access = remote->mr.access;
+                void* remoteHandle = nullptr;
+                ret = loader_.RaCtxRmemImport(ctxHandleByEid_[localEid], &importInfo, &remoteHandle);
+                if (ret != 0 || remoteHandle == nullptr) {
+                    TILEXR_LOG(WARN) << "UDMA RaCtxRmemImport failed rank " << options_.rank
+                                     << " peer=" << peer << " region=" << regionIndex
+                                     << " localEid=" << localEid << " remoteEid=" << remoteEid
+                                     << " ret=" << ret << " handle=" << remoteHandle;
+                    return TILEXR_ERROR_INTERNAL;
+                }
+                remoteHandles[regionIndex][routeIdx] = remoteHandle;
+                if (UDMADiagEnabled()) {
+                    TILEXR_LOG(INFO) << "UDMA diag rmem imported rank " << options_.rank
+                                     << " peer=" << peer << " region=" << regionIndex
+                                     << " localEid=" << localEid << " remoteEid=" << remoteEid
+                                     << " remoteHandle=" << remoteHandle;
+                }
             }
         }
         remoteMemHandlesByPeer_[peer] = remoteHandles;
@@ -1787,10 +1891,8 @@ int TileXRUDMATransport::UnregisterMemory(GM_ADDR localPtr)
     }
     CleanupMemory();
     registeredPtr_ = nullptr;
-    localMemInfoByEid_.clear();
-    if (available_) {
-        return RefreshUDMAInfo();
-    }
+    localMemInfoByRegion_.clear();
+    registeredRegions_.clear();
     return TILEXR_SUCCESS;
 }
 
@@ -1802,19 +1904,21 @@ void TileXRUDMATransport::CleanupMemory()
             continue;
         }
         auto localRoutesIt = peerLocalEids_.find(peer);
-        for (size_t routeIdx = 0; routeIdx < peerEntry.second.size(); ++routeIdx) {
-            void* remoteHandle = peerEntry.second[routeIdx];
-            if (remoteHandle == nullptr) {
-                continue;
+        for (auto& regionHandles : peerEntry.second) {
+            for (size_t routeIdx = 0; routeIdx < regionHandles.size(); ++routeIdx) {
+                void* remoteHandle = regionHandles[routeIdx];
+                if (remoteHandle == nullptr) {
+                    continue;
+                }
+                uint32_t localEid = peerLocalEid_[peer];
+                if (localRoutesIt != peerLocalEids_.end() && routeIdx < localRoutesIt->second.size()) {
+                    localEid = localRoutesIt->second[routeIdx];
+                }
+                if (ctxHandleByEid_.count(localEid) != 0) {
+                    loader_.RaCtxRmemUnimport(ctxHandleByEid_[localEid], remoteHandle);
+                }
+                regionHandles[routeIdx] = nullptr;
             }
-            uint32_t localEid = peerLocalEid_[peer];
-            if (localRoutesIt != peerLocalEids_.end() && routeIdx < localRoutesIt->second.size()) {
-                localEid = localRoutesIt->second[routeIdx];
-            }
-            if (ctxHandleByEid_.count(localEid) != 0) {
-                loader_.RaCtxRmemUnimport(ctxHandleByEid_[localEid], remoteHandle);
-            }
-            peerEntry.second[routeIdx] = nullptr;
         }
     }
     remoteMemHandlesByPeer_.clear();
@@ -1827,6 +1931,8 @@ void TileXRUDMATransport::CleanupMemory()
         }
     }
     registeredMem_.clear();
+    localMemInfoByRegion_.clear();
+    registeredRegions_.clear();
 }
 
 void TileXRUDMATransport::CleanupQueues()
@@ -1949,9 +2055,14 @@ void TileXRUDMATransport::Shutdown()
     peerQpRouteWeights_.clear();
     qpsPerRoute_ = 1;
     qpNum_ = 1;
+    logicalQpsPerRoute_ = 1;
+    logicalQpNum_ = 1;
     sharedQpPool_ = false;
-    localMemInfoByEid_.clear();
+    localMemInfoByRegion_.clear();
+    registeredRegions_.clear();
     remoteMemHandlesByPeer_.clear();
+    logicalPeerQpRouteEids_.clear();
+    logicalPeerQpRouteWeights_.clear();
     loader_.Unload();
 }
 

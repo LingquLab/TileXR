@@ -158,6 +158,18 @@ int TileXRUDMARegister(TileXRCommPtr comm, GM_ADDR localPtr, size_t bytes, TileX
     return c->RegisterUDMAMemory(localPtr, bytes, handle);
 }
 
+int TileXRUDMARegisterRegions(TileXRCommPtr comm, const TileXR::TileXRUDMARegionDesc *regions,
+                              uint32_t regionCount, TileXRUDMAMemHandle *handle)
+{
+    if (comm == nullptr || regions == nullptr || handle == nullptr || regionCount == 0 ||
+        regionCount > TileXR::TILEXR_UDMA_MAX_REGIONS) {
+        TILEXR_LOG(ERROR) << "TileXRUDMARegisterRegions invalid input";
+        return TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    auto* c = static_cast<TileXRComm *>(comm);
+    return c->RegisterUDMAMemoryRegions(regions, regionCount, handle);
+}
+
 int TileXRUDMAUnregister(TileXRCommPtr comm, TileXRUDMAMemHandle handle)
 {
     if (comm == nullptr) {

@@ -30,7 +30,7 @@ constexpr size_t kAllToAllGroupMultiChannelThresholdBytes =
     150ULL * 1024ULL * 1024ULL;
 constexpr size_t kAllToAllGroupAlignment = 512U;
 constexpr size_t kAllToAllGroupControlBytes = 4096U;
-constexpr size_t kAllToAllGroupMaxRegisteredBytes = 1ULL << 30;
+constexpr size_t kAllToAllGroupMaxRegisteredBytes = 4ULL << 30;
 
 struct AllToAllGroupPlan {
     bool valid = false;

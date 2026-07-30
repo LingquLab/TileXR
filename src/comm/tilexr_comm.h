@@ -44,6 +44,8 @@ public:
     CommArgs* GetCommArgs();
     int64_t NextMagic();
     int RegisterUDMAMemory(GM_ADDR localPtr, size_t bytes, TileXRUDMAMemHandle *handle);
+    int RegisterUDMAMemoryRegions(
+        const TileXRUDMARegionDesc *regions, uint32_t regionCount, TileXRUDMAMemHandle *handle);
     int UnregisterUDMAMemory(TileXRUDMAMemHandle handle);
     GM_ADDR GetUDMARegistryPtr() const;
     bool IsSDMAAvailable() const;

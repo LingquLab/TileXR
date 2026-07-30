@@ -337,12 +337,26 @@ void TileXRComm::FreeUDMARegistry()
 
 int TileXRComm::RegisterUDMAMemory(GM_ADDR localPtr, size_t bytes, TileXRUDMAMemHandle *handle)
 {
+    TileXRUDMARegionDesc region {};
+    region.base = localPtr;
+    region.bytes = bytes;
+    return RegisterUDMAMemoryRegions(&region, 1, handle);
+}
+
+int TileXRComm::RegisterUDMAMemoryRegions(
+    const TileXRUDMARegionDesc *regions, uint32_t regionCount, TileXRUDMAMemHandle *handle)
+{
     if (!inited_) {
-        TILEXR_LOG(ERROR) << "TileXRUDMARegister requires initialized communicator";
+        TILEXR_LOG(ERROR) << "TileXRUDMARegisterRegions requires initialized communicator";
         return TILEXR_ERROR_NOT_INITIALIZED;
     }
-    if (localPtr == nullptr || bytes == 0 || handle == nullptr) {
+    if (regions == nullptr || regionCount == 0 || regionCount > TILEXR_UDMA_MAX_REGIONS || handle == nullptr) {
         return TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    for (uint32_t i = 0; i < regionCount; ++i) {
+        if (regions[i].base == nullptr || regions[i].bytes == 0 || regions[i].bytes > UINT32_MAX) {
+            return TILEXR_ERROR_PARA_CHECK_FAIL;
+        }
     }
     if (!((commArgs_.extraFlag & ExtraFlag::UDMA) != 0 && commArgs_.udmaInfoPtr != nullptr)) {
         TILEXR_LOG(WARN) << "TileXRUDMARegister called while UDMA is unavailable";
@@ -353,15 +367,20 @@ int TileXRComm::RegisterUDMAMemory(GM_ADDR localPtr, size_t bytes, TileXRUDMAMem
         return TILEXR_ERROR_INTERNAL;
     }
 
-    TileXRUDMARegionDesc localRegion {};
-    localRegion.base = localPtr;
-    localRegion.bytes = bytes;
-
     if (udmaTransport_ == nullptr || !udmaTransport_->IsAvailable()) {
         TILEXR_LOG(ERROR) << "TileXR UDMA transport is unavailable";
         return TILEXR_ERROR_NOT_FOUND;
     }
-    int ret = udmaTransport_->RegisterMemory(localPtr, bytes);
+    if (udmaRegisteredPtr_ != nullptr) {
+        udmaTransport_->UnregisterMemory(udmaRegisteredPtr_);
+        udmaRegisteredPtr_ = nullptr;
+        FreeUDMARegistry();
+        int updateRet = UpdateCommArgsDev();
+        if (updateRet != TILEXR_SUCCESS) {
+            return updateRet;
+        }
+    }
+    int ret = udmaTransport_->RegisterMemoryRegions(regions, regionCount);
     if (ret != TILEXR_SUCCESS) {
         TILEXR_LOG(ERROR) << "TileXR UDMA memory registration failed: " << ret;
         return TILEXR_ERROR_INTERNAL;
@@ -371,63 +390,77 @@ int TileXRComm::RegisterUDMAMemory(GM_ADDR localPtr, size_t bytes, TileXRUDMAMem
     ret = UpdateCommArgsDev();
     if (ret != TILEXR_SUCCESS) {
         TILEXR_LOG(ERROR) << "TileXRUDMARegister failed to refresh CommArgs after UDMA info update: " << ret;
-        udmaTransport_->UnregisterMemory(localPtr);
+        udmaTransport_->UnregisterMemory(regions[0].base);
         return ret;
     }
 
     if (socketExchange_ == nullptr) {
         TILEXR_LOG(ERROR) << "TileXRUDMARegister requires live socket exchange";
-        udmaTransport_->UnregisterMemory(localPtr);
+        udmaTransport_->UnregisterMemory(regions[0].base);
         return TILEXR_ERROR_INTERNAL;
     }
-    std::vector<TileXRUDMARegionDesc> allRegions(rankSize_);
-    ret = socketExchange_->AllGather(&localRegion, 1, allRegions.data());
+    std::vector<uint32_t> allRegionCounts(rankSize_);
+    ret = socketExchange_->AllGather(&regionCount, 1, allRegionCounts.data());
     if (ret != TILEXR_SUCCESS) {
-        TILEXR_LOG(ERROR) << "TileXRUDMARegister allgather failed: " << ret;
-        udmaTransport_->UnregisterMemory(localPtr);
+        TILEXR_LOG(ERROR) << "TileXRUDMARegisterRegions count allgather failed: " << ret;
+        udmaTransport_->UnregisterMemory(regions[0].base);
+        return ret;
+    }
+    for (int rank = 0; rank < rankSize_; ++rank) {
+        if (allRegionCounts[rank] != regionCount) {
+            TILEXR_LOG(ERROR) << "TileXRUDMARegisterRegions region count mismatch at rank " << rank
+                              << ": " << allRegionCounts[rank] << " vs " << regionCount;
+            udmaTransport_->UnregisterMemory(regions[0].base);
+            return TILEXR_ERROR_PARA_CHECK_FAIL;
+        }
+    }
+    std::vector<TileXRUDMARegionDesc> allRegions(static_cast<size_t>(rankSize_) * regionCount);
+    ret = socketExchange_->AllGather(regions, regionCount, allRegions.data());
+    if (ret != TILEXR_SUCCESS) {
+        TILEXR_LOG(ERROR) << "TileXRUDMARegisterRegions allgather failed: " << ret;
+        udmaTransport_->UnregisterMemory(regions[0].base);
         return ret;
     }
 
     TileXRUDMARegistry nextRegistry {};
     nextRegistry.rankSize = static_cast<uint32_t>(rankSize_);
-    nextRegistry.regionCount = 1;
+    nextRegistry.regionCount = regionCount;
     for (int i = 0; i < rankSize_; ++i) {
-        if (allRegions[i].base == nullptr || allRegions[i].bytes == 0) {
-            TILEXR_LOG(ERROR) << "TileXRUDMARegister received invalid region from rank " << i;
-            udmaTransport_->UnregisterMemory(localPtr);
-            return TILEXR_ERROR_PARA_CHECK_FAIL;
+        for (uint32_t regionIndex = 0; regionIndex < regionCount; ++regionIndex) {
+            const auto& region = allRegions[static_cast<size_t>(i) * regionCount + regionIndex];
+            if (region.base == nullptr || region.bytes == 0 || region.bytes > UINT32_MAX) {
+                TILEXR_LOG(ERROR) << "TileXRUDMARegisterRegions received invalid region from rank "
+                                  << i << " region " << regionIndex;
+                udmaTransport_->UnregisterMemory(regions[0].base);
+                return TILEXR_ERROR_PARA_CHECK_FAIL;
+            }
+            nextRegistry.regions[i][regionIndex] = region;
         }
-        nextRegistry.regions[i] = allRegions[i];
     }
 
     GM_ADDR nextRegistryDev = nullptr;
     ret = aclrtMalloc(reinterpret_cast<void **>(&nextRegistryDev), sizeof(nextRegistry), ACL_MEM_MALLOC_HUGE_FIRST);
     if (ret != ACL_SUCCESS) {
         TILEXR_LOG(ERROR) << "aclrtMalloc UDMA registry failed: " << ret;
-        udmaTransport_->UnregisterMemory(localPtr);
+        udmaTransport_->UnregisterMemory(regions[0].base);
         return TILEXR_ERROR_INTERNAL;
     }
     ret = aclrtMemcpy(nextRegistryDev, sizeof(nextRegistry), &nextRegistry, sizeof(nextRegistry), ACL_MEMCPY_HOST_TO_DEVICE);
     if (ret != ACL_SUCCESS) {
         TILEXR_LOG(ERROR) << "aclrtMemcpy UDMA registry failed: " << ret;
         aclrtFree(nextRegistryDev);
-        udmaTransport_->UnregisterMemory(localPtr);
+        udmaTransport_->UnregisterMemory(regions[0].base);
         return TILEXR_ERROR_INTERNAL;
     }
 
-    if (udmaRegisteredPtr_ != nullptr) {
-        udmaTransport_->UnregisterMemory(udmaRegisteredPtr_);
-        udmaRegisteredPtr_ = nullptr;
-    }
-    FreeUDMARegistry();
     udmaRegistry_ = nextRegistry;
     udmaRegistryDev_ = nextRegistryDev;
-    udmaRegisteredPtr_ = localPtr;
+    udmaRegisteredPtr_ = regions[0].base;
     commArgs_.udmaRegistryPtr = udmaRegistryDev_;
     *handle = 0;
     ret = UpdateCommArgsDev();
     if (ret != TILEXR_SUCCESS) {
-        udmaTransport_->UnregisterMemory(localPtr);
+        udmaTransport_->UnregisterMemory(regions[0].base);
         udmaRegisteredPtr_ = nullptr;
         FreeUDMARegistry();
     }

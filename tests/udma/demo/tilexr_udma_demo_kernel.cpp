@@ -6,6 +6,7 @@
 #include "kernel_operator.h"
 #include "tilexr_data_as_flag.h"
 #include "tilexr_udma.h"
+#include "tilexr_udma_alltoall_constants.h"
 #include "tilexr_udma_fullmesh_trace.h"
 
 constexpr int32_t TILEXR_UDMA_DEMO_MAGIC = 0x5444554d; // "TDUM"
@@ -56,7 +57,8 @@ constexpr uint32_t TILEXR_UDMA_DEMO_BIGDATA_RELAY_UB_BYTES = 64 * 1024;
 constexpr uint32_t TILEXR_UDMA_DEMO_BIGDATA_RELAY_UB_PINGPONG_BYTES =
     TILEXR_UDMA_DEMO_BIGDATA_RELAY_UB_BYTES * 2U;
 constexpr uint32_t TILEXR_UDMA_DEMO_BIGDATA_PINGPONG_SLOTS = 2U;
-constexpr uint64_t TILEXR_UDMA_DEMO_BIGDATA_MULTINODE_PEER_SLOT_BYTES = 16ULL * 1024ULL * 1024ULL;
+constexpr uint64_t TILEXR_UDMA_DEMO_BIGDATA_MULTINODE_PEER_SLOT_BYTES =
+    TileXR::Demo::kAllToAllBigDataMultiNodePeerSlotBytes;
 constexpr uint32_t TILEXR_UDMA_DEMO_BIGDATA_SINGLE_NODE_SHARDS = 2U;
 constexpr uint32_t TILEXR_UDMA_DEMO_BIGDATA_LOCAL_COPY_SHARDS =
     TILEXR_UDMA_DEMO_BIGDATA_SINGLE_NODE_SHARDS;
@@ -660,7 +662,7 @@ __aicore__ inline uint32_t BigDataSelectWeightedQp(
     const __gm__ TileXR::CommArgs* args, int32_t peer, bool selectMax)
 {
     auto udmaInfo = TileXR::GetUDMAInfo(args);
-    const uint32_t qpCount = udmaInfo->qpNum == 0 ? 1U : udmaInfo->qpNum;
+    const uint32_t qpCount = TileXR::UDMAGetLogicalQpNum(udmaInfo);
     uint32_t selected = 0U;
     uint32_t selectedWeight = TileXR::UDMAGetQpWeight(udmaInfo, peer, 0U);
     for (uint32_t qpIdx = 1U; qpIdx < qpCount; ++qpIdx) {
@@ -677,7 +679,7 @@ __aicore__ inline uint32_t BigDataSelectDistinctWeightedQp(
     const __gm__ TileXR::CommArgs* args, int32_t peer, uint32_t avoidQp, bool selectMax)
 {
     auto udmaInfo = TileXR::GetUDMAInfo(args);
-    const uint32_t qpCount = udmaInfo->qpNum == 0 ? 1U : udmaInfo->qpNum;
+    const uint32_t qpCount = TileXR::UDMAGetLogicalQpNum(udmaInfo);
     if (qpCount <= 1U) {
         return 0U;
     }
@@ -1072,7 +1074,7 @@ __aicore__ inline void BigDataSendPeerWorker(
         debug[TILEXR_UDMA_DEMO_DEBUG_LOCAL_TOKEN_BASE + peer] =
             static_cast<int32_t>(wqCtx->localTokenId);
         debug[TILEXR_UDMA_DEMO_DEBUG_REMOTE_BASE_LOW_BASE + peer] =
-            static_cast<int32_t>(reinterpret_cast<uint64_t>(registry->regions[peer].base) &
+            static_cast<int32_t>(reinterpret_cast<uint64_t>(registry->regions[peer][0].base) &
                 0xFFFFFFFFU);
         debug[TILEXR_UDMA_DEMO_DEBUG_MEM_ADDR_LOW_BASE + peer] =
             static_cast<int32_t>(remoteMemInfo->addr & 0xFFFFFFFFU);
@@ -2181,7 +2183,7 @@ extern "C" __global__ __aicore__ void tilexr_udma_all_to_all_kernel(
             debug[TILEXR_UDMA_DEMO_DEBUG_WQE_BEFORE_BASE + peer] = static_cast<int32_t>(wqeBefore);
             debug[TILEXR_UDMA_DEMO_DEBUG_LOCAL_TOKEN_BASE + peer] = static_cast<int32_t>(wqCtx->localTokenId);
             debug[TILEXR_UDMA_DEMO_DEBUG_REMOTE_BASE_LOW_BASE + peer] =
-                static_cast<int32_t>(reinterpret_cast<uint64_t>(registry->regions[peer].base) & 0xFFFFFFFFU);
+                static_cast<int32_t>(reinterpret_cast<uint64_t>(registry->regions[peer][0].base) & 0xFFFFFFFFU);
             debug[TILEXR_UDMA_DEMO_DEBUG_MEM_ADDR_LOW_BASE + peer] =
                 static_cast<int32_t>(remoteMemInfo->addr & 0xFFFFFFFFU);
             debug[TILEXR_UDMA_DEMO_DEBUG_TPN_BASE + peer] = static_cast<int32_t>(remoteMemInfo->tpn);
@@ -2557,6 +2559,31 @@ extern "C" __global__ __aicore__ void tilexr_udma_registered_smoke_kernel(
     }
 }
 
+extern "C" __global__ __aicore__ void tilexr_udma_vmm_regions_probe_kernel(
+    GM_ADDR commArgsGM, GM_ADDR localBaseGM, uint64_t regionBytes, uint32_t regionCount)
+{
+    auto args = reinterpret_cast<__gm__ TileXR::CommArgs*>(commArgsGM);
+    auto localBase = reinterpret_cast<__gm__ uint8_t*>(localBaseGM);
+    if (!TileXR::UDMARegistryEnabled(args) || args->rankSize < 2 || regionCount < 4) {
+        return;
+    }
+    const int targetRank = (args->rank + 1) % args->rankSize;
+    for (uint32_t regionIndex = 0; regionIndex < regionCount; ++regionIndex) {
+        auto source = localBase + 128 + static_cast<uint64_t>(regionIndex) * sizeof(uint64_t);
+        const uint64_t destinationOffset = static_cast<uint64_t>(regionIndex) * regionBytes + 64;
+        TileXR::UDMAPutNbiOnQp<uint8_t>(
+            args, targetRank, 0, source, destinationOffset, sizeof(uint64_t));
+        TileXR::UDMAQuiet(args, targetRank);
+    }
+
+    constexpr uint32_t boundaryBytes = 64;
+    auto boundarySource = localBase + 4096;
+    const uint64_t boundaryDestinationOffset = regionBytes - boundaryBytes / 2;
+    TileXR::UDMAPutNbiOnQp<uint8_t>(
+        args, targetRank, 0, boundarySource, boundaryDestinationOffset, boundaryBytes);
+    TileXR::UDMAQuiet(args, targetRank);
+}
+
 // DMA-based scatter: write data to all peers' IPC staging area via DataCopyPad.
 // Split from the fused kernel to allow host-side sync between scatter and gather,
 // which guarantees P2P write visibility without fragile in-kernel flag polling.
@@ -2776,6 +2803,14 @@ void launch_tilexr_udma_registered_smoke(
         commArgs, local, debug, bytes, signal);
 }
 
+void launch_tilexr_udma_vmm_regions_probe(
+    uint32_t blockDim, void* stream, GM_ADDR commArgs, GM_ADDR localBase,
+    uint64_t regionBytes, uint32_t regionCount)
+{
+    tilexr_udma_vmm_regions_probe_kernel<<<blockDim, nullptr, stream>>>(
+        commArgs, localBase, regionBytes, regionCount);
+}
+
 // ---------------------------------------------------------------------------
 // Latency micro-kernels (testType 4 = P2P-only, testType 5 = DataCopy-only).
 // These mirror the two halves of tilexr_udma_all_to_all_kernel so the P2P
@@ -2819,7 +2854,7 @@ extern "C" __global__ __aicore__ void tilexr_udma_p2p_latency_kernel(
     const uint64_t payloadBytes = AllToAllPayloadBytes(effectiveChunkElements);
     const uint32_t bytes = static_cast<uint32_t>(payloadBytes);
     auto udmaInfo = TileXR::GetUDMAInfo(args);
-    const uint32_t qpCount = udmaInfo->qpNum == 0 ? 1U : udmaInfo->qpNum;
+    const uint32_t qpCount = TileXR::UDMAGetLogicalQpNum(udmaInfo);
 
     // One block per peer, skip self (peer == rank): no local copy here.
     for (int32_t peer = blockIdx; peer < rankSize; peer += blockNum) {

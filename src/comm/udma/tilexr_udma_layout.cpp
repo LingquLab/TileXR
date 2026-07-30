@@ -37,7 +37,8 @@ int BuildUDMAInfoImage(
     std::vector<uint8_t>& bytes)
 {
     return BuildUDMAInfoImage(
-        deviceBase, TILEXR_UDMA_QP_NUM, sq, rq, scq, rcq, mem, std::vector<uint32_t>(mem.size(), 1), info, bytes);
+        deviceBase, TILEXR_UDMA_QP_NUM, 1U, sq, rq, scq, rcq, mem,
+        std::vector<uint32_t>(mem.size(), 1), info, bytes);
 }
 
 int BuildUDMAInfoImage(
@@ -52,9 +53,26 @@ int BuildUDMAInfoImage(
     UDMAInfo& info,
     std::vector<uint8_t>& bytes)
 {
+    return BuildUDMAInfoImage(
+        deviceBase, qpNum, 1U, sq, rq, scq, rcq, mem, qpWeights, info, bytes);
+}
+
+int BuildUDMAInfoImage(
+    uintptr_t deviceBase,
+    uint32_t qpNum,
+    uint32_t regionCount,
+    const std::vector<UDMAWQCtx>& sq,
+    const std::vector<UDMAWQCtx>& rq,
+    const std::vector<UDMACQCtx>& scq,
+    const std::vector<UDMACQCtx>& rcq,
+    const std::vector<UDMAMemInfo>& mem,
+    const std::vector<uint32_t>& qpWeights,
+    UDMAInfo& info,
+    std::vector<uint8_t>& bytes)
+{
     const size_t rankCount = sq.size();
-    if (qpNum == 0 || rankCount == 0 || rankCount % qpNum != 0 || rq.size() != rankCount ||
-        scq.size() != rankCount || rcq.size() != rankCount || mem.size() != rankCount ||
+    if (qpNum == 0 || regionCount == 0 || rankCount == 0 || rankCount % qpNum != 0 || rq.size() != rankCount ||
+        scq.size() != rankCount || rcq.size() != rankCount || mem.size() != rankCount * regionCount ||
         qpWeights.size() != rankCount) {
         return TILEXR_UDMA_LAYOUT_INVALID;
     }
@@ -69,6 +87,7 @@ int BuildUDMAInfoImage(
 
     info = {};
     info.qpNum = qpNum;
+    info.regionCount = regionCount;
     info.sqPtr = deviceBase + sqOffset;
     info.rqPtr = deviceBase + rqOffset;
     info.scqPtr = deviceBase + scqOffset;

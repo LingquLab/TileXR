@@ -12,6 +12,8 @@
 #include <cstdint>
 #include <vector>
 
+#include "tilexr_udma_alltoall_constants.h"
+
 namespace TileXR {
 namespace Demo {
 
@@ -26,8 +28,7 @@ struct AllToAllChunkPlan {
 };
 
 constexpr size_t kAllToAllBigDataMaxRegisteredBytes = 128ULL * 1024ULL * 1024ULL;
-constexpr size_t kAllToAllBigDataMultiNodeRegisteredBytes = 1024ULL * 1024ULL * 1024ULL;
-constexpr size_t kAllToAllBigDataMultiNodePeerSlotBytes = 16ULL * 1024ULL * 1024ULL;
+constexpr size_t kAllToAllBigDataMultiNodeRegisteredBytes = 4ULL * 1024ULL * 1024ULL * 1024ULL;
 constexpr size_t kAllToAllBigDataControlSlotBytes = 128ULL;
 constexpr uint32_t kAllToAllBigDataCoresPerPeer = 5U;
 constexpr uint32_t kAllToAllBigDataSingleNodeShards = 2U;

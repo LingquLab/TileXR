@@ -166,7 +166,22 @@ void TestPlan()
 
     constexpr int32_t thirtyTwoMiBElements = 8 * 1024 * 1024;
     CHECK_EQ(TileXR::Demo::PlanAllToAllGroup(
-        rankSize, thirtyTwoMiBElements, thirtyTwoMiBElements).valid, false);
+        rankSize, thirtyTwoMiBElements, thirtyTwoMiBElements).valid, true);
+
+    constexpr int32_t oneGiBPerRankElementsPerPeer = 16 * 1024 * 1024;
+    const auto oneGiBPerRank = TileXR::Demo::PlanAllToAllGroup(
+        rankSize, oneGiBPerRankElementsPerPeer, oneGiBPerRankElementsPerPeer);
+    CHECK_EQ(oneGiBPerRank.valid, true);
+    CHECK_EQ(oneGiBPerRank.passCount, 1U);
+    CHECK_EQ(oneGiBPerRank.payloadPlaneBytes, 1ULL << 30);
+    CHECK_EQ(oneGiBPerRank.registeredBytes > (2ULL << 30), true);
+    CHECK_EQ(oneGiBPerRank.registeredBytes <=
+        TileXR::Demo::kAllToAllGroupMaxRegisteredBytes, true);
+
+    constexpr int32_t twoGiBPerRankElementsPerPeer = 32 * 1024 * 1024;
+    CHECK_EQ(TileXR::Demo::PlanAllToAllGroup(
+        rankSize, twoGiBPerRankElementsPerPeer,
+        twoGiBPerRankElementsPerPeer).valid, false);
 }
 
 void TestChannelPolicy()

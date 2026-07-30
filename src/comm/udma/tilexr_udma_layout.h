@@ -31,6 +31,19 @@ int BuildUDMAInfoImage(
 int BuildUDMAInfoImage(
     uintptr_t deviceBase,
     uint32_t qpNum,
+    uint32_t regionCount,
+    const std::vector<UDMAWQCtx>& sq,
+    const std::vector<UDMAWQCtx>& rq,
+    const std::vector<UDMACQCtx>& scq,
+    const std::vector<UDMACQCtx>& rcq,
+    const std::vector<UDMAMemInfo>& mem,
+    const std::vector<uint32_t>& qpWeights,
+    UDMAInfo& info,
+    std::vector<uint8_t>& bytes);
+
+int BuildUDMAInfoImage(
+    uintptr_t deviceBase,
+    uint32_t qpNum,
     const std::vector<UDMAWQCtx>& sq,
     const std::vector<UDMAWQCtx>& rq,
     const std::vector<UDMACQCtx>& scq,

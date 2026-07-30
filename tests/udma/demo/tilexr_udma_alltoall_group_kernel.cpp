@@ -171,7 +171,7 @@ __aicore__ inline void AllToAllGroupSelectRouteQps(
     uint32_t& primaryWeight, uint32_t& secondaryWeight)
 {
     auto udmaInfo = TileXR::GetUDMAInfo(args);
-    const uint32_t qpCount = udmaInfo->qpNum == 0U ? 1U : udmaInfo->qpNum;
+    const uint32_t qpCount = TileXR::UDMAGetLogicalQpNum(udmaInfo);
     primaryQp = 0U;
     primaryWeight = TileXR::UDMAGetQpWeight(udmaInfo, peer, 0U);
     for (uint32_t qp = 1U; qp < qpCount; ++qp) {

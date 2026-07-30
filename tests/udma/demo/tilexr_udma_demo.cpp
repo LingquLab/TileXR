@@ -47,6 +47,9 @@ extern void launch_tilexr_udma_p2p_latency(
 extern void launch_tilexr_datacopy_latency(
     uint32_t blockDim, void* stream, GM_ADDR commArgs, GM_ADDR input, GM_ADDR output,
     GM_ADDR debug, int32_t elementsPerPeer, int32_t chunkElements);
+extern void launch_tilexr_udma_vmm_regions_probe(
+    uint32_t blockDim, void* stream, GM_ADDR commArgs, GM_ADDR localBase,
+    uint64_t regionBytes, uint32_t regionCount);
 extern void launch_tilexr_udma_all_to_all_fused(
     uint32_t blockDim, void* stream, GM_ADDR commArgs, GM_ADDR input, GM_ADDR output,
     GM_ADDR udmaMem, GM_ADDR signal, GM_ADDR debug, int32_t elementsPerPeer,
@@ -109,6 +112,11 @@ constexpr int kDemoBarrierPortOffset = 97;
 constexpr int kConnectRetryCount = 500;
 constexpr int kConnectRetrySleepMs = 10;
 constexpr int kBigDataProfileStageFull = 8;
+constexpr uint32_t kVmmProbeRegionCount = 4;
+constexpr uint64_t kVmmProbeRegionBytes = 1ULL << 30;
+constexpr uint64_t kVmmProbeMarkerDstOffset = 64;
+constexpr uint64_t kVmmProbeMarkerSrcOffset = 128;
+constexpr uint64_t kVmmProbeBoundaryBytes = 64;
 
 struct BarrierEndpoint {
     std::string host;
@@ -443,6 +451,230 @@ bool DemoBarrierAll(int rank, int rankSize, const std::string& step)
     return true;
 }
 
+struct VmmMultiRegionAllocation {
+    void* base = nullptr;
+    size_t regionBytes = 0;
+    uint32_t regionCount = 0;
+    uint32_t mappedCount = 0;
+    std::array<aclrtDrvMemHandle, kVmmProbeRegionCount> physical {};
+    std::array<TileXR::TileXRUDMARegionDesc, kVmmProbeRegionCount> regions {};
+};
+
+VmmMultiRegionAllocation gRegisteredVmm;
+
+void ReleaseVmmMultiRegion(int rank, VmmMultiRegionAllocation& allocation)
+{
+    for (uint32_t i = allocation.mappedCount; i > 0; --i) {
+        void* regionBase = static_cast<uint8_t*>(allocation.base) +
+            static_cast<size_t>(i - 1) * allocation.regionBytes;
+        CheckAcl(rank, "aclrtUnmapMem region " + std::to_string(i - 1), aclrtUnmapMem(regionBase));
+    }
+    for (uint32_t i = allocation.regionCount; i > 0; --i) {
+        if (allocation.physical[i - 1] != nullptr) {
+            CheckAcl(rank, "aclrtFreePhysical region " + std::to_string(i - 1),
+                aclrtFreePhysical(allocation.physical[i - 1]));
+        }
+    }
+    if (allocation.base != nullptr) {
+        CheckAcl(rank, "aclrtReleaseMemAddress", aclrtReleaseMemAddress(allocation.base));
+    }
+    allocation = VmmMultiRegionAllocation {};
+}
+
+bool AllocateVmmMultiRegion(
+    int rank, int deviceId, size_t regionBytes, uint32_t regionCount,
+    VmmMultiRegionAllocation& allocation)
+{
+    if (regionCount == 0 || regionCount > allocation.regions.size()) {
+        return false;
+    }
+    aclrtPhysicalMemProp prop {};
+    prop.handleType = ACL_MEM_HANDLE_TYPE_NONE;
+    prop.allocationType = ACL_MEM_ALLOCATION_TYPE_PINNED;
+    prop.memAttr = ACL_HBM_MEM_HUGE;
+    prop.location.id = deviceId;
+    prop.location.type = ACL_MEM_LOCATION_TYPE_DEVICE;
+
+    size_t granularity = 0;
+    if (!CheckAcl(rank, "aclrtMemGetAllocationGranularity",
+            aclrtMemGetAllocationGranularity(
+                &prop, ACL_RT_MEM_ALLOC_GRANULARITY_RECOMMENDED, &granularity)) ||
+        granularity == 0 || regionBytes % granularity != 0) {
+        std::cerr << "[rank " << rank << "] ERROR: invalid VMM granularity=" << granularity
+                  << " for regionBytes=" << regionBytes << std::endl;
+        return false;
+    }
+
+    allocation.regionBytes = regionBytes;
+    allocation.regionCount = regionCount;
+    const size_t totalBytes = regionBytes * regionCount;
+    if (!CheckAcl(rank, "aclrtReserveMemAddress multi-region",
+            aclrtReserveMemAddress(&allocation.base, totalBytes, 0, nullptr, 1))) {
+        allocation = VmmMultiRegionAllocation {};
+        return false;
+    }
+    for (uint32_t i = 0; i < regionCount; ++i) {
+        void* regionBase = static_cast<uint8_t*>(allocation.base) + static_cast<size_t>(i) * regionBytes;
+        if (!CheckAcl(rank, "aclrtMallocPhysical region " + std::to_string(i),
+                aclrtMallocPhysical(&allocation.physical[i], regionBytes, &prop, 0)) ||
+            !CheckAcl(rank, "aclrtMapMem region " + std::to_string(i),
+                aclrtMapMem(regionBase, regionBytes, 0, allocation.physical[i], 0))) {
+            ReleaseVmmMultiRegion(rank, allocation);
+            return false;
+        }
+        ++allocation.mappedCount;
+        allocation.regions[i].base = static_cast<GM_ADDR>(regionBase);
+        allocation.regions[i].bytes = regionBytes;
+    }
+    return true;
+}
+
+bool RunVmmMultiRegionProbe(
+    int rank, int rankSize, int deviceId, TileXRCommPtr comm, aclrtStream stream, GM_ADDR commArgsDev)
+{
+    const size_t regionBytes = static_cast<size_t>(kVmmProbeRegionBytes);
+    const size_t totalBytes = regionBytes * kVmmProbeRegionCount;
+    aclrtPhysicalMemProp prop {};
+    prop.handleType = ACL_MEM_HANDLE_TYPE_NONE;
+    prop.allocationType = ACL_MEM_ALLOCATION_TYPE_PINNED;
+    prop.memAttr = ACL_HBM_MEM_HUGE;
+    prop.location.id = deviceId;
+    prop.location.type = ACL_MEM_LOCATION_TYPE_DEVICE;
+
+    size_t granularity = 0;
+    if (!CheckAcl(rank, "aclrtMemGetAllocationGranularity",
+            aclrtMemGetAllocationGranularity(
+                &prop, ACL_RT_MEM_ALLOC_GRANULARITY_RECOMMENDED, &granularity)) ||
+        granularity == 0 || regionBytes % granularity != 0) {
+        std::cerr << "[rank " << rank << "] ERROR: invalid VMM granularity=" << granularity
+                  << " for regionBytes=" << regionBytes << std::endl;
+        return false;
+    }
+
+    void* base = nullptr;
+    std::array<aclrtDrvMemHandle, kVmmProbeRegionCount> physical {};
+    uint32_t mappedCount = 0;
+    auto releaseVmm = [&]() {
+        for (uint32_t i = mappedCount; i > 0; --i) {
+            void* regionBase = static_cast<uint8_t*>(base) + static_cast<size_t>(i - 1) * regionBytes;
+            CheckAcl(rank, "aclrtUnmapMem region " + std::to_string(i - 1), aclrtUnmapMem(regionBase));
+        }
+        for (uint32_t i = kVmmProbeRegionCount; i > 0; --i) {
+            if (physical[i - 1] != nullptr) {
+                CheckAcl(rank, "aclrtFreePhysical region " + std::to_string(i - 1),
+                         aclrtFreePhysical(physical[i - 1]));
+            }
+        }
+        if (base != nullptr) {
+            CheckAcl(rank, "aclrtReleaseMemAddress", aclrtReleaseMemAddress(base));
+        }
+    };
+
+    if (!CheckAcl(rank, "aclrtReserveMemAddress 4GiB",
+            aclrtReserveMemAddress(&base, totalBytes, 0, nullptr, 1))) {
+        return false;
+    }
+    std::array<TileXR::TileXRUDMARegionDesc, kVmmProbeRegionCount> regions {};
+    for (uint32_t i = 0; i < kVmmProbeRegionCount; ++i) {
+        void* regionBase = static_cast<uint8_t*>(base) + static_cast<size_t>(i) * regionBytes;
+        if (!CheckAcl(rank, "aclrtMallocPhysical region " + std::to_string(i),
+                aclrtMallocPhysical(&physical[i], regionBytes, &prop, 0)) ||
+            !CheckAcl(rank, "aclrtMapMem region " + std::to_string(i),
+                aclrtMapMem(regionBase, regionBytes, 0, physical[i], 0))) {
+            releaseVmm();
+            return false;
+        }
+        ++mappedCount;
+        regions[i].base = static_cast<GM_ADDR>(regionBase);
+        regions[i].bytes = regionBytes;
+        std::cout << "[rank " << rank << "] VMM region " << i
+                  << " base=" << regionBase << " bytes=" << regionBytes << std::endl;
+    }
+    const uint64_t expectedEnd = reinterpret_cast<uint64_t>(base) + totalBytes;
+    const uint64_t actualEnd = reinterpret_cast<uint64_t>(regions.back().base) + regions.back().bytes;
+    if (actualEnd != expectedEnd) {
+        std::cerr << "[rank " << rank << "] ERROR: VMM VA range is not contiguous" << std::endl;
+        releaseVmm();
+        return false;
+    }
+
+    TileXRUDMAMemHandle handle = 0;
+    int ret = TileXRUDMARegisterRegions(comm, regions.data(), regions.size(), &handle);
+    if (!CheckTileXR(rank, "TileXRUDMARegisterRegions 4x1GiB", ret)) {
+        releaseVmm();
+        return false;
+    }
+
+    const int predecessor = (rank - 1 + rankSize) % rankSize;
+    bool ok = true;
+    for (uint32_t i = 0; i < kVmmProbeRegionCount; ++i) {
+        const uint64_t marker = (static_cast<uint64_t>(rank) << 32) | (0xA5000000ULL + i);
+        const uint64_t zero = 0;
+        ok = CheckAcl(rank, "init marker source " + std::to_string(i),
+            aclrtMemcpy(regions[0].base + kVmmProbeMarkerSrcOffset + i * sizeof(marker), sizeof(marker),
+                        &marker, sizeof(marker), ACL_MEMCPY_HOST_TO_DEVICE)) && ok;
+        ok = CheckAcl(rank, "clear marker destination " + std::to_string(i),
+            aclrtMemcpy(regions[i].base + kVmmProbeMarkerDstOffset, sizeof(zero),
+                        &zero, sizeof(zero), ACL_MEMCPY_HOST_TO_DEVICE)) && ok;
+    }
+    std::array<uint8_t, kVmmProbeBoundaryBytes> boundarySource {};
+    for (uint32_t i = 0; i < boundarySource.size(); ++i) {
+        boundarySource[i] = static_cast<uint8_t>((rank * 17 + i) & 0xFF);
+    }
+    GM_ADDR boundarySourceAddr = static_cast<GM_ADDR>(base) + 4096;
+    GM_ADDR boundaryDestinationAddr =
+        static_cast<GM_ADDR>(base) + regionBytes - kVmmProbeBoundaryBytes / 2;
+    ok = CheckAcl(rank, "init cross-region boundary source",
+        aclrtMemcpy(boundarySourceAddr, boundarySource.size(), boundarySource.data(), boundarySource.size(),
+                    ACL_MEMCPY_HOST_TO_DEVICE)) && ok;
+    if (!ok || !DemoBarrierAll(rank, rankSize, "VMM regions initialized")) {
+        TileXRUDMAUnregister(comm, handle);
+        releaseVmm();
+        return false;
+    }
+
+    launch_tilexr_udma_vmm_regions_probe(
+        1, stream, commArgsDev, static_cast<GM_ADDR>(base), regionBytes, kVmmProbeRegionCount);
+    ok = CheckAcl(rank, "aclrtSynchronizeStream VMM region probe", aclrtSynchronizeStream(stream));
+    ok = DemoBarrierAll(rank, rankSize, "VMM region UDMA writes complete") && ok;
+
+    for (uint32_t i = 0; i < kVmmProbeRegionCount; ++i) {
+        uint64_t actual = 0;
+        const uint64_t expected = (static_cast<uint64_t>(predecessor) << 32) | (0xA5000000ULL + i);
+        ok = CheckAcl(rank, "read marker destination " + std::to_string(i),
+            aclrtMemcpy(&actual, sizeof(actual), regions[i].base + kVmmProbeMarkerDstOffset,
+                        sizeof(actual), ACL_MEMCPY_DEVICE_TO_HOST)) && ok;
+        if (actual != expected) {
+            std::cerr << "[rank " << rank << "] ERROR: region " << i
+                      << " marker=" << actual << " expected=" << expected << std::endl;
+            ok = false;
+        }
+    }
+    std::array<uint8_t, kVmmProbeBoundaryBytes> boundaryActual {};
+    ok = CheckAcl(rank, "read cross-region boundary",
+        aclrtMemcpy(boundaryActual.data(), boundaryActual.size(), boundaryDestinationAddr, boundaryActual.size(),
+                    ACL_MEMCPY_DEVICE_TO_HOST)) && ok;
+    for (uint32_t i = 0; i < boundaryActual.size(); ++i) {
+        const uint8_t expected = static_cast<uint8_t>((predecessor * 17 + i) & 0xFF);
+        if (boundaryActual[i] != expected) {
+            std::cerr << "[rank " << rank << "] ERROR: boundary byte " << i
+                      << "=" << static_cast<uint32_t>(boundaryActual[i])
+                      << " expected=" << static_cast<uint32_t>(expected) << std::endl;
+            ok = false;
+            break;
+        }
+    }
+
+    ok = CheckTileXR(rank, "TileXRUDMAUnregister VMM regions",
+        TileXRUDMAUnregister(comm, handle)) && ok;
+    releaseVmm();
+    if (ok) {
+        std::cout << "[rank " << rank
+                  << "] VMM 4GiB / ping+pong 2GiB each / 4x1GiB MR probe success" << std::endl;
+    }
+    return ok;
+}
+
 bool ValidateData(int rank, int rankSize, const std::vector<int32_t>& data, int32_t elementsPerRank)
 {
     bool ok = true;
@@ -640,7 +872,7 @@ bool CopyChunkDeviceToHost(
 
 bool RunGroupedAllToAll(
     int rank, int rankSize, int32_t elementsPerPeer,
-    TileXRCommPtr comm, aclrtStream stream, GM_ADDR commArgsDev)
+    int deviceId, TileXRCommPtr comm, aclrtStream stream, GM_ADDR commArgsDev)
 {
     constexpr uint32_t kErrorWordsPerCore = 12U;
     constexpr uint32_t kErrorCoreCount = TileXR::Demo::kAllToAllGroupBlockDim;
@@ -771,6 +1003,7 @@ bool RunGroupedAllToAll(
     int32_t* input = nullptr;
     int32_t* output = nullptr;
     void* registeredMemory = nullptr;
+    VmmMultiRegionAllocation registeredVmm;
     std::array<void*, kRouteStageCount> groupTraceDevices {};
     std::array<std::vector<uint8_t>, kRouteStageCount> hostGroupTraces;
     aclrtEvent stageStartEvent = nullptr;
@@ -783,7 +1016,10 @@ bool RunGroupedAllToAll(
                 TileXRUDMAUnregister(comm, handle));
             registered = false;
         }
-        if (registeredMemory != nullptr) {
+        if (registeredVmm.base != nullptr) {
+            ReleaseVmmMultiRegion(rank, registeredVmm);
+            registeredMemory = nullptr;
+        } else if (registeredMemory != nullptr) {
             aclrtFree(registeredMemory);
             registeredMemory = nullptr;
         }
@@ -811,13 +1047,30 @@ bool RunGroupedAllToAll(
         }
     };
 
+    constexpr size_t kGroupedRegionBytes = 1ULL << 30;
+    const uint32_t groupedRegionCount = static_cast<uint32_t>(
+        (plan.registeredBytes + kGroupedRegionBytes - 1U) / kGroupedRegionBytes);
+    const bool useMultiRegion = plan.registeredBytes > kGroupedRegionBytes;
     if (!CheckAcl(rank, "aclrtMalloc grouped input",
             aclrtMalloc(reinterpret_cast<void**>(&input), dataBytes, ACL_MEM_MALLOC_HUGE_FIRST)) ||
         !CheckAcl(rank, "aclrtMalloc grouped output",
-            aclrtMalloc(reinterpret_cast<void**>(&output), dataBytes, ACL_MEM_MALLOC_HUGE_FIRST)) ||
-        !CheckAcl(rank, "aclrtMalloc grouped registered memory",
-            aclrtMalloc(&registeredMemory, plan.registeredBytes, ACL_MEM_MALLOC_HUGE_FIRST)) ||
-        !CopyHostToDevice(rank, input, dataBytes, hostInput.data(), dataBytes, "grouped input") ||
+            aclrtMalloc(reinterpret_cast<void**>(&output), dataBytes, ACL_MEM_MALLOC_HUGE_FIRST))) {
+        release();
+        return false;
+    }
+    if (useMultiRegion) {
+        if (!AllocateVmmMultiRegion(
+                rank, deviceId, kGroupedRegionBytes, groupedRegionCount, registeredVmm)) {
+            release();
+            return false;
+        }
+        registeredMemory = registeredVmm.base;
+    } else if (!CheckAcl(rank, "aclrtMalloc grouped registered memory",
+                   aclrtMalloc(&registeredMemory, plan.registeredBytes, ACL_MEM_MALLOC_HUGE_FIRST))) {
+        release();
+        return false;
+    }
+    if (!CopyHostToDevice(rank, input, dataBytes, hostInput.data(), dataBytes, "grouped input") ||
         !CopyHostToDevice(rank, output, dataBytes, hostOutput.data(), dataBytes, "grouped output init") ||
         !CheckAcl(rank, "aclrtMemset grouped registered memory",
             aclrtMemset(registeredMemory, plan.registeredBytes, 0, plan.registeredBytes))) {
@@ -857,9 +1110,14 @@ bool RunGroupedAllToAll(
         }
     }
 
-    const int registerRet = TileXRUDMARegister(
-        comm, static_cast<GM_ADDR>(registeredMemory), plan.registeredBytes, &handle);
-    if (!CheckTileXR(rank, "TileXRUDMARegister grouped alltoall", registerRet)) {
+    const int registerRet = useMultiRegion ?
+        TileXRUDMARegisterRegions(
+            comm, registeredVmm.regions.data(), registeredVmm.regionCount, &handle) :
+        TileXRUDMARegister(
+            comm, static_cast<GM_ADDR>(registeredMemory), plan.registeredBytes, &handle);
+    if (!CheckTileXR(rank, useMultiRegion ?
+            "TileXRUDMARegisterRegions grouped alltoall" :
+            "TileXRUDMARegister grouped alltoall", registerRet)) {
         release();
         return false;
     }
@@ -884,6 +1142,7 @@ bool RunGroupedAllToAll(
         " signalOffset0=" + std::to_string(plan.signalOffset[0]) +
         " signalOffset1=" + std::to_string(plan.signalOffset[1]) +
         " controlOffset=" + std::to_string(plan.controlOffset) +
+        " regionCount=" + std::to_string(useMultiRegion ? groupedRegionCount : 1U) +
         " groupWidth=" + std::to_string(plan.groupWidth) +
         " groups=" + std::to_string(plan.groupCount) +
         " passes=" + std::to_string(plan.passCount));
@@ -1055,8 +1314,13 @@ void Cleanup(
     TileXRCommPtr comm, aclrtStream stream, void* registeredMemory, int32_t* debug, int rank, int deviceId)
 {
     if (registeredMemory != nullptr) {
-        PrintStatus(rank, "aclrtFree registered memory");
-        aclrtFree(registeredMemory);
+        if (registeredMemory == gRegisteredVmm.base) {
+            PrintStatus(rank, "release VMM registered memory");
+            ReleaseVmmMultiRegion(rank, gRegisteredVmm);
+        } else {
+            PrintStatus(rank, "aclrtFree registered memory");
+            aclrtFree(registeredMemory);
+        }
     }
     if (debug != nullptr) {
         PrintStatus(rank, "aclrtFree debug");
@@ -1138,9 +1402,16 @@ int main(int argc, char** argv)
         return 1;
     }
 
+    if (testType == 9) {
+        const bool ok = RunVmmMultiRegionProbe(
+            rank, rankSize, deviceId, comm, stream, commArgsDev);
+        Cleanup(comm, stream, nullptr, nullptr, rank, deviceId);
+        return ok ? 0 : 1;
+    }
+
     if (testType == 8) {
         const bool ok = RunGroupedAllToAll(
-            rank, rankSize, elementsPerRank, comm, stream, commArgsDev);
+            rank, rankSize, elementsPerRank, deviceId, comm, stream, commArgsDev);
         Cleanup(comm, stream, nullptr, nullptr, rank, deviceId);
         if (!ok) {
             std::cerr << "[rank " << rank << "] TileXR grouped alltoall demo failed" << std::endl;
@@ -1292,12 +1563,21 @@ int main(int argc, char** argv)
     if (allocBytes < registeredBytes) {
         allocBytes = registeredBytes;
     }
+    const bool useBigDataMultiRegionVmm = testType == 7 &&
+        TileXR::Demo::AllToAllBigDataIsMultiNode(rankSize, bigDataRanksPerNode);
     if (!CheckAcl(rank, "aclrtMalloc debug", aclrtMalloc(reinterpret_cast<void**>(&debug),
             kDebugWords * sizeof(int32_t), ACL_MEM_MALLOC_HUGE_FIRST)) ||
-        !CheckAcl(rank, "aclrtMalloc registered memory", aclrtMalloc(&registeredMemory,
-            allocBytes, ACL_MEM_MALLOC_HUGE_FIRST))) {
+        (useBigDataMultiRegionVmm &&
+            !AllocateVmmMultiRegion(rank, deviceId, static_cast<size_t>(kVmmProbeRegionBytes),
+                kVmmProbeRegionCount, gRegisteredVmm)) ||
+        (!useBigDataMultiRegionVmm &&
+            !CheckAcl(rank, "aclrtMalloc registered memory", aclrtMalloc(&registeredMemory,
+                allocBytes, ACL_MEM_MALLOC_HUGE_FIRST)))) {
         Cleanup(comm, stream, registeredMemory, debug, rank, deviceId);
         return 1;
+    }
+    if (useBigDataMultiRegionVmm) {
+        registeredMemory = gRegisteredVmm.base;
     }
     auto data = static_cast<int32_t*>(registeredMemory);
     auto input = reinterpret_cast<int32_t*>(static_cast<uint8_t*>(registeredMemory) + inputOffset);
@@ -1435,8 +1715,11 @@ int main(int argc, char** argv)
             return 1;
         }
         if (!udmaRegistered) {
-            int registerRet = TileXRUDMARegister(comm, static_cast<GM_ADDR>(registeredMemory),
-                registeredBytes, &udmaHandle);
+            int registerRet = useBigDataMultiRegionVmm ?
+                TileXRUDMARegisterRegions(comm, gRegisteredVmm.regions.data(),
+                    gRegisteredVmm.regionCount, &udmaHandle) :
+                TileXRUDMARegister(comm, static_cast<GM_ADDR>(registeredMemory),
+                    registeredBytes, &udmaHandle);
             if (registerRet != TileXR::TILEXR_SUCCESS) {
                 std::cerr << "[rank " << rank << "] ERROR: bigdata alltoall UDMA registration failed"
                           << " ret=" << registerRet << " regBytes=" << registeredBytes << std::endl;

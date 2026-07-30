@@ -33,10 +33,10 @@ void TestRemoteAddressCalculation()
     registry.version = TileXR::TILEXR_UDMA_REGISTRY_VERSION;
     registry.regionCount = 1;
     registry.rankSize = 2;
-    registry.regions[0].base = reinterpret_cast<GM_ADDR>(0x100000);
-    registry.regions[0].bytes = 4096;
-    registry.regions[1].base = reinterpret_cast<GM_ADDR>(0x200000);
-    registry.regions[1].bytes = 2048;
+    registry.regions[0][0].base = reinterpret_cast<GM_ADDR>(0x100000);
+    registry.regions[0][0].bytes = 4096;
+    registry.regions[1][0].base = reinterpret_cast<GM_ADDR>(0x200000);
+    registry.regions[1][0].bytes = 2048;
 
     CHECK_TRUE(TileXR::UDMARegistryValid(&registry, 2));
     CHECK_TRUE(TileXR::UDMARegionContains(&registry, 0, 128, 256));
@@ -56,13 +56,29 @@ void TestRankScaleLimit()
     registry.version = TileXR::TILEXR_UDMA_REGISTRY_VERSION;
     registry.regionCount = 1;
     registry.rankSize = 1024;
-    registry.regions[TileXR::TILEXR_MAX_RANK_SIZE - 1].base =
+    registry.regions[TileXR::TILEXR_MAX_RANK_SIZE - 1][0].base =
         reinterpret_cast<GM_ADDR>(0x300000);
-    registry.regions[TileXR::TILEXR_MAX_RANK_SIZE - 1].bytes = 4096;
+    registry.regions[TileXR::TILEXR_MAX_RANK_SIZE - 1][0].bytes = 4096;
 
     CHECK_TRUE(TileXR::UDMARegistryValid(&registry, 1024));
     CHECK_TRUE(TileXR::UDMARegionContains(&registry, 1023, 2048, 2048));
     CHECK_TRUE(!TileXR::UDMARegionContains(&registry, 1024, 0, 1));
+}
+
+void TestLogicalOffsetsAcrossRegions()
+{
+    TileXR::TileXRUDMARegistry registry = {};
+    registry.rankSize = 1;
+    registry.regionCount = 2;
+    registry.regions[0][0] = {reinterpret_cast<GM_ADDR>(0x100000), 1024};
+    registry.regions[0][1] = {reinterpret_cast<GM_ADDR>(0x200000), 2048};
+
+    CHECK_TRUE(TileXR::UDMARegistryValid(&registry, 1));
+    CHECK_TRUE(TileXR::UDMARegionContains(&registry, 0, 1000, 80));
+    CHECK_TRUE(TileXR::UDMARegionContains(&registry, 0, 1024 - 8, 16));
+    CHECK_TRUE(!TileXR::UDMARegionContains(&registry, 0, 3064, 9));
+    CHECK_EQ(reinterpret_cast<uintptr_t>(TileXR::UDMARemoteAddr(&registry, 0, 1024)),
+             static_cast<uintptr_t>(0x200000));
 }
 
 } // namespace
@@ -71,6 +87,7 @@ int main()
 {
     TestRemoteAddressCalculation();
     TestRankScaleLimit();
+    TestLogicalOffsetsAcrossRegions();
     if (g_failures != 0) {
         std::cerr << g_failures << " registry checks failed" << std::endl;
         return 1;
