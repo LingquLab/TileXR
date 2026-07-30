@@ -55,7 +55,7 @@ private:
     int CreateContexts();
     int CreateQueues();
     int CreatePeerQueue(PerEidState& state, int peer, uint32_t qpIdx);
-    int CreateSharedQueue(PerEidState& state, uint32_t lane);
+    int CreateSharedQueue(PerEidState& state, uint32_t regionIndex, uint32_t lane);
     int CreateQueue(PerEidState& state, int peer, uint32_t qpIdx, uint32_t queueIndex, bool shared);
     int ImportQueues();
     int ImportSharedQueues();

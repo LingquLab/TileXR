@@ -883,11 +883,18 @@ int TileXRUDMATransport::CreateQueues()
         states_[state.eidIndex] = state;
         auto& activeState = states_[state.eidIndex];
         if (sharedQpPool_) {
-            for (uint32_t lane = 0; lane < sharedQpLaneCount_; ++lane) {
-                int ret = CreateSharedQueue(activeState, lane);
-                if (ret != TILEXR_SUCCESS) {
-                    CleanupQueues();
-                    return ret;
+            const uint32_t regionCount = static_cast<uint32_t>(registeredRegions_.size());
+            if (regionCount == 0) {
+                CleanupQueues();
+                return TILEXR_ERROR_INTERNAL;
+            }
+            for (uint32_t regionIndex = 0; regionIndex < regionCount; ++regionIndex) {
+                for (uint32_t lane = 0; lane < sharedQpLaneCount_; ++lane) {
+                    int ret = CreateSharedQueue(activeState, regionIndex, lane);
+                    if (ret != TILEXR_SUCCESS) {
+                        CleanupQueues();
+                        return ret;
+                    }
                 }
             }
             continue;
@@ -930,9 +937,14 @@ int TileXRUDMATransport::CreatePeerQueue(PerEidState& state, int peer, uint32_t 
     return CreateQueue(state, peer, qpIdx, localQpIdx, false);
 }
 
-int TileXRUDMATransport::CreateSharedQueue(PerEidState& state, uint32_t lane)
+int TileXRUDMATransport::CreateSharedQueue(
+    PerEidState& state, uint32_t regionIndex, uint32_t lane)
 {
-    return CreateQueue(state, -1, lane, lane, true);
+    const uint32_t queueIndex = UDMASharedQpIndex(regionIndex, lane, sharedQpLaneCount_);
+    if (queueIndex == UINT32_MAX) {
+        return TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    return CreateQueue(state, -1, queueIndex, queueIndex, true);
 }
 
 int TileXRUDMATransport::CreateQueue(
@@ -1163,7 +1175,7 @@ int TileXRUDMATransport::ImportSharedQueues()
         uint32_t valid;
         uint32_t eidIndex;
         uint32_t lane;
-        uint32_t reserved;
+        uint32_t regionIndex;
         QpKeyT key;
     };
 
@@ -1182,7 +1194,12 @@ int TileXRUDMATransport::ImportSharedQueues()
         return TILEXR_ERROR_INTERNAL;
     }
 
-    const size_t recordsPerRank = static_cast<size_t>(options_.rankSize) * maxRoutes;
+    const uint32_t regionCount = static_cast<uint32_t>(registeredRegions_.size());
+    if (regionCount == 0) {
+        return TILEXR_ERROR_INTERNAL;
+    }
+    const size_t recordsPerRank =
+        static_cast<size_t>(options_.rankSize) * maxRoutes * regionCount;
     std::vector<SharedQpKeyRecord> sendRecords(recordsPerRank);
     std::vector<SharedQpKeyRecord> recvRecords(recordsPerRank);
     for (int peer = 0; peer < options_.rankSize; ++peer) {
@@ -1204,20 +1221,27 @@ int TileXRUDMATransport::ImportSharedQueues()
             if (stateIt == states_.end()) {
                 return TILEXR_ERROR_INTERNAL;
             }
-            const auto queueIt = stateIt->second.sharedQueues.find(lane);
-            if (queueIt == stateIt->second.sharedQueues.end()) {
-                return TILEXR_ERROR_INTERNAL;
+            for (uint32_t regionIndex = 0; regionIndex < regionCount; ++regionIndex) {
+                const uint32_t sharedQpIndex =
+                    UDMASharedQpIndex(regionIndex, lane, sharedQpLaneCount_);
+                const auto queueIt = stateIt->second.sharedQueues.find(sharedQpIndex);
+                if (queueIt == stateIt->second.sharedQueues.end()) {
+                    return TILEXR_ERROR_INTERNAL;
+                }
+                const size_t recordIndex =
+                    (static_cast<size_t>(peer) * maxRoutes + route) * regionCount + regionIndex;
+                auto& record = sendRecords[recordIndex];
+                record.valid = 1;
+                record.eidIndex = localEid;
+                record.lane = lane;
+                record.regionIndex = regionIndex;
+                record.key = queueIt->second.qpInfo.key;
             }
-            auto& record = sendRecords[static_cast<size_t>(peer) * maxRoutes + route];
-            record.valid = 1;
-            record.eidIndex = localEid;
-            record.lane = lane;
-            record.key = queueIt->second.qpInfo.key;
         }
     }
 
     ret = options_.exchange->AllToAll(
-        sendRecords.data(), maxRoutes, recvRecords.data());
+        sendRecords.data(), static_cast<size_t>(maxRoutes) * regionCount, recvRecords.data());
     if (ret != TILEXR_SUCCESS) {
         return ret;
     }
@@ -1246,52 +1270,65 @@ int TileXRUDMATransport::ImportSharedQueues()
             const uint32_t localEid = localRoutes[route];
             const uint32_t remoteEid = remoteRoutes[route];
             auto stateIt = states_.find(localEid);
-            if (stateIt == states_.end() || stateIt->second.sharedQueues.count(localLane) == 0 ||
-                remoteEid >= eidCount_) {
+            if (stateIt == states_.end() || remoteEid >= eidCount_) {
                 return TILEXR_ERROR_INTERNAL;
             }
-            const size_t remoteSlot = static_cast<size_t>(peer) * maxRoutes + route;
-            if (remoteSlot >= recvRecords.size()) {
-                return TILEXR_ERROR_INTERNAL;
-            }
-            const auto& record = recvRecords[remoteSlot];
-            if (record.valid == 0 || record.eidIndex != remoteEid || record.lane != remoteLane) {
-                TILEXR_LOG(ERROR) << "Shared QP exchange mismatch rank " << options_.rank
-                                  << " peer=" << peer
-                                  << " route=" << route
-                                  << " expectedEid=" << remoteEid
-                                  << " receivedEid=" << record.eidIndex
-                                  << " expectedLane=" << remoteLane
-                                  << " receivedLane=" << record.lane
-                                  << " valid=" << record.valid;
-                return TILEXR_ERROR_INTERNAL;
-            }
-            QpImportInfoT importInfo {};
-            importInfo.in.ub.mode = JETTY_IMPORT_MODE_NORMAL;
-            importInfo.in.ub.tokenValue = TILEXR_UDMA_TOKEN_VALUE;
-            importInfo.in.ub.policy = JETTY_GRP_POLICY_RR;
-            importInfo.in.ub.type = TARGET_TYPE_JETTY;
-            importInfo.in.ub.flag.bs.tokenPolicy = TOKEN_POLICY_PLAIN_TEXT;
-            importInfo.in.ub.tpType = 1;
-            importInfo.in.key = record.key;
-            PerEidState::SharedRemoteQueueState remote {};
-            ret = loader_.RaCtxQpImport(stateIt->second.ctxHandle, &importInfo, &remote.remoteQpHandle);
-            if (ret != 0 || remote.remoteQpHandle == nullptr) {
-                return TILEXR_ERROR_INTERNAL;
-            }
-            remote.tpn = importInfo.out.ub.tpn;
-            const uint32_t qpIdx = static_cast<uint32_t>(route) * qpsPerRoute_;
-            stateIt->second.sharedRemoteQueues[QueueKey(peer, qpIdx, qpNum_)] = remote;
-            if (diag) {
-                TILEXR_LOG(INFO) << "UDMA diag import shared qp rank " << options_.rank
-                                 << " peer=" << peer
-                                 << " qpIdx=" << qpIdx
-                                 << " localLane=" << localLane
-                                 << " remoteLane=" << remoteLane
-                                 << " localEid=" << localEid
-                                 << " remoteEid=" << remoteEid
-                                 << " remoteQp=" << remote.remoteQpHandle
-                                 << " tpn=" << remote.tpn;
+            for (uint32_t regionIndex = 0; regionIndex < regionCount; ++regionIndex) {
+                const uint32_t localSharedQpIndex =
+                    UDMASharedQpIndex(regionIndex, localLane, sharedQpLaneCount_);
+                if (stateIt->second.sharedQueues.count(localSharedQpIndex) == 0) {
+                    return TILEXR_ERROR_INTERNAL;
+                }
+                const size_t remoteSlot =
+                    (static_cast<size_t>(peer) * maxRoutes + route) * regionCount + regionIndex;
+                if (remoteSlot >= recvRecords.size()) {
+                    return TILEXR_ERROR_INTERNAL;
+                }
+                const auto& record = recvRecords[remoteSlot];
+                if (record.valid == 0 || record.eidIndex != remoteEid ||
+                    record.lane != remoteLane || record.regionIndex != regionIndex) {
+                    TILEXR_LOG(ERROR) << "Shared QP exchange mismatch rank " << options_.rank
+                                      << " peer=" << peer
+                                      << " route=" << route
+                                      << " region=" << regionIndex
+                                      << " expectedEid=" << remoteEid
+                                      << " receivedEid=" << record.eidIndex
+                                      << " expectedLane=" << remoteLane
+                                      << " receivedLane=" << record.lane
+                                      << " receivedRegion=" << record.regionIndex
+                                      << " valid=" << record.valid;
+                    return TILEXR_ERROR_INTERNAL;
+                }
+                QpImportInfoT importInfo {};
+                importInfo.in.ub.mode = JETTY_IMPORT_MODE_NORMAL;
+                importInfo.in.ub.tokenValue = TILEXR_UDMA_TOKEN_VALUE;
+                importInfo.in.ub.policy = JETTY_GRP_POLICY_RR;
+                importInfo.in.ub.type = TARGET_TYPE_JETTY;
+                importInfo.in.ub.flag.bs.tokenPolicy = TOKEN_POLICY_PLAIN_TEXT;
+                importInfo.in.ub.tpType = 1;
+                importInfo.in.key = record.key;
+                PerEidState::SharedRemoteQueueState remote {};
+                ret = loader_.RaCtxQpImport(
+                    stateIt->second.ctxHandle, &importInfo, &remote.remoteQpHandle);
+                if (ret != 0 || remote.remoteQpHandle == nullptr) {
+                    return TILEXR_ERROR_INTERNAL;
+                }
+                remote.tpn = importInfo.out.ub.tpn;
+                const uint32_t qpIdx =
+                    static_cast<uint32_t>(route) * qpsPerRoute_ + regionIndex;
+                stateIt->second.sharedRemoteQueues[QueueKey(peer, qpIdx, qpNum_)] = remote;
+                if (diag) {
+                    TILEXR_LOG(INFO) << "UDMA diag import shared qp rank " << options_.rank
+                                     << " peer=" << peer
+                                     << " qpIdx=" << qpIdx
+                                     << " region=" << regionIndex
+                                     << " localLane=" << localLane
+                                     << " remoteLane=" << remoteLane
+                                     << " localEid=" << localEid
+                                     << " remoteEid=" << remoteEid
+                                     << " remoteQp=" << remote.remoteQpHandle
+                                     << " tpn=" << remote.tpn;
+                }
             }
         }
     }
@@ -1372,6 +1409,7 @@ int TileXRUDMATransport::RefreshUDMAInfo()
 
     for (int rank = 0; rank < options_.rankSize; ++rank) {
         for (uint32_t qpIdx = 0; qpIdx < qpNum_; ++qpIdx) {
+            const uint32_t regionIndex = qpIdx % regionCount;
             uint32_t localEid = fallbackEid;
             uint32_t remoteEid = fallbackEid;
             uint32_t routeQpIdx = qpIdx;
@@ -1410,9 +1448,19 @@ int TileXRUDMATransport::RefreshUDMAInfo()
             PerEidState::SharedRemoteQueueState* sharedRemotePtr = nullptr;
             if (rank == options_.rank) {
                 if (sharedQpPool_ && !state.sharedQueues.empty()) {
-                    queuePtr = &state.sharedQueues.begin()->second;
+                    const uint32_t sharedQpIndex =
+                        UDMASharedQpIndex(regionIndex, 0, sharedQpLaneCount_);
+                    auto queueIt = state.sharedQueues.find(sharedQpIndex);
+                    if (queueIt != state.sharedQueues.end()) {
+                        queuePtr = &queueIt->second;
+                    }
                 } else if (sharedQpPool_ && !fallbackIt->second.sharedQueues.empty()) {
-                    queuePtr = &fallbackIt->second.sharedQueues.begin()->second;
+                    const uint32_t sharedQpIndex =
+                        UDMASharedQpIndex(regionIndex, 0, sharedQpLaneCount_);
+                    auto queueIt = fallbackIt->second.sharedQueues.find(sharedQpIndex);
+                    if (queueIt != fallbackIt->second.sharedQueues.end()) {
+                        queuePtr = &queueIt->second;
+                    }
                 } else if (!state.peerQueues.empty()) {
                     queuePtr = &state.peerQueues.begin()->second;
                 } else if (!fallbackIt->second.peerQueues.empty()) {
@@ -1421,7 +1469,9 @@ int TileXRUDMATransport::RefreshUDMAInfo()
             } else if (sharedQpPool_) {
                 const uint32_t lane = UDMASharedQpLane(
                     options_.rank, rank, options_.rankSize, sharedQpLaneCount_);
-                auto queueIt = state.sharedQueues.find(lane);
+                const uint32_t sharedQpIndex =
+                    UDMASharedQpIndex(regionIndex, lane, sharedQpLaneCount_);
+                auto queueIt = state.sharedQueues.find(sharedQpIndex);
                 if (queueIt == state.sharedQueues.end()) {
                     return TILEXR_ERROR_INTERNAL;
                 }
@@ -1452,13 +1502,14 @@ int TileXRUDMATransport::RefreshUDMAInfo()
                 return TILEXR_ERROR_INTERNAL;
             }
             auto& queue = *queuePtr;
-            if (!registeredRegions_.empty()) {
+            if (regionIndex < localMemInfoByRegion_.size()) {
                 const auto localMrsIt = registeredMem_.find(
-                    reinterpret_cast<uint64_t>(registeredRegions_.front().base));
-                const auto& localMrs = localMrsIt->second;
-                const auto localMrIt = localMrs.find(localEid);
-                if (localMrIt != localMrs.end()) {
-                    queue.localWq.localTokenId = localMrIt->second.tokenId;
+                    reinterpret_cast<uint64_t>(registeredRegions_[regionIndex].base));
+                if (localMrsIt != registeredMem_.end()) {
+                    const auto localMrIt = localMrsIt->second.find(localEid);
+                    if (localMrIt != localMrsIt->second.end()) {
+                        queue.localWq.localTokenId = localMrIt->second.tokenId;
+                    }
                 }
             }
             const size_t entryIndex = static_cast<size_t>(rank) * qpNum_ + qpIdx;
@@ -1579,15 +1630,18 @@ int TileXRUDMATransport::ConfigureRegionQueues(uint32_t regionCount)
     if (regionCount == 0 || logicalQpNum_ == 0 || logicalQpsPerRoute_ == 0) {
         return TILEXR_ERROR_PARA_CHECK_FAIL;
     }
-    if (sharedQpPool_ && regionCount > 1) {
-        TILEXR_LOG(WARN) << "UDMA multi-region registration is incompatible with shared QP pool";
-        return TILEXR_ERROR_NOT_FOUND;
-    }
     constexpr uint32_t maxQpsPerRoute = 64;
     if (logicalQpsPerRoute_ > maxQpsPerRoute / regionCount ||
         logicalQpNum_ > UINT32_MAX / regionCount) {
         TILEXR_LOG(WARN) << "UDMA region QP expansion exceeds limit: logicalQpsPerRoute="
                          << logicalQpsPerRoute_ << " regionCount=" << regionCount;
+        return TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    if (sharedQpPool_ &&
+        UDMASharedQpPoolSize(sharedQpLaneCount_, static_cast<uint32_t>(ctxHandleByEid_.size()), regionCount) == 0) {
+        TILEXR_LOG(WARN) << "UDMA region-aware shared QP pool size is invalid: lanes="
+                         << sharedQpLaneCount_ << " eids=" << ctxHandleByEid_.size()
+                         << " regionCount=" << regionCount;
         return TILEXR_ERROR_PARA_CHECK_FAIL;
     }
 

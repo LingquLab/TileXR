@@ -216,11 +216,21 @@ void TestSharedQpLanesAreUniqueWithinEveryGroup()
     }
 }
 
-void TestSharedQpPoolScalesWithLanesAndEidsOnly()
+void TestSharedQpPoolScalesWithRegions()
 {
     CHECK_EQ(TileXR::UDMASharedQpPoolSize(16, 2), static_cast<size_t>(32));
     CHECK_EQ(TileXR::UDMASharedQpPoolSize(16, 1), static_cast<size_t>(16));
+    CHECK_EQ(TileXR::UDMASharedQpPoolSize(16, 2, 4), static_cast<size_t>(128));
     CHECK_EQ(TileXR::UDMASharedQpPoolSize(0, 2), static_cast<size_t>(0));
+    CHECK_EQ(TileXR::UDMASharedQpPoolSize(16, 2, 0), static_cast<size_t>(0));
+}
+
+void TestSharedQpIndexAddsRegionDimension()
+{
+    CHECK_EQ(TileXR::UDMASharedQpIndex(0, 3, 16), 3U);
+    CHECK_EQ(TileXR::UDMASharedQpIndex(1, 3, 16), 19U);
+    CHECK_EQ(TileXR::UDMASharedQpIndex(3, 15, 16), 63U);
+    CHECK_EQ(TileXR::UDMASharedQpIndex(0, 16, 16), UINT32_MAX);
 }
 
 void TestSharedQpLaneRejectsInvalidInputs()
@@ -412,7 +422,8 @@ int main()
     TestMultiRouteQpWeightsUseRouteBandwidth();
     TestSharedQpLaneMatchesGroupedPeerOrder();
     TestSharedQpLanesAreUniqueWithinEveryGroup();
-    TestSharedQpPoolScalesWithLanesAndEidsOnly();
+    TestSharedQpPoolScalesWithRegions();
+    TestSharedQpIndexAddsRegionDimension();
     TestSharedQpLaneRejectsInvalidInputs();
     TestSocketExchangeSupportsPersonalizedAllToAll();
     TestExplicitRouteSelectionKeepsRequestedCandidateOrder();
