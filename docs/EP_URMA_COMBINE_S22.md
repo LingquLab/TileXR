@@ -51,7 +51,9 @@ TileXR communicator for rank information and registered-memory exchange.
 The production comparison metric is profiling-free `strictKernelCycles`,
 aggregated as max core per rank, max rank per launch, then median across 100
 launches. For BS128, H=5120, top-k=6, rank-size=8 and enqueue-window=1, S22
-measured 94,889 cycles (94.889 us using 1000 cycles/us).
+measured 88,343.5 cycles (88.3435 us using 1000 cycles/us). The paired baseline
+was 88,602.5 cycles, a 0.29% reduction. BS32 improved from 39,753 to 38,541
+cycles (3.05%).
 
 The single retained detailed report is
 [BS128 S22 profile](performance/tilexr_ep_urma_combine_s22_bs128.html). Its
