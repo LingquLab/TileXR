@@ -417,6 +417,37 @@ void TestClearLocalWindowDoesNotPreclearSlotHeaders()
         "    }");
 }
 
+void TestUrmaCombineUsesCleanS22ProductionPath()
+{
+    const std::string configPath = "src/ep/common/ep_urma_combine_config.h";
+    std::string config;
+    if (ReadFile(configPath, &config)) {
+        CheckContains(configPath, config, "TILEXR_EP_URMA_COMBINE_SEND_CORE_COUNT 22");
+        CheckContains(configPath, config, "TILEXR_EP_URMA_RX_SCHEDULER 1");
+        CheckContains(configPath, config, "TILEXR_EP_URMA_PARALLEL_ROUND_PUBLISH 1");
+        CheckContains(configPath, config, "TILEXR_EP_URMA_DEFERRED_ROUND_CREDIT 1");
+        CheckContains(configPath, config, "TILEXR_EP_URMA_START_GATE 1");
+        CheckContains(configPath, config, "TILEXR_EP_URMA_QDC_VERSION 3");
+        CheckContains(configPath, config, "TILEXR_EP_URMA_RX_READY_STICKY_MASK 1");
+    }
+
+    const std::string kernelPath = "src/ep/kernels/tilexr_ep_urma_combine_kernel.cpp";
+    std::string kernel;
+    if (ReadFile(kernelPath, &kernel)) {
+        CheckContains(kernelPath, kernel, "const bool reverse = (lane & 1) != 0;");
+        CheckContains(kernelPath, kernel, "WaitDeferredRoundCredit");
+        CheckContains(kernelPath, kernel, "StartParallelRoundPublish");
+        CheckContains(kernelPath, kernel, "FinishParallelRoundPublish");
+        CheckNotContains(kernelPath, kernel, "TILEXR_EP_URMA_DIAGNOSTIC_");
+    }
+
+    const std::string udmaPath = "src/include/tilexr_udma.h";
+    std::string udma;
+    if (ReadFile(udmaPath, &udma)) {
+        CheckNotContains(udmaPath, udma, "TILEXR_EP_URMA_DIAGNOSTIC_");
+    }
+}
+
 void TestNoForbiddenDependencies()
 {
     const std::vector<std::string> paths = {
@@ -468,6 +499,7 @@ int main()
     TestKernelForwardsStaticQuantConfig();
     TestKernelForwardsPerTokenDynamicQuantConfig();
     TestClearLocalWindowDoesNotPreclearSlotHeaders();
+    TestUrmaCombineUsesCleanS22ProductionPath();
     TestNoForbiddenDependencies();
     if (g_failures != 0) {
         std::cerr << g_failures << " TileXR EP kernel source checks failed" << std::endl;

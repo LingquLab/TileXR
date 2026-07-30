@@ -1,8 +1,11 @@
 #include <cstdint>
 #include <iostream>
+#include <vector>
 
 #include "comm_args.h"
 #include "ep_layout.h"
+#include "ep_urma_combine.h"
+#include "ep_urma_combine_layout.h"
 #include "tilexr_types.h"
 
 namespace {
@@ -100,6 +103,147 @@ void TestRejectsInvalidConfig()
         TileXR::TILEXR_ERROR_PARA_CHECK_FAIL);
 }
 
+void TestUrmaCombineWorkspaceConfig()
+{
+    TileXREp::EpUrmaCombineWorkspaceConfig config {};
+    const int ret = TileXREp::TileXREpBuildUrmaCombineWorkspaceConfig(2, 4, 8, 2, 3, &config);
+    CheckInt("URMA combine valid config", ret, TileXR::TILEXR_SUCCESS);
+    CheckInt64("URMA combine quant bytes", config.quantDataBytes, 32);
+    CheckInt64("URMA combine comm bytes", config.commBytes, 64);
+    CheckInt64("URMA combine blocks", config.blockCount, 1);
+    CheckInt64("URMA combine route stride", config.routeStride, 512);
+    CheckInt64("URMA combine route count", config.routeCount, 8);
+    CheckInt64("URMA combine rx bytes", config.rxWindowBytes, 4096);
+    CheckInt64("URMA combine rx0", config.rxWindowOffsets[0], 512);
+    CheckInt64("URMA combine rx1", config.rxWindowOffsets[1], 4608);
+    CheckInt64("URMA combine round0", config.roundDoneOffsets[0], 8704);
+    CheckInt64("URMA combine round1", config.roundDoneOffsets[1], 8832);
+    CheckInt64("URMA combine rx lane done", config.rxLaneDoneOffset, 8960);
+    CheckInt64("URMA combine sender done", config.senderDoneOffset,
+        config.rxLaneDoneOffset + TileXREp::kEpUrmaCombinePackLaneCount *
+            TileXREp::kEpUrmaCombineCacheLineBytes);
+    CheckInt64("URMA combine round publish", config.roundPublishOffset, 13056);
+    CheckInt64("URMA combine round credit", config.roundCreditOffset,
+        TileXREp::kEpUrmaCombineDeferredRoundCredit ? 13120 : 0);
+    CheckInt64("URMA combine start gate", config.startGateOffset,
+        TileXREp::kEpUrmaCombineStartGate ?
+            (TileXREp::kEpUrmaCombineDeferredRoundCredit ? 13184 : 13120) : 0);
+    CheckInt64("URMA combine error", config.errorStatusOffset,
+        TileXREp::kEpUrmaCombineStartGate ?
+            (TileXREp::kEpUrmaCombineDeferredRoundCredit ? 13312 : 13248) :
+            (TileXREp::kEpUrmaCombineDeferredRoundCredit ? 13184 : 13120));
+    CheckInt64("URMA combine fixed bytes", config.fixedBytes,
+        TileXREp::kEpUrmaCombineStartGate ?
+            (TileXREp::kEpUrmaCombineDeferredRoundCredit ? 13376 : 13312) :
+            (TileXREp::kEpUrmaCombineDeferredRoundCredit ? 13248 : 13184));
+    CheckInt64("URMA combine fixed control boundary", config.fixedBytes,
+        config.errorStatusOffset + TileXREp::kEpUrmaCombineCacheLineBytes);
+    CheckInt64("URMA combine tx ready", config.txReadyOffset,
+        config.fixedBytes);
+    CheckInt64("URMA combine tx data", config.txDataOffset, 13824);
+    CheckInt64("URMA combine required bytes", config.requiredBytes, 15360);
+}
+
+void TestUrmaCombineStartGateLayout()
+{
+    TileXREp::EpUrmaCombineWorkspaceConfig config {};
+    CheckInt("URMA start gate config", TileXREp::TileXREpBuildUrmaCombineWorkspaceConfig(
+        64, 128, 7168, 8, 16, &config), TileXR::TILEXR_SUCCESS);
+    if (TileXREp::kEpUrmaCombineStartGate) {
+        CheckInt64("URMA start gate follows publish", config.startGateOffset,
+            (TileXREp::kEpUrmaCombineDeferredRoundCredit ? config.roundCreditOffset :
+                config.roundPublishOffset) + TileXREp::kEpUrmaCombineCacheLineBytes);
+        CheckInt64("URMA start gate rank lines", config.errorStatusOffset,
+            config.startGateOffset + config.rankSize * TileXREp::kEpUrmaCombineCacheLineBytes);
+        CheckInt64("URMA start gate required QPs", TileXREp::kEpUrmaCombineRequiredQpCount,
+            TileXREp::kEpUrmaCombineSendLaneCount);
+    } else {
+        CheckInt64("URMA disabled start gate offset", config.startGateOffset, 0);
+        CheckInt64("URMA disabled start gate keeps error", config.errorStatusOffset,
+            (TileXREp::kEpUrmaCombineDeferredRoundCredit ? config.roundCreditOffset :
+                config.roundPublishOffset) + TileXREp::kEpUrmaCombineCacheLineBytes);
+        CheckInt64("URMA disabled start gate QPs", TileXREp::kEpUrmaCombineRequiredQpCount,
+            TileXREp::kEpUrmaCombineSendLaneCount);
+    }
+}
+
+void TestParallelRoundPublishPeerShards()
+{
+    constexpr int64_t kParallelSendLanes = TileXREp::kEpUrmaCombineSendLaneCount;
+    const int64_t rankSizes[] = {1, 2, 8, 15, 16, 17, 64};
+    for (int64_t rankSize : rankSizes) {
+        for (int64_t rank = 0; rank < rankSize; ++rank) {
+            std::vector<int> visits(static_cast<std::size_t>(rankSize), 0);
+            int64_t publishCount = 0;
+            for (int64_t senderId = 0; senderId < kParallelSendLanes; ++senderId) {
+                for (int64_t peer = senderId; peer < rankSize; peer += kParallelSendLanes) {
+                    if (peer == rank) {
+                        continue;
+                    }
+                    ++visits[static_cast<std::size_t>(peer)];
+                    ++publishCount;
+                }
+            }
+            CheckInt64("parallel publish excludes self", visits[static_cast<std::size_t>(rank)], 0);
+            CheckInt64("parallel publish peer count", publishCount, rankSize - 1);
+            for (int64_t peer = 0; peer < rankSize; ++peer) {
+                if (peer != rank) {
+                    CheckInt("parallel publish peer owned once",
+                        visits[static_cast<std::size_t>(peer)], 1);
+                }
+            }
+        }
+    }
+    CheckInt("parallel publish control step follows release",
+        static_cast<int>(TileXREp::kEpUrmaCombinePublishDone),
+        static_cast<int>(TileXREp::kEpUrmaCombineRxBufferReleased + 1));
+}
+
+void TestUrmaCombineWorkspaceRejectsInvalidConfig()
+{
+    TileXREp::EpUrmaCombineWorkspaceConfig config {};
+    CheckInt("URMA combine null out", TileXREp::TileXREpBuildUrmaCombineWorkspaceConfig(2, 4, 8, 2, 3, nullptr),
+        TileXR::TILEXR_ERROR_PARA_CHECK_FAIL);
+    CheckInt("URMA combine negative sends",
+        TileXREp::TileXREpBuildUrmaCombineWorkspaceConfig(2, 4, 8, 2, -1, &config),
+        TileXR::TILEXR_ERROR_PARA_CHECK_FAIL);
+    CheckInt("URMA combine oversized hidden", TileXREp::TileXREpBuildUrmaCombineWorkspaceConfig(
+        2, 4, TileXREp::kEpUrmaCombineMaxHidden + 1, 2, 3, &config),
+        TileXR::TILEXR_ERROR_PARA_CHECK_FAIL);
+}
+
+void TestUrmaCombineDataAsFlagPayloadBoundary()
+{
+    TileXREp::EpUrmaCombineWorkspaceConfig exact {};
+    TileXREp::EpUrmaCombineWorkspaceConfig spill {};
+    CheckInt("URMA exact payload boundary",
+        TileXREp::TileXREpBuildUrmaCombineWorkspaceConfig(2, 2, 448, 1, 2, &exact),
+        TileXR::TILEXR_SUCCESS);
+    CheckInt("URMA payload spill",
+        TileXREp::TileXREpBuildUrmaCombineWorkspaceConfig(2, 2, 449, 1, 2, &spill),
+        TileXR::TILEXR_SUCCESS);
+    CheckInt64("URMA exact comm bytes", exact.commBytes, 480);
+    CheckInt64("URMA exact block count", exact.blockCount, 1);
+    CheckInt64("URMA spill comm bytes", spill.commBytes, 512);
+    CheckInt64("URMA spill block count", spill.blockCount, 2);
+    CheckInt64("URMA spill route stride", spill.routeStride, 1024);
+}
+
+void TestUrmaCombineDynamicTxDoesNotMoveRemoteRegions()
+{
+    TileXREp::EpUrmaCombineWorkspaceConfig small {};
+    TileXREp::EpUrmaCombineWorkspaceConfig large {};
+    CheckInt("URMA small dynamic tx", TileXREp::TileXREpBuildUrmaCombineWorkspaceConfig(4, 8, 7168, 8, 3, &small),
+        TileXR::TILEXR_SUCCESS);
+    CheckInt("URMA large dynamic tx", TileXREp::TileXREpBuildUrmaCombineWorkspaceConfig(4, 8, 7168, 8, 99, &large),
+        TileXR::TILEXR_SUCCESS);
+    CheckInt64("URMA dynamic tx keeps rx0", small.rxWindowOffsets[0], large.rxWindowOffsets[0]);
+    CheckInt64("URMA dynamic tx keeps rx1", small.rxWindowOffsets[1], large.rxWindowOffsets[1]);
+    CheckInt64("URMA dynamic tx keeps round0", small.roundDoneOffsets[0], large.roundDoneOffsets[0]);
+    CheckInt64("URMA dynamic tx keeps fixed bytes", small.fixedBytes, large.fixedBytes);
+    CheckBool("URMA dynamic tx grows required bytes", large.requiredBytes > small.requiredBytes, true);
+}
+
 } // namespace
 
 int main()
@@ -108,5 +252,11 @@ int main()
     TestDataTypes();
     TestWindowConfig();
     TestRejectsInvalidConfig();
+    TestUrmaCombineWorkspaceConfig();
+    TestUrmaCombineStartGateLayout();
+    TestParallelRoundPublishPeerShards();
+    TestUrmaCombineWorkspaceRejectsInvalidConfig();
+    TestUrmaCombineDataAsFlagPayloadBoundary();
+    TestUrmaCombineDynamicTxDoesNotMoveRemoteRegions();
     return g_failures == 0 ? 0 : 1;
 }
