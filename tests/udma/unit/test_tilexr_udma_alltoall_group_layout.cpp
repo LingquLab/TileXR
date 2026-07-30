@@ -178,10 +178,26 @@ void TestPlan()
     CHECK_EQ(oneGiBPerRank.registeredBytes <=
         TileXR::Demo::kAllToAllGroupMaxRegisteredBytes, true);
 
-    constexpr int32_t twoGiBPerRankElementsPerPeer = 32 * 1024 * 1024;
+    constexpr size_t largeRankBytes[] = {
+        2ULL << 30, 4ULL << 30, 8ULL << 30, 16ULL << 30};
+    for (const size_t rankBytes : largeRankBytes) {
+        const int32_t largeElementsPerPeer = static_cast<int32_t>(
+            rankBytes / (static_cast<size_t>(rankSize) * sizeof(int32_t)));
+        const auto largePlan = TileXR::Demo::PlanAllToAllGroup(
+            rankSize, largeElementsPerPeer, largeElementsPerPeer);
+        CHECK_EQ(largePlan.valid, true);
+        CHECK_EQ(largePlan.passCount, 1U);
+        CHECK_EQ(largePlan.payloadPlaneBytes, rankBytes);
+        CHECK_EQ(largePlan.registeredBytes <=
+            TileXR::Demo::kAllToAllGroupMaxRegisteredBytes, true);
+    }
+
+    constexpr size_t tooLargeRankBytes = 32ULL << 30;
+    const int32_t tooLargeElementsPerPeer = static_cast<int32_t>(
+        tooLargeRankBytes / (static_cast<size_t>(rankSize) * sizeof(int32_t)));
     CHECK_EQ(TileXR::Demo::PlanAllToAllGroup(
-        rankSize, twoGiBPerRankElementsPerPeer,
-        twoGiBPerRankElementsPerPeer).valid, false);
+        rankSize, tooLargeElementsPerPeer,
+        tooLargeElementsPerPeer).valid, false);
 }
 
 void TestChannelPolicy()

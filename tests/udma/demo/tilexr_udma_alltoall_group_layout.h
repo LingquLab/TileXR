@@ -30,7 +30,12 @@ constexpr size_t kAllToAllGroupMultiChannelThresholdBytes =
     150ULL * 1024ULL * 1024ULL;
 constexpr size_t kAllToAllGroupAlignment = 512U;
 constexpr size_t kAllToAllGroupControlBytes = 4096U;
-constexpr size_t kAllToAllGroupMaxRegisteredBytes = 4ULL << 30;
+constexpr size_t kAllToAllGroupMaxPayloadBytes = 16ULL << 30;
+constexpr size_t kAllToAllGroupMaxRegisteredBytes =
+    2U * kAllToAllGroupMaxPayloadBytes +
+    2U * static_cast<size_t>(kAllToAllGroupMaxRankSize) *
+        kAllToAllGroupSignalSlotBytes +
+    kAllToAllGroupControlBytes;
 
 struct AllToAllGroupPlan {
     bool valid = false;
@@ -225,6 +230,9 @@ inline AllToAllGroupPlan PlanAllToAllGroup(
             static_cast<size_t>(rankSize), plan.bytesPerPeer, plan.payloadPlaneBytes) ||
         !AllToAllGroupCheckedMul(
             static_cast<size_t>(rankSize), kAllToAllGroupSignalSlotBytes, plan.signalPlaneBytes)) {
+        return AllToAllGroupPlan {};
+    }
+    if (plan.payloadPlaneBytes > kAllToAllGroupMaxPayloadBytes) {
         return AllToAllGroupPlan {};
     }
 
