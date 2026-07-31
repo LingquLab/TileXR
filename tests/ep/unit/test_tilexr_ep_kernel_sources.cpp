@@ -423,12 +423,12 @@ void TestUrmaCombineUsesCleanS22ProductionPath()
     std::string config;
     if (ReadFile(configPath, &config)) {
         CheckContains(configPath, config, "TILEXR_EP_URMA_COMBINE_SEND_CORE_COUNT 22");
-        CheckContains(configPath, config, "TILEXR_EP_URMA_RX_SCHEDULER 1");
-        CheckContains(configPath, config, "TILEXR_EP_URMA_PARALLEL_ROUND_PUBLISH 1");
-        CheckContains(configPath, config, "TILEXR_EP_URMA_DEFERRED_ROUND_CREDIT 1");
-        CheckContains(configPath, config, "TILEXR_EP_URMA_START_GATE 1");
-        CheckContains(configPath, config, "TILEXR_EP_URMA_QDC_VERSION 3");
-        CheckContains(configPath, config, "TILEXR_EP_URMA_RX_READY_STICKY_MASK 1");
+        CheckNotContains(configPath, config, "#define TILEXR_EP_URMA_QDC_VERSION");
+        CheckNotContains(configPath, config, "#define TILEXR_EP_URMA_TX_READY_");
+        CheckNotContains(configPath, config, "#define TILEXR_EP_URMA_RX_READY_");
+        CheckNotContains(configPath, config, "kEpUrmaCombineQdcVersion");
+        CheckNotContains(configPath, config, "kEpUrmaCombineTxMetaPrefetchFull");
+        CheckNotContains(configPath, config, "kEpUrmaCombineRxReadyBatchVector");
     }
 
     const std::string kernelPath = "src/ep/kernels/tilexr_ep_urma_combine_kernel.cpp";
@@ -439,6 +439,8 @@ void TestUrmaCombineUsesCleanS22ProductionPath()
         CheckContains(kernelPath, kernel, "StartParallelRoundPublish");
         CheckContains(kernelPath, kernel, "FinishParallelRoundPublish");
         CheckNotContains(kernelPath, kernel, "TILEXR_EP_URMA_DIAGNOSTIC_");
+        CheckNotContains(kernelPath, kernel, "TILEXR_EP_URMA_");
+        CheckNotContains(kernelPath, kernel, "\n#if");
     }
 
     const std::string udmaPath = "src/include/tilexr_udma.h";

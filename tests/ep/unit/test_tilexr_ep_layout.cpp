@@ -123,19 +123,10 @@ void TestUrmaCombineWorkspaceConfig()
         config.rxLaneDoneOffset + TileXREp::kEpUrmaCombinePackLaneCount *
             TileXREp::kEpUrmaCombineCacheLineBytes);
     CheckInt64("URMA combine round publish", config.roundPublishOffset, 13056);
-    CheckInt64("URMA combine round credit", config.roundCreditOffset,
-        TileXREp::kEpUrmaCombineDeferredRoundCredit ? 13120 : 0);
-    CheckInt64("URMA combine start gate", config.startGateOffset,
-        TileXREp::kEpUrmaCombineStartGate ?
-            (TileXREp::kEpUrmaCombineDeferredRoundCredit ? 13184 : 13120) : 0);
-    CheckInt64("URMA combine error", config.errorStatusOffset,
-        TileXREp::kEpUrmaCombineStartGate ?
-            (TileXREp::kEpUrmaCombineDeferredRoundCredit ? 13312 : 13248) :
-            (TileXREp::kEpUrmaCombineDeferredRoundCredit ? 13184 : 13120));
-    CheckInt64("URMA combine fixed bytes", config.fixedBytes,
-        TileXREp::kEpUrmaCombineStartGate ?
-            (TileXREp::kEpUrmaCombineDeferredRoundCredit ? 13376 : 13312) :
-            (TileXREp::kEpUrmaCombineDeferredRoundCredit ? 13248 : 13184));
+    CheckInt64("URMA combine round credit", config.roundCreditOffset, 13120);
+    CheckInt64("URMA combine start gate", config.startGateOffset, 13184);
+    CheckInt64("URMA combine error", config.errorStatusOffset, 13312);
+    CheckInt64("URMA combine fixed bytes", config.fixedBytes, 13376);
     CheckInt64("URMA combine fixed control boundary", config.fixedBytes,
         config.errorStatusOffset + TileXREp::kEpUrmaCombineCacheLineBytes);
     CheckInt64("URMA combine tx ready", config.txReadyOffset,
@@ -149,22 +140,12 @@ void TestUrmaCombineStartGateLayout()
     TileXREp::EpUrmaCombineWorkspaceConfig config {};
     CheckInt("URMA start gate config", TileXREp::TileXREpBuildUrmaCombineWorkspaceConfig(
         64, 128, 7168, 8, 16, &config), TileXR::TILEXR_SUCCESS);
-    if (TileXREp::kEpUrmaCombineStartGate) {
-        CheckInt64("URMA start gate follows publish", config.startGateOffset,
-            (TileXREp::kEpUrmaCombineDeferredRoundCredit ? config.roundCreditOffset :
-                config.roundPublishOffset) + TileXREp::kEpUrmaCombineCacheLineBytes);
-        CheckInt64("URMA start gate rank lines", config.errorStatusOffset,
-            config.startGateOffset + config.rankSize * TileXREp::kEpUrmaCombineCacheLineBytes);
-        CheckInt64("URMA start gate required QPs", TileXREp::kEpUrmaCombineRequiredQpCount,
-            TileXREp::kEpUrmaCombineSendLaneCount);
-    } else {
-        CheckInt64("URMA disabled start gate offset", config.startGateOffset, 0);
-        CheckInt64("URMA disabled start gate keeps error", config.errorStatusOffset,
-            (TileXREp::kEpUrmaCombineDeferredRoundCredit ? config.roundCreditOffset :
-                config.roundPublishOffset) + TileXREp::kEpUrmaCombineCacheLineBytes);
-        CheckInt64("URMA disabled start gate QPs", TileXREp::kEpUrmaCombineRequiredQpCount,
-            TileXREp::kEpUrmaCombineSendLaneCount);
-    }
+    CheckInt64("URMA start gate follows credit", config.startGateOffset,
+        config.roundCreditOffset + TileXREp::kEpUrmaCombineCacheLineBytes);
+    CheckInt64("URMA start gate rank lines", config.errorStatusOffset,
+        config.startGateOffset + config.rankSize * TileXREp::kEpUrmaCombineCacheLineBytes);
+    CheckInt64("URMA start gate required QPs", TileXREp::kEpUrmaCombineRequiredQpCount,
+        TileXREp::kEpUrmaCombineSendLaneCount);
 }
 
 void TestParallelRoundPublishPeerShards()

@@ -1,7 +1,6 @@
 #ifndef TILEXR_EP_COMMON_EP_URMA_COMBINE_H
 #define TILEXR_EP_COMMON_EP_URMA_COMBINE_H
 
-#include <cstddef>
 #include <cstdint>
 
 #include "ep_urma_combine_config.h"
@@ -50,9 +49,6 @@ struct alignas(kEpUrmaCombineQuantHeaderBytes) EpUrmaCombineQuantHeader {
     int64_t reserved2;
 };
 
-constexpr int64_t kEpUrmaCombineTxReadyHeaderOffset =
-    offsetof(EpUrmaCombineQuantHeader, reserved2);
-
 struct alignas(kEpUrmaCombineCacheLineBytes) EpUrmaCombineControlLine {
     uint64_t value;
     uint64_t reserved[7];
@@ -60,8 +56,6 @@ struct alignas(kEpUrmaCombineCacheLineBytes) EpUrmaCombineControlLine {
 
 static_assert(sizeof(EpUrmaCombineQuantHeader) == kEpUrmaCombineQuantHeaderBytes,
     "URMA combine quant header must be 32 bytes");
-static_assert(kEpUrmaCombineTxReadyHeaderOffset == 24,
-    "URMA combine in-data TX-ready word must remain at byte 24 of the quant header");
 static_assert(sizeof(EpUrmaCombineControlLine) == kEpUrmaCombineCacheLineBytes,
     "URMA combine control line must be one cache line");
 static_assert(kEpUrmaCombinePackLaneCount + kEpUrmaCombineSendLaneCount == kEpUrmaCombineAivCount,

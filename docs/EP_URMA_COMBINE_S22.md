@@ -13,7 +13,9 @@ URMA/UDMA. The production implementation is fixed to the validated S22 layout:
 - BiSheng `-O2`, with profiling disabled by default.
 
 The fixed configuration avoids carrying experiment-only variant switches into
-the production build.
+the production build. The kernel contains no experiment-selection macros or
+alternate protocol branches; only the Send AIV count and the explicit
+profiling build remain configurable.
 
 ## Build
 

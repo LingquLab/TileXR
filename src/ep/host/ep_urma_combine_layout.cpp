@@ -95,19 +95,11 @@ int TileXREpBuildUrmaCombineWorkspaceConfig(int64_t rankSize, int64_t bs, int64_
         !AddAlignedRegion(&offset, rxLaneDoneBytes, kEpUrmaCombineCacheLineBytes, &next.rxLaneDoneOffset) ||
         !AddAlignedRegion(&offset, senderDoneBytes, kEpUrmaCombineCacheLineBytes, &next.senderDoneOffset) ||
         !AddAlignedRegion(&offset, kEpUrmaCombineCacheLineBytes, kEpUrmaCombineCacheLineBytes,
-            &next.roundPublishOffset)) {
-        return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
-    }
-    if (kEpUrmaCombineDeferredRoundCredit &&
+            &next.roundPublishOffset) ||
         !AddAlignedRegion(&offset, kEpUrmaCombineCacheLineBytes, kEpUrmaCombineCacheLineBytes,
-            &next.roundCreditOffset)) {
-        return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
-    }
-    if (kEpUrmaCombineStartGate &&
-        !AddAlignedRegion(&offset, roundDoneBytes, kEpUrmaCombineCacheLineBytes, &next.startGateOffset)) {
-        return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
-    }
-    if (!AddAlignedRegion(&offset, kEpUrmaCombineCacheLineBytes, kEpUrmaCombineCacheLineBytes,
+            &next.roundCreditOffset) ||
+        !AddAlignedRegion(&offset, roundDoneBytes, kEpUrmaCombineCacheLineBytes, &next.startGateOffset) ||
+        !AddAlignedRegion(&offset, kEpUrmaCombineCacheLineBytes, kEpUrmaCombineCacheLineBytes,
             &next.errorStatusOffset)) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
