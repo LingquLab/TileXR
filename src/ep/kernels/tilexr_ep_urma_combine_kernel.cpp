@@ -1,0 +1,1486 @@
+#include "comm_args.h"
+#include "ep_urma_combine.h"
+#include "ep_urma_udma.h"
+#include "ep_window.h"
+#include "kernel_operator.h"
+#include "tilexr_data_as_flag.h"
+#include "ep_urma_perf_trace.h"
+#include "tilexr_udma.h"
+
+namespace {
+
+constexpr uint32_t kCursorAlignment = 32;
+constexpr int64_t kPipelineBufferCount = 2;
+using PackInputQueue = AscendC::TQue<AscendC::QuePosition::VECIN, 2>;
+constexpr int64_t kRxTokenScheduleWindow = 3;
+
+using PerfStats = TileXR::TileXRPerfCoreStageStats;
+using PerfStage = TileXREp::EpUrmaCombinePerfStage;
+
+static_assert(TileXREp::kEpUrmaCombinePerfStageCount <=
+    TileXR::TILEXR_PERF_TRACE_LOCAL_MAX_STAGE_COUNT,
+    "URMA combine profile stages must fit the reserved UB trace region");
+static_assert(TileXR::TILEXR_PERF_TRACE_LOCAL_STATS_UB_OFFSET +
+    TileXREp::kEpUrmaCombinePerfStageCount * sizeof(PerfStats) <=
+    TileXR::TILEXR_PERF_TRACE_MIN_UB_BYTES,
+    "URMA combine profile stats exceed the minimum supported AIV UB");
+
+__aicore__ inline uint32_t PerfStageId(PerfStage stage)
+{
+    return static_cast<uint32_t>(stage);
+}
+
+__aicore__ inline uint64_t ProfileBegin(GM_ADDR perfTrace)
+{
+    return TileXR::TileXRPerfCycleNow(perfTrace);
+}
+
+__aicore__ inline void ProfileEnd(
+    GM_ADDR perfTrace, __ubuf__ PerfStats *stats, PerfStage stage, uint64_t startCycle)
+{
+    TileXR::TileXRPerfLocalRecord(perfTrace, stats, TileXREp::kEpUrmaCombinePerfStageCount,
+        PerfStageId(stage), startCycle, TileXR::TileXRPerfCycleNow(perfTrace));
+}
+
+__aicore__ inline void ProfileAux(
+    GM_ADDR perfTrace, __ubuf__ PerfStats *stats, PerfStage stage, uint32_t auxIndex, uint64_t value)
+{
+    TileXR::TileXRPerfLocalAddAux(perfTrace, stats, TileXREp::kEpUrmaCombinePerfStageCount,
+        PerfStageId(stage), auxIndex, value);
+}
+
+__aicore__ inline uint64_t ProfileKernelTimingBegin(GM_ADDR perfTrace)
+{
+    if (TileXR::TileXRPerfTraceEnabled(perfTrace)) {
+        AscendC::PipeBarrier<PIPE_ALL>();
+        return static_cast<uint64_t>(AscendC::GetSystemCycle());
+    }
+    return 0;
+}
+
+__aicore__ inline void ProfileFinish(
+    GM_ADDR perfTrace, uint32_t rank, uint32_t core,
+    __ubuf__ PerfStats *stats, uint64_t kernelStart)
+{
+    if (TileXR::TileXRPerfTraceEnabled(perfTrace)) {
+        AscendC::PipeBarrier<PIPE_ALL>();
+        const uint64_t kernelEnd = static_cast<uint64_t>(AscendC::GetSystemCycle());
+        TileXR::TileXRPerfLocalRecord(perfTrace, stats,
+            TileXREp::kEpUrmaCombinePerfStageCount,
+            PerfStageId(PerfStage::KERNEL_TOTAL), kernelStart, kernelEnd);
+    }
+    TileXR::TileXRPerfLocalStatsFlush(perfTrace, rank, core,
+        static_cast<uint32_t>(TileXREp::kEpUrmaCombineAivCount),
+        TileXREp::kEpUrmaCombinePerfStageCount, stats);
+}
+
+__aicore__ inline uint64_t StrictKernelTimingBegin(
+    GM_ADDR strictKernelCycles)
+{
+    if (strictKernelCycles == nullptr) {
+        return 0;
+    }
+    AscendC::PipeBarrier<PIPE_ALL>();
+    return static_cast<uint64_t>(AscendC::GetSystemCycle());
+}
+
+__aicore__ inline void StrictKernelTimingFinish(
+    GM_ADDR strictKernelCycles, uint32_t core, uint64_t startCycle)
+{
+    if (strictKernelCycles == nullptr) {
+        return;
+    }
+    AscendC::PipeBarrier<PIPE_ALL>();
+    const uint64_t endCycle = static_cast<uint64_t>(AscendC::GetSystemCycle());
+    const uint64_t duration = endCycle >= startCycle ? endCycle - startCycle : 0;
+    AscendC::WriteGmByPassDCache(
+        reinterpret_cast<__gm__ uint64_t *>(strictKernelCycles) + core, duration);
+    AscendC::DataSyncBarrier<AscendC::MemDsbT::DDR>();
+}
+
+__aicore__ inline bool ProfileBufferValid(
+    GM_ADDR perfTrace, int64_t perfTraceBytes, int32_t rank, int32_t rankSize)
+{
+    if (perfTrace == nullptr || perfTraceBytes <
+        static_cast<int64_t>(sizeof(TileXR::TileXRPerfTraceHeader)) || rank < 0 || rankSize <= 0) {
+        return false;
+    }
+    const uint64_t requiredStatsBytes = static_cast<uint64_t>(rankSize) *
+        TileXREp::kEpUrmaCombineAivCount * TileXREp::kEpUrmaCombinePerfStageCount * sizeof(PerfStats);
+    const uint64_t requiredBytes = TileXR::TILEXR_PERF_TRACE_STATS_OFFSET + requiredStatsBytes;
+    if (requiredBytes > static_cast<uint64_t>(perfTraceBytes)) {
+        return false;
+    }
+    const auto header = reinterpret_cast<__gm__ TileXR::TileXRPerfTraceHeader *>(perfTrace);
+    return header->magic == TileXR::TILEXR_PERF_TRACE_MAGIC &&
+        header->version == TileXR::TILEXR_PERF_TRACE_VERSION &&
+        header->headerSize == sizeof(TileXR::TileXRPerfTraceHeader) &&
+        header->coreStageStatsSize == sizeof(PerfStats) &&
+        header->rank == static_cast<uint32_t>(rank) &&
+        header->rankSize == static_cast<uint32_t>(rankSize) &&
+        header->blockDim == TileXREp::kEpUrmaCombineAivCount &&
+        header->maxCoreCount == TileXREp::kEpUrmaCombineAivCount &&
+        header->stageCount == TileXREp::kEpUrmaCombinePerfStageCount &&
+        header->flags <= 2 && header->cycleToUsDivisor != 0 &&
+        header->statsOffset == TileXR::TILEXR_PERF_TRACE_STATS_OFFSET &&
+        header->statsBytes == requiredStatsBytes;
+}
+
+static_assert(TileXREp::kEpUrmaCombineDataBlockBytes == TileXR::DATA_AS_FLAG_BLOCK_BYTES,
+    "URMA combine and DataAsFlag block sizes must match");
+static_assert(TileXREp::kEpUrmaCombinePayloadBytes == TileXR::DATA_AS_FLAG_PAYLOAD_BYTES,
+    "URMA combine and DataAsFlag payload sizes must match");
+static_assert(TileXREp::kEpUrmaCombineFlagBytes == TileXR::DATA_AS_FLAG_FLAG_BYTES,
+    "URMA combine and DataAsFlag flag sizes must match");
+constexpr int64_t kMaxInputBytes = TileXREp::kEpUrmaCombineMaxHidden * sizeof(half);
+constexpr int64_t kMaxFloatBytes = TileXREp::kEpUrmaCombineMaxHidden * sizeof(float);
+constexpr float kMaxFiniteHalf = 65504.0f;
+constexpr int64_t kMaxLogicalBytes =
+    ((TileXREp::kEpUrmaCombineQuantHeaderBytes + TileXREp::kEpUrmaCombineMaxHidden +
+      TileXREp::kEpUrmaCombinePayloadBytes - 1) /
+     TileXREp::kEpUrmaCombinePayloadBytes) * TileXREp::kEpUrmaCombinePayloadBytes;
+constexpr int64_t kMaxBlockCount = kMaxLogicalBytes / TileXREp::kEpUrmaCombinePayloadBytes;
+constexpr int64_t kMaxRouteStride = kMaxBlockCount * TileXREp::kEpUrmaCombineDataBlockBytes;
+constexpr int64_t kMaxPackUbBytes = kPipelineBufferCount * kMaxInputBytes +
+    kPipelineBufferCount * kMaxRouteStride +
+    kMaxFloatBytes + 2 * kMaxInputBytes + kCursorAlignment + kMaxLogicalBytes;
+constexpr int64_t kMaxRouteFlagBytes =
+    kMaxBlockCount * TileXREp::kEpUrmaCombineFlagBytes;
+constexpr int64_t kMaxReadyFlagBufferBytes = kMaxRouteFlagBytes;
+constexpr int64_t kMaxReceiveUbBytes = kPipelineBufferCount * kMaxLogicalBytes +
+    kMaxReadyFlagBufferBytes + kMaxRouteFlagBytes +
+    2 * kMaxFloatBytes + kMaxInputBytes +
+    TileXREp::kEpUrmaCombineMaxTopK * static_cast<int64_t>(sizeof(float));
+static_assert(kMaxPackUbBytes <= TileXR::TILEXR_PERF_TRACE_LOCAL_STATS_UB_OFFSET,
+    "URMA combine Pack ping-pong buffers overlap the profiling UB region");
+static_assert(kMaxReceiveUbBytes <= TileXR::TILEXR_PERF_TRACE_LOCAL_STATS_UB_OFFSET,
+    "URMA combine Receive ping-pong buffers overlap the profiling UB region");
+
+__aicore__ inline int64_t AlignUpInt64(int64_t value, int64_t alignment)
+{
+    const int64_t remainder = value % alignment;
+    return remainder == 0 ? value : value + alignment - remainder;
+}
+
+template <typename T>
+__aicore__ inline void SetNoCacheRead(AscendC::GlobalTensor<T> &tensor)
+{
+    tensor.template SetL2CacheHint<AscendC::CacheRwMode::READ>(
+        AscendC::CacheMode::CACHE_MODE_DISABLE);
+}
+
+template <typename T>
+__aicore__ inline void SetNoCacheWrite(AscendC::GlobalTensor<T> &tensor)
+{
+    tensor.template SetL2CacheHint<AscendC::CacheRwMode::WRITE>(
+        AscendC::CacheMode::CACHE_MODE_DISABLE);
+}
+
+__aicore__ inline void CachelessAcquireBarrier()
+{
+    AscendC::DataSyncBarrier<AscendC::MemDsbT::ALL>();
+    AscendC::PipeBarrier<PIPE_ALL>();
+}
+
+__aicore__ inline uint64_t EncodeControlValue(int64_t magic, uint32_t step)
+{
+    return (static_cast<uint64_t>(static_cast<uint32_t>(magic)) << 32) | static_cast<uint64_t>(step);
+}
+
+__aicore__ inline void StoreControlValue(GM_ADDR lineAddr, uint64_t value)
+{
+    AscendC::PipeBarrier<PIPE_ALL>();
+    AscendC::WriteGmByPassDCache(
+        reinterpret_cast<__gm__ uint64_t *>(lineAddr), value);
+    AscendC::DataSyncBarrier<AscendC::MemDsbT::ALL>();
+}
+
+
+__aicore__ inline uint64_t LoadControlValue(GM_ADDR lineAddr)
+{
+    const uint64_t value = AscendC::ReadGmByPassDCache(
+        reinterpret_cast<__gm__ uint64_t *>(lineAddr));
+    return value;
+}
+
+__aicore__ inline void StoreError(
+    GM_ADDR workspaceGM, int64_t errorStatusOffset, int64_t magic, uint64_t status)
+{
+    if (status != TileXREp::kEpUrmaCombineStatusOk) {
+        StoreControlValue(workspaceGM + errorStatusOffset,
+            EncodeControlValue(magic, static_cast<uint32_t>(status)));
+    }
+}
+
+__aicore__ inline TileXREp::EpAssistTuple LoadRouteMetaBypass(
+    GM_ADDR assistInfoGM, int64_t index)
+{
+    __gm__ int32_t *src = reinterpret_cast<__gm__ int32_t *>(assistInfoGM) +
+        index * TileXREp::kEpAssistTupleInts;
+    TileXREp::EpAssistTuple tuple;
+    tuple.srcRank = AscendC::ReadGmByPassDCache(src);
+    tuple.tokenId = AscendC::ReadGmByPassDCache(src + 1);
+    tuple.topKId = AscendC::ReadGmByPassDCache(src + 2);
+    tuple.expertId = 0;
+    return tuple;
+}
+
+__aicore__ inline TileXREp::EpAssistTuple LoadRouteMeta(
+    GM_ADDR assistInfoGM, int64_t index)
+{
+    return LoadRouteMetaBypass(assistInfoGM, index);
+}
+
+
+__aicore__ inline bool RouteMetaValid(
+    const TileXREp::EpAssistTuple &tuple, int32_t rankSize, int64_t bs, int64_t topK)
+{
+    return tuple.srcRank >= 0 && tuple.srcRank < rankSize && tuple.tokenId >= 0 && tuple.tokenId < bs &&
+        tuple.topKId >= 0 && tuple.topKId < topK;
+}
+
+__aicore__ inline void LoadTopKWeights(
+    GM_ADDR weightsGM, int64_t begin, int64_t topK, AscendC::LocalTensor<float> &local)
+{
+    AscendC::GlobalTensor<float> src;
+    src.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(weightsGM) + begin, topK);
+    const uint32_t alignedElements = static_cast<uint32_t>(
+        AlignUpInt64(topK * static_cast<int64_t>(sizeof(float)), kCursorAlignment) / sizeof(float));
+    AscendC::DataCopyExtParams copyParams {
+        1, static_cast<uint32_t>(topK * static_cast<int64_t>(sizeof(float))), 0, 0, 0};
+    AscendC::DataCopyPadExtParams<float> padParams {
+        true, 0, static_cast<uint8_t>(alignedElements - static_cast<uint32_t>(topK)), 0.0f};
+    AscendC::DataCopyPad(local, src, copyParams, padParams);
+    AscendC::SetFlag<AscendC::HardEvent::MTE2_S>(EVENT_ID0);
+    AscendC::WaitFlag<AscendC::HardEvent::MTE2_S>(EVENT_ID0);
+}
+
+__aicore__ inline event_t PipelineEvent(int64_t slot)
+{
+    return slot == 0 ? EVENT_ID0 : EVENT_ID1;
+}
+
+__aicore__ inline void EnqueuePackInput(
+    const AscendC::GlobalTensor<half> &expertOut, int64_t route,
+    int64_t h, uint8_t inputPadding, PackInputQueue &inputQueue)
+{
+    AscendC::LocalTensor<half> input = inputQueue.AllocTensor<half>();
+    AscendC::DataCopyExtParams inputParams {
+        1, static_cast<uint32_t>(h * static_cast<int64_t>(sizeof(half))), 0, 0, 0};
+    AscendC::DataCopyPadExtParams<half> inputPad {true, 0, inputPadding, static_cast<half>(0.0f)};
+    AscendC::DataCopyPad(input, expertOut[route * h], inputParams, inputPad);
+    inputQueue.EnQue(input);
+}
+
+__aicore__ inline void StartPackPublish(
+    GM_ADDR txRouteAddr, int64_t routeStride,
+    AscendC::LocalTensor<float> &packed, event_t eventId)
+{
+    AscendC::GlobalTensor<float> txRoute;
+    txRoute.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(txRouteAddr), routeStride / sizeof(float));
+    SetNoCacheWrite(txRoute);
+    AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(eventId);
+    AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(eventId);
+    AscendC::DataCopy(txRoute, packed, static_cast<uint32_t>(routeStride / sizeof(float)));
+    AscendC::SetFlag<AscendC::HardEvent::MTE3_S>(eventId);
+}
+
+__aicore__ inline void FinishPackCopy(
+    GM_ADDR txRouteAddr, int64_t routeStride, event_t eventId,
+    GM_ADDR perfTrace, __ubuf__ PerfStats *perfStats)
+{
+    const uint64_t waitStart = ProfileBegin(perfTrace);
+    AscendC::WaitFlag<AscendC::HardEvent::MTE3_S>(eventId);
+    ProfileEnd(perfTrace, perfStats, PerfStage::PACK_MTE3_EXPOSED_WAIT, waitStart);
+    ProfileAux(perfTrace, perfStats, PerfStage::PACK_MTE3_EXPOSED_WAIT, 0,
+        static_cast<uint64_t>(routeStride));
+}
+
+__aicore__ inline void PublishTxReadyBatch(
+    GM_ADDR workspaceGM, int64_t txReadyOffset,
+    int64_t firstRoute, int64_t routeCount, uint64_t readyValue)
+{
+    if (routeCount <= 0) {
+        return;
+    }
+    GM_ADDR firstLineAddr = workspaceGM + txReadyOffset +
+        firstRoute * TileXREp::kEpUrmaCombineCacheLineBytes;
+    for (int64_t index = 0; index < routeCount; ++index) {
+        AscendC::WriteGmByPassDCache(
+            reinterpret_cast<__gm__ uint64_t *>(firstLineAddr +
+                index * TileXREp::kEpUrmaCombineCacheLineBytes),
+            readyValue);
+    }
+    AscendC::DataSyncBarrier<AscendC::MemDsbT::ALL>();
+}
+
+__aicore__ __attribute__((always_inline)) inline void StartPackQuantization(
+    AscendC::LocalTensor<half> &routeInput,
+    AscendC::LocalTensor<float> &routePacked,
+    AscendC::LocalTensor<float> &quantFloat,
+    AscendC::LocalTensor<half> &absHalf,
+    AscendC::LocalTensor<half> &reduceOut,
+    AscendC::LocalTensor<half> &reduceTmp,
+    AscendC::LocalTensor<int8_t> &logical,
+    int64_t h, int64_t logicalBytes, int64_t routeStride, AscendC::TEventID quantizeEvent)
+{
+    (void)routePacked;
+    (void)logical;
+    (void)logicalBytes;
+    (void)routeStride;
+    AscendC::Abs<half>(absHalf, routeInput, static_cast<uint32_t>(h));
+    AscendC::PipeBarrier<PIPE_V>();
+    AscendC::ReduceMax<half>(reduceOut, absHalf, reduceTmp, static_cast<int32_t>(h), false);
+    (void)quantFloat;
+    AscendC::SetFlag<AscendC::HardEvent::V_S>(quantizeEvent);
+}
+
+__aicore__ __attribute__((always_inline)) inline void FinishPackQuantization(
+    AscendC::LocalTensor<half> &routeInput,
+    AscendC::LocalTensor<float> &routePacked,
+    AscendC::LocalTensor<float> &quantFloat,
+    AscendC::LocalTensor<half> &reduceOut,
+    AscendC::LocalTensor<int8_t> &logical,
+    AscendC::LocalTensor<float> &logicalFloat,
+    AscendC::LocalTensor<int32_t> &logicalInt,
+    int64_t h, int64_t blockCount, uint8_t repeats,
+    AscendC::TEventID quantizeEvent, AscendC::TEventID scalarToVectorEvent)
+{
+    AscendC::WaitFlag<AscendC::HardEvent::V_S>(quantizeEvent);
+    const float maxAbs = static_cast<float>(reduceOut(0));
+    const float scale = maxAbs > 0.0f ? maxAbs / 127.0f : 1.0f;
+    const float inverseScale = maxAbs > 0.0f ? 127.0f / maxAbs : 1.0f;
+    logicalFloat.SetValue(0, scale);
+    logicalInt.SetValue(1, static_cast<int32_t>(TileXREp::kEpUrmaCombineQuantModeInt8PerRoute));
+    const bool halfScaleSafe = maxAbs >= 0.0f && maxAbs <= kMaxFiniteHalf &&
+        inverseScale > 0.0f && inverseScale <= kMaxFiniteHalf;
+    if (halfScaleSafe) {
+        AscendC::Muls<half>(routeInput, routeInput, static_cast<half>(inverseScale),
+            static_cast<uint32_t>(h));
+        AscendC::PipeBarrier<PIPE_V>();
+    } else {
+        AscendC::Cast<float, half>(quantFloat, routeInput, AscendC::RoundMode::CAST_NONE,
+            static_cast<uint32_t>(h));
+        AscendC::PipeBarrier<PIPE_V>();
+        AscendC::Muls<float>(quantFloat, quantFloat, inverseScale, static_cast<uint32_t>(h));
+        AscendC::PipeBarrier<PIPE_V>();
+        AscendC::Cast<half, float>(routeInput, quantFloat, AscendC::RoundMode::CAST_RINT,
+            static_cast<uint32_t>(h));
+        AscendC::PipeBarrier<PIPE_V>();
+    }
+    AscendC::Cast<int8_t, half>(logical[TileXREp::kEpUrmaCombineQuantHeaderBytes], routeInput,
+        AscendC::RoundMode::CAST_RINT, static_cast<uint32_t>(h));
+    AscendC::PipeBarrier<PIPE_V>();
+
+    AscendC::SetFlag<AscendC::HardEvent::S_V>(scalarToVectorEvent);
+    AscendC::WaitFlag<AscendC::HardEvent::S_V>(scalarToVectorEvent);
+    AscendC::Copy(routePacked, logicalFloat, static_cast<uint64_t>(64), repeats, {1, 1, 16, 15});
+    AscendC::Copy(routePacked[64], logicalFloat[64], static_cast<uint64_t>(56), repeats, {1, 1, 16, 15});
+    AscendC::PipeBarrier<PIPE_V>();
+}
+
+__aicore__ inline void PackRoutes(
+    GM_ADDR expertOutGM, GM_ADDR workspaceGM, int64_t selfSendCnt, int64_t h,
+    int64_t magic, int64_t blockCount, int64_t routeStride, int64_t txReadyOffset, int64_t txDataOffset,
+    int64_t laneId, AscendC::TPipe &pipe, GM_ADDR perfTrace, __ubuf__ PerfStats *perfStats)
+{
+    const uint64_t firstReadyStart = ProfileBegin(perfTrace);
+    const int64_t inputBytes = AlignUpInt64(h * static_cast<int64_t>(sizeof(half)), kCursorAlignment);
+    const int64_t floatBytes = AlignUpInt64(h * static_cast<int64_t>(sizeof(float)), kCursorAlignment);
+    const int64_t logicalBytes = blockCount * TileXREp::kEpUrmaCombinePayloadBytes;
+
+    PackInputQueue inputQueue;
+    AscendC::TBuf<AscendC::QuePosition::VECCALC> quantFloatBuf;
+    AscendC::TBuf<AscendC::QuePosition::VECCALC> absHalfBuf;
+    AscendC::TBuf<AscendC::QuePosition::VECCALC> reduceOutBuf;
+    AscendC::TBuf<AscendC::QuePosition::VECCALC> reduceTmpBuf;
+    AscendC::TBuf<AscendC::QuePosition::VECCALC> logicalBuf;
+    AscendC::TBuf<AscendC::QuePosition::VECCALC> packedBuf;
+    pipe.InitBuffer(inputQueue, static_cast<uint8_t>(kPipelineBufferCount), static_cast<uint32_t>(inputBytes));
+    pipe.InitBuffer(quantFloatBuf, static_cast<uint32_t>(floatBytes));
+    pipe.InitBuffer(absHalfBuf, static_cast<uint32_t>(inputBytes));
+    pipe.InitBuffer(reduceOutBuf, kCursorAlignment);
+    pipe.InitBuffer(reduceTmpBuf, static_cast<uint32_t>(inputBytes));
+    pipe.InitBuffer(logicalBuf, static_cast<uint32_t>(logicalBytes));
+    pipe.InitBuffer(packedBuf, static_cast<uint32_t>(kPipelineBufferCount * routeStride));
+    AscendC::LocalTensor<float> packed0 = packedBuf.GetWithOffset<float>(
+        static_cast<uint32_t>(routeStride / sizeof(float)), 0);
+    AscendC::LocalTensor<float> packed1 = packedBuf.GetWithOffset<float>(
+        static_cast<uint32_t>(routeStride / sizeof(float)), static_cast<uint32_t>(routeStride));
+    AscendC::LocalTensor<float> quantFloat = quantFloatBuf.Get<float>();
+    AscendC::LocalTensor<half> absHalf = absHalfBuf.Get<half>();
+    AscendC::LocalTensor<half> reduceOutHalf = reduceOutBuf.Get<half>();
+    AscendC::LocalTensor<half> reduceTmpHalf = reduceTmpBuf.Get<half>();
+    AscendC::LocalTensor<int8_t> logical = logicalBuf.Get<int8_t>();
+    AscendC::LocalTensor<float> logicalFloat = logical.template ReinterpretCast<float>();
+    AscendC::LocalTensor<int32_t> logicalInt = logical.template ReinterpretCast<int32_t>();
+    AscendC::GlobalTensor<half> expertOut;
+    expertOut.SetGlobalBuffer(reinterpret_cast<__gm__ half *>(expertOutGM), selfSendCnt * h);
+
+    const int64_t begin = selfSendCnt * laneId / TileXREp::kEpUrmaCombinePackLaneCount;
+    const int64_t end = selfSendCnt * (laneId + 1) / TileXREp::kEpUrmaCombinePackLaneCount;
+    const uint64_t readyValue = EncodeControlValue(magic, TileXREp::kEpUrmaCombineTxRouteReady);
+    const uint32_t inputAlignedElements = static_cast<uint32_t>(inputBytes / sizeof(half));
+    const uint8_t inputPadding = static_cast<uint8_t>(inputAlignedElements - static_cast<uint32_t>(h));
+    const uint8_t repeats = static_cast<uint8_t>(blockCount);
+    const AscendC::TEventID quantizeEvent = pipe.FetchEventID<AscendC::HardEvent::V_S>();
+    const AscendC::TEventID scalarToVectorEvent = pipe.FetchEventID<AscendC::HardEvent::S_V>();
+    bool copyPending = false;
+    int64_t pendingRoute = 0;
+    int64_t pendingSlot = 0;
+    int64_t readyBatchFirstRoute = 0;
+    int64_t readyBatchCount = 0;
+    bool firstReadyPublished = false;
+
+    AscendC::Duplicate<int8_t>(logical, static_cast<int8_t>(0), static_cast<uint32_t>(logicalBytes));
+    AscendC::Duplicate<float>(packed0, TileXR::DATA_AS_FLAG_READY_VALUE,
+        static_cast<uint32_t>(routeStride / sizeof(float)));
+    AscendC::Duplicate<float>(packed1, TileXR::DATA_AS_FLAG_READY_VALUE,
+        static_cast<uint32_t>(routeStride / sizeof(float)));
+
+    for (int64_t route = begin; route < end; ++route) {
+        const int64_t slot = (route - begin) % kPipelineBufferCount;
+        const event_t eventId = PipelineEvent(slot);
+        EnqueuePackInput(expertOut, route, h, inputPadding, inputQueue);
+        const uint64_t inputWaitStart = ProfileBegin(perfTrace);
+        AscendC::LocalTensor<half> input = inputQueue.DeQue<half>();
+        ProfileEnd(perfTrace, perfStats, PerfStage::PACK_INPUT_WAIT, inputWaitStart);
+        ProfileAux(perfTrace, perfStats, PerfStage::PACK_INPUT_WAIT, 0,
+            static_cast<uint64_t>(h * static_cast<int64_t>(sizeof(half))));
+
+        const uint64_t quantizeHeadStart = ProfileBegin(perfTrace);
+        if (slot == 0) {
+            StartPackQuantization(input, packed0, quantFloat, absHalf, reduceOutHalf, reduceTmpHalf,
+                logical, h, logicalBytes, routeStride, quantizeEvent);
+        } else {
+            StartPackQuantization(input, packed1, quantFloat, absHalf, reduceOutHalf, reduceTmpHalf,
+                logical, h, logicalBytes, routeStride, quantizeEvent);
+        }
+        if (slot == 0) {
+            FinishPackQuantization(input, packed0, quantFloat, reduceOutHalf, logical, logicalFloat,
+                logicalInt, h, blockCount, repeats, quantizeEvent, scalarToVectorEvent);
+        } else {
+            FinishPackQuantization(input, packed1, quantFloat, reduceOutHalf, logical, logicalFloat,
+                logicalInt, h, blockCount, repeats, quantizeEvent, scalarToVectorEvent);
+        }
+        inputQueue.FreeTensor<half>(input);
+        ProfileEnd(perfTrace, perfStats, PerfStage::PACK_QUANTIZE, quantizeHeadStart);
+        ProfileAux(perfTrace, perfStats, PerfStage::PACK_QUANTIZE, 0, static_cast<uint64_t>(h));
+        ProfileAux(perfTrace, perfStats, PerfStage::PACK_QUANTIZE, 1, static_cast<uint64_t>(blockCount));
+
+        GM_ADDR txRouteAddr = workspaceGM + txDataOffset + route * routeStride;
+        const uint64_t dataSubmitStart = ProfileBegin(perfTrace);
+        if (slot == 0) {
+            StartPackPublish(txRouteAddr, routeStride, packed0, eventId);
+        } else {
+            StartPackPublish(txRouteAddr, routeStride, packed1, eventId);
+        }
+        ProfileEnd(perfTrace, perfStats, PerfStage::PACK_TX_DATA_SUBMIT, dataSubmitStart);
+        ProfileAux(perfTrace, perfStats, PerfStage::PACK_TX_DATA_SUBMIT, 0,
+            static_cast<uint64_t>(routeStride));
+        if (copyPending) {
+            FinishPackCopy(workspaceGM + txDataOffset + pendingRoute * routeStride,
+                routeStride, PipelineEvent(pendingSlot), perfTrace, perfStats);
+            if (readyBatchCount == 0) {
+                readyBatchFirstRoute = pendingRoute;
+            }
+            ++readyBatchCount;
+            if (readyBatchCount == 1) {
+                const uint64_t readyPublishStart = ProfileBegin(perfTrace);
+                PublishTxReadyBatch(workspaceGM, txReadyOffset,
+                    readyBatchFirstRoute, readyBatchCount, readyValue);
+                ProfileEnd(perfTrace, perfStats, PerfStage::PACK_TX_PUBLISH, readyPublishStart);
+                const uint64_t publishedLineCount = static_cast<uint64_t>(readyBatchCount);
+                ProfileAux(perfTrace, perfStats, PerfStage::PACK_TX_PUBLISH, 1,
+                    publishedLineCount);
+                ProfileAux(perfTrace, perfStats, PerfStage::PACK_TX_PUBLISH, 2,
+                    static_cast<uint64_t>(readyBatchCount));
+                ProfileAux(perfTrace, perfStats, PerfStage::PACK_TX_PUBLISH, 3,
+                    publishedLineCount * TileXREp::kEpUrmaCombineCacheLineBytes);
+                if (!firstReadyPublished) {
+                    ProfileEnd(perfTrace, perfStats, PerfStage::PACK_FIRST_TX_READY, firstReadyStart);
+                    ProfileAux(perfTrace, perfStats, PerfStage::PACK_FIRST_TX_READY, 0,
+                        static_cast<uint64_t>(readyBatchFirstRoute));
+                    firstReadyPublished = true;
+                }
+                readyBatchCount = 0;
+            }
+        }
+        copyPending = true;
+        pendingRoute = route;
+        pendingSlot = slot;
+        if (route + 1 == end) {
+            FinishPackCopy(txRouteAddr, routeStride, eventId, perfTrace, perfStats);
+            if (readyBatchCount == 0) {
+                readyBatchFirstRoute = route;
+            }
+            ++readyBatchCount;
+            copyPending = false;
+            const uint64_t readyPublishStart = ProfileBegin(perfTrace);
+            PublishTxReadyBatch(workspaceGM, txReadyOffset,
+                readyBatchFirstRoute, readyBatchCount, readyValue);
+            ProfileEnd(perfTrace, perfStats, PerfStage::PACK_TX_PUBLISH, readyPublishStart);
+            const uint64_t publishedLineCount = static_cast<uint64_t>(readyBatchCount);
+            ProfileAux(perfTrace, perfStats, PerfStage::PACK_TX_PUBLISH, 1,
+                publishedLineCount);
+            ProfileAux(perfTrace, perfStats, PerfStage::PACK_TX_PUBLISH, 2,
+                static_cast<uint64_t>(readyBatchCount));
+            ProfileAux(perfTrace, perfStats, PerfStage::PACK_TX_PUBLISH, 3,
+                publishedLineCount * TileXREp::kEpUrmaCombineCacheLineBytes);
+            if (!firstReadyPublished) {
+                ProfileEnd(perfTrace, perfStats, PerfStage::PACK_FIRST_TX_READY, firstReadyStart);
+                ProfileAux(perfTrace, perfStats, PerfStage::PACK_FIRST_TX_READY, 0,
+                    static_cast<uint64_t>(readyBatchFirstRoute));
+                firstReadyPublished = true;
+            }
+            readyBatchCount = 0;
+        }
+    }
+    pipe.ReleaseEventID<AscendC::HardEvent::V_S>(quantizeEvent);
+    pipe.ReleaseEventID<AscendC::HardEvent::S_V>(scalarToVectorEvent);
+}
+
+__aicore__ inline void StartRouteReadyCopy(
+    GM_ADDR routeAddr, int64_t blockCount, AscendC::LocalTensor<float> &flags)
+{
+    AscendC::GlobalTensor<float> src;
+    src.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(
+        routeAddr + TileXREp::kEpUrmaCombinePayloadBytes));
+    SetNoCacheRead(src);
+    AscendC::DataCopyExtParams copyParams {
+        static_cast<uint16_t>(blockCount), static_cast<uint32_t>(sizeof(float)),
+        static_cast<uint32_t>(TileXREp::kEpUrmaCombineDataBlockBytes - sizeof(float)), 0, 0};
+    AscendC::DataCopyPadExtParams<float> padParams {
+        true, 0, static_cast<uint8_t>(TileXR::DATA_AS_FLAG_FLAG_FLOATS - 1U),
+        0.0f};
+    AscendC::DataCopyPad(flags, src, copyParams, padParams);
+}
+
+__aicore__ inline bool CheckRouteReady(
+    GM_ADDR routeAddr, int64_t blockCount, AscendC::LocalTensor<float> &flags)
+{
+    StartRouteReadyCopy(routeAddr, blockCount, flags);
+    AscendC::SetFlag<AscendC::HardEvent::MTE2_S>(EVENT_ID0);
+    AscendC::WaitFlag<AscendC::HardEvent::MTE2_S>(EVENT_ID0);
+    for (int64_t block = 0; block < blockCount; ++block) {
+        if (flags.GetValue(static_cast<uint32_t>(
+                block * TileXR::DATA_AS_FLAG_FLAG_FLOATS)) != TileXR::DATA_AS_FLAG_READY_VALUE) {
+            return false;
+        }
+    }
+    return true;
+}
+
+
+__aicore__ inline void StartUnpackRoute(
+    GM_ADDR routeAddr, int64_t blockCount,
+    AscendC::LocalTensor<uint8_t> &logical, event_t eventId)
+{
+    AscendC::GlobalTensor<uint8_t> src;
+    src.SetGlobalBuffer(reinterpret_cast<__gm__ uint8_t *>(routeAddr));
+    SetNoCacheRead(src);
+    AscendC::DataCopyExtParams copyParams {
+        static_cast<uint16_t>(blockCount), static_cast<uint32_t>(TileXREp::kEpUrmaCombinePayloadBytes),
+        static_cast<uint32_t>(TileXREp::kEpUrmaCombineFlagBytes), 0, 0};
+    AscendC::DataCopyPadExtParams<uint8_t> padParams {false, 0, 0, 0};
+    AscendC::DataCopyPad(logical, src, copyParams, padParams);
+    AscendC::SetFlag<AscendC::HardEvent::MTE2_S>(eventId);
+    AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(eventId);
+}
+
+__aicore__ inline void WaitUnpackRoute(event_t eventId)
+{
+    AscendC::WaitFlag<AscendC::HardEvent::MTE2_S>(eventId);
+    AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(eventId);
+}
+
+__aicore__ inline void StartClearRouteFlags(
+    GM_ADDR routeAddr, int64_t blockCount, AscendC::LocalTensor<float> &zeroFlags)
+{
+    AscendC::GlobalTensor<float> dst;
+    dst.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(
+        routeAddr + TileXREp::kEpUrmaCombinePayloadBytes));
+    SetNoCacheWrite(dst);
+    AscendC::DataCopyExtParams copyParams {
+        static_cast<uint16_t>(blockCount), static_cast<uint32_t>(TileXREp::kEpUrmaCombineFlagBytes), 0,
+        static_cast<uint32_t>(TileXREp::kEpUrmaCombinePayloadBytes), 0};
+    AscendC::DataCopyPad(dst, zeroFlags, copyParams);
+}
+
+__aicore__ inline void FinishTokenRouteFlagClears()
+{
+    AscendC::SetFlag<AscendC::HardEvent::MTE3_S>(EVENT_ID0);
+    AscendC::WaitFlag<AscendC::HardEvent::MTE3_S>(EVENT_ID0);
+}
+
+__aicore__ inline void ReceiveTokens(
+    GM_ADDR topKWeightsGM, GM_ADDR yOutGM, GM_ADDR workspaceGM, int64_t bs,
+    int64_t h, int64_t topK, int64_t magic, int64_t rxWindowOffset, int64_t blockCount, int64_t routeStride,
+    int64_t rxLaneDoneOffset, int64_t errorStatusOffset, int64_t laneId, AscendC::TPipe &pipe,
+    GM_ADDR perfTrace, __ubuf__ PerfStats *perfStats)
+{
+    const int64_t logicalBytes = blockCount * TileXREp::kEpUrmaCombinePayloadBytes;
+    const int64_t flagBytes = blockCount * TileXREp::kEpUrmaCombineFlagBytes;
+    const int64_t accumBytes = AlignUpInt64(h * static_cast<int64_t>(sizeof(float)), kCursorAlignment);
+    const int64_t outputBytes = AlignUpInt64(h * static_cast<int64_t>(sizeof(half)), kCursorAlignment);
+    const int64_t dequantBytes = AlignUpInt64(h * static_cast<int64_t>(sizeof(float)), kCursorAlignment);
+    const int64_t weightBytes = AlignUpInt64(
+        topK * static_cast<int64_t>(sizeof(float)), kCursorAlignment);
+
+    AscendC::TBuf<AscendC::QuePosition::VECCALC> logicalBuf;
+    AscendC::TBuf<AscendC::QuePosition::VECCALC> flagBuf;
+    AscendC::TBuf<AscendC::QuePosition::VECCALC> clearFlagBuf;
+    AscendC::TBuf<AscendC::QuePosition::VECCALC> accumBuf;
+    AscendC::TBuf<AscendC::QuePosition::VECCALC> outputBuf;
+    AscendC::TBuf<AscendC::QuePosition::VECCALC> dequantBuf;
+    AscendC::TBuf<AscendC::QuePosition::VECCALC> weightBuf;
+    pipe.InitBuffer(logicalBuf, static_cast<uint32_t>(kPipelineBufferCount * logicalBytes));
+    pipe.InitBuffer(flagBuf, static_cast<uint32_t>(flagBytes));
+    pipe.InitBuffer(clearFlagBuf, static_cast<uint32_t>(flagBytes));
+    pipe.InitBuffer(accumBuf, static_cast<uint32_t>(accumBytes));
+    pipe.InitBuffer(outputBuf, static_cast<uint32_t>(outputBytes));
+    pipe.InitBuffer(dequantBuf, static_cast<uint32_t>(dequantBytes));
+    pipe.InitBuffer(weightBuf, static_cast<uint32_t>(weightBytes));
+    AscendC::LocalTensor<uint8_t> logical0 = logicalBuf.GetWithOffset<uint8_t>(
+        static_cast<uint32_t>(logicalBytes), 0);
+    AscendC::LocalTensor<uint8_t> logical1 = logicalBuf.GetWithOffset<uint8_t>(
+        static_cast<uint32_t>(logicalBytes), static_cast<uint32_t>(logicalBytes));
+    AscendC::LocalTensor<float> logicalFloat0 = logical0.template ReinterpretCast<float>();
+    AscendC::LocalTensor<float> logicalFloat1 = logical1.template ReinterpretCast<float>();
+    AscendC::LocalTensor<int32_t> logicalInt0 = logical0.template ReinterpretCast<int32_t>();
+    AscendC::LocalTensor<int32_t> logicalInt1 = logical1.template ReinterpretCast<int32_t>();
+    AscendC::LocalTensor<int8_t> logicalInt80 = logical0.template ReinterpretCast<int8_t>();
+    AscendC::LocalTensor<int8_t> logicalInt81 = logical1.template ReinterpretCast<int8_t>();
+    AscendC::LocalTensor<float> flags = flagBuf.Get<float>();
+    AscendC::LocalTensor<float> zeroFlags = clearFlagBuf.Get<float>();
+    AscendC::LocalTensor<float> accum = accumBuf.Get<float>();
+    AscendC::LocalTensor<half> output = outputBuf.Get<half>();
+    AscendC::LocalTensor<float> dequant = dequantBuf.Get<float>();
+    AscendC::LocalTensor<float> weight = weightBuf.Get<float>();
+    AscendC::GlobalTensor<half> yOut;
+    yOut.SetGlobalBuffer(reinterpret_cast<__gm__ half *>(yOutGM), bs * h);
+
+    const uint32_t flagCount = static_cast<uint32_t>(
+        blockCount * TileXR::DATA_AS_FLAG_FLAG_FLOATS);
+    AscendC::Duplicate<float>(zeroFlags, 0.0f, flagCount);
+    AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
+    AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
+
+    const int64_t tokenBegin = bs * laneId / TileXREp::kEpUrmaCombinePackLaneCount;
+    const int64_t tokenEnd = bs * (laneId + 1) / TileXREp::kEpUrmaCombinePackLaneCount;
+    const bool profileFine = TileXR::TileXRPerfTraceEnabled(perfTrace);
+    int64_t tokensRemaining = tokenEnd - tokenBegin;
+    int64_t activeToken[kRxTokenScheduleWindow] = {};
+    bool tokenActive[kRxTokenScheduleWindow] = {};
+    uint32_t routeReadyMask[kRxTokenScheduleWindow] = {};
+    int64_t nextToken = tokenBegin;
+    for (int64_t slot = 0; slot < kRxTokenScheduleWindow && nextToken < tokenEnd; ++slot) {
+        activeToken[slot] = nextToken++;
+        routeReadyMask[slot] = 0;
+        tokenActive[slot] = true;
+    }
+    int64_t nextCandidate = 0;
+    const uint32_t allRoutesReadyMask = (1U << static_cast<uint32_t>(topK)) - 1U;
+    while (tokensRemaining > 0) {
+        int64_t token = 0;
+        int64_t selectedSlot = -1;
+        uint64_t bypassedTokens = 0;
+        const uint64_t flagPollStart = ProfileBegin(perfTrace);
+        uint64_t pollPasses = 0;
+        uint64_t routeChecks = 0;
+        uint64_t readyMisses = 0;
+        while (selectedSlot < 0) {
+            for (int64_t offset = 0; offset < kRxTokenScheduleWindow; ++offset) {
+                int64_t candidate = nextCandidate + offset;
+                if (candidate >= kRxTokenScheduleWindow) {
+                    candidate -= kRxTokenScheduleWindow;
+                }
+                if (!tokenActive[candidate]) {
+                    continue;
+                }
+                if (profileFine) {
+                    ++pollPasses;
+                }
+                const int64_t candidateToken = activeToken[candidate];
+                uint32_t readyMask = routeReadyMask[candidate];
+                for (int64_t topKId = 0; topKId < topK; ++topKId) {
+                    const uint32_t routeBit = 1U << static_cast<uint32_t>(topKId);
+                    if ((readyMask & routeBit) != 0) {
+                        continue;
+                    }
+                    const int64_t routeIndex = candidateToken * topK + topKId;
+                    GM_ADDR routeAddr = workspaceGM + rxWindowOffset + routeIndex * routeStride;
+                    if (profileFine) {
+                        ++routeChecks;
+                    }
+                    if (CheckRouteReady(routeAddr, blockCount, flags)) {
+                        readyMask |= routeBit;
+                    } else {
+                        if (profileFine) {
+                            ++readyMisses;
+                        }
+                    }
+                }
+                routeReadyMask[candidate] = readyMask;
+                if (readyMask == allRoutesReadyMask) {
+                    selectedSlot = candidate;
+                    break;
+                }
+            }
+        }
+        token = activeToken[selectedSlot];
+        for (int64_t slot = 0; slot < kRxTokenScheduleWindow; ++slot) {
+            if (tokenActive[slot] && activeToken[slot] < token) {
+                ++bypassedTokens;
+            }
+        }
+        nextCandidate = selectedSlot + 1;
+        if (nextCandidate >= kRxTokenScheduleWindow) {
+            nextCandidate = 0;
+        }
+        CachelessAcquireBarrier();
+        ProfileEnd(perfTrace, perfStats, PerfStage::RX_FLAG_POLL_WAIT, flagPollStart);
+        ProfileAux(perfTrace, perfStats, PerfStage::RX_FLAG_POLL_WAIT, 0, pollPasses);
+        ProfileAux(perfTrace, perfStats, PerfStage::RX_FLAG_POLL_WAIT, 1, routeChecks);
+        ProfileAux(perfTrace, perfStats, PerfStage::RX_FLAG_POLL_WAIT, 2, readyMisses);
+        ProfileAux(perfTrace, perfStats, PerfStage::RX_FLAG_POLL_WAIT, 3,
+            routeChecks * static_cast<uint64_t>(blockCount));
+
+        LoadTopKWeights(topKWeightsGM, token * topK, topK, weight);
+        if (topK > 0) {
+            GM_ADDR firstRouteAddr = workspaceGM + rxWindowOffset + token * topK * routeStride;
+            StartUnpackRoute(firstRouteAddr, blockCount, logical0, PipelineEvent(0));
+        }
+        for (int64_t topKId = 0; topKId < topK; ++topKId) {
+            const int64_t slot = topKId % kPipelineBufferCount;
+            const event_t eventId = PipelineEvent(slot);
+            AscendC::LocalTensor<float> &routeLogicalFloat = slot == 0 ? logicalFloat0 : logicalFloat1;
+            AscendC::LocalTensor<int32_t> &routeLogicalInt = slot == 0 ? logicalInt0 : logicalInt1;
+            AscendC::LocalTensor<int8_t> &routeLogicalInt8 = slot == 0 ? logicalInt80 : logicalInt81;
+            const int64_t routeIndex = token * topK + topKId;
+            GM_ADDR routeAddr = workspaceGM + rxWindowOffset + routeIndex * routeStride;
+            const uint64_t unpackWaitStart = ProfileBegin(perfTrace);
+            WaitUnpackRoute(eventId);
+            ProfileEnd(perfTrace, perfStats, PerfStage::RX_UNPACK_WAIT, unpackWaitStart);
+            ProfileAux(perfTrace, perfStats, PerfStage::RX_UNPACK_WAIT, 0,
+                static_cast<uint64_t>(blockCount * TileXREp::kEpUrmaCombinePayloadBytes));
+
+            const uint64_t dequantStart = ProfileBegin(perfTrace);
+            const float scale = routeLogicalFloat.GetValue(0);
+            const int32_t quantMode = routeLogicalInt.GetValue(1);
+            if (!(scale > 0.0f) || quantMode != TileXREp::kEpUrmaCombineQuantModeInt8PerRoute) {
+                StoreError(workspaceGM, errorStatusOffset, magic,
+                    TileXREp::kEpUrmaCombineStatusInvalidQuantHeader);
+            }
+            const float effectiveScale = scale > 0.0f ? scale : 1.0f;
+            const float topKWeight = weight.GetValue(static_cast<uint32_t>(topKId));
+            AscendC::Cast<half, int8_t>(output,
+                routeLogicalInt8[TileXREp::kEpUrmaCombineQuantHeaderBytes], AscendC::RoundMode::CAST_NONE,
+                static_cast<uint32_t>(h));
+            AscendC::PipeBarrier<PIPE_V>();
+            if (topKId + 1 < topK) {
+                const int64_t nextSlot = (slot + 1) % kPipelineBufferCount;
+                GM_ADDR nextRouteAddr = routeAddr + routeStride;
+                AscendC::LocalTensor<uint8_t> &nextLogical = nextSlot == 0 ? logical0 : logical1;
+                StartUnpackRoute(nextRouteAddr, blockCount,
+                    nextLogical, PipelineEvent(nextSlot));
+            }
+            AscendC::Cast<float, half>(dequant, output, AscendC::RoundMode::CAST_NONE,
+                static_cast<uint32_t>(h));
+            AscendC::PipeBarrier<PIPE_V>();
+            if (topKId == 0) {
+                AscendC::Muls<float>(accum, dequant, effectiveScale * topKWeight,
+                    static_cast<uint32_t>(h));
+            } else {
+                AscendC::Axpy<float, float>(accum, dequant, effectiveScale * topKWeight,
+                    static_cast<int32_t>(h));
+            }
+            AscendC::PipeBarrier<PIPE_V>();
+            StartClearRouteFlags(routeAddr, blockCount, zeroFlags);
+            ProfileEnd(perfTrace, perfStats, PerfStage::RX_UNPACK_DEQUANT_CLEAR, dequantStart);
+            ProfileAux(perfTrace, perfStats, PerfStage::RX_UNPACK_DEQUANT_CLEAR, 0,
+                static_cast<uint64_t>(h));
+            ProfileAux(perfTrace, perfStats, PerfStage::RX_UNPACK_DEQUANT_CLEAR, 1,
+                static_cast<uint64_t>(blockCount));
+        }
+
+        const uint64_t clearFenceStart = ProfileBegin(perfTrace);
+        FinishTokenRouteFlagClears();
+        ProfileEnd(perfTrace, perfStats, PerfStage::RX_UNPACK_DEQUANT_CLEAR, clearFenceStart);
+
+        const uint64_t outputStart = ProfileBegin(perfTrace);
+        AscendC::Cast<half, float>(output, accum, AscendC::RoundMode::CAST_ROUND,
+            static_cast<uint32_t>(h));
+        AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
+        AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
+        AscendC::DataCopyExtParams outputParams {
+            1, static_cast<uint32_t>(h * static_cast<int64_t>(sizeof(half))), 0, 0, 0};
+        AscendC::DataCopyPad(yOut[token * h], output, outputParams);
+        AscendC::SetFlag<AscendC::HardEvent::MTE3_S>(EVENT_ID0);
+        AscendC::WaitFlag<AscendC::HardEvent::MTE3_S>(EVENT_ID0);
+        ProfileEnd(perfTrace, perfStats, PerfStage::RX_OUTPUT, outputStart);
+        ProfileAux(perfTrace, perfStats, PerfStage::RX_OUTPUT, 0,
+            static_cast<uint64_t>(h * static_cast<int64_t>(sizeof(half))));
+        ProfileAux(perfTrace, perfStats, PerfStage::RX_OUTPUT, 1, bypassedTokens);
+        ProfileAux(perfTrace, perfStats, PerfStage::RX_OUTPUT, 2, bypassedTokens == 0 ? 0U : 1U);
+
+        --tokensRemaining;
+        routeReadyMask[selectedSlot] = 0;
+        if (nextToken < tokenEnd) {
+            activeToken[selectedSlot] = nextToken++;
+            tokenActive[selectedSlot] = true;
+        } else {
+            tokenActive[selectedSlot] = false;
+        }
+    }
+
+    StoreControlValue(workspaceGM + rxLaneDoneOffset +
+        laneId * TileXREp::kEpUrmaCombineCacheLineBytes,
+        EncodeControlValue(magic, TileXREp::kEpUrmaCombineRxLaneDone));
+}
+
+__aicore__ inline void CopySelfRoute(
+    GM_ADDR srcAddr, GM_ADDR dstAddr, int64_t blockCount, AscendC::LocalTensor<uint8_t> &payload,
+    AscendC::LocalTensor<float> &readyFlags)
+{
+    AscendC::GlobalTensor<uint8_t> src;
+    AscendC::GlobalTensor<uint8_t> dst;
+    src.SetGlobalBuffer(reinterpret_cast<__gm__ uint8_t *>(srcAddr));
+    dst.SetGlobalBuffer(reinterpret_cast<__gm__ uint8_t *>(dstAddr));
+    SetNoCacheRead(src);
+    SetNoCacheWrite(dst);
+    AscendC::DataCopyExtParams payloadIn {
+        static_cast<uint16_t>(blockCount), static_cast<uint32_t>(TileXREp::kEpUrmaCombinePayloadBytes),
+        static_cast<uint32_t>(TileXREp::kEpUrmaCombineFlagBytes), 0, 0};
+    AscendC::DataCopyPadExtParams<uint8_t> noPad {false, 0, 0, 0};
+    AscendC::DataCopyPad(payload, src, payloadIn, noPad);
+    AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE3>(EVENT_ID0);
+    AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE3>(EVENT_ID0);
+
+    AscendC::DataCopyExtParams payloadOut {
+        static_cast<uint16_t>(blockCount), static_cast<uint32_t>(TileXREp::kEpUrmaCombinePayloadBytes),
+        0, static_cast<uint32_t>(TileXREp::kEpUrmaCombineFlagBytes), 0};
+    AscendC::DataCopyPad(dst, payload, payloadOut);
+    AscendC::SetFlag<AscendC::HardEvent::MTE3_S>(EVENT_ID0);
+    AscendC::WaitFlag<AscendC::HardEvent::MTE3_S>(EVENT_ID0);
+
+    AscendC::GlobalTensor<float> dstFlags;
+    dstFlags.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(
+        dstAddr + TileXREp::kEpUrmaCombinePayloadBytes));
+    SetNoCacheWrite(dstFlags);
+    AscendC::DataCopyExtParams flagOut {
+        static_cast<uint16_t>(blockCount), static_cast<uint32_t>(TileXREp::kEpUrmaCombineFlagBytes),
+        0, static_cast<uint32_t>(TileXREp::kEpUrmaCombinePayloadBytes), 0};
+    AscendC::DataCopyPad(dstFlags, readyFlags, flagOut);
+    AscendC::SetFlag<AscendC::HardEvent::MTE3_S>(EVENT_ID0);
+    AscendC::WaitFlag<AscendC::HardEvent::MTE3_S>(EVENT_ID0);
+}
+
+__aicore__ inline bool SendRoutes(const __gm__ TileXR::CommArgs *args, GM_ADDR assistInfoGM,
+    GM_ADDR workspaceGM, int64_t selfSendCnt, int64_t bs, int64_t topK, int64_t magic, int64_t rxWindowOffset,
+    int64_t blockCount, int64_t routeStride, int64_t txReadyOffset, int64_t txDataOffset,
+    int64_t senderDoneOffset, int64_t errorStatusOffset, int64_t senderId, AscendC::TPipe &pipe,
+    GM_ADDR perfTrace, __ubuf__ PerfStats *perfStats)
+{
+    const int64_t cursorBytes = AlignUpInt64(
+        TileXREp::kEpUrmaCombinePackLaneCount * static_cast<int64_t>(sizeof(uint32_t)), kCursorAlignment);
+    const int64_t usedPeerBytes = AlignUpInt64(args->rankSize, kCursorAlignment);
+    const int64_t selfCopyPayloadBytes = blockCount * TileXREp::kEpUrmaCombinePayloadBytes;
+    const int64_t selfCopyFlagBytes = blockCount * TileXREp::kEpUrmaCombineFlagBytes;
+    AscendC::TBuf<AscendC::QuePosition::VECCALC> cursorBuf;
+    AscendC::TBuf<AscendC::QuePosition::VECCALC> usedPeerBuf;
+    AscendC::TBuf<AscendC::QuePosition::VECCALC> selfCopyBuf;
+    pipe.InitBuffer(cursorBuf, static_cast<uint32_t>(cursorBytes));
+    pipe.InitBuffer(usedPeerBuf, static_cast<uint32_t>(usedPeerBytes));
+    pipe.InitBuffer(selfCopyBuf,
+        static_cast<uint32_t>(selfCopyPayloadBytes + selfCopyFlagBytes));
+    AscendC::LocalTensor<uint32_t> cursor = cursorBuf.Get<uint32_t>();
+    AscendC::LocalTensor<uint8_t> usedPeer = usedPeerBuf.Get<uint8_t>();
+    AscendC::LocalTensor<uint8_t> selfCopyPayload = selfCopyBuf.GetWithOffset<uint8_t>(
+        static_cast<uint32_t>(selfCopyPayloadBytes), 0);
+    AscendC::LocalTensor<float> selfCopyReady = selfCopyBuf.GetWithOffset<float>(
+        static_cast<uint32_t>(selfCopyFlagBytes / sizeof(float)),
+        static_cast<uint32_t>(selfCopyPayloadBytes));
+    AscendC::Duplicate<float>(selfCopyReady, TileXR::DATA_AS_FLAG_READY_VALUE,
+        static_cast<uint32_t>(selfCopyFlagBytes / sizeof(float)));
+    AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID1);
+    AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID1);
+
+    for (int64_t lane = 0; lane < TileXREp::kEpUrmaCombinePackLaneCount; ++lane) {
+        const int64_t begin = selfSendCnt * lane / TileXREp::kEpUrmaCombinePackLaneCount;
+        const int64_t end = selfSendCnt * (lane + 1) / TileXREp::kEpUrmaCombinePackLaneCount;
+        const int64_t laneLength = end - begin;
+        const int64_t remainder = laneLength % TileXREp::kEpUrmaCombineSendLaneCount;
+        const bool reverse = (lane & 1) != 0;
+
+        // Preserve the globally balanced residue set, but reverse odd lanes so no sender
+        // consistently waits for the last route produced by every Pack core.
+        int64_t rotation = lane % TileXREp::kEpUrmaCombineSendLaneCount;
+        if (remainder != 0) {
+            rotation = begin % TileXREp::kEpUrmaCombineSendLaneCount;
+            if (reverse) {
+                rotation = (rotation + remainder - 1) % TileXREp::kEpUrmaCombineSendLaneCount;
+            }
+        }
+        const int64_t signedDelta = reverse ? rotation - senderId : senderId - rotation;
+        const int64_t delta = (signedDelta + TileXREp::kEpUrmaCombineSendLaneCount) %
+            TileXREp::kEpUrmaCombineSendLaneCount;
+        cursor.SetValue(static_cast<uint32_t>(lane), static_cast<uint32_t>(begin + delta));
+    }
+
+    const int32_t rank = args->rank;
+    const int32_t rankSize = args->rankSize;
+    for (int32_t peer = 0; peer < rankSize; ++peer) {
+        usedPeer.SetValue(static_cast<uint32_t>(peer), 0);
+    }
+    const uint64_t readyValue = EncodeControlValue(magic, TileXREp::kEpUrmaCombineTxRouteReady);
+    uint64_t remotePutCount = 0;
+    bool allScanned = false;
+    while (!allScanned) {
+        allScanned = true;
+        for (int64_t lane = 0; lane < TileXREp::kEpUrmaCombinePackLaneCount; ++lane) {
+            const int64_t begin = selfSendCnt * lane / TileXREp::kEpUrmaCombinePackLaneCount;
+            const int64_t end = selfSendCnt * (lane + 1) / TileXREp::kEpUrmaCombinePackLaneCount;
+            const int64_t route = cursor.GetValue(static_cast<uint32_t>(lane));
+            if (route >= end) {
+                continue;
+            }
+            allScanned = false;
+            GM_ADDR readyAddr = workspaceGM + txReadyOffset +
+                route * TileXREp::kEpUrmaCombineCacheLineBytes;
+            const uint64_t readyPollStart = ProfileBegin(perfTrace);
+            const bool routeReady = LoadControlValue(readyAddr) == readyValue;
+            ProfileEnd(perfTrace, perfStats, PerfStage::TX_READY_POLL, readyPollStart);
+            if (!routeReady) {
+                ProfileAux(perfTrace, perfStats, PerfStage::TX_READY_POLL, 0, 1);
+                continue;
+            }
+            CachelessAcquireBarrier();
+            ProfileAux(perfTrace, perfStats, PerfStage::TX_READY_POLL, 1, 1);
+
+            const uint64_t metaScanStart = ProfileBegin(perfTrace);
+            const TileXREp::EpAssistTuple tuple = LoadRouteMeta(assistInfoGM, route);
+            if (!RouteMetaValid(tuple, rankSize, bs, topK)) {
+                ProfileEnd(perfTrace, perfStats, PerfStage::TX_META_SCAN, metaScanStart);
+                ProfileAux(perfTrace, perfStats, PerfStage::TX_META_SCAN, 0, 1);
+                StoreError(workspaceGM, errorStatusOffset, magic,
+                    TileXREp::kEpUrmaCombineStatusInvalidRoute);
+                cursor.SetValue(static_cast<uint32_t>(lane), static_cast<uint32_t>(
+                    route + TileXREp::kEpUrmaCombineSendLaneCount));
+                continue;
+            }
+            ProfileEnd(perfTrace, perfStats, PerfStage::TX_META_SCAN, metaScanStart);
+            ProfileAux(perfTrace, perfStats, PerfStage::TX_META_SCAN,
+                tuple.srcRank == rank ? 1U : 2U, 1);
+
+            const int64_t routeIndex = static_cast<int64_t>(tuple.tokenId) * topK + tuple.topKId;
+            const int64_t rxRouteOffset = rxWindowOffset + routeIndex * routeStride;
+            GM_ADDR txRouteAddr = workspaceGM + txDataOffset + route * routeStride;
+            if (tuple.srcRank == rank) {
+                const uint64_t selfCopyStart = ProfileBegin(perfTrace);
+                CopySelfRoute(txRouteAddr, workspaceGM + rxRouteOffset, blockCount, selfCopyPayload,
+                    selfCopyReady);
+                ProfileEnd(perfTrace, perfStats, PerfStage::SELF_COPY, selfCopyStart);
+                ProfileAux(perfTrace, perfStats, PerfStage::SELF_COPY, 0,
+                    static_cast<uint64_t>(routeStride));
+            } else {
+                const uint64_t postStart = ProfileBegin(perfTrace);
+                    TileXREp::EpUrmaUDMAPutNbi<uint8_t>(args, tuple.srcRank,
+                        reinterpret_cast<__gm__ uint8_t *>(txRouteAddr),
+                        static_cast<uint64_t>(rxRouteOffset), static_cast<uint32_t>(routeStride),
+                        static_cast<uint32_t>(senderId));
+                    ++remotePutCount;
+                usedPeer.SetValue(static_cast<uint32_t>(tuple.srcRank), 1);
+                ProfileEnd(perfTrace, perfStats, PerfStage::UDMA_POST, postStart);
+                ProfileAux(perfTrace, perfStats, PerfStage::UDMA_POST, 0,
+                    static_cast<uint64_t>(routeStride));
+            }
+            cursor.SetValue(static_cast<uint32_t>(lane), static_cast<uint32_t>(
+                route + TileXREp::kEpUrmaCombineSendLaneCount));
+        }
+    }
+
+
+    const uint64_t doorbellCommitCount = remotePutCount;
+    const uint64_t activeSendSqCount = 0;
+    ProfileAux(perfTrace, perfStats, PerfStage::UDMA_POST, 1,
+        doorbellCommitCount);
+    ProfileAux(perfTrace, perfStats, PerfStage::UDMA_POST, 2, 1);
+    ProfileAux(perfTrace, perfStats, PerfStage::UDMA_POST, 3,
+        activeSendSqCount);
+
+    __gm__ TileXR::UDMAInfo *udmaInfo = TileXR::GetUDMAInfo(args);
+    for (int32_t peer = 0; peer < rankSize; ++peer) {
+        if (usedPeer.GetValue(static_cast<uint32_t>(peer)) == 0) {
+            continue;
+        }
+        const uint64_t wqeCntAddr = TileXR::UDMAGetWQCtx(
+            udmaInfo, static_cast<uint32_t>(peer), static_cast<uint32_t>(senderId))->wqeCntAddr;
+        bool queueAlreadyDrained = false;
+        for (int32_t previous = 0; previous < peer; ++previous) {
+            if (usedPeer.GetValue(static_cast<uint32_t>(previous)) != 0 &&
+                TileXR::UDMAGetWQCtx(udmaInfo, static_cast<uint32_t>(previous),
+                    static_cast<uint32_t>(senderId))->wqeCntAddr == wqeCntAddr) {
+                queueAlreadyDrained = true;
+                break;
+            }
+        }
+        if (queueAlreadyDrained) {
+            continue;
+        }
+        const uint64_t quietStart = ProfileBegin(perfTrace);
+        (void)TileXREp::EpUrmaUDMAQuiet(args, peer, static_cast<uint32_t>(senderId));
+        ProfileEnd(perfTrace, perfStats, PerfStage::UDMA_QUIET, quietStart);
+        ProfileAux(perfTrace, perfStats, PerfStage::UDMA_QUIET, 0, 1);
+    }
+    StoreControlValue(workspaceGM + senderDoneOffset +
+        senderId * TileXREp::kEpUrmaCombineCacheLineBytes,
+        EncodeControlValue(magic, TileXREp::kEpUrmaCombineSenderDone));
+    return true;
+}
+
+
+__aicore__ inline bool WaitLocalLines(
+    GM_ADDR base, int64_t lineCount, uint64_t expected)
+{
+    for (int64_t line = 0; line < lineCount; ++line) {
+        GM_ADDR lineAddr = base + line * TileXREp::kEpUrmaCombineCacheLineBytes;
+        while (LoadControlValue(lineAddr) != expected) {
+        }
+    }
+    CachelessAcquireBarrier();
+    return true;
+}
+
+__aicore__ inline bool ReleaseGenerationReached(
+    uint64_t observed, uint32_t expectedGeneration)
+{
+    const uint32_t observedStep = static_cast<uint32_t>(observed);
+    const uint32_t observedGeneration = static_cast<uint32_t>(observed >> 32U);
+    return observedStep == TileXREp::kEpUrmaCombineRxBufferReleased &&
+        static_cast<int32_t>(observedGeneration - expectedGeneration) >= 0;
+}
+
+__aicore__ inline bool WaitDeferredRoundCredit(
+    const __gm__ TileXR::CommArgs *args, GM_ADDR workspaceGM, int64_t magic,
+    int64_t roundDoneOffset, int64_t senderDoneOffset, int64_t roundCreditOffset,
+    int64_t senderId,
+    GM_ADDR perfTrace, GM_ADDR finePerfTrace, __ubuf__ PerfStats *perfStats)
+{
+    const uint64_t globalWaitStart = ProfileBegin(perfTrace);
+    const int32_t rank = args->rank;
+    const int32_t rankSize = args->rankSize;
+    const int64_t creditLaneCount = rankSize < TileXREp::kEpUrmaCombineSendLaneCount ?
+        rankSize : TileXREp::kEpUrmaCombineSendLaneCount;
+    uint64_t pollLoads = 0;
+    uint32_t expectedGeneration = 0;
+    if (senderId < creditLaneCount) {
+        const uint64_t previousRelease = LoadControlValue(workspaceGM + roundDoneOffset +
+            rank * TileXREp::kEpUrmaCombineCacheLineBytes);
+        const uint32_t previousStep = static_cast<uint32_t>(previousRelease);
+        expectedGeneration = static_cast<uint32_t>(previousRelease >> 32U);
+        if (previousRelease != 0 && previousStep != TileXREp::kEpUrmaCombineRxBufferReleased) {
+            return false;
+        }
+        for (int32_t peer = static_cast<int32_t>(senderId); peer < rankSize;
+             peer += static_cast<int32_t>(creditLaneCount)) {
+            if (peer == rank || previousRelease == 0) {
+                continue;
+            }
+            // The same-parity roundDone line is the previous release source. Complete its
+            // QP before this launch can eventually overwrite that line with the next release.
+            (void)TileXREp::EpUrmaUDMAQuiet(
+                args, peer, static_cast<uint32_t>(senderId));
+            GM_ADDR peerRelease = workspaceGM + roundDoneOffset +
+                peer * TileXREp::kEpUrmaCombineCacheLineBytes;
+            while (true) {
+                ++pollLoads;
+                if (ReleaseGenerationReached(
+                        LoadControlValue(peerRelease), expectedGeneration)) {
+                    break;
+                }
+            }
+        }
+        StoreControlValue(workspaceGM + senderDoneOffset +
+            senderId * TileXREp::kEpUrmaCombineCacheLineBytes,
+            EncodeControlValue(magic, TileXREp::kEpUrmaCombineCreditShardDone));
+    }
+    if (senderId == 0) {
+        if (!WaitLocalLines(workspaceGM + senderDoneOffset, creditLaneCount,
+                EncodeControlValue(magic, TileXREp::kEpUrmaCombineCreditShardDone))) {
+            return false;
+        }
+        StoreControlValue(workspaceGM + roundCreditOffset,
+            EncodeControlValue(magic, TileXREp::kEpUrmaCombineCreditRun));
+    }
+    if (!WaitLocalLines(workspaceGM + roundCreditOffset, 1,
+            EncodeControlValue(magic, TileXREp::kEpUrmaCombineCreditRun))) {
+        return false;
+    }
+    ProfileEnd(perfTrace, perfStats, PerfStage::GLOBAL_ROUND_WAIT, globalWaitStart);
+    ProfileAux(perfTrace, perfStats, PerfStage::GLOBAL_ROUND_WAIT, 0, pollLoads);
+    ProfileAux(perfTrace, perfStats, PerfStage::GLOBAL_ROUND_WAIT, 1, expectedGeneration);
+    return true;
+}
+
+__aicore__ inline bool WaitLocalLineShard(
+    GM_ADDR base, int64_t lineCount, int64_t firstLine, int64_t lineStride,
+    uint64_t expected)
+{
+    for (int64_t line = firstLine; line < lineCount; line += lineStride) {
+        GM_ADDR lineAddr = base + line * TileXREp::kEpUrmaCombineCacheLineBytes;
+        while (LoadControlValue(lineAddr) != expected) {
+        }
+    }
+    CachelessAcquireBarrier();
+    return true;
+}
+
+__aicore__ inline bool WaitForSynchronizedStart(
+    const __gm__ TileXR::CommArgs *args,
+    GM_ADDR workspaceGM, int64_t magic, int64_t rxLaneDoneOffset, int64_t senderDoneOffset,
+    int64_t roundPublishOffset, int64_t startGateOffset, int64_t blockIdx,
+    GM_ADDR perfTrace, __ubuf__ PerfStats *perfStats)
+{
+    const uint64_t gateStart = ProfileBegin(perfTrace);
+    const uint64_t localReady = EncodeControlValue(
+        magic, TileXREp::kEpUrmaCombineStartLocalReady);
+    const bool isPackReceive = blockIdx < TileXREp::kEpUrmaCombinePackLaneCount;
+    if (isPackReceive) {
+        StoreControlValue(workspaceGM + rxLaneDoneOffset +
+            blockIdx * TileXREp::kEpUrmaCombineCacheLineBytes,
+            localReady);
+    } else {
+        const int64_t senderId = blockIdx - TileXREp::kEpUrmaCombinePackLaneCount;
+        StoreControlValue(workspaceGM + senderDoneOffset +
+            senderId * TileXREp::kEpUrmaCombineCacheLineBytes,
+            localReady);
+    }
+
+    const uint64_t startRun = EncodeControlValue(magic, TileXREp::kEpUrmaCombineStartRun);
+    if (isPackReceive) {
+        if (!WaitLocalLines(workspaceGM + roundPublishOffset, 1, startRun)) {
+            return false;
+        }
+        ProfileEnd(perfTrace, perfStats, PerfStage::START_GATE, gateStart);
+        return true;
+    }
+
+    const int64_t senderId = blockIdx - TileXREp::kEpUrmaCombinePackLaneCount;
+    const int32_t rank = args->rank;
+    const int32_t rankSize = args->rankSize;
+    const uint64_t rankReady = EncodeControlValue(
+        magic, TileXREp::kEpUrmaCombineStartRankReady);
+    GM_ADDR rankReadyAddr = workspaceGM + startGateOffset +
+        rank * TileXREp::kEpUrmaCombineCacheLineBytes;
+    if (senderId == 0) {
+        if (!WaitLocalLines(workspaceGM + rxLaneDoneOffset, TileXREp::kEpUrmaCombinePackLaneCount,
+                localReady) ||
+            !WaitLocalLines(workspaceGM + senderDoneOffset, TileXREp::kEpUrmaCombineSendLaneCount,
+                localReady)) {
+            return false;
+        }
+        StoreControlValue(rankReadyAddr, rankReady);
+        StoreControlValue(workspaceGM + roundPublishOffset, rankReady);
+    }
+    if (!WaitLocalLines(workspaceGM + roundPublishOffset, 1, rankReady)) {
+        return false;
+    }
+
+    const uint32_t qpIdx = static_cast<uint32_t>(senderId);
+    const uint64_t remoteOffset = static_cast<uint64_t>(startGateOffset +
+        rank * TileXREp::kEpUrmaCombineCacheLineBytes);
+    uint64_t publishCount = 0;
+    for (int32_t peer = static_cast<int32_t>(senderId); peer < rankSize;
+         peer += static_cast<int32_t>(TileXREp::kEpUrmaCombineSendLaneCount)) {
+        if (peer == rank) {
+            continue;
+        }
+        TileXREp::EpUrmaUDMAPutNbi<uint8_t>(args, peer,
+            reinterpret_cast<__gm__ uint8_t *>(rankReadyAddr), remoteOffset,
+            static_cast<uint32_t>(TileXREp::kEpUrmaCombineCacheLineBytes), qpIdx);
+        ++publishCount;
+    }
+    for (int32_t peer = static_cast<int32_t>(senderId); peer < rankSize;
+         peer += static_cast<int32_t>(TileXREp::kEpUrmaCombineSendLaneCount)) {
+        if (peer == rank) {
+            continue;
+        }
+        (void)TileXREp::EpUrmaUDMAQuiet(args, peer, qpIdx);
+    }
+    ProfileAux(perfTrace, perfStats, PerfStage::START_GATE, 0, publishCount);
+    ProfileAux(perfTrace, perfStats, PerfStage::START_GATE, 1,
+        publishCount * TileXREp::kEpUrmaCombineCacheLineBytes);
+    ProfileAux(perfTrace, perfStats, PerfStage::START_GATE, 2, publishCount);
+    ProfileAux(perfTrace, perfStats, PerfStage::START_GATE, 3, publishCount);
+    StoreControlValue(workspaceGM + senderDoneOffset +
+        senderId * TileXREp::kEpUrmaCombineCacheLineBytes,
+        EncodeControlValue(magic, TileXREp::kEpUrmaCombineStartPublishDone));
+
+    if (senderId == 0) {
+        if (!WaitLocalLines(workspaceGM + senderDoneOffset, TileXREp::kEpUrmaCombineSendLaneCount,
+                EncodeControlValue(magic, TileXREp::kEpUrmaCombineStartPublishDone)) ||
+            !WaitLocalLines(workspaceGM + startGateOffset, rankSize, rankReady)) {
+            return false;
+        }
+        StoreControlValue(workspaceGM + roundPublishOffset, startRun);
+    }
+    if (!WaitLocalLines(workspaceGM + roundPublishOffset, 1, startRun)) {
+        return false;
+    }
+    ProfileEnd(perfTrace, perfStats, PerfStage::START_GATE, gateStart);
+    return true;
+}
+
+__aicore__ inline void RecordRoundPublishCounters(
+    GM_ADDR perfTrace, __ubuf__ PerfStats *perfStats, uint64_t publishCount)
+{
+    ProfileAux(perfTrace, perfStats, PerfStage::ROUND_PUBLISH, 0, publishCount);
+    ProfileAux(perfTrace, perfStats, PerfStage::ROUND_PUBLISH, 1,
+        publishCount * TileXREp::kEpUrmaCombineCacheLineBytes);
+    ProfileAux(perfTrace, perfStats, PerfStage::ROUND_PUBLISH, 2, publishCount);
+    ProfileAux(perfTrace, perfStats, PerfStage::ROUND_PUBLISH, 3, publishCount);
+}
+
+__aicore__ inline uint64_t StartParallelRoundPublish(
+    const __gm__ TileXR::CommArgs *args,
+    GM_ADDR workspaceGM, int64_t magic, int64_t roundDoneOffset, GM_ADDR perfTrace)
+{
+    const uint64_t publishStart = ProfileBegin(perfTrace);
+    const uint64_t roundValue = EncodeControlValue(magic, TileXREp::kEpUrmaCombineRxBufferReleased);
+    StoreControlValue(workspaceGM + roundDoneOffset +
+        args->rank * TileXREp::kEpUrmaCombineCacheLineBytes,
+        roundValue);
+    return publishStart;
+}
+__aicore__ inline uint64_t PublishRoundShard(
+    const __gm__ TileXR::CommArgs *args,
+    GM_ADDR workspaceGM, int64_t magic, int64_t roundDoneOffset, int64_t senderId,
+    GM_ADDR perfTrace, __ubuf__ PerfStats *perfStats)
+{
+    const int32_t rank = args->rank;
+    const int32_t rankSize = args->rankSize;
+    const uint64_t roundValue = EncodeControlValue(magic, TileXREp::kEpUrmaCombineRxBufferReleased);
+    GM_ADDR publishAddr = workspaceGM + roundDoneOffset +
+        rank * TileXREp::kEpUrmaCombineCacheLineBytes;
+    if (!WaitLocalLines(publishAddr, 1, roundValue)) {
+        return ~0ULL;
+    }
+
+    const uint64_t shardStart = senderId == 0 ? 0 : ProfileBegin(perfTrace);
+    const uint32_t qpIdx = static_cast<uint32_t>(senderId);
+    const uint64_t remoteOffset = static_cast<uint64_t>(roundDoneOffset +
+        rank * TileXREp::kEpUrmaCombineCacheLineBytes);
+    uint64_t publishCount = 0;
+    for (int32_t peer = static_cast<int32_t>(senderId); peer < rankSize;
+         peer += static_cast<int32_t>(TileXREp::kEpUrmaCombineSendLaneCount)) {
+        if (peer == rank) {
+            continue;
+        }
+        TileXREp::EpUrmaUDMAPutNbi<uint8_t>(args, peer,
+            reinterpret_cast<__gm__ uint8_t *>(publishAddr), remoteOffset,
+            static_cast<uint32_t>(TileXREp::kEpUrmaCombineCacheLineBytes), qpIdx);
+        ++publishCount;
+    }
+    if (senderId != 0) {
+        ProfileEnd(perfTrace, perfStats, PerfStage::ROUND_PUBLISH, shardStart);
+        RecordRoundPublishCounters(perfTrace, perfStats, publishCount);
+    }
+    return publishCount;
+}
+
+__aicore__ inline void FinishParallelRoundPublish(
+    uint64_t publishStart, uint64_t sender0PublishCount,
+    GM_ADDR perfTrace, __ubuf__ PerfStats *perfStats)
+{
+    ProfileEnd(perfTrace, perfStats, PerfStage::ROUND_PUBLISH, publishStart);
+    RecordRoundPublishCounters(perfTrace, perfStats, sender0PublishCount);
+}
+
+} // namespace
+
+extern "C" __global__ __aicore__ void tilexr_ep_urma_combine_kernel(GM_ADDR commArgsGM,
+    GM_ADDR expertOutGM, GM_ADDR assistInfoForCombineGM, GM_ADDR topKWeightsGM, GM_ADDR yOutGM,
+    GM_ADDR workspaceGM, int64_t selfSendCnt, int64_t bs, int64_t h, int64_t topK,
+    int64_t workspaceBytes, int64_t magic, int64_t commBytes, int64_t blockCount, int64_t routeStride,
+    int64_t rxWindowBytes, int64_t rxWindowOffset0, int64_t rxWindowOffset1, int64_t roundDoneOffset0,
+    int64_t roundDoneOffset1, int64_t rxLaneDoneOffset, int64_t senderDoneOffset,
+    int64_t roundPublishOffset, int64_t roundCreditOffset, int64_t startGateOffset,
+    int64_t runStartGate, int64_t errorStatusOffset,
+    int64_t txReadyOffset, int64_t txDataOffset, GM_ADDR perfTrace, int64_t perfTraceBytes,
+    GM_ADDR strictKernelCycles)
+{
+    if constexpr (g_coreType == AscendC::AIV) {
+        if (commArgsGM == nullptr || topKWeightsGM == nullptr || yOutGM == nullptr || workspaceGM == nullptr ||
+            (selfSendCnt > 0 && (expertOutGM == nullptr || assistInfoForCombineGM == nullptr)) ||
+            selfSendCnt < 0 || bs <= 0 || h <= 0 || h > TileXREp::kEpUrmaCombineMaxHidden || topK <= 0 ||
+            topK > TileXREp::kEpUrmaCombineMaxTopK || magic <= 0 || commBytes !=
+                TileXREp::kEpUrmaCombineQuantHeaderBytes + AlignUpInt64(h, kCursorAlignment) || blockCount <= 0 ||
+            blockCount != (commBytes + TileXREp::kEpUrmaCombinePayloadBytes - 1) /
+                TileXREp::kEpUrmaCombinePayloadBytes ||
+            blockCount > TileXREp::kEpUrmaCombineMaxBlocksPerRoute || routeStride <= 0 ||
+            routeStride != blockCount * TileXREp::kEpUrmaCombineDataBlockBytes ||
+            (runStartGate != 0 && runStartGate != 1) ||
+            roundCreditOffset <= 0 ||
+            roundCreditOffset > workspaceBytes - TileXREp::kEpUrmaCombineCacheLineBytes ||
+            rxWindowBytes <= 0 || txReadyOffset < 0 || txDataOffset < txReadyOffset ||
+            txDataOffset > workspaceBytes || selfSendCnt >
+                (txDataOffset - txReadyOffset) / TileXREp::kEpUrmaCombineCacheLineBytes ||
+            selfSendCnt > (workspaceBytes - txDataOffset) / routeStride) {
+            return;
+        }
+        auto args = reinterpret_cast<__gm__ TileXR::CommArgs *>(commArgsGM);
+        if (args->rankSize <= 0 || args->rankSize > TileXR::TILEXR_MAX_RANK_SIZE || args->rank < 0 ||
+            args->rank >= args->rankSize || (args->rankSize > 1 && !TileXR::UDMARegistryEnabled(args))) {
+            return;
+        }
+        if (args->rankSize > 1) {
+            __gm__ TileXR::UDMAInfo *udmaInfo = TileXR::GetUDMAInfo(args);
+            if (udmaInfo == nullptr || udmaInfo->qpNum <
+                static_cast<uint32_t>(TileXREp::kEpUrmaCombineRequiredQpCount)) {
+                return;
+            }
+        }
+        if (startGateOffset < 0 || startGateOffset > workspaceBytes ||
+            args->rankSize > (workspaceBytes - startGateOffset) /
+                TileXREp::kEpUrmaCombineCacheLineBytes) {
+            return;
+        }
+        if (strictKernelCycles != nullptr && perfTrace != nullptr) {
+            return;
+        }
+        if (!ProfileBufferValid(perfTrace, perfTraceBytes, args->rank, args->rankSize)) {
+            perfTrace = nullptr;
+        }
+        GM_ADDR kernelPerfTrace = perfTrace;
+
+        const int64_t blockIdx = AscendC::GetBlockIdx();
+        if (blockIdx < 0 || blockIdx >= TileXREp::kEpUrmaCombineAivCount) {
+            return;
+        }
+        const uint32_t perfRank = static_cast<uint32_t>(args->rank);
+        const uint32_t perfCore = static_cast<uint32_t>(blockIdx);
+        __ubuf__ PerfStats *perfStats = reinterpret_cast<__ubuf__ PerfStats *>(
+            TileXR::TILEXR_PERF_TRACE_LOCAL_STATS_UB_OFFSET);
+        TileXR::TileXRPerfLocalStatsInit(kernelPerfTrace, perfStats, perfRank, perfCore,
+            TileXREp::kEpUrmaCombinePerfStageCount);
+        GM_ADDR finePerfTrace = nullptr;
+        if (kernelPerfTrace != nullptr) {
+            const uint32_t profileDetail =
+                reinterpret_cast<__gm__ TileXR::TileXRPerfTraceHeader *>(kernelPerfTrace)->flags;
+            if (profileDetail >= 2) {
+                finePerfTrace = kernelPerfTrace;
+            }
+            if (profileDetail == 0) {
+                perfTrace = nullptr;
+            }
+        }
+        if (runStartGate != 0) {
+            if (!WaitForSynchronizedStart(args, workspaceGM, magic, rxLaneDoneOffset, senderDoneOffset,
+                    roundPublishOffset, startGateOffset, blockIdx, perfTrace, perfStats)) {
+                return;
+            }
+        }
+        const uint64_t kernelStart = ProfileKernelTimingBegin(kernelPerfTrace);
+        const uint64_t strictKernelStart = StrictKernelTimingBegin(strictKernelCycles);
+        const int64_t rxBufferIndex = static_cast<uint32_t>(magic) & 1U;
+        const int64_t rxWindowOffset = rxBufferIndex == 0 ? rxWindowOffset0 : rxWindowOffset1;
+        const int64_t roundDoneOffset = rxBufferIndex == 0 ? roundDoneOffset0 : roundDoneOffset1;
+        AscendC::TPipe pipe;
+        if (blockIdx < TileXREp::kEpUrmaCombinePackLaneCount) {
+            const uint64_t packStart = ProfileBegin(perfTrace);
+            PackRoutes(expertOutGM, workspaceGM, selfSendCnt, h, magic, blockCount, routeStride,
+                txReadyOffset, txDataOffset, blockIdx, pipe, finePerfTrace, perfStats);
+            ProfileEnd(perfTrace, perfStats, PerfStage::PACK_TOTAL, packStart);
+            pipe.Reset();
+            const uint64_t receiveStart = ProfileBegin(perfTrace);
+            ReceiveTokens(topKWeightsGM, yOutGM, workspaceGM, bs, h, topK, magic, rxWindowOffset,
+                blockCount, routeStride, rxLaneDoneOffset, errorStatusOffset, blockIdx, pipe,
+                finePerfTrace, perfStats);
+            ProfileEnd(perfTrace, perfStats, PerfStage::RECEIVE_TOTAL, receiveStart);
+            StrictKernelTimingFinish(strictKernelCycles, perfCore, strictKernelStart);
+            ProfileFinish(kernelPerfTrace, perfRank, perfCore, perfStats, kernelStart);
+            return;
+        }
+
+        const int64_t senderId = blockIdx - TileXREp::kEpUrmaCombinePackLaneCount;
+        if (senderId >= TileXREp::kEpUrmaCombineSendLaneCount) {
+            return;
+        }
+        if (!WaitDeferredRoundCredit(args, workspaceGM, magic, roundDoneOffset,
+                senderDoneOffset, roundCreditOffset, senderId,
+                perfTrace, finePerfTrace, perfStats)) {
+            return;
+        }
+        const uint64_t sendStart = ProfileBegin(perfTrace);
+        if (!SendRoutes(args, assistInfoForCombineGM, workspaceGM, selfSendCnt, bs, topK, magic,
+                rxWindowOffset, blockCount, routeStride, txReadyOffset, txDataOffset, senderDoneOffset,
+                errorStatusOffset, senderId, pipe, finePerfTrace, perfStats)) {
+            return;
+        }
+        ProfileEnd(perfTrace, perfStats, PerfStage::SEND_TOTAL, sendStart);
+        const int64_t publisherCount = args->rankSize < TileXREp::kEpUrmaCombineSendLaneCount ?
+            args->rankSize : TileXREp::kEpUrmaCombineSendLaneCount;
+        uint64_t publishStart = 0;
+        if (senderId < publisherCount) {
+            // Only release publishers participate, reducing sender0's serial fan-in while
+            // preserving complete coverage of every RX lane.
+            const uint64_t receiveWaitStart = ProfileBegin(perfTrace);
+            if (!WaitLocalLineShard(workspaceGM + rxLaneDoneOffset,
+                    TileXREp::kEpUrmaCombinePackLaneCount, senderId, publisherCount,
+                    EncodeControlValue(magic, TileXREp::kEpUrmaCombineRxLaneDone))) {
+                return;
+            }
+            StoreControlValue(workspaceGM + senderDoneOffset +
+                senderId * TileXREp::kEpUrmaCombineCacheLineBytes,
+                EncodeControlValue(magic, TileXREp::kEpUrmaCombineRxReleaseShardDone));
+            if (senderId == 0) {
+                if (!WaitLocalLines(workspaceGM + senderDoneOffset, publisherCount,
+                        EncodeControlValue(magic, TileXREp::kEpUrmaCombineRxReleaseShardDone))) {
+                    return;
+                }
+                ProfileEnd(perfTrace, perfStats, PerfStage::LOCAL_RX_WAIT, receiveWaitStart);
+                ProfileAux(perfTrace, perfStats, PerfStage::LOCAL_RX_WAIT, 0,
+                    static_cast<uint64_t>(TileXREp::kEpUrmaCombinePackLaneCount));
+                publishStart = StartParallelRoundPublish(args, workspaceGM, magic,
+                    roundDoneOffset, perfTrace);
+            } else {
+                ProfileEnd(perfTrace, perfStats, PerfStage::LOCAL_RX_WAIT, receiveWaitStart);
+            }
+        }
+
+        uint64_t publishCount = 0;
+        if (senderId < publisherCount) {
+            publishCount = PublishRoundShard(args, workspaceGM, magic,
+                roundDoneOffset, senderId, perfTrace, perfStats);
+            if (publishCount == ~0ULL) {
+                return;
+            }
+        }
+        if (senderId == 0) {
+            FinishParallelRoundPublish(publishStart, publishCount, perfTrace, perfStats);
+        }
+        StrictKernelTimingFinish(strictKernelCycles, perfCore, strictKernelStart);
+        ProfileFinish(kernelPerfTrace, perfRank, perfCore, perfStats, kernelStart);
+    }
+}
+
+
+void launch_tilexr_ep_urma_combine_kernel(uint32_t blockDim, void *stream, GM_ADDR commArgs,
+    GM_ADDR expertOut, GM_ADDR assistInfoForCombine, GM_ADDR topKWeights, GM_ADDR yOut, GM_ADDR workspace,
+    int64_t selfSendCnt, int64_t bs, int64_t h, int64_t topK, int64_t workspaceBytes, int64_t magic,
+    int64_t commBytes, int64_t blockCount, int64_t routeStride, int64_t rxWindowBytes, int64_t rxWindowOffset0,
+    int64_t rxWindowOffset1, int64_t roundDoneOffset0, int64_t roundDoneOffset1, int64_t rxLaneDoneOffset,
+    int64_t senderDoneOffset, int64_t roundPublishOffset, int64_t roundCreditOffset,
+    int64_t startGateOffset, int64_t runStartGate,
+    int64_t errorStatusOffset, int64_t txReadyOffset, int64_t txDataOffset, GM_ADDR perfTrace, int64_t perfTraceBytes,
+    GM_ADDR strictKernelCycles)
+{
+    tilexr_ep_urma_combine_kernel<<<blockDim, nullptr, stream>>>(commArgs, expertOut, assistInfoForCombine,
+        topKWeights, yOut, workspace, selfSendCnt, bs, h, topK, workspaceBytes, magic, commBytes,
+        blockCount, routeStride, rxWindowBytes, rxWindowOffset0, rxWindowOffset1,
+        roundDoneOffset0, roundDoneOffset1, rxLaneDoneOffset, senderDoneOffset, roundPublishOffset,
+        roundCreditOffset, startGateOffset, runStartGate, errorStatusOffset, txReadyOffset, txDataOffset,
+        perfTrace, perfTraceBytes,
+        strictKernelCycles);
+}

@@ -1,5 +1,14 @@
 include(GNUInstallDirs)
 
+option(TILEXR_EP_ENABLE_PROFILING "Enable EP URMA combine kernel profiling" OFF)
+
+# The protocol constants live in ep_urma_combine_config.h and are fixed
+# to the validated Ascend 950 S22 production configuration.
+set(TILEXR_EP_PROFILE_COMPILE_DEFINITION)
+if(TILEXR_EP_ENABLE_PROFILING)
+    set(TILEXR_EP_PROFILE_COMPILE_DEFINITION -DTILEXR_EP_ENABLE_PROFILING=1)
+endif()
+
 find_program(BISHENG_EXECUTABLE bisheng)
 if(NOT BISHENG_EXECUTABLE)
     message(FATAL_ERROR "bisheng not found; source scripts/common_env.sh before configuring with -DTILEXR_BUILD_EP=ON")
@@ -12,7 +21,9 @@ endif()
 set(TILEXR_EP_SOC_TYPE "${TILEXR_EP_DEFAULT_SOC_TYPE}" CACHE STRING "TileXR EP kernel SOC type")
 string(TOLOWER "${TILEXR_EP_SOC_TYPE}" TILEXR_EP_SOC_TYPE_LOWER)
 
+set(TILEXR_EP_URMA_COMBINE_SUPPORTED OFF)
 if(TILEXR_EP_SOC_TYPE_LOWER MATCHES "ascend950|ascend910_9|ascend910-9|a5")
+    set(TILEXR_EP_URMA_COMBINE_SUPPORTED ON)
     set(TILEXR_EP_NPU_ARCH "dav-3510")
     set(TILEXR_EP_AICORE_ARCH "--cce-aicore-arch=dav-c310-vec")
     set(TILEXR_EP_CATLASS_ARCH "3510")
@@ -24,6 +35,10 @@ else()
     set(TILEXR_EP_NPU_ARCH "dav-2201")
     set(TILEXR_EP_AICORE_ARCH "--cce-aicore-arch=dav-c220-vec")
     set(TILEXR_EP_CATLASS_ARCH "2201")
+endif()
+if(TILEXR_EP_BUILD_URMA_COMBINE AND NOT TILEXR_EP_URMA_COMBINE_SUPPORTED)
+    message(FATAL_ERROR
+        "TILEXR_EP_BUILD_URMA_COMBINE requires an Ascend950/A5 EP target")
 endif()
 
 set(TILEXR_EP_KERNEL_COMPILE_OPTIONS
@@ -40,8 +55,10 @@ set(TILEXR_EP_KERNEL_LINK_OPTIONS ${TILEXR_EP_AICORE_ARCH})
 
 set(TILEXR_EP_DISPATCH_KERNEL_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_ep_dispatch_kernel.cpp")
 set(TILEXR_EP_COMBINE_KERNEL_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_ep_combine_kernel.cpp")
+set(TILEXR_EP_URMA_COMBINE_KERNEL_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_ep_urma_combine_kernel.cpp")
 set(TILEXR_EP_DISPATCH_KERNEL_SO "${CMAKE_CURRENT_BINARY_DIR}/libtilexr_ep_dispatch_kernel.so")
 set(TILEXR_EP_COMBINE_KERNEL_SO "${CMAKE_CURRENT_BINARY_DIR}/libtilexr_ep_combine_kernel.so")
+set(TILEXR_EP_URMA_COMBINE_KERNEL_SO "${CMAKE_CURRENT_BINARY_DIR}/libtilexr_ep_urma_combine_kernel.so")
 set(TILEXR_EP_KERNEL_INCLUDES
     -I${ASCEND_HOME_PATH}/compiler/tikcpp
     -I${ASCEND_HOME_PATH}/compiler/tikcpp/tikcfw
@@ -55,6 +72,8 @@ set(TILEXR_EP_KERNEL_INCLUDES
     -I${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc/runtime
     -I${ASCEND_HOME_PATH}/${ARCH}-linux/runtime/include
     -I${ASCEND_HOME_PATH}/${ARCH}-linux/include
+    -I${ASCEND_HOME_PATH}/${ARCH}-linux/asc/include
+    -I${ASCEND_HOME_PATH}/${ARCH}-linux/asc/impl
     -I${ASCEND_DRIVER_PATH}/kernel/inc
     -I${CMAKE_SOURCE_DIR}/3rdparty
     -I${CMAKE_SOURCE_DIR}/src/include
@@ -135,15 +154,82 @@ add_custom_command(
 )
 add_custom_target(tilexr_ep_combine_kernel ALL DEPENDS "${TILEXR_EP_COMBINE_KERNEL_SO}")
 
-add_library(tilexr-ep SHARED
+if(TILEXR_EP_BUILD_URMA_COMBINE)
+    add_custom_command(
+        OUTPUT "${TILEXR_EP_URMA_COMBINE_KERNEL_SO}"
+        COMMAND ${BISHENG_EXECUTABLE}
+            ${TILEXR_EP_KERNEL_COMPILE_OPTIONS}
+            -O2
+            -std=gnu++17
+            -fPIC
+            -shared
+            ${TILEXR_EP_KERNEL_LINK_OPTIONS}
+            -DCATLASS_ARCH=${TILEXR_EP_CATLASS_ARCH}
+            -DTILEXR_EP_URMA_COMBINE_SEND_CORE_COUNT=${TILEXR_EP_URMA_COMBINE_SEND_CORE_COUNT}
+            ${TILEXR_EP_PROFILE_COMPILE_DEFINITION}
+            ${TILEXR_EP_KERNEL_INCLUDES}
+            "${TILEXR_EP_URMA_COMBINE_KERNEL_SOURCE}"
+            -L${ASCEND_DRIVER_PATH}/lib64/driver
+            -L${ASCEND_HOME_PATH}/${ARCH}-linux/lib64
+            -L${ASCEND_HOME_PATH}/${ARCH}-linux/devlib
+            -lruntime
+            -lascendcl
+            -lstdc++
+            -lm
+            -ltiling_api
+            -lplatform
+            -lc_sec
+            -ldl
+            -lnnopbase
+            -lpthread
+            -o "${TILEXR_EP_URMA_COMBINE_KERNEL_SO}"
+        DEPENDS
+            "${TILEXR_EP_URMA_COMBINE_KERNEL_SOURCE}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/common/ep_urma_combine_config.h"
+            "${CMAKE_CURRENT_SOURCE_DIR}/common/ep_urma_combine.h"
+            "${CMAKE_CURRENT_SOURCE_DIR}/common/ep_urma_perf_trace.h"
+            "${CMAKE_CURRENT_SOURCE_DIR}/common/ep_urma_udma.h"
+            "${CMAKE_CURRENT_SOURCE_DIR}/common/ep_window.h"
+            "${CMAKE_SOURCE_DIR}/src/include/comm_args.h"
+            "${CMAKE_SOURCE_DIR}/src/include/tilexr_data_as_flag.h"
+            "${CMAKE_SOURCE_DIR}/src/include/tilexr_perf_trace.h"
+            "${CMAKE_SOURCE_DIR}/src/include/tilexr_udma.h"
+        VERBATIM
+        COMMENT "Building TileXR EP URMA combine kernel (Ascend 950 S22, O2)"
+    )
+    add_custom_target(tilexr_ep_urma_combine_kernel ALL
+        DEPENDS "${TILEXR_EP_URMA_COMBINE_KERNEL_SO}")
+endif()
+
+set(TILEXR_EP_HOST_SOURCES
     host/ep_layout.cpp
     host/ep_dispatch_host.cpp
     host/ep_launch_context.cpp
     host/ep_kernel_launch.cpp
     host/tilexr_ep_dispatch.cpp
 )
+if(TILEXR_EP_BUILD_URMA_COMBINE)
+    list(APPEND TILEXR_EP_HOST_SOURCES
+        host/ep_urma_combine_layout.cpp
+        host/ep_urma_combine_host.cpp
+        host/tilexr_ep_urma_combine.cpp)
+endif()
+add_library(tilexr-ep SHARED ${TILEXR_EP_HOST_SOURCES})
 
-add_dependencies(tilexr-ep tilexr_ep_dispatch_kernel tilexr_ep_combine_kernel)
+add_dependencies(tilexr-ep
+    tilexr_ep_dispatch_kernel
+    tilexr_ep_combine_kernel)
+if(TILEXR_EP_BUILD_URMA_COMBINE)
+    add_dependencies(tilexr-ep tilexr_ep_urma_combine_kernel)
+endif()
+
+if(TILEXR_EP_BUILD_URMA_COMBINE)
+    target_compile_definitions(tilexr-ep PRIVATE
+        TILEXR_EP_URMA_COMBINE_SEND_CORE_COUNT=${TILEXR_EP_URMA_COMBINE_SEND_CORE_COUNT})
+endif()
+if(TILEXR_EP_BUILD_URMA_COMBINE AND TILEXR_EP_ENABLE_PROFILING)
+    target_compile_definitions(tilexr-ep PRIVATE TILEXR_EP_ENABLE_PROFILING=1)
+endif()
 
 target_include_directories(tilexr-ep
     PUBLIC
@@ -170,6 +256,9 @@ target_link_libraries(tilexr-ep
         runtime
         ascend_hal
 )
+if(TILEXR_EP_BUILD_URMA_COMBINE)
+    target_link_libraries(tilexr-ep PRIVATE -l:libtilexr_ep_urma_combine_kernel.so)
+endif()
 
 set_target_properties(tilexr-ep PROPERTIES
     BUILD_RPATH "${CMAKE_CURRENT_BINARY_DIR}"
@@ -182,4 +271,9 @@ install(FILES
     "${TILEXR_EP_COMBINE_KERNEL_SO}"
     DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )
-install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/../include/tilexr_ep.h DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+if(TILEXR_EP_BUILD_URMA_COMBINE)
+    install(FILES "${TILEXR_EP_URMA_COMBINE_KERNEL_SO}"
+        DESTINATION ${CMAKE_INSTALL_LIBDIR})
+endif()
+install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/../include/tilexr_ep.h
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})

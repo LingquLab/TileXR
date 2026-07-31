@@ -183,6 +183,25 @@ void TestCommBuildIncludesProfilingHeaders()
     CheckContains(commPath, commText, "${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc/profiling/");
 }
 
+void TestUdmaQpProvisioningIsOperatorDriven()
+{
+    const std::string rootPath = "CMakeLists.txt";
+    const std::string commPath = "src/comm/CMakeLists.txt";
+    const auto rootText = ReadFile(rootPath);
+    const auto commText = ReadFile(commPath);
+
+    CheckContains(rootPath, rootText,
+        "option(TILEXR_EP_BUILD_URMA_COMBINE \"Build the Ascend950 URMA EP combine operator\" OFF)");
+    CheckContains(rootPath, rootText,
+        "set(TILEXR_UDMA_QP_COUNT \"1\" CACHE STRING");
+    CheckContains(rootPath, rootText,
+        "TILEXR_UDMA_EFFECTIVE_QP_COUNT LESS TILEXR_EP_URMA_COMBINE_SEND_CORE_COUNT");
+    CheckContains(commPath, commText,
+        "TILEXR_UDMA_QP_COUNT_VALUE=${TILEXR_UDMA_EFFECTIVE_QP_COUNT}");
+    CheckNotContains(commPath, commText, "ascend950");
+    CheckNotContains(commPath, commText, "_tilexr_udma_qp_count");
+}
+
 void TestChipMapCoversObservedAscend950Variants()
 {
     const std::string path = "src/comm/tilexr_internal.cpp";
@@ -205,6 +224,7 @@ int main()
     TestRuntimeEnvDoesNotPrependCannDevlib();
     TestRootCMakeRespectsAscendDriverOverride();
     TestCommBuildIncludesProfilingHeaders();
+    TestUdmaQpProvisioningIsOperatorDriven();
     TestChipMapCoversObservedAscend950Variants();
 
     if (g_failures != 0) {

@@ -91,6 +91,10 @@ void TestBuildPlacement()
     if (ReadFile("CMakeLists.txt", &rootCmake)) {
         CheckContains("CMakeLists.txt", rootCmake,
             "option(TILEXR_BUILD_EP \"Build TileXR EP communication library\" OFF)");
+        CheckContains("CMakeLists.txt", rootCmake,
+            "option(TILEXR_EP_BUILD_URMA_COMBINE \"Build the Ascend950 URMA EP combine operator\" OFF)");
+        CheckContains("CMakeLists.txt", rootCmake,
+            "TILEXR_EP_URMA_COMBINE_SEND_CORE_COUNT \"22\"");
         CheckContains("CMakeLists.txt", rootCmake, "add_subdirectory(src/ep)");
     }
 
@@ -99,6 +103,8 @@ void TestBuildPlacement()
         CheckContains("src/ep/CMakeLists.txt", epCmake, "add_library(tilexr-ep SHARED");
         CheckContains("src/ep/CMakeLists.txt", epCmake, "tile-comm");
         CheckContains("src/ep/CMakeLists.txt", epCmake, "libtilexr_ep_combine_kernel.so");
+        CheckContains("src/ep/CMakeLists.txt", epCmake,
+            "TILEXR_EP_URMA_COMBINE_SEND_CORE_COUNT=${TILEXR_EP_URMA_COMBINE_SEND_CORE_COUNT}");
         CheckContains("src/ep/CMakeLists.txt", epCmake, "tilexr_ep.h");
         CheckContains("src/ep/CMakeLists.txt", epCmake, "install(TARGETS tilexr-ep");
     }
@@ -257,6 +263,35 @@ void TestDispatchDemoUsesHostBarrierBeforeValidation()
     CheckContains("tests/ep/demo/tilexr_ep_dispatch_demo.cpp", demo, "dispatch synchronized");
 }
 
+void TestUrmaCombineApiAndBuildIntegration()
+{
+    const std::string apiPath = "src/include/tilexr_ep.h";
+    std::string api;
+    if (ReadFile(apiPath, &api)) {
+        CheckContains(apiPath, api, "TileXRMoeEpCombineUrmaGetWorkspaceSize");
+        CheckContains(apiPath, api, "TileXRMoeEpCombineUrma(");
+        CheckContains(apiPath, api, "TileXRMoeEpCombineUrmaProfile(");
+    }
+
+    const std::string hostPath = "src/ep/host/ep_urma_combine_host.cpp";
+    std::string host;
+    if (ReadFile(hostPath, &host)) {
+        CheckContains(hostPath, host, "TileXREpPrepareUrmaCombineLaunchContext");
+        CheckContains(hostPath, host, "launch_tilexr_ep_urma_combine_kernel");
+        CheckNotContains(hostPath, host, "TILEXR_EP_URMA_OPERATOR_LAUNCH");
+    }
+
+    const std::string cmakePath = "src/ep/CMakeLists.txt";
+    std::string cmake;
+    if (ReadFile(cmakePath, &cmake)) {
+        CheckContains(cmakePath, cmake, "tilexr_ep_urma_combine_kernel.cpp");
+        CheckContains(cmakePath, cmake, "Building TileXR EP URMA combine kernel (Ascend 950 S22, O2)");
+        CheckContains(cmakePath, cmake, "-O2");
+        CheckNotContains(cmakePath, cmake, "DIAGNOSTIC");
+        CheckNotContains(cmakePath, cmake, "KERNEL_OPT_LEVEL");
+    }
+}
+
 void TestNoForbiddenDependencies()
 {
     const std::vector<std::string> paths = {
@@ -301,6 +336,7 @@ int main()
     TestDemoRunnerUsesLibAndLib64Paths();
     TestDispatchDemoRegistersAlignedUdmaWorkspace();
     TestDispatchDemoUsesHostBarrierBeforeValidation();
+    TestUrmaCombineApiAndBuildIntegration();
     TestNoForbiddenDependencies();
     return g_failures == 0 ? 0 : 1;
 }

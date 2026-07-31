@@ -26,6 +26,17 @@ int BuildUDMAInfoImage(
     UDMAInfo& info,
     std::vector<uint8_t>& bytes);
 
+int BuildUDMAInfoImage(
+    uintptr_t deviceBase,
+    uint32_t qpCount,
+    const std::vector<UDMAWQCtx>& sq,
+    const std::vector<UDMAWQCtx>& rq,
+    const std::vector<UDMACQCtx>& scq,
+    const std::vector<UDMACQCtx>& rcq,
+    const std::vector<UDMAMemInfo>& mem,
+    UDMAInfo& info,
+    std::vector<uint8_t>& bytes);
+
 } // namespace TileXR
 
 #endif // TILEXR_UDMA_LAYOUT_H

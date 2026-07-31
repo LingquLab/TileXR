@@ -10,8 +10,6 @@
 namespace TileXR {
 namespace {
 
-constexpr uint32_t TILEXR_UDMA_QP_NUM = 1;
-
 template <typename T>
 void CopyVector(std::vector<uint8_t>& dst, size_t offset, const std::vector<T>& src)
 {
@@ -32,9 +30,24 @@ int BuildUDMAInfoImage(
     UDMAInfo& info,
     std::vector<uint8_t>& bytes)
 {
-    const size_t rankCount = sq.size();
-    if (rankCount == 0 || rq.size() != rankCount || scq.size() != rankCount ||
-        rcq.size() != rankCount || mem.size() != rankCount) {
+    return BuildUDMAInfoImage(deviceBase, 1, sq, rq, scq, rcq, mem, info, bytes);
+}
+
+int BuildUDMAInfoImage(
+    uintptr_t deviceBase,
+    uint32_t qpCount,
+    const std::vector<UDMAWQCtx>& sq,
+    const std::vector<UDMAWQCtx>& rq,
+    const std::vector<UDMACQCtx>& scq,
+    const std::vector<UDMACQCtx>& rcq,
+    const std::vector<UDMAMemInfo>& mem,
+    UDMAInfo& info,
+    std::vector<uint8_t>& bytes)
+{
+    const size_t queueEntryCount = sq.size();
+    if (qpCount == 0 || queueEntryCount == 0 || queueEntryCount % qpCount != 0 ||
+        rq.size() != queueEntryCount || scq.size() != queueEntryCount ||
+        rcq.size() != queueEntryCount || mem.size() != queueEntryCount) {
         return TILEXR_UDMA_LAYOUT_INVALID;
     }
 
@@ -46,7 +59,7 @@ int BuildUDMAInfoImage(
     const size_t totalBytes = memOffset + mem.size() * sizeof(UDMAMemInfo);
 
     info = {};
-    info.qpNum = TILEXR_UDMA_QP_NUM;
+    info.qpNum = qpCount;
     info.sqPtr = deviceBase + sqOffset;
     info.rqPtr = deviceBase + rqOffset;
     info.scqPtr = deviceBase + scqOffset;

@@ -77,6 +77,7 @@ endif()
 add_executable(test_tilexr_ep_layout
     unit/test_tilexr_ep_layout.cpp
     ${TILEXR_ROOT}/src/ep/host/ep_layout.cpp
+    ${TILEXR_ROOT}/src/ep/host/ep_urma_combine_layout.cpp
 )
 
 add_executable(test_tilexr_ep_api_sources
@@ -85,6 +86,10 @@ add_executable(test_tilexr_ep_api_sources
 
 add_executable(test_tilexr_ep_kernel_sources unit/test_tilexr_ep_kernel_sources.cpp)
 
+add_executable(test_tilexr_ep_start_gate_window
+    unit/test_tilexr_ep_start_gate_window.cpp
+)
+
 add_executable(test_tilexr_ep_host_validation
     unit/test_tilexr_ep_host_validation.cpp
     ${TILEXR_ROOT}/src/ep/host/ep_layout.cpp
@@ -92,6 +97,10 @@ add_executable(test_tilexr_ep_host_validation
 )
 
 target_include_directories(test_tilexr_ep_layout PRIVATE
+    ${TILEXR_EP_TEST_INCLUDE_DIRS}
+)
+
+target_include_directories(test_tilexr_ep_start_gate_window PRIVATE
     ${TILEXR_EP_TEST_INCLUDE_DIRS}
 )
 
@@ -105,12 +114,14 @@ target_compile_definitions(test_tilexr_ep_kernel_sources PRIVATE TILEXR_SOURCE_R
 add_test(NAME test_tilexr_ep_layout COMMAND test_tilexr_ep_layout)
 add_test(NAME test_tilexr_ep_api_sources COMMAND test_tilexr_ep_api_sources)
 add_test(NAME test_tilexr_ep_kernel_sources COMMAND test_tilexr_ep_kernel_sources)
+add_test(NAME test_tilexr_ep_start_gate_window COMMAND test_tilexr_ep_start_gate_window)
 add_test(NAME test_tilexr_ep_host_validation COMMAND test_tilexr_ep_host_validation)
 
 install(TARGETS
     test_tilexr_ep_layout
     test_tilexr_ep_api_sources
     test_tilexr_ep_kernel_sources
+    test_tilexr_ep_start_gate_window
     test_tilexr_ep_host_validation
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 )

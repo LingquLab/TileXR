@@ -122,6 +122,9 @@ set(TILEXR_SOURCE_FILE tilexr_comm.cpp
 
 add_library(tile-comm SHARED ${TILEXR_SOURCE_FILE})
 
+target_compile_definitions(tile-comm PRIVATE
+        TILEXR_UDMA_QP_COUNT_VALUE=${TILEXR_UDMA_EFFECTIVE_QP_COUNT})
+
 if(TILEXR_HAVE_PTO_SDMA)
     target_compile_definitions(tile-comm PRIVATE TILEXR_HAVE_PTO_SDMA=1)
 else()

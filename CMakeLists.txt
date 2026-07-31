@@ -14,8 +14,27 @@ project(tilexr LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 14)
 option(TILEXR_BUILD_COLLECTIVES "Build optional TileXR collectives library" OFF)
 option(TILEXR_BUILD_EP "Build TileXR EP communication library" OFF)
+option(TILEXR_EP_BUILD_URMA_COMBINE "Build the Ascend950 URMA EP combine operator" OFF)
 option(TILEXR_BUILD_TESTS "Build TileXR tests" OFF)
 option(TILEXR_BUILD_CHECKER "Build TileXR no-NPU checker" OFF)
+set(TILEXR_UDMA_QP_COUNT "1" CACHE STRING "Base UDMA queue-pair count per EID")
+set(TILEXR_EP_URMA_COMBINE_SEND_CORE_COUNT "22" CACHE STRING
+    "Send AIV count for the Ascend950 URMA EP combine operator")
+
+if(NOT TILEXR_UDMA_QP_COUNT MATCHES "^[1-9][0-9]*$")
+    message(FATAL_ERROR "TILEXR_UDMA_QP_COUNT must be a positive integer")
+endif()
+if(NOT TILEXR_EP_URMA_COMBINE_SEND_CORE_COUNT MATCHES "^[1-9][0-9]*$" OR
+        TILEXR_EP_URMA_COMBINE_SEND_CORE_COUNT GREATER_EQUAL 64)
+    message(FATAL_ERROR
+        "TILEXR_EP_URMA_COMBINE_SEND_CORE_COUNT must be an integer in [1, 63]")
+endif()
+
+set(TILEXR_UDMA_EFFECTIVE_QP_COUNT "${TILEXR_UDMA_QP_COUNT}")
+if(TILEXR_BUILD_EP AND TILEXR_EP_BUILD_URMA_COMBINE AND
+        TILEXR_UDMA_EFFECTIVE_QP_COUNT LESS TILEXR_EP_URMA_COMBINE_SEND_CORE_COUNT)
+    set(TILEXR_UDMA_EFFECTIVE_QP_COUNT "${TILEXR_EP_URMA_COMBINE_SEND_CORE_COUNT}")
+endif()
 include(CTest)
 if(BUILD_TESTING OR TILEXR_BUILD_TESTS)
     enable_testing()
