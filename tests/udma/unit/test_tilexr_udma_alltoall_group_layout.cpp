@@ -572,7 +572,7 @@ void TestHostStructure()
         "DemoBarrierAll(rank, rankSize, \"grouped measured ready\")");
     const size_t measuredBegin = grouped.find(
         "const auto begin = std::chrono::steady_clock::now()");
-    CHECK_TRUE(warmupSync < measuredBarrier && measuredBarrier < measuredBegin);
+    CHECK_EQ(warmupSync < measuredBarrier && measuredBarrier < measuredBegin, true);
     CHECK_CONTAINS(demo, "\"/tilexr_group_trace_\" + stageName + \"_rank_\"");
 }
 
