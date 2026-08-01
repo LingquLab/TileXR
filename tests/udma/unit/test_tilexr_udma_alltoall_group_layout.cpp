@@ -462,7 +462,16 @@ void TestKernelStructure()
     CHECK_CONTAINS(kernel, "AllToAllGroupFlushQuiet");
     CHECK_CONTAINS(kernel,
         "UDMAQuietStatusOnQp(args, request.peer, request.qpIdx)");
-    CHECK_CONTAINS(kernel, "pendingCount == quietBatch");
+    CHECK_CONTAINS(kernel, "state.pendingCount != quietBatch");
+    CHECK_CONTAINS(kernel, "template <bool BatchQuiet>");
+    CHECK_CONTAINS(kernel, "struct AllToAllGroupQuietState<true>");
+    CHECK_CONTAINS(kernel, "AllToAllGroupQuietState<BatchQuiet> quietState");
+    CHECK_CONTAINS(kernel, "AllToAllGroupCompleteQuiet(");
+    CHECK_CONTAINS(kernel, "AllToAllGroupFinishQuiet(");
+    CHECK_CONTAINS(kernel,
+        "UDMAQuietStatusOnQp(args, peer, selectedQp)");
+    CHECK_CONTAINS(kernel, "tilexr_udma_all_to_all_group_batch_kernel");
+    CHECK_CONTAINS(kernel, "if (quietBatch == 1U)");
     CHECK_CONTAINS(kernel, "uint32_t groupWidth, uint32_t quietBatch");
     CHECK_CONTAINS(kernel, "AllToAllGroupWaitTokenMte");
     CHECK_CONTAINS(kernel, "AllToAllGroupStageRunsSendDevice(routeStage)");
