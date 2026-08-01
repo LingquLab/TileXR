@@ -281,6 +281,8 @@ bool ParseRootInfo(TileXRRootInfo& root)
         }
         if (root.deviceToLocalId.empty()) {
             root.deviceIdOffset = deviceId;
+        } else {
+            root.deviceIdOffset = std::min(root.deviceIdOffset, deviceId);
         }
         root.deviceToLocalId[deviceId] = localId;
 

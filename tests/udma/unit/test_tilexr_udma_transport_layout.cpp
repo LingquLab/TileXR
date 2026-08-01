@@ -330,6 +330,14 @@ void TestRootInfoEidBytesSelectRuntimeContexts()
     CHECK_CONTAINS(transport, "ctxHandleByEid_[eidIndex] = ctxHandle");
 }
 
+void TestRootInfoDeviceOffsetDoesNotDependOnEntryOrder()
+{
+    const std::string transport =
+        ReadFile(std::string(TILEXR_SOURCE_ROOT) + "/src/comm/udma/tilexr_udma_transport.cpp");
+
+    CHECK_CONTAINS(transport, "root.deviceIdOffset = std::min(root.deviceIdOffset, deviceId)");
+}
+
 void TestMemoryRegistrationUsesOfficialUbFlags()
 {
     const std::string transport =
@@ -391,6 +399,7 @@ int main()
     TestTransportUsesPerPeerQueues();
     TestTransportHasOptInSharedQpPool();
     TestRootInfoEidBytesSelectRuntimeContexts();
+    TestRootInfoDeviceOffsetDoesNotDependOnEntryOrder();
     TestMemoryRegistrationUsesOfficialUbFlags();
     TestDeviceSgeUsesPerPeerLocalTokenId();
     TestDeviceSqeInitializesOfficialFields();
