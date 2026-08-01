@@ -351,6 +351,16 @@ void TestDeviceReusesLogicalQpAcrossRegions()
     CHECK_NOT_CONTAINS(device, "qpIdx * regionCount");
 }
 
+void TestDeviceHasSingleRegionFastPath()
+{
+    const std::string device =
+        ReadFile(std::string(TILEXR_SOURCE_ROOT) + "/src/include/tilexr_udma.h");
+
+    CHECK_CONTAINS(device, "if (registry->regionCount == 1U)");
+    CHECK_CONTAINS(device, "const auto& region = registry->regions[targetRank][0]");
+    CHECK_CONTAINS(device, "targetRank, qpIdx, 0U, byteCount, &signalParams");
+}
+
 void TestSocketExchangeSupportsPersonalizedAllToAll()
 {
     const std::string exchange =
@@ -448,6 +458,7 @@ int main()
     TestTransportUsesPerPeerQueues();
     TestTransportHasOptInSharedQpPool();
     TestDeviceReusesLogicalQpAcrossRegions();
+    TestDeviceHasSingleRegionFastPath();
     TestRootInfoEidBytesSelectRuntimeContexts();
     TestRootInfoDeviceOffsetDoesNotDependOnEntryOrder();
     TestMemoryRegistrationUsesOfficialUbFlags();

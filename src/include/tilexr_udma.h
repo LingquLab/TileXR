@@ -83,6 +83,11 @@ __aicore__ inline bool UDMARegisteredRangeValid(
         static_cast<uint32_t>(targetRank) >= registry->rankSize) {
         return false;
     }
+    if (registry->regionCount == 1U) {
+        const auto& region = registry->regions[targetRank][0];
+        return region.base != nullptr && region.bytes != 0 &&
+            byteOffset <= region.bytes && byteCount <= region.bytes - byteOffset;
+    }
     uint64_t totalBytes = 0;
     for (uint32_t regionIndex = 0; regionIndex < registry->regionCount; ++regionIndex) {
         const auto& region = registry->regions[targetRank][regionIndex];
@@ -98,6 +103,17 @@ __aicore__ inline bool UDMAResolveRegisteredOffset(
     const __gm__ TileXRUDMARegistry* registry, int targetRank, uint64_t byteOffset,
     UDMARegionLocation& location)
 {
+    if (registry->regionCount == 1U) {
+        const auto& region = registry->regions[targetRank][0];
+        if (byteOffset >= region.bytes) {
+            return false;
+        }
+        location.regionIndex = 0U;
+        location.regionOffset = byteOffset;
+        location.bytesAvailable = region.bytes - byteOffset;
+        location.addr = reinterpret_cast<__gm__ uint8_t*>(region.base + byteOffset);
+        return true;
+    }
     uint64_t cursor = 0;
     for (uint32_t regionIndex = 0; regionIndex < registry->regionCount; ++regionIndex) {
         const auto& region = registry->regions[targetRank][regionIndex];
@@ -479,6 +495,36 @@ __aicore__ inline void UDMAPutSignalNbiOnQp(
     if (!UDMARegistryEnabled(args)) return;
 
     auto registry = GetUDMARegistry(args);
+    if (registry != nullptr && registry->regionCount == 1U) {
+        if (registry->magic != TILEXR_UDMA_REGISTRY_MAGIC ||
+            registry->version != TILEXR_UDMA_REGISTRY_VERSION ||
+            registry->rankSize > TILEXR_MAX_RANK_SIZE || targetRank < 0 ||
+            static_cast<uint32_t>(targetRank) >= registry->rankSize) {
+            return;
+        }
+        const auto& region = registry->regions[targetRank][0];
+        if (region.base == nullptr || region.bytes == 0 ||
+            byteOffset > region.bytes || byteCount > region.bytes - byteOffset ||
+            signalByteOffset > region.bytes ||
+            sizeof(uint64_t) > region.bytes - signalByteOffset) {
+            return;
+        }
+
+        __gm__ UDMAInfo* udmaInfo = GetUDMAInfo(args);
+        __gm__ UDMAMemInfo* signalMemInfo =
+            UDMAGetRemoteMemInfo(udmaInfo, targetRank, qpIdx, 0U);
+        UDMASignalParams signalParams = {};
+        signalParams.sigAddr = reinterpret_cast<__gm__ uint64_t*>(
+            region.base + signalByteOffset);
+        signalParams.signal = signal;
+        signalParams.tid = signalMemInfo->tid;
+        signalParams.tokenValue = signalMemInfo->rmtTokenValue;
+        UDMAWriteNotify(
+            args, reinterpret_cast<__gm__ uint8_t*>(region.base + byteOffset),
+            reinterpret_cast<__gm__ uint8_t*>(const_cast<__gm__ T*>(localSrc)),
+            targetRank, qpIdx, 0U, byteCount, &signalParams);
+        return;
+    }
     if (!UDMARegisteredRangeValid(registry, targetRank, byteOffset, byteCount) ||
         !UDMARegisteredRangeValid(registry, targetRank, signalByteOffset, sizeof(uint64_t))) {
         return;
