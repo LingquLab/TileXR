@@ -77,6 +77,7 @@ endif()
 add_executable(test_tilexr_ep_layout
     unit/test_tilexr_ep_layout.cpp
     ${TILEXR_ROOT}/src/ep/host/ep_layout.cpp
+    ${TILEXR_ROOT}/src/ep/host/ep_memory_layout.cpp
 )
 
 add_executable(test_tilexr_ep_api_sources
@@ -88,11 +89,15 @@ add_executable(test_tilexr_ep_kernel_sources unit/test_tilexr_ep_kernel_sources.
 add_executable(test_tilexr_ep_host_validation
     unit/test_tilexr_ep_host_validation.cpp
     ${TILEXR_ROOT}/src/ep/host/ep_layout.cpp
+    ${TILEXR_ROOT}/src/ep/host/ep_memory_layout.cpp
     ${TILEXR_ROOT}/src/ep/host/ep_dispatch_host.cpp
+    ${TILEXR_ROOT}/src/ep/host/ep_dispatch_memory_host.cpp
+    ${TILEXR_ROOT}/src/ep/host/ep_combine_memory_host.cpp
 )
 
 target_include_directories(test_tilexr_ep_layout PRIVATE
     ${TILEXR_EP_TEST_INCLUDE_DIRS}
+    ${CMAKE_CURRENT_SOURCE_DIR}/demo
 )
 
 target_include_directories(test_tilexr_ep_host_validation PRIVATE

@@ -36,8 +36,8 @@ namespace TileXR {
 
 constexpr int TILEXR_MAX_RANK_SIZE = 128; // 最大支持的npu卡数
 constexpr int RANK_SIZE_TWO = 2;  // 可用SIO的规模，以及是否需要跨卡搬运数据核的分界规模
-constexpr int64_t IPC_BUFF_MAX_SIZE = 100 * 1024 * 1024;
-constexpr int64_t IPC_DATA_OFFSET = 2 * 1024 * 1024; // 前2MB作为flag标志位，之后100MB作为数据存储
+constexpr int64_t IPC_BUFF_MAX_SIZE = 512LL * 1024 * 1024;
+constexpr int64_t IPC_DATA_OFFSET = 2 * 1024 * 1024; // 每个ping-pong分区前2MB作为flag，之后512MB存储数据
 constexpr int64_t SYNC_FLAG_BIT_NUM = 10;  // cce 算子在用
 constexpr int64_t MEM_DMA_UNIT_INT_NUM = 4;
 constexpr int64_t EVENT_ID_MASK = 0xFFFFFFFF;
