@@ -564,6 +564,15 @@ void TestHostStructure()
     CHECK_CONTAINS(grouped, "\" complete\"");
     CHECK_CONTAINS(grouped,
         "DemoBarrierAll(rank, rankSize, \"grouped route stages ready\")");
+    CHECK_CONTAINS(grouped,
+        "DemoBarrierAll(rank, rankSize, \"grouped measured ready\")");
+    const size_t warmupSync = grouped.find(
+        "aclrtSynchronizeStream grouped warmup");
+    const size_t measuredBarrier = grouped.find(
+        "DemoBarrierAll(rank, rankSize, \"grouped measured ready\")");
+    const size_t measuredBegin = grouped.find(
+        "const auto begin = std::chrono::steady_clock::now()");
+    CHECK_TRUE(warmupSync < measuredBarrier && measuredBarrier < measuredBegin);
     CHECK_CONTAINS(demo, "\"/tilexr_group_trace_\" + stageName + \"_rank_\"");
 }
 

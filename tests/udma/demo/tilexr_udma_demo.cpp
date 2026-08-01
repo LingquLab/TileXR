@@ -1230,6 +1230,10 @@ bool RunGroupedAllToAll(
             release();
             return false;
         }
+        if (!DemoBarrierAll(rank, rankSize, "grouped measured ready")) {
+            release();
+            return false;
+        }
 
         const auto begin = std::chrono::steady_clock::now();
         for (int iter = 0; iter < repeat; ++iter, ++invocationId) {
