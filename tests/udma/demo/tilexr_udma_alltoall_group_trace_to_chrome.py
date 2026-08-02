@@ -178,14 +178,14 @@ def build_chrome_trace(rank_traces):
         sources.append(rank_trace["path"])
         events.append(_metadata("process_name", rank, 0, f"rank {rank}"))
         for core in range(MAX_CORES):
-            role = "send" if core < 16 else "receive"
+            role = "send" if core < 32 else "receive"
             events.append(_metadata("thread_name", rank, core, f"core{core} {role}"))
 
         for iteration in range(header["iteration_count"]):
             base = bases[(rank, iteration)]
             offset_us = iteration_offsets[iteration]
             for core in range(MAX_CORES):
-                role = "send" if core < 16 else "receive"
+                role = "send" if core < 32 else "receive"
                 kernel = _read_span(
                     data, kernel_span_offset(iteration, core),
                     f"kernel rank={rank} iter={iteration} core={core}")
@@ -217,7 +217,7 @@ def build_chrome_trace(rank_traces):
                                     "iteration": iteration,
                                     "group": group,
                                     "pass": pass_index,
-                                    "lane": core if core < 16 else core - 16,
+                                    "lane": core % 16 if core < 32 else core - 32,
                                     "peer": peer,
                                     "qp": None if qp == NO_QP else qp,
                                     "role": role,

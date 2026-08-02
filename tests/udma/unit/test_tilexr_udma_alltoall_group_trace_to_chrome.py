@@ -105,6 +105,24 @@ class GroupTraceConverterTest(unittest.TestCase):
             self.assertEqual(trace["otherData"]["displayTimeUnit"], "ns")
             json.loads(json.dumps(trace))
 
+    def test_labels_32_send_and_32_receive_cores(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "tilexr_group_trace_rank_0.bin"
+            self.make_trace(path)
+
+            trace = MODULE.build_chrome_trace([MODULE.read_rank_trace(path)])
+            thread_names = {
+                event["tid"]: event["args"]["name"]
+                for event in trace["traceEvents"]
+                if event.get("name") == "thread_name"
+            }
+
+            self.assertEqual(thread_names[0], "core0 send")
+            self.assertEqual(thread_names[16], "core16 send")
+            self.assertEqual(thread_names[31], "core31 send")
+            self.assertEqual(thread_names[32], "core32 receive")
+            self.assertEqual(thread_names[63], "core63 receive")
+
     def test_reads_suffixed_stage_trace(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "tilexr_group_trace_primary_rank_0.bin"
