@@ -534,6 +534,7 @@ void TestRouteStages()
 void TestCopyoutWorkerPolicy()
 {
     CHECK_EQ(TileXR::Demo::kAllToAllGroupBlockDim, 64U);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupValidCopyoutWorkers(1U), true);
     CHECK_EQ(TileXR::Demo::AllToAllGroupValidCopyoutWorkers(8U), true);
     CHECK_EQ(TileXR::Demo::AllToAllGroupValidCopyoutWorkers(16U), true);
     CHECK_EQ(TileXR::Demo::AllToAllGroupValidCopyoutWorkers(32U), true);
@@ -541,6 +542,7 @@ void TestCopyoutWorkerPolicy()
     CHECK_EQ(TileXR::Demo::AllToAllGroupValidCopyoutWorkers(4U), false);
     CHECK_EQ(TileXR::Demo::AllToAllGroupValidCopyoutWorkers(12U), false);
     CHECK_EQ(TileXR::Demo::AllToAllGroupBlockDim(32U, 32U), 64U);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupBlockDim(32U, 1U), 33U);
     CHECK_EQ(TileXR::Demo::AllToAllGroupBlockDim(16U, 48U), 0U);
     CHECK_EQ(TileXR::Demo::AllToAllGroupBlockDim(32U, 48U), 0U);
 
@@ -567,12 +569,25 @@ void TestCopyoutWorkerPolicy()
     CHECK_EQ(TileXR::Demo::AllToAllGroupCopyoutLane(32U, 0U, 48U), 0);
     CHECK_EQ(TileXR::Demo::AllToAllGroupCopyoutLane(47U, 0U, 48U), 15);
     CHECK_EQ(TileXR::Demo::AllToAllGroupCopyoutLane(32U, 1U, 48U), -1);
+
+    lanes.clear();
+    for (uint32_t assignment = 0U; assignment < 16U; ++assignment) {
+        lanes.insert(TileXR::Demo::AllToAllGroupCopyoutLane(
+            0U, assignment, 1U));
+    }
+    CHECK_EQ(lanes.size(), 16U);
+    CHECK_EQ(*lanes.begin(), 0);
+    CHECK_EQ(*lanes.rbegin(), 15);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupCopyoutLane(0U, 16U, 1U), -1);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupCopyoutLane(1U, 0U, 1U), -1);
 }
 
 void TestKernelStructure()
 {
     const std::string kernel = ReadFile(
         std::string(TILEXR_SOURCE_ROOT) + "/tests/udma/demo/tilexr_udma_alltoall_group_kernel.cpp");
+    const std::string launcher = ReadFile(
+        std::string(TILEXR_SOURCE_ROOT) + "/tests/udma/demo/tilexr_udma_alltoall_group_launcher.cpp");
     CHECK_CONTAINS(kernel, "tilexr_udma_all_to_all_group_kernel");
     CHECK_CONTAINS(kernel, "TILEXR_ALLTOALL_GROUP_SEND_CORES");
     CHECK_CONTAINS(kernel, "#include \"tilexr_udma_alltoall_group_route.h\"");
@@ -583,7 +598,7 @@ void TestKernelStructure()
     CHECK_CONTAINS(kernel, "secondaryQp");
     CHECK_CONTAINS(kernel, "selectedQp");
     CHECK_CONTAINS(kernel, "copyoutWorkers");
-    CHECK_CONTAINS(kernel, "constexpr uint32_t copyoutWorkers = 32U");
+    CHECK_CONTAINS(kernel, "constexpr uint32_t copyoutWorkers = 1U");
     CHECK_CONTAINS(kernel, "uint32_t multiChannel, uint32_t primaryRouteParts");
     CHECK_CONTAINS(kernel, "AllToAllGroupPeerInRouteStageDevice");
     CHECK_CONTAINS(kernel,
@@ -593,8 +608,17 @@ void TestKernelStructure()
     CHECK_CONTAINS(kernel, "AllToAllGroupRemoteAssistDevice");
     CHECK_CONTAINS(kernel, "copySliceCount");
     CHECK_CONTAINS(kernel, "copySliceIndex");
+    CHECK_CONTAINS(kernel, "#include \"tilexr_sdma.h\"");
+    CHECK_CONTAINS(kernel, "AllToAllGroupCopySdma");
+    CHECK_CONTAINS(kernel,
+        "args, relayDst, relaySrc, copyBytes, worker, sdmaEvent");
+    CHECK_CONTAINS(kernel, "event == 0ULL");
+    CHECK_CONTAINS(kernel, "TILEXR_ALLTOALL_GROUP_SDMA_FALLBACK");
+    CHECK_CONTAINS(kernel, "TILEXR_ALLTOALL_GROUP_SDMA_FAILED");
+    CHECK_CONTAINS(kernel, "TILEXR_ALLTOALL_GROUP_STAGE_SDMA");
     CHECK_CONTAINS(kernel, "TILEXR_ALLTOALL_GROUP_SEND_WORKERS + copyoutWorkers");
-    CHECK_CONTAINS(kernel, "const uint32_t traceCore = copyoutWorkers == 8U");
+    CHECK_CONTAINS(kernel,
+        "const uint32_t traceCore = copyoutWorkers < TILEXR_ALLTOALL_GROUP_SEND_CORES");
     CHECK_CONTAINS(kernel, "TILEXR_ALLTOALL_GROUP_SEND_WORKERS + lane : blockIdx");
     CHECK_CONTAINS(kernel, "UDMAPutNbiOnQpWithFlag<int32_t>");
     CHECK_CONTAINS(kernel, "UDMAPutNbiOnQpWithFlag<uint64_t>");
@@ -623,7 +647,6 @@ void TestKernelStructure()
     CHECK_CONTAINS(kernel, "AllToAllGroupKernelImpl<false, true>");
     CHECK_CONTAINS(kernel, "AllToAllGroupKernelImpl<true, true>");
     CHECK_CONTAINS(kernel, "if constexpr (IngressCredit)");
-    CHECK_CONTAINS(kernel, "if (quietBatch == 1U)");
     CHECK_CONTAINS(kernel, "uint32_t groupWidth, uint32_t quietBatch");
     CHECK_CONTAINS(kernel, "uint64_t creditOffset0, uint64_t creditOffset1");
     CHECK_CONTAINS(kernel, "uint32_t ingressWindow");
@@ -656,7 +679,21 @@ void TestKernelStructure()
     CHECK_CONTAINS(kernel, "AllToAllGroupStageRunsCopyDevice(routeStage)");
     CHECK_CONTAINS(kernel, "AllToAllGroupStageWaitsForSignalDevice(routeStage)");
     CHECK_CONTAINS(kernel, "observed >= expectedToken");
-    CHECK_CONTAINS(kernel, "launch_tilexr_udma_all_to_all_group");
+    CHECK_NOT_CONTAINS(kernel, "<<<");
+    CHECK_CONTAINS(launcher, "rtDevBinaryRegister");
+    CHECK_CONTAINS(launcher, "rtFunctionRegister");
+    CHECK_CONTAINS(launcher, "rtKernelLaunchWithFlagV2");
+    CHECK_CONTAINS(launcher, "GroupedAllToAllKernelArgs");
+    CHECK_CONTAINS(launcher, "sizeof(GroupedAllToAllKernelArgs) == 128U");
+    CHECK_CONTAINS(launcher, "GroupedAllToAllCreditKernelArgs");
+    CHECK_CONTAINS(launcher, "sizeof(GroupedAllToAllCreditKernelArgs) == 152U");
+    CHECK_CONTAINS(launcher, "TILEXR_GROUPED_ALLTOALL_BATCH_KERNEL_NAME");
+    CHECK_CONTAINS(launcher, "TILEXR_GROUPED_ALLTOALL_CREDIT_KERNEL_NAME");
+    CHECK_CONTAINS(launcher, "TILEXR_GROUPED_ALLTOALL_BATCH_CREDIT_KERNEL_NAME");
+    CHECK_CONTAINS(launcher, "const bool useCredit = ingressWindow != 0U");
+    CHECK_CONTAINS(launcher, "const bool useBatch = quietBatch != 1U");
+    CHECK_CONTAINS(launcher, "cfgInfo.schemMode = RT_SCHEM_MODE_NORMAL");
+    CHECK_NOT_CONTAINS(launcher, "<<<");
     CHECK_NOT_CONTAINS(kernel, "UDMAPutSignalNbi<int32_t>");
     CHECK_NOT_CONTAINS(kernel, "SyncAll");
     CHECK_NOT_CONTAINS(kernel, "elementsPerPeer) * lane /");

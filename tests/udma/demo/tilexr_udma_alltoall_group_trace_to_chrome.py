@@ -12,6 +12,8 @@ TRACE_BYTES = 128 * 1024 * 1024
 HEADER_BYTES = 4096
 MAX_ITERATIONS = 50
 MAX_CORES = 64
+SEND_WORKER_COUNT = 32
+LANE_COUNT = 16
 PHASE_COUNT = 5
 CURRENT_PHASE_COUNT = 6
 SPAN_BYTES = 16
@@ -190,14 +192,14 @@ def build_chrome_trace(rank_traces):
         sources.append(rank_trace["path"])
         events.append(_metadata("process_name", rank, 0, f"rank {rank}"))
         for core in range(MAX_CORES):
-            role = "send" if core < 32 else "receive"
-            events.append(_metadata("thread_name", rank, core, f"core{core} {role}"))
+            role = "send" if core < SEND_WORKER_COUNT else "receive"
+            events.append(_metadata("thread_name", rank, core, f"core{core:02d} {role}"))
 
         for iteration in range(header["iteration_count"]):
             base = bases[(rank, iteration)]
             offset_us = iteration_offsets[iteration]
             for core in range(MAX_CORES):
-                role = "send" if core < 32 else "receive"
+                role = "send" if core < SEND_WORKER_COUNT else "receive"
                 kernel = _read_span(
                     data, kernel_span_offset(iteration, core),
                     f"kernel rank={rank} iter={iteration} core={core}")
@@ -230,7 +232,7 @@ def build_chrome_trace(rank_traces):
                                     "iteration": iteration,
                                     "group": group,
                                     "pass": pass_index,
-                                    "lane": core % 16 if core < 32 else core - 32,
+                                    "lane": core % LANE_COUNT,
                                     "peer": peer,
                                     "qp": None if qp == NO_QP else qp,
                                     "role": role,

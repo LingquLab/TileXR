@@ -55,7 +55,7 @@ extern void launch_tilexr_udma_all_to_all_fused(
     GM_ADDR udmaMem, GM_ADDR signal, GM_ADDR debug, int32_t elementsPerPeer,
     uint64_t udmaMemByteOffset, uint64_t signalByteOffsetBase,
     int32_t chunkElements, uint32_t passCount, uint32_t loopCount);
-extern void launch_tilexr_udma_all_to_all_group(
+extern int launch_tilexr_udma_all_to_all_group(
     uint32_t blockDim, void* stream, GM_ADDR commArgs, GM_ADDR input, GM_ADDR output,
     GM_ADDR registeredMemory, GM_ADDR debug, uint32_t invocationId,
     int32_t elementsPerPeer, int32_t chunkElements,
@@ -1027,7 +1027,7 @@ bool RunGroupedAllToAll(
         static_cast<uint32_t>(primaryRoutePartsValue);
 
     constexpr uint32_t sendWorkers = TileXR::Demo::kAllToAllGroupSendWorkerCount;
-    constexpr uint32_t copyoutWorkers = 32U;
+    constexpr uint32_t copyoutWorkers = 1U;
     const uint32_t groupBlockDim = TileXR::Demo::AllToAllGroupBlockDim(
         sendWorkers, copyoutWorkers);
     const int routeStagesValue = GetEnvInt(
@@ -1251,8 +1251,8 @@ bool RunGroupedAllToAll(
 
     uint32_t invocationId = 0U;
     auto launchGroupStage = [&](TileXR::Demo::AllToAllGroupRouteStage routeStage,
-                                void* trace, uint32_t traceIteration) {
-        launch_tilexr_udma_all_to_all_group(
+                                void* trace, uint32_t traceIteration) -> bool {
+        const int launchRet = launch_tilexr_udma_all_to_all_group(
             groupBlockDim, stream, commArgsDev,
             reinterpret_cast<GM_ADDR>(input), reinterpret_cast<GM_ADDR>(output),
             reinterpret_cast<GM_ADDR>(registeredMemory), reinterpret_cast<GM_ADDR>(debug),
@@ -1267,13 +1267,24 @@ bool RunGroupedAllToAll(
             groupWidth, quietBatch,
             routeStage == TileXR::Demo::AllToAllGroupRouteStage::kCombined ?
                 ingressWindow : 0U);
+        if (launchRet != 0) {
+            std::cerr << "[rank " << rank
+                      << "] rtKernelLaunchWithFlagV2 grouped failed: "
+                      << launchRet << std::endl;
+            return false;
+        }
+        return true;
     };
 
     double totalUs = 0.0;
     std::array<double, kRouteStageCount> stageTotalUs {};
     if (!routeStages) {
         for (int iter = 0; iter < warmup; ++iter, ++invocationId) {
-            launchGroupStage(TileXR::Demo::AllToAllGroupRouteStage::kCombined, nullptr, 0U);
+            if (!launchGroupStage(
+                    TileXR::Demo::AllToAllGroupRouteStage::kCombined, nullptr, 0U)) {
+                release();
+                return false;
+            }
         }
         if (!CheckAcl(rank, "aclrtSynchronizeStream grouped warmup",
                 aclrtSynchronizeStream(stream))) {
@@ -1287,8 +1298,11 @@ bool RunGroupedAllToAll(
 
         const auto begin = std::chrono::steady_clock::now();
         for (int iter = 0; iter < repeat; ++iter, ++invocationId) {
-            launchGroupStage(TileXR::Demo::AllToAllGroupRouteStage::kCombined,
-                groupTraceDevices[0], static_cast<uint32_t>(iter));
+            if (!launchGroupStage(TileXR::Demo::AllToAllGroupRouteStage::kCombined,
+                    groupTraceDevices[0], static_cast<uint32_t>(iter))) {
+                release();
+                return false;
+            }
         }
         if (!CheckAcl(rank, "aclrtSynchronizeStream grouped measured",
                 aclrtSynchronizeStream(stream))) {
@@ -1300,7 +1314,9 @@ bool RunGroupedAllToAll(
     } else {
         auto runStageBatch = [&](size_t stageIndex) -> bool {
             for (int iter = 0; iter < warmup; ++iter, ++invocationId) {
-                launchGroupStage(stagedRouteStages[stageIndex], nullptr, 0U);
+                if (!launchGroupStage(stagedRouteStages[stageIndex], nullptr, 0U)) {
+                    return false;
+                }
             }
             if (!CheckAcl(rank, "aclrtSynchronizeStream grouped stage warmup",
                     aclrtSynchronizeStream(stream)) ||
@@ -1309,8 +1325,10 @@ bool RunGroupedAllToAll(
                 return false;
             }
             for (int iter = 0; iter < repeat; ++iter, ++invocationId) {
-                launchGroupStage(stagedRouteStages[stageIndex],
-                    groupTraceDevices[stageIndex], static_cast<uint32_t>(iter));
+                if (!launchGroupStage(stagedRouteStages[stageIndex],
+                        groupTraceDevices[stageIndex], static_cast<uint32_t>(iter))) {
+                    return false;
+                }
             }
             if (!CheckAcl(rank, "aclrtRecordEvent grouped stage end",
                     aclrtRecordEvent(stageEndEvent, stream)) ||

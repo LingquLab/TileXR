@@ -52,18 +52,19 @@ class GroupTraceConverterTest(unittest.TestCase):
             MODULE.TASK_BASE_OFFSET,
         )
         spans = (
-            (16, 0, 0, 0, 1100, 1200, rank, MODULE.NO_QP),
+            (32, 0, 0, 0, 1100, 1200, rank, MODULE.NO_QP),
             (0, 0, 0, 1, 1200, 1300, 1, 3),
+            (16, 0, 0, 1, 1250, 1350, 2, 4),
             (0, 0, 0, 2, 1300, 1400, 1, 3),
-            (16, 0, 0, 3, 1400, 1500, 1, MODULE.NO_QP),
-            (16, 0, 0, 4, 1500, 1600, 1, MODULE.NO_QP),
+            (32, 0, 0, 3, 1400, 1500, 1, MODULE.NO_QP),
+            (32, 0, 0, 4, 1500, 1600, 1, MODULE.NO_QP),
             (0, 0, 0, 5, 1050, 1100, 1, MODULE.NO_QP),
         )
         with path.open("wb") as stream:
             stream.truncate(MODULE.TRACE_BYTES)
             stream.seek(0)
             stream.write(header)
-            for core in (0, 16):
+            for core in (0, 16, 32):
                 stream.seek(MODULE.kernel_span_offset(0, core))
                 stream.write(struct.pack("<QQ", 1000, 3000))
             for core, group, pass_index, phase, begin, end, peer, qp in spans:
@@ -110,6 +111,11 @@ class GroupTraceConverterTest(unittest.TestCase):
             self.assertEqual(send["args"]["peer"], 1)
             self.assertEqual(send["args"]["qp"], 3)
             self.assertEqual(send["args"]["lane"], 0)
+            second_send = next(
+                event for event in complete
+                if event["name"] == "send-put-signal" and event["tid"] == 16)
+            self.assertEqual(second_send["args"]["role"], "send")
+            self.assertEqual(second_send["args"]["lane"], 0)
             self.assertEqual(trace["otherData"]["displayTimeUnit"], "ns")
             json.loads(json.dumps(trace))
 
@@ -119,17 +125,23 @@ class GroupTraceConverterTest(unittest.TestCase):
             self.make_trace(path)
 
             trace = MODULE.build_chrome_trace([MODULE.read_rank_trace(path)])
+            complete = [
+                event for event in trace["traceEvents"] if event.get("ph") == "X"]
             thread_names = {
                 event["tid"]: event["args"]["name"]
                 for event in trace["traceEvents"]
                 if event.get("name") == "thread_name"
             }
-
-            self.assertEqual(thread_names[0], "core0 send")
+            self.assertEqual(thread_names[0], "core00 send")
+            self.assertEqual(thread_names[2], "core02 send")
             self.assertEqual(thread_names[16], "core16 send")
             self.assertEqual(thread_names[31], "core31 send")
             self.assertEqual(thread_names[32], "core32 receive")
             self.assertEqual(thread_names[63], "core63 receive")
+            receive = next(event for event in complete if event["name"] == "receive-copy")
+            self.assertEqual(receive["args"]["lane"], 0)
+            self.assertEqual(trace["otherData"]["displayTimeUnit"], "ns")
+            json.loads(json.dumps(trace))
 
     def test_reads_suffixed_stage_trace(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -148,7 +160,7 @@ class GroupTraceConverterTest(unittest.TestCase):
             second = Path(directory) / "rank1.bin"
             self.make_trace(first, rank=0)
             self.make_trace(second, rank=1)
-            for core in (0, 16):
+            for core in (0, 16, 32):
                 self.write_at(
                     second, MODULE.kernel_span_offset(0, core),
                     struct.pack("<QQ", 5000, 7000))
@@ -161,7 +173,7 @@ class GroupTraceConverterTest(unittest.TestCase):
                 MODULE.read_rank_trace(first), MODULE.read_rank_trace(second)])
             sends = [
                 event for event in trace["traceEvents"]
-                if event.get("name") == "send-put-signal"
+                if event.get("name") == "send-put-signal" and event["tid"] == 0
             ]
             self.assertEqual([event["ts"] for event in sends], [0.2, 0.2])
 

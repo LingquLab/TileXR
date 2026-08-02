@@ -132,7 +132,8 @@ inline bool AllToAllGroupValidRankSize(int rankSize)
 
 inline bool AllToAllGroupValidCopyoutWorkers(uint32_t workers)
 {
-    return workers == 8U || workers == 16U || workers == 32U || workers == 48U;
+    return workers == 1U || workers == 8U || workers == 16U ||
+        workers == 32U || workers == 48U;
 }
 
 inline uint32_t AllToAllGroupBlockDim(uint32_t sendWorkers, uint32_t copyoutWorkers)

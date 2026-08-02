@@ -4,6 +4,7 @@
  */
 
 #include "kernel_operator.h"
+#include "tilexr_sdma.h"
 #include "tilexr_udma.h"
 #include "tilexr_udma_alltoall_group_route.h"
 #include "tilexr_udma_alltoall_group_trace.h"
@@ -37,6 +38,10 @@ constexpr uint32_t TILEXR_ALLTOALL_GROUP_STAGE_CONFIG = 1U;
 constexpr uint32_t TILEXR_ALLTOALL_GROUP_STAGE_QUIET = 2U;
 constexpr uint32_t TILEXR_ALLTOALL_GROUP_STAGE_WAIT = 3U;
 constexpr uint32_t TILEXR_ALLTOALL_GROUP_STAGE_CREDIT_WAIT = 4U;
+constexpr uint32_t TILEXR_ALLTOALL_GROUP_STAGE_SDMA = 5U;
+constexpr uint32_t TILEXR_ALLTOALL_GROUP_SDMA_FALLBACK = 0U;
+constexpr uint32_t TILEXR_ALLTOALL_GROUP_SDMA_COMPLETE = 1U;
+constexpr uint32_t TILEXR_ALLTOALL_GROUP_SDMA_FAILED = 2U;
 constexpr uint32_t TILEXR_ALLTOALL_GROUP_ROUTE_STAGE_COMBINED = 0U;
 constexpr uint32_t TILEXR_ALLTOALL_GROUP_ROUTE_STAGE_LOCAL = 1U;
 constexpr uint32_t TILEXR_ALLTOALL_GROUP_ROUTE_STAGE_PRIMARY = 2U;
@@ -289,6 +294,24 @@ __aicore__ inline void AllToAllGroupCopyMte(
         AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
     }
     AscendC::PipeBarrier<PIPE_ALL>();
+}
+
+__aicore__ inline uint32_t AllToAllGroupCopySdma(
+    const __gm__ TileXR::CommArgs* args, __gm__ uint8_t* dst,
+    __gm__ uint8_t* src, uint32_t bytes, uint32_t channel,
+    uint64_t& event)
+{
+    event = 0ULL;
+    if (!TileXR::SDMAEnabled(args)) {
+        return TILEXR_ALLTOALL_GROUP_SDMA_FALLBACK;
+    }
+    event = TileXR::SDMACopyNbi(args, dst, src, bytes, channel);
+    if (event == 0ULL) {
+        return TILEXR_ALLTOALL_GROUP_SDMA_FALLBACK;
+    }
+    return TileXR::SDMAWait(args, event, channel) ?
+        TILEXR_ALLTOALL_GROUP_SDMA_COMPLETE :
+        TILEXR_ALLTOALL_GROUP_SDMA_FAILED;
 }
 
 __aicore__ inline uint64_t AllToAllGroupLoadTokenMte(
@@ -638,7 +661,7 @@ __aicore__ inline void AllToAllGroupKernelImpl(
     uint32_t routeStage, uint32_t multiChannel, uint32_t primaryRouteParts,
     uint32_t groupWidth, uint32_t quietBatch)
 {
-    constexpr uint32_t copyoutWorkers = 32U;
+    constexpr uint32_t copyoutWorkers = 1U;
     const uint32_t blockIdx = static_cast<uint32_t>(AscendC::GetBlockIdx());
     auto groupTrace = blockIdx < TileXR::Demo::kAllToAllGroupTraceCoreCount ?
         reinterpret_cast<__gm__ uint8_t*>(groupTraceGM) : nullptr;
@@ -651,7 +674,7 @@ __aicore__ inline void AllToAllGroupKernelImpl(
     const int32_t rank = args->rank;
     const int32_t rankSize = args->rankSize;
 
-    if ((copyoutWorkers != 8U && copyoutWorkers != 16U &&
+    if ((copyoutWorkers != 1U && copyoutWorkers != 8U && copyoutWorkers != 16U &&
             copyoutWorkers != 32U && copyoutWorkers != 48U) ||
         routeStage > TILEXR_ALLTOALL_GROUP_ROUTE_STAGE_NO_COPY ||
         multiChannel > 1U ||
@@ -776,7 +799,7 @@ __aicore__ inline void AllToAllGroupKernelImpl(
                 static_cast<uint32_t>(elementsPerPeer), primaryWeight,
                 secondaryWeight, primaryRouteParts,
                 primaryTotalElements, secondaryTotalElements);
-            const uint32_t traceCore = copyoutWorkers == 8U ?
+            const uint32_t traceCore = copyoutWorkers < TILEXR_ALLTOALL_GROUP_SEND_CORES ?
                 TILEXR_ALLTOALL_GROUP_SEND_WORKERS + lane : blockIdx;
             for (uint32_t pass = 0U; pass < passCount; ++pass) {
                 const int32_t chunkElementOffset = static_cast<int32_t>(pass) * chunkElements;
@@ -890,12 +913,27 @@ __aicore__ inline void AllToAllGroupKernelImpl(
                     output + static_cast<uint64_t>(peer) * elementsPerPeer +
                     chunkElementOffset + copyElementBegin);
                 const uint64_t receiveCopyBegin = AllToAllGroupTraceCycle(groupTrace);
-                AllToAllGroupCopyMte(relayDst, relaySrc, copyBytes, relayLocal);
+                uint64_t sdmaEvent = 0ULL;
+                const uint32_t sdmaStatus = AllToAllGroupCopySdma(
+                    args, relayDst, relaySrc, copyBytes, worker, sdmaEvent);
+                if (sdmaStatus == TILEXR_ALLTOALL_GROUP_SDMA_FALLBACK) {
+                    AllToAllGroupCopyMte(relayDst, relaySrc, copyBytes, relayLocal);
+                }
                 AllToAllGroupTraceRecordTask(
                     groupTrace, traceIteration, traceCore, group, pass,
                     TileXR::Demo::kAllToAllGroupTraceReceiveCopy, groupCount, passCount,
                     peer, TileXR::Demo::kAllToAllGroupTraceNoQp,
                     receiveCopyBegin, AllToAllGroupTraceCycle(groupTrace));
+                if (sdmaStatus == TILEXR_ALLTOALL_GROUP_SDMA_FAILED) {
+                    AllToAllGroupRecordError(
+                        debug, blockIdx, TILEXR_ALLTOALL_GROUP_STAGE_SDMA,
+                        group, pass, peer, worker, 0U,
+                        static_cast<uint64_t>(worker), sdmaEvent);
+                    AllToAllGroupTraceRecordKernel(
+                        groupTrace, traceIteration, blockIdx, kernelBegin,
+                        AllToAllGroupTraceCycle(groupTrace));
+                    return;
+                }
             }
             }
         }
@@ -1158,49 +1196,4 @@ extern "C" __global__ __aicore__ void tilexr_udma_all_to_all_group_batch_credit_
         creditOffset0, creditOffset1,
         groupTraceGM, traceIteration, routeStage, multiChannel, primaryRouteParts,
         groupWidth, quietBatch);
-}
-
-void launch_tilexr_udma_all_to_all_group(
-    uint32_t blockDim, void* stream, GM_ADDR commArgs, GM_ADDR input, GM_ADDR output,
-    GM_ADDR registeredMemory, GM_ADDR debug, uint32_t invocationId,
-    int32_t elementsPerPeer, int32_t chunkElements,
-    uint32_t passCount, uint32_t groupCount,
-    uint64_t payloadOffset0, uint64_t payloadOffset1,
-    uint64_t signalOffset0, uint64_t signalOffset1,
-    uint64_t creditOffset0, uint64_t creditOffset1,
-    GM_ADDR groupTrace, uint32_t traceIteration,
-    uint32_t routeStage, uint32_t multiChannel, uint32_t primaryRouteParts,
-    uint32_t groupWidth, uint32_t quietBatch, uint32_t ingressWindow)
-{
-    if (ingressWindow == 0U && quietBatch == 1U) {
-        tilexr_udma_all_to_all_group_kernel<<<blockDim, nullptr, stream>>>(
-            commArgs, input, output, registeredMemory, debug, invocationId,
-            elementsPerPeer, chunkElements, passCount, groupCount,
-            payloadOffset0, payloadOffset1, signalOffset0, signalOffset1,
-            groupTrace, traceIteration, routeStage,
-            multiChannel, primaryRouteParts, groupWidth, quietBatch);
-    } else if (ingressWindow == 0U) {
-        tilexr_udma_all_to_all_group_batch_kernel<<<blockDim, nullptr, stream>>>(
-            commArgs, input, output, registeredMemory, debug, invocationId,
-            elementsPerPeer, chunkElements, passCount, groupCount,
-            payloadOffset0, payloadOffset1, signalOffset0, signalOffset1,
-            groupTrace, traceIteration, routeStage,
-            multiChannel, primaryRouteParts, groupWidth, quietBatch);
-    } else if (quietBatch == 1U) {
-        tilexr_udma_all_to_all_group_credit_kernel<<<blockDim, nullptr, stream>>>(
-            commArgs, input, output, registeredMemory, debug, invocationId,
-            elementsPerPeer, chunkElements, passCount, groupCount,
-            payloadOffset0, payloadOffset1, signalOffset0, signalOffset1,
-            creditOffset0, creditOffset1,
-            groupTrace, traceIteration, routeStage,
-            multiChannel, primaryRouteParts, groupWidth, quietBatch, ingressWindow);
-    } else {
-        tilexr_udma_all_to_all_group_batch_credit_kernel<<<blockDim, nullptr, stream>>>(
-            commArgs, input, output, registeredMemory, debug, invocationId,
-            elementsPerPeer, chunkElements, passCount, groupCount,
-            payloadOffset0, payloadOffset1, signalOffset0, signalOffset1,
-            creditOffset0, creditOffset1,
-            groupTrace, traceIteration, routeStage,
-            multiChannel, primaryRouteParts, groupWidth, quietBatch, ingressWindow);
-    }
 }

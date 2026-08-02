@@ -218,7 +218,11 @@ int TileXRComm::InitSDMA()
             lock_guard<mutex> lock(g_sdmaMtx);
             g_sdmaUnavailable = true;
         }
-        sdmaTransport_.reset();
+        if (sdmaTransport_->Shutdown()) {
+            sdmaTransport_.reset();
+        } else {
+            TILEXR_LOG(ERROR) << "TileXR SDMA cleanup incomplete after initialization failure";
+        }
         sdmaWorkspaceDev_ = nullptr;
         commArgs_.sdmaWorkspacePtr = nullptr;
         return TILEXR_SUCCESS;
@@ -231,7 +235,11 @@ int TileXRComm::InitSDMA()
         commArgs_.extraFlag &= ~ExtraFlag::SDMA;
         commArgs_.sdmaWorkspacePtr = nullptr;
         sdmaWorkspaceDev_ = nullptr;
-        sdmaTransport_.reset();
+        if (sdmaTransport_->Shutdown()) {
+            sdmaTransport_.reset();
+        } else {
+            TILEXR_LOG(ERROR) << "TileXR SDMA cleanup incomplete after null workspace";
+        }
         return TILEXR_SUCCESS;
     }
 
@@ -242,16 +250,31 @@ int TileXRComm::InitSDMA()
     return TILEXR_SUCCESS;
 }
 
-void TileXRComm::ResetSDMAState()
+bool TileXRComm::ResetSDMAState()
 {
+    const uint32_t oldExtraFlag = commArgs_.extraFlag;
+    const GM_ADDR oldWorkspace = commArgs_.sdmaWorkspacePtr;
     commArgs_.extraFlag &= ~ExtraFlag::SDMA;
     commArgs_.sdmaWorkspacePtr = nullptr;
-    sdmaWorkspaceDev_ = nullptr;
-    sdmaInitStatus_ = SDMAInitStatus::DISABLED_BY_ENV;
+    if (commArgsPtr_ != nullptr && UpdateCommArgsDev() != TILEXR_SUCCESS) {
+        commArgs_.extraFlag = oldExtraFlag;
+        commArgs_.sdmaWorkspacePtr = oldWorkspace;
+        return false;
+    }
     if (sdmaTransport_ != nullptr) {
-        sdmaTransport_->Shutdown();
+        if (!sdmaTransport_->Shutdown()) {
+            return false;
+        }
         sdmaTransport_.reset();
     }
+    sdmaWorkspaceDev_ = nullptr;
+    sdmaInitStatus_ = SDMAInitStatus::DISABLED_BY_ENV;
+    return true;
+}
+
+bool TileXRComm::PrepareDestroy()
+{
+    return ResetSDMAState();
 }
 
 bool TileXRComm::IsSDMAAvailable() const
@@ -1170,7 +1193,7 @@ TileXRComm::~TileXRComm()
         udmaTransport_.reset();
     }
     udmaInfoDev_ = nullptr;
-    ResetSDMAState();
+    (void)ResetSDMAState();
 }
 
 TileXRComm::TileXRComm(int rank, int rankSize) : rank_(rank), rankSize_(rankSize)

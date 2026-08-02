@@ -77,6 +77,18 @@ target_link_libraries(test_tilexr_sdma_api_invalid
 add_executable(test_tilexr_sdma_transport_disabled
     unit/test_tilexr_sdma_transport_disabled.cpp
     ${TILEXR_ROOT}/src/comm/sdma/tilexr_sdma_transport.cpp
+    ${TILEXR_ROOT}/src/comm/sdma/tilexr_sdma_a5_backend.cpp
+)
+
+add_executable(test_tilexr_sdma_a5_validation
+    unit/test_tilexr_sdma_a5_validation.cpp
+)
+target_include_directories(test_tilexr_sdma_a5_validation PRIVATE
+    ${TILEXR_ROOT}/src/comm
+    ${TILEXR_ROOT}/src/include
+    ${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc/
+    ${ASCEND_HOME_PATH}/${ARCH}-linux/include/
+    ${ASCEND_DRIVER_PATH}/kernel/inc
 )
 target_include_directories(test_tilexr_sdma_transport_disabled PRIVATE
     ${TILEXR_ROOT}/src/comm
@@ -85,6 +97,12 @@ target_include_directories(test_tilexr_sdma_transport_disabled PRIVATE
     ${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc/runtime/
     ${ASCEND_HOME_PATH}/${ARCH}-linux/include/
     ${ASCEND_DRIVER_PATH}/kernel/inc
+)
+target_link_libraries(test_tilexr_sdma_transport_disabled
+    ascendcl
+    runtime
+    ascend_hal
+    dl
 )
 
 add_executable(test_tilexr_sdma_comm_wiring
@@ -132,6 +150,7 @@ set(INSTALL_TARGETS
     test_tilexr_sdma_metadata
     test_tilexr_sdma_api_invalid
     test_tilexr_sdma_transport_disabled
+    test_tilexr_sdma_a5_validation
     test_tilexr_sdma_comm_wiring
     test_tilexr_sdma_source_guard
     test_tilexr_sdma_header_compile
