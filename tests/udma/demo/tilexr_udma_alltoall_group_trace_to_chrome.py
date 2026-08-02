@@ -6,12 +6,14 @@ from pathlib import Path
 
 
 TRACE_MAGIC = 0x47545243
-TRACE_VERSION = 1
+TRACE_VERSION = 2
+LEGACY_TRACE_VERSION = 1
 TRACE_BYTES = 128 * 1024 * 1024
 HEADER_BYTES = 4096
 MAX_ITERATIONS = 50
 MAX_CORES = 64
 PHASE_COUNT = 5
+CURRENT_PHASE_COUNT = 6
 SPAN_BYTES = 16
 CACHE_LINE_BYTES = 128
 TASK_FORMAT = "<QQiI"
@@ -27,6 +29,7 @@ PHASE_NAMES = (
     "send-quiet",
     "receive-wait",
     "receive-copy",
+    "credit-wait",
 )
 
 
@@ -34,16 +37,20 @@ def kernel_span_offset(iteration, core):
     return HEADER_BYTES + (iteration * MAX_CORES + core) * CACHE_LINE_BYTES
 
 
-def task_span_offset(iteration, core, group, pass_index, phase, group_count, pass_count):
-    raw_core_bytes = group_count * pass_count * PHASE_COUNT * TASK_BYTES
+def task_span_offset(
+        iteration, core, group, pass_index, phase, group_count, pass_count,
+        phase_count=CURRENT_PHASE_COUNT):
+    raw_core_bytes = group_count * pass_count * phase_count * TASK_BYTES
     core_bytes = (raw_core_bytes + CACHE_LINE_BYTES - 1) & ~(CACHE_LINE_BYTES - 1)
     core_index = iteration * MAX_CORES + core
-    task_index = ((group * pass_count + pass_index) * PHASE_COUNT) + phase
+    task_index = ((group * pass_count + pass_index) * phase_count) + phase
     return TASK_BASE_OFFSET + core_index * core_bytes + task_index * TASK_BYTES
 
 
-def layout_bytes(iteration_count, group_count, pass_count):
-    raw_core_bytes = group_count * pass_count * PHASE_COUNT * TASK_BYTES
+def layout_bytes(
+        iteration_count, group_count, pass_count,
+        phase_count=CURRENT_PHASE_COUNT):
+    raw_core_bytes = group_count * pass_count * phase_count * TASK_BYTES
     core_bytes = (raw_core_bytes + CACHE_LINE_BYTES - 1) & ~(CACHE_LINE_BYTES - 1)
     return TASK_BASE_OFFSET + iteration_count * MAX_CORES * core_bytes
 
@@ -98,7 +105,7 @@ def read_rank_trace(path):
     }
     if header["magic"] != TRACE_MAGIC:
         raise ValueError(f"invalid trace magic in {path}")
-    if header["version"] != TRACE_VERSION:
+    if header["version"] not in (LEGACY_TRACE_VERSION, TRACE_VERSION):
         raise ValueError(f"unsupported trace version {header['version']} in {path}")
     if header["trace_bytes"] != TRACE_BYTES:
         raise ValueError(f"trace byte dimension mismatch in {path}")
@@ -106,7 +113,11 @@ def read_rank_trace(path):
         raise ValueError(f"iteration dimension mismatch in {path}")
     if header["group_count"] <= 0 or header["pass_count"] <= 0:
         raise ValueError(f"group/pass dimension mismatch in {path}")
-    if header["core_count"] != MAX_CORES or header["phase_count"] != PHASE_COUNT:
+    expected_phase_count = (
+        PHASE_COUNT if header["version"] == LEGACY_TRACE_VERSION
+        else CURRENT_PHASE_COUNT)
+    if (header["core_count"] != MAX_CORES or
+            header["phase_count"] != expected_phase_count):
         raise ValueError(f"core/phase dimension mismatch in {path}")
     if (header["kernel_span_offset"] != HEADER_BYTES or
             header["task_span_offset"] != TASK_BASE_OFFSET):
@@ -114,7 +125,8 @@ def read_rank_trace(path):
     if header["cycles_per_us"] == 0:
         raise ValueError(f"invalid cycle frequency in {path}")
     required = layout_bytes(
-        header["iteration_count"], header["group_count"], header["pass_count"])
+        header["iteration_count"], header["group_count"],
+        header["pass_count"], header["phase_count"])
     if required > TRACE_BYTES:
         raise ValueError(f"trace capacity exceeded in {path}: required={required}")
     with path.open("rb") as stream:
@@ -196,7 +208,7 @@ def build_chrome_trace(rank_traces):
                         {"iteration": iteration, "role": role}, offset_us))
                 for group in range(header["group_count"]):
                     for pass_index in range(header["pass_count"]):
-                        for phase in range(PHASE_COUNT):
+                        for phase in range(header["phase_count"]):
                             label = (
                                 f"task rank={rank} iter={iteration} core={core} "
                                 f"group={group} pass={pass_index} phase={phase}")
@@ -204,7 +216,8 @@ def build_chrome_trace(rank_traces):
                                 data,
                                 task_span_offset(
                                     iteration, core, group, pass_index, phase,
-                                    header["group_count"], header["pass_count"]),
+                                    header["group_count"], header["pass_count"],
+                                    header["phase_count"]),
                                 label,
                             )
                             if task is None:

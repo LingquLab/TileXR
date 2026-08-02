@@ -20,11 +20,13 @@ constexpr uint32_t kAllToAllGroupWidth = 16U;
 constexpr uint32_t kAllToAllGroupHalfWidth = 8U;
 constexpr uint32_t kAllToAllGroupExperimentalWidth = 4U;
 constexpr uint32_t kAllToAllGroupMaxQuietBatch = 64U;
+constexpr uint32_t kAllToAllGroupMaxIngressWindow = 1U;
 constexpr uint32_t kAllToAllGroupPingPongSlots = 2U;
 constexpr uint32_t kAllToAllGroupRouteSignalStride = 512U;
 constexpr uint32_t kAllToAllGroupSignalSlotBytes = 1024U;
 constexpr uint32_t kAllToAllGroupSendCoreCount = 16U;
 constexpr uint32_t kAllToAllGroupSendWorkerCount = 32U;
+constexpr uint32_t kAllToAllGroupMaxGroupCount = 64U;
 constexpr uint32_t kAllToAllGroupErrorWordsPerCore = 12U;
 constexpr uint32_t kAllToAllGroupErrorCoreCount = 64U;
 constexpr size_t kAllToAllGroupErrorBytes =
@@ -35,17 +37,32 @@ constexpr size_t kAllToAllGroupSignalSourceSlots =
     kAllToAllGroupMaxQuietBatch;
 constexpr size_t kAllToAllGroupSignalSourceBytes =
     kAllToAllGroupSignalSourceSlots * sizeof(uint64_t);
+constexpr size_t kAllToAllGroupCreditSourceSlots =
+    static_cast<size_t>(kAllToAllGroupSendCoreCount) *
+    kAllToAllGroupMaxGroupCount;
+constexpr size_t kAllToAllGroupCreditSourceBytes =
+    kAllToAllGroupCreditSourceSlots * sizeof(uint64_t);
+constexpr size_t kAllToAllGroupCreditRequestSlots =
+    static_cast<size_t>(kAllToAllGroupPingPongSlots) *
+    kAllToAllGroupSendCoreCount;
+constexpr size_t kAllToAllGroupCreditRequestStride = 64U;
+constexpr size_t kAllToAllGroupCreditRequestBytes =
+    kAllToAllGroupCreditRequestSlots * kAllToAllGroupCreditRequestStride;
 constexpr uint32_t kAllToAllGroupBlockDim = 64U;
 constexpr size_t kAllToAllGroupMultiChannelThresholdBytes =
     150ULL * 1024ULL * 1024ULL;
 constexpr size_t kAllToAllGroupAlignment = 512U;
-constexpr size_t kAllToAllGroupControlBytes =
+constexpr size_t kAllToAllGroupBaseControlBytes =
     kAllToAllGroupErrorBytes + kAllToAllGroupSignalSourceBytes;
+constexpr size_t kAllToAllGroupControlBytes =
+    kAllToAllGroupBaseControlBytes + kAllToAllGroupCreditSourceBytes +
+    kAllToAllGroupCreditRequestBytes;
 constexpr size_t kAllToAllGroupMaxPayloadBytes = 16ULL << 30;
 constexpr size_t kAllToAllGroupMaxRegisteredBytes =
     2U * kAllToAllGroupMaxPayloadBytes +
     2U * static_cast<size_t>(kAllToAllGroupMaxRankSize) *
         kAllToAllGroupSignalSlotBytes +
+    2U * static_cast<size_t>(kAllToAllGroupMaxRankSize) * sizeof(uint64_t) +
     kAllToAllGroupControlBytes;
 
 struct AllToAllGroupPlan {
@@ -59,10 +76,16 @@ struct AllToAllGroupPlan {
     size_t payloadOffset[kAllToAllGroupPingPongSlots] = {0, 0};
     size_t signalPlaneBytes = 0;
     size_t signalOffset[kAllToAllGroupPingPongSlots] = {0, 0};
+    size_t creditPlaneBytes = 0;
+    size_t creditOffset[kAllToAllGroupPingPongSlots] = {0, 0};
     size_t controlOffset = 0;
-    size_t controlBytes = kAllToAllGroupControlBytes;
+    size_t controlBytes = kAllToAllGroupBaseControlBytes;
     size_t signalSourceOffset = 0;
     size_t signalSourceBytes = kAllToAllGroupSignalSourceBytes;
+    size_t creditSourceOffset = 0;
+    size_t creditSourceBytes = 0;
+    size_t creditRequestOffset = 0;
+    size_t creditRequestBytes = 0;
     size_t registeredBytes = 0;
 };
 
@@ -76,6 +99,11 @@ inline bool AllToAllGroupValidQuietBatch(uint32_t quietBatch)
 {
     return quietBatch != 0U && quietBatch <= kAllToAllGroupMaxQuietBatch &&
         (quietBatch & (quietBatch - 1U)) == 0U;
+}
+
+inline bool AllToAllGroupValidIngressWindow(uint32_t ingressWindow)
+{
+    return ingressWindow <= kAllToAllGroupMaxIngressWindow;
 }
 
 enum class AllToAllGroupChannelMode : uint32_t {
@@ -105,6 +133,25 @@ inline size_t AllToAllGroupSignalByteOffset(uint32_t sourceRank, uint32_t route)
 {
     return static_cast<size_t>(sourceRank) * kAllToAllGroupSignalSlotBytes +
         static_cast<size_t>(route) * kAllToAllGroupRouteSignalStride;
+}
+
+inline size_t AllToAllGroupCreditByteOffset(uint32_t destinationRank)
+{
+    return static_cast<size_t>(destinationRank) * sizeof(uint64_t);
+}
+
+inline size_t AllToAllGroupCreditSourceByteOffset(
+    uint32_t lane, uint32_t completedGroup)
+{
+    return (static_cast<size_t>(lane) * kAllToAllGroupMaxGroupCount +
+        completedGroup) * sizeof(uint64_t);
+}
+
+inline size_t AllToAllGroupCreditRequestByteOffset(
+    uint32_t slot, uint32_t lane)
+{
+    return (static_cast<size_t>(slot) * kAllToAllGroupSendCoreCount + lane) *
+        kAllToAllGroupCreditRequestStride;
 }
 
 inline bool AllToAllGroupValidRankSize(int rankSize)
@@ -177,6 +224,23 @@ inline int32_t AllToAllGroupPeer(
         (rank - distance + rankSize) % rankSize;
 }
 
+inline int32_t AllToAllGroupNextCreditPeer(
+    int rank, int rankSize, uint32_t completedGroup, uint32_t lane,
+    uint32_t groupWidth = kAllToAllGroupWidth)
+{
+    const uint32_t groupCount = AllToAllGroupCount(rankSize, groupWidth);
+    if (groupCount == 0U || completedGroup + 1U >= groupCount) {
+        return -1;
+    }
+    return AllToAllGroupPeer(
+        rank, rankSize, completedGroup + 1U, lane, groupWidth);
+}
+
+inline bool AllToAllGroupCreditOwner(uint32_t copyoutWorker)
+{
+    return copyoutWorker < kAllToAllGroupSendCoreCount;
+}
+
 inline uint64_t AllToAllGroupToken(
     uint32_t invocationId, uint32_t group, uint32_t pass)
 {
@@ -185,6 +249,12 @@ inline uint64_t AllToAllGroupToken(
     return (invocation << 32U) | (slot << 31U) |
         (static_cast<uint64_t>(group) << 16U) |
         (static_cast<uint64_t>(pass) + 1ULL);
+}
+
+inline uint64_t AllToAllGroupCreditToken(
+    uint32_t invocationId, uint32_t group)
+{
+    return AllToAllGroupToken(invocationId, group, 0U);
 }
 
 inline bool AllToAllGroupCheckedAdd(size_t lhs, size_t rhs, size_t& result)
@@ -217,11 +287,14 @@ inline bool AllToAllGroupAlignUp(size_t value, size_t& result)
 
 inline AllToAllGroupPlan PlanAllToAllGroup(
     int rankSize, int32_t elementsPerPeer, int32_t chunkElements,
-    uint32_t groupWidth = kAllToAllGroupWidth)
+    uint32_t groupWidth = kAllToAllGroupWidth,
+    uint32_t ingressWindow = 0U)
 {
     AllToAllGroupPlan plan {};
     if (!AllToAllGroupValidRankSize(rankSize) ||
         !AllToAllGroupValidWidth(groupWidth) ||
+        !AllToAllGroupValidIngressWindow(ingressWindow) ||
+        (ingressWindow != 0U && groupWidth != kAllToAllGroupWidth) ||
         elementsPerPeer <= 0 || chunkElements <= 0) {
         return plan;
     }
@@ -245,6 +318,10 @@ inline AllToAllGroupPlan PlanAllToAllGroup(
             static_cast<size_t>(rankSize), kAllToAllGroupSignalSlotBytes, plan.signalPlaneBytes)) {
         return AllToAllGroupPlan {};
     }
+    if (ingressWindow != 0U && !AllToAllGroupCheckedMul(
+            static_cast<size_t>(rankSize), sizeof(uint64_t), plan.creditPlaneBytes)) {
+        return AllToAllGroupPlan {};
+    }
     if (plan.payloadPlaneBytes > kAllToAllGroupMaxPayloadBytes) {
         return AllToAllGroupPlan {};
     }
@@ -259,13 +336,34 @@ inline AllToAllGroupPlan PlanAllToAllGroup(
         !AllToAllGroupAlignUp(cursor, plan.signalOffset[0]) ||
         !AllToAllGroupCheckedAdd(plan.signalOffset[0], plan.signalPlaneBytes, cursor) ||
         !AllToAllGroupAlignUp(cursor, plan.signalOffset[1]) ||
-        !AllToAllGroupCheckedAdd(plan.signalOffset[1], plan.signalPlaneBytes, cursor) ||
-        !AllToAllGroupAlignUp(cursor, plan.controlOffset) ||
+        !AllToAllGroupCheckedAdd(plan.signalOffset[1], plan.signalPlaneBytes, cursor)) {
+        return AllToAllGroupPlan {};
+    }
+    if (ingressWindow != 0U) {
+        plan.creditSourceBytes = kAllToAllGroupCreditSourceBytes;
+        plan.creditRequestBytes = kAllToAllGroupCreditRequestBytes;
+        plan.controlBytes = kAllToAllGroupControlBytes;
+        if (!AllToAllGroupAlignUp(cursor, plan.creditOffset[0]) ||
+            !AllToAllGroupCheckedAdd(
+                plan.creditOffset[0], plan.creditPlaneBytes, cursor) ||
+            !AllToAllGroupAlignUp(cursor, plan.creditOffset[1]) ||
+            !AllToAllGroupCheckedAdd(
+                plan.creditOffset[1], plan.creditPlaneBytes, cursor)) {
+            return AllToAllGroupPlan {};
+        }
+    }
+    if (!AllToAllGroupAlignUp(cursor, plan.controlOffset) ||
         !AllToAllGroupCheckedAdd(plan.controlOffset, plan.controlBytes, cursor) ||
         !AllToAllGroupAlignUp(cursor, plan.registeredBytes)) {
         return AllToAllGroupPlan {};
     }
     plan.signalSourceOffset = plan.controlOffset + kAllToAllGroupErrorBytes;
+    if (ingressWindow != 0U) {
+        plan.creditSourceOffset =
+            plan.signalSourceOffset + kAllToAllGroupSignalSourceBytes;
+        plan.creditRequestOffset =
+            plan.creditSourceOffset + kAllToAllGroupCreditSourceBytes;
+    }
     if (plan.registeredBytes > kAllToAllGroupMaxRegisteredBytes) {
         return AllToAllGroupPlan {};
     }

@@ -62,9 +62,10 @@ extern void launch_tilexr_udma_all_to_all_group(
     uint32_t passCount, uint32_t groupCount,
     uint64_t payloadOffset0, uint64_t payloadOffset1,
     uint64_t signalOffset0, uint64_t signalOffset1,
+    uint64_t creditOffset0, uint64_t creditOffset1,
     GM_ADDR groupTrace, uint32_t traceIteration,
     uint32_t routeStage, uint32_t multiChannel, uint32_t primaryRouteParts,
-    uint32_t groupWidth, uint32_t quietBatch);
+    uint32_t groupWidth, uint32_t quietBatch, uint32_t ingressWindow);
 extern void launch_tilexr_udma_all_to_all_bigdata(
     uint32_t blockDim, void* stream, GM_ADDR commArgs, GM_ADDR input, GM_ADDR output,
     GM_ADDR udmaMem, GM_ADDR debug, GM_ADDR fullmeshTrace, uint32_t fullmeshTraceIteration,
@@ -936,15 +937,38 @@ bool RunGroupedAllToAll(
         return false;
     }
     const uint32_t quietBatch = static_cast<uint32_t>(quietBatchValue);
+    const int ingressWindowValue = GetEnvInt(
+        "TILEXR_DEMO_ALLTOALL_GROUP_INGRESS_WINDOW", 0);
+    if (ingressWindowValue < 0 || !TileXR::Demo::AllToAllGroupValidIngressWindow(
+            static_cast<uint32_t>(ingressWindowValue))) {
+        std::cerr << "[rank " << rank
+                  << "] ERROR: TILEXR_DEMO_ALLTOALL_GROUP_INGRESS_WINDOW"
+                  << " must be 0 or 1, got " << ingressWindowValue << std::endl;
+        return false;
+    }
+    const uint32_t ingressWindow = static_cast<uint32_t>(ingressWindowValue);
+    if (ingressWindow != 0U && groupWidth != TileXR::Demo::kAllToAllGroupWidth) {
+        std::cerr << "[rank " << rank
+                  << "] ERROR: grouped ingress credit currently requires groupWidth=16"
+                  << " groupWidth=" << groupWidth << std::endl;
+        return false;
+    }
     const int32_t requestedChunkElements = std::max(
         1, GetEnvInt("TILEXR_DEMO_ALLTOALL_GROUP_CHUNK_ELEMENTS", elementsPerPeer));
     const auto plan = TileXR::Demo::PlanAllToAllGroup(
-        rankSize, elementsPerPeer, requestedChunkElements, groupWidth);
+        rankSize, elementsPerPeer, requestedChunkElements, groupWidth,
+        ingressWindow);
     if (!plan.valid) {
         std::cerr << "[rank " << rank << "] ERROR: invalid grouped alltoall plan"
                   << " rankSize=" << rankSize
                   << " elementsPerPeer=" << elementsPerPeer
                   << " chunkElements=" << requestedChunkElements << std::endl;
+        return false;
+    }
+    if (ingressWindow != 0U && plan.passCount != 1U) {
+        std::cerr << "[rank " << rank
+                  << "] ERROR: grouped ingress credit currently requires single pass"
+                  << " passCount=" << plan.passCount << std::endl;
         return false;
     }
     const int channelModeValue = GetEnvInt(
@@ -1179,6 +1203,11 @@ bool RunGroupedAllToAll(
         " signalPlaneBytes=" + std::to_string(plan.signalPlaneBytes) +
         " signalOffset0=" + std::to_string(plan.signalOffset[0]) +
         " signalOffset1=" + std::to_string(plan.signalOffset[1]) +
+        " creditPlaneBytes=" + std::to_string(plan.creditPlaneBytes) +
+        " creditOffset0=" + std::to_string(plan.creditOffset[0]) +
+        " creditOffset1=" + std::to_string(plan.creditOffset[1]) +
+        " creditRequestOffset=" + std::to_string(plan.creditRequestOffset) +
+        " creditRequestBytes=" + std::to_string(plan.creditRequestBytes) +
         " controlOffset=" + std::to_string(plan.controlOffset) +
         " regionCount=" + std::to_string(useMultiRegion ? groupedRegionCount : 1U) +
         " groupWidth=" + std::to_string(plan.groupWidth) +
@@ -1194,6 +1223,7 @@ bool RunGroupedAllToAll(
         " blockDim=" + std::to_string(groupBlockDim) +
         " useSecondaryRoute=" + std::to_string(useSecondaryRouteValue) +
         " quietBatch=" + std::to_string(quietBatch) +
+        " ingressWindow=" + std::to_string(ingressWindow) +
         " routeStages=" + std::to_string(routeStagesValue));
 
     if (routeStages &&
@@ -1213,10 +1243,13 @@ bool RunGroupedAllToAll(
             plan.passCount, plan.groupCount,
             plan.payloadOffset[0], plan.payloadOffset[1],
             plan.signalOffset[0], plan.signalOffset[1],
+            plan.creditOffset[0], plan.creditOffset[1],
             reinterpret_cast<GM_ADDR>(trace), traceIteration,
             static_cast<uint32_t>(routeStage),
             multiChannel ? 1U : 0U, primaryRouteParts,
-            groupWidth, quietBatch);
+            groupWidth, quietBatch,
+            routeStage == TileXR::Demo::AllToAllGroupRouteStage::kCombined ?
+                ingressWindow : 0U);
     };
 
     double totalUs = 0.0;

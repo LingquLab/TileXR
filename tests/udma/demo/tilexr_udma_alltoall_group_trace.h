@@ -14,12 +14,12 @@ namespace TileXR {
 namespace Demo {
 
 constexpr uint32_t kAllToAllGroupTraceMagic = 0x47545243U; // "GTRC"
-constexpr uint32_t kAllToAllGroupTraceVersion = 1U;
+constexpr uint32_t kAllToAllGroupTraceVersion = 2U;
 constexpr size_t kAllToAllGroupTraceBytes = 128ULL * 1024ULL * 1024ULL;
 constexpr size_t kAllToAllGroupTraceHeaderBytes = 4096ULL;
 constexpr uint32_t kAllToAllGroupTraceMaxIterations = 50U;
 constexpr uint32_t kAllToAllGroupTraceCoreCount = 64U;
-constexpr uint32_t kAllToAllGroupTracePhaseCount = 5U;
+constexpr uint32_t kAllToAllGroupTracePhaseCount = 6U;
 constexpr uint32_t kAllToAllGroupTraceNoQp = 0xFFFFFFFFU;
 constexpr uint64_t kAllToAllGroupTraceCyclesPerUs = 1000ULL;
 constexpr size_t kAllToAllGroupTraceCacheLineBytes = 128U;
@@ -30,6 +30,7 @@ enum AllToAllGroupTracePhase : uint32_t {
     kAllToAllGroupTraceSendQuiet = 2U,
     kAllToAllGroupTraceReceiveWait = 3U,
     kAllToAllGroupTraceReceiveCopy = 4U,
+    kAllToAllGroupTraceCreditWait = 5U,
 };
 
 struct AllToAllGroupTraceSpan {

@@ -16,6 +16,7 @@ constexpr uint32_t TILEXR_ALLTOALL_GROUP_BLOCK_DIM = 64U;
 constexpr uint32_t TILEXR_ALLTOALL_GROUP_DEFAULT_WIDTH = 16U;
 constexpr uint32_t TILEXR_ALLTOALL_GROUP_EXPERIMENTAL_WIDTH = 4U;
 constexpr uint32_t TILEXR_ALLTOALL_GROUP_MAX_QUIET_BATCH = 64U;
+constexpr uint32_t TILEXR_ALLTOALL_GROUP_MAX_GROUP_COUNT = 64U;
 constexpr uint32_t TILEXR_ALLTOALL_GROUP_ROUTE_SIGNAL_STRIDE = 512U;
 constexpr uint32_t TILEXR_ALLTOALL_GROUP_SIGNAL_STRIDE = 1024U;
 constexpr uint32_t TILEXR_ALLTOALL_GROUP_RELAY_BYTES = 64U * 1024U;
@@ -24,9 +25,25 @@ constexpr uint32_t TILEXR_ALLTOALL_GROUP_ERROR_WORDS = 12U;
 constexpr uint32_t TILEXR_ALLTOALL_GROUP_ERROR_BYTES =
     TILEXR_ALLTOALL_GROUP_ERROR_WORDS * TILEXR_ALLTOALL_GROUP_BLOCK_DIM *
     sizeof(uint32_t);
+constexpr uint32_t TILEXR_ALLTOALL_GROUP_SIGNAL_SOURCE_BYTES =
+    TILEXR_ALLTOALL_GROUP_SEND_WORKERS *
+    TILEXR_ALLTOALL_GROUP_MAX_QUIET_BATCH * sizeof(uint64_t);
+constexpr uint32_t TILEXR_ALLTOALL_GROUP_CREDIT_SOURCE_OFFSET =
+    TILEXR_ALLTOALL_GROUP_ERROR_BYTES +
+    TILEXR_ALLTOALL_GROUP_SIGNAL_SOURCE_BYTES;
+constexpr uint32_t TILEXR_ALLTOALL_GROUP_CREDIT_SOURCE_BYTES =
+    TILEXR_ALLTOALL_GROUP_SEND_CORES *
+    TILEXR_ALLTOALL_GROUP_MAX_GROUP_COUNT * sizeof(uint64_t);
+constexpr uint32_t TILEXR_ALLTOALL_GROUP_CREDIT_REQUEST_OFFSET =
+    TILEXR_ALLTOALL_GROUP_CREDIT_SOURCE_OFFSET +
+    TILEXR_ALLTOALL_GROUP_CREDIT_SOURCE_BYTES;
+constexpr uint32_t TILEXR_ALLTOALL_GROUP_CREDIT_REQUEST_STRIDE = 64U;
 constexpr uint32_t TILEXR_ALLTOALL_GROUP_STAGE_CONFIG = 1U;
 constexpr uint32_t TILEXR_ALLTOALL_GROUP_STAGE_QUIET = 2U;
 constexpr uint32_t TILEXR_ALLTOALL_GROUP_STAGE_WAIT = 3U;
+constexpr uint32_t TILEXR_ALLTOALL_GROUP_STAGE_CREDIT_WAIT = 4U;
+constexpr uint32_t TILEXR_ALLTOALL_GROUP_STAGE_CREDIT_QUIET = 5U;
+constexpr uint32_t TILEXR_ALLTOALL_GROUP_STAGE_CREDIT_REQUEST_WAIT = 6U;
 constexpr uint32_t TILEXR_ALLTOALL_GROUP_ROUTE_STAGE_COMBINED = 0U;
 constexpr uint32_t TILEXR_ALLTOALL_GROUP_ROUTE_STAGE_LOCAL = 1U;
 constexpr uint32_t TILEXR_ALLTOALL_GROUP_ROUTE_STAGE_PRIMARY = 2U;
@@ -166,6 +183,11 @@ __aicore__ inline bool AllToAllGroupRemoteAssistDevice(
     uint32_t worker, uint32_t copyoutWorkers)
 {
     return copyoutWorkers >= 32U && worker >= TILEXR_ALLTOALL_GROUP_SEND_CORES;
+}
+
+__aicore__ inline bool AllToAllGroupCreditOwnerDevice(uint32_t worker)
+{
+    return worker < TILEXR_ALLTOALL_GROUP_SEND_CORES;
 }
 
 __aicore__ inline void AllToAllGroupSelectRouteQps(
@@ -331,6 +353,130 @@ __aicore__ inline bool AllToAllGroupWaitRouteTokensMte(
     }
     observed = primaryObserved < secondaryObserved ? primaryObserved : secondaryObserved;
     return true;
+}
+
+__aicore__ inline void AllToAllGroupRecordError(
+    __gm__ int32_t* debug, uint32_t blockIdx, uint32_t stage,
+    uint32_t group, uint32_t pass, int32_t peer, uint32_t qpIdx,
+    uint32_t quietStatus, uint64_t expectedToken, uint64_t observedToken);
+
+__aicore__ inline int32_t AllToAllGroupNextCreditPeerDevice(
+    int32_t rank, int32_t rankSize, uint32_t completedGroup,
+    uint32_t lane, uint32_t groupCount, uint32_t groupWidth)
+{
+    if (completedGroup + 1U >= groupCount) {
+        return -1;
+    }
+    return AllToAllGroupDevicePeer(
+        rank, rankSize, completedGroup + 1U, lane, groupWidth);
+}
+
+__aicore__ inline uint32_t AllToAllGroupCreditQp(
+    const __gm__ TileXR::CommArgs* args, int32_t peer)
+{
+    uint32_t primaryQp = 0U;
+    uint32_t secondaryQp = 0U;
+    uint32_t primaryWeight = 0U;
+    uint32_t secondaryWeight = 0U;
+    AllToAllGroupSelectRouteQps(args, peer, primaryQp, secondaryQp,
+        primaryWeight, secondaryWeight);
+    return primaryQp;
+}
+
+__aicore__ inline void AllToAllGroupPublishNextCredit(
+    const __gm__ TileXR::CommArgs* args, __gm__ int32_t* debug,
+    int32_t rank, int32_t rankSize, uint32_t invocationId,
+    uint32_t completedGroup, uint32_t lane, uint32_t groupCount,
+    uint32_t groupWidth, uint64_t remoteCreditOffset)
+{
+    const int32_t nextPeer = AllToAllGroupNextCreditPeerDevice(
+        rank, rankSize, completedGroup, lane, groupCount, groupWidth);
+    if (nextPeer < 0) {
+        return;
+    }
+    const uint64_t creditToken =
+        AllToAllGroupDeviceToken(invocationId, completedGroup + 1U, 0U);
+    const uint64_t sourceIndex =
+        static_cast<uint64_t>(lane) * TILEXR_ALLTOALL_GROUP_MAX_GROUP_COUNT +
+        completedGroup;
+    auto creditLocal = reinterpret_cast<__gm__ uint64_t*>(
+        reinterpret_cast<__gm__ uint8_t*>(debug) +
+        TILEXR_ALLTOALL_GROUP_CREDIT_SOURCE_OFFSET +
+        sourceIndex * sizeof(uint64_t));
+    *creditLocal = creditToken;
+    TileXR::UDMACleanCacheLines(
+        reinterpret_cast<__gm__ uint8_t*>(creditLocal), sizeof(uint64_t));
+    TileXR::UDMAPutNbiOnQpWithFlag<uint64_t>(
+        args, nextPeer, AllToAllGroupCreditQp(args, nextPeer), creditLocal,
+        remoteCreditOffset + static_cast<uint64_t>(rank) * sizeof(uint64_t),
+        sizeof(uint64_t), TileXR::TILEXR_UDMA_SQE_FLAG_COMPLETION);
+}
+
+__aicore__ inline __gm__ uint64_t* AllToAllGroupCreditRequest(
+    __gm__ int32_t* debug, uint32_t slot, uint32_t lane)
+{
+    const uint64_t requestIndex =
+        static_cast<uint64_t>(slot) * TILEXR_ALLTOALL_GROUP_SEND_CORES + lane;
+    return reinterpret_cast<__gm__ uint64_t*>(
+        reinterpret_cast<__gm__ uint8_t*>(debug) +
+        TILEXR_ALLTOALL_GROUP_CREDIT_REQUEST_OFFSET +
+        requestIndex * TILEXR_ALLTOALL_GROUP_CREDIT_REQUEST_STRIDE);
+}
+
+__aicore__ inline void AllToAllGroupPublishCreditRequest(
+    __gm__ int32_t* debug, uint32_t invocationId, uint32_t completedGroup,
+    uint32_t slot, uint32_t lane, uint32_t groupCount)
+{
+    if (completedGroup + 1U >= groupCount) {
+        return;
+    }
+    auto request = AllToAllGroupCreditRequest(debug, slot, lane);
+    *request = AllToAllGroupDeviceToken(invocationId, completedGroup + 1U, 0U);
+    TileXR::UDMACleanCacheLines(
+        reinterpret_cast<__gm__ uint8_t*>(request), sizeof(uint64_t));
+}
+
+__aicore__ inline bool AllToAllGroupFinishCredits(
+    const __gm__ TileXR::CommArgs* args, __gm__ int32_t* debug,
+    uint32_t blockIdx, int32_t rank, int32_t rankSize,
+    uint32_t invocationId, uint32_t lane, uint32_t groupCount,
+    uint32_t groupWidth, uint32_t publishedCreditCount)
+{
+    uint64_t completedQueueKeys[TILEXR_ALLTOALL_GROUP_MAX_GROUP_COUNT] = {};
+    uint32_t completedQueueCount = 0U;
+    bool success = true;
+    for (uint32_t group = 0U; group < publishedCreditCount; ++group) {
+        const int32_t nextPeer = AllToAllGroupNextCreditPeerDevice(
+            rank, rankSize, group, lane, groupCount, groupWidth);
+        if (nextPeer < 0) {
+            continue;
+        }
+        const uint32_t qpIdx = AllToAllGroupCreditQp(args, nextPeer);
+        auto udmaInfo = TileXR::GetUDMAInfo(args);
+        auto wq = TileXR::UDMAGetWQCtx(udmaInfo, nextPeer, qpIdx);
+        const uint64_t queueKey = wq->wqeCntAddr;
+        bool alreadyCompleted = false;
+        for (uint32_t index = 0U; index < completedQueueCount; ++index) {
+            if (completedQueueKeys[index] == queueKey) {
+                alreadyCompleted = true;
+                break;
+            }
+        }
+        if (alreadyCompleted) {
+            continue;
+        }
+        completedQueueKeys[completedQueueCount++] = queueKey;
+        const uint32_t quietStatus =
+            TileXR::UDMAQuietStatusOnQp(args, nextPeer, qpIdx);
+        if (quietStatus != 0U) {
+            AllToAllGroupRecordError(debug, blockIdx,
+                TILEXR_ALLTOALL_GROUP_STAGE_CREDIT_QUIET, group, 0U,
+                nextPeer, qpIdx, quietStatus,
+                AllToAllGroupDeviceToken(invocationId, group + 1U, 0U), 0ULL);
+            success = false;
+        }
+    }
+    return success;
 }
 
 __aicore__ inline void AllToAllGroupRecordError(
@@ -533,7 +679,7 @@ __aicore__ inline bool AllToAllGroupFinishQuiet(
 
 } // namespace
 
-template <bool BatchQuiet>
+template <bool BatchQuiet, bool IngressCredit>
 __aicore__ inline void AllToAllGroupKernelImpl(
     GM_ADDR commArgsGM, GM_ADDR inputGM, GM_ADDR outputGM,
     GM_ADDR registeredMemoryGM, GM_ADDR debugGM, uint32_t invocationId,
@@ -541,6 +687,7 @@ __aicore__ inline void AllToAllGroupKernelImpl(
     uint32_t passCount, uint32_t groupCount,
     uint64_t payloadOffset0, uint64_t payloadOffset1,
     uint64_t signalOffset0, uint64_t signalOffset1,
+    uint64_t creditOffset0, uint64_t creditOffset1,
     GM_ADDR groupTraceGM, uint32_t traceIteration,
     uint32_t routeStage, uint32_t multiChannel, uint32_t primaryRouteParts,
     uint32_t groupWidth, uint32_t quietBatch)
@@ -577,12 +724,28 @@ __aicore__ inline void AllToAllGroupKernelImpl(
         elementsPerPeer <= 0 || chunkElements <= 0 || passCount == 0U ||
         groupCount == 0U || groupCount != static_cast<uint32_t>(
             (rankSize - 1 + static_cast<int32_t>(groupWidth) - 1) /
-            static_cast<int32_t>(groupWidth))) {
+            static_cast<int32_t>(groupWidth)) ||
+        (IngressCredit &&
+            (debug == nullptr ||
+             groupWidth != TILEXR_ALLTOALL_GROUP_DEFAULT_WIDTH ||
+             passCount != 1U ||
+             routeStage != TILEXR_ALLTOALL_GROUP_ROUTE_STAGE_COMBINED))) {
         AllToAllGroupRecordError(debug, blockIdx, TILEXR_ALLTOALL_GROUP_STAGE_CONFIG,
             0U, 0U, -1, 0U, 0U, 0ULL, 0ULL);
         AllToAllGroupTraceRecordKernel(groupTrace, traceIteration, blockIdx,
             kernelBegin, AllToAllGroupTraceCycle(groupTrace));
         return;
+    }
+
+    if constexpr (IngressCredit) {
+        auto priorError = reinterpret_cast<__gm__ AllToAllGroupDeviceError*>(
+            debug + static_cast<uint64_t>(blockIdx) *
+                TILEXR_ALLTOALL_GROUP_ERROR_WORDS);
+        if (priorError->valid != 0U) {
+            AllToAllGroupTraceRecordKernel(groupTrace, traceIteration, blockIdx,
+                kernelBegin, AllToAllGroupTraceCycle(groupTrace));
+            return;
+        }
     }
 
     AscendC::TPipe pipe;
@@ -593,6 +756,7 @@ __aicore__ inline void AllToAllGroupKernelImpl(
     const uint32_t slot = invocationId & 1U;
     const uint64_t payloadOffsets[2] = {payloadOffset0, payloadOffset1};
     const uint64_t signalOffsets[2] = {signalOffset0, signalOffset1};
+    const uint64_t creditOffsets[2] = {creditOffset0, creditOffset1};
     const uint64_t bytesPerPeer =
         static_cast<uint64_t>(elementsPerPeer) * sizeof(int32_t);
 
@@ -741,6 +905,13 @@ __aicore__ inline void AllToAllGroupKernelImpl(
                         peer, TileXR::Demo::kAllToAllGroupTraceNoQp,
                         waitBegin, AllToAllGroupTraceCycle(groupTrace));
                 }
+                if constexpr (IngressCredit) {
+                    if (AllToAllGroupCreditOwnerDevice(worker) &&
+                        pass + 1U == passCount) {
+                        AllToAllGroupPublishCreditRequest(
+                            debug, invocationId, group, slot, lane, groupCount);
+                    }
+                }
                 if (!AllToAllGroupStageRunsCopyDevice(routeStage)) {
                     continue;
                 }
@@ -794,6 +965,7 @@ __aicore__ inline void AllToAllGroupKernelImpl(
     const uint32_t lane = blockIdx % TILEXR_ALLTOALL_GROUP_SEND_CORES;
     const uint32_t workerRoute = blockIdx / TILEXR_ALLTOALL_GROUP_SEND_CORES;
     AllToAllGroupQuietState<BatchQuiet> quietState;
+    uint32_t publishedCreditCount = 0U;
     for (uint32_t group = 0U; group < groupCount; ++group) {
         const int32_t peer = AllToAllGroupDevicePeer(
             rank, rankSize, group, lane, groupWidth);
@@ -821,6 +993,89 @@ __aicore__ inline void AllToAllGroupKernelImpl(
             static_cast<uint32_t>(elementsPerPeer), primaryWeight,
             secondaryWeight, primaryRouteParts,
             primaryTotalElements, secondaryTotalElements);
+        if constexpr (IngressCredit) {
+            const uint32_t routeElements = workerRoute == 0U ?
+                primaryTotalElements : secondaryTotalElements;
+            if (group != 0U) {
+                const uint64_t expectedCredit =
+                    AllToAllGroupDeviceToken(invocationId, group, 0U);
+                const uint64_t creditWaitBegin =
+                    AllToAllGroupTraceCycle(groupTrace);
+                if (workerRoute == 0U) {
+                    auto request = AllToAllGroupCreditRequest(debug, slot, lane);
+                    uint64_t observedRequest = 0ULL;
+                    if (!AllToAllGroupWaitTokenMte(
+                            request, expectedCredit,
+                            TILEXR_ALLTOALL_GROUP_WAIT_TIMEOUT_CYCLES,
+                            relayLocal, observedRequest)) {
+                        AllToAllGroupRecordError(debug, blockIdx,
+                            TILEXR_ALLTOALL_GROUP_STAGE_CREDIT_REQUEST_WAIT,
+                            group, 0U, peer, workerRoute, 0U,
+                            expectedCredit, observedRequest);
+                        AllToAllGroupTraceRecordTask(
+                            groupTrace, traceIteration, blockIdx, group, 0U,
+                            TileXR::Demo::kAllToAllGroupTraceCreditWait,
+                            groupCount, passCount, peer,
+                            TileXR::Demo::kAllToAllGroupTraceNoQp,
+                            creditWaitBegin,
+                            AllToAllGroupTraceCycle(groupTrace));
+                        (void)AllToAllGroupFinishCredits(
+                            args, debug, blockIdx, rank, rankSize,
+                            invocationId, lane, groupCount, groupWidth,
+                            publishedCreditCount);
+                        AllToAllGroupTraceRecordKernel(
+                            groupTrace, traceIteration, blockIdx, kernelBegin,
+                            AllToAllGroupTraceCycle(groupTrace));
+                        return;
+                    }
+                    AllToAllGroupPublishNextCredit(
+                        args, debug, rank, rankSize, invocationId, group - 1U,
+                        lane, groupCount, groupWidth, creditOffsets[slot]);
+                    ++publishedCreditCount;
+                }
+                if (routeElements != 0U) {
+                    auto creditSignal = reinterpret_cast<__gm__ uint64_t*>(
+                        registeredMemory + creditOffsets[slot] +
+                        static_cast<uint64_t>(peer) * sizeof(uint64_t));
+                    uint64_t observedCredit = 0ULL;
+                    if (!AllToAllGroupWaitTokenMte(
+                            creditSignal, expectedCredit,
+                            TILEXR_ALLTOALL_GROUP_WAIT_TIMEOUT_CYCLES,
+                            relayLocal, observedCredit)) {
+                        AllToAllGroupRecordError(debug, blockIdx,
+                            TILEXR_ALLTOALL_GROUP_STAGE_CREDIT_WAIT, group, 0U,
+                            peer, workerRoute, 0U, expectedCredit,
+                            observedCredit);
+                        AllToAllGroupTraceRecordTask(
+                            groupTrace, traceIteration, blockIdx, group, 0U,
+                            TileXR::Demo::kAllToAllGroupTraceCreditWait,
+                            groupCount, passCount, peer,
+                            TileXR::Demo::kAllToAllGroupTraceNoQp,
+                            creditWaitBegin,
+                            AllToAllGroupTraceCycle(groupTrace));
+                        if (workerRoute == 0U) {
+                            (void)AllToAllGroupFinishCredits(
+                                args, debug, blockIdx, rank, rankSize,
+                                invocationId, lane, groupCount, groupWidth,
+                                publishedCreditCount);
+                        }
+                        AllToAllGroupTraceRecordKernel(
+                            groupTrace, traceIteration, blockIdx, kernelBegin,
+                            AllToAllGroupTraceCycle(groupTrace));
+                        return;
+                    }
+                }
+                AllToAllGroupTraceRecordTask(
+                    groupTrace, traceIteration, blockIdx, group, 0U,
+                    TileXR::Demo::kAllToAllGroupTraceCreditWait,
+                    groupCount, passCount, peer,
+                    TileXR::Demo::kAllToAllGroupTraceNoQp,
+                    creditWaitBegin, AllToAllGroupTraceCycle(groupTrace));
+            }
+            if (routeElements == 0U) {
+                continue;
+            }
+        }
         for (uint32_t pass = 0U; pass < passCount; ++pass) {
             const int32_t chunkElementOffset = static_cast<int32_t>(pass) * chunkElements;
             const int32_t remaining = elementsPerPeer - chunkElementOffset;
@@ -896,6 +1151,14 @@ __aicore__ inline void AllToAllGroupKernelImpl(
                         args, quietState, quietBatch, peer, selectedQp,
                         group, pass, expectedToken, debug, blockIdx,
                         groupTrace, traceIteration, groupCount, passCount)) {
+                    if constexpr (IngressCredit) {
+                        if (workerRoute == 0U) {
+                            (void)AllToAllGroupFinishCredits(
+                                args, debug, blockIdx, rank, rankSize,
+                                invocationId, lane, groupCount, groupWidth,
+                                publishedCreditCount);
+                        }
+                    }
                     AllToAllGroupTraceRecordKernel(groupTrace, traceIteration, blockIdx,
                         kernelBegin, AllToAllGroupTraceCycle(groupTrace));
                     return;
@@ -906,9 +1169,25 @@ __aicore__ inline void AllToAllGroupKernelImpl(
     if (!AllToAllGroupFinishQuiet(
             args, quietState, debug, blockIdx, groupTrace, traceIteration,
             groupCount, passCount)) {
+        if constexpr (IngressCredit) {
+            if (workerRoute == 0U) {
+                (void)AllToAllGroupFinishCredits(
+                    args, debug, blockIdx, rank, rankSize, invocationId, lane,
+                    groupCount, groupWidth, publishedCreditCount);
+            }
+        }
         AllToAllGroupTraceRecordKernel(groupTrace, traceIteration, blockIdx,
             kernelBegin, AllToAllGroupTraceCycle(groupTrace));
         return;
+    }
+    if constexpr (IngressCredit) {
+        if (workerRoute == 0U && !AllToAllGroupFinishCredits(
+                args, debug, blockIdx, rank, rankSize, invocationId, lane,
+                groupCount, groupWidth, publishedCreditCount)) {
+            AllToAllGroupTraceRecordKernel(groupTrace, traceIteration, blockIdx,
+                kernelBegin, AllToAllGroupTraceCycle(groupTrace));
+            return;
+        }
     }
     AllToAllGroupTraceRecordKernel(groupTrace, traceIteration, blockIdx,
         kernelBegin, AllToAllGroupTraceCycle(groupTrace));
@@ -925,10 +1204,11 @@ extern "C" __global__ __aicore__ void tilexr_udma_all_to_all_group_kernel(
     uint32_t routeStage, uint32_t multiChannel, uint32_t primaryRouteParts,
     uint32_t groupWidth, uint32_t quietBatch)
 {
-    AllToAllGroupKernelImpl<false>(
+    AllToAllGroupKernelImpl<false, false>(
         commArgsGM, inputGM, outputGM, registeredMemoryGM, debugGM, invocationId,
         elementsPerPeer, chunkElements, passCount, groupCount,
         payloadOffset0, payloadOffset1, signalOffset0, signalOffset1,
+        0ULL, 0ULL,
         groupTraceGM, traceIteration, routeStage, multiChannel, primaryRouteParts,
         groupWidth, quietBatch);
 }
@@ -944,10 +1224,53 @@ extern "C" __global__ __aicore__ void tilexr_udma_all_to_all_group_batch_kernel(
     uint32_t routeStage, uint32_t multiChannel, uint32_t primaryRouteParts,
     uint32_t groupWidth, uint32_t quietBatch)
 {
-    AllToAllGroupKernelImpl<true>(
+    AllToAllGroupKernelImpl<true, false>(
         commArgsGM, inputGM, outputGM, registeredMemoryGM, debugGM, invocationId,
         elementsPerPeer, chunkElements, passCount, groupCount,
         payloadOffset0, payloadOffset1, signalOffset0, signalOffset1,
+        0ULL, 0ULL,
+        groupTraceGM, traceIteration, routeStage, multiChannel, primaryRouteParts,
+        groupWidth, quietBatch);
+}
+
+extern "C" __global__ __aicore__ void tilexr_udma_all_to_all_group_credit_kernel(
+    GM_ADDR commArgsGM, GM_ADDR inputGM, GM_ADDR outputGM,
+    GM_ADDR registeredMemoryGM, GM_ADDR debugGM, uint32_t invocationId,
+    int32_t elementsPerPeer, int32_t chunkElements,
+    uint32_t passCount, uint32_t groupCount,
+    uint64_t payloadOffset0, uint64_t payloadOffset1,
+    uint64_t signalOffset0, uint64_t signalOffset1,
+    uint64_t creditOffset0, uint64_t creditOffset1,
+    GM_ADDR groupTraceGM, uint32_t traceIteration,
+    uint32_t routeStage, uint32_t multiChannel, uint32_t primaryRouteParts,
+    uint32_t groupWidth, uint32_t quietBatch, uint32_t ingressWindow)
+{
+    AllToAllGroupKernelImpl<false, true>(
+        commArgsGM, inputGM, outputGM, registeredMemoryGM, debugGM, invocationId,
+        elementsPerPeer, chunkElements, passCount, groupCount,
+        payloadOffset0, payloadOffset1, signalOffset0, signalOffset1,
+        creditOffset0, creditOffset1,
+        groupTraceGM, traceIteration, routeStage, multiChannel, primaryRouteParts,
+        groupWidth, quietBatch);
+}
+
+extern "C" __global__ __aicore__ void tilexr_udma_all_to_all_group_batch_credit_kernel(
+    GM_ADDR commArgsGM, GM_ADDR inputGM, GM_ADDR outputGM,
+    GM_ADDR registeredMemoryGM, GM_ADDR debugGM, uint32_t invocationId,
+    int32_t elementsPerPeer, int32_t chunkElements,
+    uint32_t passCount, uint32_t groupCount,
+    uint64_t payloadOffset0, uint64_t payloadOffset1,
+    uint64_t signalOffset0, uint64_t signalOffset1,
+    uint64_t creditOffset0, uint64_t creditOffset1,
+    GM_ADDR groupTraceGM, uint32_t traceIteration,
+    uint32_t routeStage, uint32_t multiChannel, uint32_t primaryRouteParts,
+    uint32_t groupWidth, uint32_t quietBatch, uint32_t ingressWindow)
+{
+    AllToAllGroupKernelImpl<true, true>(
+        commArgsGM, inputGM, outputGM, registeredMemoryGM, debugGM, invocationId,
+        elementsPerPeer, chunkElements, passCount, groupCount,
+        payloadOffset0, payloadOffset1, signalOffset0, signalOffset1,
+        creditOffset0, creditOffset1,
         groupTraceGM, traceIteration, routeStage, multiChannel, primaryRouteParts,
         groupWidth, quietBatch);
 }
@@ -959,23 +1282,40 @@ void launch_tilexr_udma_all_to_all_group(
     uint32_t passCount, uint32_t groupCount,
     uint64_t payloadOffset0, uint64_t payloadOffset1,
     uint64_t signalOffset0, uint64_t signalOffset1,
+    uint64_t creditOffset0, uint64_t creditOffset1,
     GM_ADDR groupTrace, uint32_t traceIteration,
     uint32_t routeStage, uint32_t multiChannel, uint32_t primaryRouteParts,
-    uint32_t groupWidth, uint32_t quietBatch)
+    uint32_t groupWidth, uint32_t quietBatch, uint32_t ingressWindow)
 {
-    if (quietBatch == 1U) {
+    if (ingressWindow == 0U && quietBatch == 1U) {
         tilexr_udma_all_to_all_group_kernel<<<blockDim, nullptr, stream>>>(
             commArgs, input, output, registeredMemory, debug, invocationId,
             elementsPerPeer, chunkElements, passCount, groupCount,
             payloadOffset0, payloadOffset1, signalOffset0, signalOffset1,
             groupTrace, traceIteration, routeStage,
             multiChannel, primaryRouteParts, groupWidth, quietBatch);
-    } else {
+    } else if (ingressWindow == 0U) {
         tilexr_udma_all_to_all_group_batch_kernel<<<blockDim, nullptr, stream>>>(
             commArgs, input, output, registeredMemory, debug, invocationId,
             elementsPerPeer, chunkElements, passCount, groupCount,
             payloadOffset0, payloadOffset1, signalOffset0, signalOffset1,
             groupTrace, traceIteration, routeStage,
             multiChannel, primaryRouteParts, groupWidth, quietBatch);
+    } else if (quietBatch == 1U) {
+        tilexr_udma_all_to_all_group_credit_kernel<<<blockDim, nullptr, stream>>>(
+            commArgs, input, output, registeredMemory, debug, invocationId,
+            elementsPerPeer, chunkElements, passCount, groupCount,
+            payloadOffset0, payloadOffset1, signalOffset0, signalOffset1,
+            creditOffset0, creditOffset1,
+            groupTrace, traceIteration, routeStage,
+            multiChannel, primaryRouteParts, groupWidth, quietBatch, ingressWindow);
+    } else {
+        tilexr_udma_all_to_all_group_batch_credit_kernel<<<blockDim, nullptr, stream>>>(
+            commArgs, input, output, registeredMemory, debug, invocationId,
+            elementsPerPeer, chunkElements, passCount, groupCount,
+            payloadOffset0, payloadOffset1, signalOffset0, signalOffset1,
+            creditOffset0, creditOffset1,
+            groupTrace, traceIteration, routeStage,
+            multiChannel, primaryRouteParts, groupWidth, quietBatch, ingressWindow);
     }
 }

@@ -142,6 +142,9 @@ void TestPlan()
     CHECK_EQ(TileXR::Demo::AllToAllGroupSignalByteOffset(3U, 1U), 3584ULL);
     CHECK_EQ(plan.signalOffset[0] >= plan.payloadOffset[1] + plan.payloadPlaneBytes, true);
     CHECK_EQ(plan.signalOffset[1] >= plan.signalOffset[0] + plan.signalPlaneBytes, true);
+    CHECK_EQ(plan.creditPlaneBytes, 0ULL);
+    CHECK_EQ(plan.creditOffset[0], 0ULL);
+    CHECK_EQ(plan.creditOffset[1], 0ULL);
     CHECK_EQ(plan.controlOffset >= plan.signalOffset[1] + plan.signalPlaneBytes, true);
     CHECK_EQ(plan.signalSourceOffset,
         plan.controlOffset + TileXR::Demo::kAllToAllGroupErrorBytes);
@@ -149,8 +152,65 @@ void TestPlan()
         TileXR::Demo::kAllToAllGroupSignalSourceBytes);
     CHECK_EQ(plan.signalSourceOffset + plan.signalSourceBytes <=
         plan.controlOffset + plan.controlBytes, true);
+    CHECK_EQ(plan.creditSourceOffset, 0ULL);
+    CHECK_EQ(plan.creditSourceBytes, 0ULL);
+    CHECK_EQ(plan.creditRequestOffset, 0ULL);
+    CHECK_EQ(plan.creditRequestBytes, 0ULL);
+    const auto legacyAlign = [](size_t value) {
+        return (value + TileXR::Demo::kAllToAllGroupAlignment - 1U) &
+            ~(TileXR::Demo::kAllToAllGroupAlignment - 1U);
+    };
+    const size_t legacyPayloadOffset1 = legacyAlign(plan.payloadPlaneBytes);
+    const size_t legacySignalOffset0 = legacyAlign(
+        legacyPayloadOffset1 + plan.payloadPlaneBytes);
+    const size_t legacySignalOffset1 = legacyAlign(
+        legacySignalOffset0 + plan.signalPlaneBytes);
+    const size_t legacyControlOffset = legacyAlign(
+        legacySignalOffset1 + plan.signalPlaneBytes);
+    const size_t legacyRegisteredBytes = legacyAlign(
+        legacyControlOffset + TileXR::Demo::kAllToAllGroupBaseControlBytes);
+    CHECK_EQ(plan.payloadOffset[1], legacyPayloadOffset1);
+    CHECK_EQ(plan.signalOffset[0], legacySignalOffset0);
+    CHECK_EQ(plan.signalOffset[1], legacySignalOffset1);
+    CHECK_EQ(plan.controlOffset, legacyControlOffset);
+    CHECK_EQ(plan.registeredBytes, legacyRegisteredBytes);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupCreditByteOffset(3U), 24ULL);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupCreditSourceByteOffset(1U, 2U),
+        (TileXR::Demo::kAllToAllGroupMaxGroupCount + 2ULL) * sizeof(uint64_t));
+    CHECK_EQ(TileXR::Demo::AllToAllGroupCreditRequestByteOffset(1U, 2U),
+        (TileXR::Demo::kAllToAllGroupSendCoreCount + 2ULL) *
+            TileXR::Demo::kAllToAllGroupCreditRequestStride);
     CHECK_EQ(plan.registeredBytes <= TileXR::Demo::kAllToAllGroupMaxRegisteredBytes, true);
     CHECK_EQ(TileXR::Demo::kAllToAllGroupMaxPayloadBytes, 16ULL << 30);
+
+    const auto ingressPlan = TileXR::Demo::PlanAllToAllGroup(
+        rankSize, elementsPerPeer, elementsPerPeer,
+        TileXR::Demo::kAllToAllGroupWidth, 1U);
+    CHECK_EQ(ingressPlan.valid, true);
+    CHECK_EQ(ingressPlan.creditPlaneBytes,
+        static_cast<size_t>(rankSize) * sizeof(uint64_t));
+    CHECK_EQ(ingressPlan.creditOffset[0] >=
+        ingressPlan.signalOffset[1] + ingressPlan.signalPlaneBytes, true);
+    CHECK_EQ(ingressPlan.creditOffset[1] >=
+        ingressPlan.creditOffset[0] + ingressPlan.creditPlaneBytes, true);
+    CHECK_EQ(ingressPlan.controlOffset >=
+        ingressPlan.creditOffset[1] + ingressPlan.creditPlaneBytes, true);
+    CHECK_EQ(ingressPlan.creditSourceOffset,
+        ingressPlan.signalSourceOffset +
+        TileXR::Demo::kAllToAllGroupSignalSourceBytes);
+    CHECK_EQ(ingressPlan.creditSourceOffset + ingressPlan.creditSourceBytes <=
+        ingressPlan.controlOffset + ingressPlan.controlBytes, true);
+    CHECK_EQ(ingressPlan.creditRequestOffset,
+        ingressPlan.creditSourceOffset +
+        TileXR::Demo::kAllToAllGroupCreditSourceBytes);
+    CHECK_EQ(ingressPlan.creditRequestBytes,
+        TileXR::Demo::kAllToAllGroupCreditRequestBytes);
+    CHECK_EQ(ingressPlan.creditRequestOffset + ingressPlan.creditRequestBytes <=
+        ingressPlan.controlOffset + ingressPlan.controlBytes, true);
+    CHECK_EQ(ingressPlan.registeredBytes > plan.registeredBytes, true);
+    CHECK_EQ(TileXR::Demo::PlanAllToAllGroup(
+        rankSize, elementsPerPeer, elementsPerPeer,
+        TileXR::Demo::kAllToAllGroupExperimentalWidth, 1U).valid, false);
 
     const auto chunked = TileXR::Demo::PlanAllToAllGroup(
         rankSize, elementsPerPeer, elementsPerPeer / 4);
@@ -255,8 +315,9 @@ void TestScalePlanAndTraceCapacity()
 
     CHECK_EQ(TileXR::Demo::kAllToAllGroupTraceBytes,
         128ULL * 1024ULL * 1024ULL);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupTraceLayoutFits(50U, 64U, 3U), true);
     CHECK_EQ(TileXR::Demo::AllToAllGroupTraceLayoutFits(50U, 64U, 4U), true);
-    CHECK_EQ(TileXR::Demo::AllToAllGroupTraceLayoutFits(50U, 64U, 5U), true);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupTraceLayoutFits(50U, 64U, 5U), false);
     CHECK_EQ(TileXR::Demo::AllToAllGroupTraceLayoutFits(50U, 64U, 6U), false);
 }
 
@@ -271,6 +332,69 @@ void TestTokens()
     CHECK_EQ(TileXR::Demo::AllToAllGroupToken(49U, 1U, 0U) > token49, true);
     CHECK_EQ(TileXR::Demo::AllToAllGroupToken(49U, 1U, 1U) >
         TileXR::Demo::AllToAllGroupToken(49U, 1U, 0U), true);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupCreditToken(49U, 1U),
+        TileXR::Demo::AllToAllGroupToken(49U, 1U, 0U));
+    CHECK_EQ(TileXR::Demo::AllToAllGroupCreditToken(50U, 1U) >
+        TileXR::Demo::AllToAllGroupCreditToken(49U, 1U), true);
+}
+
+void TestIngressCreditPolicy()
+{
+    CHECK_EQ(TileXR::Demo::AllToAllGroupValidIngressWindow(0U), true);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupValidIngressWindow(1U), true);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupValidIngressWindow(2U), false);
+
+    constexpr int rankSize = 256;
+    constexpr uint32_t groupCount = 16U;
+    for (int rank = 0; rank < rankSize; ++rank) {
+        for (uint32_t group = 0U; group < groupCount; ++group) {
+            for (uint32_t lane = 0U;
+                 lane < TileXR::Demo::kAllToAllGroupWidth; ++lane) {
+                const int32_t nextPeer = TileXR::Demo::AllToAllGroupNextCreditPeer(
+                    rank, rankSize, group, lane);
+                const int32_t expected = group + 1U < groupCount ?
+                    TileXR::Demo::AllToAllGroupPeer(
+                        rank, rankSize, group + 1U, lane) : -1;
+                CHECK_EQ(nextPeer, expected);
+                if (nextPeer >= 0) {
+                    uint32_t senderLane = lane ^
+                        TileXR::Demo::kAllToAllGroupHalfWidth;
+                    if (TileXR::Demo::AllToAllGroupPeer(
+                            nextPeer, rankSize, group + 1U,
+                            senderLane) < 0) {
+                        senderLane = lane;
+                    }
+                    CHECK_EQ(TileXR::Demo::AllToAllGroupPeer(
+                        nextPeer, rankSize, group + 1U, senderLane), rank);
+                }
+            }
+        }
+    }
+
+    CHECK_EQ(TileXR::Demo::AllToAllGroupNextCreditPeer(0, 64, 2U, 0U), 25);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupNextCreditPeer(0, 64, 3U, 0U), -1);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupNextCreditPeer(0, 64, 2U, 15U), -1);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupCreditOwner(0U), true);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupCreditOwner(15U), true);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupCreditOwner(16U), false);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupCreditOwner(31U), false);
+    for (uint32_t lane = 0U;
+         lane < TileXR::Demo::kAllToAllGroupSendCoreCount; ++lane) {
+        const uint32_t primaryWorker = lane;
+        const uint32_t secondaryWorker =
+            lane + TileXR::Demo::kAllToAllGroupSendCoreCount;
+        CHECK_EQ(primaryWorker % TileXR::Demo::kAllToAllGroupSendCoreCount,
+            secondaryWorker % TileXR::Demo::kAllToAllGroupSendCoreCount);
+        const int32_t primaryPeer = TileXR::Demo::AllToAllGroupPeer(
+            0, rankSize, 3U,
+            primaryWorker % TileXR::Demo::kAllToAllGroupSendCoreCount);
+        const int32_t secondaryPeer = TileXR::Demo::AllToAllGroupPeer(
+            0, rankSize, 3U,
+            secondaryWorker % TileXR::Demo::kAllToAllGroupSendCoreCount);
+        CHECK_EQ(primaryPeer, secondaryPeer);
+        CHECK_EQ(TileXR::Demo::AllToAllGroupCreditByteOffset(primaryPeer),
+            TileXR::Demo::AllToAllGroupCreditByteOffset(secondaryPeer));
+    }
 }
 
 void TestDualRoutePeerPolicy()
@@ -507,7 +631,7 @@ void TestKernelStructure()
     CHECK_CONTAINS(kernel,
         "UDMAQuietStatusOnQp(args, request.peer, request.qpIdx)");
     CHECK_CONTAINS(kernel, "state.pendingCount != quietBatch");
-    CHECK_CONTAINS(kernel, "template <bool BatchQuiet>");
+    CHECK_CONTAINS(kernel, "template <bool BatchQuiet, bool IngressCredit>");
     CHECK_CONTAINS(kernel, "struct AllToAllGroupQuietState<true>");
     CHECK_CONTAINS(kernel, "AllToAllGroupQuietState<BatchQuiet> quietState");
     CHECK_CONTAINS(kernel, "AllToAllGroupCompleteQuiet(");
@@ -515,8 +639,40 @@ void TestKernelStructure()
     CHECK_CONTAINS(kernel,
         "UDMAQuietStatusOnQp(args, peer, selectedQp)");
     CHECK_CONTAINS(kernel, "tilexr_udma_all_to_all_group_batch_kernel");
+    CHECK_CONTAINS(kernel, "tilexr_udma_all_to_all_group_credit_kernel");
+    CHECK_CONTAINS(kernel, "tilexr_udma_all_to_all_group_batch_credit_kernel");
+    CHECK_CONTAINS(kernel, "AllToAllGroupKernelImpl<false, false>");
+    CHECK_CONTAINS(kernel, "AllToAllGroupKernelImpl<true, false>");
+    CHECK_CONTAINS(kernel, "AllToAllGroupKernelImpl<false, true>");
+    CHECK_CONTAINS(kernel, "AllToAllGroupKernelImpl<true, true>");
+    CHECK_CONTAINS(kernel, "if constexpr (IngressCredit)");
     CHECK_CONTAINS(kernel, "if (quietBatch == 1U)");
     CHECK_CONTAINS(kernel, "uint32_t groupWidth, uint32_t quietBatch");
+    CHECK_CONTAINS(kernel, "uint64_t creditOffset0, uint64_t creditOffset1");
+    CHECK_CONTAINS(kernel, "uint32_t ingressWindow");
+    CHECK_CONTAINS(kernel, "AllToAllGroupPublishNextCredit");
+    CHECK_CONTAINS(kernel, "AllToAllGroupPublishCreditRequest");
+    CHECK_CONTAINS(kernel, "AllToAllGroupCreditRequest(debug, slot, lane)");
+    CHECK_CONTAINS(kernel, "AllToAllGroupFinishCredits");
+    CHECK_CONTAINS(kernel, "AllToAllGroupCreditOwnerDevice(worker)");
+    CHECK_CONTAINS(kernel, "TILEXR_ALLTOALL_GROUP_STAGE_CREDIT_WAIT");
+    CHECK_CONTAINS(kernel, "TILEXR_ALLTOALL_GROUP_STAGE_CREDIT_QUIET");
+    CHECK_CONTAINS(kernel,
+        "TILEXR_ALLTOALL_GROUP_STAGE_CREDIT_REQUEST_WAIT");
+    CHECK_CONTAINS(kernel, "kAllToAllGroupTraceCreditWait");
+    CHECK_CONTAINS(kernel, "completedQueueKeys");
+    CHECK_CONTAINS(kernel, "publishedCreditCount");
+    CHECK_CONTAINS(kernel, "TileXR::TILEXR_UDMA_SQE_FLAG_COMPLETION");
+    const size_t publishCreditBegin = kernel.find(
+        "__aicore__ inline void AllToAllGroupPublishNextCredit");
+    const size_t publishCreditEnd = kernel.find(
+        "__aicore__ inline bool AllToAllGroupFinishCredits", publishCreditBegin);
+    const std::string publishCredit = publishCreditBegin == std::string::npos ?
+        std::string() : kernel.substr(publishCreditBegin,
+            publishCreditEnd == std::string::npos ? std::string::npos :
+                publishCreditEnd - publishCreditBegin);
+    CHECK_CONTAINS(publishCredit, "UDMAPutNbiOnQpWithFlag<uint64_t>");
+    CHECK_NOT_CONTAINS(publishCredit, "UDMAQuiet");
     CHECK_CONTAINS(kernel, "AllToAllGroupWaitTokenMte");
     CHECK_CONTAINS(kernel, "AllToAllGroupStageRunsSendDevice(routeStage)");
     CHECK_CONTAINS(kernel, "AllToAllGroupStageRunsReceiveDevice(routeStage)");
@@ -545,6 +701,9 @@ void TestHostStructure()
     CHECK_CONTAINS(demo, "TILEXR_DEMO_ALLTOALL_GROUP_CHANNEL_MODE");
     CHECK_CONTAINS(demo, "TILEXR_DEMO_ALLTOALL_GROUP_WIDTH");
     CHECK_CONTAINS(demo, "TILEXR_DEMO_ALLTOALL_GROUP_QUIET_BATCH");
+    CHECK_CONTAINS(demo, "TILEXR_DEMO_ALLTOALL_GROUP_INGRESS_WINDOW");
+    CHECK_CONTAINS(demo, "grouped ingress credit currently requires single pass");
+    CHECK_CONTAINS(demo, "grouped ingress credit currently requires groupWidth=16");
     CHECK_CONTAINS(demo, "TILEXR_DEMO_ALLTOALL_GROUP_PRIMARY_ROUTE_PARTS");
     CHECK_CONTAINS(demo, "kAllToAllGroupSendWorkerCount");
     CHECK_CONTAINS(demo, "grouped alltoall registeredBytes=");
@@ -598,6 +757,7 @@ int main()
     TestChannelPolicy();
     TestScalePlanAndTraceCapacity();
     TestTokens();
+    TestIngressCreditPolicy();
     TestDualRoutePeerPolicy();
     TestDualRouteQpWeights();
     TestRouteStages();

@@ -31,17 +31,21 @@ class GroupTraceConverterTest(unittest.TestCase):
     def make_trace(
         self, path, *, rank=0, magic=None, iteration_count=1,
         group_count=1, pass_count=1, core_count=64,
+        version=None, phase_count=None,
     ):
+        version = MODULE.TRACE_VERSION if version is None else version
+        phase_count = (
+            MODULE.CURRENT_PHASE_COUNT if phase_count is None else phase_count)
         header = struct.pack(
             MODULE.HEADER_FORMAT,
             MODULE.TRACE_MAGIC if magic is None else magic,
-            MODULE.TRACE_VERSION,
+            version,
             rank,
             iteration_count,
             group_count,
             pass_count,
             core_count,
-            MODULE.PHASE_COUNT,
+            phase_count,
             1000,
             MODULE.TRACE_BYTES,
             MODULE.HEADER_BYTES,
@@ -53,6 +57,7 @@ class GroupTraceConverterTest(unittest.TestCase):
             (0, 0, 0, 2, 1300, 1400, 1, 3),
             (16, 0, 0, 3, 1400, 1500, 1, MODULE.NO_QP),
             (16, 0, 0, 4, 1500, 1600, 1, MODULE.NO_QP),
+            (0, 0, 0, 5, 1050, 1100, 1, MODULE.NO_QP),
         )
         with path.open("wb") as stream:
             stream.truncate(MODULE.TRACE_BYTES)
@@ -62,8 +67,11 @@ class GroupTraceConverterTest(unittest.TestCase):
                 stream.seek(MODULE.kernel_span_offset(0, core))
                 stream.write(struct.pack("<QQ", 1000, 3000))
             for core, group, pass_index, phase, begin, end, peer, qp in spans:
+                if phase >= phase_count:
+                    continue
                 stream.seek(MODULE.task_span_offset(
-                    0, core, group, pass_index, phase, group_count, pass_count))
+                    0, core, group, pass_index, phase, group_count, pass_count,
+                    phase_count))
                 stream.write(struct.pack(
                     MODULE.TASK_FORMAT, begin, end, peer, qp))
 
@@ -95,7 +103,7 @@ class GroupTraceConverterTest(unittest.TestCase):
                 {event["name"] for event in complete},
                 {
                     "kernel", "self-copy", "send-put-signal", "send-quiet",
-                    "receive-wait", "receive-copy",
+                    "receive-wait", "receive-copy", "credit-wait",
                 },
             )
             send = next(event for event in complete if event["name"] == "send-put-signal")
@@ -186,6 +194,23 @@ class GroupTraceConverterTest(unittest.TestCase):
                 struct.pack(MODULE.TASK_FORMAT, 0, 1300, 1, 3))
             with self.assertRaisesRegex(ValueError, "incomplete"):
                 MODULE.build_chrome_trace([MODULE.read_rank_trace(path)])
+
+    def test_reads_legacy_five_phase_trace(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "legacy.bin"
+            self.make_trace(
+                path, version=MODULE.LEGACY_TRACE_VERSION,
+                phase_count=MODULE.PHASE_COUNT)
+
+            rank_trace = MODULE.read_rank_trace(path)
+            trace = MODULE.build_chrome_trace([rank_trace])
+
+            self.assertEqual(rank_trace["header"]["phase_count"], 5)
+            names = {
+                event["name"] for event in trace["traceEvents"]
+                if event.get("ph") == "X"
+            }
+            self.assertNotIn("credit-wait", names)
 
     def test_main_writes_json_without_dumps(self):
         with tempfile.TemporaryDirectory() as directory:
