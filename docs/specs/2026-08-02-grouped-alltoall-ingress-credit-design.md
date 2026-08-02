@@ -2,7 +2,7 @@
 
 ## Status
 
-Implemented and validated on 4x8 hardware on 2026-08-02. The experimental
+Implemented and validated through 8x8 hardware on 2026-08-02. The experimental
 feature remains disabled by default. The strict global admission bound still
 requires 256P all-rank trace or admission-counter validation.
 
@@ -156,6 +156,21 @@ validation on all 32 ranks:
 This proves the request/credit protocol progresses across repeated invocations
 and does not regress 1 GiB throughput in the 4x8 environment. It does not prove
 the 16-source global bound because 4x8 has only two peer groups.
+
+The 8x8 A10 run used the fixed host order `226, 223, 220, 217, 198, 195,
+192, 189`, single pass, shared QP, trace disabled, and warmup-5/repeat-50. All
+64 ranks passed data validation:
+
+```text
+1 KiB/rank single: window0 P50 73.067 us, window1 P50 105.930 us
+1 GiB/rank multi:  window0 P50 6516.335 us, window1 P50 6336.370 us
+```
+
+At 64 ranks, ingress credit reduced the 1 GiB P50 by 179.965 us (2.76%), from
+approximately 153.46 GiB/s to 157.82 GiB/s. The 1 KiB case paid 32.863 us of
+additional fixed control latency. This run exercises four peer groups and
+therefore provides stronger repeated credit-chain evidence than 4x8, but it
+still does not prove the 256P global admission bound.
 
 ## Residual Risk
 
