@@ -433,6 +433,14 @@ void TestDeviceSqeInitializesOfficialFields()
     CHECK_CONTAINS(device, "UDMAFillSqeCtx(sqeCtx, remoteAddr, remoteMemInfo, curHead, qpCtxEntry->depth");
 }
 
+void TestCompletionPollingAllowsLargeOutstandingBatches()
+{
+    const std::string types =
+        ReadFile(std::string(TILEXR_SOURCE_ROOT) + "/src/include/tilexr_udma_types.h");
+
+    CHECK_CONTAINS(types, "TILEXR_UDMA_MAX_RETRY_TIMES = 100000000");
+}
+
 } // namespace
 
 int main()
@@ -464,6 +472,7 @@ int main()
     TestMemoryRegistrationUsesOfficialUbFlags();
     TestDeviceSgeUsesPerPeerLocalTokenId();
     TestDeviceSqeInitializesOfficialFields();
+    TestCompletionPollingAllowsLargeOutstandingBatches();
     if (g_failures != 0) {
         std::cerr << g_failures << " UDMA transport layout checks failed" << std::endl;
         return 1;
