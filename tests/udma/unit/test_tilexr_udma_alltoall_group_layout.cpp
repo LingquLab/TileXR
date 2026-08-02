@@ -641,10 +641,15 @@ void TestKernelStructure()
             publishCreditEnd == std::string::npos ? std::string::npos :
                 publishCreditEnd - publishCreditBegin);
     CHECK_CONTAINS(publishCredit, "args->creditMems[nextPeer]");
-    CHECK_CONTAINS(publishCredit, "*remoteCredit = creditToken");
+    CHECK_CONTAINS(publishCredit, "TILEXR_ALLTOALL_GROUP_CREDIT_WORDS");
+    CHECK_CONTAINS(publishCredit, "AscendC::HardEvent::S_MTE3");
+    CHECK_CONTAINS(publishCredit, "AscendC::HardEvent::MTE3_S");
+    CHECK_CONTAINS(publishCredit, "AscendC::DataCopy(");
+    CHECK_NOT_CONTAINS(publishCredit, "*remoteCredit = creditToken");
     CHECK_NOT_CONTAINS(publishCredit, "UDMAPutNbiOnQpWithFlag<uint64_t>");
     CHECK_NOT_CONTAINS(publishCredit, "UDMAQuiet");
     CHECK_CONTAINS(kernel, "AllToAllGroupWaitTokenMte");
+    CHECK_CONTAINS(kernel, "AllToAllGroupWaitCreditMte");
     CHECK_CONTAINS(kernel, "AllToAllGroupStageRunsSendDevice(routeStage)");
     CHECK_CONTAINS(kernel, "AllToAllGroupStageRunsReceiveDevice(routeStage)");
     CHECK_CONTAINS(kernel, "AllToAllGroupReceivePeerInRouteStageDevice");

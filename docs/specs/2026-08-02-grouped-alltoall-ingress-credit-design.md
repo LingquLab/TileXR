@@ -89,10 +89,13 @@ latency on the send admission path.
 
 ## Credit Submission
 
-Credit publication is a direct 8-byte GM store by the receive owner through
-`creditMems[nextSource]`. It does not consume a UDMA WQE, QP, completion, or
-quiet, and it does not add another producer to a shared UDMA SQ. Both send
-routes poll the same local dedicated credit address through MTE.
+Credit publication is one 512-byte MTE copy by the receive owner through
+`creditMems[nextSource]`. The token occupies the first 8 bytes of the slot;
+copying the complete slot gives the remote IPC write an explicit MTE3
+completion and keeps adjacent credits on separate transfer units. It does not
+consume a UDMA WQE, QP, completion, or quiet, and it does not add another
+producer to a shared UDMA SQ. Both send routes poll the same local dedicated
+credit slot through a 512-byte MTE2 copy.
 
 The dedicated allocation is independent of the existing optional communication
 IPC buffer, so grouped ingress credit can run with `TILEXR_ENABLE_IPC=0`. It

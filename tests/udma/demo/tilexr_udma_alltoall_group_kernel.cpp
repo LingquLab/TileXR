@@ -29,6 +29,10 @@ constexpr uint32_t TILEXR_ALLTOALL_GROUP_SIGNAL_SOURCE_BYTES =
     TILEXR_ALLTOALL_GROUP_SEND_WORKERS *
     TILEXR_ALLTOALL_GROUP_MAX_QUIET_BATCH * sizeof(uint64_t);
 constexpr uint32_t TILEXR_ALLTOALL_GROUP_CREDIT_STRIDE = 512U;
+constexpr uint32_t TILEXR_ALLTOALL_GROUP_CREDIT_WORDS =
+    TILEXR_ALLTOALL_GROUP_CREDIT_STRIDE / sizeof(uint64_t);
+static_assert(TILEXR_ALLTOALL_GROUP_CREDIT_STRIDE == TileXR::CREDIT_IPC_STRIDE,
+    "grouped credit slot must match the runtime IPC layout");
 constexpr uint32_t TILEXR_ALLTOALL_GROUP_STAGE_CONFIG = 1U;
 constexpr uint32_t TILEXR_ALLTOALL_GROUP_STAGE_QUIET = 2U;
 constexpr uint32_t TILEXR_ALLTOALL_GROUP_STAGE_WAIT = 3U;
@@ -316,6 +320,35 @@ __aicore__ inline bool AllToAllGroupWaitTokenMte(
     return observed >= expectedToken;
 }
 
+__aicore__ inline uint64_t AllToAllGroupLoadCreditMte(
+    __gm__ uint64_t* credit, AscendC::LocalTensor<uint8_t> relayLocal)
+{
+    AscendC::GlobalTensor<uint64_t> creditGlobal;
+    creditGlobal.SetGlobalBuffer(
+        credit, TILEXR_ALLTOALL_GROUP_CREDIT_WORDS);
+    auto creditLocal = relayLocal.ReinterpretCast<uint64_t>();
+    AscendC::DataCopy(
+        creditLocal, creditGlobal, TILEXR_ALLTOALL_GROUP_CREDIT_WORDS);
+    AscendC::SetFlag<AscendC::HardEvent::MTE2_S>(EVENT_ID0);
+    AscendC::WaitFlag<AscendC::HardEvent::MTE2_S>(EVENT_ID0);
+    return creditLocal.GetValue(0);
+}
+
+__aicore__ inline bool AllToAllGroupWaitCreditMte(
+    __gm__ uint64_t* credit, uint64_t expectedToken, uint64_t timeoutCycles,
+    AscendC::LocalTensor<uint8_t> relayLocal, uint64_t& observed)
+{
+    const uint64_t begin = static_cast<uint64_t>(AscendC::GetSystemCycle());
+    observed = AllToAllGroupLoadCreditMte(credit, relayLocal);
+    while (observed < expectedToken) {
+        if (static_cast<uint64_t>(AscendC::GetSystemCycle()) - begin >= timeoutCycles) {
+            return false;
+        }
+        observed = AllToAllGroupLoadCreditMte(credit, relayLocal);
+    }
+    return observed >= expectedToken;
+}
+
 __aicore__ inline bool AllToAllGroupWaitRouteTokensMte(
     __gm__ uint64_t* primarySignal, __gm__ uint64_t* secondarySignal,
     bool waitPrimary, bool waitSecondary, uint64_t expectedToken,
@@ -364,7 +397,8 @@ __aicore__ inline void AllToAllGroupPublishNextCredit(
     const __gm__ TileXR::CommArgs* args,
     int32_t rank, int32_t rankSize, uint32_t invocationId,
     uint32_t completedGroup, uint32_t lane, uint32_t groupCount,
-    uint32_t groupWidth, uint64_t creditOffset)
+    uint32_t groupWidth, uint64_t creditOffset,
+    AscendC::LocalTensor<uint8_t> relayLocal)
 {
     const int32_t nextPeer = AllToAllGroupNextCreditPeerDevice(
         rank, rankSize, completedGroup, lane, groupCount, groupWidth);
@@ -376,7 +410,19 @@ __aicore__ inline void AllToAllGroupPublishNextCredit(
     auto remoteCredit = reinterpret_cast<__gm__ uint64_t*>(
         args->creditMems[nextPeer] + creditOffset +
         static_cast<uint64_t>(rank) * TILEXR_ALLTOALL_GROUP_CREDIT_STRIDE);
-    *remoteCredit = creditToken;
+    auto creditLocal = relayLocal.ReinterpretCast<uint64_t>();
+    creditLocal.SetValue(0, creditToken);
+    AscendC::SetFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID0);
+    AscendC::WaitFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID0);
+
+    AscendC::GlobalTensor<uint64_t> remoteCreditGlobal;
+    remoteCreditGlobal.SetGlobalBuffer(
+        remoteCredit, TILEXR_ALLTOALL_GROUP_CREDIT_WORDS);
+    AscendC::DataCopy(
+        remoteCreditGlobal, creditLocal,
+        TILEXR_ALLTOALL_GROUP_CREDIT_WORDS);
+    AscendC::SetFlag<AscendC::HardEvent::MTE3_S>(EVENT_ID0);
+    AscendC::WaitFlag<AscendC::HardEvent::MTE3_S>(EVENT_ID0);
 }
 
 __aicore__ inline void AllToAllGroupRecordError(
@@ -810,7 +856,7 @@ __aicore__ inline void AllToAllGroupKernelImpl(
                         pass + 1U == passCount) {
                         AllToAllGroupPublishNextCredit(
                             args, rank, rankSize, invocationId, group, lane,
-                            groupCount, groupWidth, creditOffsets[slot]);
+                            groupCount, groupWidth, creditOffsets[slot], relayLocal);
                     }
                 }
                 if (!AllToAllGroupStageRunsCopyDevice(routeStage)) {
@@ -907,7 +953,7 @@ __aicore__ inline void AllToAllGroupKernelImpl(
                         static_cast<uint64_t>(peer) *
                             TILEXR_ALLTOALL_GROUP_CREDIT_STRIDE);
                     uint64_t observedCredit = 0ULL;
-                    if (!AllToAllGroupWaitTokenMte(
+                    if (!AllToAllGroupWaitCreditMte(
                             creditSignal, expectedCredit,
                             TILEXR_ALLTOALL_GROUP_WAIT_TIMEOUT_CYCLES,
                             relayLocal, observedCredit)) {
