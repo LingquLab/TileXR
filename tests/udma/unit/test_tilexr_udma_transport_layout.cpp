@@ -430,7 +430,11 @@ void TestDeviceSqeInitializesOfficialFields()
     CHECK_CONTAINS(device, "sqeCtx->rsv1 = 0");
     CHECK_CONTAINS(device, "sqeCtx->rsv2 = 0");
     CHECK_CONTAINS(device, "sqeCtx->rsv3 = 0");
-    CHECK_CONTAINS(device, "UDMAFillSqeCtx(sqeCtx, remoteAddr, remoteMemInfo, curHead, qpCtxEntry->depth");
+    CHECK_CONTAINS(device, "UDMAFillSqeCtx(");
+    CHECK_CONTAINS(device, "opcode, signalParams, sqeFlag");
+    CHECK_CONTAINS(device, "sqeCtx->flag = sqeFlag");
+    CHECK_CONTAINS(device, "UDMAPutNbiOnQpWithFlag");
+    CHECK_CONTAINS(device, "location.regionIndex, chunk, sqeFlag");
 }
 
 } // namespace

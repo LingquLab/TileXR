@@ -21,6 +21,9 @@ constexpr uint32_t TILEXR_ALLTOALL_GROUP_SIGNAL_STRIDE = 1024U;
 constexpr uint32_t TILEXR_ALLTOALL_GROUP_RELAY_BYTES = 64U * 1024U;
 constexpr uint64_t TILEXR_ALLTOALL_GROUP_WAIT_TIMEOUT_CYCLES = 10000000000ULL;
 constexpr uint32_t TILEXR_ALLTOALL_GROUP_ERROR_WORDS = 12U;
+constexpr uint32_t TILEXR_ALLTOALL_GROUP_ERROR_BYTES =
+    TILEXR_ALLTOALL_GROUP_ERROR_WORDS * TILEXR_ALLTOALL_GROUP_BLOCK_DIM *
+    sizeof(uint32_t);
 constexpr uint32_t TILEXR_ALLTOALL_GROUP_STAGE_CONFIG = 1U;
 constexpr uint32_t TILEXR_ALLTOALL_GROUP_STAGE_QUIET = 2U;
 constexpr uint32_t TILEXR_ALLTOALL_GROUP_STAGE_WAIT = 3U;
@@ -427,6 +430,18 @@ struct AllToAllGroupQuietState<true> {
     AllToAllGroupPendingQuiet pending[TILEXR_ALLTOALL_GROUP_MAX_QUIET_BATCH];
     uint32_t pendingCount = 0U;
 };
+
+__aicore__ inline uint32_t AllToAllGroupSignalSourceSlot(
+    const AllToAllGroupQuietState<false>&)
+{
+    return 0U;
+}
+
+__aicore__ inline uint32_t AllToAllGroupSignalSourceSlot(
+    const AllToAllGroupQuietState<true>& state)
+{
+    return state.pendingCount;
+}
 
 __aicore__ inline bool AllToAllGroupFlushQuiet(
     const __gm__ TileXR::CommArgs* args,
@@ -853,10 +868,26 @@ __aicore__ inline void AllToAllGroupKernelImpl(
                     static_cast<uint64_t>(rank) * TILEXR_ALLTOALL_GROUP_SIGNAL_STRIDE +
                     static_cast<uint64_t>(route) *
                         TILEXR_ALLTOALL_GROUP_ROUTE_SIGNAL_STRIDE;
+                const uint64_t signalSourceIndex =
+                    static_cast<uint64_t>(blockIdx) *
+                    TILEXR_ALLTOALL_GROUP_MAX_QUIET_BATCH +
+                    AllToAllGroupSignalSourceSlot(quietState);
+                auto signalLocal = reinterpret_cast<__gm__ uint64_t*>(
+                    reinterpret_cast<__gm__ uint8_t*>(debug) +
+                    TILEXR_ALLTOALL_GROUP_ERROR_BYTES +
+                    signalSourceIndex * sizeof(uint64_t));
+                *signalLocal = expectedToken;
+                TileXR::UDMACleanCacheLines(
+                    reinterpret_cast<__gm__ uint8_t*>(signalLocal), sizeof(uint64_t));
                 const uint64_t putBegin = AllToAllGroupTraceCycle(groupTrace);
-                TileXR::UDMAPutSignalNbiOnQp<int32_t>(
+                TileXR::UDMAPutNbiOnQpWithFlag<int32_t>(
                     args, peer, selectedQp, localSrc, remotePayloadOffset,
-                    segmentElements * sizeof(int32_t), remoteSignalOffset, expectedToken);
+                    segmentElements * sizeof(int32_t),
+                    TileXR::TILEXR_UDMA_SQE_FLAG_COMPLETION);
+                TileXR::UDMAPutNbiOnQpWithFlag<uint64_t>(
+                    args, peer, selectedQp, signalLocal, remoteSignalOffset,
+                    sizeof(uint64_t),
+                    TileXR::TILEXR_UDMA_SQE_FLAG_ORDERED_COMPLETION);
                 AllToAllGroupTraceRecordTask(
                     groupTrace, traceIteration, blockIdx, group, pass,
                     TileXR::Demo::kAllToAllGroupTraceSendPutSignal, groupCount, passCount,

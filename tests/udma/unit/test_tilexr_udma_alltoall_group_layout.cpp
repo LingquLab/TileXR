@@ -143,7 +143,14 @@ void TestPlan()
     CHECK_EQ(plan.signalOffset[0] >= plan.payloadOffset[1] + plan.payloadPlaneBytes, true);
     CHECK_EQ(plan.signalOffset[1] >= plan.signalOffset[0] + plan.signalPlaneBytes, true);
     CHECK_EQ(plan.controlOffset >= plan.signalOffset[1] + plan.signalPlaneBytes, true);
+    CHECK_EQ(plan.signalSourceOffset,
+        plan.controlOffset + TileXR::Demo::kAllToAllGroupErrorBytes);
+    CHECK_EQ(plan.signalSourceBytes,
+        TileXR::Demo::kAllToAllGroupSignalSourceBytes);
+    CHECK_EQ(plan.signalSourceOffset + plan.signalSourceBytes <=
+        plan.controlOffset + plan.controlBytes, true);
     CHECK_EQ(plan.registeredBytes <= TileXR::Demo::kAllToAllGroupMaxRegisteredBytes, true);
+    CHECK_EQ(TileXR::Demo::kAllToAllGroupMaxPayloadBytes, 16ULL << 30);
 
     const auto chunked = TileXR::Demo::PlanAllToAllGroup(
         rankSize, elementsPerPeer, elementsPerPeer / 4);
@@ -488,7 +495,13 @@ void TestKernelStructure()
     CHECK_CONTAINS(kernel, "TILEXR_ALLTOALL_GROUP_SEND_WORKERS + copyoutWorkers");
     CHECK_CONTAINS(kernel, "const uint32_t traceCore = copyoutWorkers == 8U");
     CHECK_CONTAINS(kernel, "TILEXR_ALLTOALL_GROUP_SEND_WORKERS + lane : blockIdx");
-    CHECK_CONTAINS(kernel, "UDMAPutSignalNbiOnQp<int32_t>");
+    CHECK_CONTAINS(kernel, "UDMAPutNbiOnQpWithFlag<int32_t>");
+    CHECK_CONTAINS(kernel, "UDMAPutNbiOnQpWithFlag<uint64_t>");
+    CHECK_NOT_CONTAINS(kernel, "UDMAPutSignalNbiOnQp<int32_t>");
+    CHECK_CONTAINS(kernel, "AllToAllGroupSignalSourceSlot(quietState)");
+    CHECK_CONTAINS(kernel,
+        "AllToAllGroupSignalSourceSlot(\n    const AllToAllGroupQuietState<false>&)");
+    CHECK_CONTAINS(kernel, "return state.pendingCount;");
     CHECK_CONTAINS(kernel, "AllToAllGroupPendingQuiet");
     CHECK_CONTAINS(kernel, "AllToAllGroupFlushQuiet");
     CHECK_CONTAINS(kernel,

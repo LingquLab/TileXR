@@ -25,11 +25,22 @@ constexpr uint32_t kAllToAllGroupRouteSignalStride = 512U;
 constexpr uint32_t kAllToAllGroupSignalSlotBytes = 1024U;
 constexpr uint32_t kAllToAllGroupSendCoreCount = 16U;
 constexpr uint32_t kAllToAllGroupSendWorkerCount = 32U;
+constexpr uint32_t kAllToAllGroupErrorWordsPerCore = 12U;
+constexpr uint32_t kAllToAllGroupErrorCoreCount = 64U;
+constexpr size_t kAllToAllGroupErrorBytes =
+    static_cast<size_t>(kAllToAllGroupErrorWordsPerCore) *
+    kAllToAllGroupErrorCoreCount * sizeof(uint32_t);
+constexpr size_t kAllToAllGroupSignalSourceSlots =
+    static_cast<size_t>(kAllToAllGroupSendWorkerCount) *
+    kAllToAllGroupMaxQuietBatch;
+constexpr size_t kAllToAllGroupSignalSourceBytes =
+    kAllToAllGroupSignalSourceSlots * sizeof(uint64_t);
 constexpr uint32_t kAllToAllGroupBlockDim = 64U;
 constexpr size_t kAllToAllGroupMultiChannelThresholdBytes =
     150ULL * 1024ULL * 1024ULL;
 constexpr size_t kAllToAllGroupAlignment = 512U;
-constexpr size_t kAllToAllGroupControlBytes = 4096U;
+constexpr size_t kAllToAllGroupControlBytes =
+    kAllToAllGroupErrorBytes + kAllToAllGroupSignalSourceBytes;
 constexpr size_t kAllToAllGroupMaxPayloadBytes = 16ULL << 30;
 constexpr size_t kAllToAllGroupMaxRegisteredBytes =
     2U * kAllToAllGroupMaxPayloadBytes +
@@ -50,6 +61,8 @@ struct AllToAllGroupPlan {
     size_t signalOffset[kAllToAllGroupPingPongSlots] = {0, 0};
     size_t controlOffset = 0;
     size_t controlBytes = kAllToAllGroupControlBytes;
+    size_t signalSourceOffset = 0;
+    size_t signalSourceBytes = kAllToAllGroupSignalSourceBytes;
     size_t registeredBytes = 0;
 };
 
@@ -252,6 +265,7 @@ inline AllToAllGroupPlan PlanAllToAllGroup(
         !AllToAllGroupAlignUp(cursor, plan.registeredBytes)) {
         return AllToAllGroupPlan {};
     }
+    plan.signalSourceOffset = plan.controlOffset + kAllToAllGroupErrorBytes;
     if (plan.registeredBytes > kAllToAllGroupMaxRegisteredBytes) {
         return AllToAllGroupPlan {};
     }

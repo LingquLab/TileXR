@@ -13,6 +13,11 @@
 
 namespace TileXR {
 
+constexpr uint32_t TILEXR_UDMA_SQE_FLAG_COMPLETION = 0x20U;
+constexpr uint32_t TILEXR_UDMA_SQE_FLAG_STRONG_ORDER = 0x02U;
+constexpr uint32_t TILEXR_UDMA_SQE_FLAG_ORDERED_COMPLETION =
+    TILEXR_UDMA_SQE_FLAG_COMPLETION | TILEXR_UDMA_SQE_FLAG_STRONG_ORDER;
+
 /**
  * @file tilexr_udma.h
  * @brief Device-side UDMA wrapper for TileXR-registered memory.
@@ -272,11 +277,12 @@ __aicore__ inline void UDMAFillNotifyData(
 
 __aicore__ inline void UDMAFillSqeCtx(
     __gm__ UDMASqeCtx* sqeCtx, __gm__ uint8_t* remoteAddr, __gm__ UDMAMemInfo* remoteMemInfo,
-    uint32_t curHead, uint32_t depth, UDMAOpcode opcode, const UDMASignalParams* signalParams)
+    uint32_t curHead, uint32_t depth, UDMAOpcode opcode, const UDMASignalParams* signalParams,
+    uint32_t sqeFlag = TILEXR_UDMA_SQE_FLAG_ORDERED_COMPLETION)
 {
     sqeCtx->sqeBbIdx = curHead % depth;
     sqeCtx->opcode = static_cast<uint32_t>(opcode);
-    sqeCtx->flag = 0b00100010;
+    sqeCtx->flag = sqeFlag;
     sqeCtx->rsv0 = 0;
     sqeCtx->nf = 0;
     sqeCtx->tokenEn = remoteMemInfo->tokenValueValid;
@@ -336,7 +342,8 @@ __aicore__ inline void UDMAPostSendUpdateInfo(uint32_t curHead, __gm__ UDMAWQCtx
 __aicore__ inline void UDMAPostSend(
     __gm__ UDMAInfo* udmaInfo, __gm__ uint8_t* remoteAddr, __gm__ uint8_t* localAddr,
     uint32_t pe, uint32_t qpIdx, uint32_t regionIndex, uint64_t messageLen,
-    UDMAOpcode opcode, const UDMASignalParams* signalParams)
+    UDMAOpcode opcode, const UDMASignalParams* signalParams,
+    uint32_t sqeFlag = TILEXR_UDMA_SQE_FLAG_ORDERED_COMPLETION)
 {
     uint32_t physicalQpIdx = UDMAGetRegionQpIndex(udmaInfo, qpIdx, regionIndex);
     if (physicalQpIdx >= udmaInfo->qpNum) return;
@@ -351,7 +358,9 @@ __aicore__ inline void UDMAPostSend(
     __gm__ uint8_t* wqeAddr =
         reinterpret_cast<__gm__ uint8_t*>(qpCtxEntry->bufAddr + wqeSize * (curHead % depth));
     __gm__ UDMASqeCtx* sqeCtx = reinterpret_cast<__gm__ UDMASqeCtx*>(wqeAddr);
-    UDMAFillSqeCtx(sqeCtx, remoteAddr, remoteMemInfo, curHead, qpCtxEntry->depth, opcode, signalParams);
+    UDMAFillSqeCtx(
+        sqeCtx, remoteAddr, remoteMemInfo, curHead, qpCtxEntry->depth,
+        opcode, signalParams, sqeFlag);
 
     __gm__ UDMASgeCtx* sgeCtx = reinterpret_cast<__gm__ UDMASgeCtx*>(UDMAGetSgeCtxAddr(wqeAddr, opcode));
     UDMAFillSgeCtx(sgeCtx, messageLen, localAddr, qpCtxEntry);
@@ -361,6 +370,17 @@ __aicore__ inline void UDMAPostSend(
     UDMAPostSendUpdateInfo(curHead, qpCtxEntry);
     ++wqeCnt;
     st_dev(wqeCnt, reinterpret_cast<__gm__ uint32_t*>(qpCtxEntry->wqeCntAddr), 0);
+}
+
+__aicore__ inline void UDMAWriteWithFlag(
+    const __gm__ CommArgs* args, __gm__ uint8_t* remoteAddr, __gm__ uint8_t* localAddr,
+    uint32_t pe, uint32_t qpIdx, uint32_t regionIndex, uint64_t messageLen,
+    uint32_t sqeFlag)
+{
+    if constexpr (TILEXR_UDMA_ARCH_SUPPORTED) {
+        UDMAPostSend(GetUDMAInfo(args), remoteAddr, localAddr, pe, qpIdx, regionIndex,
+                     messageLen, UDMAOpcode::WRITE, nullptr, sqeFlag);
+    }
 }
 
 __aicore__ inline void UDMAWrite(
@@ -436,6 +456,35 @@ __aicore__ inline void UDMAPutNbi(
     const __gm__ CommArgs* args, int targetRank, const __gm__ T* localSrc, uint64_t byteOffset, uint32_t byteCount)
 {
     UDMAPutNbiOnQp<T>(args, targetRank, 0, localSrc, byteOffset, byteCount);
+}
+
+template <typename T>
+__aicore__ inline void UDMAPutNbiOnQpWithFlag(
+    const __gm__ CommArgs* args, int targetRank, uint32_t qpIdx,
+    const __gm__ T* localSrc, uint64_t byteOffset, uint32_t byteCount,
+    uint32_t sqeFlag)
+{
+    if (!UDMARegistryEnabled(args)) return;
+
+    auto registry = GetUDMARegistry(args);
+    if (!UDMARegisteredRangeValid(registry, targetRank, byteOffset, byteCount)) return;
+
+    auto localAddr = reinterpret_cast<__gm__ uint8_t*>(const_cast<__gm__ T*>(localSrc));
+    uint64_t currentOffset = byteOffset;
+    uint64_t remaining = byteCount;
+    while (remaining != 0) {
+        UDMARegionLocation location {};
+        if (!UDMAResolveRegisteredOffset(registry, targetRank, currentOffset, location)) return;
+        uint32_t chunk = UDMAChunkBytes(remaining, location.bytesAvailable);
+        UDMAWriteWithFlag(args, location.addr, localAddr, targetRank, qpIdx,
+                          location.regionIndex, chunk, sqeFlag);
+        currentOffset += chunk;
+        localAddr += chunk;
+        remaining -= chunk;
+        if (remaining != 0 && chunk == location.bytesAvailable) {
+            UDMAQuietInternalOnQp(args, targetRank, qpIdx, location.regionIndex);
+        }
+    }
 }
 
 template <typename T>
