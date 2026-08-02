@@ -38,6 +38,9 @@ constexpr int TILEXR_MAX_RANK_SIZE = 1024; // 最大支持的npu卡数
 constexpr int RANK_SIZE_TWO = 2;  // 可用SIO的规模，以及是否需要跨卡搬运数据核的分界规模
 constexpr int64_t IPC_BUFF_MAX_SIZE = 100 * 1024 * 1024;
 constexpr int64_t IPC_DATA_OFFSET = 2 * 1024 * 1024; // 前2MB作为flag标志位，之后100MB作为数据存储
+constexpr int64_t CREDIT_IPC_STRIDE = 512;
+constexpr int64_t CREDIT_IPC_SLOT_BYTES = TILEXR_MAX_RANK_SIZE * CREDIT_IPC_STRIDE;
+constexpr int64_t CREDIT_IPC_BYTES = 2 * CREDIT_IPC_SLOT_BYTES;
 constexpr int64_t SYNC_FLAG_BIT_NUM = 10;  // cce 算子在用
 constexpr int64_t MEM_DMA_UNIT_INT_NUM = 4;
 constexpr int64_t EVENT_ID_MASK = 0xFFFFFFFF;
@@ -105,6 +108,7 @@ struct CommArgs {
     int localRankSize = -1;  // 此参数是指fullmesh互联的卡数
     uint32_t extraFlag = 0; // 32 bit map，具体每一位的含义就在此文件正上方
     GM_ADDR peerMems[TILEXR_MAX_RANK_SIZE] = {}; // 传入初始化获得的buff，所有allreduce都是同一个参数
+    GM_ADDR creditMems[TILEXR_MAX_RANK_SIZE] = {}; // optional dedicated grouped ingress-credit IPC buffers
     /**
      * @param sendCountMatrix 大小是rankSize*rankSize的一维数组
      * eg: sendCountMatrix[1] 的数值，对应二维数组的[0][1]，表示 卡0 要给 卡1 发送的数据个数

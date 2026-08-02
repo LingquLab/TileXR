@@ -911,8 +911,15 @@ bool CopyChunkDeviceToHost(
 
 bool RunGroupedAllToAll(
     int rank, int rankSize, int32_t elementsPerPeer,
-    int deviceId, TileXRCommPtr comm, aclrtStream stream, GM_ADDR commArgsDev)
+    int deviceId, TileXRCommPtr comm, aclrtStream stream,
+    const TileXR::CommArgs& commArgsHost, GM_ADDR commArgsDev)
 {
+    static_assert(TileXR::Demo::kAllToAllGroupCreditStride ==
+        static_cast<size_t>(TileXR::CREDIT_IPC_STRIDE),
+        "grouped credit stride must match the communicator IPC layout");
+    static_assert(TileXR::Demo::kAllToAllGroupCreditSlotBytes ==
+        static_cast<size_t>(TileXR::CREDIT_IPC_SLOT_BYTES),
+        "grouped credit slot must match the communicator IPC layout");
     constexpr uint32_t kErrorWordsPerCore = 12U;
     constexpr uint32_t kErrorCoreCount = TileXR::Demo::kAllToAllGroupBlockDim;
     const int groupWidthValue = GetEnvInt(
@@ -952,6 +959,18 @@ bool RunGroupedAllToAll(
                   << "] ERROR: grouped ingress credit currently requires groupWidth=16"
                   << " groupWidth=" << groupWidth << std::endl;
         return false;
+    }
+    if (ingressWindow != 0U) {
+        for (int peer = 0; peer < rankSize; ++peer) {
+            if (commArgsHost.creditMems[peer] == nullptr) {
+                std::cerr << "[rank " << rank
+                          << "] ERROR: grouped ingress credit requires dedicated"
+                          << " credit IPC mappings for every rank; missing peer="
+                          << peer << ". Set TILEXR_ENABLE_CREDIT_IPC=1."
+                          << std::endl;
+                return false;
+            }
+        }
     }
     const int32_t requestedChunkElements = std::max(
         1, GetEnvInt("TILEXR_DEMO_ALLTOALL_GROUP_CHUNK_ELEMENTS", elementsPerPeer));
@@ -1206,8 +1225,6 @@ bool RunGroupedAllToAll(
         " creditPlaneBytes=" + std::to_string(plan.creditPlaneBytes) +
         " creditOffset0=" + std::to_string(plan.creditOffset[0]) +
         " creditOffset1=" + std::to_string(plan.creditOffset[1]) +
-        " creditRequestOffset=" + std::to_string(plan.creditRequestOffset) +
-        " creditRequestBytes=" + std::to_string(plan.creditRequestBytes) +
         " controlOffset=" + std::to_string(plan.controlOffset) +
         " regionCount=" + std::to_string(useMultiRegion ? groupedRegionCount : 1U) +
         " groupWidth=" + std::to_string(plan.groupWidth) +
@@ -1486,7 +1503,8 @@ int main(int argc, char** argv)
 
     if (testType == 8) {
         const bool ok = RunGroupedAllToAll(
-            rank, rankSize, elementsPerRank, deviceId, comm, stream, commArgsDev);
+            rank, rankSize, elementsPerRank, deviceId, comm, stream,
+            *commArgsHost, commArgsDev);
         Cleanup(comm, stream, nullptr, nullptr, rank, deviceId);
         if (!ok) {
             std::cerr << "[rank " << rank << "] TileXR grouped alltoall demo failed" << std::endl;

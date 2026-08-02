@@ -2,9 +2,10 @@
 
 ## Status
 
-Implemented and validated through 8x8 hardware on 2026-08-02. The experimental
-feature remains disabled by default. The strict global admission bound still
-requires 256P all-rank trace or admission-counter validation.
+The original request-plus-UDMA-credit implementation was validated through 8x8
+hardware on 2026-08-02. It has since been replaced by direct receive-core
+publication through a dedicated credit IPC allocation and requires renewed
+hardware validation. The experimental feature remains disabled by default.
 
 ## Goal
 
@@ -45,10 +46,9 @@ For destination rank `D`, lane `L`, and group `g`:
 
 1. The designated receive owner waits until all payload routes expected from
    `peer(D, g, L)` have published their data-ready tokens.
-2. Before receive-copy, the owner publishes a local request for lane `L`.
-3. Primary send core `L` observes that request and posts one credit token to
-   `peer(D, g + 1, L)`, when that peer exists.
-4. The next source observes the credit in its local registered credit plane and
+2. Before receive-copy, the owner directly writes one credit token through the
+   dedicated IPC mapping of `peer(D, g + 1, L)`, when that peer exists.
+3. The next source observes the credit in its local dedicated credit buffer and
    may post both primary and secondary payload routes to `D`.
 
 At most one source per destination lane can therefore be admitted. With 16
@@ -59,12 +59,13 @@ dependency, so the protocol does not introduce a cyclic startup wait.
 
 ## Credit Storage And Tokens
 
-Credits use a separate registered-memory plane. A credit received by source
-rank `S` is indexed by destination rank `D`, because `S` communicates with `D`
-only once per invocation:
+Each rank allocates a dedicated 1 MiB IPC buffer when
+`TILEXR_ENABLE_CREDIT_IPC=1`. A credit received by source rank `S` is indexed by
+destination rank `D`; each entry occupies 512 bytes and two fixed 512 KiB
+ping-pong planes support 1024 ranks:
 
 ```text
-credit[pingPongSlot][destinationRank]
+credit[pingPongSlot][destinationRank * 512]
 ```
 
 The expected value encodes at least the invocation and destination group. The
@@ -79,35 +80,24 @@ Credits control source-rank admission, not route admission.
 
 With 32 copyout workers, workers 0 through 15 and 16 through 31 can wait on the
 same peer signal while copying different payload slices. Only the first slice,
-kernel cores 32 through 47, owns the local credit request. Cores 48 through 63
-never request credits.
+kernel cores 32 through 47, owns direct credit publication. Cores 48 through 63
+never publish credits.
 
-The owner publishes its request after both expected primary and secondary data
+The owner publishes its credit after both expected primary and secondary data
 tokens arrive and before MTE receive-copy begins. This avoids placing copyout
 latency on the send admission path.
 
-Each `(pingPongSlot, lane)` request occupies its own 64-byte cache line. Packing
-multiple lanes into one line is incorrect: independent receive cores clean and
-invalidate the line concurrently, so one core can overwrite another lane's
-request with stale cache-line contents.
-
 ## Credit Submission
 
-Credit publication is an NBI 8-byte UDMA write issued only by the corresponding
-primary send core. Receive cores do not issue UDMA operations because they can
-share a payload SQ with a send core, while SQ head and WQE count updates require
-a single producer.
+Credit publication is a direct 8-byte GM store by the receive owner through
+`creditMems[nextSource]`. It does not consume a UDMA WQE, QP, completion, or
+quiet, and it does not add another producer to a shared UDMA SQ. Both send
+routes poll the same local dedicated credit address through MTE.
 
-The credit path must not perform a quiet for every credit. Token source storage
-remains immutable until completion through distinct lane/group slots. At the
-end of the invocation, the primary send core reclaims credit completions once
-per unique underlying shared SQ, identified by its WQE-count address. This
-preserves single-producer SQ ownership and avoids duplicate quiet operations
-when multiple peer/QP views refer to the same shared queue.
-
-If the available UDMA interface cannot safely keep credit source data alive
-without per-credit quiet, implementation pauses for a revised design rather
-than adding a per-credit quiet to the critical path.
+The dedicated allocation is independent of the existing optional communication
+IPC buffer, so grouped ingress credit can run with `TILEXR_ENABLE_IPC=0`. It
+adds one IPC mapping per peer and process, but only 1 MiB of device memory per
+rank. Host code rejects ingress-credit execution if any mapping is missing.
 
 ## Configuration
 
@@ -120,6 +110,9 @@ TILEXR_DEMO_ALLTOALL_GROUP_INGRESS_WINDOW=0|1
 - `0`: current behavior and default.
 - `1`: one admitted source per lane, at most 16 payload source ranks per
   destination.
+
+`window=1` additionally requires `TILEXR_ENABLE_CREDIT_IPC=1` before
+communicator initialization.
 
 A later `window=2` extension may trade a 32-source bound for more tolerance of
 credit latency, but it is outside the first implementation.
@@ -153,7 +146,7 @@ validation on all 32 ranks:
 1 GiB/rank multi:  window0 P50 5329.210 us, window1 P50 5317.925 us
 ```
 
-This proves the request/credit protocol progresses across repeated invocations
+This proved the previous request/UDMA-credit protocol progressed across repeated invocations
 and does not regress 1 GiB throughput in the 4x8 environment. It does not prove
 the 16-source global bound because 4x8 has only two peer groups.
 
@@ -166,7 +159,8 @@ The 8x8 A10 run used the fixed host order `226, 223, 220, 217, 198, 195,
 1 GiB/rank multi:  window0 P50 6516.335 us, window1 P50 6336.370 us
 ```
 
-At 64 ranks, ingress credit reduced the 1 GiB P50 by 179.965 us (2.76%), from
+Under the previous request/UDMA-credit implementation, ingress credit reduced
+the 1 GiB P50 by 179.965 us (2.76%), from
 approximately 153.46 GiB/s to 157.82 GiB/s. The 1 KiB case paid 32.863 us of
 additional fixed control latency. This run exercises four peer groups and
 therefore provides stronger repeated credit-chain evidence than 4x8, but it

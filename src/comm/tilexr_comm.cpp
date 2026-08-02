@@ -277,6 +277,7 @@ int TileXRComm::SyncCommArgs()
     commArgs_.localRankSize = localRankSize_;
     for (int i = 0; i < rankSize_; ++i) {
         commArgs_.peerMems[i] = peerMem_[i];    // 这里不会越界，之前有逻辑校验过越界了
+        commArgs_.creditMems[i] = creditIpcMem_[i];
     }
 
     if (isEnableMsprofOp_) {
@@ -534,6 +535,20 @@ void TileXRComm::CloseIpcMem()
     }
 }
 
+void TileXRComm::CloseCreditIpcMem()
+{
+    for (int i = 0; i < rankSize_; ++i) {
+        if (i == rank_ || creditIpcMem_[i] == nullptr) {
+            continue;
+        }
+        int ret = rtIpcCloseMemory(static_cast<void *>(creditIpcMem_[i]));
+        if (ret != RT_ERROR_NONE) {
+            TILEXR_LOG(WARN) << "Close credit ipc[" << i << "] memory failed! ret: " << ret;
+        }
+        creditIpcMem_[i] = nullptr;
+    }
+}
+
 void TileXRComm::FreePeerMem(GM_ADDR &mem) const
 {
     if (mem != nullptr) {
@@ -587,6 +602,13 @@ int TileXRComm::Init()
                           << ", localRankSize_ : " << localRankSize_ << " success";
     } else {
         TILEXR_LOG(INFO) << "TileXR IPC memory disabled by environment";
+    }
+    if (IsEnvEnabled("TILEXR_ENABLE_CREDIT_IPC", false)) {
+        if (InitCreditCommMem() != TILEXR_SUCCESS) {
+            TILEXR_LOG(ERROR) << "InitCreditCommMem failed!";
+            return TILEXR_ERROR_INTERNAL;
+        }
+        TILEXR_LOG(INFO) << "Dedicated credit IPC memory initialized";
     }
 
     // 新增：初始化 UDMA
@@ -956,6 +978,86 @@ int TileXRComm::InitCommMem()
     return TILEXR_SUCCESS;
 }
 
+int TileXRComm::InitCreditCommMem()
+{
+    uint32_t pids[TILEXR_MAX_RANK_SIZE] = {0};
+    int ret = GetPid(pids);
+    if (ret != TILEXR_SUCCESS) {
+        TILEXR_LOG(ERROR) << "GetPid for credit IPC failed! ret: " << ret;
+        return ret;
+    }
+    int64_t sdids[TILEXR_MAX_RANK_SIZE] = {0};
+    ret = GetSidId(sdids, rankSize_);
+    if (ret != TILEXR_SUCCESS) {
+        TILEXR_LOG(ERROR) << "GetSidId for credit IPC failed! ret: " << ret;
+        return ret;
+    }
+    return InitCreditIpcMem(pids, sdids);
+}
+
+int TileXRComm::InitCreditIpcMem(const uint32_t *pids, const int64_t *sdids)
+{
+    aclError aclRet = aclrtMalloc(
+        reinterpret_cast<void **>(&creditIpcMem_[rank_]), CREDIT_IPC_BYTES,
+        (GetChipName() == ChipName::CHIP_310P3) ?
+            ACL_MEM_MALLOC_HUGE_FIRST_P2P : ACL_MEM_MALLOC_HUGE_FIRST);
+    if (aclRet != ACL_SUCCESS) {
+        TILEXR_LOG(ERROR) << "allocate credit IPC memory failed: " << aclRet;
+        return TILEXR_ERROR_INTERNAL;
+    }
+    aclRet = aclrtMemset(
+        creditIpcMem_[rank_], CREDIT_IPC_BYTES, 0, CREDIT_IPC_BYTES);
+    if (aclRet != ACL_SUCCESS) {
+        TILEXR_LOG(ERROR) << "initialize credit IPC memory failed: " << aclRet;
+        return TILEXR_ERROR_INTERNAL;
+    }
+
+    char nameBuffer[IPC_NAME_SIZE] = {};
+    if (rtIpcSetMemoryName(
+            creditIpcMem_[rank_], CREDIT_IPC_BYTES,
+            nameBuffer, IPC_NAME_SIZE) != RT_ERROR_NONE) {
+        TILEXR_LOG(ERROR) << "set credit IPC memory name failed";
+        return TILEXR_ERROR_INTERNAL;
+    }
+    string name(nameBuffer);
+    if (SetIpcPidSdid(name, pids, sdids) != TILEXR_SUCCESS) {
+        TILEXR_LOG(ERROR) << "set credit IPC pid/sdid failed";
+        return TILEXR_ERROR_INTERNAL;
+    }
+    char names[TILEXR_MAX_RANK_SIZE][IPC_NAME_SIZE] = {};
+    name.resize(IPC_NAME_SIZE);
+    if (GetName(name, names) != TILEXR_SUCCESS) {
+        TILEXR_LOG(ERROR) << "gather credit IPC memory names failed";
+        return TILEXR_ERROR_INTERNAL;
+    }
+    return OpenCreditIpcMem(names);
+}
+
+int TileXRComm::OpenCreditIpcMem(
+    const char names[TILEXR_MAX_RANK_SIZE][IPC_NAME_SIZE])
+{
+    static mutex mut;
+    lock_guard<mutex> lock(mut);
+    for (int i = 0; i < rankSize_; ++i) {
+        if (i == rank_) {
+            continue;
+        }
+        if (SkipUnusedChannel910B2C(rank_, i, GetChipName())) {
+            continue;
+        }
+        int ret = rtIpcOpenMemory(
+            reinterpret_cast<void **>(&creditIpcMem_[i]), names[i]);
+        if (ret != RT_ERROR_NONE) {
+            CloseCreditIpcMem();
+            TILEXR_LOG(ERROR) << "rank: " << rank_ << " creditIpcMem: " << i
+                              << " IpcOpenMemory err " << ret;
+            return TILEXR_ERROR_INTERNAL;
+        }
+    }
+    creditIpcMemInited_ = true;
+    return TILEXR_SUCCESS;
+}
+
 int TileXRComm::OpenIpcMem(const char names[TILEXR_MAX_RANK_SIZE][IPC_NAME_SIZE])
 {
     static mutex mut;
@@ -1042,6 +1144,10 @@ TileXRComm::~TileXRComm()
         CloseIpcMem();
         ipcMemInited_ = false;
     }
+    if (creditIpcMemInited_) {
+        CloseCreditIpcMem();
+        creditIpcMemInited_ = false;
+    }
     if (socketExchange_) {
         delete socketExchange_;
         socketExchange_ = nullptr;
@@ -1056,6 +1162,7 @@ TileXRComm::~TileXRComm()
     }
     FreeUDMARegistry();
     FreePeerMem(peerMem_[rank_]);
+    FreePeerMem(creditIpcMem_[rank_]);
     FreePeerMem(commArgsPtr_);
 
     if (udmaTransport_ != nullptr) {

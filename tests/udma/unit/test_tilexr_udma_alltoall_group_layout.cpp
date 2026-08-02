@@ -152,10 +152,6 @@ void TestPlan()
         TileXR::Demo::kAllToAllGroupSignalSourceBytes);
     CHECK_EQ(plan.signalSourceOffset + plan.signalSourceBytes <=
         plan.controlOffset + plan.controlBytes, true);
-    CHECK_EQ(plan.creditSourceOffset, 0ULL);
-    CHECK_EQ(plan.creditSourceBytes, 0ULL);
-    CHECK_EQ(plan.creditRequestOffset, 0ULL);
-    CHECK_EQ(plan.creditRequestBytes, 0ULL);
     const auto legacyAlign = [](size_t value) {
         return (value + TileXR::Demo::kAllToAllGroupAlignment - 1U) &
             ~(TileXR::Demo::kAllToAllGroupAlignment - 1U);
@@ -174,12 +170,8 @@ void TestPlan()
     CHECK_EQ(plan.signalOffset[1], legacySignalOffset1);
     CHECK_EQ(plan.controlOffset, legacyControlOffset);
     CHECK_EQ(plan.registeredBytes, legacyRegisteredBytes);
-    CHECK_EQ(TileXR::Demo::AllToAllGroupCreditByteOffset(3U), 24ULL);
-    CHECK_EQ(TileXR::Demo::AllToAllGroupCreditSourceByteOffset(1U, 2U),
-        (TileXR::Demo::kAllToAllGroupMaxGroupCount + 2ULL) * sizeof(uint64_t));
-    CHECK_EQ(TileXR::Demo::AllToAllGroupCreditRequestByteOffset(1U, 2U),
-        (TileXR::Demo::kAllToAllGroupSendCoreCount + 2ULL) *
-            TileXR::Demo::kAllToAllGroupCreditRequestStride);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupCreditByteOffset(3U),
+        3ULL * TileXR::Demo::kAllToAllGroupCreditStride);
     CHECK_EQ(plan.registeredBytes <= TileXR::Demo::kAllToAllGroupMaxRegisteredBytes, true);
     CHECK_EQ(TileXR::Demo::kAllToAllGroupMaxPayloadBytes, 16ULL << 30);
 
@@ -188,26 +180,11 @@ void TestPlan()
         TileXR::Demo::kAllToAllGroupWidth, 1U);
     CHECK_EQ(ingressPlan.valid, true);
     CHECK_EQ(ingressPlan.creditPlaneBytes,
-        static_cast<size_t>(rankSize) * sizeof(uint64_t));
-    CHECK_EQ(ingressPlan.creditOffset[0] >=
-        ingressPlan.signalOffset[1] + ingressPlan.signalPlaneBytes, true);
-    CHECK_EQ(ingressPlan.creditOffset[1] >=
-        ingressPlan.creditOffset[0] + ingressPlan.creditPlaneBytes, true);
-    CHECK_EQ(ingressPlan.controlOffset >=
-        ingressPlan.creditOffset[1] + ingressPlan.creditPlaneBytes, true);
-    CHECK_EQ(ingressPlan.creditSourceOffset,
-        ingressPlan.signalSourceOffset +
-        TileXR::Demo::kAllToAllGroupSignalSourceBytes);
-    CHECK_EQ(ingressPlan.creditSourceOffset + ingressPlan.creditSourceBytes <=
-        ingressPlan.controlOffset + ingressPlan.controlBytes, true);
-    CHECK_EQ(ingressPlan.creditRequestOffset,
-        ingressPlan.creditSourceOffset +
-        TileXR::Demo::kAllToAllGroupCreditSourceBytes);
-    CHECK_EQ(ingressPlan.creditRequestBytes,
-        TileXR::Demo::kAllToAllGroupCreditRequestBytes);
-    CHECK_EQ(ingressPlan.creditRequestOffset + ingressPlan.creditRequestBytes <=
-        ingressPlan.controlOffset + ingressPlan.controlBytes, true);
-    CHECK_EQ(ingressPlan.registeredBytes > plan.registeredBytes, true);
+        static_cast<size_t>(rankSize) * TileXR::Demo::kAllToAllGroupCreditStride);
+    CHECK_EQ(ingressPlan.creditOffset[0], 0ULL);
+    CHECK_EQ(ingressPlan.creditOffset[1],
+        TileXR::Demo::kAllToAllGroupCreditSlotBytes);
+    CHECK_EQ(ingressPlan.registeredBytes, plan.registeredBytes);
     CHECK_EQ(TileXR::Demo::PlanAllToAllGroup(
         rankSize, elementsPerPeer, elementsPerPeer,
         TileXR::Demo::kAllToAllGroupExperimentalWidth, 1U).valid, false);
@@ -651,27 +628,21 @@ void TestKernelStructure()
     CHECK_CONTAINS(kernel, "uint64_t creditOffset0, uint64_t creditOffset1");
     CHECK_CONTAINS(kernel, "uint32_t ingressWindow");
     CHECK_CONTAINS(kernel, "AllToAllGroupPublishNextCredit");
-    CHECK_CONTAINS(kernel, "AllToAllGroupPublishCreditRequest");
-    CHECK_CONTAINS(kernel, "AllToAllGroupCreditRequest(debug, slot, lane)");
-    CHECK_CONTAINS(kernel, "AllToAllGroupFinishCredits");
     CHECK_CONTAINS(kernel, "AllToAllGroupCreditOwnerDevice(worker)");
     CHECK_CONTAINS(kernel, "TILEXR_ALLTOALL_GROUP_STAGE_CREDIT_WAIT");
-    CHECK_CONTAINS(kernel, "TILEXR_ALLTOALL_GROUP_STAGE_CREDIT_QUIET");
-    CHECK_CONTAINS(kernel,
-        "TILEXR_ALLTOALL_GROUP_STAGE_CREDIT_REQUEST_WAIT");
     CHECK_CONTAINS(kernel, "kAllToAllGroupTraceCreditWait");
-    CHECK_CONTAINS(kernel, "completedQueueKeys");
-    CHECK_CONTAINS(kernel, "publishedCreditCount");
     CHECK_CONTAINS(kernel, "TileXR::TILEXR_UDMA_SQE_FLAG_COMPLETION");
     const size_t publishCreditBegin = kernel.find(
         "__aicore__ inline void AllToAllGroupPublishNextCredit");
     const size_t publishCreditEnd = kernel.find(
-        "__aicore__ inline bool AllToAllGroupFinishCredits", publishCreditBegin);
+        "__aicore__ inline void AllToAllGroupRecordError", publishCreditBegin);
     const std::string publishCredit = publishCreditBegin == std::string::npos ?
         std::string() : kernel.substr(publishCreditBegin,
             publishCreditEnd == std::string::npos ? std::string::npos :
                 publishCreditEnd - publishCreditBegin);
-    CHECK_CONTAINS(publishCredit, "UDMAPutNbiOnQpWithFlag<uint64_t>");
+    CHECK_CONTAINS(publishCredit, "args->creditMems[nextPeer]");
+    CHECK_CONTAINS(publishCredit, "*remoteCredit = creditToken");
+    CHECK_NOT_CONTAINS(publishCredit, "UDMAPutNbiOnQpWithFlag<uint64_t>");
     CHECK_NOT_CONTAINS(publishCredit, "UDMAQuiet");
     CHECK_CONTAINS(kernel, "AllToAllGroupWaitTokenMte");
     CHECK_CONTAINS(kernel, "AllToAllGroupStageRunsSendDevice(routeStage)");
@@ -702,6 +673,8 @@ void TestHostStructure()
     CHECK_CONTAINS(demo, "TILEXR_DEMO_ALLTOALL_GROUP_WIDTH");
     CHECK_CONTAINS(demo, "TILEXR_DEMO_ALLTOALL_GROUP_QUIET_BATCH");
     CHECK_CONTAINS(demo, "TILEXR_DEMO_ALLTOALL_GROUP_INGRESS_WINDOW");
+    CHECK_CONTAINS(demo, "TILEXR_ENABLE_CREDIT_IPC=1");
+    CHECK_CONTAINS(demo, "*commArgsHost, commArgsDev");
     CHECK_CONTAINS(demo, "grouped ingress credit currently requires single pass");
     CHECK_CONTAINS(demo, "grouped ingress credit currently requires groupWidth=16");
     CHECK_CONTAINS(demo, "TILEXR_DEMO_ALLTOALL_GROUP_PRIMARY_ROUTE_PARTS");

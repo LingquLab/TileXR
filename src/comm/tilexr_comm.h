@@ -60,12 +60,16 @@ private:
     int SetMemoryName(std::string &name);
     int SetIpcPidSdid(std::string &name, const uint32_t *pids, const int64_t *sdids) const;
     int OpenIpcMem(const char names[TILEXR_MAX_RANK_SIZE][IPC_NAME_SIZE]);
+    int InitCreditIpcMem(const uint32_t *pids, const int64_t *sdids);
+    int OpenCreditIpcMem(const char names[TILEXR_MAX_RANK_SIZE][IPC_NAME_SIZE]);
     int GetDev();
     int GetDevThread(const std::string &uid = "");
     int EnablePeerAccess();
     int InitCommMem();
+    int InitCreditCommMem();
     int InitCommon();
     void CloseIpcMem();
+    void CloseCreditIpcMem();
     void FreePeerMem(GM_ADDR &mem) const;
     int InitMem();
     int GetSidId(int64_t sdids[TILEXR_MAX_RANK_SIZE], int rankSize);
@@ -89,6 +93,7 @@ private:
     std::atomic<int64_t> magic_ {1};
     bool inited_ = false;
     bool ipcMemInited_ = false;
+    bool creditIpcMemInited_ = false;
     std::string uid_ = {};
     std::vector<int> devList_ = {};
     int commDomain_ = {};
@@ -96,6 +101,7 @@ private:
 
     // shared ping pong buff，这个地址就是一开始申请在HBM上的，所以host上可以取到，但不能直接修改。
     GM_ADDR peerMem_[TILEXR_MAX_RANK_SIZE] = {};
+    GM_ADDR creditIpcMem_[TILEXR_MAX_RANK_SIZE] = {};
     PhysicalInfo physicalInfo_ = {};
     CommArgs commArgs_ = {};    // host侧
     GM_ADDR commArgsPtr_ = nullptr; // device侧
