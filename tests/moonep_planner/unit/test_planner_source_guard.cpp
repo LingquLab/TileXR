@@ -62,6 +62,7 @@ int main()
     ok &= Require(kernel, "BuildLocalHistogram", "planner histogram phase missing");
     ok &= Require(kernel, "BuildExpertLayout", "planner layout phase missing");
     ok &= Require(kernel, "BuildDst", "planner dst phase missing");
+    ok &= Require(kernel, "rtKernelLaunchWithFlagV2", "Planner Runtime V2 launch missing");
     ok &= Require(kernel, "WaitReadyFlag", "bounded planner ready poll missing");
     ok &= Require(readyPolling, "DataCacheCleanAndInvalid",
         "Planner ready poll cache invalidation missing");
@@ -89,6 +90,7 @@ int main()
     ok &= Reject(publicHeader, "zeroFillRanges", "Planner public ABI still exposes cleanup ranges");
     ok &= Reject(publicHeader, "TileXRMoonEpPlanner(", "legacy unversioned Planner ABI present");
     ok &= Reject(kernel, "truncated", "Planner kernel contains a truncated migration artifact");
+    ok &= Reject(kernel, "<<<", "Planner still uses compiler kernel launch syntax");
 
     ok &= Require(launcher, "rank % physical_device_count",
         "logical-rank to physical-device mapping missing");

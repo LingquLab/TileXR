@@ -1,9 +1,10 @@
 #include "planner_launch.h"
 
 #include "planner_common.h"
+#include "runtime/kernel.h"
 #include "tilexr_types.h"
 
-extern void launch_tilexr_moonep_planner_kernel(uint32_t blockDim, void *stream,
+extern rtError_t launch_tilexr_moonep_planner_kernel(uint32_t blockDim, void *stream,
     GM_ADDR commArgs, GM_ADDR topkExpertIds, GM_ADDR tokensPerExpert, GM_ADDR workspace,
     GM_ADDR dst, GM_ADDR cuSeqlens, GM_ADDR expertsToCopy, GM_ADDR remoteStats,
     GM_ADDR plannerStatus, int64_t s, int64_t k, int64_t expertCount,
@@ -23,7 +24,8 @@ int TileXRMoonEpLaunchKernel(const PlannerParams &params, const PlannerLaunchCon
     }
 
     const PlannerLayout &layout = context.layout;
-    launch_tilexr_moonep_planner_kernel(static_cast<uint32_t>(layout.blockDim),
+    const rtError_t launchRet = launch_tilexr_moonep_planner_kernel(
+        static_cast<uint32_t>(layout.blockDim),
         params.stream, context.devArgs,
         reinterpret_cast<GM_ADDR>(const_cast<int32_t *>(params.topkExpertIds)),
         reinterpret_cast<GM_ADDR>(const_cast<int32_t *>(params.tokensPerExpert)),
@@ -36,7 +38,7 @@ int TileXRMoonEpLaunchKernel(const PlannerParams &params, const PlannerLaunchCon
         layout.dispatchedCapacity, params.waitIterations, layout.tpePrefixOffset,
         layout.blockHistogramOffset, layout.allocPrefixOffset,
         layout.expertOffsetsOffset, layout.zOffset, layout.groupTotalsOffset, magic);
-    return TileXR::TILEXR_SUCCESS;
+    return launchRet == RT_ERROR_NONE ? TileXR::TILEXR_SUCCESS : TileXR::TILEXR_ERROR_MKIRT;
 }
 
 } // namespace TileXRMoonEp

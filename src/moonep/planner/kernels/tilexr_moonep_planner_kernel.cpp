@@ -4,6 +4,7 @@
 
 #include "comm_args.h"
 #include "planner_common.h"
+#include "runtime/kernel.h"
 #include "tilexr_sync.h"
 
 namespace TileXRMoonEp {
@@ -994,7 +995,7 @@ extern "C" __global__ __aicore__ void tilexr_moonep_planner_kernel(GM_ADDR commA
     op.Process();
 }
 
-void launch_tilexr_moonep_planner_kernel(uint32_t blockDim, void *stream,
+rtError_t launch_tilexr_moonep_planner_kernel(uint32_t blockDim, void *stream,
     GM_ADDR commArgs, GM_ADDR topkExpertIds, GM_ADDR tokensPerExpert, GM_ADDR workspace,
     GM_ADDR dst, GM_ADDR cuSeqlens, GM_ADDR expertsToCopy, GM_ADDR remoteStats,
     GM_ADDR plannerStatus, int64_t s, int64_t k, int64_t expertCount,
@@ -1003,9 +1004,46 @@ void launch_tilexr_moonep_planner_kernel(uint32_t blockDim, void *stream,
     uint64_t allocPrefixOffset, uint64_t expertOffsetsOffset, uint64_t zOffset,
     uint64_t groupTotalsOffset, int64_t magic)
 {
-    tilexr_moonep_planner_kernel<<<blockDim, nullptr, stream>>>(commArgs,
-        topkExpertIds, tokensPerExpert, workspace, dst, cuSeqlens, expertsToCopy,
-        remoteStats, plannerStatus, s, k, expertCount, expertsPerRank, routeCount,
-        dispatchedCapacity, waitIterations, tpePrefixOffset, blockHistogramOffset,
-        allocPrefixOffset, expertOffsetsOffset, zOffset, groupTotalsOffset, magic);
+    struct PlannerKernelArgs {
+        GM_ADDR commArgs;
+        GM_ADDR topkExpertIds;
+        GM_ADDR tokensPerExpert;
+        GM_ADDR workspace;
+        GM_ADDR dst;
+        GM_ADDR cuSeqlens;
+        GM_ADDR expertsToCopy;
+        GM_ADDR remoteStats;
+        GM_ADDR plannerStatus;
+        int64_t s;
+        int64_t k;
+        int64_t expertCount;
+        int64_t expertsPerRank;
+        int64_t routeCount;
+        int64_t dispatchedCapacity;
+        uint64_t waitIterations;
+        uint64_t tpePrefixOffset;
+        uint64_t blockHistogramOffset;
+        uint64_t allocPrefixOffset;
+        uint64_t expertOffsetsOffset;
+        uint64_t zOffset;
+        uint64_t groupTotalsOffset;
+        int64_t magic;
+    } args {
+        commArgs, topkExpertIds, tokensPerExpert, workspace, dst, cuSeqlens,
+        expertsToCopy, remoteStats, plannerStatus, s, k, expertCount,
+        expertsPerRank, routeCount, dispatchedCapacity, waitIterations,
+        tpePrefixOffset, blockHistogramOffset, allocPrefixOffset,
+        expertOffsetsOffset, zOffset, groupTotalsOffset, magic
+    };
+
+    rtArgsEx_t argsInfo {};
+    argsInfo.args = &args;
+    argsInfo.argsSize = sizeof(args);
+
+    rtTaskCfgInfo_t cfgInfo {};
+    cfgInfo.schemMode = 1;
+
+    return rtKernelLaunchWithFlagV2(
+        reinterpret_cast<const void *>(tilexr_moonep_planner_kernel), blockDim,
+        &argsInfo, nullptr, static_cast<rtStream_t>(stream), 0, &cfgInfo);
 }
