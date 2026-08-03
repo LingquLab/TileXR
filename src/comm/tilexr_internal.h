@@ -14,10 +14,22 @@
 #include "../include/tilexr_types.h"
 
 namespace TileXR {
+enum class IpcPidMode {
+    AUTO,
+    PID_ONLY,
+    SUPERPOD_SDID,
+    INVALID
+};
+
 // Common functions
 ChipName GetChipName();
 
 bool UseLegacyIpcPid(ChipName chipName);
+
+IpcPidMode ResolveIpcPidMode(const char *value);
+
+bool UsePidOnlyIpcForPeer(ChipName chipName, int rank, int peer, int localRankSize,
+    IpcPidMode mode);
 
 uint32_t GetCoreNum(ChipName chipName);
 } // namespace TileXR

@@ -1,0 +1,144 @@
+#ifndef TILEXR_MOONEP_H
+#define TILEXR_MOONEP_H
+
+#include <stddef.h>
+#include <stdint.h>
+
+#include "acl/acl_base.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+typedef void *TileXRCommPtr;
+
+#define TILEXR_MOONEP_ABI_VERSION_V1 UINT32_C(1)
+#define TILEXR_MOONEP_MAX_TENSOR_RANK UINT32_C(4)
+#define TILEXR_MOONEP_FLAG_NONE UINT64_C(0)
+
+typedef enum TileXRMoonEpStatus {
+    TILEXR_MOONEP_SUCCESS = 0,
+    TILEXR_MOONEP_ERROR_INVALID_ARGUMENT = -3,
+    TILEXR_MOONEP_ERROR_INTERNAL = -4,
+    TILEXR_MOONEP_ERROR_NOT_SUPPORTED = -6
+} TileXRMoonEpStatus;
+
+typedef enum TileXRMoonEpDType {
+    TILEXR_MOONEP_DTYPE_INT32 = 2,
+    TILEXR_MOONEP_DTYPE_FLOAT16 = 3,
+    TILEXR_MOONEP_DTYPE_FLOAT32 = 4,
+    TILEXR_MOONEP_DTYPE_BFLOAT16 = 11
+} TileXRMoonEpDType;
+
+typedef enum TileXRMoonEpStage {
+    TILEXR_MOONEP_STAGE_PLANNING = 1u << 0,
+    TILEXR_MOONEP_STAGE_DISPATCH = 1u << 1,
+    TILEXR_MOONEP_STAGE_PREFETCH_WEIGHT = 1u << 2,
+    TILEXR_MOONEP_STAGE_COMBINE = 1u << 3,
+    TILEXR_MOONEP_STAGE_REDUCE_GRAD = 1u << 4
+} TileXRMoonEpStage;
+
+typedef struct TileXRMoonEpTensorV1 {
+    uint32_t structSize;
+    uint32_t abiVersion;
+    void *data;
+    uint64_t elementCount;
+    uint32_t dtype;
+    uint32_t rank;
+    int64_t shape[TILEXR_MOONEP_MAX_TENSOR_RANK];
+} TileXRMoonEpTensorV1;
+
+typedef struct TileXRMoonEpPlanV1 {
+    uint32_t structSize;
+    uint32_t abiVersion;
+    int64_t s;
+    int64_t k;
+    int64_t e;
+    int64_t b;
+    int64_t rank;
+    int64_t world;
+    int64_t dispatchedCapacity;
+    void *dst;
+    void *cu;
+    void *expertsToCopy;
+    void *remoteStats;
+    void *status;
+} TileXRMoonEpPlanV1;
+
+typedef struct TileXRMoonEpPlanningArgsV1 {
+    uint32_t structSize;
+    uint32_t abiVersion;
+    TileXRCommPtr comm;
+    const TileXRMoonEpTensorV1 *topkExperts;
+    const TileXRMoonEpTensorV1 *tokensPerExpert;
+    void *workspace;
+    uint64_t workspaceBytes;
+    TileXRMoonEpPlanV1 *plan;
+    uint64_t waitIterations;
+    uint64_t flags;
+} TileXRMoonEpPlanningArgsV1;
+
+typedef struct TileXRMoonEpDispatchArgsV1 {
+    uint32_t structSize;
+    uint32_t abiVersion;
+    TileXRCommPtr comm;
+    const TileXRMoonEpPlanV1 *plan;
+    const TileXRMoonEpTensorV1 *input;
+    TileXRMoonEpTensorV1 *output;
+    uint64_t flags;
+} TileXRMoonEpDispatchArgsV1;
+
+typedef struct TileXRMoonEpPrefetchWeightArgsV1 {
+    uint32_t structSize;
+    uint32_t abiVersion;
+    TileXRCommPtr comm;
+    const TileXRMoonEpPlanV1 *plan;
+    const TileXRMoonEpTensorV1 *input;
+    TileXRMoonEpTensorV1 *output;
+    uint64_t flags;
+} TileXRMoonEpPrefetchWeightArgsV1;
+
+typedef struct TileXRMoonEpCombineArgsV1 {
+    uint32_t structSize;
+    uint32_t abiVersion;
+    TileXRCommPtr comm;
+    const TileXRMoonEpPlanV1 *plan;
+    const TileXRMoonEpTensorV1 *input;
+    TileXRMoonEpTensorV1 *output;
+    uint64_t flags;
+} TileXRMoonEpCombineArgsV1;
+
+typedef struct TileXRMoonEpReduceGradArgsV1 {
+    uint32_t structSize;
+    uint32_t abiVersion;
+    TileXRCommPtr comm;
+    const TileXRMoonEpPlanV1 *plan;
+    const TileXRMoonEpTensorV1 *input;
+    TileXRMoonEpTensorV1 *output;
+    uint64_t flags;
+} TileXRMoonEpReduceGradArgsV1;
+
+uint32_t TileXRMoonEpGetAbiVersion(void);
+
+int TileXRMoonEpGetCapabilitiesV1(uint64_t *nativeStages, uint64_t *stubStages);
+
+int TileXRMoonEpPlanningGetWorkspaceSizeV1(TileXRCommPtr comm, int64_t s, int64_t k,
+    int64_t e, uint64_t *workspaceBytes, int64_t *dispatchedCapacity);
+
+int TileXRMoonEpPlanningV1(const TileXRMoonEpPlanningArgsV1 *args, aclrtStream stream);
+
+int TileXRMoonEpDispatchV1(const TileXRMoonEpDispatchArgsV1 *args, aclrtStream stream);
+
+int TileXRMoonEpPrefetchWeightV1(const TileXRMoonEpPrefetchWeightArgsV1 *args,
+    aclrtStream stream);
+
+int TileXRMoonEpCombineV1(const TileXRMoonEpCombineArgsV1 *args, aclrtStream stream);
+
+int TileXRMoonEpReduceGradV1(const TileXRMoonEpReduceGradArgsV1 *args,
+    aclrtStream stream);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif // TILEXR_MOONEP_H

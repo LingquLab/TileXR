@@ -79,7 +79,39 @@ ChipName GetChipName()
 
 bool UseLegacyIpcPid(ChipName chipName)
 {
-    return chipName < ChipName::CHIP_910_9391 || chipName == ChipName::CHIP_950PR;
+    // Ascend950 DT/PR IPC mappings use the PID-only whitelist contract.
+    return chipName < ChipName::CHIP_910_9391 || chipName == ChipName::CHIP_950PR ||
+           chipName == ChipName::CHIP_950;
+}
+
+IpcPidMode ResolveIpcPidMode(const char *value)
+{
+    if (value == nullptr || value[0] == '\0' || std::string(value) == "auto") {
+        return IpcPidMode::AUTO;
+    }
+    if (std::string(value) == "pid") {
+        return IpcPidMode::PID_ONLY;
+    }
+    if (std::string(value) == "sdid") {
+        return IpcPidMode::SUPERPOD_SDID;
+    }
+    return IpcPidMode::INVALID;
+}
+
+bool UsePidOnlyIpcForPeer(ChipName chipName, int rank, int peer, int localRankSize,
+    IpcPidMode mode)
+{
+    if (mode == IpcPidMode::PID_ONLY) {
+        return true;
+    }
+    if (mode == IpcPidMode::SUPERPOD_SDID) {
+        return false;
+    }
+    if ((chipName == ChipName::CHIP_950 || chipName == ChipName::CHIP_950PR) &&
+        localRankSize > 0 && rank >= 0 && peer >= 0) {
+        return rank / localRankSize == peer / localRankSize;
+    }
+    return UseLegacyIpcPid(chipName);
 }
 
 uint32_t GetCoreNum(ChipName chipName)

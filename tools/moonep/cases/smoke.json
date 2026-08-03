@@ -1,0 +1,14 @@
+[
+  {
+    "id": "smoke",
+    "S": 32,
+    "K": 2,
+    "E": 16,
+    "H": 64,
+    "dtype": "bfloat16",
+    "seed": 1234,
+    "warmup": 2,
+    "iters": 10,
+    "correctness": true
+  }
+]
