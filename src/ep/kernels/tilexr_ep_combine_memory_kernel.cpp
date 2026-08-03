@@ -3,7 +3,9 @@
 #include "comm_args.h"
 #include "kernel_operator.h"
 #include "tilexr_data_as_flag.h"
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510)
 #include "tilexr_ep_mxfp8_quant.h"
+#endif
 #include "tilexr_types.h"
 
 #define FLOAT_OVERFLOW_MODE_CTRL 60
@@ -80,8 +82,10 @@ private:
     __aicore__ inline void InitSendBuffers();
     __aicore__ inline void ExpertAlltoAllDispatchCopyAdd();
     __aicore__ inline void SendOneRow(uint32_t row, LocalTensor<int32_t> assistLocal);
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510)
     template <typename Fp8Type>
     __aicore__ inline void QuantMxfp8(LocalTensor<uint8_t> quantLocal, LocalTensor<XType> inputLocal);
+#endif
     __aicore__ inline void InitReceiveBuffers();
     __aicore__ inline bool TokenActive(uint32_t tokenIndex);
     __aicore__ inline bool CheckPackedTokenArrive(uint32_t tokenIndex);
@@ -168,7 +172,9 @@ __aicore__ inline void MoeDistributeCombineV2A5Mte<XType>::Init(GM_ADDR commArgs
     int64_t moeExpertNum, int64_t sharedExpertNum, int64_t sharedExpertRankNum,
     int64_t globalBs, int64_t activeMaskType, int64_t quantMode, int64_t magic, TPipe *pipe)
 {
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510)
     AscendC::SetCtrlSpr<FLOAT_OVERFLOW_MODE_CTRL, FLOAT_OVERFLOW_MODE_CTRL>(0);
+#endif
     pipe_ = pipe;
     context_.Init(commArgsGM);
     coreIdx_ = GetBlockIdx();
@@ -183,7 +189,11 @@ __aicore__ inline void MoeDistributeCombineV2A5Mte<XType>::Init(GM_ADDR commArgs
     sharedExpertRankNum_ = static_cast<uint32_t>(sharedExpertRankNum);
     activeMaskType_ = activeMaskType;
     quantMode_ = quantMode;
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510)
     useMxfp8_ = quantMode_ == MXFP8_E5M2_COMM_QUANT || quantMode_ == MXFP8_E4M3_COMM_QUANT;
+#else
+    useMxfp8_ = false;
+#endif
     slotCount_ = axisK_ + sharedExpertNum_;
     const uint32_t moeRankNum = epWorldSize_ - sharedExpertRankNum_;
     moeExpertNumPerRank_ = moeExpertNum_ / moeRankNum;
@@ -270,7 +280,9 @@ template <typename XType>
 __aicore__ inline void MoeDistributeCombineV2A5Mte<XType>::InitSendBuffers()
 {
     pipe_->Reset();
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510)
     AscendC::SetCtrlSpr<FLOAT_OVERFLOW_MODE_CTRL, FLOAT_OVERFLOW_MODE_CTRL>(0);
+#endif
     pipe_->InitBuffer(assistBuf_, UB_ALIGN);
     pipe_->InitBuffer(sendInputQueue_, 1, inputAlignBytes_);
     pipe_->InitBuffer(sendOutputQueue_, 1, packedRowBytes_);
@@ -280,6 +292,7 @@ __aicore__ inline void MoeDistributeCombineV2A5Mte<XType>::InitSendBuffers()
     }
 }
 
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510)
 template <typename XType>
 template <typename Fp8Type>
 __aicore__ inline void MoeDistributeCombineV2A5Mte<XType>::QuantMxfp8(
@@ -302,6 +315,7 @@ __aicore__ inline void MoeDistributeCombineV2A5Mte<XType>::QuantMxfp8(
         RoundMode::CAST_TRUNC, RoundMode::CAST_RINT>(
         srcAddr, halfScaleAddr, outAddr, quantComputeCount_);
 }
+#endif
 
 template <typename XType>
 __aicore__ inline void MoeDistributeCombineV2A5Mte<XType>::SendOneRow(uint32_t row,
@@ -324,7 +338,8 @@ __aicore__ inline void MoeDistributeCombineV2A5Mte<XType>::SendOneRow(uint32_t r
     const DataCopyExtParams inputParams {1U, rowBytes_, 0U, 0U, 0U};
     const DataCopyPadExtParams<XType> inputPad {useMxfp8_, 0U, 0U, 0U};
     if (useMxfp8_) {
-        Duplicate<uint8_t>(inputLocal.template ReinterpretCast<uint8_t>(), 0, inputAlignBytes_);
+        Duplicate<uint32_t>(inputLocal.template ReinterpretCast<uint32_t>(), 0U,
+            inputAlignBytes_ / sizeof(uint32_t));
         SyncFunc<AscendC::HardEvent::V_MTE2>();
     }
     DataCopyPad(inputLocal, expertOutGM_[static_cast<uint64_t>(row) * axisH_], inputParams, inputPad);
@@ -333,9 +348,11 @@ __aicore__ inline void MoeDistributeCombineV2A5Mte<XType>::SendOneRow(uint32_t r
 
     LocalTensor<XType> outputLocal = sendOutputQueue_.AllocTensor<XType>();
     LocalTensor<float> sourceFloat = inputLocal.template ReinterpretCast<float>();
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510)
     if (useMxfp8_) {
         LocalTensor<uint8_t> quantLocal = quantResultBuf_.Get<uint8_t>();
-        Duplicate<uint8_t>(quantLocal, 0, compactPayloadBytes_);
+        Duplicate<uint32_t>(quantLocal.ReinterpretCast<uint32_t>(), 0U,
+            compactPayloadBytes_ / sizeof(uint32_t));
         PipeBarrier<PIPE_V>();
         if (quantMode_ == MXFP8_E5M2_COMM_QUANT) {
             QuantMxfp8<fp8_e5m2_t>(quantLocal, inputLocal);
@@ -345,6 +362,7 @@ __aicore__ inline void MoeDistributeCombineV2A5Mte<XType>::SendOneRow(uint32_t r
         PipeBarrier<PIPE_V>();
         sourceFloat = quantLocal.template ReinterpretCast<float>();
     }
+#endif
     LocalTensor<float> packedFloat = outputLocal.template ReinterpretCast<float>();
     Duplicate(packedFloat, TileXR::DATA_AS_FLAG_READY_VALUE, packedRowBytes_ / sizeof(float));
     PipeBarrier<PIPE_V>();
@@ -390,7 +408,9 @@ template <typename XType>
 __aicore__ inline void MoeDistributeCombineV2A5Mte<XType>::InitReceiveBuffers()
 {
     pipe_->Reset();
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510)
     AscendC::SetCtrlSpr<FLOAT_OVERFLOW_MODE_CTRL, FLOAT_OVERFLOW_MODE_CTRL>(0);
+#endif
     const uint32_t totalBlocks = slotCount_ * blockCntPerToken_;
     const uint32_t flagFloatCount = totalBlocks * TileXR::DATA_AS_FLAG_FLAG_FLOATS;
     const uint32_t compareCount = static_cast<uint32_t>(AlignUp(flagFloatCount, 64U));
@@ -491,6 +511,7 @@ __aicore__ inline void MoeDistributeCombineV2A5Mte<XType>::CopyAndAccumulateSlot
     DataCopyPad(packedLocal, packedGlobal, copyParams, copyPad);
     packedInputQueue_.EnQue(packedLocal);
     packedLocal = packedInputQueue_.DeQue<XType>();
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510)
     if (useMxfp8_) {
         __ubuf__ uint8_t *tokenAddr = reinterpret_cast<__ubuf__ uint8_t *>(packedLocal.GetPhyAddr());
         __ubuf__ fp8_e8m0_t *scaleAddr = reinterpret_cast<__ubuf__ fp8_e8m0_t *>(
@@ -510,6 +531,7 @@ __aicore__ inline void MoeDistributeCombineV2A5Mte<XType>::CopyAndAccumulateSlot
         packedInputQueue_.FreeTensor(packedLocal);
         return;
     }
+#endif
     Cast(rowFloat, packedLocal, RoundMode::CAST_NONE, axisH_);
     PipeBarrier<PIPE_V>();
     if (scale == 1.0f) {
@@ -674,6 +696,11 @@ extern "C" __global__ __aicore__ void tilexr_ep_combine_memory_kernel(GM_ADDR co
     int64_t moeExpertNum, int64_t sharedExpertNum, int64_t sharedExpertRankNum, int64_t globalBs,
     int64_t activeMaskType, int64_t quantMode, int64_t dtype, int64_t magic)
 {
+#if !defined(__NPU_ARCH__) || (__NPU_ARCH__ != 3510)
+    if (quantMode == Mc2Kernel::MXFP8_E5M2_COMM_QUANT || quantMode == Mc2Kernel::MXFP8_E4M3_COMM_QUANT) {
+        return;
+    }
+#endif
     if (commArgsGM == nullptr || expertOutGM == nullptr || assistInfoForCombineGM == nullptr ||
         sendCountsGM == nullptr || yOutGM == nullptr || bs <= 0 || h <= 0 || topK <= 0 ||
         moeExpertNum <= 0 || sharedExpertNum < 0 || sharedExpertRankNum < 0 || globalBs <= 0 || magic <= 0 ||
@@ -693,4 +720,3 @@ extern "C" __global__ __aicore__ void tilexr_ep_combine_memory_kernel(GM_ADDR co
             sharedExpertNum, sharedExpertRankNum, globalBs, activeMaskType, quantMode, magic);
     }
 }
-

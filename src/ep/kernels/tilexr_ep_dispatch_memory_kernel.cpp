@@ -3,7 +3,9 @@
 #include "adv_api/reduce/sum.h"
 #include "comm_args.h"
 #include "kernel_operator.h"
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510)
 #include "tilexr_ep_mxfp8_quant.h"
+#endif
 #include "tilexr_types.h"
 
 #define FLOAT_OVERFLOW_MODE_CTRL 60
@@ -166,10 +168,12 @@ private:
     __aicore__ inline void CalTokenSendExpertCnt(uint32_t dstExpertId, int32_t calCnt, int32_t &curExpertCnt);
     __aicore__ inline void TokenToExpert(GlobalTensor<uint8_t> dstWinGMTensor, TQue<QuePosition::VECIN, 1> inQueue,
                                         uint32_t srcTokenIndex, uint32_t toExpertIndex);
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510)
     __aicore__ inline void TokenToExpertInQuant(GlobalTensor<uint8_t> dstWinGMTensor,
         TQue<QuePosition::VECIN, 1> inQueue, uint32_t srcTokenIndex, uint32_t toExpertIndex);
     template <typename Fp8Type>
     __aicore__ inline void QuantMxfp8(LocalTensor<uint8_t> &outLocal, LocalTensor<XType> &inLocal);
+#endif
     __aicore__ inline GM_ADDR GetWindAddrByRankId(const int32_t rankId)
     {
         return ctx_.GetWindAddrByRankId(rankId, epRankIdOriginal_) + winDataSizeOffset_;
@@ -424,7 +428,9 @@ __aicore__ inline void MoeDistributeDispatchV2FullMesh<XType>::Init(GM_ADDR comm
     int64_t expertTokenNumsType, int64_t activeMaskType, int64_t quantMode,
     int64_t expandXOutDtype, int64_t magic, TPipe *pipe)
 {
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510)
     AscendC::SetCtrlSpr<FLOAT_OVERFLOW_MODE_CTRL, FLOAT_OVERFLOW_MODE_CTRL>(0);
+#endif
     tpipe_ = pipe;
     tpipe_->InitBuffer(calBeginBuf_, UB_ALIGN);
     aivId_ = GetBlockIdx();
@@ -438,7 +444,11 @@ __aicore__ inline void MoeDistributeDispatchV2FullMesh<XType>::Init(GM_ADDR comm
     sharedExpertRankNum_ = static_cast<uint32_t>(sharedExpertRankNum);
     globalBS_ = static_cast<uint32_t>(globalBs);
     expertTokenNumsType_ = static_cast<uint32_t>(expertTokenNumsType);
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510)
     useMxfp8_ = quantMode == MX_QUANT;
+#else
+    useMxfp8_ = false;
+#endif
     useMxfp8E4M3_ = expandXOutDtype == TileXR::TILEXR_DATA_TYPE_FP8E4M3;
     dataStateSeed_ = static_cast<uint32_t>(magic) & 1U;
     epRankId_ = static_cast<int32_t>(ctx_.GetEpRankId());
@@ -484,6 +494,7 @@ __aicore__ inline void MoeDistributeDispatchV2FullMesh<XType>::FillTriple(
     xOutTint32(tokenQuantAlign_ + 2) = k;            
 }
 
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510)
 template <typename XType>
 template <typename Fp8Type>
 __aicore__ inline void MoeDistributeDispatchV2FullMesh<XType>::QuantMxfp8(
@@ -511,7 +522,8 @@ __aicore__ inline void MoeDistributeDispatchV2FullMesh<XType>::TokenToExpertInQu
 {
     DataCopyPadParams copyPadParams{true, 0U, 0U, 0U};
     LocalTensor<XType> xInTensor = inQueue.AllocTensor<XType>();
-    Duplicate<uint8_t>(xInTensor.template ReinterpretCast<uint8_t>(), 0, hAlignSize_);
+    Duplicate<uint32_t>(xInTensor.template ReinterpretCast<uint32_t>(), 0U,
+        hAlignSize_ / sizeof(uint32_t));
     SyncFunc<AscendC::HardEvent::V_MTE2>();
     DataCopyPad(xInTensor, xGMTensor_[srcTokenIndex * axisH_], hCopyParams_, copyPadParams);
     inQueue.EnQue(xInTensor);
@@ -538,6 +550,7 @@ __aicore__ inline void MoeDistributeDispatchV2FullMesh<XType>::TokenToExpertInQu
     AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(syncFlagId_ % sendTokenBufNum_);
     ++syncFlagId_;
 }
+#endif
 
 template <typename XType>
 __aicore__ inline void MoeDistributeDispatchV2FullMesh<XType>::TokenToExpert(
@@ -624,11 +637,15 @@ __aicore__ inline void MoeDistributeDispatchV2FullMesh<XType>::SendToSharedExper
         if (isExpertMaskFlag_) {
             srcTokenIndex = validBsIndexTensor_.GetValue(sendTokenIndex);
         }
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510)
         if (useMxfp8_) {
             TokenToExpertInQuant(dstWinGMTensor, inQueue, srcTokenIndex, axisK_ + toSharedExpertIndex);
         } else {
+#endif
             TokenToExpert(dstWinGMTensor, inQueue, srcTokenIndex, axisK_ + toSharedExpertIndex);
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510)
         }
+#endif
     }
     for (int i = 0; i < sendTokenBufNum_; i ++) {
         AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(i % sendTokenBufNum_);
@@ -664,11 +681,15 @@ __aicore__ inline void MoeDistributeDispatchV2FullMesh<XType>::SendToMoeExpert(T
         dstWinGMTensor.SetGlobalBuffer((__gm__ uint8_t *)(uint64_t(GetWindAddrByRankId(toRankId))
             + expertPerSizeOnWin_ * ((epRankId_ + toRankId) % epWorldSize_ * moeExpertNumPerRank_
             + expertId % moeExpertNumPerRank_) + dstTokenIdx * hCommuSize_));
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510)
         if (useMxfp8_) {
             TokenToExpertInQuant(dstWinGMTensor, inQueue, tokenId, topKId);
         } else {
+#endif
             TokenToExpert(dstWinGMTensor, inQueue, tokenId, topKId);
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510)
         }
+#endif
     }
 
     for (int i = 0; i < sendTokenBufNum_; i ++) {
@@ -708,7 +729,8 @@ __aicore__ inline void MoeDistributeDispatchV2FullMesh<XType>::AllToAllDispatch(
     tbufPool1.InitBuffer(inQueueCleanBuf, BUFFER_NUM * hAlignSize_);
     if (useMxfp8_) {
         LocalTensor<uint8_t> cleanTensor = inQueueCleanBuf.Get<uint8_t>();
-        Duplicate<uint8_t>(cleanTensor, 0, BUFFER_NUM * hAlignSize_);
+        Duplicate<uint32_t>(cleanTensor.ReinterpretCast<uint32_t>(), 0U,
+            BUFFER_NUM * hAlignSize_ / sizeof(uint32_t));
     }
 
     uint32_t calTokenIdxBuffSize = Ceil(axisBS_ * axisK_ * sizeof(int32_t), UB_ALIGN) * UB_ALIGN;
@@ -1167,7 +1189,7 @@ __aicore__ inline uint32_t MoeDistributeDispatchV2FullMesh<XType>::CheckDataArri
     LocalTensor<float> flagSumOutTensor = scalarBuf_.Get<float>();
     ReduceSum(flagSumOutTensor, flagRecvTensor_, flagReduceWorkTensor_, 1U, flagNum, 1U);
     SyncFunc<AscendC::HardEvent::V_S>();
-    return flagSumOutTensor.GetValue(0) == static_cast<float>(flagNum) ? static_cast<uint32_t>(copyCnt) : 0U;
+    return flagSumOutTensor.GetValue(0) == 1.0f * flagNum ? static_cast<uint32_t>(copyCnt) : 0U;
 }
 
 template <typename XType>
@@ -1536,6 +1558,11 @@ extern "C" __global__ __aicore__ void tilexr_ep_dispatch_memory_kernel(GM_ADDR c
     int64_t expertTokenNumsType, int64_t activeMaskType, int64_t quantMode,
     int64_t dtype, int64_t expandXOutDtype, int64_t magic)
 {
+#if !defined(__NPU_ARCH__) || (__NPU_ARCH__ != 3510)
+    if (quantMode == Mc2Kernel::MX_QUANT) {
+        return;
+    }
+#endif
     if (commArgsGM == nullptr || xGM == nullptr || expertIdsGM == nullptr || expandXOutGM == nullptr ||
         expertTokenNumsOutGM == nullptr || sendCountsOutGM == nullptr || assistInfoForCombineOutGM == nullptr ||
         bs <= 0 || h <= 0 || topK <= 0 || moeExpertNum <= 0 || sharedExpertNum < 0 ||
