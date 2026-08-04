@@ -27,12 +27,12 @@ Credit 通道只传控制 token，使用 IPC GM 加 MTE，不使用 UDMA QP。
 
 | 模块 | 文件 | 职责 |
 |---|---|---|
-| 公共 ABI 和常量 | `src/include/comm_args.h` | IPC 大小、stride、`CommArgs::creditMems` |
-| 通信域 Host 初始化 | `src/comm/tilexr_comm.cpp` | 申请、授权、交换、映射和释放 IPC memory |
-| 布局与 Host 校验 | `tests/udma/demo/tilexr_udma_alltoall_group_layout.h` | ping-pong slot、offset、参数约束 |
-| Demo Host 流程 | `tests/udma/demo/tilexr_udma_demo.cpp` | 环境变量、映射完整性和 single-pass 校验 |
-| Kernel launch ABI | `tests/udma/demo/tilexr_udma_alltoall_group_launcher.cpp` | credit offset 和 ingressWindow 下发 |
-| Device set/wait | `tests/udma/demo/tilexr_udma_alltoall_group_kernel.cpp` | MTE3 publish、MTE2 poll 和调度 |
+| 公共 ABI 和常量 | `D:/workspace/TileXR/.kilo/worktrees/serene-beak/src/include/comm_args.h` | IPC 大小、stride、`CommArgs::creditMems` |
+| 通信域 Host 初始化 | `D:/workspace/TileXR/.kilo/worktrees/serene-beak/src/comm/tilexr_comm.cpp` | 申请、授权、交换、映射和释放 IPC memory |
+| 布局与 Host 校验 | `D:/workspace/TileXR/.kilo/worktrees/serene-beak/tests/udma/demo/tilexr_udma_alltoall_group_layout.h` | ping-pong slot、offset、参数约束 |
+| Demo Host 流程 | `D:/workspace/TileXR/.kilo/worktrees/serene-beak/tests/udma/demo/tilexr_udma_demo.cpp` | 环境变量、映射完整性和 single-pass 校验 |
+| Kernel launch ABI | `D:/workspace/TileXR/.kilo/worktrees/serene-beak/tests/udma/demo/tilexr_udma_alltoall_group_launcher.cpp` | credit offset 和 ingressWindow 下发 |
+| Device set/wait | `D:/workspace/TileXR/.kilo/worktrees/serene-beak/tests/udma/demo/tilexr_udma_alltoall_group_kernel.cpp` | MTE3 publish、MTE2 poll 和调度 |
 
 ## 3. IPC 内存参数与布局
 
@@ -421,3 +421,628 @@ waiter core
 - 两个 ping-pong slot 解决相邻 invocation 干扰，但不能替代正确的 epoch/token 设计。
 - Busy polling 会占用 AIV/MTE2 资源。若快慢卡严重，credit-wait 本身可能成为关键路径，需要结合调度顺序、窗口大小或硬件通知机制进一步优化。
 - 当前 `ingressWindow=1` 是严格的相邻 group credit，不等同于可配置的多 credit 滑动窗口。扩展到 window > 1 时，需要重新设计 entry 状态或 token/ack 关系，不能只放宽 Host 参数校验。
+
+## 13. 可直接提取的实际代码
+
+本节不是伪代码，来自当前 `b51dc2e` 实现。迁移时可以直接复制，再替换目标项目的日志、错误码、通信域类名和 all-gather 接口。
+
+### 13.1 依赖和唯一适配点
+
+Host 代码依赖 CANN ACL/Runtime IPC API：
+
+```cpp
+#include <acl/acl_rt.h>
+#include "runtime/dev.h"
+#include "runtime/mem.h"
+
+#include <cstdint>
+#include <cstddef>
+#include <cstdlib>
+#include <mutex>
+#include <string>
+```
+
+目标项目需要提供以下已有上下文：
+
+```text
+rank_ / rankSize_                 当前 rank 和通信域大小
+devList_[rank_]                   当前 rank 对应的逻辑 device id
+physicalInfo_.chipName            芯片型号，用于选择 PID/SDID 模式
+socketExchange_->AllGather(...)   Host 侧全通信域 all-gather
+SkipUnusedChannel910B2C(...)      可选；没有特殊拓扑时删除该判断
+TILEXR_SUCCESS / TILEXR_ERROR_*   替换成目标项目错误码
+TILEXR_LOG                        替换成目标项目日志
+```
+
+其中 `AllGather` 必须在所有 rank 上以完全相同的顺序调用。支持 SDID 的芯片依次执行 PID、SDID 和 IPC name 三次 collective；其它芯片执行 PID 和 IPC name 两次 collective。通信域内不能让部分 rank 单独跳过其中一次。
+
+### 13.2 Host/Device 共用头文件
+
+这部分必须放在 Host 和 Ascend C kernel 都包含的公共头文件中：
+
+```cpp
+#pragma once
+
+#include <cstdint>
+
+#ifndef GM_ADDR
+using GM_ADDR = uint8_t*;
+#endif
+
+namespace TileXR {
+
+constexpr int TILEXR_MAX_RANK_SIZE = 1024;
+constexpr int IPC_NAME_SIZE = 65;
+constexpr int HCCL_IPC_PID_ARRAY_SIZE = 1;
+constexpr int64_t CREDIT_IPC_STRIDE = 512;
+constexpr int64_t CREDIT_IPC_SLOT_BYTES =
+    TILEXR_MAX_RANK_SIZE * CREDIT_IPC_STRIDE;
+constexpr int64_t CREDIT_IPC_BYTES = 2 * CREDIT_IPC_SLOT_BYTES;
+
+struct CommArgs {
+    int rank = 0;
+    int localRank = -1;
+    int rankSize = 0;
+    int localRankSize = -1;
+    // 其它通信参数放在这里。
+    GM_ADDR creditMems[TILEXR_MAX_RANK_SIZE] = {};
+};
+
+} // namespace TileXR
+```
+
+如果目标项目已经有 `CommArgs`，只添加 `creditMems[]` 字段。Host 和 kernel 必须使用同一份结构体定义，不要维护两份相似 ABI。
+
+### 13.3 通信域类成员
+
+当前通信域需要的成员和方法声明如下：
+
+```cpp
+private:
+    int GetPid(uint32_t *pids);
+    int GetSidId(int64_t sdids[TileXR::TILEXR_MAX_RANK_SIZE], int rankSize);
+    int GetName(
+        std::string &name,
+        char names[TileXR::TILEXR_MAX_RANK_SIZE][IPC_NAME_SIZE]) const;
+    int SetIpcPidSdid(
+        std::string &name, const uint32_t *pids,
+        const int64_t *sdids) const;
+    int InitCreditCommMem();
+    int InitCreditIpcMem(const uint32_t *pids, const int64_t *sdids);
+    int OpenCreditIpcMem(
+        const char names[TileXR::TILEXR_MAX_RANK_SIZE][IPC_NAME_SIZE]);
+    void CloseCreditIpcMem();
+
+    GM_ADDR creditIpcMem_[TileXR::TILEXR_MAX_RANK_SIZE] = {};
+    bool creditIpcMemInited_ = false;
+```
+
+`IPC_NAME_SIZE` 使用目标 CANN/Runtime 头文件中的 IPC name 容量定义；所有 rank 必须交换固定的 `IPC_NAME_SIZE` 字节，而不是 `strlen(name)` 字节。
+
+### 13.4 PID、SDID 和 IPC name all-gather
+
+以下是当前实际实现。`socketExchange_->AllGather(local, count, output)` 的 `count` 是元素数：
+
+```cpp
+int TileXRComm::GetPid(uint32_t *pids)
+{
+    if (rtDeviceGetBareTgid(&pids[rank_]) != RT_ERROR_NONE) {
+        return TILEXR_ERROR_INTERNAL;
+    }
+    return socketExchange_->AllGather(&pids[rank_], 1, pids);
+}
+
+int TileXRComm::GetSidId(
+    int64_t sdids[TileXR::TILEXR_MAX_RANK_SIZE], int rankSize)
+{
+    if (rank_ >= rankSize) {
+        return TILEXR_ERROR_INTERNAL;
+    }
+
+    if (physicalInfo_.chipName >= ChipName::CHIP_910_9391 &&
+        physicalInfo_.chipName < ChipName::RESERVED) {
+        constexpr int kRtModuleTypeSystem = 0;
+        constexpr int kInfoTypeSdid = 26;
+        if (rtGetDeviceInfo(
+                devList_[rank_], kRtModuleTypeSystem, kInfoTypeSdid,
+                &sdids[rank_]) != RT_ERROR_NONE) {
+            return TILEXR_ERROR_INTERNAL;
+        }
+        return socketExchange_->AllGather(&sdids[rank_], 1, sdids);
+    }
+    return TILEXR_SUCCESS;
+}
+
+int TileXRComm::GetName(
+    std::string &name,
+    char names[TileXR::TILEXR_MAX_RANK_SIZE][IPC_NAME_SIZE]) const
+{
+    return socketExchange_->AllGather<char>(
+        name.c_str(), IPC_NAME_SIZE, names[0]);
+}
+```
+
+如果目标项目的 all-gather 以字节数为单位，PID/SDID 的发送长度应分别改为 `sizeof(uint32_t)` 和 `sizeof(int64_t)`；不要机械保留这里的 `1`。
+
+### 13.5 IPC PID/SDID 授权
+
+这是当前实际授权函数：
+
+```cpp
+int TileXRComm::SetIpcPidSdid(
+    std::string &name, const uint32_t *pids,
+    const int64_t *sdids) const
+{
+    const char *modeEnv = std::getenv("TILEXR_IPC_PID_MODE");
+    const bool forcePid =
+        modeEnv != nullptr && std::string(modeEnv) == "pid";
+    const bool forceSdid =
+        modeEnv != nullptr && std::string(modeEnv) == "sdid";
+    const bool defaultSdid =
+        physicalInfo_.chipName >= ChipName::CHIP_910_9391 &&
+        physicalInfo_.chipName < ChipName::CHIP_950;
+    const bool useSdid = forceSdid || (!forcePid && defaultSdid);
+
+    for (int i = 0; i < rankSize_; ++i) {
+        if (i == rank_) {
+            continue;
+        }
+
+        int32_t pid = static_cast<int32_t>(pids[i]);
+        if (!useSdid) {
+            if (rtSetIpcMemPid(
+                    name.c_str(), &pid,
+                    HCCL_IPC_PID_ARRAY_SIZE) != RT_ERROR_NONE) {
+                return TILEXR_ERROR_INTERNAL;
+            }
+            continue;
+        }
+
+        int ret = rtSetIpcMemorySuperPodPid(
+            name.c_str(), sdids[i], &pid, HCCL_IPC_PID_ARRAY_SIZE);
+        if (ret != RT_ERROR_NONE) {
+            ret = rtSetIpcMemPid(
+                name.c_str(), &pid, HCCL_IPC_PID_ARRAY_SIZE);
+            if (ret != RT_ERROR_NONE) {
+                return TILEXR_ERROR_INTERNAL;
+            }
+        }
+    }
+    return TILEXR_SUCCESS;
+}
+```
+
+### 13.6 IPC memory 申请、交换和打开
+
+以下函数构成通信域 credit 初始化主体：
+
+```cpp
+int TileXRComm::InitCreditCommMem()
+{
+    uint32_t pids[TileXR::TILEXR_MAX_RANK_SIZE] = {};
+    int ret = GetPid(pids);
+    if (ret != TILEXR_SUCCESS) {
+        return ret;
+    }
+
+    int64_t sdids[TileXR::TILEXR_MAX_RANK_SIZE] = {};
+    ret = GetSidId(sdids, rankSize_);
+    if (ret != TILEXR_SUCCESS) {
+        return ret;
+    }
+    return InitCreditIpcMem(pids, sdids);
+}
+
+int TileXRComm::InitCreditIpcMem(
+    const uint32_t *pids, const int64_t *sdids)
+{
+    const auto policy =
+        GetChipName() == ChipName::CHIP_310P3
+            ? ACL_MEM_MALLOC_HUGE_FIRST_P2P
+            : ACL_MEM_MALLOC_HUGE_FIRST;
+
+    aclError aclRet = aclrtMalloc(
+        reinterpret_cast<void **>(&creditIpcMem_[rank_]),
+        TileXR::CREDIT_IPC_BYTES, policy);
+    if (aclRet != ACL_SUCCESS) {
+        return TILEXR_ERROR_INTERNAL;
+    }
+
+    aclRet = aclrtMemset(
+        creditIpcMem_[rank_], TileXR::CREDIT_IPC_BYTES,
+        0, TileXR::CREDIT_IPC_BYTES);
+    if (aclRet != ACL_SUCCESS) {
+        aclrtFree(creditIpcMem_[rank_]);
+        creditIpcMem_[rank_] = nullptr;
+        return TILEXR_ERROR_INTERNAL;
+    }
+
+    char nameBuffer[IPC_NAME_SIZE] = {};
+    if (rtIpcSetMemoryName(
+            creditIpcMem_[rank_], TileXR::CREDIT_IPC_BYTES,
+            nameBuffer, IPC_NAME_SIZE) != RT_ERROR_NONE) {
+        aclrtFree(creditIpcMem_[rank_]);
+        creditIpcMem_[rank_] = nullptr;
+        return TILEXR_ERROR_INTERNAL;
+    }
+
+    std::string name(nameBuffer);
+    if (SetIpcPidSdid(name, pids, sdids) != TILEXR_SUCCESS) {
+        aclrtFree(creditIpcMem_[rank_]);
+        creditIpcMem_[rank_] = nullptr;
+        return TILEXR_ERROR_INTERNAL;
+    }
+
+    char names[TileXR::TILEXR_MAX_RANK_SIZE][IPC_NAME_SIZE] = {};
+    name.resize(IPC_NAME_SIZE);
+    if (GetName(name, names) != TILEXR_SUCCESS) {
+        aclrtFree(creditIpcMem_[rank_]);
+        creditIpcMem_[rank_] = nullptr;
+        return TILEXR_ERROR_INTERNAL;
+    }
+    return OpenCreditIpcMem(names);
+}
+
+int TileXRComm::OpenCreditIpcMem(
+    const char names[TileXR::TILEXR_MAX_RANK_SIZE][IPC_NAME_SIZE])
+{
+    static std::mutex mutex;
+    std::lock_guard<std::mutex> lock(mutex);
+
+    for (int peer = 0; peer < rankSize_; ++peer) {
+        if (peer == rank_) {
+            continue;
+        }
+        if (SkipUnusedChannel910B2C(rank_, peer, GetChipName())) {
+            continue;
+        }
+        if (rtIpcOpenMemory(
+                reinterpret_cast<void **>(&creditIpcMem_[peer]),
+                names[peer]) != RT_ERROR_NONE) {
+            CloseCreditIpcMem();
+            aclrtFree(creditIpcMem_[rank_]);
+            creditIpcMem_[rank_] = nullptr;
+            return TILEXR_ERROR_INTERNAL;
+        }
+    }
+    creditIpcMemInited_ = true;
+    return TILEXR_SUCCESS;
+}
+```
+
+上面在当前代码基础上补齐了初始化失败时本 rank owner allocation 的释放，适合作为其它项目直接采用的版本。没有 910B2C 特殊拓扑时，应删除 `SkipUnusedChannel910B2C()` 判断，确保每个通信 peer 都完成映射。
+
+通信域主初始化中的调用位置必须在 `SyncCommArgs()` 之前：
+
+```cpp
+if (IsEnvEnabled("TILEXR_ENABLE_CREDIT_IPC", false)) {
+    const int ret = InitCreditCommMem();
+    if (ret != TILEXR_SUCCESS) {
+        return ret;
+    }
+}
+
+// InitUDMA / InitSDMA ...
+
+const int ret = SyncCommArgs();
+if (ret != TILEXR_SUCCESS) {
+    return ret;
+}
+```
+
+### 13.7 `CommArgs` Host 到 Device
+
+实际同步代码的 credit 部分如下：
+
+```cpp
+int TileXRComm::SyncCommArgs()
+{
+    commArgs_.rank = rank_;
+    commArgs_.localRank = localRank_;
+    commArgs_.rankSize = rankSize_;
+    commArgs_.localRankSize = localRankSize_;
+
+    for (int peer = 0; peer < rankSize_; ++peer) {
+        commArgs_.creditMems[peer] = creditIpcMem_[peer];
+    }
+
+    int ret = aclrtMalloc(
+        reinterpret_cast<void **>(&commArgsPtr_), sizeof(commArgs_),
+        ACL_MEM_MALLOC_HUGE_FIRST);
+    if (ret != ACL_SUCCESS) {
+        return TILEXR_ERROR_INTERNAL;
+    }
+
+    ret = aclrtMemcpy(
+        commArgsPtr_, sizeof(commArgs_),
+        &commArgs_, sizeof(commArgs_),
+        ACL_MEMCPY_HOST_TO_DEVICE);
+    if (ret != ACL_SUCCESS) {
+        aclrtFree(commArgsPtr_);
+        commArgsPtr_ = nullptr;
+        return TILEXR_ERROR_INTERNAL;
+    }
+    return TILEXR_SUCCESS;
+}
+```
+
+启用 credit 的 Host 在 launch 前必须验证：
+
+```cpp
+for (int peer = 0; peer < rankSize; ++peer) {
+    if (commArgsHost.creditMems[peer] == nullptr) {
+        std::cerr << "missing credit IPC mapping, peer=" << peer << '\n';
+        return false;
+    }
+}
+
+static_assert(
+    kAllToAllGroupCreditStride ==
+        static_cast<size_t>(TileXR::CREDIT_IPC_STRIDE));
+static_assert(
+    kAllToAllGroupCreditSlotBytes ==
+        static_cast<size_t>(TileXR::CREDIT_IPC_SLOT_BYTES));
+```
+
+### 13.8 Device 侧完整 MTE set/wait helper
+
+以下代码可直接放入 Ascend C kernel。调用者提供至少 512 B 的 `relayLocal`，并保证同一个 core 不会同时把它用于其它未完成的 MTE 操作：
+
+```cpp
+#include "kernel_operator.h"
+
+namespace {
+
+constexpr uint32_t kCreditStride = 512U;
+constexpr uint32_t kCreditWords = kCreditStride / sizeof(uint64_t);
+constexpr uint64_t kCreditWaitTimeoutCycles = 10000000000ULL;
+
+static_assert(
+    kCreditStride == TileXR::CREDIT_IPC_STRIDE,
+    "credit stride must match Host IPC layout");
+
+__aicore__ inline uint64_t MakeCreditToken(
+    uint32_t invocationId, uint32_t group, uint32_t pass)
+{
+    const uint64_t invocation = static_cast<uint64_t>(invocationId) + 1ULL;
+    const uint64_t slot = static_cast<uint64_t>(invocationId & 1U);
+    return (invocation << 32U) |
+        (slot << 31U) |
+        (static_cast<uint64_t>(group) << 16U) |
+        (static_cast<uint64_t>(pass) + 1ULL);
+}
+
+__aicore__ inline uint64_t LoadCreditMte(
+    __gm__ uint64_t *credit,
+    AscendC::LocalTensor<uint8_t> relayLocal)
+{
+    AscendC::GlobalTensor<uint64_t> creditGlobal;
+    creditGlobal.SetGlobalBuffer(credit, kCreditWords);
+    auto creditLocal = relayLocal.ReinterpretCast<uint64_t>();
+
+    AscendC::DataCopy(creditLocal, creditGlobal, kCreditWords);
+    AscendC::SetFlag<AscendC::HardEvent::MTE2_S>(EVENT_ID0);
+    AscendC::WaitFlag<AscendC::HardEvent::MTE2_S>(EVENT_ID0);
+    return creditLocal.GetValue(0);
+}
+
+__aicore__ inline bool WaitCreditMte(
+    __gm__ uint64_t *credit, uint64_t expectedToken,
+    uint64_t timeoutCycles,
+    AscendC::LocalTensor<uint8_t> relayLocal,
+    uint64_t &observed)
+{
+    const uint64_t begin =
+        static_cast<uint64_t>(AscendC::GetSystemCycle());
+    observed = LoadCreditMte(credit, relayLocal);
+    while (observed < expectedToken) {
+        if (static_cast<uint64_t>(AscendC::GetSystemCycle()) - begin >=
+            timeoutCycles) {
+            return false;
+        }
+        observed = LoadCreditMte(credit, relayLocal);
+    }
+    return true;
+}
+
+__aicore__ inline void PublishCreditMte(
+    __gm__ uint8_t *remoteOwnerBuffer,
+    uint64_t slotOffset, int32_t grantingRank,
+    uint64_t creditToken,
+    AscendC::LocalTensor<uint8_t> relayLocal)
+{
+    auto remoteCredit = reinterpret_cast<__gm__ uint64_t *>(
+        remoteOwnerBuffer + slotOffset +
+        static_cast<uint64_t>(grantingRank) * kCreditStride);
+
+    auto creditLocal = relayLocal.ReinterpretCast<uint64_t>();
+    creditLocal.SetValue(0, creditToken);
+    AscendC::SetFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID0);
+    AscendC::WaitFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID0);
+
+    AscendC::GlobalTensor<uint64_t> remoteCreditGlobal;
+    remoteCreditGlobal.SetGlobalBuffer(remoteCredit, kCreditWords);
+    AscendC::DataCopy(remoteCreditGlobal, creditLocal, kCreditWords);
+    AscendC::SetFlag<AscendC::HardEvent::MTE3_S>(EVENT_ID0);
+    AscendC::WaitFlag<AscendC::HardEvent::MTE3_S>(EVENT_ID0);
+}
+
+} // namespace
+```
+
+`PublishCreditMte()` 是从当前 `AllToAllGroupPublishNextCredit()` 提取出的通用形式，数据搬运和同步指令完全相同，只把 grouped peer 计算移到调用侧，方便其它项目复用。
+
+### 13.9 Device 调用位置和地址计算
+
+接收端 `R` 确认 group `g` 的 payload 到达后，为下一 group 的发送端 `S` 发布 credit：
+
+```cpp
+const uint32_t slot = invocationId & 1U;
+const uint64_t slotOffsets[2] = {
+    0ULL,
+    static_cast<uint64_t>(TileXR::CREDIT_IPC_SLOT_BYTES)
+};
+const uint64_t token = MakeCreditToken(invocationId, group + 1U, 0U);
+
+// args->creditMems[S] 是 S 拥有的 buffer 在 R 地址空间中的 IPC mapping。
+PublishCreditMte(
+    args->creditMems[S], slotOffsets[slot], R, token, relayLocal);
+```
+
+发送端 `S` 在向 `R` 发送 group `g > 0` 前等待：
+
+```cpp
+const uint32_t slot = invocationId & 1U;
+const uint64_t slotOffset = slot == 0U
+    ? 0ULL
+    : static_cast<uint64_t>(TileXR::CREDIT_IPC_SLOT_BYTES);
+const uint64_t expected = MakeCreditToken(invocationId, group, 0U);
+
+// args->creditMems[S] 是 S 自己的 owner buffer；entry R 由 R 写入。
+auto credit = reinterpret_cast<__gm__ uint64_t *>(
+    args->creditMems[S] + slotOffset +
+    static_cast<uint64_t>(R) * kCreditStride);
+
+uint64_t observed = 0ULL;
+if (!WaitCreditMte(
+        credit, expected, kCreditWaitTimeoutCycles,
+        relayLocal, observed)) {
+    // 必须记录 S、R、group、expected 和 observed，并让整个算子报错。
+    return;
+}
+```
+
+Grouped all-to-all 当前实际变量代入为：
+
+```text
+S = 当前 send core 所在 rank
+R = 当前 group/lane 算出的 peer
+发布侧 next S = 接收 rank 在下一 group/同 lane 算出的 nextPeer
+group 0 不 wait
+最后一个 group 不再发布 next credit
+routeElements == 0 时不 wait，也不发送该 route
+```
+
+### 13.10 Kernel launch 的实际 Host/Device ABI
+
+当前代码不是通过 `<<<>>>` 启动，而是注册 kernel binary 后使用 `rtKernelLaunchWithFlagV2()`。Credit kernel 的实际参数结构如下：
+
+```cpp
+struct alignas(8) GroupedAllToAllCreditKernelArgs {
+    uint8_t* commArgs;
+    uint8_t* input;
+    uint8_t* output;
+    uint8_t* registeredMemory;
+    uint8_t* debug;
+    uint32_t invocationId;
+    int32_t elementsPerPeer;
+    int32_t chunkElements;
+    uint32_t passCount;
+    uint32_t groupCount;
+    uint64_t payloadOffset0;
+    uint64_t payloadOffset1;
+    uint64_t signalOffset0;
+    uint64_t signalOffset1;
+    uint64_t creditOffset0;
+    uint64_t creditOffset1;
+    uint8_t* groupTrace;
+    uint32_t traceIteration;
+    uint32_t routeStage;
+    uint32_t multiChannel;
+    uint32_t primaryRouteParts;
+    uint32_t groupWidth;
+    uint32_t quietBatch;
+    uint32_t ingressWindow;
+};
+
+static_assert(sizeof(GroupedAllToAllCreditKernelArgs) == 152U);
+static_assert(offsetof(GroupedAllToAllCreditKernelArgs, creditOffset0) == 96U);
+static_assert(offsetof(GroupedAllToAllCreditKernelArgs, groupTrace) == 112U);
+```
+
+实际组参和 launch 方式：
+
+```cpp
+GroupedAllToAllCreditKernelArgs args {
+    commArgs, input, output, registeredMemory, debug, invocationId,
+    elementsPerPeer, chunkElements, passCount, groupCount,
+    payloadOffset0, payloadOffset1, signalOffset0, signalOffset1,
+    creditOffset0, creditOffset1, groupTrace, traceIteration,
+    routeStage, multiChannel, primaryRouteParts, groupWidth,
+    quietBatch, ingressWindow,
+};
+
+rtArgsEx_t argsInfo {};
+argsInfo.args = static_cast<void*>(&args);
+argsInfo.argsSize = sizeof(args);
+
+rtTaskCfgInfo_t cfgInfo {};
+cfgInfo.schemMode = RT_SCHEM_MODE_NORMAL;
+const rtError_t ret = rtKernelLaunchWithFlagV2(
+    groupedCreditKernelFunctionSignature,
+    blockDim,
+    &argsInfo,
+    nullptr,
+    static_cast<rtStream_t>(stream),
+    0U,
+    &cfgInfo);
+```
+
+Device kernel 声明必须保持完全相同的参数顺序：
+
+```cpp
+extern "C" __global__ __aicore__ void grouped_alltoall_credit_kernel(
+    GM_ADDR commArgsGM, GM_ADDR inputGM, GM_ADDR outputGM,
+    GM_ADDR registeredMemoryGM, GM_ADDR debugGM,
+    uint32_t invocationId,
+    int32_t elementsPerPeer, int32_t chunkElements,
+    uint32_t passCount, uint32_t groupCount,
+    uint64_t payloadOffset0, uint64_t payloadOffset1,
+    uint64_t signalOffset0, uint64_t signalOffset1,
+    uint64_t creditOffset0, uint64_t creditOffset1,
+    GM_ADDR groupTraceGM, uint32_t traceIteration,
+    uint32_t routeStage, uint32_t multiChannel,
+    uint32_t primaryRouteParts, uint32_t groupWidth,
+    uint32_t quietBatch, uint32_t ingressWindow)
+{
+    // 调用包含 PublishCreditMte/WaitCreditMte 的 kernel 实现。
+}
+```
+
+如果目标项目使用直接 kernel launch，也仍应保留参数结构的 `sizeof/offsetof` 校验；Host 和 Device 参数错位通常不会在编译期报错，而会表现为错误地址或 kernel 卡死。
+
+### 13.11 完整释放代码
+
+```cpp
+void TileXRComm::CloseCreditIpcMem()
+{
+    for (int peer = 0; peer < rankSize_; ++peer) {
+        if (peer == rank_ || creditIpcMem_[peer] == nullptr) {
+            continue;
+        }
+        rtIpcCloseMemory(static_cast<void *>(creditIpcMem_[peer]));
+        creditIpcMem_[peer] = nullptr;
+    }
+}
+
+TileXRComm::~TileXRComm()
+{
+    // 析构前必须保证所有使用 creditMems 的 kernel/stream 已结束。
+    if (creditIpcMemInited_) {
+        CloseCreditIpcMem();
+        creditIpcMemInited_ = false;
+    }
+
+    if (creditIpcMem_[rank_] != nullptr) {
+        aclrtFree(creditIpcMem_[rank_]);
+        creditIpcMem_[rank_] = nullptr;
+    }
+
+    if (commArgsPtr_ != nullptr) {
+        aclrtFree(commArgsPtr_);
+        commArgsPtr_ = nullptr;
+    }
+}
+```
+
+如果通信域析构前没有隐式 stream synchronize，目标项目必须显式同步；仅 Host barrier 不能证明 Device 已停止访问 IPC mapping。
