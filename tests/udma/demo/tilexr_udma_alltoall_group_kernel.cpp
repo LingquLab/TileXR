@@ -661,12 +661,12 @@ __aicore__ inline void AllToAllGroupKernelImpl(
     uint32_t routeStage, uint32_t multiChannel, uint32_t primaryRouteParts,
     uint32_t groupWidth, uint32_t quietBatch)
 {
-    constexpr uint32_t copyoutWorkers = 1U;
     const uint32_t blockIdx = static_cast<uint32_t>(AscendC::GetBlockIdx());
     auto groupTrace = blockIdx < TileXR::Demo::kAllToAllGroupTraceCoreCount ?
         reinterpret_cast<__gm__ uint8_t*>(groupTraceGM) : nullptr;
     const uint64_t kernelBegin = AllToAllGroupTraceCycle(groupTrace);
     auto args = reinterpret_cast<__gm__ TileXR::CommArgs*>(commArgsGM);
+    const uint32_t copyoutWorkers = TileXR::SDMAEnabled(args) ? 1U : 32U;
     auto input = reinterpret_cast<__gm__ int32_t*>(inputGM);
     auto output = reinterpret_cast<__gm__ int32_t*>(outputGM);
     auto registeredMemory = reinterpret_cast<__gm__ uint8_t*>(registeredMemoryGM);
@@ -915,7 +915,7 @@ __aicore__ inline void AllToAllGroupKernelImpl(
                 const uint64_t receiveCopyBegin = AllToAllGroupTraceCycle(groupTrace);
                 uint64_t sdmaEvent = 0ULL;
                 const uint32_t sdmaStatus = AllToAllGroupCopySdma(
-                    args, relayDst, relaySrc, copyBytes, worker, sdmaEvent);
+                    args, relayDst, relaySrc, copyBytes, lane, sdmaEvent);
                 if (sdmaStatus == TILEXR_ALLTOALL_GROUP_SDMA_FALLBACK) {
                     AllToAllGroupCopyMte(relayDst, relaySrc, copyBytes, relayLocal);
                 }

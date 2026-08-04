@@ -1026,8 +1026,13 @@ bool RunGroupedAllToAll(
         TileXR::Demo::kAllToAllGroupAutoPrimaryParts :
         static_cast<uint32_t>(primaryRoutePartsValue);
 
+    bool sdmaAvailable = false;
+    if (!CheckTileXR(rank, "TileXRSDMAAvailable grouped alltoall",
+            TileXRSDMAAvailable(comm, &sdmaAvailable))) {
+        return false;
+    }
     constexpr uint32_t sendWorkers = TileXR::Demo::kAllToAllGroupSendWorkerCount;
-    constexpr uint32_t copyoutWorkers = 1U;
+    const uint32_t copyoutWorkers = sdmaAvailable ? 1U : 32U;
     const uint32_t groupBlockDim = TileXR::Demo::AllToAllGroupBlockDim(
         sendWorkers, copyoutWorkers);
     const int routeStagesValue = GetEnvInt(
@@ -1235,6 +1240,7 @@ bool RunGroupedAllToAll(
         " channelMode=" + std::to_string(channelModeValue) +
         " multiChannel=" + std::to_string(multiChannel ? 1 : 0) +
         " primaryRouteParts=" + std::to_string(primaryRoutePartsValue) +
+        " sdmaAvailable=" + std::to_string(sdmaAvailable ? 1 : 0) +
         " sendWorkers=" + std::to_string(sendWorkers) +
         " copyoutWorkers=" + std::to_string(copyoutWorkers) +
         " blockDim=" + std::to_string(groupBlockDim) +

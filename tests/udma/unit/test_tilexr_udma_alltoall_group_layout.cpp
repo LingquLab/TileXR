@@ -598,7 +598,10 @@ void TestKernelStructure()
     CHECK_CONTAINS(kernel, "secondaryQp");
     CHECK_CONTAINS(kernel, "selectedQp");
     CHECK_CONTAINS(kernel, "copyoutWorkers");
-    CHECK_CONTAINS(kernel, "constexpr uint32_t copyoutWorkers = 1U");
+    CHECK_CONTAINS(kernel,
+        "const uint32_t copyoutWorkers = TileXR::SDMAEnabled(args) ? 1U : 32U");
+    CHECK_CONTAINS(kernel,
+        "args, relayDst, relaySrc, copyBytes, lane, sdmaEvent");
     CHECK_CONTAINS(kernel, "uint32_t multiChannel, uint32_t primaryRouteParts");
     CHECK_CONTAINS(kernel, "AllToAllGroupPeerInRouteStageDevice");
     CHECK_CONTAINS(kernel,
@@ -610,8 +613,6 @@ void TestKernelStructure()
     CHECK_CONTAINS(kernel, "copySliceIndex");
     CHECK_CONTAINS(kernel, "#include \"tilexr_sdma.h\"");
     CHECK_CONTAINS(kernel, "AllToAllGroupCopySdma");
-    CHECK_CONTAINS(kernel,
-        "args, relayDst, relaySrc, copyBytes, worker, sdmaEvent");
     CHECK_CONTAINS(kernel, "event == 0ULL");
     CHECK_CONTAINS(kernel, "TILEXR_ALLTOALL_GROUP_SDMA_FALLBACK");
     CHECK_CONTAINS(kernel, "TILEXR_ALLTOALL_GROUP_SDMA_FAILED");
@@ -721,6 +722,9 @@ void TestHostStructure()
     CHECK_CONTAINS(demo, "grouped ingress credit currently requires groupWidth=16");
     CHECK_CONTAINS(demo, "TILEXR_DEMO_ALLTOALL_GROUP_PRIMARY_ROUTE_PARTS");
     CHECK_CONTAINS(demo, "kAllToAllGroupSendWorkerCount");
+    CHECK_CONTAINS(demo, "TileXRSDMAAvailable(comm, &sdmaAvailable)");
+    CHECK_CONTAINS(demo,
+        "const uint32_t copyoutWorkers = sdmaAvailable ? 1U : 32U");
     CHECK_CONTAINS(demo, "grouped alltoall registeredBytes=");
     CHECK_CONTAINS(demo, "grouped alltoall warmup=");
     const size_t begin = demo.find("bool RunGroupedAllToAll(");
