@@ -87,6 +87,8 @@ def aggregate_rank_artifacts(
         "oversubscribed",
         "planner_block_dim",
         "planner_block_dim_source",
+        "udma_qp_num",
+        "prefetch_block_dim",
         "peer_memory_cross_node",
         "cross_node_validated",
     )
@@ -144,12 +146,19 @@ def aggregate_rank_artifacts(
         and not oversubscribed
         and (not peer_memory_cross_node or cross_node_validated)
     )
+    prefetch_weight_performance_valid = bool(
+        capabilities["implementations"].get("prefetch_weight") == "native"
+        and not oversubscribed
+        and (not peer_memory_cross_node or cross_node_validated)
+    )
     if oversubscribed:
         performance_scope = "oversubscribed_functional_only"
     elif peer_memory_cross_node and not cross_node_validated:
         performance_scope = "cross_node_functional_unvalidated"
     elif transport_performance_valid:
         performance_scope = "transport"
+    elif prefetch_weight_performance_valid:
+        performance_scope = "native_prefetch_only"
     else:
         performance_scope = "stub_contract_only"
     summary = {
@@ -162,8 +171,11 @@ def aggregate_rank_artifacts(
         "oversubscribed": oversubscribed,
         "planner_block_dim": first["topology"].get("planner_block_dim"),
         "planner_block_dim_source": first["topology"].get("planner_block_dim_source"),
+        "udma_qp_num": first["topology"].get("udma_qp_num"),
+        "prefetch_block_dim": first["topology"].get("prefetch_block_dim"),
         "capabilities": capabilities,
         "transport_performance_valid": transport_performance_valid,
+        "prefetch_weight_performance_valid": prefetch_weight_performance_valid,
         "performance_scope": performance_scope,
         "validation": {
             "passed": all(bool(item["validation"]["passed"]) for item in rank_results),

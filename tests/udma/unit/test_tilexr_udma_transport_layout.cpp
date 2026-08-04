@@ -45,7 +45,7 @@ void TestHostLayoutUsesDeviceRelativePointers()
     constexpr uintptr_t deviceBase = 0x100000000ULL;
     TileXR::UDMAInfo info = {};
     std::vector<uint8_t> bytes;
-    const int ret = TileXR::BuildUDMAInfoImage(deviceBase, sq, rq, scq, rcq, mem, info, bytes);
+    const int ret = TileXR::BuildUDMAInfoImage(deviceBase, 1, sq, rq, scq, rcq, mem, info, bytes);
 
     CHECK_EQ(ret, TileXR::TILEXR_UDMA_LAYOUT_SUCCESS);
     CHECK_EQ(info.qpNum, 1U);
@@ -71,6 +71,40 @@ void TestHostLayoutUsesDeviceRelativePointers()
     CHECK_EQ(imageMem[1].tpn, 9U);
 }
 
+void TestMultiQpLayoutUsesPeerMajorIndexing()
+{
+    constexpr uint32_t qpNum = 4;
+    constexpr size_t rankCount = 2;
+    const size_t entryCount = rankCount * qpNum;
+    std::vector<TileXR::UDMAWQCtx> sq(entryCount);
+    std::vector<TileXR::UDMAWQCtx> rq(entryCount);
+    std::vector<TileXR::UDMACQCtx> scq(entryCount);
+    std::vector<TileXR::UDMACQCtx> rcq(entryCount);
+    std::vector<TileXR::UDMAMemInfo> mem(entryCount);
+    const size_t peerOneQpThree = 1 * qpNum + 3;
+    sq[peerOneQpThree].bufAddr = 0x1234000;
+    scq[peerOneQpThree].tailAddr = 0x5678000;
+    mem[peerOneQpThree].tpn = 77;
+
+    constexpr uintptr_t deviceBase = 0x200000000ULL;
+    TileXR::UDMAInfo info = {};
+    std::vector<uint8_t> bytes;
+    const int ret = TileXR::BuildUDMAInfoImage(
+        deviceBase, qpNum, sq, rq, scq, rcq, mem, info, bytes);
+
+    CHECK_EQ(ret, TileXR::TILEXR_UDMA_LAYOUT_SUCCESS);
+    CHECK_EQ(info.qpNum, qpNum);
+    const auto* imageSq = reinterpret_cast<const TileXR::UDMAWQCtx*>(
+        bytes.data() + (info.sqPtr - deviceBase));
+    const auto* imageScq = reinterpret_cast<const TileXR::UDMACQCtx*>(
+        bytes.data() + (info.scqPtr - deviceBase));
+    const auto* imageMem = reinterpret_cast<const TileXR::UDMAMemInfo*>(
+        bytes.data() + (info.memPtr - deviceBase));
+    CHECK_EQ(imageSq[peerOneQpThree].bufAddr, static_cast<uint64_t>(0x1234000));
+    CHECK_EQ(imageScq[peerOneQpThree].tailAddr, static_cast<uint64_t>(0x5678000));
+    CHECK_EQ(imageMem[peerOneQpThree].tpn, 77U);
+}
+
 void TestRejectsMismatchedArrays()
 {
     std::vector<TileXR::UDMAWQCtx> sq(2);
@@ -81,8 +115,41 @@ void TestRejectsMismatchedArrays()
 
     TileXR::UDMAInfo info = {};
     std::vector<uint8_t> bytes;
-    const int ret = TileXR::BuildUDMAInfoImage(0x1000, sq, rq, scq, rcq, mem, info, bytes);
+    const int ret = TileXR::BuildUDMAInfoImage(0x1000, 1, sq, rq, scq, rcq, mem, info, bytes);
     CHECK_EQ(ret, TileXR::TILEXR_UDMA_LAYOUT_INVALID);
+}
+
+void TestRejectsInvalidQpCountsAndEntryCounts()
+{
+    std::vector<TileXR::UDMAWQCtx> sq(6);
+    std::vector<TileXR::UDMAWQCtx> rq(6);
+    std::vector<TileXR::UDMACQCtx> scq(6);
+    std::vector<TileXR::UDMACQCtx> rcq(6);
+    std::vector<TileXR::UDMAMemInfo> mem(6);
+    TileXR::UDMAInfo info = {};
+    std::vector<uint8_t> bytes;
+
+    CHECK_EQ(TileXR::BuildUDMAInfoImage(0x1000, 3, sq, rq, scq, rcq, mem, info, bytes),
+             TileXR::TILEXR_UDMA_LAYOUT_INVALID);
+    CHECK_EQ(TileXR::BuildUDMAInfoImage(0x1000, 4, sq, rq, scq, rcq, mem, info, bytes),
+             TileXR::TILEXR_UDMA_LAYOUT_INVALID);
+    CHECK_TRUE(TileXR::IsSupportedUDMAQpNum(1));
+    CHECK_TRUE(TileXR::IsSupportedUDMAQpNum(2));
+    CHECK_TRUE(TileXR::IsSupportedUDMAQpNum(4));
+    CHECK_TRUE(TileXR::IsSupportedUDMAQpNum(8));
+    CHECK_TRUE(!TileXR::IsSupportedUDMAQpNum(3));
+}
+
+void TestParsesQpCountConfiguration()
+{
+    uint32_t qpNum = 0;
+    CHECK_EQ(TileXR::ParseUDMAQpNum(nullptr, qpNum), TileXR::TILEXR_UDMA_LAYOUT_SUCCESS);
+    CHECK_EQ(qpNum, TileXR::TILEXR_UDMA_DEFAULT_QP_NUM);
+    CHECK_EQ(TileXR::ParseUDMAQpNum("8", qpNum), TileXR::TILEXR_UDMA_LAYOUT_SUCCESS);
+    CHECK_EQ(qpNum, 8U);
+    CHECK_EQ(TileXR::ParseUDMAQpNum("3", qpNum), TileXR::TILEXR_UDMA_LAYOUT_INVALID);
+    CHECK_EQ(TileXR::ParseUDMAQpNum("4x", qpNum), TileXR::TILEXR_UDMA_LAYOUT_INVALID);
+    CHECK_EQ(TileXR::ParseUDMAQpNum("-1", qpNum), TileXR::TILEXR_UDMA_LAYOUT_INVALID);
 }
 
 } // namespace
@@ -90,7 +157,10 @@ void TestRejectsMismatchedArrays()
 int main()
 {
     TestHostLayoutUsesDeviceRelativePointers();
+    TestMultiQpLayoutUsesPeerMajorIndexing();
     TestRejectsMismatchedArrays();
+    TestRejectsInvalidQpCountsAndEntryCounts();
+    TestParsesQpCountConfiguration();
     if (g_failures != 0) {
         std::cerr << g_failures << " UDMA transport layout checks failed" << std::endl;
         return 1;

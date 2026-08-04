@@ -48,6 +48,7 @@ public:
     int UnregisterUDMAMemory(TileXRUDMAMemHandle handle);
     GM_ADDR GetUDMARegistryPtr() const;
     const TileXRUDMARegistry* GetUDMARegistryHost() const;
+    uint32_t GetUDMAQpNum() const;
     bool IsSDMAAvailable() const;
     GM_ADDR GetSDMAWorkspacePtr() const;
     SDMAInitStatus GetSDMAInitStatus() const;

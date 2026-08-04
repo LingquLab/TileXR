@@ -28,6 +28,7 @@ struct TileXRUDMATransportOptions {
     int rank = 0;
     int rankSize = 0;
     int devId = 0;
+    uint32_t qpNum = TILEXR_UDMA_DEFAULT_QP_NUM;
     TileXRSockExchange* exchange = nullptr;
 };
 
@@ -45,6 +46,7 @@ public:
 
     bool IsAvailable() const;
     GM_ADDR GetUDMAInfoDev() const;
+    uint32_t GetQpNum() const;
 
 private:
     struct PerEidState;

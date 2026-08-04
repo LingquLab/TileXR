@@ -18,6 +18,7 @@ constexpr int TILEXR_UDMA_LAYOUT_INVALID = -3;
 
 int BuildUDMAInfoImage(
     uintptr_t deviceBase,
+    uint32_t qpNum,
     const std::vector<UDMAWQCtx>& sq,
     const std::vector<UDMAWQCtx>& rq,
     const std::vector<UDMACQCtx>& scq,
@@ -25,6 +26,10 @@ int BuildUDMAInfoImage(
     const std::vector<UDMAMemInfo>& mem,
     UDMAInfo& info,
     std::vector<uint8_t>& bytes);
+
+bool IsSupportedUDMAQpNum(uint32_t qpNum);
+
+int ParseUDMAQpNum(const char* value, uint32_t& qpNum);
 
 } // namespace TileXR
 

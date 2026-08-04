@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import os
 import secrets
 import socket
@@ -104,6 +105,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--ranks-per-device", type=int, choices=(1, 2), default=1)
     parser.add_argument("--world-size", type=int, default=None)
     parser.add_argument("--planner-block-dim", type=int, default=None)
+    parser.add_argument(
+        "--prefetch-workers",
+        default=None,
+        help="comma-separated UDMA QP/AIV candidates chosen from 1,2,4,8",
+    )
     parser.add_argument("--comm-id", default=None)
     parser.add_argument("--python", default=sys.executable)
     parser.add_argument("--wait-iterations", type=int, default=1_000_000)
@@ -131,8 +137,7 @@ def _process_command(args: argparse.Namespace) -> list[str]:
     return command
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+def _run_once(args: argparse.Namespace, prefetch_workers: int | None):
     if args.wait_iterations <= 0 or args.timeout_sec <= 0:
         raise ValueError("wait_iterations and timeout_sec must be positive")
     topology = resolve_topology(
@@ -143,6 +148,22 @@ def main(argv: list[str] | None = None) -> int:
         environment=os.environ,
     )
     world_size = int(topology["logical_world_size"])
+    cases = [
+        apply_overrides(case, args)
+        for case in select_cases(load_cases(args.cases), args.case_ids)
+    ]
+    if prefetch_workers is not None:
+        too_small = [
+            case.case_id
+            for case in cases
+            if case.expert_count % world_size != 0
+            or case.expert_count // world_size < prefetch_workers
+        ]
+        if too_small:
+            raise ValueError(
+                f"prefetch worker count {prefetch_workers} exceeds B=E/R for cases: "
+                + ", ".join(too_small)
+            )
     comm_id = args.comm_id or _unused_local_comm_id()
     barrier_addr = os.environ.get("TILEXR_MOONEP_BARRIER_ADDR") or offset_host_port(
         comm_id
@@ -160,6 +181,7 @@ def main(argv: list[str] | None = None) -> int:
         "barrier_timeout_sec": barrier_timeout_sec,
         "launch_id": launch_id,
         "command": _process_command(args),
+        "prefetch_workers": prefetch_workers,
     }
     write_json(output_dir / "launcher_metadata.json", metadata)
 
@@ -187,6 +209,9 @@ def main(argv: list[str] | None = None) -> int:
         topology["planner_block_dim_source"]
     )
     base_env[PLANNER_BLOCK_DIM_ENV] = str(topology["planner_block_dim"])
+    if prefetch_workers is not None:
+        base_env["TILEXR_UDMA_QP_NUM"] = str(prefetch_workers)
+        base_env["TILEXR_MOONEP_PREFETCH_BLOCK_DIM"] = str(prefetch_workers)
 
     command = _process_command(args)
     processes: list[tuple[int, subprocess.Popen, object]] = []
@@ -247,10 +272,60 @@ def main(argv: list[str] | None = None) -> int:
                     process.kill()
             log_handle.close()
 
-    cases = select_cases(load_cases(args.cases), args.case_ids)
+    summaries = {}
     for case in cases:
-        case = apply_overrides(case, args)
-        aggregate_rank_artifacts(output_dir / case.case_id, world_size=world_size)
+        summaries[case.case_id] = aggregate_rank_artifacts(
+            output_dir / case.case_id, world_size=world_size
+        )
+    return summaries
+
+
+def _parse_prefetch_workers(value: str | None) -> list[int]:
+    if value is None or not value.strip():
+        return []
+    workers = [int(item.strip()) for item in value.split(",") if item.strip()]
+    if not workers or any(item not in (1, 2, 4, 8) for item in workers):
+        raise ValueError("prefetch worker candidates must be chosen from 1,2,4,8")
+    if len(workers) != len(set(workers)):
+        raise ValueError("prefetch worker candidates must be unique")
+    return workers
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    candidates = _parse_prefetch_workers(args.prefetch_workers)
+    if len(candidates) <= 1:
+        _run_once(args, candidates[0] if candidates else None)
+        return 0
+
+    output_root = Path(args.output_dir).resolve()
+    output_root.mkdir(parents=True, exist_ok=True)
+    results = []
+    for workers in candidates:
+        candidate_args = copy.copy(args)
+        candidate_args.output_dir = str(output_root / f"prefetch_workers_{workers}")
+        summaries = _run_once(candidate_args, workers)
+        p50_values = [
+            float(summary["metrics_us"]["prefetch_weight"]["p50"])
+            for summary in summaries.values()
+        ]
+        results.append(
+            {
+                "workers": workers,
+                "score_prefetch_p50_us": sum(p50_values) / len(p50_values),
+                "cases": summaries,
+            }
+        )
+    best = min(results, key=lambda item: item["score_prefetch_p50_us"])
+    write_json(
+        output_root / "prefetch_sweep_summary.json",
+        {
+            "schema_version": 1,
+            "metric": "mean_case_cross_rank_prefetch_weight_p50_us",
+            "recommended_worker_count": best["workers"],
+            "candidates": results,
+        },
+    )
     return 0
 
 

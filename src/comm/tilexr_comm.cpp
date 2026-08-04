@@ -360,6 +360,11 @@ const TileXRUDMARegistry* TileXRComm::GetUDMARegistryHost() const
     return udmaContext_ == nullptr ? nullptr : udmaContext_->GetRegistryHost();
 }
 
+uint32_t TileXRComm::GetUDMAQpNum() const
+{
+    return udmaContext_ == nullptr ? 0 : udmaContext_->GetQpNum();
+}
+
 int TileXRComm::InitCommon()
 {
     // enable peer device

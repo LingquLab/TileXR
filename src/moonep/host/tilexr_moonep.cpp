@@ -5,16 +5,19 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <cstdlib>
 
 #include "acl/acl_rt.h"
 #include "tilexr_api.h"
 #include "tilexr_moonep_planner.h"
+#include "prefetch_weight_layout.h"
+#include "prefetch_weight_launch.h"
 
 namespace {
 
-const uint64_t kNativeStages = static_cast<uint64_t>(TILEXR_MOONEP_STAGE_PLANNING);
+const uint64_t kNativeStages = static_cast<uint64_t>(TILEXR_MOONEP_STAGE_PLANNING) |
+    static_cast<uint64_t>(TILEXR_MOONEP_STAGE_PREFETCH_WEIGHT);
 const uint64_t kStubStages = static_cast<uint64_t>(TILEXR_MOONEP_STAGE_DISPATCH) |
-    static_cast<uint64_t>(TILEXR_MOONEP_STAGE_PREFETCH_WEIGHT) |
     static_cast<uint64_t>(TILEXR_MOONEP_STAGE_COMBINE) |
     static_cast<uint64_t>(TILEXR_MOONEP_STAGE_REDUCE_GRAD);
 
@@ -168,7 +171,6 @@ bool TensorDescriptorsEqual(const TileXRMoonEpTensorV1 &lhs,
 
 enum class StubStage {
     Dispatch,
-    PrefetchWeight,
     Combine,
     ReduceGrad,
 };
@@ -196,7 +198,6 @@ bool ValidateStubShapes(StubStage stage, const TileXRMoonEpPlanV1 &plan,
             return input.rank == 2 && output.rank == 2 && input.shape[1] > 0 &&
                 input.shape[1] == output.shape[1] &&
                 input.shape[0] == plan.dispatchedCapacity && output.shape[0] == plan.s;
-        case StubStage::PrefetchWeight:
         case StubStage::ReduceGrad:
             return input.rank == 2 && output.rank == 2 && input.shape[1] > 0 &&
                 input.shape[1] == output.shape[1] && input.shape[0] == output.shape[0] &&
@@ -247,7 +248,7 @@ int RunLocalStub(const Args *args, aclrtStream stream, StubStage stage)
 
 extern "C" uint32_t TileXRMoonEpGetAbiVersion(void)
 {
-    return TILEXR_MOONEP_ABI_VERSION_V1;
+    return TILEXR_MOONEP_ABI_VERSION_V2;
 }
 
 extern "C" int TileXRMoonEpGetCapabilitiesV1(uint64_t *nativeStages, uint64_t *stubStages)
@@ -348,10 +349,42 @@ extern "C" int TileXRMoonEpDispatchV1(const TileXRMoonEpDispatchArgsV1 *args,
     return RunLocalStub(args, stream, StubStage::Dispatch);
 }
 
-extern "C" int TileXRMoonEpPrefetchWeightV1(
-    const TileXRMoonEpPrefetchWeightArgsV1 *args, aclrtStream stream)
+extern "C" int TileXRMoonEpPrefetchWeightV2(
+    const TileXRMoonEpPrefetchWeightArgsV2 *args, aclrtStream stream)
 {
-    return RunLocalStub(args, stream, StubStage::PrefetchWeight);
+    if (args == nullptr || args->structSize < sizeof(TileXRMoonEpPrefetchWeightArgsV2) ||
+        args->abiVersion != TILEXR_MOONEP_ABI_VERSION_V2 || args->comm == nullptr ||
+        args->plan == nullptr || args->gate == nullptr || args->up == nullptr ||
+        args->down == nullptr || args->flags != TILEXR_MOONEP_FLAG_NONE ||
+        stream == nullptr) {
+        return TILEXR_MOONEP_ERROR_INVALID_ARGUMENT;
+    }
+    const int commRet = ValidateCommPlan(args->comm, args->plan);
+    if (commRet != TILEXR_MOONEP_SUCCESS) {
+        return commRet;
+    }
+
+    TileXR::CommArgs *commArgs = nullptr;
+    GM_ADDR devArgs = nullptr;
+    const TileXR::TileXRUDMARegistry *registry = nullptr;
+    uint32_t qpNum = 0;
+    if (TileXRGetCommArgsHost(args->comm, commArgs) != TILEXR_MOONEP_SUCCESS ||
+        TileXRGetCommArgsDev(args->comm, devArgs) != TILEXR_MOONEP_SUCCESS ||
+        TileXRGetUDMARegistryHost(args->comm, &registry) != TILEXR_MOONEP_SUCCESS ||
+        TileXRGetUDMAQpNum(args->comm, &qpNum) != TILEXR_MOONEP_SUCCESS ||
+        commArgs == nullptr || devArgs == nullptr || registry == nullptr) {
+        return TILEXR_MOONEP_ERROR_NOT_SUPPORTED;
+    }
+
+    TileXRMoonEp::PrefetchWeightLayout layout {};
+    const int layoutRet = TileXRMoonEp::BuildPrefetchWeightLayout(*args, *commArgs,
+        *registry, qpNum, std::getenv("TILEXR_MOONEP_PREFETCH_BLOCK_DIM"), layout);
+    if (layoutRet != TILEXR_MOONEP_SUCCESS) {
+        return layoutRet;
+    }
+    return TileXRMoonEp::LaunchPrefetchWeight(layout, devArgs,
+        static_cast<GM_ADDR>(args->plan->expertsToCopy),
+        static_cast<GM_ADDR>(args->plan->status), stream);
 }
 
 extern "C" int TileXRMoonEpCombineV1(const TileXRMoonEpCombineArgsV1 *args,

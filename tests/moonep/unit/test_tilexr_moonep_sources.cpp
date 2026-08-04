@@ -75,6 +75,10 @@ int main()
 {
     const std::string header = ReadFile("src/include/tilexr_moonep.h");
     const std::string host = ReadFile("src/moonep/host/tilexr_moonep.cpp");
+    const std::string launch =
+        ReadFile("src/moonep/host/prefetch_weight_launch.cpp");
+    const std::string kernel =
+        ReadFile("src/moonep/kernels/tilexr_moonep_prefetch_weight_kernel.cpp");
     const std::string cmake = ReadFile("src/moonep/CMakeLists.txt");
     const std::string testCmake = ReadFile("tests/moonep/CMakeLists.txt");
     const std::string flowDemo =
@@ -84,6 +88,9 @@ int main()
     Contains("public header", header, "extern \"C\"");
     Contains("public header", header, "TileXRMoonEpTensorV1");
     Contains("public header", header, "TileXRMoonEpPlanV1");
+    Contains("public header", header, "TileXRMoonEpPrefetchWeightArgsV2");
+    Contains("public header", header, "TileXRMoonEpPrefetchWeightV2");
+    Excludes("public header", header, "TileXRMoonEpPrefetchWeightV1");
     Excludes("public header", header, "tilexr_api.h");
     Excludes("public header", header, "std::");
 
@@ -93,9 +100,21 @@ int main()
     Contains("host", host, "aclrtMemcpyAsync");
     Contains("host", host, "ACL_MEMCPY_DEVICE_TO_DEVICE");
     Excludes("host", host, "aclrtSynchronizeStream");
+    Contains("host", host, "BuildPrefetchWeightLayout");
+    Contains("host", host, "LaunchPrefetchWeight");
+    Excludes("host", host, "StubStage::PrefetchWeight");
+
+    Contains("launch", launch, "rtKernelLaunchWithFlagV2");
+    Contains("launch", launch, "layout.blockDim");
+    Contains("kernel", kernel, "UDMAGetNbiQp<uint8_t>");
+    Contains("kernel", kernel, "UDMAQuietQpStatus");
+    Contains("kernel", kernel, "AtomicCas");
+    Excludes("kernel", kernel, "aclrtMemcpy");
+    Excludes("kernel", Lower(kernel), "hccl");
+    Excludes("kernel", kernel, "SDMA");
 
     Contains("CMake", cmake, "add_library(tilexr-moonep SHARED");
-    Contains("CMake", cmake, "SOVERSION 1");
+    Contains("CMake", cmake, "SOVERSION 2");
     Contains("CMake", cmake, "INSTALL_RPATH \"$ORIGIN\"");
     Contains("CMake", cmake, "tilexr-moonep-planner");
     Excludes("CMake", cmake, "devlib");
@@ -114,16 +133,19 @@ int main()
     Contains("flow demo", flowDemo, "CheckPrefixAndZeroTail");
     Contains("flow demo", flowDemo, "torch_validated=false");
     Contains("flow demo", flowDemo, "transport_performance_valid=false");
+    Contains("flow demo", flowDemo, "TileXRUDMARegister");
+    Contains("flow demo", flowDemo, "TileXRUDMAUnregister");
     CheckOrdered("native flow", flowDemo, {
         "TileXRMoonEpPlanningV1(&planning",
         "TileXRMoonEpDispatchV1(&forwardDispatch",
-        "TileXRMoonEpPrefetchWeightV1(&prefetch",
+        "TileXRMoonEpPrefetchWeightV2(&prefetch",
         "TileXRMoonEpCombineV1(&forwardCombine",
         "TileXRMoonEpDispatchV1(&backwardDispatch",
         "TileXRMoonEpCombineV1(&backwardCombine",
         "TileXRMoonEpReduceGradV1(&reduceGrad",
         "aclrtSynchronizeStream(resources->stream)",
     });
+    Excludes("flow demo", flowDemo, "TileXRMoonEpPrefetchWeightV1");
     CheckOrdered("native flow cleanup", flowDemo, {
         "\"local completion synchronize\"",
         "DemoBarrierAll(options.rank, options.world)",

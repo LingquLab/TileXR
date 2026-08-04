@@ -47,6 +47,8 @@ int TileXRGetUDMARegistryDev(TileXRCommPtr comm, GM_ADDR &registryPtr);
 
 int TileXRGetUDMARegistryHost(TileXRCommPtr comm, const TileXR::TileXRUDMARegistry **registry);
 
+int TileXRGetUDMAQpNum(TileXRCommPtr comm, uint32_t *qpNum);
+
 int TileXRSDMAAvailable(TileXRCommPtr comm, bool *available);
 
 int TileXRGetSDMAWorkspaceDev(TileXRCommPtr comm, GM_ADDR *workspace);

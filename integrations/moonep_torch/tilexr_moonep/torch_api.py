@@ -49,6 +49,7 @@ def _validate_tensor(
     shape: tuple[int, ...] | None = None,
     device_index: int,
     allow_empty: bool = False,
+    allow_storage_offset: bool = False,
 ) -> None:
     if tensor is None:
         raise ValueError(f"{name} is required")
@@ -63,7 +64,7 @@ def _validate_tensor(
         raise ValueError(f"{name} must have shape {tuple(shape)}, got {_shape(tensor)}")
     if not tensor.is_contiguous():
         raise ValueError(f"{name} must be contiguous")
-    if int(tensor.storage_offset()) != 0:
+    if not allow_storage_offset and int(tensor.storage_offset()) != 0:
         raise ValueError(f"{name} must have storage_offset 0")
     if not allow_empty and int(tensor.numel()) <= 0:
         raise ValueError(f"{name} must contain at least one element")
@@ -77,6 +78,71 @@ class ProjectionBuffers:
     gate_reduce: Any | None = None
     up_reduce: Any | None = None
     down_reduce: Any | None = None
+    backing: Any | None = None
+    udma_handle: int | None = None
+
+    @classmethod
+    def from_local_weights(
+        cls,
+        context,
+        gate,
+        up,
+        down,
+        *,
+        slot_fill_value: float = 0.0,
+        torch_module=None,
+    ) -> "ProjectionBuffers":
+        torch_module = torch_module or _torch()
+        sources = (gate, up, down)
+        alignment = 64
+        offsets = []
+        cursor_bytes = 0
+        for name, source in zip(("gate", "up", "down"), sources):
+            _validate_tensor(
+                torch_module,
+                source,
+                f"local_weights.{name}",
+                dtype=context.dtype,
+                device_index=context.device_index,
+            )
+            shape = _shape(source)
+            if len(shape) < 2 or len(shape) > 4 or shape[0] != context.experts_per_rank:
+                raise ValueError(
+                    f"local_weights.{name} must have shape [B,...] with B="
+                    f"{context.experts_per_rank}, got {shape}"
+                )
+            row_bytes = int(source.numel()) * int(source.element_size()) // shape[0]
+            if row_bytes <= 0 or row_bytes % alignment:
+                raise ValueError(
+                    f"local_weights.{name} expert row bytes must be 64-byte aligned, "
+                    f"got {row_bytes}"
+                )
+            cursor_bytes = (cursor_bytes + alignment - 1) // alignment * alignment
+            offsets.append(cursor_bytes)
+            cursor_bytes += 2 * int(source.numel()) * int(source.element_size())
+
+        element_bytes = int(gate.element_size())
+        if any(source.dtype != gate.dtype or int(source.element_size()) != element_bytes
+               for source in sources):
+            raise TypeError("gate, up, and down local weights must use the same dtype")
+        total_elements = (cursor_bytes + element_bytes - 1) // element_bytes
+        backing = torch_module.empty(
+            (total_elements,), dtype=gate.dtype, device=f"npu:{context.device_index}"
+        )
+        if int(backing.data_ptr()) % alignment:
+            raise RuntimeError("projection backing allocation is not 64-byte aligned")
+
+        views = []
+        for source, offset_bytes in zip(sources, offsets):
+            shape = (2 * context.experts_per_rank, *_shape(source)[1:])
+            elements = 2 * int(source.numel())
+            view = backing.narrow(0, offset_bytes // element_bytes, elements).reshape(shape)
+            view.narrow(0, 0, context.experts_per_rank).copy_(source)
+            view.narrow(0, context.experts_per_rank, context.experts_per_rank).fill_(
+                slot_fill_value
+            )
+            views.append(view)
+        return cls(gate=views[0], up=views[1], down=views[2], backing=backing)
 
 
 @dataclass(frozen=True, slots=True)
@@ -265,6 +331,7 @@ class TileXRMoonEPBuffer:
         self._bound_stream_ptr: int | None = None
         self._pending_refs: list[tuple[Any, ...]] = []
         self._pending_plans: list[MoonEPPlan] = []
+        self._registered_projections: ProjectionBuffers | None = None
         self._quiesced = True
         supported = (self._torch.bfloat16, self._torch.float16)
         if context.dtype not in supported:
@@ -440,15 +507,23 @@ class TileXRMoonEPBuffer:
                 f"projection.{name}",
                 dtype=dtype,
                 device_index=c.device_index,
+                allow_storage_offset=not reduce,
             )
             tensor_shape = _shape(tensor)
-            if len(tensor_shape) != 2 or tensor_shape[1] <= 0:
-                raise ValueError(f"projection.{name} must be a non-empty rank-2 tensor")
-            if tensor_shape[0] != c.expert_count + c.experts_per_rank:
+            if len(tensor_shape) < 2 or len(tensor_shape) > 4:
+                raise ValueError(f"projection.{name} rank must be in [2, 4]")
+            row_elements = int(tensor.numel()) // tensor_shape[0]
+            if row_elements <= 0 or (
+                not reduce and row_elements * int(tensor.element_size()) % 64
+            ):
+                raise ValueError(f"projection.{name} expert rows must be 64-byte aligned")
+            expected_rows = c.expert_count + c.experts_per_rank if reduce else 2 * c.experts_per_rank
+            if tensor_shape[0] != expected_rows:
                 raise ValueError(
-                    f"projection.{name} first dimension must be E+B="
-                    f"{c.expert_count + c.experts_per_rank}"
+                    f"projection.{name} first dimension must be {expected_rows}"
                 )
+            if not reduce and int(tensor.data_ptr()) % 64:
+                raise ValueError(f"projection.{name} must be 64-byte aligned")
         if not reduce:
             return
         for full_name, reduce_name in (
@@ -468,22 +543,35 @@ class TileXRMoonEPBuffer:
                 device_index=c.device_index,
             )
 
+    def register_projection_buffers(self, projections: ProjectionBuffers) -> None:
+        self._require_open()
+        self._validate_projection_buffers(projections, reduce=False)
+        if projections.backing is None:
+            raise ValueError("projection buffers require one flat backing allocation")
+        if self._registered_projections is projections and projections.udma_handle is not None:
+            return
+        if self._registered_projections is not None:
+            raise RuntimeError("only one projection allocation can be registered per buffer")
+        try:
+            self._torch.npu.synchronize(self.context.device_index)
+        except TypeError:
+            self._torch.npu.synchronize()
+        projections.udma_handle = self.runtime.udma_register(projections.backing)
+        self._registered_projections = projections
+
     def prefetch_weight(
         self, plan: MoonEPPlan, projections: ProjectionBuffers
     ) -> ProjectionBuffers:
         self._require_open()
         self._validate_plan(plan)
         self._validate_projection_buffers(projections, reduce=False)
-        prefetched = ProjectionBuffers(
-            gate=self._empty(_shape(projections.gate), projections.gate.dtype),
-            up=self._empty(_shape(projections.up), projections.up.dtype),
-            down=self._empty(_shape(projections.down), projections.down.dtype),
-        )
-        self._retain(plan, projections, prefetched)
+        if self._registered_projections is not projections or projections.udma_handle is None:
+            raise RuntimeError("projection buffers must be registered before PrefetchWeight")
+        self._retain(plan, projections)
         self.runtime.prefetch_weight(
-            self.context, plan, projections, prefetched, self._stream_ptr()
+            self.context, plan, projections, self._stream_ptr()
         )
-        return prefetched
+        return projections
 
     def combine(self, hidden, plan: MoonEPPlan, route_weights=None) -> CombineResult:
         self._require_open()
@@ -626,7 +714,7 @@ class TileXRMoonEPBuffer:
         self._bound_stream_ptr = None
         failed = [(epoch, status) for epoch, status in statuses if status != 0]
         if failed:
-            raise RuntimeError(f"Planner device status failures: {failed}")
+            raise RuntimeError(f"MoonEP device status failures: {failed}")
 
     def synchronize(self) -> None:
         self.quiesce()
@@ -642,7 +730,15 @@ class TileXRMoonEPBuffer:
         except Exception as exc:
             sync_error = exc
         try:
-            self.context.close()
+            try:
+                if self._registered_projections is not None:
+                    projections = self._registered_projections
+                    if projections.udma_handle is not None:
+                        self.runtime.udma_unregister(projections.udma_handle)
+                        projections.udma_handle = None
+                    self._registered_projections = None
+            finally:
+                self.context.close()
         finally:
             self._closed = True
             self._pending_refs.clear()

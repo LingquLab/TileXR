@@ -30,10 +30,12 @@ file(WRITE "${TILEXR_MOONEP_FAKE_INCLUDE_DIR}/acl/acl_rt.h"
 "#include <stddef.h>\n"
 "#include <stdint.h>\n"
 "#include \"acl_base.h\"\n"
+"#ifdef __cplusplus\nextern \"C\" {\n#endif\n"
 "typedef enum aclrtMemcpyKind { ACL_MEMCPY_DEVICE_TO_DEVICE = 3 } aclrtMemcpyKind;\n"
 "aclError aclrtMemsetAsync(void *devPtr, size_t maxCount, int32_t value, size_t count, aclrtStream stream);\n"
 "aclError aclrtMemcpyAsync(void *dst, size_t destMax, const void *src, size_t count, aclrtMemcpyKind kind, aclrtStream stream);\n"
 "aclError aclrtSynchronizeStream(aclrtStream stream);\n"
+"#ifdef __cplusplus\n}\n#endif\n"
 "#endif\n")
 
 file(WRITE "${TILEXR_MOONEP_FAKE_INCLUDE_DIR}/tilexr_moonep_planner.h"
@@ -51,11 +53,16 @@ file(WRITE "${TILEXR_MOONEP_FAKE_INCLUDE_DIR}/tilexr_moonep_planner.h"
 file(WRITE "${TILEXR_MOONEP_FAKE_INCLUDE_DIR}/tilexr_api.h"
 "#ifndef TILEXR_MOONEP_TEST_TILEXR_API_H\n"
 "#define TILEXR_MOONEP_TEST_TILEXR_API_H\n"
+"#include <stdint.h>\n"
+"#include \"comm_args.h\"\n"
+"#include \"tilexr_udma_reg.h\"\n"
 "#ifdef __cplusplus\n"
-"namespace TileXR { struct CommArgs { int rank; int rankSize; }; }\n"
 "extern \"C\" {\n"
 "typedef void *TileXRCommPtr;\n"
 "int TileXRGetCommArgsHost(TileXRCommPtr comm, TileXR::CommArgs *&commArgs);\n"
+"int TileXRGetCommArgsDev(TileXRCommPtr comm, GM_ADDR &commArgs);\n"
+"int TileXRGetUDMARegistryHost(TileXRCommPtr comm, const TileXR::TileXRUDMARegistry **registry);\n"
+"int TileXRGetUDMAQpNum(TileXRCommPtr comm, uint32_t *qpNum);\n"
 "}\n"
 "#endif\n"
 "#endif\n")
@@ -63,6 +70,7 @@ file(WRITE "${TILEXR_MOONEP_FAKE_INCLUDE_DIR}/tilexr_api.h"
 set(TILEXR_MOONEP_TEST_INCLUDE_DIRS
     ${TILEXR_MOONEP_FAKE_INCLUDE_DIR}
     ${TILEXR_ROOT}/src/include
+    ${TILEXR_ROOT}/src/moonep/host
 )
 
 add_executable(test_tilexr_moonep_c_header
@@ -79,6 +87,7 @@ target_include_directories(test_tilexr_moonep_abi_layout PRIVATE
 
 add_executable(test_tilexr_moonep_host
     unit/test_tilexr_moonep_host.cpp
+    ${TILEXR_ROOT}/src/moonep/host/prefetch_weight_layout.cpp
     ${TILEXR_ROOT}/src/moonep/host/tilexr_moonep.cpp
 )
 target_include_directories(test_tilexr_moonep_host PRIVATE

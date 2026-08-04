@@ -190,6 +190,16 @@ int TileXRGetUDMARegistryHost(TileXRCommPtr comm, const TileXR::TileXRUDMARegist
     return *registry == nullptr ? TILEXR_ERROR_NOT_INITIALIZED : TILEXR_SUCCESS;
 }
 
+int TileXRGetUDMAQpNum(TileXRCommPtr comm, uint32_t *qpNum)
+{
+    if (comm == nullptr || qpNum == nullptr) {
+        return TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    auto* c = static_cast<TileXRComm *>(comm);
+    *qpNum = c->GetUDMAQpNum();
+    return *qpNum == 0 ? TILEXR_ERROR_NOT_FOUND : TILEXR_SUCCESS;
+}
+
 int TileXRSDMAAvailable(TileXRCommPtr comm, bool *available)
 {
     if (comm == nullptr || available == nullptr) {

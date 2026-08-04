@@ -8,6 +8,7 @@
 #include <acl/acl_rt.h>
 
 #include <algorithm>
+#include <cstdlib>
 #include <mutex>
 #include <new>
 #include <vector>
@@ -60,6 +61,12 @@ int TileXRUDMAContext::Init(const TileXRUDMAContextOptions& options)
     transportOptions.rankSize = options_.rankSize;
     transportOptions.devId = options_.devId;
     transportOptions.exchange = options_.exchange;
+    if (ParseUDMAQpNum(std::getenv("TILEXR_UDMA_QP_NUM"), transportOptions.qpNum) !=
+        TILEXR_UDMA_LAYOUT_SUCCESS) {
+        TILEXR_LOG(WARN) << "Invalid TILEXR_UDMA_QP_NUM; supported values are 1, 2, 4, and 8";
+        transport_.reset();
+        return TILEXR_SUCCESS;
+    }
     int ret = transport_->Init(transportOptions);
     if (ret != TILEXR_SUCCESS || !transport_->IsAvailable()) {
         TILEXR_LOG(WARN) << "TileXR UDMA init failed: " << ret << ", UDMA disabled";
@@ -86,7 +93,8 @@ int TileXRUDMAContext::Init(const TileXRUDMAContextOptions& options)
         return ret;
     }
 
-    TILEXR_LOG(INFO) << "InitUDMA success, rank " << options_.rank << "/" << options_.rankSize;
+    TILEXR_LOG(INFO) << "InitUDMA success, rank " << options_.rank << "/"
+                     << options_.rankSize << ", qpNum=" << transport_->GetQpNum();
     return TILEXR_SUCCESS;
 }
 
@@ -249,6 +257,11 @@ GM_ADDR TileXRUDMAContext::GetRegistryDev() const
 const TileXRUDMARegistry* TileXRUDMAContext::GetRegistryHost() const
 {
     return UDMARegistryValid(&registry_, options_.rankSize) ? &registry_ : nullptr;
+}
+
+uint32_t TileXRUDMAContext::GetQpNum() const
+{
+    return transport_ == nullptr ? 0 : transport_->GetQpNum();
 }
 
 int TileXRUDMAContext::ApplyCommArgsState(const TileXRUDMACommArgsState& state) const

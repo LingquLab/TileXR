@@ -8,13 +8,14 @@ from typing import Callable, Mapping, Sequence
 
 from .abi import (
     TILEXR_MOONEP_ABI_VERSION,
+    TILEXR_MOONEP_ABI_VERSION_V2,
     TILEXR_MOONEP_FLAG_NONE,
     TILEXR_SUCCESS,
     TileXRMoonEPCombineArgsV1,
     TileXRMoonEPDispatchArgsV1,
     TileXRMoonEPPlanV1,
     TileXRMoonEPPlanningArgsV1,
-    TileXRMoonEPPrefetchWeightArgsV1,
+    TileXRMoonEPPrefetchWeightArgsV2,
     TileXRMoonEPReduceGradArgsV1,
     TileXRMoonEPStage,
     TileXRMoonEPTensorV1,
@@ -125,7 +126,7 @@ def _resolve_library(
 
 
 class TileXRMoonEPRuntime:
-    """Owns a TileXR communicator and calls the exact V1 ABI from tilexr_moonep.h."""
+    """Owns a TileXR communicator and calls the versioned tilexr_moonep.h ABI."""
 
     def __init__(
         self,
@@ -156,7 +157,7 @@ class TileXRMoonEPRuntime:
             paths.get("planner"),
         )
         moonep_path = _resolve_library(
-            ("libtilexr-moonep.so.1", "libtilexr-moonep.so"),
+            ("libtilexr-moonep.so.2", "libtilexr-moonep.so"),
             "TILEXR_MOONEP_LIB",
             self.install_prefix,
             paths.get("moonep"),
@@ -182,6 +183,15 @@ class TileXRMoonEPRuntime:
         self._comm_lib.TileXRCommInitRankLocal.restype = ctypes.c_int
         self._comm_lib.TileXRCommDestroy.argtypes = [ctypes.c_void_p]
         self._comm_lib.TileXRCommDestroy.restype = ctypes.c_int
+        self._comm_lib.TileXRUDMARegister.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_size_t,
+            ctypes.POINTER(ctypes.c_uint32),
+        ]
+        self._comm_lib.TileXRUDMARegister.restype = ctypes.c_int
+        self._comm_lib.TileXRUDMAUnregister.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+        self._comm_lib.TileXRUDMAUnregister.restype = ctypes.c_int
         self._moonep_lib.TileXRMoonEpGetAbiVersion.argtypes = []
         self._moonep_lib.TileXRMoonEpGetAbiVersion.restype = ctypes.c_uint32
         self._moonep_lib.TileXRMoonEpGetCapabilitiesV1.argtypes = [
@@ -201,7 +211,7 @@ class TileXRMoonEPRuntime:
         symbols = (
             ("TileXRMoonEpPlanningV1", TileXRMoonEPPlanningArgsV1),
             ("TileXRMoonEpDispatchV1", TileXRMoonEPDispatchArgsV1),
-            ("TileXRMoonEpPrefetchWeightV1", TileXRMoonEPPrefetchWeightArgsV1),
+            ("TileXRMoonEpPrefetchWeightV2", TileXRMoonEPPrefetchWeightArgsV2),
             ("TileXRMoonEpCombineV1", TileXRMoonEPCombineArgsV1),
             ("TileXRMoonEpReduceGradV1", TileXRMoonEPReduceGradArgsV1),
         )
@@ -272,6 +282,20 @@ class TileXRMoonEPRuntime:
                 f"expected NvS={context.dispatched_capacity}, got {capacity.value}",
             )
         return int(workspace_bytes.value)
+
+    def udma_register(self, tensor) -> int:
+        handle = ctypes.c_uint32()
+        ret = self._comm_lib.TileXRUDMARegister(
+            void_p(self.comm_ptr), tensor_ptr(tensor), tensor_nbytes(tensor), ctypes.byref(handle)
+        )
+        self._check("TileXRUDMARegister", ret, f"bytes={tensor_nbytes(tensor)}")
+        return int(handle.value)
+
+    def udma_unregister(self, handle: int) -> None:
+        ret = self._comm_lib.TileXRUDMAUnregister(
+            void_p(self.comm_ptr), ctypes.c_uint32(int(handle))
+        )
+        self._check("TileXRUDMAUnregister", ret, f"handle={int(handle)}")
 
     def planning(
         self,
@@ -346,17 +370,24 @@ class TileXRMoonEPRuntime:
                 stream_ptr,
             )
 
-    def prefetch_weight(self, context, plan, inputs, outputs, stream_ptr: int) -> None:
-        for name in ("gate", "up", "down"):
-            self._run_stage(
-                "TileXRMoonEpPrefetchWeightV1",
-                TileXRMoonEPPrefetchWeightArgsV1,
-                context,
-                plan,
-                getattr(inputs, name),
-                getattr(outputs, name),
-                stream_ptr,
-            )
+    def prefetch_weight(self, context, plan, projections, stream_ptr: int) -> None:
+        plan_v1 = self._plan_v1(context, plan)
+        gate = make_tensor_v1(projections.gate)
+        up = make_tensor_v1(projections.up)
+        down = make_tensor_v1(projections.down)
+        args = initialize_struct(
+            TileXRMoonEPPrefetchWeightArgsV2(), TILEXR_MOONEP_ABI_VERSION_V2
+        )
+        args.comm = void_p(self.comm_ptr)
+        args.plan = ctypes.pointer(plan_v1)
+        args.gate = ctypes.pointer(gate)
+        args.up = ctypes.pointer(up)
+        args.down = ctypes.pointer(down)
+        args.flags = TILEXR_MOONEP_FLAG_NONE
+        ret = self._moonep_lib.TileXRMoonEpPrefetchWeightV2(
+            ctypes.byref(args), void_p(stream_ptr)
+        )
+        self._check("TileXRMoonEpPrefetchWeightV2", ret)
 
     def combine(
         self,

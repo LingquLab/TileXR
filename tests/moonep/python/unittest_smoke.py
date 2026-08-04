@@ -26,7 +26,7 @@ from tools.moonep.benchmark import (
     topology_metadata,
     validate_plan,
 )
-from tools.moonep.launcher import rank_to_device, resolve_topology
+from tools.moonep.launcher import _parse_prefetch_workers, rank_to_device, resolve_topology
 from tools.moonep.planner_reference import build_reference_plan, deterministic_all_topk
 from tools.moonep.rendezvous import completion_barrier, offset_host_port
 from tools.moonep.report import aggregate_rank_artifacts, write_json, write_jsonl
@@ -62,6 +62,14 @@ def make_buffer():
 
 
 class MoonEPSmokeTests(unittest.TestCase):
+    def test_prefetch_worker_candidates_are_explicit_and_bounded(self):
+        self.assertEqual(_parse_prefetch_workers(None), [])
+        self.assertEqual(_parse_prefetch_workers("1,2,8"), [1, 2, 8])
+        with self.assertRaisesRegex(ValueError, "chosen from"):
+            _parse_prefetch_workers("1,3")
+        with self.assertRaisesRegex(ValueError, "unique"):
+            _parse_prefetch_workers("2,2")
+
     def test_oversubscribed_planning_barrier_is_outside_device_work(self):
         buffer = SimpleNamespace(synchronize_calls=0)
         buffer.synchronize = lambda: setattr(
@@ -93,11 +101,15 @@ class MoonEPSmokeTests(unittest.TestCase):
 
     def test_forward_backward_order_and_plan_reuse(self):
         torch, runtime, buffer = make_buffer()
-        projection = ProjectionBuffers(
-            tensor((6, 8), torch.bfloat16),
-            tensor((6, 8), torch.bfloat16),
-            tensor((6, 8), torch.bfloat16),
+        projection = ProjectionBuffers.from_local_weights(
+            buffer.context,
+            tensor((2, 32), torch.bfloat16),
+            tensor((2, 32), torch.bfloat16),
+            tensor((2, 32), torch.bfloat16),
+            torch_module=torch,
         )
+        buffer.register_projection_buffers(projection)
+        runtime.calls.clear()
 
         def expert_forward(dispatched, plan, projections):
             runtime.calls.append(("expert_forward", plan))
@@ -218,17 +230,17 @@ class MoonEPSmokeTests(unittest.TestCase):
         self.assertNotIn("import " + "hccl", text.lower())
         self.assertNotIn("from " + "hccl", text.lower())
 
-    def test_projection_must_be_non_empty_rank_two(self):
+    def test_projection_must_match_compact_registered_layout(self):
         torch, _, buffer = make_buffer()
         plan = buffer.planning(
             tensor((4, 2), torch.int32), tensor((4,), torch.int32)
         )
         bad = ProjectionBuffers(
-            tensor((6, 2, 4), torch.bfloat16),
+            tensor((4, 2, 2, 2, 2), torch.bfloat16),
             tensor((6, 8), torch.bfloat16),
             tensor((6, 8), torch.bfloat16),
         )
-        with self.assertRaisesRegex(ValueError, "rank-2"):
+        with self.assertRaisesRegex(ValueError, "rank must be in"):
             buffer.prefetch_weight(plan, bad)
 
     def test_json_case_and_oversubscribed_topology(self):
@@ -657,6 +669,54 @@ class MoonEPSmokeTests(unittest.TestCase):
         self.assertFalse(summary["transport_performance_valid"])
         self.assertEqual(summary["performance_scope"], "oversubscribed_functional_only")
         self.assertIn("p50", summary["tokens_per_second"])
+
+    def test_report_preserves_native_prefetch_scope(self):
+        capabilities = {
+            "abi_version": 2,
+            "stage_mask": 5,
+            "stub_mask": 26,
+            "implementations": {
+                "planning": "native",
+                "dispatch": "stub",
+                "prefetch_weight": "native",
+                "combine": "stub",
+                "reduce_grad": "stub",
+            },
+            "transport_performance_valid": False,
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            case_dir = Path(directory) / "native-prefetch"
+            rank_dir = case_dir / "rank_0"
+            write_json(
+                rank_dir / "result.json",
+                {
+                    "status": "passed",
+                    "case": {"case_id": "native-prefetch", "tokens_per_rank": 4},
+                    "capabilities": capabilities,
+                    "topology": {
+                        "physical_device_count": 1,
+                        "ranks_per_device": 1,
+                        "oversubscribed": False,
+                        "planner_block_dim": 64,
+                        "planner_block_dim_source": "default_native",
+                        "udma_qp_num": 4,
+                        "prefetch_block_dim": 4,
+                    },
+                    "validation": {"passed": True},
+                },
+            )
+            write_jsonl(
+                rank_dir / "samples.jsonl",
+                [{
+                    "iteration": 0,
+                    "timings_us": {"end_to_end": 20.0, "prefetch_weight": 3.0},
+                }],
+            )
+            summary = aggregate_rank_artifacts(case_dir, world_size=1)
+        self.assertFalse(summary["transport_performance_valid"])
+        self.assertTrue(summary["prefetch_weight_performance_valid"])
+        self.assertEqual(summary["performance_scope"], "native_prefetch_only")
+        self.assertEqual(summary["metrics_us"]["prefetch_weight"]["p50"], 3.0)
 
 
 if __name__ == "__main__":

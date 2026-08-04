@@ -55,6 +55,7 @@ public:
 
     GM_ADDR GetRegistryDev() const;
     const TileXRUDMARegistry* GetRegistryHost() const;
+    uint32_t GetQpNum() const;
 
 private:
     int ApplyCommArgsState(const TileXRUDMACommArgsState& state) const;

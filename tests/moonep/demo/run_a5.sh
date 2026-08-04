@@ -13,11 +13,11 @@ rank_size="${1:-8}"
 s="${2:-8}"
 k="${3:-2}"
 experts="${4:-$((rank_size * 2))}"
-hidden="${5:-8}"
+hidden="${5:-32}"
 physical_device_count="${6:-$((rank_size < 8 ? rank_size : 8))}"
 
 if ((rank_size <= 0 || rank_size > 128 || physical_device_count <= 0 ||
-     s <= 0 || k < 2 || experts <= 0 || hidden <= 0 ||
+     s <= 0 || k < 2 || experts <= 0 || hidden <= 0 || hidden % 32 != 0 ||
      experts % rank_size != 0)); then
     echo "invalid rank/dimension configuration" >&2
     exit 2
