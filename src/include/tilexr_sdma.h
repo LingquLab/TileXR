@@ -51,6 +51,22 @@ __aicore__ inline uint32_t SDMAResolveChannelGroup(uint32_t channelGroupIdx)
     return channelGroupIdx;
 }
 
+__aicore__ inline bool SDMAPrewarmSqPages(
+    const __gm__ CommArgs* args, uint32_t channelCount,
+    AscendC::LocalTensor<uint8_t> scratch)
+{
+#if TILEXR_SDMA_A5_AICORE_COMPILE
+    return SDMAEnabled(args) && detail::A5SdmaPrewarmSqPages(
+        reinterpret_cast<__gm__ uint8_t*>(args->sdmaWorkspacePtr),
+        channelCount, scratch);
+#else
+    (void)args;
+    (void)channelCount;
+    (void)scratch;
+    return false;
+#endif
+}
+
 __aicore__ inline uint64_t SDMACopyNbi(
     const __gm__ CommArgs* args,
     __gm__ uint8_t* dst,

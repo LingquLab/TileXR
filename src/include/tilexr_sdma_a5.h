@@ -87,6 +87,62 @@ __aicore__ inline bool A5SdmaWorkspaceValid(const __gm__ A5SdmaWorkspace* worksp
         workspace->header.workspaceSize == sizeof(A5SdmaWorkspace);
 }
 
+__aicore__ inline bool A5SdmaPrewarmSqPages(
+    __gm__ uint8_t* workspaceAddress, uint32_t channelCount,
+    AscendC::LocalTensor<uint8_t> scratch)
+{
+    __gm__ A5SdmaWorkspace* workspace =
+        reinterpret_cast<__gm__ A5SdmaWorkspace*>(workspaceAddress);
+    if (!A5SdmaWorkspaceValid(workspace) || channelCount == 0U ||
+        channelCount > TILEXR_SDMA_A5_CHANNEL_COUNT) {
+        return false;
+    }
+
+    for (uint32_t channelIndex = 0U; channelIndex < channelCount; ++channelIndex) {
+        __gm__ A5SdmaChannel* channel = &workspace->channels[channelIndex];
+        const uint32_t originalHead = channel->head;
+        const uint32_t originalTail = channel->tail;
+        const uint32_t originalGeneration = channel->generation;
+        const uint32_t originalTaskId = channel->taskId;
+        if (channel->sqBase == 0U || channel->depth == 0U ||
+            originalHead != originalTail || channel->outstanding != 0U) {
+            return false;
+        }
+
+        const uint32_t pageCount = A5SdmaSqPageCount(channel->depth);
+        for (uint32_t page = 0U; page < pageCount; ++page) {
+            const uint64_t offset = A5SdmaSqPageOffset(page);
+            if (offset + TILEXR_SDMA_A5_PREWARM_BYTES >
+                A5SdmaSqBytes(channel->depth)) {
+                return false;
+            }
+            AscendC::GlobalTensor<uint8_t> pageGlobal;
+            pageGlobal.SetGlobalBuffer(
+                reinterpret_cast<__gm__ uint8_t*>(channel->sqBase) + offset);
+            AscendC::DataCopyPadExtParams<uint8_t> padIn {false, 0U, 0U, 0};
+            AscendC::DataCopyExtParams copyIn {
+                1U, TILEXR_SDMA_A5_PREWARM_BYTES, 0U, 0U, 0U};
+            AscendC::DataCopyPad(scratch, pageGlobal, copyIn, padIn);
+            AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE3>(EVENT_ID0);
+            AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE3>(EVENT_ID0);
+
+            AscendC::DataCopyExtParams copyOut {
+                1U, TILEXR_SDMA_A5_PREWARM_BYTES, 0U, 0U, 0U};
+            AscendC::DataCopyPad(pageGlobal, scratch, copyOut);
+            AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
+            AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
+        }
+        AscendC::PipeBarrier<PIPE_ALL>();
+        dsb(DSB_DDR);
+        if (channel->head != originalHead || channel->tail != originalTail ||
+            channel->generation != originalGeneration ||
+            channel->taskId != originalTaskId || channel->outstanding != 0U) {
+            return false;
+        }
+    }
+    return true;
+}
+
 __aicore__ inline uint64_t A5SdmaCopyNbi(__gm__ uint8_t* workspaceAddress,
                                          __gm__ uint8_t* destination,
                                          __gm__ uint8_t* source,

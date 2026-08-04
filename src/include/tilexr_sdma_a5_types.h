@@ -24,6 +24,8 @@ constexpr uint16_t TILEXR_SDMA_A5_BACKEND_KIND = 2U;
 constexpr uint32_t TILEXR_SDMA_A5_CHANNEL_COUNT = 48U;
 constexpr uint32_t TILEXR_SDMA_A5_SQE_BYTES = 64U;
 constexpr uint32_t TILEXR_SDMA_A5_COMPLETION_BYTES = 64U;
+constexpr uint32_t TILEXR_SDMA_A5_SQ_PAGE_BYTES = 4096U;
+constexpr uint32_t TILEXR_SDMA_A5_PREWARM_BYTES = 64U;
 constexpr uint64_t TILEXR_SDMA_A5_MAX_TRANSFER_BYTES = 0xFFFFFFFFULL;
 constexpr uint32_t TILEXR_SDMA_A5_SQE_TYPE = 11U;
 constexpr uint32_t TILEXR_SDMA_A5_KERNEL_CREDIT = 254U;
@@ -125,6 +127,24 @@ TILEXR_SDMA_A5_HOST_DEVICE_INLINE bool A5SdmaQueueStateValid(uint32_t tail, uint
     return depth >= 3U && tail < depth;
 }
 
+TILEXR_SDMA_A5_HOST_DEVICE_INLINE uint64_t A5SdmaSqBytes(uint32_t depth)
+{
+    return static_cast<uint64_t>(depth) * TILEXR_SDMA_A5_SQE_BYTES;
+}
+
+TILEXR_SDMA_A5_HOST_DEVICE_INLINE uint32_t A5SdmaSqPageCount(uint32_t depth)
+{
+    const uint64_t bytes = A5SdmaSqBytes(depth);
+    return static_cast<uint32_t>(
+        (bytes + TILEXR_SDMA_A5_SQ_PAGE_BYTES - 1U) /
+        TILEXR_SDMA_A5_SQ_PAGE_BYTES);
+}
+
+TILEXR_SDMA_A5_HOST_DEVICE_INLINE uint64_t A5SdmaSqPageOffset(uint32_t page)
+{
+    return static_cast<uint64_t>(page) * TILEXR_SDMA_A5_SQ_PAGE_BYTES;
+}
+
 TILEXR_SDMA_A5_HOST_DEVICE_INLINE uint32_t A5SdmaAdvanceTail(uint32_t tail, uint32_t depth)
 {
     return (tail + 2U) % depth;
@@ -181,6 +201,10 @@ static_assert(sizeof(A5SdmaWorkspaceHeader) == 64U, "A5 workspace header must be
 static_assert(sizeof(A5SdmaChannel) == 192U, "A5 channel ABI must be 192 bytes");
 static_assert(sizeof(A5SdmaCompletionLine) == 64U, "A5 completion line must be 64 bytes");
 static_assert(sizeof(A5SdmaSqe) == TILEXR_SDMA_A5_SQE_BYTES, "A5 SQE must be 64 bytes");
+static_assert(TILEXR_SDMA_A5_SQ_PAGE_BYTES % TILEXR_SDMA_A5_SQE_BYTES == 0U,
+    "A5 SQ pages must contain whole SQEs");
+static_assert(TILEXR_SDMA_A5_PREWARM_BYTES == TILEXR_SDMA_A5_SQE_BYTES,
+    "A5 SQ prewarm must preserve one complete SQE");
 static_assert(alignof(A5SdmaWorkspace) == 64U, "A5 workspace must be cache-line aligned");
 static_assert(sizeof(A5SdmaWorkspace) % 64U == 0U, "A5 workspace size must be cache-line aligned");
 static_assert(offsetof(A5SdmaChannel, sqBase) == 0U, "unexpected A5 SQ base offset");

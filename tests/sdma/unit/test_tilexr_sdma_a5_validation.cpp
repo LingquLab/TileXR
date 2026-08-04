@@ -197,6 +197,17 @@ void TestGroupedCopyWaitIsBounded()
     CHECK_TRUE(TileXR::detail::TILEXR_SDMA_A5_WAIT_TIMEOUT_CYCLES != 0ULL);
 }
 
+void TestSqPrewarmPageLayout()
+{
+    using namespace TileXR::detail;
+    CHECK_TRUE(A5SdmaSqBytes(2049U) == 131136ULL);
+    CHECK_TRUE(A5SdmaSqPageCount(2049U) == 33U);
+    CHECK_TRUE(A5SdmaSqPageOffset(0U) == 0ULL);
+    CHECK_TRUE(A5SdmaSqPageOffset(7U) == 28672ULL);
+    CHECK_TRUE(A5SdmaSqPageOffset(32U) + TILEXR_SDMA_A5_PREWARM_BYTES ==
+               A5SdmaSqBytes(2049U));
+}
+
 void TestCleanupFailuresRetainHandlesForRetry()
 {
     struct FailureCase {
@@ -260,6 +271,7 @@ int main()
     TestPartialClassificationFailsClosed();
     TestCompleteClassificationRequiresFinishedHeader();
     TestGroupedCopyWaitIsBounded();
+    TestSqPrewarmPageLayout();
     TestCleanupFailuresRetainHandlesForRetry();
     TestCleanupRestoreFailureIsRetryable();
     if (g_failures != 0) {

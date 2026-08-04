@@ -65,7 +65,8 @@ extern int launch_tilexr_udma_all_to_all_group(
     uint64_t creditOffset0, uint64_t creditOffset1,
     GM_ADDR groupTrace, uint32_t traceIteration,
     uint32_t routeStage, uint32_t multiChannel, uint32_t primaryRouteParts,
-    uint32_t groupWidth, uint32_t quietBatch, uint32_t ingressWindow);
+    uint32_t groupWidth, uint32_t quietBatch, uint32_t ingressWindow,
+    uint32_t prewarmSq);
 extern void launch_tilexr_udma_all_to_all_bigdata(
     uint32_t blockDim, void* stream, GM_ADDR commArgs, GM_ADDR input, GM_ADDR output,
     GM_ADDR udmaMem, GM_ADDR debug, GM_ADDR fullmeshTrace, uint32_t fullmeshTraceIteration,
@@ -1033,6 +1034,17 @@ bool RunGroupedAllToAll(
     }
     constexpr uint32_t sendWorkers = TileXR::Demo::kAllToAllGroupSendWorkerCount;
     const uint32_t copyoutWorkers = sdmaAvailable ? 1U : 32U;
+    const int prewarmSqValue = GetEnvInt(
+        "TILEXR_DEMO_ALLTOALL_GROUP_PREWARM_SQ", 0);
+    if ((prewarmSqValue != 0 && prewarmSqValue != 1) ||
+        (prewarmSqValue != 0 && !sdmaAvailable)) {
+        std::cerr << "[rank " << rank
+                  << "] ERROR: TILEXR_DEMO_ALLTOALL_GROUP_PREWARM_SQ"
+                  << " must be 0 or 1 and requires SDMA, got "
+                  << prewarmSqValue << std::endl;
+        return false;
+    }
+    const uint32_t prewarmSq = static_cast<uint32_t>(prewarmSqValue);
     const uint32_t groupBlockDim = TileXR::Demo::AllToAllGroupBlockDim(
         sendWorkers, copyoutWorkers);
     const int routeStagesValue = GetEnvInt(
@@ -1247,6 +1259,7 @@ bool RunGroupedAllToAll(
         " useSecondaryRoute=" + std::to_string(useSecondaryRouteValue) +
         " quietBatch=" + std::to_string(quietBatch) +
         " ingressWindow=" + std::to_string(ingressWindow) +
+        " prewarmSq=" + std::to_string(prewarmSq) +
         " routeStages=" + std::to_string(routeStagesValue));
 
     if (routeStages &&
@@ -1256,8 +1269,12 @@ bool RunGroupedAllToAll(
     }
 
     uint32_t invocationId = 0U;
+    bool prewarmSqPending = prewarmSq != 0U;
     auto launchGroupStage = [&](TileXR::Demo::AllToAllGroupRouteStage routeStage,
-                                void* trace, uint32_t traceIteration) -> bool {
+                                 void* trace, uint32_t traceIteration) -> bool {
+        const uint32_t prewarmThisLaunch =
+            prewarmSqPending &&
+            routeStage == TileXR::Demo::AllToAllGroupRouteStage::kCombined ? 1U : 0U;
         const int launchRet = launch_tilexr_udma_all_to_all_group(
             groupBlockDim, stream, commArgsDev,
             reinterpret_cast<GM_ADDR>(input), reinterpret_cast<GM_ADDR>(output),
@@ -1272,12 +1289,16 @@ bool RunGroupedAllToAll(
             multiChannel ? 1U : 0U, primaryRouteParts,
             groupWidth, quietBatch,
             routeStage == TileXR::Demo::AllToAllGroupRouteStage::kCombined ?
-                ingressWindow : 0U);
+                ingressWindow : 0U,
+            prewarmThisLaunch);
         if (launchRet != 0) {
             std::cerr << "[rank " << rank
                       << "] rtKernelLaunchWithFlagV2 grouped failed: "
                       << launchRet << std::endl;
             return false;
+        }
+        if (prewarmThisLaunch != 0U) {
+            prewarmSqPending = false;
         }
         return true;
     };

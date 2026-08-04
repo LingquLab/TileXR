@@ -48,6 +48,7 @@ struct alignas(8) GroupedAllToAllKernelArgs {
     uint32_t primaryRouteParts;
     uint32_t groupWidth;
     uint32_t quietBatch;
+    uint32_t prewarmSq;
 };
 
 struct alignas(8) GroupedAllToAllCreditKernelArgs {
@@ -75,9 +76,10 @@ struct alignas(8) GroupedAllToAllCreditKernelArgs {
     uint32_t groupWidth;
     uint32_t quietBatch;
     uint32_t ingressWindow;
+    uint32_t prewarmSq;
 };
 
-static_assert(sizeof(GroupedAllToAllKernelArgs) == 128U,
+static_assert(sizeof(GroupedAllToAllKernelArgs) == 136U,
     "grouped alltoall kernel argument ABI changed");
 static_assert(offsetof(GroupedAllToAllKernelArgs, payloadOffset0) == 64U,
     "grouped alltoall payload offset ABI changed");
@@ -181,7 +183,8 @@ int launch_tilexr_udma_all_to_all_group(
     uint64_t creditOffset0, uint64_t creditOffset1,
     uint8_t* groupTrace, uint32_t traceIteration,
     uint32_t routeStage, uint32_t multiChannel, uint32_t primaryRouteParts,
-    uint32_t groupWidth, uint32_t quietBatch, uint32_t ingressWindow)
+    uint32_t groupWidth, uint32_t quietBatch, uint32_t ingressWindow,
+    uint32_t prewarmSq)
 {
     const rtError_t registrationStatus = EnsureGroupedKernelRegistered();
     if (registrationStatus != RT_ERROR_NONE) {
@@ -200,7 +203,7 @@ int launch_tilexr_udma_all_to_all_group(
             payloadOffset0, payloadOffset1, signalOffset0, signalOffset1,
             creditOffset0, creditOffset1, groupTrace, traceIteration,
             routeStage, multiChannel, primaryRouteParts, groupWidth,
-            quietBatch, ingressWindow,
+            quietBatch, ingressWindow, prewarmSq,
         };
         functionSignature = useBatch ? GroupedBatchCreditKernelFunctionSignature() :
             GroupedCreditKernelFunctionSignature();
@@ -210,7 +213,7 @@ int launch_tilexr_udma_all_to_all_group(
             elementsPerPeer, chunkElements, passCount, groupCount,
             payloadOffset0, payloadOffset1, signalOffset0, signalOffset1,
             groupTrace, traceIteration, routeStage, multiChannel,
-            primaryRouteParts, groupWidth, quietBatch,
+            primaryRouteParts, groupWidth, quietBatch, prewarmSq,
         };
         functionSignature = useBatch ? GroupedBatchKernelFunctionSignature() :
             GroupedKernelFunctionSignature();

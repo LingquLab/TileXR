@@ -746,9 +746,10 @@ void TestKernelStructure()
     CHECK_CONTAINS(launcher, "rtFunctionRegister");
     CHECK_CONTAINS(launcher, "rtKernelLaunchWithFlagV2");
     CHECK_CONTAINS(launcher, "GroupedAllToAllKernelArgs");
-    CHECK_CONTAINS(launcher, "sizeof(GroupedAllToAllKernelArgs) == 128U");
+    CHECK_CONTAINS(launcher, "sizeof(GroupedAllToAllKernelArgs) == 136U");
     CHECK_CONTAINS(launcher, "GroupedAllToAllCreditKernelArgs");
     CHECK_CONTAINS(launcher, "sizeof(GroupedAllToAllCreditKernelArgs) == 152U");
+    CHECK_CONTAINS(launcher, "prewarmSq");
     CHECK_CONTAINS(launcher, "TILEXR_GROUPED_ALLTOALL_BATCH_KERNEL_NAME");
     CHECK_CONTAINS(launcher, "TILEXR_GROUPED_ALLTOALL_CREDIT_KERNEL_NAME");
     CHECK_CONTAINS(launcher, "TILEXR_GROUPED_ALLTOALL_BATCH_CREDIT_KERNEL_NAME");

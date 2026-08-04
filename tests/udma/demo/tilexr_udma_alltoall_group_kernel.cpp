@@ -43,6 +43,7 @@ constexpr uint32_t TILEXR_ALLTOALL_GROUP_STAGE_QUIET = 2U;
 constexpr uint32_t TILEXR_ALLTOALL_GROUP_STAGE_WAIT = 3U;
 constexpr uint32_t TILEXR_ALLTOALL_GROUP_STAGE_CREDIT_WAIT = 4U;
 constexpr uint32_t TILEXR_ALLTOALL_GROUP_STAGE_SDMA = 5U;
+constexpr uint32_t TILEXR_ALLTOALL_GROUP_STAGE_SDMA_PREWARM = 6U;
 constexpr uint32_t TILEXR_ALLTOALL_GROUP_SDMA_FALLBACK = 0U;
 constexpr uint32_t TILEXR_ALLTOALL_GROUP_SDMA_COMPLETE = 1U;
 constexpr uint32_t TILEXR_ALLTOALL_GROUP_SDMA_FAILED = 2U;
@@ -773,7 +774,7 @@ __aicore__ inline void AllToAllGroupKernelImpl(
     uint64_t creditOffset0, uint64_t creditOffset1,
     GM_ADDR groupTraceGM, uint32_t traceIteration,
     uint32_t routeStage, uint32_t multiChannel, uint32_t primaryRouteParts,
-    uint32_t groupWidth, uint32_t quietBatch)
+    uint32_t groupWidth, uint32_t quietBatch, uint32_t prewarmSq)
 {
     const uint32_t blockIdx = static_cast<uint32_t>(AscendC::GetBlockIdx());
     auto groupTrace = blockIdx < TileXR::Demo::kAllToAllGroupTraceCoreCount ?
@@ -797,6 +798,8 @@ __aicore__ inline void AllToAllGroupKernelImpl(
         quietBatch == 0U ||
         quietBatch > TILEXR_ALLTOALL_GROUP_MAX_QUIET_BATCH ||
         (quietBatch & (quietBatch - 1U)) != 0U ||
+        prewarmSq > 1U ||
+        (prewarmSq != 0U && copyoutWorkers != 1U) ||
         (primaryRouteParts > TileXR::Demo::kAllToAllGroupRouteParts &&
             primaryRouteParts != TileXR::Demo::kAllToAllGroupAutoPrimaryParts) ||
         TILEXR_ALLTOALL_GROUP_SEND_WORKERS + copyoutWorkers >
@@ -850,6 +853,15 @@ __aicore__ inline void AllToAllGroupKernelImpl(
             return;
         }
         const uint32_t worker = blockIdx - TILEXR_ALLTOALL_GROUP_SEND_WORKERS;
+        if (prewarmSq != 0U && worker == 0U &&
+            !TileXR::SDMAPrewarmSqPages(args, groupWidth, relayLocal)) {
+            AllToAllGroupRecordError(
+                debug, blockIdx, TILEXR_ALLTOALL_GROUP_STAGE_SDMA_PREWARM,
+                0U, 0U, -1, 0U, 0U, groupWidth, 0ULL);
+            AllToAllGroupTraceRecordKernel(groupTrace, traceIteration, blockIdx,
+                kernelBegin, AllToAllGroupTraceCycle(groupTrace));
+            return;
+        }
         const uint32_t selfCopyWorkers = copyoutWorkers >= 32U ? 16U : copyoutWorkers;
         const int32_t selfBegin = worker < selfCopyWorkers ? static_cast<int32_t>(
             static_cast<int64_t>(elementsPerPeer) * worker / selfCopyWorkers) : 0;
@@ -1390,7 +1402,7 @@ extern "C" __global__ __aicore__ void tilexr_udma_all_to_all_group_kernel(
     uint64_t signalOffset0, uint64_t signalOffset1,
     GM_ADDR groupTraceGM, uint32_t traceIteration,
     uint32_t routeStage, uint32_t multiChannel, uint32_t primaryRouteParts,
-    uint32_t groupWidth, uint32_t quietBatch)
+    uint32_t groupWidth, uint32_t quietBatch, uint32_t prewarmSq)
 {
     AllToAllGroupKernelImpl<false, false>(
         commArgsGM, inputGM, outputGM, registeredMemoryGM, debugGM, invocationId,
@@ -1398,7 +1410,7 @@ extern "C" __global__ __aicore__ void tilexr_udma_all_to_all_group_kernel(
         payloadOffset0, payloadOffset1, signalOffset0, signalOffset1,
         0ULL, 0ULL,
         groupTraceGM, traceIteration, routeStage, multiChannel, primaryRouteParts,
-        groupWidth, quietBatch);
+        groupWidth, quietBatch, prewarmSq);
 }
 
 extern "C" __global__ __aicore__ void tilexr_udma_all_to_all_group_batch_kernel(
@@ -1410,7 +1422,7 @@ extern "C" __global__ __aicore__ void tilexr_udma_all_to_all_group_batch_kernel(
     uint64_t signalOffset0, uint64_t signalOffset1,
     GM_ADDR groupTraceGM, uint32_t traceIteration,
     uint32_t routeStage, uint32_t multiChannel, uint32_t primaryRouteParts,
-    uint32_t groupWidth, uint32_t quietBatch)
+    uint32_t groupWidth, uint32_t quietBatch, uint32_t prewarmSq)
 {
     AllToAllGroupKernelImpl<true, false>(
         commArgsGM, inputGM, outputGM, registeredMemoryGM, debugGM, invocationId,
@@ -1418,7 +1430,7 @@ extern "C" __global__ __aicore__ void tilexr_udma_all_to_all_group_batch_kernel(
         payloadOffset0, payloadOffset1, signalOffset0, signalOffset1,
         0ULL, 0ULL,
         groupTraceGM, traceIteration, routeStage, multiChannel, primaryRouteParts,
-        groupWidth, quietBatch);
+        groupWidth, quietBatch, prewarmSq);
 }
 
 extern "C" __global__ __aicore__ void tilexr_udma_all_to_all_group_credit_kernel(
@@ -1431,7 +1443,8 @@ extern "C" __global__ __aicore__ void tilexr_udma_all_to_all_group_credit_kernel
     uint64_t creditOffset0, uint64_t creditOffset1,
     GM_ADDR groupTraceGM, uint32_t traceIteration,
     uint32_t routeStage, uint32_t multiChannel, uint32_t primaryRouteParts,
-    uint32_t groupWidth, uint32_t quietBatch, uint32_t ingressWindow)
+    uint32_t groupWidth, uint32_t quietBatch, uint32_t ingressWindow,
+    uint32_t prewarmSq)
 {
     AllToAllGroupKernelImpl<false, true>(
         commArgsGM, inputGM, outputGM, registeredMemoryGM, debugGM, invocationId,
@@ -1439,7 +1452,7 @@ extern "C" __global__ __aicore__ void tilexr_udma_all_to_all_group_credit_kernel
         payloadOffset0, payloadOffset1, signalOffset0, signalOffset1,
         creditOffset0, creditOffset1,
         groupTraceGM, traceIteration, routeStage, multiChannel, primaryRouteParts,
-        groupWidth, quietBatch);
+        groupWidth, quietBatch, prewarmSq);
 }
 
 extern "C" __global__ __aicore__ void tilexr_udma_all_to_all_group_batch_credit_kernel(
@@ -1452,7 +1465,8 @@ extern "C" __global__ __aicore__ void tilexr_udma_all_to_all_group_batch_credit_
     uint64_t creditOffset0, uint64_t creditOffset1,
     GM_ADDR groupTraceGM, uint32_t traceIteration,
     uint32_t routeStage, uint32_t multiChannel, uint32_t primaryRouteParts,
-    uint32_t groupWidth, uint32_t quietBatch, uint32_t ingressWindow)
+    uint32_t groupWidth, uint32_t quietBatch, uint32_t ingressWindow,
+    uint32_t prewarmSq)
 {
     AllToAllGroupKernelImpl<true, true>(
         commArgsGM, inputGM, outputGM, registeredMemoryGM, debugGM, invocationId,
@@ -1460,5 +1474,5 @@ extern "C" __global__ __aicore__ void tilexr_udma_all_to_all_group_batch_credit_
         payloadOffset0, payloadOffset1, signalOffset0, signalOffset1,
         creditOffset0, creditOffset1,
         groupTraceGM, traceIteration, routeStage, multiChannel, primaryRouteParts,
-        groupWidth, quietBatch);
+        groupWidth, quietBatch, prewarmSq);
 }
