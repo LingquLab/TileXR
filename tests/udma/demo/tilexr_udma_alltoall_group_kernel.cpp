@@ -942,7 +942,7 @@ __aicore__ inline void AllToAllGroupKernelImpl(
                         TileXR::Demo::kAllToAllGroupTraceNoQp,
                         sdmaWaitBegin, sdmaWaitEnd);
                     if (sdmaStatus == TILEXR_ALLTOALL_GROUP_SDMA_FAILED) {
-                        AllToAllGroupTraceRecordError(
+                        AllToAllGroupRecordError(
                             debug, blockIdx, TILEXR_ALLTOALL_GROUP_STAGE_SDMA,
                             group, pass, peer, worker, 0U,
                             static_cast<uint64_t>(worker), sdmaEvent);

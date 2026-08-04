@@ -617,6 +617,9 @@ void TestKernelStructure()
     CHECK_CONTAINS(kernel, "TILEXR_ALLTOALL_GROUP_SDMA_FALLBACK");
     CHECK_CONTAINS(kernel, "TILEXR_ALLTOALL_GROUP_SDMA_FAILED");
     CHECK_CONTAINS(kernel, "TILEXR_ALLTOALL_GROUP_STAGE_SDMA");
+    CHECK_CONTAINS(kernel, "kAllToAllGroupTraceSdmaSubmit");
+    CHECK_CONTAINS(kernel, "kAllToAllGroupTraceSdmaWait");
+    CHECK_NOT_CONTAINS(kernel, "AllToAllGroupTraceRecordError");
     CHECK_CONTAINS(kernel, "TILEXR_ALLTOALL_GROUP_SEND_WORKERS + copyoutWorkers");
     CHECK_CONTAINS(kernel,
         "const uint32_t traceCore = copyoutWorkers < TILEXR_ALLTOALL_GROUP_SEND_CORES");
