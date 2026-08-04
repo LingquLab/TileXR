@@ -42,6 +42,9 @@ The demo has exactly two execution backends, selected with `TILEXR_EP_DEMO_IMPL=
 same-node/cross-node topology are handled inside the TileXR library and are not demo branches. Select the operator
 sequence with `TILEXR_EP_DEMO_RUN_MODE=dispatch|combine|dispatch_combine`.
 
+When the backend is not specified, the runner selects `udma` on Ascend950 and `memory` on other supported SoCs,
+including Ascend910B. Pass the fifth argument or set `TILEXR_EP_DEMO_IMPL` to override this default.
+
 The runner accepts:
 
 ```text

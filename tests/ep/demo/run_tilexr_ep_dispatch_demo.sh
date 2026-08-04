@@ -6,11 +6,20 @@ EP_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 TILEXR_ROOT="$(cd "${EP_DIR}/../.." && pwd)"
 INSTALL_DIR="${EP_DIR}/install"
 
+: "${ASCEND_HOME_PATH:=}"
+: "${LD_LIBRARY_PATH:=}"
+source "${TILEXR_ROOT}/scripts/common_env.sh"
+
+case "${TILEXR_SOC_NAME}" in
+    ascend950*) default_impl="udma" ;;
+    *) default_impl="memory" ;;
+esac
+
 rank_size="${1:-2}"
 npu_count="${2:-${rank_size}}"
 first_npu="${3:-0}"
 loop_count="${4:-${TILEXR_EP_DEMO_LOOP:-100}}"
-impl="${5:-${TILEXR_EP_DEMO_IMPL:-udma}}"
+impl="${5:-${TILEXR_EP_DEMO_IMPL:-${default_impl}}}"
 bs="${6:-${TILEXR_EP_DEMO_BS:-4}}"
 h="${7:-${TILEXR_EP_DEMO_H:-8}}"
 topk="${8:-${TILEXR_EP_DEMO_TOPK:-2}}"
@@ -98,10 +107,6 @@ if [[ "${expert_mode}" != "explicit" && -n "${expert_ids}" ]]; then
     echo "expert_ids must be empty unless expert_mode=explicit" >&2
     exit 2
 fi
-
-: "${ASCEND_HOME_PATH:=}"
-: "${LD_LIBRARY_PATH:=}"
-source "${TILEXR_ROOT}/scripts/common_env.sh"
 
 export TILEXR_COMM_ID="${TILEXR_COMM_ID:-127.0.0.1:10077}"
 export TILEXR_DEMO_NPUS="${npu_count}"
