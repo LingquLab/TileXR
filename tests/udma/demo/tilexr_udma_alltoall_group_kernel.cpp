@@ -29,6 +29,12 @@ constexpr uint32_t TILEXR_ALLTOALL_GROUP_ERROR_BYTES =
 constexpr uint32_t TILEXR_ALLTOALL_GROUP_SIGNAL_SOURCE_BYTES =
     TILEXR_ALLTOALL_GROUP_SEND_WORKERS *
     TILEXR_ALLTOALL_GROUP_MAX_QUIET_BATCH * sizeof(uint64_t);
+constexpr uint32_t TILEXR_ALLTOALL_GROUP_MAX_COPYOUT_SLICES = 3U;
+constexpr uint32_t TILEXR_ALLTOALL_GROUP_TERMINAL_ASSIST_SLICES =
+    TILEXR_ALLTOALL_GROUP_MAX_COPYOUT_SLICES - 1U;
+constexpr uint32_t TILEXR_ALLTOALL_GROUP_TERMINAL_ASSIST_STRIDE = 512U;
+constexpr uint32_t TILEXR_ALLTOALL_GROUP_TERMINAL_ASSIST_OFFSET =
+    TILEXR_ALLTOALL_GROUP_ERROR_BYTES + TILEXR_ALLTOALL_GROUP_SIGNAL_SOURCE_BYTES;
 constexpr uint32_t TILEXR_ALLTOALL_GROUP_CREDIT_STRIDE = 512U;
 constexpr uint32_t TILEXR_ALLTOALL_GROUP_CREDIT_WORDS =
     TILEXR_ALLTOALL_GROUP_CREDIT_STRIDE / sizeof(uint64_t);
@@ -497,6 +503,37 @@ __aicore__ inline void AllToAllGroupPublishTerminalCredits(
     }
 }
 
+__aicore__ inline __gm__ uint64_t* AllToAllGroupTerminalAssistSignal(
+    __gm__ int32_t* debug, uint32_t lane, uint32_t copySliceIndex)
+{
+    const uint32_t assistIndex =
+        lane * TILEXR_ALLTOALL_GROUP_TERMINAL_ASSIST_SLICES + copySliceIndex - 1U;
+    return reinterpret_cast<__gm__ uint64_t*>(
+        reinterpret_cast<__gm__ uint8_t*>(debug) +
+        TILEXR_ALLTOALL_GROUP_TERMINAL_ASSIST_OFFSET +
+        static_cast<uint64_t>(assistIndex) *
+            TILEXR_ALLTOALL_GROUP_TERMINAL_ASSIST_STRIDE);
+}
+
+__aicore__ inline void AllToAllGroupPublishTerminalAssist(
+    __gm__ int32_t* debug, uint32_t lane, uint32_t copySliceIndex,
+    uint64_t terminalToken, AscendC::LocalTensor<uint8_t> relayLocal)
+{
+    auto signal = AllToAllGroupTerminalAssistSignal(
+        debug, lane, copySliceIndex);
+    auto signalLocal = relayLocal.ReinterpretCast<uint64_t>();
+    signalLocal.SetValue(0, terminalToken);
+    AscendC::SetFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID0);
+    AscendC::WaitFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID0);
+    AscendC::GlobalTensor<uint64_t> signalGlobal;
+    signalGlobal.SetGlobalBuffer(
+        signal, TILEXR_ALLTOALL_GROUP_CREDIT_WORDS);
+    AscendC::DataCopy(
+        signalGlobal, signalLocal, TILEXR_ALLTOALL_GROUP_CREDIT_WORDS);
+    AscendC::SetFlag<AscendC::HardEvent::MTE3_S>(EVENT_ID0);
+    AscendC::WaitFlag<AscendC::HardEvent::MTE3_S>(EVENT_ID0);
+}
+
 __aicore__ inline void AllToAllGroupRecordError(
     __gm__ int32_t* debug, uint32_t blockIdx, uint32_t stage,
     uint32_t group, uint32_t pass, int32_t peer, uint32_t qpIdx,
@@ -623,6 +660,43 @@ __aicore__ inline bool AllToAllGroupWaitTerminalCredit(
             expectedCredit, observedCredit);
     }
     return ok;
+}
+
+__aicore__ inline bool AllToAllGroupWaitTerminalAssistCredits(
+    __gm__ int32_t* debug, uint32_t blockIdx,
+    uint32_t worker, uint32_t copyoutWorkers, uint32_t groupCount,
+    uint64_t terminalToken,
+    AscendC::LocalTensor<uint8_t> relayLocal)
+{
+    if (!AllToAllGroupCreditOwnerDevice(worker) || copyoutWorkers < 32U) {
+        return true;
+    }
+    const uint32_t copySliceCount =
+        copyoutWorkers / TILEXR_ALLTOALL_GROUP_SEND_CORES;
+    for (uint32_t assignment = 0U; ; ++assignment) {
+        const int32_t laneValue = AllToAllGroupCopyoutLaneDevice(
+            worker, assignment, copyoutWorkers);
+        if (laneValue < 0) {
+            return true;
+        }
+        const uint32_t lane = static_cast<uint32_t>(laneValue);
+        for (uint32_t copySliceIndex = 1U;
+             copySliceIndex < copySliceCount; ++copySliceIndex) {
+            uint64_t observedToken = 0ULL;
+            if (!AllToAllGroupWaitCreditMte(
+                    AllToAllGroupTerminalAssistSignal(
+                        debug, lane, copySliceIndex),
+                    terminalToken, TILEXR_ALLTOALL_GROUP_WAIT_TIMEOUT_CYCLES,
+                    relayLocal, observedToken)) {
+                AllToAllGroupRecordError(
+                    debug, blockIdx, TILEXR_ALLTOALL_GROUP_STAGE_CREDIT_WAIT,
+                    groupCount, 0U,
+                    static_cast<int32_t>(lane), copySliceIndex, 0U,
+                    terminalToken, observedToken);
+                return false;
+            }
+        }
+    }
 }
 
 struct AllToAllGroupPendingQuiet {
@@ -1096,10 +1170,25 @@ __aicore__ inline void AllToAllGroupKernelImpl(
             }
         }
         if constexpr (IngressCredit) {
-            AscendC::SyncAll();
-            AllToAllGroupPublishTerminalCredits(
-                args, rank, rankSize, invocationId, worker, copyoutWorkers,
-                groupCount, groupWidth, creditOffsets[slot], relayLocal);
+            const uint64_t terminalToken =
+                AllToAllGroupDeviceTerminalCreditToken(invocationId, groupCount);
+            if (AllToAllGroupRemoteAssistDevice(worker, copyoutWorkers)) {
+                AllToAllGroupPublishTerminalAssist(
+                    debug, worker % TILEXR_ALLTOALL_GROUP_SEND_CORES,
+                    worker / TILEXR_ALLTOALL_GROUP_SEND_CORES,
+                    terminalToken, relayLocal);
+            } else if (AllToAllGroupWaitTerminalAssistCredits(
+                    debug, blockIdx, worker, copyoutWorkers, groupCount,
+                    terminalToken, relayLocal)) {
+                AllToAllGroupPublishTerminalCredits(
+                    args, rank, rankSize, invocationId, worker, copyoutWorkers,
+                    groupCount, groupWidth, creditOffsets[slot], relayLocal);
+            } else {
+                AllToAllGroupTraceRecordKernel(
+                    groupTrace, traceIteration, blockIdx, kernelBegin,
+                    AllToAllGroupTraceCycle(groupTrace));
+                return;
+            }
         }
         AllToAllGroupTraceRecordKernel(groupTrace, traceIteration, blockIdx,
             kernelBegin, AllToAllGroupTraceCycle(groupTrace));
@@ -1277,7 +1366,6 @@ __aicore__ inline void AllToAllGroupKernelImpl(
         return;
     }
     if constexpr (IngressCredit) {
-        AscendC::SyncAll();
         if (workerRoute == 0U && !AllToAllGroupWaitTerminalCredit(
                 args, rank, rankSize, invocationId, lane, groupCount, passCount,
                 groupWidth, creditOffsets[slot], relayLocal,
