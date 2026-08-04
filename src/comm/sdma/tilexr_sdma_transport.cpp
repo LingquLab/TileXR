@@ -9,6 +9,8 @@
 #include <new>
 #include <string>
 
+#include "acl/acl_rt.h"
+#include "sdma/tilexr_sdma_a5_backend.h"
 #include "tilexr_log.h"
 #include "tilexr_types.h"
 
@@ -19,8 +21,10 @@
 namespace TileXR {
 
 struct TileXRSDMATransport::Impl {
+    std::unique_ptr<TileXRA5SDMABackend> a5Backend;
 #if TILEXR_HAVE_PTO_SDMA
     pto::comm::sdma::SdmaWorkspaceManager workspaceManager;
+    bool ptoInitialized = false;
 #endif
 };
 
@@ -28,7 +32,7 @@ TileXRSDMATransport::TileXRSDMATransport() = default;
 
 TileXRSDMATransport::~TileXRSDMATransport()
 {
-    Shutdown();
+    (void)Shutdown();
 }
 
 bool TileXRSDMATransport::EnvEnabled()
@@ -43,7 +47,11 @@ bool TileXRSDMATransport::EnvEnabled()
 
 int TileXRSDMATransport::Init(const TileXRSDMATransportOptions& options)
 {
-    Shutdown();
+    if (impl_ != nullptr) {
+        TILEXR_LOG(ERROR) << "TileXR SDMA transport contains state before initialization";
+        lastStatus_ = SDMAInitStatus::INIT_FAILED;
+        return TILEXR_ERROR_INTERNAL;
+    }
     options_ = options;
     available_ = false;
     workspaceDev_ = nullptr;
@@ -54,19 +62,53 @@ int TileXRSDMATransport::Init(const TileXRSDMATransportOptions& options)
         return TILEXR_SUCCESS;
     }
 
-#if TILEXR_HAVE_PTO_SDMA
+    const char* socName = aclrtGetSocName();
+    const detail::SDMABackendKind backend = detail::ClassifySDMABackend(socName);
+    if (backend == detail::SDMABackendKind::UNSUPPORTED) {
+        lastStatus_ = SDMAInitStatus::PTO_UNAVAILABLE;
+        TILEXR_LOG(WARN) << "TileXR SDMA unsupported on SoC "
+                         << (socName == nullptr ? "unknown" : socName);
+        return TILEXR_SUCCESS;
+    }
+
     impl_.reset(new (std::nothrow) Impl());
     if (impl_ == nullptr) {
         lastStatus_ = SDMAInitStatus::INIT_FAILED;
-        TILEXR_LOG(WARN) << "TileXR SDMA workspace manager allocation failed";
+        TILEXR_LOG(WARN) << "TileXR SDMA implementation allocation failed";
         return TILEXR_SUCCESS;
     }
+
+    if (backend == detail::SDMABackendKind::A5_DIRECT) {
+        impl_->a5Backend.reset(new (std::nothrow) TileXRA5SDMABackend());
+        if (impl_->a5Backend == nullptr) {
+            impl_.reset();
+            lastStatus_ = SDMAInitStatus::INIT_FAILED;
+            return TILEXR_SUCCESS;
+        }
+        if (!impl_->a5Backend->Init(options_.devId)) {
+            lastStatus_ = SDMAInitStatus::INIT_FAILED;
+            TILEXR_LOG(WARN) << "TileXR A5 direct SDMA unavailable; communicator will continue without SDMA";
+            return TILEXR_SUCCESS;
+        }
+        workspaceDev_ = impl_->a5Backend->GetWorkspaceDev();
+        if (workspaceDev_ == nullptr) {
+            (void)Shutdown();
+            lastStatus_ = SDMAInitStatus::NULL_WORKSPACE;
+            return TILEXR_SUCCESS;
+        }
+        available_ = true;
+        lastStatus_ = SDMAInitStatus::INITIALIZED;
+        return TILEXR_SUCCESS;
+    }
+
+#if TILEXR_HAVE_PTO_SDMA
     if (!impl_->workspaceManager.Init()) {
         lastStatus_ = SDMAInitStatus::INIT_FAILED;
         TILEXR_LOG(WARN) << "TileXR SDMA workspace manager init failed";
         impl_.reset();
         return TILEXR_SUCCESS;
     }
+    impl_->ptoInitialized = true;
     workspaceDev_ = static_cast<GM_ADDR>(impl_->workspaceManager.GetWorkspaceAddr());
     if (workspaceDev_ == nullptr) {
         lastStatus_ = SDMAInitStatus::NULL_WORKSPACE;
@@ -83,20 +125,35 @@ int TileXRSDMATransport::Init(const TileXRSDMATransportOptions& options)
 #else
     lastStatus_ = SDMAInitStatus::PTO_UNAVAILABLE;
     TILEXR_LOG(WARN) << "TileXR SDMA PTO headers unavailable at build time";
+    impl_.reset();
     return TILEXR_SUCCESS;
 #endif
 }
 
-void TileXRSDMATransport::Shutdown()
+bool TileXRSDMATransport::Shutdown()
 {
-#if TILEXR_HAVE_PTO_SDMA
+    bool cleanupComplete = true;
     if (impl_ != nullptr) {
-        impl_->workspaceManager.Finalize();
-        impl_.reset();
-    }
+        if (impl_->a5Backend != nullptr) {
+            if (impl_->a5Backend->Shutdown()) {
+                impl_->a5Backend.reset();
+            } else {
+                cleanupComplete = false;
+            }
+        }
+#if TILEXR_HAVE_PTO_SDMA
+        if (impl_->ptoInitialized) {
+            impl_->workspaceManager.Finalize();
+            impl_->ptoInitialized = false;
+        }
 #endif
+        if (cleanupComplete) {
+            impl_.reset();
+        }
+    }
     available_ = false;
     workspaceDev_ = nullptr;
+    return cleanupComplete;
 }
 
 bool TileXRSDMATransport::IsAvailable() const

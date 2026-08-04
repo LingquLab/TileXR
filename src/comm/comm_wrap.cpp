@@ -328,7 +328,10 @@ int TileXRCommDestroy(TileXRCommPtr comm)
         return TILEXR_INVALID_VALUE;
     }
     auto *c = static_cast<TileXRComm *>(comm);
-
+    if (!c->PrepareDestroy()) {
+        TILEXR_LOG(ERROR) << "TileXR SDMA cleanup failed; communicator retained for retry";
+        return TILEXR_ERROR_INTERNAL;
+    }
     delete c;
     return TILEXR_SUCCESS;
 }

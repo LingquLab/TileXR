@@ -3,8 +3,17 @@ project(TileXR_SDMA_Tests)
 
 set(CMAKE_CXX_STANDARD 14)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_SKIP_BUILD_RPATH TRUE)
 option(BUILD_TILEXR_SDMA_DEMO "Build TileXR SDMA data-plane demo with Ascend C kernel" ON)
 set(TILEXR_SDMA_DEMO_SOC_TYPE "Ascend910B" CACHE STRING "SOC type used for the TileXR SDMA demo kernel")
+set_property(CACHE TILEXR_SDMA_DEMO_SOC_TYPE PROPERTY STRINGS Ascend910B Ascend950)
+if(NOT TILEXR_SDMA_DEMO_SOC_TYPE STREQUAL "Ascend910B" AND
+        NOT TILEXR_SDMA_DEMO_SOC_TYPE STREQUAL "Ascend950")
+    message(FATAL_ERROR
+        "Unsupported TILEXR_SDMA_DEMO_SOC_TYPE=${TILEXR_SDMA_DEMO_SOC_TYPE}; "
+        "expected Ascend910B or Ascend950")
+endif()
+message(STATUS "TILEXR_SDMA_DEMO_SOC_TYPE: ${TILEXR_SDMA_DEMO_SOC_TYPE}")
 
 set(ASCEND_HOME_PATH $ENV{ASCEND_HOME_PATH})
 set(ARCH $ENV{ARCH})
@@ -48,8 +57,8 @@ add_executable(test_tilexr_sdma_metadata
     unit/test_tilexr_sdma_metadata.cpp
 )
 target_include_directories(test_tilexr_sdma_metadata PRIVATE
-    ${TILEXR_ROOT}/install/include
     ${TILEXR_ROOT}/src/include
+    ${TILEXR_ROOT}/install/include
     ${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc/
     ${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc/runtime/
     ${ASCEND_HOME_PATH}/${ARCH}-linux/include/
@@ -77,6 +86,18 @@ target_link_libraries(test_tilexr_sdma_api_invalid
 add_executable(test_tilexr_sdma_transport_disabled
     unit/test_tilexr_sdma_transport_disabled.cpp
     ${TILEXR_ROOT}/src/comm/sdma/tilexr_sdma_transport.cpp
+    ${TILEXR_ROOT}/src/comm/sdma/tilexr_sdma_a5_backend.cpp
+)
+
+add_executable(test_tilexr_sdma_a5_validation
+    unit/test_tilexr_sdma_a5_validation.cpp
+)
+target_include_directories(test_tilexr_sdma_a5_validation PRIVATE
+    ${TILEXR_ROOT}/src/comm
+    ${TILEXR_ROOT}/src/include
+    ${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc/
+    ${ASCEND_HOME_PATH}/${ARCH}-linux/include/
+    ${ASCEND_DRIVER_PATH}/kernel/inc
 )
 target_include_directories(test_tilexr_sdma_transport_disabled PRIVATE
     ${TILEXR_ROOT}/src/comm
@@ -86,18 +107,17 @@ target_include_directories(test_tilexr_sdma_transport_disabled PRIVATE
     ${ASCEND_HOME_PATH}/${ARCH}-linux/include/
     ${ASCEND_DRIVER_PATH}/kernel/inc
 )
+target_link_libraries(test_tilexr_sdma_transport_disabled
+    ascendcl
+    runtime
+    ascend_hal
+    dl
+)
 
 add_executable(test_tilexr_sdma_comm_wiring
     unit/test_tilexr_sdma_comm_wiring.cpp
 )
 target_compile_definitions(test_tilexr_sdma_comm_wiring PRIVATE
-    TILEXR_SOURCE_ROOT="${TILEXR_ROOT}"
-)
-
-add_executable(test_tilexr_sdma_source_guard
-    unit/test_tilexr_sdma_source_guard.cpp
-)
-target_compile_definitions(test_tilexr_sdma_source_guard PRIVATE
     TILEXR_SOURCE_ROOT="${TILEXR_ROOT}"
 )
 
@@ -132,13 +152,15 @@ set(INSTALL_TARGETS
     test_tilexr_sdma_metadata
     test_tilexr_sdma_api_invalid
     test_tilexr_sdma_transport_disabled
+    test_tilexr_sdma_a5_validation
     test_tilexr_sdma_comm_wiring
-    test_tilexr_sdma_source_guard
     test_tilexr_sdma_header_compile
     test_tilexr_sdma_disabled_comm
 )
 
-if(BUILD_TILEXR_SDMA_DEMO AND NOT TILEXR_TEST_HAVE_PTO_SDMA)
+if(BUILD_TILEXR_SDMA_DEMO AND
+        TILEXR_SDMA_DEMO_SOC_TYPE STREQUAL "Ascend910B" AND
+        NOT TILEXR_TEST_HAVE_PTO_SDMA)
     message(WARNING "installed tilexr_sdma_config.h disables PTO SDMA; skip tilexr_sdma_demo")
 elseif(BUILD_TILEXR_SDMA_DEMO)
     find_program(BISHENG_EXECUTABLE bisheng)
@@ -149,10 +171,14 @@ elseif(BUILD_TILEXR_SDMA_DEMO)
             set(TILEXR_SDMA_NPU_ARCH "dav-3510")
             set(TILEXR_SDMA_AICORE_ARCH "--cce-aicore-arch=dav-c310-vec")
             set(TILEXR_SDMA_CATLASS_ARCH "3510")
-        else()
+            set(TILEXR_SDMA_KERNEL_DEFINITIONS -DTILEXR_HAVE_PTO_SDMA=0)
+            set(TILEXR_SDMA_KERNEL_EXTRA_LIBS "")
+        elseif(TILEXR_SDMA_DEMO_SOC_TYPE STREQUAL "Ascend910B")
             set(TILEXR_SDMA_NPU_ARCH "dav-2201")
             set(TILEXR_SDMA_AICORE_ARCH "--cce-aicore-arch=dav-c220-vec")
             set(TILEXR_SDMA_CATLASS_ARCH "2201")
+            set(TILEXR_SDMA_KERNEL_DEFINITIONS -DTILEXR_HAVE_PTO_SDMA=1)
+            set(TILEXR_SDMA_KERNEL_EXTRA_LIBS -lnnopbase)
         endif()
 
         execute_process(
@@ -209,11 +235,12 @@ elseif(BUILD_TILEXR_SDMA_DEMO)
             COMMAND ${BISHENG_EXECUTABLE}
                 ${TILEXR_SDMA_KERNEL_COMPILE_OPTIONS}
                 -std=gnu++17
+                -O2
                 -fPIC
                 -shared
                 ${TILEXR_SDMA_KERNEL_LINK_OPTIONS}
                 -DCATLASS_ARCH=${TILEXR_SDMA_CATLASS_ARCH}
-                -DTILEXR_HAVE_PTO_SDMA=1
+                ${TILEXR_SDMA_KERNEL_DEFINITIONS}
                 ${TILEXR_SDMA_DEMO_KERNEL_INCLUDES}
                 "${CMAKE_CURRENT_SOURCE_DIR}/demo/tilexr_sdma_demo_kernel.cpp"
                 -L${ASCEND_DRIVER_PATH}/lib64
@@ -225,12 +252,15 @@ elseif(BUILD_TILEXR_SDMA_DEMO)
                 -lstdc++
                 -lm
                 -ldl
-                -lnnopbase
+                ${TILEXR_SDMA_KERNEL_EXTRA_LIBS}
                 -lpthread
                 -o "${TILEXR_SDMA_DEMO_KERNEL_SO}"
             DEPENDS
                 "${CMAKE_CURRENT_SOURCE_DIR}/demo/tilexr_sdma_demo_kernel.cpp"
+                "${CMAKE_CURRENT_SOURCE_DIR}/demo/tilexr_sdma_benchmark_types.h"
                 "${TILEXR_ROOT}/src/include/tilexr_sdma.h"
+                "${TILEXR_ROOT}/src/include/tilexr_sdma_a5.h"
+                "${TILEXR_ROOT}/src/include/tilexr_sdma_a5_types.h"
                 "${TILEXR_ROOT}/src/include/tilexr_sdma_compat.h"
                 "${TILEXR_ROOT}/src/include/tilexr_sdma_types.h"
             VERBATIM
@@ -241,6 +271,11 @@ elseif(BUILD_TILEXR_SDMA_DEMO)
         add_executable(tilexr_sdma_demo
             demo/tilexr_sdma_demo.cpp
         )
+        if(TILEXR_SDMA_DEMO_SOC_TYPE STREQUAL "Ascend950")
+            target_compile_definitions(tilexr_sdma_demo PRIVATE TILEXR_SDMA_DEMO_A5=1)
+        else()
+            target_compile_definitions(tilexr_sdma_demo PRIVATE TILEXR_SDMA_DEMO_A5=0)
+        endif()
         add_dependencies(tilexr_sdma_demo tilexr_sdma_demo_kernel)
         target_include_directories(tilexr_sdma_demo PRIVATE
             ${TILEXR_ROOT}/install/include
@@ -259,6 +294,31 @@ elseif(BUILD_TILEXR_SDMA_DEMO)
             ascend_hal
         )
         list(APPEND INSTALL_TARGETS tilexr_sdma_demo)
+
+        if(TILEXR_SDMA_DEMO_SOC_TYPE STREQUAL "Ascend950")
+            add_executable(tilexr_sdma_benchmark
+                demo/tilexr_sdma_benchmark.cpp
+            )
+            add_dependencies(tilexr_sdma_benchmark tilexr_sdma_demo_kernel)
+            target_include_directories(tilexr_sdma_benchmark PRIVATE
+                ${CMAKE_CURRENT_SOURCE_DIR}/demo
+                ${TILEXR_ROOT}/install/include
+                ${TILEXR_ROOT}/src/include
+                ${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc/
+                ${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc/runtime/
+                ${ASCEND_HOME_PATH}/${ARCH}-linux/include/
+                ${ASCEND_DRIVER_PATH}/kernel/inc
+            )
+            target_link_directories(tilexr_sdma_benchmark PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
+            target_link_libraries(tilexr_sdma_benchmark
+                "${TILEXR_SDMA_DEMO_KERNEL_SO}"
+                ${TILEXR_LIB}
+                ascendcl
+                runtime
+                ascend_hal
+            )
+            list(APPEND INSTALL_TARGETS tilexr_sdma_benchmark)
+        endif()
         install(FILES "${TILEXR_SDMA_DEMO_KERNEL_SO}" DESTINATION ${CMAKE_INSTALL_PREFIX}/lib)
         message(STATUS "TileXR SDMA demo enabled with ${BISHENG_EXECUTABLE}, SOC=${TILEXR_SDMA_DEMO_SOC_TYPE}")
     endif()

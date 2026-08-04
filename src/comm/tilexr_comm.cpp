@@ -50,8 +50,6 @@ constexpr int TILEXR_INIT_TIMEOUT = 600;
 static map<string, GM_ADDR [TILEXR_MAX_RANK_SIZE]> g_localPeerMemMap;
 static map<string, int[TILEXR_MAX_RANK_SIZE]> g_devList;
 static std::mutex g_mtx;
-static std::mutex g_sdmaMtx;
-static bool g_sdmaUnavailable = false;
 
 
 // 如果是互联的链路，返回false； 对910B2C那些不互联的链路，返回true
@@ -192,15 +190,11 @@ int TileXRComm::ApplyUDMACommArgsStateCallback(const TileXRUDMACommArgsState &st
 
 int TileXRComm::InitSDMA()
 {
-    {
-        lock_guard<mutex> lock(g_sdmaMtx);
-        if (g_sdmaUnavailable) {
-            TILEXR_LOG(INFO) << "InitSDMA skipped after previous SDMA init failure";
-            sdmaInitStatus_ = SDMAInitStatus::PTO_UNAVAILABLE;
-            return TILEXR_SUCCESS;
-        }
+    if (sdmaTransport_ != nullptr) {
+        TILEXR_LOG(ERROR) << "TileXR SDMA transport exists before initialization";
+        sdmaInitStatus_ = SDMAInitStatus::INIT_FAILED;
+        return TILEXR_ERROR_INTERNAL;
     }
-
     sdmaTransport_.reset(new (nothrow) TileXRSDMATransport());
     if (sdmaTransport_ == nullptr) {
         TILEXR_LOG(WARN) << "TileXRSDMATransport allocation failed, SDMA disabled";
@@ -212,13 +206,17 @@ int TileXRComm::InitSDMA()
     options.devId = devId_;
     int ret = sdmaTransport_->Init(options);
     sdmaInitStatus_ = sdmaTransport_->GetLastStatus();
-    if (ret != TILEXR_SUCCESS || !sdmaTransport_->IsAvailable()) {
+    if (ret != TILEXR_SUCCESS) {
+        TILEXR_LOG(ERROR) << "TileXR SDMA transport initialization failed";
+        return ret;
+    }
+    if (!sdmaTransport_->IsAvailable()) {
         if (sdmaInitStatus_ != SDMAInitStatus::DISABLED_BY_ENV) {
             TILEXR_LOG(WARN) << "TileXR SDMA init unavailable, status " << static_cast<int>(sdmaInitStatus_);
-            lock_guard<mutex> lock(g_sdmaMtx);
-            g_sdmaUnavailable = true;
         }
-        sdmaTransport_.reset();
+        if (sdmaTransport_->Shutdown()) {
+            sdmaTransport_.reset();
+        }
         sdmaWorkspaceDev_ = nullptr;
         commArgs_.sdmaWorkspacePtr = nullptr;
         return TILEXR_SUCCESS;
@@ -231,7 +229,9 @@ int TileXRComm::InitSDMA()
         commArgs_.extraFlag &= ~ExtraFlag::SDMA;
         commArgs_.sdmaWorkspacePtr = nullptr;
         sdmaWorkspaceDev_ = nullptr;
-        sdmaTransport_.reset();
+        if (sdmaTransport_->Shutdown()) {
+            sdmaTransport_.reset();
+        }
         return TILEXR_SUCCESS;
     }
 
@@ -242,16 +242,30 @@ int TileXRComm::InitSDMA()
     return TILEXR_SUCCESS;
 }
 
-void TileXRComm::ResetSDMAState()
+bool TileXRComm::ResetSDMAState()
 {
+    if (sdmaTransport_ == nullptr) {
+        return true;
+    }
     commArgs_.extraFlag &= ~ExtraFlag::SDMA;
     commArgs_.sdmaWorkspacePtr = nullptr;
+    if (UpdateCommArgsDev() != TILEXR_SUCCESS) {
+        return false;
+    }
     sdmaWorkspaceDev_ = nullptr;
     sdmaInitStatus_ = SDMAInitStatus::DISABLED_BY_ENV;
     if (sdmaTransport_ != nullptr) {
-        sdmaTransport_->Shutdown();
+        if (!sdmaTransport_->Shutdown()) {
+            return false;
+        }
         sdmaTransport_.reset();
     }
+    return true;
+}
+
+bool TileXRComm::PrepareDestroy()
+{
+    return ResetSDMAState();
 }
 
 bool TileXRComm::IsSDMAAvailable() const
@@ -890,8 +904,8 @@ TileXRComm::~TileXRComm()
     }
     FreePeerMem(commArgs_.dumpAddr);
     FreePeerMem(peerMem_[rank_]);
+    (void)ResetSDMAState();
     FreePeerMem(commArgsPtr_);
-    ResetSDMAState();
 }
 
 TileXRComm::TileXRComm(int rank, int rankSize) : rank_(rank), rankSize_(rankSize)

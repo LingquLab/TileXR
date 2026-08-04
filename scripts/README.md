@@ -75,6 +75,21 @@ bash scripts/download_open_source_deps.sh --check
 
 ## Testing
 
+### SDMA
+
+The production SDMA build, unit-test, and hardware-demo entry points live under
+`tests/sdma/`:
+
+```bash
+bash tests/sdma/build.sh /path/to/cann Ascend950
+bash tests/sdma/run_tests.sh /path/to/cann
+bash tests/sdma/demo/run_tilexr_sdma_demo.sh /path/to/cann 5 64 4096 1048576
+```
+
+Omit `Ascend950` to compile the Ascend910B PTO demo. See
+[`docs/SDMA_TRANSPORT.md`](../docs/SDMA_TRANSPORT.md) for channel, concurrency,
+repeat, and dependency checks.
+
 ### Pull-request CI
 
 The CI operator runbook is [docs/CI.md](../docs/CI.md). Primary entrypoints are:

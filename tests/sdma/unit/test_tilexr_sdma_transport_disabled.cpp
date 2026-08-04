@@ -2,6 +2,7 @@
 #include <iostream>
 #include <string>
 
+#include "acl/acl_rt.h"
 #include "sdma/tilexr_sdma_transport.h"
 #include "tilexr_sdma_types.h"
 #include "tilexr_types.h"
@@ -84,7 +85,27 @@ void TestEnvZeroSkipsInitialization()
     CHECK_EQ(transport.GetLastStatus(), TileXR::SDMAInitStatus::DISABLED_BY_ENV);
 }
 
-void TestEnvOneReportsPTOUnavailable()
+TileXR::SDMAInitStatus ExpectedUnavailableStatus()
+{
+    return TileXR::detail::ClassifySDMABackend(aclrtGetSocName()) ==
+            TileXR::detail::SDMABackendKind::A5_DIRECT
+        ? TileXR::SDMAInitStatus::INIT_FAILED
+        : TileXR::SDMAInitStatus::PTO_UNAVAILABLE;
+}
+
+void TestBackendClassification()
+{
+    using TileXR::detail::ClassifySDMABackend;
+    using TileXR::detail::SDMABackendKind;
+    CHECK_EQ(ClassifySDMABackend("Ascend950PR_9589"), SDMABackendKind::A5_DIRECT);
+    CHECK_EQ(ClassifySDMABackend("Ascend910B3"), SDMABackendKind::PTO);
+    CHECK_EQ(ClassifySDMABackend("Ascend910A"), SDMABackendKind::PTO);
+    CHECK_EQ(ClassifySDMABackend("Ascend910_9391"), SDMABackendKind::PTO);
+    CHECK_EQ(ClassifySDMABackend("Ascend310P"), SDMABackendKind::UNSUPPORTED);
+    CHECK_EQ(ClassifySDMABackend(nullptr), SDMABackendKind::UNSUPPORTED);
+}
+
+void TestEnvOneReportsBackendUnavailable()
 {
     EnvGuard env;
     setenv("TILEXR_ENABLE_SDMA", "1", 1);
@@ -94,7 +115,7 @@ void TestEnvOneReportsPTOUnavailable()
     CHECK_EQ(transport.Init(options), TileXR::TILEXR_SUCCESS);
     CHECK_TRUE(!transport.IsAvailable());
     CHECK_TRUE(transport.GetWorkspaceDev() == nullptr);
-    CHECK_EQ(transport.GetLastStatus(), TileXR::SDMAInitStatus::PTO_UNAVAILABLE);
+    CHECK_EQ(transport.GetLastStatus(), ExpectedUnavailableStatus());
 }
 
 void TestSameInstanceTransitionsResetState()
@@ -114,12 +135,12 @@ void TestSameInstanceTransitionsResetState()
     CHECK_EQ(transport.Init(options), TileXR::TILEXR_SUCCESS);
     CHECK_TRUE(!transport.IsAvailable());
     CHECK_TRUE(transport.GetWorkspaceDev() == nullptr);
-    CHECK_EQ(transport.GetLastStatus(), TileXR::SDMAInitStatus::PTO_UNAVAILABLE);
+    CHECK_EQ(transport.GetLastStatus(), ExpectedUnavailableStatus());
 
     transport.Shutdown();
     CHECK_TRUE(!transport.IsAvailable());
     CHECK_TRUE(transport.GetWorkspaceDev() == nullptr);
-    CHECK_EQ(transport.GetLastStatus(), TileXR::SDMAInitStatus::PTO_UNAVAILABLE);
+    CHECK_EQ(transport.GetLastStatus(), ExpectedUnavailableStatus());
 
     unsetenv("TILEXR_ENABLE_SDMA");
     CHECK_EQ(transport.Init(options), TileXR::TILEXR_SUCCESS);
@@ -134,7 +155,8 @@ int main()
 {
     TestEnvDisabledSkipsInitialization();
     TestEnvZeroSkipsInitialization();
-    TestEnvOneReportsPTOUnavailable();
+    TestBackendClassification();
+    TestEnvOneReportsBackendUnavailable();
     TestSameInstanceTransitionsResetState();
     if (g_failures != 0) {
         std::cerr << g_failures << " SDMA transport disabled checks failed" << std::endl;
