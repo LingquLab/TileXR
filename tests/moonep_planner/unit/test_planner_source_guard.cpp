@@ -45,6 +45,7 @@ int main()
     const std::string kernel = Read(
         root + "/src/moonep/planner/kernels/tilexr_moonep_planner_kernel.cpp");
     const std::string host = Read(root + "/src/moonep/planner/host/planner_host.cpp");
+    const std::string hostLaunch = Read(root + "/src/moonep/planner/host/planner_launch.cpp");
     const std::string layout = Read(root + "/src/moonep/planner/host/planner_layout.cpp");
     const std::string publicHeader = Read(root + "/src/include/tilexr_moonep_planner.h");
     const std::string launcher = Read(root + "/tests/moonep_planner/demo/run_a5.sh");
@@ -62,7 +63,7 @@ int main()
     ok &= Require(kernel, "BuildLocalHistogram", "planner histogram phase missing");
     ok &= Require(kernel, "BuildExpertLayout", "planner layout phase missing");
     ok &= Require(kernel, "BuildDst", "planner dst phase missing");
-    ok &= Require(kernel, "rtKernelLaunchWithFlagV2", "Planner Runtime V2 launch missing");
+    ok &= Require(hostLaunch, "rtKernelLaunchWithFlagV2", "Planner Runtime V2 launch missing");
     ok &= Require(kernel, "WaitReadyFlag", "bounded planner ready poll missing");
     ok &= Require(readyPolling, "DataCacheCleanAndInvalid",
         "Planner ready poll cache invalidation missing");
@@ -91,6 +92,7 @@ int main()
     ok &= Reject(publicHeader, "TileXRMoonEpPlanner(", "legacy unversioned Planner ABI present");
     ok &= Reject(kernel, "truncated", "Planner kernel contains a truncated migration artifact");
     ok &= Reject(kernel, "<<<", "Planner still uses compiler kernel launch syntax");
+    ok &= Reject(kernel, "rtKernelLaunch", "Planner kernel still contains host launch code");
 
     ok &= Require(launcher, "rank % physical_device_count",
         "logical-rank to physical-device mapping missing");
