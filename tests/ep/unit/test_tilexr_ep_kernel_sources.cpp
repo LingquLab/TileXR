@@ -453,6 +453,34 @@ void TestMemoryDispatchUsesExternalDataState()
     CheckNotContains(path, contents, "CompareScalar(flagCompResultU8_");
 }
 
+void TestMemoryKernelUbStagingCoversPackedPayloads()
+{
+    const std::string dispatchPath = "src/ep/kernels/tilexr_ep_dispatch_memory_kernel.cpp";
+    std::string dispatch;
+    if (ReadFile(dispatchPath, &dispatch)) {
+        CheckContains(dispatchPath, dispatch,
+            "packedPayloadBytes_ = blockCntPerToken_ * SPLIT_BLOCK_DATA_SIZE");
+        CheckContains(dispatchPath, dispatch,
+            "inputTensorBytes_ = useMxfp8_ ? hAlignSize_ : packedPayloadBytes_");
+        CheckContains(dispatchPath, dispatch, "quantTensorBytes_ = packedPayloadBytes_");
+        CheckContains(dispatchPath, dispatch,
+            "tbufPool0.InitBuffer(inQueue, BUFFER_NUM, inputTensorBytes_)");
+    }
+
+    const std::string combinePath = "src/ep/kernels/tilexr_ep_combine_memory_kernel.cpp";
+    std::string combine;
+    if (ReadFile(combinePath, &combine)) {
+        CheckContains(combinePath, combine,
+            "pipe_->InitBuffer(sendInputQueue_, 1, sendInputBytes_)");
+        CheckContains(combinePath, combine,
+            "pipe_->InitBuffer(packedInputQueue_, 1, receiveInputBytes_)");
+        CheckContains(combinePath, combine,
+            "AlignUp(quantScaleCount_, 128U) * sizeof(float) * 2U");
+        CheckContains(combinePath, combine,
+            "sendInputBytes_ / sizeof(uint32_t)");
+    }
+}
+
 void TestMemoryCombineUsesRegisteredBinaryLaunch()
 {
     const std::string kernelPath = "src/ep/kernels/tilexr_ep_combine_memory_kernel.cpp";
@@ -548,6 +576,7 @@ int main()
     TestKernelForwardsPerTokenDynamicQuantConfig();
     TestClearLocalWindowDoesNotPreclearSlotHeaders();
     TestMemoryDispatchUsesExternalDataState();
+    TestMemoryKernelUbStagingCoversPackedPayloads();
     TestMemoryCombineUsesRegisteredBinaryLaunch();
     TestNoForbiddenDependencies();
     if (g_failures != 0) {

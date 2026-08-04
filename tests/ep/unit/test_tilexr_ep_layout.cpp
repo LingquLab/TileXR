@@ -257,6 +257,43 @@ void TestMemoryWindowConfig()
     CheckInt("combine mxfp8 memory config ret", combineMxfp8Ret, TileXR::TILEXR_SUCCESS);
     CheckInt64("combine mxfp8 blocks", combineConfig.blockCntPerToken, 3);
     CheckInt64("combine mxfp8 packed row", combineConfig.packedRowBytes, 1536);
+    CheckInt64("combine mxfp8 receive UB", combineConfig.receiveUbBytes, 18112);
+    CheckInt64("combine mxfp8 send UB", combineConfig.sendUbBytes, 5248);
+
+    TileXREp::EpMemoryDispatchReferenceConfig dispatchMxfp8Config {};
+    const int dispatchMxfp8Ret = TileXREp::TileXREpBuildMemoryDispatchReferenceConfig(
+        8, 0, 4, 1024, 2, 8, 0, 0, 32, TileXR::TILEXR_DATA_TYPE_FP16,
+        TileXR::TILEXR_DATA_TYPE_FP8E4M3, 4, 48, &dispatchMxfp8Config);
+    CheckInt("dispatch mxfp8 UB config ret", dispatchMxfp8Ret, TileXR::TILEXR_SUCCESS);
+    CheckInt64("dispatch mxfp8 all-to-all UB", dispatchMxfp8Config.allToAllUbBytes, 12288);
+
+    TileXREp::EpMemoryDispatchReferenceConfig dispatchNonQuantConfig {};
+    const int dispatchNonQuantRet = TileXREp::TileXREpBuildMemoryDispatchReferenceConfig(
+        8, 0, 4, 1024, 2, 8, 0, 0, 32, TileXR::TILEXR_DATA_TYPE_FP16,
+        TileXR::TILEXR_DATA_TYPE_FP16, 0, 48, &dispatchNonQuantConfig);
+    CheckInt("dispatch non-quant UB config ret", dispatchNonQuantRet, TileXR::TILEXR_SUCCESS);
+    CheckInt64("dispatch non-quant all-to-all UB", dispatchNonQuantConfig.allToAllUbBytes, 12576);
+
+    TileXREp::EpMemoryCombineReferenceConfig combineNonQuantConfig {};
+    const int combineNonQuantRet = TileXREp::TileXREpBuildMemoryCombineReferenceConfig(
+        8, 0, 4, 1024, 2, 8, 0, 0, 32, TileXR::TILEXR_DATA_TYPE_FP16, 0, 48,
+        &combineNonQuantConfig);
+    CheckInt("combine non-quant UB config ret", combineNonQuantRet, TileXR::TILEXR_SUCCESS);
+    CheckInt64("combine non-quant send UB", combineNonQuantConfig.sendUbBytes, 4992);
+
+    TileXREp::EpMemoryCombineReferenceConfig combineSharedMxfp8Config {};
+    const int combineSharedMxfp8Ret = TileXREp::TileXREpBuildMemoryCombineReferenceConfig(
+        2, 0, 4, 1024, 2, 1, 1, 1, 8, TileXR::TILEXR_DATA_TYPE_FP16, 4, 48,
+        &combineSharedMxfp8Config);
+    CheckInt("combine shared mxfp8 UB config ret", combineSharedMxfp8Ret, TileXR::TILEXR_SUCCESS);
+    CheckInt64("combine shared mxfp8 receive UB", combineSharedMxfp8Config.receiveUbBytes, 18304);
+
+    TileXREp::EpMemoryCombineReferenceConfig combineLargeMxfp8Config {};
+    const int combineLargeMxfp8Ret = TileXREp::TileXREpBuildMemoryCombineReferenceConfig(
+        16, 0, 256, 7168, 16, 64, 0, 0, 4096, TileXR::TILEXR_DATA_TYPE_FP16, 4, 200,
+        &combineLargeMxfp8Config);
+    CheckInt("combine large mxfp8 UB config ret", combineLargeMxfp8Ret, TileXR::TILEXR_SUCCESS);
+    CheckInt64("combine large mxfp8 receive UB", combineLargeMxfp8Config.receiveUbBytes, 134112);
 
     const int combineInvalidQuantRet = TileXREp::TileXREpBuildMemoryCombineReferenceConfig(
         8, 0, 4, 1024, 2, 8, 0, 0, 32, TileXR::TILEXR_DATA_TYPE_FP16, 2, 48,

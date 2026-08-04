@@ -34,6 +34,7 @@ struct EpMemoryDispatchReferenceConfig {
     int64_t dispatchHalfBytes = 0;
     int64_t maxSizeForUbBuffer = 0;
     int64_t totalUbSize = 0;
+    int64_t allToAllUbBytes = 0;
 };
 
 struct EpMemoryCombineReferenceConfig {
@@ -46,6 +47,7 @@ struct EpMemoryCombineReferenceConfig {
     int64_t totalWinSize = 0;
     int64_t combineHalfBytes = 0;
     int64_t receiveUbBytes = 0;
+    int64_t sendUbBytes = 0;
 };
 
 uint32_t TileXREpMemoryCountCoreNum(int64_t totalExpertNum, int64_t rscvStatusNum, uint32_t blockDim);

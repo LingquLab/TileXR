@@ -272,6 +272,8 @@ private:
     uint32_t hOutSize_{0};
     uint32_t hOutSizeAlign_{0};
     uint32_t hAlignSize_{0};
+    uint32_t inputTensorBytes_{0};
+    uint32_t packedPayloadBytes_{0};
     uint32_t quantComputeCount_{0};
     uint32_t quantComputeScaleCount_{0};
     uint32_t startId_;
@@ -370,8 +372,10 @@ __aicore__ inline void MoeDistributeDispatchV2FullMesh<XType>::SetTilingDataAndC
         tokenQuantAlign_ = hAlignSize_ / sizeof(int32_t);
     }
     hOutSizeAlign_ = tokenQuantAlign_ * sizeof(int32_t) + UB_ALIGN;
-    quantTensorBytes_ = Ceil(hOutSizeAlign_, UB_ALIGN) * UB_ALIGN;
     blockCntPerToken_ = Ceil(hOutSizeAlign_, SPLIT_BLOCK_DATA_SIZE);
+    packedPayloadBytes_ = blockCntPerToken_ * SPLIT_BLOCK_DATA_SIZE;
+    inputTensorBytes_ = useMxfp8_ ? hAlignSize_ : packedPayloadBytes_;
+    quantTensorBytes_ = packedPayloadBytes_;
     hCommuSize_ = blockCntPerToken_ * SPLIT_BLOCK_SIZE;
     axisHCommu_ = hCommuSize_;
     expertPerSizeOnWin_ = axisMaxBS_ * hCommuSize_;
@@ -559,6 +563,9 @@ __aicore__ inline void MoeDistributeDispatchV2FullMesh<XType>::TokenToExpert(
 {
     DataCopyPadParams copyPadParams{false, 0U, 0U, 0U};
     LocalTensor<XType> xInTensor = inQueue.AllocTensor<XType>();
+    Duplicate<uint32_t>(xInTensor.template ReinterpretCast<uint32_t>(), 0U,
+        inputTensorBytes_ / sizeof(uint32_t));
+    SyncFunc<AscendC::HardEvent::V_MTE2>();
     DataCopyPad(xInTensor, xGMTensor_[srcTokenIndex * axisH_], hCopyParams_, copyPadParams);
     inQueue.EnQue(xInTensor);
     xInTensor = inQueue.DeQue<XType>();
@@ -723,9 +730,9 @@ __aicore__ inline void MoeDistributeDispatchV2FullMesh<XType>::AllToAllDispatch(
     TBuf<> quantBuf, quantWorkBuf, quantAuxBuf;
     expertIdsBufSize_ = Ceil(expertIdsCnt_ * sizeof(int32_t), SIZE_ALIGN_256) * SIZE_ALIGN_256;
     AscendC::TBufPool<AscendC::TPosition::VECIN> tbufPool0, tbufPool1;
-    tpipe_->InitBufPool(tbufPool0, BUFFER_NUM * hAlignSize_);
+    tpipe_->InitBufPool(tbufPool0, BUFFER_NUM * inputTensorBytes_);
     tpipe_->InitBufPool(tbufPool1, BUFFER_NUM * hAlignSize_, tbufPool0);
-    tbufPool0.InitBuffer(inQueue, BUFFER_NUM, hAlignSize_);
+    tbufPool0.InitBuffer(inQueue, BUFFER_NUM, inputTensorBytes_);
     tbufPool1.InitBuffer(inQueueCleanBuf, BUFFER_NUM * hAlignSize_);
     if (useMxfp8_) {
         LocalTensor<uint8_t> cleanTensor = inQueueCleanBuf.Get<uint8_t>();
@@ -744,6 +751,9 @@ __aicore__ inline void MoeDistributeDispatchV2FullMesh<XType>::AllToAllDispatch(
         tpipe_->InitBuffer(quantWorkBuf, maxSize_);
         tpipe_->InitBuffer(quantAuxBuf, maxSize_);
         quantTensor_ = quantBuf.Get<uint8_t>();
+        Duplicate<uint32_t>(quantTensor_.ReinterpretCast<uint32_t>(), 0U,
+            quantTensorBytes_ / sizeof(uint32_t));
+        PipeBarrier<PIPE_V>();
         quantWorkTensor_ = quantWorkBuf.Get<float>();
         dstExpBuf_ = quantWorkBuf;
         subExpBuf_ = quantAuxBuf;

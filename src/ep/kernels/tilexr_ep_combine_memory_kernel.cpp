@@ -123,6 +123,8 @@ private:
     uint32_t rowBytes_{0};
     uint32_t rowAlignBytes_{0};
     uint32_t inputAlignBytes_{0};
+    uint32_t sendInputBytes_{0};
+    uint32_t receiveInputBytes_{0};
     uint32_t floatRowAlignBytes_{0};
     uint32_t quantPayloadBytes_{0};
     uint32_t quantScaleCount_{0};
@@ -221,6 +223,10 @@ __aicore__ inline void MoeDistributeCombineV2A5Mte<XType>::Init(GM_ADDR commArgs
         CeilDiv(commDataBytes_, TileXR::DATA_AS_FLAG_PAYLOAD_BYTES));
     packedRowBytes_ = blockCntPerToken_ * TileXR::DATA_AS_FLAG_BLOCK_BYTES;
     compactPayloadBytes_ = blockCntPerToken_ * TileXR::DATA_AS_FLAG_PAYLOAD_BYTES;
+    sendInputBytes_ = useMxfp8_ ? inputAlignBytes_ :
+        (inputAlignBytes_ > compactPayloadBytes_ ? inputAlignBytes_ : compactPayloadBytes_);
+    receiveInputBytes_ = rowAlignBytes_ > compactPayloadBytes_ ?
+        rowAlignBytes_ : compactPayloadBytes_;
 
     const uint64_t workspaceStatusNum = static_cast<uint64_t>(epWorldSize_) * moeExpertNumPerRank_;
     const uint64_t workspaceBytes = AlignUp(
@@ -284,7 +290,7 @@ __aicore__ inline void MoeDistributeCombineV2A5Mte<XType>::InitSendBuffers()
     AscendC::SetCtrlSpr<FLOAT_OVERFLOW_MODE_CTRL, FLOAT_OVERFLOW_MODE_CTRL>(0);
 #endif
     pipe_->InitBuffer(assistBuf_, UB_ALIGN);
-    pipe_->InitBuffer(sendInputQueue_, 1, inputAlignBytes_);
+    pipe_->InitBuffer(sendInputQueue_, 1, sendInputBytes_);
     pipe_->InitBuffer(sendOutputQueue_, 1, packedRowBytes_);
     if (useMxfp8_) {
         pipe_->InitBuffer(quantResultBuf_, compactPayloadBytes_);
@@ -337,11 +343,9 @@ __aicore__ inline void MoeDistributeCombineV2A5Mte<XType>::SendOneRow(uint32_t r
     LocalTensor<XType> inputLocal = sendInputQueue_.AllocTensor<XType>();
     const DataCopyExtParams inputParams {1U, rowBytes_, 0U, 0U, 0U};
     const DataCopyPadExtParams<XType> inputPad {useMxfp8_, 0U, 0U, 0U};
-    if (useMxfp8_) {
-        Duplicate<uint32_t>(inputLocal.template ReinterpretCast<uint32_t>(), 0U,
-            inputAlignBytes_ / sizeof(uint32_t));
-        SyncFunc<AscendC::HardEvent::V_MTE2>();
-    }
+    Duplicate<uint32_t>(inputLocal.template ReinterpretCast<uint32_t>(), 0U,
+        sendInputBytes_ / sizeof(uint32_t));
+    SyncFunc<AscendC::HardEvent::V_MTE2>();
     DataCopyPad(inputLocal, expertOutGM_[static_cast<uint64_t>(row) * axisH_], inputParams, inputPad);
     sendInputQueue_.EnQue(inputLocal);
     inputLocal = sendInputQueue_.DeQue<XType>();
@@ -416,13 +420,13 @@ __aicore__ inline void MoeDistributeCombineV2A5Mte<XType>::InitReceiveBuffers()
     const uint32_t compareCount = static_cast<uint32_t>(AlignUp(flagFloatCount, 64U));
     pipe_->InitBuffer(packedCheckFlagBuf_, compareCount * sizeof(float));
     pipe_->InitBuffer(packedCheckCompareBuf_, AlignUp(compareCount * sizeof(uint8_t), 256U));
-    pipe_->InitBuffer(packedInputQueue_, 1, compactPayloadBytes_);
+    pipe_->InitBuffer(packedInputQueue_, 1, receiveInputBytes_);
     pipe_->InitBuffer(rowFloatBuf_, floatRowAlignBytes_);
     pipe_->InitBuffer(mulFloatBuf_, floatRowAlignBytes_);
     pipe_->InitBuffer(sumFloatBuf_, floatRowAlignBytes_);
     if (useMxfp8_) {
         pipe_->InitBuffer(dequantScaleBuf_,
-            AlignUp(quantScaleCount_, 128U) * sizeof(XType) * 2U);
+            AlignUp(quantScaleCount_, 128U) * sizeof(float) * 2U);
     }
     pipe_->InitBuffer(outputQueue_, 1, rowAlignBytes_);
     pipe_->InitBuffer(expertScaleBuf_, AlignUp(axisK_ * sizeof(float), UB_ALIGN));
