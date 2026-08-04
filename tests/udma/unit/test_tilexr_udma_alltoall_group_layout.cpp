@@ -293,7 +293,7 @@ void TestScalePlanAndTraceCapacity()
     CHECK_EQ(TileXR::Demo::kAllToAllGroupTraceBytes,
         128ULL * 1024ULL * 1024ULL);
     CHECK_EQ(TileXR::Demo::AllToAllGroupTraceLayoutFits(50U, 64U, 3U), true);
-    CHECK_EQ(TileXR::Demo::AllToAllGroupTraceLayoutFits(50U, 64U, 4U), true);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupTraceLayoutFits(50U, 64U, 4U), false);
     CHECK_EQ(TileXR::Demo::AllToAllGroupTraceLayoutFits(50U, 64U, 5U), false);
     CHECK_EQ(TileXR::Demo::AllToAllGroupTraceLayoutFits(50U, 64U, 6U), false);
 }

@@ -6,7 +6,7 @@ from pathlib import Path
 
 
 TRACE_MAGIC = 0x47545243
-TRACE_VERSION = 2
+TRACE_VERSION = 3
 LEGACY_TRACE_VERSION = 1
 TRACE_BYTES = 128 * 1024 * 1024
 HEADER_BYTES = 4096
@@ -15,7 +15,9 @@ MAX_CORES = 64
 SEND_WORKER_COUNT = 32
 LANE_COUNT = 16
 PHASE_COUNT = 5
-CURRENT_PHASE_COUNT = 6
+TRACE_V2_PHASE_COUNT = 6
+TRACE_V3_PHASE_COUNT = 8
+CURRENT_PHASE_COUNT = TRACE_V3_PHASE_COUNT
 SPAN_BYTES = 16
 CACHE_LINE_BYTES = 128
 TASK_FORMAT = "<QQiI"
@@ -32,6 +34,8 @@ PHASE_NAMES = (
     "receive-wait",
     "receive-copy",
     "credit-wait",
+    "sdma-submit",
+    "sdma-wait",
 )
 
 
@@ -107,7 +111,7 @@ def read_rank_trace(path):
     }
     if header["magic"] != TRACE_MAGIC:
         raise ValueError(f"invalid trace magic in {path}")
-    if header["version"] not in (LEGACY_TRACE_VERSION, TRACE_VERSION):
+    if header["version"] not in (LEGACY_TRACE_VERSION, 2, TRACE_VERSION):
         raise ValueError(f"unsupported trace version {header['version']} in {path}")
     if header["trace_bytes"] != TRACE_BYTES:
         raise ValueError(f"trace byte dimension mismatch in {path}")
@@ -115,9 +119,11 @@ def read_rank_trace(path):
         raise ValueError(f"iteration dimension mismatch in {path}")
     if header["group_count"] <= 0 or header["pass_count"] <= 0:
         raise ValueError(f"group/pass dimension mismatch in {path}")
-    expected_phase_count = (
-        PHASE_COUNT if header["version"] == LEGACY_TRACE_VERSION
-        else CURRENT_PHASE_COUNT)
+    expected_phase_count = {
+        LEGACY_TRACE_VERSION: PHASE_COUNT,
+        2: TRACE_V2_PHASE_COUNT,
+        TRACE_VERSION: TRACE_V3_PHASE_COUNT,
+    }[header["version"]]
     if (header["core_count"] != MAX_CORES or
             header["phase_count"] != expected_phase_count):
         raise ValueError(f"core/phase dimension mismatch in {path}")

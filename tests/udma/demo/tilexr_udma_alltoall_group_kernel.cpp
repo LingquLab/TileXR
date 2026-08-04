@@ -296,7 +296,7 @@ __aicore__ inline void AllToAllGroupCopyMte(
     AscendC::PipeBarrier<PIPE_ALL>();
 }
 
-__aicore__ inline uint32_t AllToAllGroupCopySdma(
+__aicore__ inline uint32_t AllToAllGroupCopySdmaSubmit(
     const __gm__ TileXR::CommArgs* args, __gm__ uint8_t* dst,
     __gm__ uint8_t* src, uint32_t bytes, uint32_t channel,
     uint64_t& event)
@@ -309,6 +309,12 @@ __aicore__ inline uint32_t AllToAllGroupCopySdma(
     if (event == 0ULL) {
         return TILEXR_ALLTOALL_GROUP_SDMA_FALLBACK;
     }
+    return TILEXR_ALLTOALL_GROUP_SDMA_COMPLETE;
+}
+
+__aicore__ inline uint32_t AllToAllGroupCopySdmaWait(
+    const __gm__ TileXR::CommArgs* args, uint64_t event, uint32_t channel)
+{
     return TileXR::SDMAWait(args, event, channel) ?
         TILEXR_ALLTOALL_GROUP_SDMA_COMPLETE :
         TILEXR_ALLTOALL_GROUP_SDMA_FAILED;
@@ -914,9 +920,38 @@ __aicore__ inline void AllToAllGroupKernelImpl(
                     chunkElementOffset + copyElementBegin);
                 const uint64_t receiveCopyBegin = AllToAllGroupTraceCycle(groupTrace);
                 uint64_t sdmaEvent = 0ULL;
-                const uint32_t sdmaStatus = AllToAllGroupCopySdma(
+                const uint64_t sdmaSubmitBegin = AllToAllGroupTraceCycle(groupTrace);
+                const uint32_t sdmaSubmitStatus = AllToAllGroupCopySdmaSubmit(
                     args, relayDst, relaySrc, copyBytes, lane, sdmaEvent);
-                if (sdmaStatus == TILEXR_ALLTOALL_GROUP_SDMA_FALLBACK) {
+                const uint64_t sdmaSubmitEnd = AllToAllGroupTraceCycle(groupTrace);
+                if (sdmaSubmitStatus != TILEXR_ALLTOALL_GROUP_SDMA_FALLBACK) {
+                    AllToAllGroupTraceRecordTask(
+                        groupTrace, traceIteration, traceCore, group, pass,
+                        TileXR::Demo::kAllToAllGroupTraceSdmaSubmit,
+                        groupCount, passCount, peer,
+                        TileXR::Demo::kAllToAllGroupTraceNoQp,
+                        sdmaSubmitBegin, sdmaSubmitEnd);
+                    const uint64_t sdmaWaitBegin = AllToAllGroupTraceCycle(groupTrace);
+                    const uint32_t sdmaStatus = AllToAllGroupCopySdmaWait(
+                        args, sdmaEvent, lane);
+                    const uint64_t sdmaWaitEnd = AllToAllGroupTraceCycle(groupTrace);
+                    AllToAllGroupTraceRecordTask(
+                        groupTrace, traceIteration, traceCore, group, pass,
+                        TileXR::Demo::kAllToAllGroupTraceSdmaWait,
+                        groupCount, passCount, peer,
+                        TileXR::Demo::kAllToAllGroupTraceNoQp,
+                        sdmaWaitBegin, sdmaWaitEnd);
+                    if (sdmaStatus == TILEXR_ALLTOALL_GROUP_SDMA_FAILED) {
+                        AllToAllGroupTraceRecordError(
+                            debug, blockIdx, TILEXR_ALLTOALL_GROUP_STAGE_SDMA,
+                            group, pass, peer, worker, 0U,
+                            static_cast<uint64_t>(worker), sdmaEvent);
+                        AllToAllGroupTraceRecordKernel(
+                            groupTrace, traceIteration, blockIdx, kernelBegin,
+                            AllToAllGroupTraceCycle(groupTrace));
+                        return;
+                    }
+                } else {
                     AllToAllGroupCopyMte(relayDst, relaySrc, copyBytes, relayLocal);
                 }
                 AllToAllGroupTraceRecordTask(
@@ -924,16 +959,6 @@ __aicore__ inline void AllToAllGroupKernelImpl(
                     TileXR::Demo::kAllToAllGroupTraceReceiveCopy, groupCount, passCount,
                     peer, TileXR::Demo::kAllToAllGroupTraceNoQp,
                     receiveCopyBegin, AllToAllGroupTraceCycle(groupTrace));
-                if (sdmaStatus == TILEXR_ALLTOALL_GROUP_SDMA_FAILED) {
-                    AllToAllGroupRecordError(
-                        debug, blockIdx, TILEXR_ALLTOALL_GROUP_STAGE_SDMA,
-                        group, pass, peer, worker, 0U,
-                        static_cast<uint64_t>(worker), sdmaEvent);
-                    AllToAllGroupTraceRecordKernel(
-                        groupTrace, traceIteration, blockIdx, kernelBegin,
-                        AllToAllGroupTraceCycle(groupTrace));
-                    return;
-                }
             }
             }
         }

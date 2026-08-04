@@ -59,6 +59,8 @@ class GroupTraceConverterTest(unittest.TestCase):
             (32, 0, 0, 3, 1400, 1500, 1, MODULE.NO_QP),
             (32, 0, 0, 4, 1500, 1600, 1, MODULE.NO_QP),
             (0, 0, 0, 5, 1050, 1100, 1, MODULE.NO_QP),
+            (32, 0, 0, 6, 1600, 1650, 1, MODULE.NO_QP),
+            (32, 0, 0, 7, 1650, 1700, 1, MODULE.NO_QP),
         )
         with path.open("wb") as stream:
             stream.truncate(MODULE.TRACE_BYTES)
@@ -105,6 +107,7 @@ class GroupTraceConverterTest(unittest.TestCase):
                 {
                     "kernel", "self-copy", "send-put-signal", "send-quiet",
                     "receive-wait", "receive-copy", "credit-wait",
+                    "sdma-submit", "sdma-wait",
                 },
             )
             send = next(event for event in complete if event["name"] == "send-put-signal")
@@ -223,6 +226,19 @@ class GroupTraceConverterTest(unittest.TestCase):
                 if event.get("ph") == "X"
             }
             self.assertNotIn("credit-wait", names)
+
+    def test_reads_version_two_six_phase_trace(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "version2.bin"
+            self.make_trace(path, version=2, phase_count=MODULE.TRACE_V2_PHASE_COUNT)
+            rank_trace = MODULE.read_rank_trace(path)
+            self.assertEqual(rank_trace["header"]["phase_count"], 6)
+            names = {
+                event["name"] for event in MODULE.build_chrome_trace([rank_trace])["traceEvents"]
+                if event.get("ph") == "X"
+            }
+            self.assertIn("credit-wait", names)
+            self.assertNotIn("sdma-submit", names)
 
     def test_main_writes_json_without_dumps(self):
         with tempfile.TemporaryDirectory() as directory:
