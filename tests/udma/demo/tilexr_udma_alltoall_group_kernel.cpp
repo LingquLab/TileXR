@@ -18,6 +18,10 @@ constexpr uint32_t TILEXR_ALLTOALL_GROUP_DEFAULT_WIDTH = 16U;
 constexpr uint32_t TILEXR_ALLTOALL_GROUP_EXPERIMENTAL_WIDTH = 4U;
 constexpr uint32_t TILEXR_ALLTOALL_GROUP_MAX_QUIET_BATCH = 64U;
 constexpr uint32_t TILEXR_ALLTOALL_GROUP_MAX_GROUP_COUNT = 64U;
+constexpr uint32_t TILEXR_ALLTOALL_GROUP_READY_BITMAP_WORDS =
+    (TileXR::TILEXR_MAX_RANK_SIZE + 63U) / 64U;
+static_assert(TILEXR_ALLTOALL_GROUP_READY_BITMAP_WORDS * 64U >=
+    TileXR::TILEXR_MAX_RANK_SIZE, "ready bitmap must cover every peer task");
 constexpr uint32_t TILEXR_ALLTOALL_GROUP_ROUTE_SIGNAL_STRIDE = 512U;
 constexpr uint32_t TILEXR_ALLTOALL_GROUP_SIGNAL_STRIDE = 1024U;
 constexpr uint32_t TILEXR_ALLTOALL_GROUP_RELAY_BYTES = 64U * 1024U;
@@ -411,6 +415,20 @@ __aicore__ inline bool AllToAllGroupWaitRouteTokensMte(
     }
     observed = primaryObserved < secondaryObserved ? primaryObserved : secondaryObserved;
     return true;
+}
+
+__aicore__ inline bool AllToAllGroupRouteTokensReadyMte(
+    __gm__ uint64_t* primarySignal, __gm__ uint64_t* secondarySignal,
+    bool waitPrimary, bool waitSecondary, uint64_t expectedToken,
+    AscendC::LocalTensor<uint8_t> relayLocal, uint64_t& observed)
+{
+    const uint64_t primaryObserved = waitPrimary ?
+        AllToAllGroupLoadTokenMte(primarySignal, relayLocal) : expectedToken;
+    const uint64_t secondaryObserved = waitSecondary ?
+        AllToAllGroupLoadTokenMte(secondarySignal, relayLocal) : expectedToken;
+    observed = primaryObserved < secondaryObserved ?
+        primaryObserved : secondaryObserved;
+    return observed >= expectedToken;
 }
 
 __aicore__ inline void AllToAllGroupRecordError(
@@ -856,6 +874,28 @@ __aicore__ inline void AllToAllGroupKernelImpl(
                 selfCopyBegin, AllToAllGroupTraceCycle(groupTrace));
         }
 
+        const bool readyDrivenCopyout = copyoutWorkers == 1U &&
+            TileXR::SDMAEnabled(args) &&
+            routeStage == TILEXR_ALLTOALL_GROUP_ROUTE_STAGE_COMBINED;
+        const uint32_t schedulerPassCount = readyDrivenCopyout ? passCount : 1U;
+        for (uint32_t schedulerPass = 0U;
+             schedulerPass < schedulerPassCount; ++schedulerPass) {
+            uint64_t completedTasks[TILEXR_ALLTOALL_GROUP_READY_BITMAP_WORDS];
+            for (uint32_t word = 0U;
+                 word < TILEXR_ALLTOALL_GROUP_READY_BITMAP_WORDS; ++word) {
+                completedTasks[word] = 0ULL;
+            }
+            uint64_t noProgressBegin =
+                static_cast<uint64_t>(AscendC::GetSystemCycle());
+            bool schedulerDone = false;
+            while (!schedulerDone) {
+                bool pendingTask = false;
+                bool madeProgress = false;
+                uint32_t lastPendingGroup = 0U;
+                uint32_t lastPendingPass = schedulerPass;
+                int32_t lastPendingPeer = -1;
+                uint64_t lastExpectedToken = 0ULL;
+                uint64_t lastObservedToken = 0ULL;
         for (uint32_t group = 0U; group < groupCount; ++group) {
             for (uint32_t assignment = 0U; ; ++assignment) {
                 const int32_t laneValue = AllToAllGroupCopyoutLaneDevice(
@@ -864,6 +904,12 @@ __aicore__ inline void AllToAllGroupKernelImpl(
                     break;
                 }
                 const uint32_t lane = static_cast<uint32_t>(laneValue);
+            const uint32_t taskIndex = group * groupWidth + lane;
+            const uint32_t taskWord = taskIndex / 64U;
+            const uint64_t taskMask = 1ULL << (taskIndex % 64U);
+            if (readyDrivenCopyout && (completedTasks[taskWord] & taskMask) != 0ULL) {
+                continue;
+            }
             const int32_t peer = AllToAllGroupDevicePeer(
                 rank, rankSize, group, lane, groupWidth);
             if (peer < 0) {
@@ -897,7 +943,9 @@ __aicore__ inline void AllToAllGroupKernelImpl(
                 primaryTotalElements, secondaryTotalElements);
             const uint32_t traceCore = copyoutWorkers < TILEXR_ALLTOALL_GROUP_SEND_CORES ?
                 TILEXR_ALLTOALL_GROUP_SEND_WORKERS + lane : blockIdx;
-            for (uint32_t pass = 0U; pass < passCount; ++pass) {
+            const uint32_t passBegin = readyDrivenCopyout ? schedulerPass : 0U;
+            const uint32_t passEnd = readyDrivenCopyout ? schedulerPass + 1U : passCount;
+            for (uint32_t pass = passBegin; pass < passEnd; ++pass) {
                 const int32_t chunkElementOffset = static_cast<int32_t>(pass) * chunkElements;
                 const int32_t remaining = elementsPerPeer - chunkElementOffset;
                 if (remaining <= 0) {
@@ -934,6 +982,9 @@ __aicore__ inline void AllToAllGroupKernelImpl(
                         secondaryElements == 0U)) {
                     continue;
                 }
+                if (readyDrivenCopyout) {
+                    pendingTask = true;
+                }
                 const uint64_t expectedToken =
                     AllToAllGroupDeviceToken(invocationId, group, pass);
                 auto primarySignal = reinterpret_cast<__gm__ uint64_t*>(
@@ -949,10 +1000,23 @@ __aicore__ inline void AllToAllGroupKernelImpl(
                         routeStage != TILEXR_ALLTOALL_GROUP_ROUTE_STAGE_SECONDARY;
                     const bool waitSecondary = secondaryElements != 0U &&
                         routeStage != TILEXR_ALLTOALL_GROUP_ROUTE_STAGE_PRIMARY;
-                    if (!AllToAllGroupWaitRouteTokensMte(
+                    const bool ready = readyDrivenCopyout ?
+                        AllToAllGroupRouteTokensReadyMte(
+                            primarySignal, secondarySignal, waitPrimary, waitSecondary,
+                            expectedToken, relayLocal, observed) :
+                        AllToAllGroupWaitRouteTokensMte(
                             primarySignal, secondarySignal, waitPrimary, waitSecondary,
                             expectedToken, TILEXR_ALLTOALL_GROUP_WAIT_TIMEOUT_CYCLES,
-                            relayLocal, observed)) {
+                            relayLocal, observed);
+                    if (!ready && readyDrivenCopyout) {
+                        lastPendingGroup = group;
+                        lastPendingPass = pass;
+                        lastPendingPeer = peer;
+                        lastExpectedToken = expectedToken;
+                        lastObservedToken = observed;
+                        continue;
+                    }
+                    if (!ready) {
                         AllToAllGroupTraceRecordTask(
                             groupTrace, traceIteration, traceCore, group, pass,
                             TileXR::Demo::kAllToAllGroupTraceReceiveWait, groupCount, passCount,
@@ -1092,7 +1156,33 @@ __aicore__ inline void AllToAllGroupKernelImpl(
                         TileXR::Demo::kAllToAllGroupTraceNoQp,
                         receiveCopyBegin, AllToAllGroupTraceCycle(groupTrace));
                 }
+                if (readyDrivenCopyout) {
+                    completedTasks[taskWord] |= taskMask;
+                    madeProgress = true;
+                }
             }
+            }
+        }
+                if (!readyDrivenCopyout || !pendingTask) {
+                    schedulerDone = true;
+                    continue;
+                }
+                if (madeProgress) {
+                    noProgressBegin =
+                        static_cast<uint64_t>(AscendC::GetSystemCycle());
+                    continue;
+                }
+                if (static_cast<uint64_t>(AscendC::GetSystemCycle()) -
+                        noProgressBegin >= TILEXR_ALLTOALL_GROUP_WAIT_TIMEOUT_CYCLES) {
+                    AllToAllGroupRecordError(
+                        debug, blockIdx, TILEXR_ALLTOALL_GROUP_STAGE_WAIT,
+                        lastPendingGroup, lastPendingPass, lastPendingPeer,
+                        0U, 0U, lastExpectedToken, lastObservedToken);
+                    AllToAllGroupTraceRecordKernel(
+                        groupTrace, traceIteration, blockIdx, kernelBegin,
+                        AllToAllGroupTraceCycle(groupTrace));
+                    return;
+                }
             }
         }
         if constexpr (IngressCredit) {

@@ -639,6 +639,12 @@ void TestKernelStructure()
     CHECK_CONTAINS(kernel, "AllToAllGroupSplitByRouteDevice");
     CHECK_CONTAINS(kernel, "TILEXR_ALLTOALL_GROUP_ROUTE_SIGNAL_STRIDE");
     CHECK_CONTAINS(kernel, "AllToAllGroupWaitRouteTokensMte");
+    CHECK_CONTAINS(kernel, "AllToAllGroupRouteTokensReadyMte");
+    CHECK_CONTAINS(kernel, "readyDrivenCopyout");
+    CHECK_CONTAINS(kernel, "taskIndex = group * groupWidth + lane");
+    CHECK_CONTAINS(kernel, "completedTasks[taskWord] |= taskMask");
+    CHECK_CONTAINS(kernel, "while (!schedulerDone)");
+    CHECK_CONTAINS(kernel, "noProgressBegin");
     CHECK_CONTAINS(kernel, "secondaryQp");
     CHECK_CONTAINS(kernel, "selectedQp");
     CHECK_CONTAINS(kernel, "copyoutWorkers");
