@@ -102,6 +102,12 @@ __aicore__ inline uint64_t AllToAllGroupDeviceToken(
         (static_cast<uint64_t>(pass) + 1ULL);
 }
 
+__aicore__ inline uint64_t AllToAllGroupDeviceTerminalCreditToken(
+    uint32_t invocationId, uint32_t groupCount)
+{
+    return AllToAllGroupDeviceToken(invocationId, groupCount, 0U);
+}
+
 __aicore__ inline bool AllToAllGroupPeerInRouteStageDevice(
     int32_t rank, int32_t peer, uint32_t routeStage)
 {
@@ -423,22 +429,13 @@ __aicore__ inline int32_t AllToAllGroupNextCreditPeerDevice(
         rank, rankSize, completedGroup + 1U, lane, groupWidth);
 }
 
-__aicore__ inline void AllToAllGroupPublishNextCredit(
+__aicore__ inline void AllToAllGroupPublishCredit(
     const __gm__ TileXR::CommArgs* args,
-    int32_t rank, int32_t rankSize, uint32_t invocationId,
-    uint32_t completedGroup, uint32_t lane, uint32_t groupCount,
-    uint32_t groupWidth, uint64_t creditOffset,
+    int32_t rank, int32_t peer, uint64_t creditToken, uint64_t creditOffset,
     AscendC::LocalTensor<uint8_t> relayLocal)
 {
-    const int32_t nextPeer = AllToAllGroupNextCreditPeerDevice(
-        rank, rankSize, completedGroup, lane, groupCount, groupWidth);
-    if (nextPeer < 0) {
-        return;
-    }
-    const uint64_t creditToken =
-        AllToAllGroupDeviceToken(invocationId, completedGroup + 1U, 0U);
     auto remoteCredit = reinterpret_cast<__gm__ uint64_t*>(
-        args->creditMems[nextPeer] + creditOffset +
+        args->creditMems[peer] + creditOffset +
         static_cast<uint64_t>(rank) * TILEXR_ALLTOALL_GROUP_CREDIT_STRIDE);
     auto creditLocal = relayLocal.ReinterpretCast<uint64_t>();
     creditLocal.SetValue(0, creditToken);
@@ -453,6 +450,51 @@ __aicore__ inline void AllToAllGroupPublishNextCredit(
         TILEXR_ALLTOALL_GROUP_CREDIT_WORDS);
     AscendC::SetFlag<AscendC::HardEvent::MTE3_S>(EVENT_ID0);
     AscendC::WaitFlag<AscendC::HardEvent::MTE3_S>(EVENT_ID0);
+}
+
+__aicore__ inline void AllToAllGroupPublishNextCredit(
+    const __gm__ TileXR::CommArgs* args,
+    int32_t rank, int32_t rankSize, uint32_t invocationId,
+    uint32_t completedGroup, uint32_t lane, uint32_t groupCount,
+    uint32_t groupWidth, uint64_t creditOffset,
+    AscendC::LocalTensor<uint8_t> relayLocal)
+{
+    const int32_t nextPeer = AllToAllGroupNextCreditPeerDevice(
+        rank, rankSize, completedGroup, lane, groupCount, groupWidth);
+    if (nextPeer < 0) {
+        return;
+    }
+    AllToAllGroupPublishCredit(
+        args, rank, nextPeer,
+        AllToAllGroupDeviceToken(invocationId, completedGroup + 1U, 0U),
+        creditOffset, relayLocal);
+}
+
+__aicore__ inline void AllToAllGroupPublishTerminalCredits(
+    const __gm__ TileXR::CommArgs* args,
+    int32_t rank, int32_t rankSize, uint32_t invocationId,
+    uint32_t worker, uint32_t copyoutWorkers, uint32_t groupCount,
+    uint32_t groupWidth, uint64_t creditOffset,
+    AscendC::LocalTensor<uint8_t> relayLocal)
+{
+    if (!AllToAllGroupCreditOwnerDevice(worker)) {
+        return;
+    }
+    const uint64_t terminalToken =
+        AllToAllGroupDeviceTerminalCreditToken(invocationId, groupCount);
+    for (uint32_t assignment = 0U; ; ++assignment) {
+        const int32_t laneValue = AllToAllGroupCopyoutLaneDevice(
+            worker, assignment, copyoutWorkers);
+        if (laneValue < 0) {
+            return;
+        }
+        const int32_t firstPeer = AllToAllGroupDevicePeer(
+            rank, rankSize, 0U, static_cast<uint32_t>(laneValue), groupWidth);
+        if (firstPeer >= 0) {
+            AllToAllGroupPublishCredit(
+                args, rank, firstPeer, terminalToken, creditOffset, relayLocal);
+        }
+    }
 }
 
 __aicore__ inline void AllToAllGroupRecordError(
@@ -542,6 +584,45 @@ __aicore__ inline void AllToAllGroupTraceRecordTask(
     span->sdmaGeneration = sdmaGeneration;
     span->beginCycle = beginCycle;
     span->endCycle = endCycle;
+}
+
+__aicore__ inline bool AllToAllGroupWaitTerminalCredit(
+    const __gm__ TileXR::CommArgs* args,
+    int32_t rank, int32_t rankSize, uint32_t invocationId,
+    uint32_t lane, uint32_t groupCount, uint32_t passCount,
+    uint32_t groupWidth, uint64_t creditOffset,
+    AscendC::LocalTensor<uint8_t> relayLocal,
+    __gm__ int32_t* debug, uint32_t blockIdx,
+    __gm__ uint8_t* groupTrace, uint32_t traceIteration)
+{
+    const int32_t firstPeer = AllToAllGroupDevicePeer(
+        rank, rankSize, 0U, lane, groupWidth);
+    if (firstPeer < 0) {
+        return true;
+    }
+    const uint64_t expectedCredit =
+        AllToAllGroupDeviceTerminalCreditToken(invocationId, groupCount);
+    auto creditSignal = reinterpret_cast<__gm__ uint64_t*>(
+        args->creditMems[rank] + creditOffset +
+        static_cast<uint64_t>(firstPeer) * TILEXR_ALLTOALL_GROUP_CREDIT_STRIDE);
+    const uint64_t creditWaitBegin = AllToAllGroupTraceCycle(groupTrace);
+    uint64_t observedCredit = 0ULL;
+    const bool ok = AllToAllGroupWaitCreditMte(
+        creditSignal, expectedCredit, TILEXR_ALLTOALL_GROUP_WAIT_TIMEOUT_CYCLES,
+        relayLocal, observedCredit);
+    AllToAllGroupTraceRecordTask(
+        groupTrace, traceIteration, blockIdx, 0U, 0U,
+        TileXR::Demo::kAllToAllGroupTraceCreditWait,
+        groupCount, passCount, firstPeer,
+        TileXR::Demo::kAllToAllGroupTraceNoQp,
+        creditWaitBegin, AllToAllGroupTraceCycle(groupTrace));
+    if (!ok) {
+        AllToAllGroupRecordError(
+            debug, blockIdx, TILEXR_ALLTOALL_GROUP_STAGE_CREDIT_WAIT,
+            groupCount, 0U, firstPeer, 0U, 0U,
+            expectedCredit, observedCredit);
+    }
+    return ok;
 }
 
 struct AllToAllGroupPendingQuiet {
@@ -1014,6 +1095,12 @@ __aicore__ inline void AllToAllGroupKernelImpl(
             }
             }
         }
+        if constexpr (IngressCredit) {
+            AscendC::SyncAll();
+            AllToAllGroupPublishTerminalCredits(
+                args, rank, rankSize, invocationId, worker, copyoutWorkers,
+                groupCount, groupWidth, creditOffsets[slot], relayLocal);
+        }
         AllToAllGroupTraceRecordKernel(groupTrace, traceIteration, blockIdx,
             kernelBegin, AllToAllGroupTraceCycle(groupTrace));
         return;
@@ -1188,6 +1275,17 @@ __aicore__ inline void AllToAllGroupKernelImpl(
         AllToAllGroupTraceRecordKernel(groupTrace, traceIteration, blockIdx,
             kernelBegin, AllToAllGroupTraceCycle(groupTrace));
         return;
+    }
+    if constexpr (IngressCredit) {
+        AscendC::SyncAll();
+        if (workerRoute == 0U && !AllToAllGroupWaitTerminalCredit(
+                args, rank, rankSize, invocationId, lane, groupCount, passCount,
+                groupWidth, creditOffsets[slot], relayLocal,
+                debug, blockIdx, groupTrace, traceIteration)) {
+            AllToAllGroupTraceRecordKernel(groupTrace, traceIteration, blockIdx,
+                kernelBegin, AllToAllGroupTraceCycle(groupTrace));
+            return;
+        }
     }
     AllToAllGroupTraceRecordKernel(groupTrace, traceIteration, blockIdx,
         kernelBegin, AllToAllGroupTraceCycle(groupTrace));

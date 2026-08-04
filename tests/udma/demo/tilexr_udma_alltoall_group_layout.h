@@ -207,6 +207,13 @@ inline int32_t AllToAllGroupNextCreditPeer(
         rank, rankSize, completedGroup + 1U, lane, groupWidth);
 }
 
+inline int32_t AllToAllGroupTerminalCreditPeer(
+    int rank, int rankSize, uint32_t lane,
+    uint32_t groupWidth = kAllToAllGroupWidth)
+{
+    return AllToAllGroupPeer(rank, rankSize, 0U, lane, groupWidth);
+}
+
 inline bool AllToAllGroupCreditOwner(uint32_t copyoutWorker)
 {
     return copyoutWorker < kAllToAllGroupSendCoreCount;
@@ -226,6 +233,12 @@ inline uint64_t AllToAllGroupCreditToken(
     uint32_t invocationId, uint32_t group)
 {
     return AllToAllGroupToken(invocationId, group, 0U);
+}
+
+inline uint64_t AllToAllGroupTerminalCreditToken(
+    uint32_t invocationId, uint32_t groupCount)
+{
+    return AllToAllGroupToken(invocationId, groupCount, 0U);
 }
 
 inline bool AllToAllGroupCheckedAdd(size_t lhs, size_t rhs, size_t& result)

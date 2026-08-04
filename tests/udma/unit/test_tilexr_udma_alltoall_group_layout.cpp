@@ -315,6 +315,10 @@ void TestTokens()
         TileXR::Demo::AllToAllGroupToken(49U, 1U, 0U));
     CHECK_EQ(TileXR::Demo::AllToAllGroupCreditToken(50U, 1U) >
         TileXR::Demo::AllToAllGroupCreditToken(49U, 1U), true);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupTerminalCreditToken(49U, 16U),
+        TileXR::Demo::AllToAllGroupToken(49U, 16U, 0U));
+    CHECK_EQ(TileXR::Demo::AllToAllGroupTerminalCreditToken(49U, 16U) >
+        TileXR::Demo::AllToAllGroupCreditToken(49U, 15U), true);
 }
 
 void TestIngressCreditPolicy()
@@ -357,6 +361,44 @@ void TestIngressCreditPolicy()
     CHECK_EQ(TileXR::Demo::AllToAllGroupCreditOwner(15U), true);
     CHECK_EQ(TileXR::Demo::AllToAllGroupCreditOwner(16U), false);
     CHECK_EQ(TileXR::Demo::AllToAllGroupCreditOwner(31U), false);
+
+    for (const int terminalRankSize : {16, 32, 256, 512}) {
+        const uint32_t terminalGroupCount =
+            TileXR::Demo::AllToAllGroupCount(terminalRankSize);
+        for (int rank = 0; rank < terminalRankSize; ++rank) {
+            uint32_t chainedCredits = 0U;
+            uint32_t terminalCredits = 0U;
+            for (uint32_t group = 0U; group < terminalGroupCount; ++group) {
+                for (uint32_t lane = 0U;
+                     lane < TileXR::Demo::kAllToAllGroupWidth; ++lane) {
+                    if (TileXR::Demo::AllToAllGroupNextCreditPeer(
+                            rank, terminalRankSize, group, lane) >= 0) {
+                        ++chainedCredits;
+                    }
+                }
+            }
+            for (uint32_t lane = 0U;
+                 lane < TileXR::Demo::kAllToAllGroupWidth; ++lane) {
+                const int32_t terminalPeer =
+                    TileXR::Demo::AllToAllGroupTerminalCreditPeer(
+                        rank, terminalRankSize, lane);
+                if (terminalPeer < 0) {
+                    continue;
+                }
+                ++terminalCredits;
+                uint32_t senderLane = lane ^
+                    TileXR::Demo::kAllToAllGroupHalfWidth;
+                if (TileXR::Demo::AllToAllGroupPeer(
+                        terminalPeer, terminalRankSize, 0U, senderLane) < 0) {
+                    senderLane = lane;
+                }
+                CHECK_EQ(TileXR::Demo::AllToAllGroupPeer(
+                    terminalPeer, terminalRankSize, 0U, senderLane), rank);
+            }
+            CHECK_EQ(chainedCredits + terminalCredits,
+                static_cast<uint32_t>(terminalRankSize - 1));
+        }
+    }
     for (uint32_t lane = 0U;
          lane < TileXR::Demo::kAllToAllGroupSendCoreCount; ++lane) {
         const uint32_t primaryWorker = lane;
@@ -661,19 +703,23 @@ void TestKernelStructure()
     CHECK_CONTAINS(kernel, "uint64_t creditOffset0, uint64_t creditOffset1");
     CHECK_CONTAINS(kernel, "uint32_t ingressWindow");
     CHECK_CONTAINS(kernel, "AllToAllGroupPublishNextCredit");
+    CHECK_CONTAINS(kernel, "AllToAllGroupPublishTerminalCredits");
+    CHECK_CONTAINS(kernel, "AllToAllGroupWaitTerminalCredit");
+    CHECK_CONTAINS(kernel, "AllToAllGroupDeviceTerminalCreditToken");
+    CHECK_CONTAINS(kernel, "AscendC::SyncAll()");
     CHECK_CONTAINS(kernel, "AllToAllGroupCreditOwnerDevice(worker)");
     CHECK_CONTAINS(kernel, "TILEXR_ALLTOALL_GROUP_STAGE_CREDIT_WAIT");
     CHECK_CONTAINS(kernel, "kAllToAllGroupTraceCreditWait");
     CHECK_CONTAINS(kernel, "TileXR::TILEXR_UDMA_SQE_FLAG_COMPLETION");
     const size_t publishCreditBegin = kernel.find(
-        "__aicore__ inline void AllToAllGroupPublishNextCredit");
+        "__aicore__ inline void AllToAllGroupPublishCredit");
     const size_t publishCreditEnd = kernel.find(
-        "__aicore__ inline void AllToAllGroupRecordError", publishCreditBegin);
+        "__aicore__ inline void AllToAllGroupPublishNextCredit", publishCreditBegin);
     const std::string publishCredit = publishCreditBegin == std::string::npos ?
         std::string() : kernel.substr(publishCreditBegin,
             publishCreditEnd == std::string::npos ? std::string::npos :
                 publishCreditEnd - publishCreditBegin);
-    CHECK_CONTAINS(publishCredit, "args->creditMems[nextPeer]");
+    CHECK_CONTAINS(publishCredit, "args->creditMems[peer]");
     CHECK_CONTAINS(publishCredit, "TILEXR_ALLTOALL_GROUP_CREDIT_WORDS");
     CHECK_CONTAINS(publishCredit, "AscendC::HardEvent::S_MTE3");
     CHECK_CONTAINS(publishCredit, "AscendC::HardEvent::MTE3_S");
@@ -705,7 +751,6 @@ void TestKernelStructure()
     CHECK_CONTAINS(launcher, "cfgInfo.schemMode = RT_SCHEM_MODE_NORMAL");
     CHECK_NOT_CONTAINS(launcher, "<<<");
     CHECK_NOT_CONTAINS(kernel, "UDMAPutSignalNbi<int32_t>");
-    CHECK_NOT_CONTAINS(kernel, "SyncAll");
     CHECK_NOT_CONTAINS(kernel, "elementsPerPeer) * lane /");
 }
 
