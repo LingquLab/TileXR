@@ -150,11 +150,7 @@ void TestPlan()
         plan.controlOffset + TileXR::Demo::kAllToAllGroupErrorBytes);
     CHECK_EQ(plan.signalSourceBytes,
         TileXR::Demo::kAllToAllGroupSignalSourceBytes);
-    CHECK_EQ(plan.terminalAssistOffset,
-        plan.signalSourceOffset + plan.signalSourceBytes);
-    CHECK_EQ(plan.terminalAssistBytes,
-        TileXR::Demo::kAllToAllGroupTerminalAssistBytes);
-    CHECK_EQ(plan.terminalAssistOffset + plan.terminalAssistBytes <=
+    CHECK_EQ(plan.signalSourceOffset + plan.signalSourceBytes <=
         plan.controlOffset + plan.controlBytes, true);
     const auto legacyAlign = [](size_t value) {
         return (value + TileXR::Demo::kAllToAllGroupAlignment - 1U) &
@@ -708,10 +704,9 @@ void TestKernelStructure()
     CHECK_CONTAINS(kernel, "uint32_t ingressWindow");
     CHECK_CONTAINS(kernel, "AllToAllGroupPublishNextCredit");
     CHECK_CONTAINS(kernel, "AllToAllGroupPublishTerminalCredits");
-    CHECK_CONTAINS(kernel, "AllToAllGroupPublishTerminalAssist");
-    CHECK_CONTAINS(kernel, "AllToAllGroupWaitTerminalAssistCredits");
     CHECK_CONTAINS(kernel, "AllToAllGroupWaitTerminalCredit");
     CHECK_CONTAINS(kernel, "AllToAllGroupDeviceTerminalCreditToken");
+    CHECK_CONTAINS(kernel, "AscendC::SyncAll()");
     CHECK_CONTAINS(kernel, "AllToAllGroupCreditOwnerDevice(worker)");
     CHECK_CONTAINS(kernel, "TILEXR_ALLTOALL_GROUP_STAGE_CREDIT_WAIT");
     CHECK_CONTAINS(kernel, "kAllToAllGroupTraceCreditWait");
@@ -756,7 +751,6 @@ void TestKernelStructure()
     CHECK_CONTAINS(launcher, "cfgInfo.schemMode = RT_SCHEM_MODE_NORMAL");
     CHECK_NOT_CONTAINS(launcher, "<<<");
     CHECK_NOT_CONTAINS(kernel, "UDMAPutSignalNbi<int32_t>");
-    CHECK_NOT_CONTAINS(kernel, "SyncAll");
     CHECK_NOT_CONTAINS(kernel, "elementsPerPeer) * lane /");
 }
 

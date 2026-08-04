@@ -40,20 +40,12 @@ constexpr size_t kAllToAllGroupSignalSourceSlots =
     kAllToAllGroupMaxQuietBatch;
 constexpr size_t kAllToAllGroupSignalSourceBytes =
     kAllToAllGroupSignalSourceSlots * sizeof(uint64_t);
-constexpr uint32_t kAllToAllGroupMaxCopyoutSlices = 3U;
-constexpr uint32_t kAllToAllGroupTerminalAssistSlices =
-    kAllToAllGroupMaxCopyoutSlices - 1U;
-constexpr size_t kAllToAllGroupTerminalAssistStride = 512U;
-constexpr size_t kAllToAllGroupTerminalAssistBytes =
-    static_cast<size_t>(kAllToAllGroupSendCoreCount) *
-    kAllToAllGroupTerminalAssistSlices * kAllToAllGroupTerminalAssistStride;
 constexpr uint32_t kAllToAllGroupBlockDim = 64U;
 constexpr size_t kAllToAllGroupMultiChannelThresholdBytes =
     150ULL * 1024ULL * 1024ULL;
 constexpr size_t kAllToAllGroupAlignment = 512U;
 constexpr size_t kAllToAllGroupBaseControlBytes =
-    kAllToAllGroupErrorBytes + kAllToAllGroupSignalSourceBytes +
-    kAllToAllGroupTerminalAssistBytes;
+    kAllToAllGroupErrorBytes + kAllToAllGroupSignalSourceBytes;
 constexpr size_t kAllToAllGroupMaxPayloadBytes = 16ULL << 30;
 constexpr size_t kAllToAllGroupMaxRegisteredBytes =
     2U * kAllToAllGroupMaxPayloadBytes +
@@ -78,8 +70,6 @@ struct AllToAllGroupPlan {
     size_t controlBytes = kAllToAllGroupBaseControlBytes;
     size_t signalSourceOffset = 0;
     size_t signalSourceBytes = kAllToAllGroupSignalSourceBytes;
-    size_t terminalAssistOffset = 0;
-    size_t terminalAssistBytes = kAllToAllGroupTerminalAssistBytes;
     size_t registeredBytes = 0;
 };
 
@@ -341,8 +331,6 @@ inline AllToAllGroupPlan PlanAllToAllGroup(
         return AllToAllGroupPlan {};
     }
     plan.signalSourceOffset = plan.controlOffset + kAllToAllGroupErrorBytes;
-    plan.terminalAssistOffset =
-        plan.signalSourceOffset + plan.signalSourceBytes;
     if (plan.registeredBytes > kAllToAllGroupMaxRegisteredBytes) {
         return AllToAllGroupPlan {};
     }
