@@ -188,9 +188,21 @@ void TestChipMapCoversObservedAscend950Variants()
     const std::string path = "src/comm/tilexr_internal.cpp";
     const auto text = ReadFile(path);
 
+    CheckContains(path, text, "{\"Ascend950DT_9582\", ChipName::CHIP_950}");
     CheckContains(path, text, "{\"Ascend950PR\", ChipName::CHIP_950PR}");
     CheckContains(path, text, "{\"Ascend950PR_9589\", ChipName::CHIP_950PR}");
     CheckContains(path, text, "{\"Ascend950PR_9599\", ChipName::CHIP_950PR}");
+    CheckContains(path, text, "chipName == ChipName::CHIP_950;");
+    CheckContains(path, text, "std::string(value) == \"pid\"");
+    CheckContains(path, text, "std::string(value) == \"sdid\"");
+    CheckContains(path, text, "rank / localRankSize == peer / localRankSize");
+
+    const std::string commPath = "src/comm/tilexr_comm.cpp";
+    const auto commText = ReadFile(commPath);
+    CheckContains(commPath, commText, "TILEXR_IPC_PID_MODE");
+    CheckContains(commPath, commText, "UsePidOnlyIpcForPeer");
+    CheckContains(commPath, commText, "rtSetIpcMemPid");
+    CheckContains(commPath, commText, "rtSetIpcMemorySuperPodPid");
 }
 
 } // namespace

@@ -838,13 +838,18 @@ int TileXRComm::SetMemoryName(string &name)
 
 int TileXRComm::SetIpcPidSdid(string &name, const uint32_t *pids, const int64_t *sdids) const
 {
+    const char *modeValue = std::getenv("TILEXR_IPC_PID_MODE");
+    const IpcPidMode mode = ResolveIpcPidMode(modeValue);
+    if (mode == IpcPidMode::INVALID) {
+        TILEXR_LOG(ERROR) << "TILEXR_IPC_PID_MODE must be auto, pid, or sdid";
+        return TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
     for (int i = 0; i < rankSize_; ++i) {
         if (i == rank_) {
             continue;
         }
 
-        if (UseLegacyIpcPid(physicalInfo_.chipName)) {
-            // 910B
+        if (UsePidOnlyIpcForPeer(physicalInfo_.chipName, rank_, i, localRankSize_, mode)) {
             int32_t pidInt32 = pids[i];
             int rtRet = rtSetIpcMemPid(name.c_str(), &pidInt32, HCCL_IPC_PID_ARRAY_SIZE);
             if (rtRet != RT_ERROR_NONE) {
@@ -852,7 +857,6 @@ int TileXRComm::SetIpcPidSdid(string &name, const uint32_t *pids, const int64_t 
                 return TILEXR_ERROR_INTERNAL;
             }
         } else {
-            // 910A3
             int32_t pidInt32 = pids[i];
             int rtRet = rtSetIpcMemorySuperPodPid(name.c_str(), sdids[i], &pidInt32, HCCL_IPC_PID_ARRAY_SIZE);
             if (rtRet != RT_ERROR_NONE) {
