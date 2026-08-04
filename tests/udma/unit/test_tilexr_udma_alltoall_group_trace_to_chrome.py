@@ -36,6 +36,10 @@ class GroupTraceConverterTest(unittest.TestCase):
         version = MODULE.TRACE_VERSION if version is None else version
         phase_count = (
             MODULE.CURRENT_PHASE_COUNT if phase_count is None else phase_count)
+        task_format = (
+            MODULE.TASK_FORMAT if version == MODULE.TRACE_VERSION
+            else MODULE.LEGACY_TASK_FORMAT)
+        task_bytes = struct.calcsize(task_format)
         header = struct.pack(
             MODULE.HEADER_FORMAT,
             MODULE.TRACE_MAGIC if magic is None else magic,
@@ -61,6 +65,10 @@ class GroupTraceConverterTest(unittest.TestCase):
             (0, 0, 0, 5, 1050, 1100, 1, MODULE.NO_QP),
             (32, 0, 0, 6, 1600, 1650, 1, MODULE.NO_QP),
             (32, 0, 0, 7, 1650, 1700, 1, MODULE.NO_QP),
+            (32, 0, 0, 8, 1605, 1615, 1, MODULE.NO_QP),
+            (32, 0, 0, 9, 1615, 1625, 1, MODULE.NO_QP),
+            (32, 0, 0, 10, 1625, 1635, 1, MODULE.NO_QP),
+            (32, 0, 0, 11, 1635, 1645, 1, MODULE.NO_QP),
         )
         with path.open("wb") as stream:
             stream.truncate(MODULE.TRACE_BYTES)
@@ -74,9 +82,11 @@ class GroupTraceConverterTest(unittest.TestCase):
                     continue
                 stream.seek(MODULE.task_span_offset(
                     0, core, group, pass_index, phase, group_count, pass_count,
-                    phase_count))
-                stream.write(struct.pack(
-                    MODULE.TASK_FORMAT, begin, end, peer, qp))
+                    phase_count, task_bytes))
+                values = [begin, end, peer, qp]
+                if version == MODULE.TRACE_VERSION:
+                    values.extend([0, 62, 0, 64, 33])
+                stream.write(struct.pack(task_format, *values))
 
     def write_at(self, path, offset, payload):
         with path.open("r+b") as stream:
@@ -108,6 +118,8 @@ class GroupTraceConverterTest(unittest.TestCase):
                     "kernel", "self-copy", "send-put-signal", "send-quiet",
                     "receive-wait", "receive-copy", "credit-wait",
                     "sdma-submit", "sdma-wait",
+                    "sdma-prepare", "sdma-cache-clean", "sdma-dsb",
+                    "sdma-doorbell",
                 },
             )
             send = next(event for event in complete if event["name"] == "send-put-signal")
@@ -120,6 +132,11 @@ class GroupTraceConverterTest(unittest.TestCase):
             self.assertEqual(second_send["args"]["role"], "send")
             self.assertEqual(second_send["args"]["lane"], 0)
             self.assertEqual(trace["otherData"]["displayTimeUnit"], "ns")
+            submit = next(event for event in complete if event["name"] == "sdma-submit")
+            self.assertEqual(submit["args"]["sdmaTail"], 62)
+            self.assertEqual(submit["args"]["sdmaNewTail"], 0)
+            self.assertEqual(submit["args"]["sdmaDepth"], 64)
+            self.assertTrue(submit["args"]["sdmaWrapped"])
             json.loads(json.dumps(trace))
 
     def test_labels_32_send_and_32_receive_cores(self):
@@ -170,7 +187,8 @@ class GroupTraceConverterTest(unittest.TestCase):
             offset = MODULE.task_span_offset(0, 0, 0, 0, 1, 1, 1)
             self.write_at(
                 second, offset,
-                struct.pack(MODULE.TASK_FORMAT, 5200, 5300, 2, 3))
+                struct.pack(MODULE.TASK_FORMAT, 5200, 5300, 2, 3,
+                            0, 0, 0, 0, 0))
 
             trace = MODULE.build_chrome_trace([
                 MODULE.read_rank_trace(first), MODULE.read_rank_trace(second)])
@@ -206,7 +224,8 @@ class GroupTraceConverterTest(unittest.TestCase):
             offset = MODULE.task_span_offset(0, 0, 0, 0, 1, 1, 1)
             self.write_at(
                 path, offset,
-                struct.pack(MODULE.TASK_FORMAT, 0, 1300, 1, 3))
+                struct.pack(MODULE.TASK_FORMAT, 0, 1300, 1, 3,
+                            0, 0, 0, 0, 0))
             with self.assertRaisesRegex(ValueError, "incomplete"):
                 MODULE.build_chrome_trace([MODULE.read_rank_trace(path)])
 
@@ -239,6 +258,19 @@ class GroupTraceConverterTest(unittest.TestCase):
             }
             self.assertIn("credit-wait", names)
             self.assertNotIn("sdma-submit", names)
+
+    def test_reads_version_three_eight_phase_trace(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "version3.bin"
+            self.make_trace(path, version=3, phase_count=MODULE.TRACE_V3_PHASE_COUNT)
+            rank_trace = MODULE.read_rank_trace(path)
+            self.assertEqual(rank_trace["header"]["phase_count"], 8)
+            names = {
+                event["name"] for event in MODULE.build_chrome_trace([rank_trace])["traceEvents"]
+                if event.get("ph") == "X"
+            }
+            self.assertIn("sdma-submit", names)
+            self.assertNotIn("sdma-prepare", names)
 
     def test_main_writes_json_without_dumps(self):
         with tempfile.TemporaryDirectory() as directory:

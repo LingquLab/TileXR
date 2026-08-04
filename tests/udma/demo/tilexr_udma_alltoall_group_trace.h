@@ -14,12 +14,12 @@ namespace TileXR {
 namespace Demo {
 
 constexpr uint32_t kAllToAllGroupTraceMagic = 0x47545243U; // "GTRC"
-constexpr uint32_t kAllToAllGroupTraceVersion = 3U;
+constexpr uint32_t kAllToAllGroupTraceVersion = 4U;
 constexpr size_t kAllToAllGroupTraceBytes = 128ULL * 1024ULL * 1024ULL;
 constexpr size_t kAllToAllGroupTraceHeaderBytes = 4096ULL;
 constexpr uint32_t kAllToAllGroupTraceMaxIterations = 50U;
 constexpr uint32_t kAllToAllGroupTraceCoreCount = 64U;
-constexpr uint32_t kAllToAllGroupTracePhaseCount = 8U;
+constexpr uint32_t kAllToAllGroupTracePhaseCount = 12U;
 constexpr uint32_t kAllToAllGroupTraceNoQp = 0xFFFFFFFFU;
 constexpr uint64_t kAllToAllGroupTraceCyclesPerUs = 1000ULL;
 constexpr size_t kAllToAllGroupTraceCacheLineBytes = 128U;
@@ -33,6 +33,10 @@ enum AllToAllGroupTracePhase : uint32_t {
     kAllToAllGroupTraceCreditWait = 5U,
     kAllToAllGroupTraceSdmaSubmit = 6U,
     kAllToAllGroupTraceSdmaWait = 7U,
+    kAllToAllGroupTraceSdmaPrepare = 8U,
+    kAllToAllGroupTraceSdmaCacheClean = 9U,
+    kAllToAllGroupTraceSdmaDsb = 10U,
+    kAllToAllGroupTraceSdmaDoorbell = 11U,
 };
 
 struct AllToAllGroupTraceSpan {
@@ -45,6 +49,11 @@ struct AllToAllGroupTraceTaskSpan {
     uint64_t endCycle;
     int32_t peer;
     uint32_t qpIdx;
+    uint32_t sdmaHead;
+    uint32_t sdmaTail;
+    uint32_t sdmaNewTail;
+    uint32_t sdmaDepth;
+    uint32_t sdmaGeneration;
 };
 
 struct AllToAllGroupTraceHeader {
@@ -146,7 +155,7 @@ inline size_t AllToAllGroupTraceTaskSpanOffset(
 
 static_assert(sizeof(AllToAllGroupTraceSpan) == 16U,
     "group trace kernel span must contain two uint64 timestamps");
-static_assert(sizeof(AllToAllGroupTraceTaskSpan) == 24U,
+static_assert(sizeof(AllToAllGroupTraceTaskSpan) == 48U,
     "group trace task span layout changed");
 static_assert(sizeof(AllToAllGroupTraceHeader) <= kAllToAllGroupTraceHeaderBytes,
     "group trace header must fit its region");

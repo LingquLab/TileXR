@@ -8,6 +8,7 @@
 
 #include "kernel_operator.h"
 #include "tilexr_sdma_a5_types.h"
+#include "tilexr_sdma_types.h"
 
 namespace TileXR {
 namespace detail {
@@ -90,8 +91,12 @@ __aicore__ inline uint64_t A5SdmaCopyNbi(__gm__ uint8_t* workspaceAddress,
                                          __gm__ uint8_t* destination,
                                          __gm__ uint8_t* source,
                                          uint64_t bytes,
-                                         uint32_t channelIndex)
+                                         uint32_t channelIndex,
+                                         SDMASubmitTrace* submitTrace)
 {
+    if (submitTrace != nullptr) {
+        submitTrace->prepareBegin = static_cast<uint64_t>(AscendC::GetSystemCycle());
+    }
     __gm__ A5SdmaWorkspace* workspace =
         reinterpret_cast<__gm__ A5SdmaWorkspace*>(workspaceAddress);
     if (!A5SdmaWorkspaceValid(workspace) || destination == nullptr || source == nullptr ||
@@ -115,6 +120,13 @@ __aicore__ inline uint64_t A5SdmaCopyNbi(__gm__ uint8_t* workspaceAddress,
     const uint32_t dataIndex = channel->tail;
     const uint32_t completionIndex = (dataIndex + 1U) % channel->depth;
     const uint32_t newTail = A5SdmaAdvanceTail(dataIndex, channel->depth);
+    if (submitTrace != nullptr) {
+        submitTrace->head = channel->head;
+        submitTrace->tail = dataIndex;
+        submitTrace->newTail = newTail;
+        submitTrace->depth = channel->depth;
+        submitTrace->generation = generation;
+    }
     __gm__ A5SdmaCompletionLine* payload = reinterpret_cast<__gm__ A5SdmaCompletionLine*>(
         channel->completionPayloadAddress);
     __gm__ A5SdmaCompletionLine* completion = reinterpret_cast<__gm__ A5SdmaCompletionLine*>(
@@ -140,6 +152,10 @@ __aicore__ inline uint64_t A5SdmaCopyNbi(__gm__ uint8_t* workspaceAddress,
     channel->generation = generation;
     channel->tail = newTail;
     channel->taskId = A5SdmaAdvanceTaskId(channel->taskId);
+    if (submitTrace != nullptr) {
+        submitTrace->prepareEnd = static_cast<uint64_t>(AscendC::GetSystemCycle());
+        submitTrace->cacheCleanBegin = submitTrace->prepareEnd;
+    }
     pipe_barrier(PIPE_ALL);
     A5SdmaCleanCacheLine(reinterpret_cast<__gm__ uint8_t*>(payload));
     A5SdmaCleanCacheLine(reinterpret_cast<__gm__ uint8_t*>(completion));
@@ -147,9 +163,20 @@ __aicore__ inline uint64_t A5SdmaCopyNbi(__gm__ uint8_t* workspaceAddress,
     A5SdmaCleanCacheLine(reinterpret_cast<__gm__ uint8_t*>(sqBase + completionIndex));
     A5SdmaCleanCacheLine(reinterpret_cast<__gm__ uint8_t*>(channel));
     A5SdmaCleanCacheLine(reinterpret_cast<__gm__ uint8_t*>(channel) + 64U);
+    if (submitTrace != nullptr) {
+        submitTrace->cacheCleanEnd = static_cast<uint64_t>(AscendC::GetSystemCycle());
+        submitTrace->dsbBegin = submitTrace->cacheCleanEnd;
+    }
     pipe_barrier(PIPE_ALL);
     dsb(DSB_DDR);
+    if (submitTrace != nullptr) {
+        submitTrace->dsbEnd = static_cast<uint64_t>(AscendC::GetSystemCycle());
+        submitTrace->doorbellBegin = submitTrace->dsbEnd;
+    }
     A5SdmaRingDoorbell(channel->rtsqAddress, newTail);
+    if (submitTrace != nullptr) {
+        submitTrace->doorbellEnd = static_cast<uint64_t>(AscendC::GetSystemCycle());
+    }
     return A5SdmaEncodeEvent(channelIndex, generation);
 }
 

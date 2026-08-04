@@ -292,7 +292,9 @@ void TestScalePlanAndTraceCapacity()
 
     CHECK_EQ(TileXR::Demo::kAllToAllGroupTraceBytes,
         128ULL * 1024ULL * 1024ULL);
-    CHECK_EQ(TileXR::Demo::AllToAllGroupTraceLayoutFits(50U, 64U, 3U), true);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupTraceLayoutFits(50U, 64U, 1U), true);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupTraceLayoutFits(50U, 64U, 2U), false);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupTraceLayoutFits(50U, 64U, 3U), false);
     CHECK_EQ(TileXR::Demo::AllToAllGroupTraceLayoutFits(50U, 64U, 4U), false);
     CHECK_EQ(TileXR::Demo::AllToAllGroupTraceLayoutFits(50U, 64U, 5U), false);
     CHECK_EQ(TileXR::Demo::AllToAllGroupTraceLayoutFits(50U, 64U, 6U), false);
@@ -619,6 +621,10 @@ void TestKernelStructure()
     CHECK_CONTAINS(kernel, "TILEXR_ALLTOALL_GROUP_STAGE_SDMA");
     CHECK_CONTAINS(kernel, "kAllToAllGroupTraceSdmaSubmit");
     CHECK_CONTAINS(kernel, "kAllToAllGroupTraceSdmaWait");
+    CHECK_CONTAINS(kernel, "kAllToAllGroupTraceSdmaPrepare");
+    CHECK_CONTAINS(kernel, "kAllToAllGroupTraceSdmaCacheClean");
+    CHECK_CONTAINS(kernel, "kAllToAllGroupTraceSdmaDsb");
+    CHECK_CONTAINS(kernel, "kAllToAllGroupTraceSdmaDoorbell");
     CHECK_NOT_CONTAINS(kernel, "AllToAllGroupTraceRecordError");
     CHECK_CONTAINS(kernel, "TILEXR_ALLTOALL_GROUP_SEND_WORKERS + copyoutWorkers");
     CHECK_CONTAINS(kernel,

@@ -6,7 +6,7 @@ from pathlib import Path
 
 
 TRACE_MAGIC = 0x47545243
-TRACE_VERSION = 3
+TRACE_VERSION = 4
 LEGACY_TRACE_VERSION = 1
 TRACE_BYTES = 128 * 1024 * 1024
 HEADER_BYTES = 4096
@@ -17,10 +17,13 @@ LANE_COUNT = 16
 PHASE_COUNT = 5
 TRACE_V2_PHASE_COUNT = 6
 TRACE_V3_PHASE_COUNT = 8
-CURRENT_PHASE_COUNT = TRACE_V3_PHASE_COUNT
+TRACE_V4_PHASE_COUNT = 12
+CURRENT_PHASE_COUNT = TRACE_V4_PHASE_COUNT
 SPAN_BYTES = 16
 CACHE_LINE_BYTES = 128
-TASK_FORMAT = "<QQiI"
+LEGACY_TASK_FORMAT = "<QQiI"
+TASK_FORMAT = "<QQiI5I4x"
+LEGACY_TASK_BYTES = struct.calcsize(LEGACY_TASK_FORMAT)
 TASK_BYTES = struct.calcsize(TASK_FORMAT)
 HEADER_FORMAT = "<8I4Q"
 TASK_BASE_OFFSET = HEADER_BYTES + MAX_ITERATIONS * MAX_CORES * CACHE_LINE_BYTES
@@ -36,6 +39,10 @@ PHASE_NAMES = (
     "credit-wait",
     "sdma-submit",
     "sdma-wait",
+    "sdma-prepare",
+    "sdma-cache-clean",
+    "sdma-dsb",
+    "sdma-doorbell",
 )
 
 
@@ -45,18 +52,18 @@ def kernel_span_offset(iteration, core):
 
 def task_span_offset(
         iteration, core, group, pass_index, phase, group_count, pass_count,
-        phase_count=CURRENT_PHASE_COUNT):
-    raw_core_bytes = group_count * pass_count * phase_count * TASK_BYTES
+        phase_count=CURRENT_PHASE_COUNT, task_bytes=TASK_BYTES):
+    raw_core_bytes = group_count * pass_count * phase_count * task_bytes
     core_bytes = (raw_core_bytes + CACHE_LINE_BYTES - 1) & ~(CACHE_LINE_BYTES - 1)
     core_index = iteration * MAX_CORES + core
     task_index = ((group * pass_count + pass_index) * phase_count) + phase
-    return TASK_BASE_OFFSET + core_index * core_bytes + task_index * TASK_BYTES
+    return TASK_BASE_OFFSET + core_index * core_bytes + task_index * task_bytes
 
 
 def layout_bytes(
         iteration_count, group_count, pass_count,
-        phase_count=CURRENT_PHASE_COUNT):
-    raw_core_bytes = group_count * pass_count * phase_count * TASK_BYTES
+        phase_count=CURRENT_PHASE_COUNT, task_bytes=TASK_BYTES):
+    raw_core_bytes = group_count * pass_count * phase_count * task_bytes
     core_bytes = (raw_core_bytes + CACHE_LINE_BYTES - 1) & ~(CACHE_LINE_BYTES - 1)
     return TASK_BASE_OFFSET + iteration_count * MAX_CORES * core_bytes
 
@@ -74,17 +81,19 @@ def _read_span(data, offset, label):
     return begin, end
 
 
-def _read_task(data, offset, label):
-    if offset < 0 or offset + TASK_BYTES > len(data):
+def _read_task(data, offset, label, task_format, task_bytes):
+    if offset < 0 or offset + task_bytes > len(data):
         raise ValueError(f"task offset out of range for {label}: {offset}")
-    begin, end, peer, qp = struct.unpack_from(TASK_FORMAT, data, offset)
+    fields = struct.unpack_from(task_format, data, offset)
+    begin, end, peer, qp = fields[:4]
     if begin == 0 and end == 0:
         return None
     if begin == 0 or end == 0:
         raise ValueError(f"incomplete {label}: begin={begin} end={end}")
     if end < begin:
         raise ValueError(f"invalid {label}: begin={begin} end={end}")
-    return begin, end, peer, qp
+    metadata = fields[4:] if len(fields) > 4 else (0, 0, 0, 0, 0)
+    return begin, end, peer, qp, *metadata
 
 
 def read_rank_trace(path):
@@ -111,7 +120,7 @@ def read_rank_trace(path):
     }
     if header["magic"] != TRACE_MAGIC:
         raise ValueError(f"invalid trace magic in {path}")
-    if header["version"] not in (LEGACY_TRACE_VERSION, 2, TRACE_VERSION):
+    if header["version"] not in (LEGACY_TRACE_VERSION, 2, 3, TRACE_VERSION):
         raise ValueError(f"unsupported trace version {header['version']} in {path}")
     if header["trace_bytes"] != TRACE_BYTES:
         raise ValueError(f"trace byte dimension mismatch in {path}")
@@ -122,8 +131,11 @@ def read_rank_trace(path):
     expected_phase_count = {
         LEGACY_TRACE_VERSION: PHASE_COUNT,
         2: TRACE_V2_PHASE_COUNT,
-        TRACE_VERSION: TRACE_V3_PHASE_COUNT,
+        3: TRACE_V3_PHASE_COUNT,
+        TRACE_VERSION: TRACE_V4_PHASE_COUNT,
     }[header["version"]]
+    task_format = TASK_FORMAT if header["version"] == TRACE_VERSION else LEGACY_TASK_FORMAT
+    task_bytes = TASK_BYTES if header["version"] == TRACE_VERSION else LEGACY_TASK_BYTES
     if (header["core_count"] != MAX_CORES or
             header["phase_count"] != expected_phase_count):
         raise ValueError(f"core/phase dimension mismatch in {path}")
@@ -134,13 +146,15 @@ def read_rank_trace(path):
         raise ValueError(f"invalid cycle frequency in {path}")
     required = layout_bytes(
         header["iteration_count"], header["group_count"],
-        header["pass_count"], header["phase_count"])
+        header["pass_count"], header["phase_count"], task_bytes)
     if required > TRACE_BYTES:
         raise ValueError(f"trace capacity exceeded in {path}: required={required}")
     with path.open("rb") as stream:
         data = stream.read(required)
     if len(data) != required:
         raise ValueError(f"short trace read in {path}: read={len(data)} required={required}")
+    header["task_format"] = task_format
+    header["task_bytes"] = task_bytes
     return {"path": str(path), "header": header, "data": data}
 
 
@@ -225,24 +239,36 @@ def build_chrome_trace(rank_traces):
                                 task_span_offset(
                                     iteration, core, group, pass_index, phase,
                                     header["group_count"], header["pass_count"],
-                                    header["phase_count"]),
+                                    header["phase_count"], header["task_bytes"]),
                                 label,
+                                header["task_format"], header["task_bytes"],
                             )
                             if task is None:
                                 continue
-                            begin, end, peer, qp = task
+                            (begin, end, peer, qp, sdma_head, sdma_tail,
+                             sdma_new_tail, sdma_depth, sdma_generation) = task
+                            task_args = {
+                                "iteration": iteration,
+                                "group": group,
+                                "pass": pass_index,
+                                "lane": core % LANE_COUNT,
+                                "peer": peer,
+                                "qp": None if qp == NO_QP else qp,
+                                "role": role,
+                            }
+                            if sdma_depth != 0:
+                                task_args.update({
+                                    "sdmaHead": sdma_head,
+                                    "sdmaTail": sdma_tail,
+                                    "sdmaNewTail": sdma_new_tail,
+                                    "sdmaDepth": sdma_depth,
+                                    "sdmaGeneration": sdma_generation,
+                                    "sdmaWrapped": sdma_new_tail < sdma_tail,
+                                })
                             events.append(_event(
                                 PHASE_NAMES[phase], role, rank, core, begin, end, base,
                                 header["cycles_per_us"],
-                                {
-                                    "iteration": iteration,
-                                    "group": group,
-                                    "pass": pass_index,
-                                    "lane": core % LANE_COUNT,
-                                    "peer": peer,
-                                    "qp": None if qp == NO_QP else qp,
-                                    "role": role,
-                                },
+                                task_args,
                                 offset_us,
                             ))
     return {

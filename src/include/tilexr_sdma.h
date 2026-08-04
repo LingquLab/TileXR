@@ -56,7 +56,8 @@ __aicore__ inline uint64_t SDMACopyNbi(
     __gm__ uint8_t* dst,
     __gm__ uint8_t* src,
     uint64_t bytes,
-    uint32_t channelGroupIdx = TILEXR_SDMA_AUTO_CHANNEL_GROUP)
+    uint32_t channelGroupIdx = TILEXR_SDMA_AUTO_CHANNEL_GROUP,
+    SDMASubmitTrace* submitTrace = nullptr)
 {
 #if TILEXR_SDMA_A5_AICORE_COMPILE
     if (!SDMAEnabled(args) || dst == nullptr || src == nullptr || bytes == 0) {
@@ -65,8 +66,9 @@ __aicore__ inline uint64_t SDMACopyNbi(
     const uint32_t resolvedGroup = SDMAResolveChannelGroup(channelGroupIdx);
     return detail::A5SdmaCopyNbi(
         reinterpret_cast<__gm__ uint8_t*>(args->sdmaWorkspacePtr),
-        dst, src, bytes, resolvedGroup);
+        dst, src, bytes, resolvedGroup, submitTrace);
 #elif defined(TILEXR_HAVE_PTO_SDMA) && TILEXR_HAVE_PTO_SDMA
+    (void)submitTrace;
     if (!SDMAEnabled(args) || dst == nullptr || src == nullptr || bytes == 0) {
         return 0;
     }
@@ -85,6 +87,7 @@ __aicore__ inline uint64_t SDMACopyNbi(
     (void)src;
     (void)bytes;
     (void)channelGroupIdx;
+    (void)submitTrace;
     return 0;
 #endif
 }
