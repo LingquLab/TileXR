@@ -379,6 +379,10 @@ int TileXREpBuildMemoryCombineReferenceConfig(int64_t rankSize, int64_t rank, in
     }
 
     int64_t totalPackedBlocks = 0;
+    int64_t flagFloatCount = 0;
+    int64_t compareCount = 0;
+    int64_t checkFlagBytes = 0;
+    int64_t checkCompareBytes = 0;
     int64_t checkFlagsBytes = 0;
     int64_t compactPayloadBytes = 0;
     int64_t floatRowBytes = 0;
@@ -392,8 +396,13 @@ int TileXREpBuildMemoryCombineReferenceConfig(int64_t rankSize, int64_t rank, in
     int64_t receiveBytes = 4 * kEpMemoryWindowAlignmentBytes;
     int64_t term = 0;
     if (!MulInt64(routesPerToken, next.blockCntPerToken, &totalPackedBlocks) ||
-        !MulInt64(totalPackedBlocks, 2 * kEpMemoryWindowAlignmentBytes, &checkFlagsBytes) ||
-        !AddInt64(checkFlagsBytes, kEpMemoryWindowAlignmentBytes, &checkFlagsBytes) ||
+        !MulInt64(totalPackedBlocks,
+            kEpMemoryWindowAlignmentBytes / static_cast<int64_t>(sizeof(float)), &flagFloatCount) ||
+        !AlignUpInt64(flagFloatCount, 64, &compareCount) ||
+        !MulInt64(compareCount, static_cast<int64_t>(sizeof(float)), &checkFlagBytes) ||
+        !MulInt64(compareCount, static_cast<int64_t>(sizeof(uint8_t)), &checkCompareBytes) ||
+        !AlignUpInt64(checkCompareBytes, 256, &checkCompareBytes) ||
+        !AddInt64(checkFlagBytes, checkCompareBytes, &checkFlagsBytes) ||
         !MulInt64(next.blockCntPerToken, kEpMemorySplitPayloadBytes, &compactPayloadBytes) ||
         !MulInt64(h, static_cast<int64_t>(sizeof(float)), &floatRowBytes) ||
         !AlignUpInt64(floatRowBytes, useMxfp8 ? 512 : kEpMemoryWindowAlignmentBytes,

@@ -1,5 +1,5 @@
-#ifndef TILEXR_EP_HOST_EP_DISPATCH_HOST_H
-#define TILEXR_EP_HOST_EP_DISPATCH_HOST_H
+#ifndef TILEXR_EP_HOST_EP_HOST_H
+#define TILEXR_EP_HOST_EP_HOST_H
 
 #include <cstdint>
 
@@ -102,4 +102,4 @@ int TileXREpPrepareMemoryCombineLaunchContext(const EpCombineParams &params, EpH
 
 } // namespace TileXREp
 
-#endif // TILEXR_EP_HOST_EP_DISPATCH_HOST_H
+#endif // TILEXR_EP_HOST_EP_HOST_H

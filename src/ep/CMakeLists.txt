@@ -112,7 +112,7 @@ add_custom_target(tilexr_ep_dispatch_kernel ALL DEPENDS "${TILEXR_EP_DISPATCH_KE
 
 set_source_files_properties("${TILEXR_EP_DISPATCH_MEMORY_KERNEL_SOURCE}" PROPERTIES LANGUAGE CCE)
 set_source_files_properties("${TILEXR_EP_DISPATCH_MEMORY_KERNEL_SOURCE}" PROPERTIES
-    OBJECT_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_ep_mxfp8_quant.h;${CMAKE_SOURCE_DIR}/src/include/comm_args.h;${CMAKE_SOURCE_DIR}/src/include/tilexr_types.h")
+    OBJECT_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_ep_dispatch_memory_kernel.h;${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_ep_mxfp8_quant.h;${CMAKE_SOURCE_DIR}/src/include/comm_args.h;${CMAKE_SOURCE_DIR}/src/include/tilexr_types.h")
 add_library(tilexr_ep_dispatch_memory_kernel_tmp OBJECT
     "${TILEXR_EP_DISPATCH_MEMORY_KERNEL_SOURCE}")
 target_compile_options(tilexr_ep_dispatch_memory_kernel_tmp PRIVATE
@@ -194,7 +194,7 @@ add_custom_target(tilexr_ep_combine_kernel ALL DEPENDS "${TILEXR_EP_COMBINE_KERN
 
 set_source_files_properties("${TILEXR_EP_COMBINE_MEMORY_KERNEL_SOURCE}" PROPERTIES LANGUAGE CCE)
 set_source_files_properties("${TILEXR_EP_COMBINE_MEMORY_KERNEL_SOURCE}" PROPERTIES
-    OBJECT_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_ep_mxfp8_quant.h;${CMAKE_SOURCE_DIR}/src/include/comm_args.h;${CMAKE_SOURCE_DIR}/src/include/tilexr_data_as_flag.h;${CMAKE_SOURCE_DIR}/src/include/tilexr_types.h")
+    OBJECT_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_ep_combine_memory_kernel.h;${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_ep_mxfp8_quant.h;${CMAKE_SOURCE_DIR}/src/include/comm_args.h;${CMAKE_SOURCE_DIR}/src/include/tilexr_data_as_flag.h;${CMAKE_SOURCE_DIR}/src/include/tilexr_types.h")
 add_library(tilexr_ep_combine_memory_kernel_tmp OBJECT
     "${TILEXR_EP_COMBINE_MEMORY_KERNEL_SOURCE}")
 target_compile_options(tilexr_ep_combine_memory_kernel_tmp PRIVATE

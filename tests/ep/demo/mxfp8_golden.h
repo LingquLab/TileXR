@@ -12,7 +12,7 @@ namespace TileXREpDemo {
 
 constexpr std::size_t kMxfp8BlockSize = 32;
 
-enum class Mxfp8Format {
+enum class Mxfp8Format : uint64_t {
     E4M3,
     E5M2,
 };

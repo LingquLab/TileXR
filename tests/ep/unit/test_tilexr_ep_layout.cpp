@@ -1,6 +1,7 @@
 #include <cmath>
 #include <cstdint>
 #include <iostream>
+#include <type_traits>
 #include <vector>
 
 #include "comm_args.h"
@@ -12,6 +13,9 @@
 namespace {
 
 int g_failures = 0;
+
+static_assert(std::is_same<std::underlying_type<TileXREpDemo::Mxfp8Format>::type, uint64_t>::value,
+    "Mxfp8Format must use uint64_t as its underlying type");
 
 void CheckInt64(const char *label, int64_t actual, int64_t expected)
 {
@@ -257,7 +261,7 @@ void TestMemoryWindowConfig()
     CheckInt("combine mxfp8 memory config ret", combineMxfp8Ret, TileXR::TILEXR_SUCCESS);
     CheckInt64("combine mxfp8 blocks", combineConfig.blockCntPerToken, 3);
     CheckInt64("combine mxfp8 packed row", combineConfig.packedRowBytes, 1536);
-    CheckInt64("combine mxfp8 receive UB", combineConfig.receiveUbBytes, 18112);
+    CheckInt64("combine mxfp8 receive UB", combineConfig.receiveUbBytes, 18208);
     CheckInt64("combine mxfp8 send UB", combineConfig.sendUbBytes, 5248);
 
     TileXREp::EpMemoryDispatchReferenceConfig dispatchMxfp8Config {};
@@ -286,14 +290,14 @@ void TestMemoryWindowConfig()
         2, 0, 4, 1024, 2, 1, 1, 1, 8, TileXR::TILEXR_DATA_TYPE_FP16, 4, 48,
         &combineSharedMxfp8Config);
     CheckInt("combine shared mxfp8 UB config ret", combineSharedMxfp8Ret, TileXR::TILEXR_SUCCESS);
-    CheckInt64("combine shared mxfp8 receive UB", combineSharedMxfp8Config.receiveUbBytes, 18304);
+    CheckInt64("combine shared mxfp8 receive UB", combineSharedMxfp8Config.receiveUbBytes, 18464);
 
     TileXREp::EpMemoryCombineReferenceConfig combineLargeMxfp8Config {};
     const int combineLargeMxfp8Ret = TileXREp::TileXREpBuildMemoryCombineReferenceConfig(
         16, 0, 256, 7168, 16, 64, 0, 0, 4096, TileXR::TILEXR_DATA_TYPE_FP16, 4, 200,
         &combineLargeMxfp8Config);
     CheckInt("combine large mxfp8 UB config ret", combineLargeMxfp8Ret, TileXR::TILEXR_SUCCESS);
-    CheckInt64("combine large mxfp8 receive UB", combineLargeMxfp8Config.receiveUbBytes, 134112);
+    CheckInt64("combine large mxfp8 receive UB", combineLargeMxfp8Config.receiveUbBytes, 127936);
 
     const int combineInvalidQuantRet = TileXREp::TileXREpBuildMemoryCombineReferenceConfig(
         8, 0, 4, 1024, 2, 8, 0, 0, 32, TileXR::TILEXR_DATA_TYPE_FP16, 2, 48,
@@ -348,6 +352,13 @@ void TestMemoryWindowRejectsInvalidConfig()
     CheckInt("memory oversized ub", TileXREp::TileXREpBuildMemoryDispatchReferenceConfig(
         2, 0, 1, 60000, 1, 2, 0, 0, 2,
         TileXR::TILEXR_DATA_TYPE_FP16, TileXR::TILEXR_DATA_TYPE_FP16, 0, 48, &config),
+        TileXR::TILEXR_ERROR_PARA_CHECK_FAIL);
+
+    TileXREp::EpMemoryCombineReferenceConfig combineConfig {};
+    CheckInt("combine aligned polling buffers exceed UB",
+        TileXREp::TileXREpBuildMemoryCombineReferenceConfig(
+            2, 0, 193377, 1, 1, 2, 0, 0, 386754,
+            TileXR::TILEXR_DATA_TYPE_FP16, 0, 48, &combineConfig),
         TileXR::TILEXR_ERROR_PARA_CHECK_FAIL);
 }
 

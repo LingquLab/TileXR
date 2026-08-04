@@ -435,7 +435,7 @@ void TestClearLocalWindowDoesNotPreclearSlotHeaders()
 
 void TestMemoryDispatchUsesExternalDataState()
 {
-    const std::string path = "src/ep/kernels/tilexr_ep_dispatch_memory_kernel.cpp";
+    const std::string path = "src/ep/kernels/tilexr_ep_dispatch_memory_kernel.h";
     std::string contents;
     if (!ReadFile(path, &contents)) {
         return;
@@ -451,11 +451,23 @@ void TestMemoryDispatchUsesExternalDataState()
         "ReduceSum(flagSumOutTensor, flagRecvTensor_, flagReduceWorkTensor_, 1U, flagNum, 1U)");
     CheckNotContains(path, contents, "GatherMask(flagGatherOutTensor_");
     CheckNotContains(path, contents, "CompareScalar(flagCompResultU8_");
+    CheckContains(path, contents, "class MoeDistributeDispatchV2FullMesh");
+    CheckNotContains(path, contents,
+        "extern \"C\" __global__ __aicore__ void tilexr_ep_dispatch_memory_kernel");
+
+    const std::string entryPath = "src/ep/kernels/tilexr_ep_dispatch_memory_kernel.cpp";
+    std::string entry;
+    if (ReadFile(entryPath, &entry)) {
+        CheckContains(entryPath, entry, "#include \"tilexr_ep_dispatch_memory_kernel.h\"");
+        CheckContains(entryPath, entry,
+            "extern \"C\" __global__ __aicore__ void tilexr_ep_dispatch_memory_kernel");
+        CheckNotContains(entryPath, entry, "class MoeDistributeDispatchV2FullMesh");
+    }
 }
 
 void TestMemoryKernelUbStagingCoversPackedPayloads()
 {
-    const std::string dispatchPath = "src/ep/kernels/tilexr_ep_dispatch_memory_kernel.cpp";
+    const std::string dispatchPath = "src/ep/kernels/tilexr_ep_dispatch_memory_kernel.h";
     std::string dispatch;
     if (ReadFile(dispatchPath, &dispatch)) {
         CheckContains(dispatchPath, dispatch,
@@ -467,7 +479,7 @@ void TestMemoryKernelUbStagingCoversPackedPayloads()
             "tbufPool0.InitBuffer(inQueue, BUFFER_NUM, inputTensorBytes_)");
     }
 
-    const std::string combinePath = "src/ep/kernels/tilexr_ep_combine_memory_kernel.cpp";
+    const std::string combinePath = "src/ep/kernels/tilexr_ep_combine_memory_kernel.h";
     std::string combine;
     if (ReadFile(combinePath, &combine)) {
         CheckContains(combinePath, combine,
@@ -483,15 +495,25 @@ void TestMemoryKernelUbStagingCoversPackedPayloads()
 
 void TestMemoryCombineUsesRegisteredBinaryLaunch()
 {
-    const std::string kernelPath = "src/ep/kernels/tilexr_ep_combine_memory_kernel.cpp";
-    std::string kernel;
-    if (ReadFile(kernelPath, &kernel)) {
-        CheckContains(kernelPath, kernel,
+    const std::string entryPath = "src/ep/kernels/tilexr_ep_combine_memory_kernel.cpp";
+    std::string entry;
+    if (ReadFile(entryPath, &entry)) {
+        CheckContains(entryPath, entry, "#include \"tilexr_ep_combine_memory_kernel.h\"");
+        CheckContains(entryPath, entry,
             "extern \"C\" __global__ __aicore__ void tilexr_ep_combine_memory_kernel");
-        CheckNotContains(kernelPath, kernel, "<<<blockDim, nullptr, stream>>>");
-        CheckNotContains(kernelPath, kernel, "launch_tilexr_ep_combine_memory_kernel");
-        CheckContains(kernelPath, kernel, "dataState_ = static_cast<uint32_t>(magic) & 1U");
-        CheckNotContains(kernelPath, kernel, "dataState_ = meta.GetValue(0) == 0U ? 1U : 0U");
+        CheckNotContains(entryPath, entry, "class MoeDistributeCombineV2A5Mte");
+        CheckNotContains(entryPath, entry, "<<<blockDim, nullptr, stream>>>");
+        CheckNotContains(entryPath, entry, "launch_tilexr_ep_combine_memory_kernel");
+    }
+
+    const std::string algorithmPath = "src/ep/kernels/tilexr_ep_combine_memory_kernel.h";
+    std::string algorithm;
+    if (ReadFile(algorithmPath, &algorithm)) {
+        CheckContains(algorithmPath, algorithm, "class MoeDistributeCombineV2A5Mte");
+        CheckContains(algorithmPath, algorithm, "dataState_ = static_cast<uint32_t>(magic) & 1U");
+        CheckNotContains(algorithmPath, algorithm, "dataState_ = meta.GetValue(0) == 0U ? 1U : 0U");
+        CheckNotContains(algorithmPath, algorithm,
+            "extern \"C\" __global__ __aicore__ void tilexr_ep_combine_memory_kernel");
     }
 
     const std::string hostPath = "src/ep/host/ep_kernel_launch.cpp";
@@ -510,6 +532,8 @@ void TestMemoryCombineUsesRegisteredBinaryLaunch()
     std::string cmake;
     if (ReadFile(cmakePath, &cmake)) {
         CheckContains(cmakePath, cmake, "tilexr_ep_combine_memory_kernel_tmp OBJECT");
+        CheckContains(cmakePath, cmake, "kernels/tilexr_ep_dispatch_memory_kernel.h");
+        CheckContains(cmakePath, cmake, "kernels/tilexr_ep_combine_memory_kernel.h");
         CheckContains(cmakePath, cmake, "TILEXR_EP_COMBINE_MEMORY_EMBED_CPP");
         CheckContains(cmakePath, cmake, "embed_combine_memory_kernel.cmake");
         CheckOccurrenceCount(cmakePath, cmake, "--cce-auto-sync", 2U);

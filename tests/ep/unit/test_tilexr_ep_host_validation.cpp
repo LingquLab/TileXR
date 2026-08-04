@@ -2,7 +2,7 @@
 #include <iostream>
 
 #include "comm_args.h"
-#include "ep_dispatch_host.h"
+#include "ep_host.h"
 #include "tilexr_types.h"
 
 int TileXRGetCommArgsDev(TileXRCommPtr, GM_ADDR &commArgsPtr)

@@ -1,6 +1,6 @@
 #include "tilexr_ep.h"
 
-#include "ep_dispatch_host.h"
+#include "ep_host.h"
 #include "ep_kernel_launch.h"
 
 namespace {
