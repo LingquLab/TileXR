@@ -2,8 +2,20 @@
 #include <iostream>
 
 #include "comm_args.h"
-#include "ep_dispatch_host.h"
+#include "ep_host.h"
 #include "tilexr_types.h"
+
+int TileXRGetCommArgsDev(TileXRCommPtr, GM_ADDR &commArgsPtr)
+{
+    commArgsPtr = nullptr;
+    return TileXR::TILEXR_ERROR_NOT_INITIALIZED;
+}
+
+int TileXRGetCommArgsHost(TileXRCommPtr, TileXR::CommArgs *&commArgsPtr)
+{
+    commArgsPtr = nullptr;
+    return TileXR::TILEXR_ERROR_NOT_INITIALIZED;
+}
 
 namespace {
 
@@ -48,6 +60,7 @@ TileXREp::EpDispatchParams ValidV2Params()
     static bool xActiveMask[4] = {true, false, true, true};
     TileXREp::EpDispatchParams params = ValidParams();
     params.xActiveMask = xActiveMask;
+    params.activeMaskType = TileXREp::TILEXR_EP_ACTIVE_MASK_TOKEN;
     params.epWorldSize = 2;
     params.epRankId = 0;
     params.tpWorldSize = 1;
@@ -85,6 +98,18 @@ TileXREp::EpDispatchParams ValidPerTokenDynamicQuantParams()
     return params;
 }
 
+TileXREp::EpDispatchParams ValidMemoryMxfp8Params()
+{
+    TileXREp::EpDispatchParams params = ValidV2Params();
+    static uint8_t expandXOutFp8[64] = {};
+    static uint8_t dynamicScalesOut[16] = {};
+    params.expandXOut = expandXOutFp8;
+    params.dynamicScalesOut = dynamicScalesOut;
+    params.quantMode = 4;
+    params.expandXOutDtype = TileXR::TILEXR_DATA_TYPE_FP8E4M3;
+    return params;
+}
+
 TileXREp::EpCombineParams ValidCombineParams()
 {
     static uint16_t expertOut[64] = {};
@@ -104,6 +129,16 @@ TileXREp::EpCombineParams ValidCombineParams()
     params.yOut = yOut;
     params.dtype = TileXR::TILEXR_DATA_TYPE_FP16;
     params.stream = reinterpret_cast<aclrtStream>(0x2000);
+    return params;
+}
+
+TileXREp::EpCombineParams ValidMemoryCombineMxfp8Params(int64_t quantMode)
+{
+    TileXREp::EpCombineParams params = ValidCombineParams();
+    static float expertScales[8] = {1.0f, 0.5f, 1.0f, 0.5f, 1.0f, 0.5f, 1.0f, 0.5f};
+    params.expertScales = expertScales;
+    params.quantMode = quantMode;
+    params.globalBs = 8;
     return params;
 }
 
@@ -139,6 +174,13 @@ TileXR::CommArgs CrossNodeUdmaCommArgs()
     args.udmaInfoPtr = reinterpret_cast<GM_ADDR>(0x30000000);
     args.udmaRegistryPtr = reinterpret_cast<GM_ADDR>(0x40000000);
     return args;
+}
+
+int ValidateMemoryDispatch(
+    const TileXREp::EpDispatchParams &params, const TileXR::CommArgs &commArgs)
+{
+    TileXREp::EpMemoryDispatchReferenceConfig config {};
+    return TileXREp::TileXREpValidateDispatchMemoryConfig(params, commArgs, 48, &config);
 }
 
 void TestBasicValidation()
@@ -186,8 +228,107 @@ void TestCommValidation()
         TileXR::TILEXR_ERROR_NOT_INITIALIZED);
 
     commArgs = CrossNodeCommArgs();
-    CheckInt("cross-node dispatch needs udma registry", TileXREp::TileXREpValidateDispatchConfig(params, commArgs, &window),
+    CheckInt("cross-node dispatch needs udma registry",
+        TileXREp::TileXREpValidateDispatchConfig(params, commArgs, &window),
         TileXR::TILEXR_ERROR_NOT_INITIALIZED);
+
+    commArgs = CrossNodeCommArgs();
+    CheckInt("cross-node memory dispatch config", ValidateMemoryDispatch(params, commArgs),
+        TileXR::TILEXR_SUCCESS);
+
+    commArgs = CrossNodeCommArgs();
+    commArgs.peerMems[1] = nullptr;
+    CheckInt("cross-node memory dispatch missing peer mem", ValidateMemoryDispatch(params, commArgs),
+        TileXR::TILEXR_ERROR_NOT_INITIALIZED);
+
+    params = ValidV2Params();
+    commArgs = ValidCommArgs();
+    params.tpWorldSize = 2;
+    params.epWorldSize = 1;
+    static int32_t memoryTpRecvCountsOut[2] = {};
+    params.tpRecvCountsOut = memoryTpRecvCountsOut;
+    CheckInt("memory dispatch rejects tp", ValidateMemoryDispatch(params, commArgs),
+        TileXR::TILEXR_ERROR_NOT_SUPPORT);
+
+    params = ValidStaticQuantParams();
+    commArgs = ValidCommArgs();
+    CheckInt("memory dispatch rejects static quant", ValidateMemoryDispatch(params, commArgs),
+        TileXR::TILEXR_ERROR_NOT_SUPPORT);
+
+    params = ValidMemoryMxfp8Params();
+    commArgs = ValidCommArgs();
+    CheckInt("memory dispatch supports mxfp8 e4m3", ValidateMemoryDispatch(params, commArgs),
+        TileXR::TILEXR_SUCCESS);
+
+    params = ValidMemoryMxfp8Params();
+    params.expandXOutDtype = TileXR::TILEXR_DATA_TYPE_FP8E5M2;
+    CheckInt("memory dispatch supports mxfp8 e5m2", ValidateMemoryDispatch(params, commArgs),
+        TileXR::TILEXR_SUCCESS);
+
+    params = ValidMemoryMxfp8Params();
+    params.dynamicScalesOut = nullptr;
+    CheckInt("memory mxfp8 requires dynamic scales output", ValidateMemoryDispatch(params, commArgs),
+        TileXR::TILEXR_ERROR_PARA_CHECK_FAIL);
+
+    params = ValidMemoryMxfp8Params();
+    params.expandXOutDtype = TileXR::TILEXR_DATA_TYPE_INT8;
+    CheckInt("memory mxfp8 requires fp8 output dtype", ValidateMemoryDispatch(params, commArgs),
+        TileXR::TILEXR_ERROR_PARA_CHECK_FAIL);
+
+    params = ValidV2Params();
+    params.epWorldSize = 4;
+    params.globalBs = 16;
+    params.sharedExpertNum = 1;
+    params.sharedExpertRankNum = 1;
+    params.moeExpertNum = 6;
+    commArgs = ValidCommArgs();
+    commArgs.rankSize = 4;
+    commArgs.localRankSize = 4;
+    commArgs.peerMems[2] = reinterpret_cast<GM_ADDR>(0x30000000);
+    commArgs.peerMems[3] = reinterpret_cast<GM_ADDR>(0x40000000);
+    CheckInt("memory dispatch supports shared experts", ValidateMemoryDispatch(params, commArgs),
+        TileXR::TILEXR_SUCCESS);
+
+    params = ValidV2Params();
+    params.xActiveMask = nullptr;
+    params.activeMaskType = TileXREp::TILEXR_EP_ACTIVE_MASK_TOKEN;
+    commArgs = ValidCommArgs();
+    CheckInt("memory token mask requires pointer", ValidateMemoryDispatch(params, commArgs),
+        TileXR::TILEXR_ERROR_PARA_CHECK_FAIL);
+
+    params = ValidV2Params();
+    params.activeMaskType = TileXREp::TILEXR_EP_ACTIVE_MASK_NONE;
+    commArgs = ValidCommArgs();
+    CheckInt("memory none mask rejects pointer", ValidateMemoryDispatch(params, commArgs),
+        TileXR::TILEXR_ERROR_PARA_CHECK_FAIL);
+
+    params = ValidV2Params();
+    static bool expertMask[8] = {true, true, false, true, true, false, true, true};
+    params.xActiveMask = expertMask;
+    params.activeMaskType = TileXREp::TILEXR_EP_ACTIVE_MASK_EXPERT;
+    commArgs = ValidCommArgs();
+    CheckInt("memory expert mask supported", ValidateMemoryDispatch(params, commArgs),
+        TileXR::TILEXR_SUCCESS);
+
+    params = ValidV2Params();
+    params.epWorldSize = 8;
+    params.globalBs = 32;
+    params.sharedExpertNum = 2;
+    params.sharedExpertRankNum = 4;
+    params.moeExpertNum = 8;
+    commArgs = ValidCommArgs();
+    commArgs.rankSize = 8;
+    commArgs.localRankSize = 8;
+    for (int rank = 0; rank < commArgs.rankSize; ++rank) {
+        commArgs.peerMems[rank] = reinterpret_cast<GM_ADDR>(0x10000000 + rank * 0x01000000);
+    }
+    CheckInt("memory supports multiple ranks per shared expert",
+        ValidateMemoryDispatch(params, commArgs), TileXR::TILEXR_SUCCESS);
+
+    params.sharedExpertRankNum = 3;
+    CheckInt("memory rejects uneven shared expert groups",
+        ValidateMemoryDispatch(params, commArgs),
+        TileXR::TILEXR_ERROR_PARA_CHECK_FAIL);
 
     commArgs = CrossNodeUdmaCommArgs();
     params = ValidParams();
@@ -251,6 +392,28 @@ void TestCombineValidation()
     params.workspace = reinterpret_cast<void *>(0x50000000);
     CheckInt("cross-node combine config", TileXREp::TileXREpValidateCombineConfig(params, commArgs, &window),
         TileXR::TILEXR_SUCCESS);
+
+    TileXREp::EpMemoryCombineReferenceConfig memoryConfig {};
+    params = ValidMemoryCombineMxfp8Params(3);
+    commArgs = ValidCommArgs();
+    CheckInt("memory combine supports mxfp8 e5m2",
+        TileXREp::TileXREpValidateCombineMemoryConfig(params, commArgs, 48, &memoryConfig),
+        TileXR::TILEXR_SUCCESS);
+
+    params = ValidMemoryCombineMxfp8Params(4);
+    CheckInt("memory combine supports mxfp8 e4m3",
+        TileXREp::TileXREpValidateCombineMemoryConfig(params, commArgs, 48, &memoryConfig),
+        TileXR::TILEXR_SUCCESS);
+
+    params.expertScales = nullptr;
+    CheckInt("memory combine mxfp8 requires expert scales",
+        TileXREp::TileXREpValidateCombineMemoryConfig(params, commArgs, 48, &memoryConfig),
+        TileXR::TILEXR_ERROR_PARA_CHECK_FAIL);
+
+    params = ValidMemoryCombineMxfp8Params(2);
+    CheckInt("memory combine rejects int8 communication quantization",
+        TileXREp::TileXREpValidateCombineMemoryConfig(params, commArgs, 48, &memoryConfig),
+        TileXR::TILEXR_ERROR_NOT_SUPPORT);
 }
 
 void TestV2CapabilityValidation()

@@ -1,5 +1,8 @@
 include(GNUInstallDirs)
 
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/src/collectives/kernels/cmake")
+enable_language(CCE)
+
 find_program(BISHENG_EXECUTABLE bisheng)
 if(NOT BISHENG_EXECUTABLE)
     message(FATAL_ERROR "bisheng not found; source scripts/common_env.sh before configuring with -DTILEXR_BUILD_EP=ON")
@@ -39,9 +42,17 @@ set(TILEXR_EP_KERNEL_COMPILE_OPTIONS
 set(TILEXR_EP_KERNEL_LINK_OPTIONS ${TILEXR_EP_AICORE_ARCH})
 
 set(TILEXR_EP_DISPATCH_KERNEL_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_ep_dispatch_kernel.cpp")
+set(TILEXR_EP_DISPATCH_MEMORY_KERNEL_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_ep_dispatch_memory_kernel.cpp")
 set(TILEXR_EP_COMBINE_KERNEL_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_ep_combine_kernel.cpp")
+set(TILEXR_EP_COMBINE_MEMORY_KERNEL_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_ep_combine_memory_kernel.cpp")
 set(TILEXR_EP_DISPATCH_KERNEL_SO "${CMAKE_CURRENT_BINARY_DIR}/libtilexr_ep_dispatch_kernel.so")
+set(TILEXR_EP_DISPATCH_MEMORY_OP "${CMAKE_CURRENT_BINARY_DIR}/tilexr_ep_dispatch_memory_kernel.o")
+set(TILEXR_EP_DISPATCH_MEMORY_EMBED_CPP
+    "${CMAKE_CURRENT_BINARY_DIR}/tilexr_ep_dispatch_memory_kernel_embed.cpp")
 set(TILEXR_EP_COMBINE_KERNEL_SO "${CMAKE_CURRENT_BINARY_DIR}/libtilexr_ep_combine_kernel.so")
+set(TILEXR_EP_COMBINE_MEMORY_OP "${CMAKE_CURRENT_BINARY_DIR}/tilexr_ep_combine_memory_kernel.o")
+set(TILEXR_EP_COMBINE_MEMORY_EMBED_CPP
+    "${CMAKE_CURRENT_BINARY_DIR}/tilexr_ep_combine_memory_kernel_embed.cpp")
 set(TILEXR_EP_KERNEL_INCLUDES
     -I${ASCEND_HOME_PATH}/compiler/tikcpp
     -I${ASCEND_HOME_PATH}/compiler/tikcpp/tikcfw
@@ -51,6 +62,7 @@ set(TILEXR_EP_KERNEL_INCLUDES
     -I${ASCEND_HOME_PATH}/${ARCH}-linux/tikcpp/tikcfw
     -I${ASCEND_HOME_PATH}/${ARCH}-linux/tikcpp/tikcfw/impl
     -I${ASCEND_HOME_PATH}/${ARCH}-linux/tikcpp/tikcfw/interface
+    -I${ASCEND_HOME_PATH}/${ARCH}-linux/asc/include
     -I${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc
     -I${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc/runtime
     -I${ASCEND_HOME_PATH}/${ARCH}-linux/runtime/include
@@ -98,6 +110,51 @@ add_custom_command(
 )
 add_custom_target(tilexr_ep_dispatch_kernel ALL DEPENDS "${TILEXR_EP_DISPATCH_KERNEL_SO}")
 
+set_source_files_properties("${TILEXR_EP_DISPATCH_MEMORY_KERNEL_SOURCE}" PROPERTIES LANGUAGE CCE)
+set_source_files_properties("${TILEXR_EP_DISPATCH_MEMORY_KERNEL_SOURCE}" PROPERTIES
+    OBJECT_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_ep_dispatch_memory_kernel.h;${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_ep_mxfp8_quant.h;${CMAKE_SOURCE_DIR}/src/include/comm_args.h;${CMAKE_SOURCE_DIR}/src/include/tilexr_types.h")
+add_library(tilexr_ep_dispatch_memory_kernel_tmp OBJECT
+    "${TILEXR_EP_DISPATCH_MEMORY_KERNEL_SOURCE}")
+target_compile_options(tilexr_ep_dispatch_memory_kernel_tmp PRIVATE
+    -O2
+    -std=gnu++17
+    --cce-aicore-only
+    --cce-auto-sync
+    -Wno-deprecated-declarations
+    "SHELL:-mllvm -cce-aicore-stack-size=0x8000"
+    "SHELL:-mllvm -cce-aicore-function-stack-size=0x8000"
+    "SHELL:-mllvm -cce-aicore-record-overflow=true"
+    "SHELL:-mllvm -cce-aicore-addr-transform"
+    "SHELL:-mllvm -cce-aicore-dcci-insert-for-scalar=false"
+    ${TILEXR_EP_AICORE_ARCH}
+    ${TILEXR_EP_KERNEL_INCLUDES})
+target_compile_definitions(tilexr_ep_dispatch_memory_kernel_tmp PRIVATE
+    CATLASS_ARCH=${TILEXR_EP_CATLASS_ARCH})
+
+set(TILEXR_EP_DISPATCH_MEMORY_TMP_OBJECT
+    "${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/tilexr_ep_dispatch_memory_kernel_tmp.dir/kernels/tilexr_ep_dispatch_memory_kernel.cpp.o")
+add_custom_command(
+    OUTPUT "${TILEXR_EP_DISPATCH_MEMORY_OP}"
+    COMMAND ${CMAKE_CCE_LINKER} -m aicorelinux -Ttext=0
+        "${TILEXR_EP_DISPATCH_MEMORY_TMP_OBJECT}"
+        --static -o "${TILEXR_EP_DISPATCH_MEMORY_OP}" --allow-multiple-definition
+    COMMAND truncate -c -s 10485760 "${TILEXR_EP_DISPATCH_MEMORY_OP}"
+    DEPENDS tilexr_ep_dispatch_memory_kernel_tmp "${TILEXR_EP_DISPATCH_MEMORY_TMP_OBJECT}"
+    VERBATIM
+    COMMENT "Linking TileXR EP memory dispatch AICore binary")
+
+add_custom_command(
+    OUTPUT "${TILEXR_EP_DISPATCH_MEMORY_EMBED_CPP}"
+    COMMAND ${CMAKE_COMMAND}
+        -DTILEXR_EP_DISPATCH_MEMORY_OP=${TILEXR_EP_DISPATCH_MEMORY_OP}
+        -DTILEXR_EP_DISPATCH_MEMORY_EMBED_CPP=${TILEXR_EP_DISPATCH_MEMORY_EMBED_CPP}
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_dispatch_memory_kernel.cmake"
+    DEPENDS "${TILEXR_EP_DISPATCH_MEMORY_OP}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_dispatch_memory_kernel.cmake"
+    VERBATIM)
+add_custom_target(tilexr_ep_dispatch_memory_kernel ALL
+    DEPENDS "${TILEXR_EP_DISPATCH_MEMORY_OP}" "${TILEXR_EP_DISPATCH_MEMORY_EMBED_CPP}")
+
 add_custom_command(
     OUTPUT "${TILEXR_EP_COMBINE_KERNEL_SO}"
     COMMAND ${BISHENG_EXECUTABLE}
@@ -135,15 +192,68 @@ add_custom_command(
 )
 add_custom_target(tilexr_ep_combine_kernel ALL DEPENDS "${TILEXR_EP_COMBINE_KERNEL_SO}")
 
+set_source_files_properties("${TILEXR_EP_COMBINE_MEMORY_KERNEL_SOURCE}" PROPERTIES LANGUAGE CCE)
+set_source_files_properties("${TILEXR_EP_COMBINE_MEMORY_KERNEL_SOURCE}" PROPERTIES
+    OBJECT_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_ep_combine_memory_kernel.h;${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_ep_mxfp8_quant.h;${CMAKE_SOURCE_DIR}/src/include/comm_args.h;${CMAKE_SOURCE_DIR}/src/include/tilexr_data_as_flag.h;${CMAKE_SOURCE_DIR}/src/include/tilexr_types.h")
+add_library(tilexr_ep_combine_memory_kernel_tmp OBJECT
+    "${TILEXR_EP_COMBINE_MEMORY_KERNEL_SOURCE}")
+target_compile_options(tilexr_ep_combine_memory_kernel_tmp PRIVATE
+    -O2
+    -std=gnu++17
+    --cce-aicore-only
+    --cce-auto-sync
+    -Wno-deprecated-declarations
+    "SHELL:-mllvm -cce-aicore-stack-size=0x8000"
+    "SHELL:-mllvm -cce-aicore-function-stack-size=0x8000"
+    "SHELL:-mllvm -cce-aicore-record-overflow=true"
+    "SHELL:-mllvm -cce-aicore-addr-transform"
+    "SHELL:-mllvm -cce-aicore-dcci-insert-for-scalar=false"
+    ${TILEXR_EP_AICORE_ARCH}
+    ${TILEXR_EP_KERNEL_INCLUDES})
+target_compile_definitions(tilexr_ep_combine_memory_kernel_tmp PRIVATE
+    CATLASS_ARCH=${TILEXR_EP_CATLASS_ARCH})
+
+set(TILEXR_EP_COMBINE_MEMORY_TMP_OBJECT
+    "${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/tilexr_ep_combine_memory_kernel_tmp.dir/kernels/tilexr_ep_combine_memory_kernel.cpp.o")
+add_custom_command(
+    OUTPUT "${TILEXR_EP_COMBINE_MEMORY_OP}"
+    COMMAND ${CMAKE_CCE_LINKER} -m aicorelinux -Ttext=0
+        "${TILEXR_EP_COMBINE_MEMORY_TMP_OBJECT}"
+        --static -o "${TILEXR_EP_COMBINE_MEMORY_OP}" --allow-multiple-definition
+    COMMAND truncate -c -s 10485760 "${TILEXR_EP_COMBINE_MEMORY_OP}"
+    DEPENDS tilexr_ep_combine_memory_kernel_tmp "${TILEXR_EP_COMBINE_MEMORY_TMP_OBJECT}"
+    VERBATIM
+    COMMENT "Linking TileXR EP memory combine AICore binary")
+
+add_custom_command(
+    OUTPUT "${TILEXR_EP_COMBINE_MEMORY_EMBED_CPP}"
+    COMMAND ${CMAKE_COMMAND}
+        -DTILEXR_EP_COMBINE_MEMORY_OP=${TILEXR_EP_COMBINE_MEMORY_OP}
+        -DTILEXR_EP_COMBINE_MEMORY_EMBED_CPP=${TILEXR_EP_COMBINE_MEMORY_EMBED_CPP}
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_combine_memory_kernel.cmake"
+    DEPENDS "${TILEXR_EP_COMBINE_MEMORY_OP}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_combine_memory_kernel.cmake"
+    VERBATIM)
+add_custom_target(tilexr_ep_combine_memory_kernel ALL
+    DEPENDS "${TILEXR_EP_COMBINE_MEMORY_OP}" "${TILEXR_EP_COMBINE_MEMORY_EMBED_CPP}")
+
 add_library(tilexr-ep SHARED
     host/ep_layout.cpp
+    host/ep_memory_layout.cpp
     host/ep_dispatch_host.cpp
+    host/ep_dispatch_memory_host.cpp
+    host/ep_combine_memory_host.cpp
     host/ep_launch_context.cpp
     host/ep_kernel_launch.cpp
     host/tilexr_ep_dispatch.cpp
+    host/tilexr_ep_memory_dispatch.cpp
+    host/tilexr_ep_memory_combine.cpp
+    "${TILEXR_EP_DISPATCH_MEMORY_EMBED_CPP}"
+    "${TILEXR_EP_COMBINE_MEMORY_EMBED_CPP}"
 )
 
-add_dependencies(tilexr-ep tilexr_ep_dispatch_kernel tilexr_ep_combine_kernel)
+add_dependencies(tilexr-ep tilexr_ep_dispatch_kernel tilexr_ep_dispatch_memory_kernel tilexr_ep_combine_kernel
+    tilexr_ep_combine_memory_kernel)
 
 target_include_directories(tilexr-ep
     PUBLIC

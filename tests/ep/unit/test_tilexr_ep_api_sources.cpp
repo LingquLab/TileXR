@@ -229,6 +229,21 @@ void TestDemoRunnerUsesLibAndLib64Paths()
     CheckContains("tests/ep/demo/run_tilexr_ep_dispatch_demo.sh", runner, "${INSTALL_DIR}/lib");
 }
 
+void TestDemoRunnerSelectsBackendForSoc()
+{
+    std::string runner;
+    if (!ReadFile("tests/ep/demo/run_tilexr_ep_dispatch_demo.sh", &runner)) {
+        return;
+    }
+
+    CheckContains("tests/ep/demo/run_tilexr_ep_dispatch_demo.sh", runner,
+        "ascend950*) default_impl=\"udma\" ;;");
+    CheckContains("tests/ep/demo/run_tilexr_ep_dispatch_demo.sh", runner,
+        "*) default_impl=\"memory\" ;;");
+    CheckContains("tests/ep/demo/run_tilexr_ep_dispatch_demo.sh", runner,
+        "impl=\"${5:-${TILEXR_EP_DEMO_IMPL:-${default_impl}}}\"");
+}
+
 void TestDispatchDemoRegistersAlignedUdmaWorkspace()
 {
     std::string demo;
@@ -299,6 +314,7 @@ int main()
     TestRemoteDeployScriptDoesNotInitializeSubmodules();
     TestRemoteDeployScriptDoesNotExposePrivateRemoteDefaults();
     TestDemoRunnerUsesLibAndLib64Paths();
+    TestDemoRunnerSelectsBackendForSoc();
     TestDispatchDemoRegistersAlignedUdmaWorkspace();
     TestDispatchDemoUsesHostBarrierBeforeValidation();
     TestNoForbiddenDependencies();

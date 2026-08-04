@@ -415,6 +415,13 @@ class ControlSourceContractTests(unittest.TestCase):
         ]:
             self.assertIn(token, text)
 
+    def test_910b_hardware_manifest_uses_memory_ep_backend(self):
+        text = self.read("scripts/ci/control/run_hardware.sh")
+        self.assertRegex(
+            text,
+            r'run_tilexr_ep_dispatch_demo[.]sh"\s+8\s+8\s+0\s+100\s+memory',
+        )
+
     def test_every_multirank_launch_has_external_ten_minute_timeout(self):
         text = self.read("scripts/ci/control/run_hardware.sh")
         timeout = "/usr/bin/timeout --signal=TERM --kill-after=10 600"

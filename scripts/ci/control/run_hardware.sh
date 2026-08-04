@@ -323,7 +323,7 @@ run_case memory-eight-rank \
     bash "${SOURCE_DIR}/tests/memory/demo/run_tilexr_memory_demo.sh" 8 1024 8 0
 run_case ep-eight-rank \
     /usr/bin/timeout --signal=TERM --kill-after=10 600 \
-    bash "${SOURCE_DIR}/tests/ep/demo/run_tilexr_ep_dispatch_demo.sh" 8 8 0
+    bash "${SOURCE_DIR}/tests/ep/demo/run_tilexr_ep_dispatch_demo.sh" 8 8 0 100 memory
 
 for op in allgather allreduce reducescatter; do
     run_case "collectives-correctness-${op}" run_in_dir \

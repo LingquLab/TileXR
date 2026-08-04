@@ -193,16 +193,12 @@ __aicore__ inline void DataAsFlagCopyScratchToDataAsFlagGM(
     AscendC::LocalTensor<uint8_t>& sendScratch,
     uint32_t batchBlocks)
 {
-    AscendC::GlobalTensor<uint8_t> dstGlobal;
-    dstGlobal.SetGlobalBuffer(
-        dstDataAsFlagGM + static_cast<uint64_t>(dstBlockOffset) * DATA_AS_FLAG_BLOCK_BYTES);
-    AscendC::DataCopyExtParams outParams {
-        1U,
-        batchBlocks * DATA_AS_FLAG_BLOCK_BYTES,
-        0U,
-        0U,
-        0U};
-    AscendC::DataCopyPad(dstGlobal, sendScratch, outParams);
+    AscendC::GlobalTensor<float> dstGlobal;
+    dstGlobal.SetGlobalBuffer(reinterpret_cast<__gm__ float*>(
+        dstDataAsFlagGM + static_cast<uint64_t>(dstBlockOffset) * DATA_AS_FLAG_BLOCK_BYTES));
+    AscendC::LocalTensor<float> sendFloat = sendScratch.template ReinterpretCast<float>();
+    AscendC::DataCopy(dstGlobal, sendFloat,
+        batchBlocks * DATA_AS_FLAG_BLOCK_BYTES / sizeof(float));
 }
 
 __aicore__ inline uint32_t DataAsFlagSend(
@@ -287,7 +283,7 @@ __aicore__ inline bool DataAsFlagCheckBatch(
     AscendC::Sum<float>(sumOut, flagLocal, sharedTmpBuffer, sumParams);
     AscendC::SetFlag<AscendC::HardEvent::V_S>(EVENT_ID0);
     AscendC::WaitFlag<AscendC::HardEvent::V_S>(EVENT_ID0);
-    return sumOut.GetValue(0) == static_cast<float>(batchBlocks);
+    return sumOut.GetValue(0) == 1.0f * batchBlocks;
 }
 
 __aicore__ inline bool DataAsFlagCheck(
