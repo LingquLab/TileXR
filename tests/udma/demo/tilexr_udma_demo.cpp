@@ -278,7 +278,7 @@ bool WriteGroupTraceBinary(
     return true;
 }
 
-BarrierEndpoint GetBarrierEndpoint()
+BarrierEndpoint GetBarrierEndpoint(uint32_t sequence)
 {
     std::string host = "127.0.0.1";
     int basePort = kDefaultCommPort;
@@ -297,9 +297,10 @@ BarrierEndpoint GetBarrierEndpoint()
             basePort = std::atoi(value.c_str() + colon + 1);
         }
     }
-    int barrierPort = basePort + kDemoBarrierPortOffset;
+    int barrierPort = basePort + kDemoBarrierPortOffset + static_cast<int>(sequence);
     if (barrierPort <= 0 || barrierPort > 65535) {
-        barrierPort = kDefaultCommPort + kDemoBarrierPortOffset;
+        barrierPort = kDefaultCommPort + kDemoBarrierPortOffset +
+            static_cast<int>(sequence);
     }
     return BarrierEndpoint{host, static_cast<uint16_t>(barrierPort)};
 }
@@ -396,7 +397,8 @@ bool DemoBarrierAll(int rank, int rankSize, const std::string& step)
         return true;
     }
 
-    BarrierEndpoint endpoint = GetBarrierEndpoint();
+    static uint32_t barrierSequence = 0U;
+    BarrierEndpoint endpoint = GetBarrierEndpoint(barrierSequence++);
     PrintStatus(rank, "demo tcp barrier begin: " + step +
         " host=" + endpoint.host + " port=" + std::to_string(endpoint.port));
     constexpr uint8_t kArrive = 1;
