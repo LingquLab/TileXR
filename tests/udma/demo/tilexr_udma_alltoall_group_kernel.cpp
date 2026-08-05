@@ -614,8 +614,9 @@ __aicore__ inline void AllToAllGroupTraceRecordSimtTask(
     uint64_t beginCycle, uint64_t endCycle, uint32_t pollCount = 0U)
 {
     const uint32_t worker = batch->worker[task];
+    const uint32_t traceCore = worker == 0U ? 0U : 32U + worker;
     AllToAllGroupTraceRecordTask(
-        trace, iteration, TileXR::Demo::AllToAllGroupTraceSimtStorageCore(worker),
+        trace, iteration, traceCore,
         batch->group[task], batch->pass[task], phase, groupCount, passCount,
         static_cast<int32_t>(batch->peer[task]), batch->qpIdx[task],
         beginCycle, endCycle, worker, worker / 16U, batch->byteCount[task], pollCount);
