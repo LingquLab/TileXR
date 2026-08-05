@@ -1034,8 +1034,7 @@ __aicore__ inline bool AllToAllGroupFlushSimt(
         reinterpret_cast<__gm__ uint8_t*>(debug) +
             TILEXR_ALLTOALL_GROUP_ERROR_BYTES,
         static_cast<uint64_t>(taskCount) * sizeof(uint64_t));
-    TileXR::Demo::AllToAllGroupSimtPost(
-        batch, queueCount, udmaInfo, queueDiag != nullptr ? 1U : 0U);
+    TileXR::Demo::AllToAllGroupSimtPost(batch, queueCount, udmaInfo);
     for (uint32_t task = 0U; task < taskCount; ++task) {
         if (batch->active[task] == 0U) {
             continue;
@@ -1072,8 +1071,7 @@ __aicore__ inline bool AllToAllGroupFlushSimt(
         }
     }
     const uint64_t quietBegin = AllToAllGroupTraceCycle(trace);
-    TileXR::Demo::AllToAllGroupSimtQuiet(
-        batch, queueCount, udmaInfo, queueDiag != nullptr ? 1U : 0U);
+    TileXR::Demo::AllToAllGroupSimtQuiet(batch, queueCount, udmaInfo);
     const uint64_t quietEnd = AllToAllGroupTraceCycle(trace);
     for (uint32_t queue = 0U; queue < queueCount; ++queue) {
         if (batch->active[queue] == 0U) {
@@ -1090,30 +1088,36 @@ __aicore__ inline bool AllToAllGroupFlushSimt(
                 batch->queuePollCount[queue]);
         }
         if (queueDiag != nullptr) {
+            const uint32_t completedTail = batch->queueCompletedTail[queue];
+            const uint32_t cqeIndex = batch->queueQuietStatus[queue] == 0U &&
+                completedTail != 0U ? completedTail - 1U : completedTail;
             auto diagWq = TileXR::UDMAGetWQCtx(
                 udmaInfo, batch->queuePeer[queue], batch->queueQpIdx[queue]);
             auto diagCq = TileXR::UDMAGetSCQCtx(
                 udmaInfo, batch->queuePeer[queue], batch->queueQpIdx[queue]);
+            const uint32_t wqeCount = queueTasks *
+                TileXR::Demo::kAllToAllGroupSimtWqesPerTask;
+            const uint32_t headBefore = batch->queueHead[queue] - wqeCount;
+            const uint32_t wqeCntBefore =
+                batch->queueExpectedCount[queue] - wqeCount;
+            const uint32_t cqeSize = 1U << diagCq->baseBkShift;
+            auto cqeWord = reinterpret_cast<__gm__ uint32_t*>(
+                diagCq->bufAddr + static_cast<uint64_t>(cqeSize) *
+                    (cqeIndex & (TileXR::TILEXR_UDMA_CQ_DEPTH - 1U)));
             AllToAllGroupQueueDiagCapturePost(
                 queueDiag, TileXR::Demo::kAllToAllGroupQueueDiagModeSimt,
                 blockIdx, invocationId, batch->group[taskBegin],
                 batch->pass[taskBegin],
                 static_cast<int32_t>(batch->peer[taskBegin]),
                 batch->qpIdx[taskBegin], diagWq, diagCq,
-                batch->queueHeadBefore[queue], batch->reservedHead[taskBegin],
-                batch->queueHead[queue], batch->queueWqeCntBefore[queue],
-                batch->queueExpectedCount[queue], queueTasks *
-                    TileXR::Demo::kAllToAllGroupSimtWqesPerTask);
+                headBefore, batch->reservedHead[taskBegin],
+                batch->queueHead[queue], wqeCntBefore,
+                batch->queueExpectedCount[queue], wqeCount);
             AllToAllGroupQueueDiagCaptureQuiet(
                 queueDiag, diagWq, diagCq,
-                batch->queueTailAtQuietBegin[queue],
+                wqeCntBefore,
                 batch->queueExpectedCount[queue],
-                batch->queueCompletedTail[queue],
-                batch->queueQuietStatus[queue] == 0U &&
-                    batch->queueCompletedTail[queue] != 0U ?
-                    batch->queueCompletedTail[queue] - 1U :
-                    batch->queueCompletedTail[queue],
-                batch->queueRawCqeWord[queue],
+                completedTail, cqeIndex, AllToAllGroupQueueDiagLoad(cqeWord),
                 batch->queuePollCount[queue], batch->queueQuietStatus[queue],
                 quietBegin);
         }
@@ -1162,10 +1166,10 @@ __aicore__ inline bool AllToAllGroupFlushSplitSimt(
     }
     if (postPhase == TileXR::Demo::kAllToAllGroupSimtPostPayload) {
         TileXR::Demo::AllToAllGroupSimtPostPayload(
-            batch, queueCount, udmaInfo, queueDiag != nullptr ? 1U : 0U);
+            batch, queueCount, udmaInfo);
     } else {
         TileXR::Demo::AllToAllGroupSimtPostSignal(
-            batch, queueCount, udmaInfo, queueDiag != nullptr ? 1U : 0U);
+            batch, queueCount, udmaInfo);
     }
     for (uint32_t task = 0U; task < taskCount; ++task) {
         if (batch->active[task] == 0U) {
@@ -1207,8 +1211,7 @@ __aicore__ inline bool AllToAllGroupFlushSplitSimt(
         }
     }
     const uint64_t quietBegin = AllToAllGroupTraceCycle(trace);
-    TileXR::Demo::AllToAllGroupSimtQuiet(
-        batch, queueCount, udmaInfo, queueDiag != nullptr ? 1U : 0U);
+    TileXR::Demo::AllToAllGroupSimtQuiet(batch, queueCount, udmaInfo);
     const uint64_t quietEnd = AllToAllGroupTraceCycle(trace);
     for (uint32_t queue = 0U; queue < queueCount; ++queue) {
         if (batch->active[queue] == 0U) {
@@ -1225,18 +1228,27 @@ __aicore__ inline bool AllToAllGroupFlushSplitSimt(
                 batch->queuePollCount[queue]);
         }
         if (queueDiag != nullptr) {
+            const uint32_t completedTail = batch->queueCompletedTail[queue];
+            const uint32_t cqeIndex = batch->queueQuietStatus[queue] == 0U &&
+                completedTail != 0U ? completedTail - 1U : completedTail;
             auto diagWq = TileXR::UDMAGetWQCtx(
                 udmaInfo, batch->queuePeer[queue], batch->queueQpIdx[queue]);
             auto diagCq = TileXR::UDMAGetSCQCtx(
                 udmaInfo, batch->queuePeer[queue], batch->queueQpIdx[queue]);
             const bool signalPhase =
                 postPhase == TileXR::Demo::kAllToAllGroupSimtPostSignal;
+            const uint32_t phaseWqeCount = queueTasks;
+            const uint32_t totalWqeCount = signalPhase ?
+                queueTasks * 2U : queueTasks;
             const uint32_t diagBegin = signalPhase ?
                 batch->reservedHead[taskBegin] - 1U :
                 batch->reservedHead[taskBegin];
-            const uint32_t diagWqeCntBefore = signalPhase ?
-                batch->queueWqeCntBefore[queue] - 1U :
-                batch->queueWqeCntBefore[queue];
+            const uint32_t diagWqeCntBefore =
+                batch->queueExpectedCount[queue] - totalWqeCount;
+            const uint32_t cqeSize = 1U << diagCq->baseBkShift;
+            auto cqeWord = reinterpret_cast<__gm__ uint32_t*>(
+                diagCq->bufAddr + static_cast<uint64_t>(cqeSize) *
+                    (cqeIndex & (TileXR::TILEXR_UDMA_CQ_DEPTH - 1U)));
             AllToAllGroupQueueDiagCapturePost(
                 queueDiag, TileXR::Demo::kAllToAllGroupQueueDiagModeSimt,
                 blockIdx, invocationId, batch->group[taskBegin],
@@ -1244,17 +1256,13 @@ __aicore__ inline bool AllToAllGroupFlushSplitSimt(
                 static_cast<int32_t>(batch->peer[taskBegin]),
                 batch->qpIdx[taskBegin], diagWq, diagCq, diagBegin, diagBegin,
                 batch->queueHead[queue], diagWqeCntBefore,
-                batch->queueExpectedCount[queue], signalPhase ? 2U : queueTasks);
+                batch->queueExpectedCount[queue], signalPhase ?
+                    totalWqeCount : phaseWqeCount);
             AllToAllGroupQueueDiagCaptureQuiet(
                 queueDiag, diagWq, diagCq,
-                batch->queueTailAtQuietBegin[queue],
+                diagWqeCntBefore,
                 batch->queueExpectedCount[queue],
-                batch->queueCompletedTail[queue],
-                batch->queueQuietStatus[queue] == 0U &&
-                    batch->queueCompletedTail[queue] != 0U ?
-                    batch->queueCompletedTail[queue] - 1U :
-                    batch->queueCompletedTail[queue],
-                batch->queueRawCqeWord[queue],
+                completedTail, cqeIndex, AllToAllGroupQueueDiagLoad(cqeWord),
                 batch->queuePollCount[queue], batch->queueQuietStatus[queue],
                 quietBegin);
         }
