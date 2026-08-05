@@ -181,6 +181,46 @@ inline int32_t AllToAllGroupPeer(
         group >= AllToAllGroupCount(rankSize, groupWidth)) {
         return -1;
     }
+    if (rankSize == 128 && groupWidth == kAllToAllGroupWidth) {
+        constexpr int32_t partitionSize = 64;
+        const int32_t partitionBase = rank / partitionSize * partitionSize;
+        const int32_t oppositeBase = partitionSize - partitionBase;
+        const int32_t partitionRank = rank % partitionSize;
+        if (lane < kAllToAllGroupHalfWidth) {
+            constexpr uint32_t sideWidth = kAllToAllGroupHalfWidth / 2U;
+            const uint32_t index = lane < sideWidth ? lane : lane - sideWidth;
+            const int32_t distance = static_cast<int32_t>(
+                group * sideWidth + index + 1U);
+            if (distance > partitionSize / 2 ||
+                (lane >= sideWidth && distance == partitionSize / 2)) {
+                return -1;
+            }
+            const int32_t peer = lane < sideWidth ?
+                (partitionRank + distance) % partitionSize :
+                (partitionRank - distance + partitionSize) % partitionSize;
+            return partitionBase + peer;
+        }
+
+        const uint32_t remoteLane = lane - kAllToAllGroupHalfWidth;
+        int32_t offset = 0;
+        if (group == 0U) {
+            // Zero and the diameter are self-inverse, so they share one group.
+            if (remoteLane < 4U) {
+                offset = static_cast<int32_t>(remoteLane);
+            } else if (remoteLane == 4U) {
+                offset = partitionSize / 2;
+            } else {
+                offset = -static_cast<int32_t>(remoteLane - 4U);
+            }
+        } else {
+            const uint32_t index = remoteLane < 4U ?
+                remoteLane : remoteLane - 4U;
+            const int32_t distance = static_cast<int32_t>(group * 4U + index);
+            offset = remoteLane < 4U ? distance : -distance;
+        }
+        return oppositeBase +
+            (partitionRank + offset + partitionSize) % partitionSize;
+    }
     const uint32_t halfWidth = groupWidth / 2U;
     const uint32_t index = lane < halfWidth ? lane : lane - halfWidth;
     const int32_t distance = static_cast<int32_t>(

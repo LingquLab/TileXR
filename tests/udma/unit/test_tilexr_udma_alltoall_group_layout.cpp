@@ -120,6 +120,75 @@ void TestSchedules()
     CHECK_EQ(TileXR::Demo::AllToAllGroupPeer(0, 16, 0, 4, width), -1);
 }
 
+void Test128PartitionBalancedSchedule()
+{
+    constexpr int rankSize = 128;
+    constexpr uint32_t groupWidth = TileXR::Demo::kAllToAllGroupWidth;
+    constexpr uint32_t groupCount = 8U;
+    const int expectedRank0[groupCount][groupWidth] = {
+        {1, 2, 3, 4, 63, 62, 61, 60,
+            64, 65, 66, 67, 96, 127, 126, 125},
+        {5, 6, 7, 8, 59, 58, 57, 56,
+            68, 69, 70, 71, 124, 123, 122, 121},
+        {9, 10, 11, 12, 55, 54, 53, 52,
+            72, 73, 74, 75, 120, 119, 118, 117},
+        {13, 14, 15, 16, 51, 50, 49, 48,
+            76, 77, 78, 79, 116, 115, 114, 113},
+        {17, 18, 19, 20, 47, 46, 45, 44,
+            80, 81, 82, 83, 112, 111, 110, 109},
+        {21, 22, 23, 24, 43, 42, 41, 40,
+            84, 85, 86, 87, 108, 107, 106, 105},
+        {25, 26, 27, 28, 39, 38, 37, 36,
+            88, 89, 90, 91, 104, 103, 102, 101},
+        {29, 30, 31, 32, 35, 34, 33, -1,
+            92, 93, 94, 95, 100, 99, 98, 97},
+    };
+
+    for (uint32_t group = 0U; group < groupCount; ++group) {
+        for (uint32_t lane = 0U; lane < groupWidth; ++lane) {
+            CHECK_EQ(TileXR::Demo::AllToAllGroupPeer(
+                0, rankSize, group, lane), expectedRank0[group][lane]);
+        }
+    }
+
+    for (int rank = 0; rank < rankSize; ++rank) {
+        const int partition = rank / 64;
+        std::set<int> peers;
+        for (uint32_t group = 0U; group < groupCount; ++group) {
+            uint32_t localPeers = 0U;
+            uint32_t remotePeers = 0U;
+            for (uint32_t lane = 0U; lane < groupWidth; ++lane) {
+                const int peer = TileXR::Demo::AllToAllGroupPeer(
+                    rank, rankSize, group, lane);
+                if (peer < 0) {
+                    CHECK_EQ(group, groupCount - 1U);
+                    CHECK_EQ(lane, 7U);
+                    continue;
+                }
+                CHECK_EQ(peers.insert(peer).second, true);
+                if (peer / 64 == partition) {
+                    ++localPeers;
+                    CHECK_EQ(lane < 8U, true);
+                } else {
+                    ++remotePeers;
+                    CHECK_EQ(lane >= 8U, true);
+                }
+                bool reciprocal = false;
+                for (uint32_t remoteLane = 0U;
+                     remoteLane < groupWidth; ++remoteLane) {
+                    reciprocal = reciprocal ||
+                        TileXR::Demo::AllToAllGroupPeer(
+                            peer, rankSize, group, remoteLane) == rank;
+                }
+                CHECK_EQ(reciprocal, true);
+            }
+            CHECK_EQ(localPeers, group + 1U == groupCount ? 7U : 8U);
+            CHECK_EQ(remotePeers, 8U);
+        }
+        CHECK_EQ(peers.size(), static_cast<size_t>(rankSize - 1));
+    }
+}
+
 void TestPlan()
 {
     constexpr int rankSize = 16;
@@ -833,6 +902,7 @@ void TestHostStructure()
 int main()
 {
     TestSchedules();
+    Test128PartitionBalancedSchedule();
     TestPlan();
     TestChannelPolicy();
     TestScalePlanAndTraceCapacity();
