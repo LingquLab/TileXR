@@ -332,7 +332,7 @@ def build_chrome_trace(rank_traces):
                             if task is None:
                                 continue
                             (begin, end, peer, qp, task_worker, route,
-                             byte_count, _, _) = task
+                             byte_count, poll_count, _) = task
                             if task_worker != worker or route > 1:
                                 raise ValueError(
                                     f"invalid SIMT task metadata in {label}: "
@@ -351,6 +351,7 @@ def build_chrome_trace(rank_traces):
                                     "peer": peer,
                                     "qp": None if qp == NO_QP else qp,
                                     "bytes": byte_count,
+                                    "cqPolls": poll_count if phase == 2 else 0,
                                     "role": "send",
                                 },
                                 offset_us,

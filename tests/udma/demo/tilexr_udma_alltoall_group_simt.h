@@ -41,7 +41,6 @@ struct AllToAllGroupSimtBatch {
     uint32_t worker[kAllToAllGroupSimtMaxTasks];
     uint32_t group[kAllToAllGroupSimtMaxTasks];
     uint32_t pass[kAllToAllGroupSimtMaxTasks];
-    uint64_t postBegin[kAllToAllGroupSimtMaxTasks];
     uint32_t reservedHead[kAllToAllGroupSimtMaxTasks];
     uint32_t queuePeer[kAllToAllGroupSimtMaxQueues];
     uint32_t queueQpIdx[kAllToAllGroupSimtMaxQueues];
@@ -51,21 +50,11 @@ struct AllToAllGroupSimtBatch {
     uint32_t queueExpectedCount[kAllToAllGroupSimtMaxQueues];
     uint32_t queueCompletedTail[kAllToAllGroupSimtMaxQueues];
     uint32_t queueQuietStatus[kAllToAllGroupSimtMaxQueues];
-    uint64_t queueQuietBegin[kAllToAllGroupSimtMaxQueues];
-    uint64_t queueQuietEnd[kAllToAllGroupSimtMaxQueues];
+    uint32_t queuePollCount[kAllToAllGroupSimtMaxQueues];
 };
 
 static_assert(sizeof(AllToAllGroupSimtBatch) <= 64U * 1024U,
     "grouped AllToAll SIMT batch must fit in the relay UB buffer");
-
-__simt_callee__ inline uint64_t AllToAllGroupSimtTraceCycle(uint32_t traceEnabled)
-{
-    uint64_t cycle = 0ULL;
-    if (traceEnabled != 0U) {
-        asm volatile("MOV %0, SYS_CNT\n" : "+l"(cycle));
-    }
-    return cycle;
-}
 
 __aicore__ inline uint32_t AllToAllGroupSimtWqesForPhase(uint32_t phase)
 {
@@ -172,9 +161,7 @@ inline void AllToAllGroupSimtBuildVf(
         batch->configStatus[slot] = 0U;
         const uint32_t worker = workerBegin + slot;
         batch->worker[slot] = worker;
-        batch->postBegin[slot] = 0ULL;
-        batch->queueQuietBegin[slot] = 0ULL;
-        batch->queueQuietEnd[slot] = 0ULL;
+        batch->queuePollCount[slot] = 0U;
         const uint32_t lane = worker % 16U;
         const uint32_t route = worker / 16U;
         const int32_t rank = args->rank;
@@ -342,7 +329,7 @@ __simt_callee__ inline void AllToAllGroupSimtWriteWqe(
 __simt_vf__ __aicore__ LAUNCH_BOUND(kAllToAllGroupSimtThreads)
 inline void AllToAllGroupSimtPostVf(
     __ubuf__ AllToAllGroupSimtBatch* batch, uint32_t queueCount,
-    __gm__ UDMAInfo* udmaInfo, uint32_t traceEnabled)
+    __gm__ UDMAInfo* udmaInfo)
 {
     const uint32_t thread = static_cast<uint32_t>(threadIdx.x);
     for (uint32_t queue = thread; queue < queueCount;
@@ -354,7 +341,6 @@ inline void AllToAllGroupSimtPostVf(
         const uint32_t qpIdx = batch->queueQpIdx[queue];
         const uint32_t taskBegin = batch->queueTaskBegin[queue];
         const uint32_t taskCount = batch->queueTaskCount[queue];
-        batch->postBegin[taskBegin] = AllToAllGroupSimtTraceCycle(traceEnabled);
         const uint32_t queueIndex = peer * udmaInfo->qpNum + qpIdx;
         __gm__ UDMAWQCtx* wq = reinterpret_cast<__gm__ UDMAWQCtx*>(
             udmaInfo->sqPtr + static_cast<uint64_t>(queueIndex) * sizeof(UDMAWQCtx));
@@ -395,7 +381,7 @@ inline void AllToAllGroupSimtPostVf(
 __simt_vf__ __aicore__ LAUNCH_BOUND(kAllToAllGroupSimtThreads)
 inline void AllToAllGroupSimtPostPayloadVf(
     __ubuf__ AllToAllGroupSimtBatch* batch, uint32_t queueCount,
-    __gm__ UDMAInfo* udmaInfo, uint32_t traceEnabled)
+    __gm__ UDMAInfo* udmaInfo)
 {
     const uint32_t thread = static_cast<uint32_t>(threadIdx.x);
     for (uint32_t queue = thread; queue < queueCount;
@@ -407,7 +393,6 @@ inline void AllToAllGroupSimtPostPayloadVf(
         const uint32_t qpIdx = batch->queueQpIdx[queue];
         const uint32_t taskBegin = batch->queueTaskBegin[queue];
         const uint32_t taskCount = batch->queueTaskCount[queue];
-        batch->postBegin[taskBegin] = AllToAllGroupSimtTraceCycle(traceEnabled);
         const uint32_t queueIndex = peer * udmaInfo->qpNum + qpIdx;
         __gm__ UDMAWQCtx* wq = reinterpret_cast<__gm__ UDMAWQCtx*>(
             udmaInfo->sqPtr + static_cast<uint64_t>(queueIndex) * sizeof(UDMAWQCtx));
@@ -478,7 +463,7 @@ inline void AllToAllGroupSimtPostSignalVf(
 __simt_vf__ __aicore__ LAUNCH_BOUND(kAllToAllGroupSimtThreads)
 inline void AllToAllGroupSimtQuietVf(
     __ubuf__ AllToAllGroupSimtBatch* batch, uint32_t queueCount,
-    __gm__ UDMAInfo* udmaInfo, uint32_t traceEnabled)
+    __gm__ UDMAInfo* udmaInfo)
 {
     const uint32_t thread = static_cast<uint32_t>(threadIdx.x);
     for (uint32_t queue = thread; queue < queueCount;
@@ -498,8 +483,8 @@ inline void AllToAllGroupSimtQuietVf(
                 reinterpret_cast<__gm__ uint32_t*>(wq->tailAddr));
         const uint32_t expected = batch->queueExpectedCount[queue];
         uint32_t quietStatus = 0U;
+        uint32_t pollCount = 0U;
         const uint32_t cqeSize = 1U << cq->baseBkShift;
-        batch->queueQuietBegin[queue] = AllToAllGroupSimtTraceCycle(traceEnabled);
 
         while (curTail != expected && quietStatus == 0U) {
             auto cqeWordAddr = reinterpret_cast<__gm__ uint32_t*>(
@@ -517,6 +502,7 @@ inline void AllToAllGroupSimtQuietVf(
                     break;
                 }
             }
+            pollCount += retry < TILEXR_UDMA_MAX_RETRY_TIMES ? retry + 1U : retry;
             if (retry == TILEXR_UDMA_MAX_RETRY_TIMES) {
                 quietStatus = 0xFFU;
                 break;
@@ -531,28 +517,28 @@ inline void AllToAllGroupSimtQuietVf(
         }
         batch->queueCompletedTail[queue] = curTail;
         batch->queueQuietStatus[queue] = quietStatus;
-        batch->queueQuietEnd[queue] = AllToAllGroupSimtTraceCycle(traceEnabled);
+        batch->queuePollCount[queue] = pollCount;
     }
     asc_syncthreads();
 }
 
 __aicore__ inline void AllToAllGroupSimtPost(
     __ubuf__ AllToAllGroupSimtBatch* batch, uint32_t queueCount,
-    __gm__ UDMAInfo* udmaInfo, uint32_t traceEnabled)
+    __gm__ UDMAInfo* udmaInfo)
 {
     asc_vf_call<AllToAllGroupSimtPostVf>(
         dim3{kAllToAllGroupSimtThreads, 1U, 1U},
-        batch, queueCount, udmaInfo, traceEnabled);
+        batch, queueCount, udmaInfo);
     AscendC::PipeBarrier<PIPE_ALL>();
 }
 
 __aicore__ inline void AllToAllGroupSimtPostPayload(
     __ubuf__ AllToAllGroupSimtBatch* batch, uint32_t queueCount,
-    __gm__ UDMAInfo* udmaInfo, uint32_t traceEnabled)
+    __gm__ UDMAInfo* udmaInfo)
 {
     asc_vf_call<AllToAllGroupSimtPostPayloadVf>(
         dim3{kAllToAllGroupSimtThreads, 1U, 1U},
-        batch, queueCount, udmaInfo, traceEnabled);
+        batch, queueCount, udmaInfo);
     AscendC::PipeBarrier<PIPE_ALL>();
 }
 
@@ -587,11 +573,11 @@ __aicore__ inline void AllToAllGroupSimtBuild(
 
 __aicore__ inline void AllToAllGroupSimtQuiet(
     __ubuf__ AllToAllGroupSimtBatch* batch, uint32_t queueCount,
-    __gm__ UDMAInfo* udmaInfo, uint32_t traceEnabled)
+    __gm__ UDMAInfo* udmaInfo)
 {
     asc_vf_call<AllToAllGroupSimtQuietVf>(
         dim3{kAllToAllGroupSimtThreads, 1U, 1U},
-        batch, queueCount, udmaInfo, traceEnabled);
+        batch, queueCount, udmaInfo);
     AscendC::PipeBarrier<PIPE_ALL>();
 }
 

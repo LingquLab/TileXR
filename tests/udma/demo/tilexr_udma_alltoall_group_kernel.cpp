@@ -611,14 +611,14 @@ __aicore__ inline void AllToAllGroupTraceRecordSimtTask(
     __gm__ uint8_t* trace, uint32_t iteration,
     __ubuf__ TileXR::Demo::AllToAllGroupSimtBatch* batch, uint32_t task,
     uint32_t phase, uint32_t groupCount, uint32_t passCount,
-    uint64_t beginCycle, uint64_t endCycle)
+    uint64_t beginCycle, uint64_t endCycle, uint32_t pollCount = 0U)
 {
     const uint32_t worker = batch->worker[task];
     AllToAllGroupTraceRecordTask(
         trace, iteration, TileXR::Demo::AllToAllGroupTraceSimtStorageCore(worker),
         batch->group[task], batch->pass[task], phase, groupCount, passCount,
         static_cast<int32_t>(batch->peer[task]), batch->qpIdx[task],
-        beginCycle, endCycle, worker, worker / 16U, batch->byteCount[task]);
+        beginCycle, endCycle, worker, worker / 16U, batch->byteCount[task], pollCount);
 }
 
 __aicore__ inline bool AllToAllGroupWaitTerminalCredit(
@@ -790,12 +790,12 @@ __aicore__ inline bool AllToAllGroupFlushSimt(
         return true;
     }
     auto udmaInfo = TileXR::GetUDMAInfo(args);
+    const uint64_t postBegin = AllToAllGroupTraceCycle(trace);
     TileXR::UDMACleanCacheLines(
         reinterpret_cast<__gm__ uint8_t*>(debug) +
             TILEXR_ALLTOALL_GROUP_ERROR_BYTES,
         static_cast<uint64_t>(taskCount) * sizeof(uint64_t));
-    TileXR::Demo::AllToAllGroupSimtPost(
-        batch, queueCount, udmaInfo, trace == nullptr ? 0U : 1U);
+    TileXR::Demo::AllToAllGroupSimtPost(batch, queueCount, udmaInfo);
     for (uint32_t task = 0U; task < taskCount; ++task) {
         if (batch->active[task] == 0U) {
             continue;
@@ -828,11 +828,12 @@ __aicore__ inline bool AllToAllGroupFlushSimt(
             AllToAllGroupTraceRecordSimtTask(
                 trace, traceIteration, batch, task,
                 TileXR::Demo::kAllToAllGroupTraceSendPutSignal,
-                groupCount, passCount, batch->postBegin[task], postEnd);
+                groupCount, passCount, postBegin, postEnd);
         }
     }
-    TileXR::Demo::AllToAllGroupSimtQuiet(
-        batch, queueCount, udmaInfo, trace == nullptr ? 0U : 1U);
+    const uint64_t quietBegin = AllToAllGroupTraceCycle(trace);
+    TileXR::Demo::AllToAllGroupSimtQuiet(batch, queueCount, udmaInfo);
+    const uint64_t quietEnd = AllToAllGroupTraceCycle(trace);
     for (uint32_t queue = 0U; queue < queueCount; ++queue) {
         if (batch->active[queue] == 0U) {
             continue;
@@ -844,8 +845,8 @@ __aicore__ inline bool AllToAllGroupFlushSimt(
             AllToAllGroupTraceRecordSimtTask(
                 trace, traceIteration, batch, task,
                 TileXR::Demo::kAllToAllGroupTraceSendQuiet,
-                groupCount, passCount, batch->queueQuietBegin[queue],
-                batch->queueQuietEnd[queue]);
+                groupCount, passCount, quietBegin, quietEnd,
+                batch->queuePollCount[queue]);
         }
         if (batch->queueQuietStatus[queue] != 0U) {
             const uint32_t task = taskBegin;
@@ -874,7 +875,8 @@ __aicore__ inline bool AllToAllGroupFlushSplitSimt(
     __gm__ int32_t* debug, uint32_t blockIdx,
     __gm__ uint8_t* trace, uint32_t traceIteration,
     uint32_t groupCount, uint32_t passCount,
-    uint32_t postPhase, bool quietAfterPost, bool resetBatch)
+    uint32_t postPhase, bool quietAfterPost, bool resetBatch,
+    uint64_t aggregatePostBegin)
 {
     if (taskCount == 0U) {
         queueCount = 0U;
@@ -888,8 +890,7 @@ __aicore__ inline bool AllToAllGroupFlushSplitSimt(
             static_cast<uint64_t>(taskCount) * sizeof(uint64_t));
     }
     if (postPhase == TileXR::Demo::kAllToAllGroupSimtPostPayload) {
-        TileXR::Demo::AllToAllGroupSimtPostPayload(
-            batch, queueCount, udmaInfo, trace == nullptr ? 0U : 1U);
+        TileXR::Demo::AllToAllGroupSimtPostPayload(batch, queueCount, udmaInfo);
     } else {
         TileXR::Demo::AllToAllGroupSimtPostSignal(batch, queueCount, udmaInfo);
     }
@@ -929,11 +930,12 @@ __aicore__ inline bool AllToAllGroupFlushSplitSimt(
             AllToAllGroupTraceRecordSimtTask(
                 trace, traceIteration, batch, task,
                 TileXR::Demo::kAllToAllGroupTraceSendPutSignal,
-                groupCount, passCount, batch->postBegin[task], postEnd);
+                groupCount, passCount, aggregatePostBegin, postEnd);
         }
     }
-    TileXR::Demo::AllToAllGroupSimtQuiet(
-        batch, queueCount, udmaInfo, trace == nullptr ? 0U : 1U);
+    const uint64_t quietBegin = AllToAllGroupTraceCycle(trace);
+    TileXR::Demo::AllToAllGroupSimtQuiet(batch, queueCount, udmaInfo);
+    const uint64_t quietEnd = AllToAllGroupTraceCycle(trace);
     for (uint32_t queue = 0U; queue < queueCount; ++queue) {
         if (batch->active[queue] == 0U) {
             continue;
@@ -945,8 +947,8 @@ __aicore__ inline bool AllToAllGroupFlushSplitSimt(
             AllToAllGroupTraceRecordSimtTask(
                 trace, traceIteration, batch, task,
                 TileXR::Demo::kAllToAllGroupTraceSendQuiet,
-                groupCount, passCount, batch->queueQuietBegin[queue],
-                batch->queueQuietEnd[queue]);
+                groupCount, passCount, quietBegin, quietEnd,
+                batch->queuePollCount[queue]);
         }
         if (batch->queueQuietStatus[queue] != 0U) {
             const uint32_t task = taskBegin;
@@ -1072,17 +1074,19 @@ __aicore__ inline bool AllToAllGroupRunSimtSend(
                 }
                 taskCount = workerCount;
                 queueCount = workerCount;
+                const uint64_t aggregatePostBegin =
+                    AllToAllGroupTraceCycle(trace);
                 if (registry->regionCount > 1U) {
                     if (!AllToAllGroupFlushSplitSimt(
                             args, batch, taskCount, queueCount, debug, blockIdx,
                             trace, traceIteration, groupCount, passCount,
                             TileXR::Demo::kAllToAllGroupSimtPostPayload,
-                            false, false) ||
+                            false, false, aggregatePostBegin) ||
                         !AllToAllGroupFlushSplitSimt(
                             args, batch, taskCount, queueCount, debug, blockIdx,
                             trace, traceIteration, groupCount, passCount,
                             TileXR::Demo::kAllToAllGroupSimtPostSignal,
-                            true, true)) {
+                            true, true, aggregatePostBegin)) {
                         return false;
                     }
                 } else if (!AllToAllGroupFlushSimt(

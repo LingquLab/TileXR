@@ -190,7 +190,8 @@ class GroupTraceConverterTest(unittest.TestCase):
                             0, storage_core, 0, 0, phase, 1, 1),
                         struct.pack(
                             MODULE.TASK_FORMAT, begin, end, peer, route,
-                            worker, route, byte_count, 0, 0))
+                            worker, route, byte_count,
+                            17 if phase == 2 else 0, 0))
 
             trace = MODULE.build_chrome_trace([MODULE.read_rank_trace(path)])
             thread_names = {
@@ -209,6 +210,11 @@ class GroupTraceConverterTest(unittest.TestCase):
             self.assertEqual(secondary["args"]["peer"], 8)
             self.assertEqual(secondary["args"]["route"], "secondary")
             self.assertEqual(secondary["args"]["bytes"], 16 * 1024 * 1024)
+            quiet = next(
+                event for event in trace["traceEvents"]
+                if event.get("name") == "send-quiet" and
+                event["args"].get("thread") == 23)
+            self.assertEqual(quiet["args"]["cqPolls"], 17)
 
     def test_reads_version_four_trace(self):
         with tempfile.TemporaryDirectory() as directory:
