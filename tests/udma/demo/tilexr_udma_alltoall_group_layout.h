@@ -46,6 +46,7 @@ constexpr uint32_t kAllToAllGroupBlockDim = 64U;
 constexpr size_t kAllToAllGroupMultiChannelThresholdBytes =
     150ULL * 1024ULL * 1024ULL;
 constexpr size_t kAllToAllGroupAlignment = 512U;
+constexpr size_t kAllToAllGroupIpcSignalStride = 512U;
 constexpr size_t kAllToAllGroupBaseControlBytes =
     kAllToAllGroupErrorBytes + kAllToAllGroupSignalSourceBytes;
 constexpr size_t kAllToAllGroupMaxPayloadBytes = 16ULL << 30;
@@ -90,6 +91,55 @@ inline bool AllToAllGroupValidQuietBatch(uint32_t quietBatch)
 inline bool AllToAllGroupValidIngressWindow(uint32_t ingressWindow)
 {
     return ingressWindow <= kAllToAllGroupMaxIngressWindow;
+}
+
+inline bool AllToAllGroupOversubscribed(int32_t localRankSize, int32_t npuCount)
+{
+    return npuCount > 0 && localRankSize > npuCount;
+}
+
+inline bool AllToAllGroupCoResidentPeer(
+    int32_t rank, int32_t peer, int32_t localRankSize, int32_t npuCount)
+{
+    if (!AllToAllGroupOversubscribed(localRankSize, npuCount) ||
+        rank < 0 || peer < 0 || rank == peer) {
+        return false;
+    }
+    return rank / localRankSize == peer / localRankSize &&
+        (rank % localRankSize) % npuCount ==
+            (peer % localRankSize) % npuCount;
+}
+
+inline size_t AllToAllGroupIpcSignalByteOffset(
+    uint32_t slot, int32_t rankSize, int32_t sourceRank)
+{
+    return (static_cast<size_t>(slot) * static_cast<size_t>(rankSize) +
+        static_cast<size_t>(sourceRank)) * kAllToAllGroupIpcSignalStride;
+}
+
+inline size_t AllToAllGroupIpcPayloadByteOffset(
+    uint32_t slot, int32_t rankSize, size_t bytesPerPeer,
+    int32_t sourceRank)
+{
+    return (static_cast<size_t>(slot) * static_cast<size_t>(rankSize) +
+        static_cast<size_t>(sourceRank)) * bytesPerPeer;
+}
+
+inline bool AllToAllGroupIpcLoopbackFits(
+    int32_t rankSize, size_t bytesPerPeer,
+    size_t signalCapacityBytes, size_t payloadCapacityBytes)
+{
+    if (rankSize <= 0 || bytesPerPeer == 0U) {
+        return false;
+    }
+    const size_t ranks = static_cast<size_t>(rankSize);
+    if (ranks > std::numeric_limits<size_t>::max() /
+            kAllToAllGroupPingPongSlots) {
+        return false;
+    }
+    const size_t slotRanks = ranks * kAllToAllGroupPingPongSlots;
+    return slotRanks <= signalCapacityBytes / kAllToAllGroupIpcSignalStride &&
+        slotRanks <= payloadCapacityBytes / bytesPerPeer;
 }
 
 enum class AllToAllGroupChannelMode : uint32_t {

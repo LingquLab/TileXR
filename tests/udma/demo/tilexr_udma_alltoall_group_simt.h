@@ -144,6 +144,16 @@ __simt_callee__ inline uint32_t AllToAllGroupSimtQpWeight(
     return weight == 0U ? 1U : weight;
 }
 
+__simt_callee__ inline bool AllToAllGroupSimtCoResidentPeer(
+    int32_t rank, int32_t peer, int32_t localRankSize, uint32_t npuCount)
+{
+    return npuCount != 0U && localRankSize > static_cast<int32_t>(npuCount) &&
+        rank >= 0 && peer >= 0 && rank != peer &&
+        rank / localRankSize == peer / localRankSize &&
+        (rank % localRankSize) % static_cast<int32_t>(npuCount) ==
+            (peer % localRankSize) % static_cast<int32_t>(npuCount);
+}
+
 __simt_vf__ __aicore__ LAUNCH_BOUND(kAllToAllGroupSimtThreads)
 inline void AllToAllGroupSimtBuildVf(
     __ubuf__ AllToAllGroupSimtBatch* batch, uint32_t workerBegin,
@@ -153,7 +163,7 @@ inline void AllToAllGroupSimtBuildVf(
     int32_t elementsPerPeer, int32_t chunkElementOffset,
     int32_t currentElements, uint64_t payloadOffset, uint64_t signalOffset,
     uint32_t routeStage, uint32_t multiChannel, uint32_t primaryRouteParts,
-    uint32_t groupWidth)
+    uint32_t groupWidth, uint32_t npuCount)
 {
     const uint32_t slot = static_cast<uint32_t>(threadIdx.x);
     if (slot < workerCount) {
@@ -170,6 +180,8 @@ inline void AllToAllGroupSimtBuildVf(
         const bool routeRuns = (routeStage == 2U) ? route == 0U :
             ((routeStage == 3U) ? route == 1U : true);
         if (peer >= 0 && routeRuns &&
+            !AllToAllGroupSimtCoResidentPeer(
+                rank, peer, args->localRankSize, npuCount) &&
             AllToAllGroupSimtPeerInRouteStage(rank, peer, routeStage)) {
             auto udmaInfo = reinterpret_cast<__gm__ UDMAInfo*>(args->udmaInfoPtr);
             const uint32_t qpCount = udmaInfo->qpNum == 0U ? 1U : udmaInfo->qpNum;
@@ -560,14 +572,14 @@ __aicore__ inline void AllToAllGroupSimtBuild(
     int32_t elementsPerPeer, int32_t chunkElementOffset,
     int32_t currentElements, uint64_t payloadOffset, uint64_t signalOffset,
     uint32_t routeStage, uint32_t multiChannel, uint32_t primaryRouteParts,
-    uint32_t groupWidth)
+    uint32_t groupWidth, uint32_t npuCount)
 {
     asc_vf_call<AllToAllGroupSimtBuildVf>(
         dim3{kAllToAllGroupSimtThreads, 1U, 1U}, batch,
         workerBegin, workerCount, args, registry, input, tokenBase,
         invocationId, group, pass, elementsPerPeer, chunkElementOffset,
         currentElements, payloadOffset, signalOffset, routeStage,
-        multiChannel, primaryRouteParts, groupWidth);
+        multiChannel, primaryRouteParts, groupWidth, npuCount);
     AscendC::PipeBarrier<PIPE_ALL>();
 }
 

@@ -66,7 +66,7 @@ extern int launch_tilexr_udma_all_to_all_group(
     GM_ADDR groupTrace, uint32_t traceIteration,
     uint32_t routeStage, uint32_t multiChannel, uint32_t primaryRouteParts,
     uint32_t simtMode, uint32_t groupWidth, uint32_t quietBatch,
-    uint32_t ingressWindow, uint32_t prewarmSq);
+    uint32_t ingressWindow, uint32_t prewarmSq, uint32_t npuCount);
 extern void launch_tilexr_udma_all_to_all_bigdata(
     uint32_t blockDim, void* stream, GM_ADDR commArgs, GM_ADDR input, GM_ADDR output,
     GM_ADDR udmaMem, GM_ADDR debug, GM_ADDR fullmeshTrace, uint32_t fullmeshTraceIteration,
@@ -912,7 +912,7 @@ bool CopyChunkDeviceToHost(
 
 bool RunGroupedAllToAll(
     int rank, int rankSize, int32_t elementsPerPeer,
-    int deviceId, TileXRCommPtr comm, aclrtStream stream,
+    int deviceId, int npuCount, TileXRCommPtr comm, aclrtStream stream,
     const TileXR::CommArgs& commArgsHost, GM_ADDR commArgsDev)
 {
     static_assert(TileXR::Demo::kAllToAllGroupCreditStride ==
@@ -985,6 +985,46 @@ bool RunGroupedAllToAll(
                   << " chunkElements=" << requestedChunkElements << std::endl;
         return false;
     }
+    const bool ipcLoopback = TileXR::Demo::AllToAllGroupOversubscribed(
+        commArgsHost.localRankSize, npuCount);
+    if (ipcLoopback) {
+        if (commArgsHost.localRankSize <= 0 || npuCount <= 0 ||
+            commArgsHost.localRankSize % npuCount != 0) {
+            std::cerr << "[rank " << rank
+                      << "] ERROR: grouped IPC loopback requires localRankSize"
+                      << " to be a positive multiple of npuCount"
+                      << " localRankSize=" << commArgsHost.localRankSize
+                      << " npuCount=" << npuCount << std::endl;
+            return false;
+        }
+        if (!TileXR::Demo::AllToAllGroupIpcLoopbackFits(
+                rankSize, plan.bytesPerPeer,
+                static_cast<size_t>(TileXR::IPC_DATA_OFFSET),
+                static_cast<size_t>(TileXR::IPC_BUFF_MAX_SIZE))) {
+            std::cerr << "[rank " << rank
+                      << "] ERROR: grouped IPC loopback double buffer exceeds"
+                      << " IPC capacity rankSize=" << rankSize
+                      << " bytesPerPeer=" << plan.bytesPerPeer << std::endl;
+            return false;
+        }
+        if (commArgsHost.peerMems[rank] == nullptr) {
+            std::cerr << "[rank " << rank
+                      << "] ERROR: grouped IPC loopback requires TILEXR_ENABLE_IPC=1"
+                      << std::endl;
+            return false;
+        }
+        for (int peer = 0; peer < rankSize; ++peer) {
+            if (TileXR::Demo::AllToAllGroupCoResidentPeer(
+                    rank, peer, commArgsHost.localRankSize, npuCount) &&
+                commArgsHost.peerMems[peer] == nullptr) {
+                std::cerr << "[rank " << rank
+                          << "] ERROR: grouped IPC loopback missing co-resident"
+                          << " peer mapping peer=" << peer
+                          << ". Set TILEXR_ENABLE_IPC=1." << std::endl;
+                return false;
+            }
+        }
+    }
     if (ingressWindow != 0U && plan.passCount != 1U) {
         std::cerr << "[rank " << rank
                   << "] ERROR: grouped ingress credit currently requires single pass"
@@ -1036,6 +1076,12 @@ bool RunGroupedAllToAll(
         return false;
     }
     const uint32_t simtMode = static_cast<uint32_t>(simtModeValue);
+    if (ipcLoopback && simtMode == 0U) {
+        std::cerr << "[rank " << rank
+                  << "] ERROR: grouped IPC loopback requires"
+                  << " TILEXR_DEMO_ALLTOALL_GROUP_SIMT=1" << std::endl;
+        return false;
+    }
 
     bool sdmaAvailable = false;
     if (!CheckTileXR(rank, "TileXRSDMAAvailable grouped alltoall",
@@ -1068,6 +1114,12 @@ bool RunGroupedAllToAll(
         return false;
     }
     const bool routeStages = routeStagesValue == 1;
+    if (ipcLoopback && routeStages) {
+        std::cerr << "[rank " << rank
+                  << "] ERROR: grouped IPC loopback does not support"
+                  << " TILEXR_DEMO_ALLTOALL_GROUP_ROUTE_STAGES=1" << std::endl;
+        return false;
+    }
     constexpr size_t kRouteStageCount = 10U;
     const std::array<TileXR::Demo::AllToAllGroupRouteStage, kRouteStageCount>
         stagedRouteStages {{
@@ -1277,6 +1329,8 @@ bool RunGroupedAllToAll(
         " quietBatch=" + std::to_string(quietBatch) +
         " ingressWindow=" + std::to_string(ingressWindow) +
         " prewarmSq=" + std::to_string(prewarmSq) +
+        " npuCount=" + std::to_string(npuCount) +
+        " ipcLoopback=" + std::to_string(ipcLoopback ? 1 : 0) +
         " routeStages=" + std::to_string(routeStagesValue));
 
     if (routeStages &&
@@ -1307,7 +1361,7 @@ bool RunGroupedAllToAll(
             simtMode, groupWidth, quietBatch,
             routeStage == TileXR::Demo::AllToAllGroupRouteStage::kCombined ?
                 ingressWindow : 0U,
-            prewarmThisLaunch);
+            prewarmThisLaunch, static_cast<uint32_t>(npuCount));
         if (launchRet != 0) {
             std::cerr << "[rank " << rank
                       << "] rtKernelLaunchWithFlagV2 grouped failed: "
@@ -1565,7 +1619,7 @@ int main(int argc, char** argv)
 
     if (testType == 8) {
         const bool ok = RunGroupedAllToAll(
-            rank, rankSize, elementsPerRank, deviceId, comm, stream,
+            rank, rankSize, elementsPerRank, deviceId, npuCount, comm, stream,
             *commArgsHost, commArgsDev);
         Cleanup(comm, stream, nullptr, nullptr, rank, deviceId);
         if (!ok) {

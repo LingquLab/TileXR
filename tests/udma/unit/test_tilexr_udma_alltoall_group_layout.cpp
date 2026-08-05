@@ -131,6 +131,27 @@ void TestSchedules()
     CHECK_EQ(TileXR::Demo::AllToAllGroupPeer(0, 16, 0, 4, width), -1);
 }
 
+void TestIpcLoopbackLayout()
+{
+    CHECK_EQ(TileXR::Demo::AllToAllGroupOversubscribed(16, 8), true);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupOversubscribed(8, 8), false);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupCoResidentPeer(0, 8, 16, 8), true);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupCoResidentPeer(7, 15, 16, 8), true);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupCoResidentPeer(0, 16, 16, 8), false);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupCoResidentPeer(0, 1, 16, 8), false);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupCoResidentPeer(0, 8, 8, 8), false);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupIpcSignalByteOffset(1U, 32, 31),
+        63U * TileXR::Demo::kAllToAllGroupIpcSignalStride);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupIpcPayloadByteOffset(
+        1U, 32, 32U, 31), 63U * 32U);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupIpcLoopbackFits(
+        128, 8U, 2U * 1024U * 1024U, 100U * 1024U * 1024U), true);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupIpcLoopbackFits(
+        1024, 51200U, 2U * 1024U * 1024U, 100U * 1024U * 1024U), true);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupIpcLoopbackFits(
+        1024, 51201U, 2U * 1024U * 1024U, 100U * 1024U * 1024U), false);
+}
+
 void TestPlan()
 {
     constexpr int rankSize = 16;
@@ -766,9 +787,10 @@ void TestKernelStructure()
     CHECK_CONTAINS(launcher, "rtKernelLaunchWithFlagV2");
     CHECK_CONTAINS(launcher, "tilexr_udma_all_to_all_group_kernel");
     CHECK_CONTAINS(launcher, "GroupedAllToAllKernelArgs");
-    CHECK_CONTAINS(launcher, "sizeof(GroupedAllToAllKernelArgs) == 136U");
+    CHECK_CONTAINS(launcher, "sizeof(GroupedAllToAllKernelArgs) == 144U");
     CHECK_CONTAINS(launcher, "GroupedAllToAllCreditKernelArgs");
     CHECK_CONTAINS(launcher, "sizeof(GroupedAllToAllCreditKernelArgs) == 160U");
+    CHECK_CONTAINS(launcher, "uint32_t npuCount");
     CHECK_CONTAINS(launcher, "prewarmSq");
     CHECK_CONTAINS(launcher, "tilexr_udma_all_to_all_group_batch_kernel<<<");
     CHECK_CONTAINS(launcher, "tilexr_udma_all_to_all_group_credit_kernel<<<");
@@ -782,6 +804,9 @@ void TestKernelStructure()
     CHECK_CONTAINS(launcher, "<<<");
     CHECK_NOT_CONTAINS(kernel, "UDMAPutSignalNbi<int32_t>");
     CHECK_NOT_CONTAINS(kernel, "elementsPerPeer) * lane /");
+    CHECK_CONTAINS(kernel, "AllToAllGroupSendIpcLoopback");
+    CHECK_CONTAINS(kernel, "AllToAllGroupIpcSignalOffsetDevice");
+    CHECK_CONTAINS(kernel, "AllToAllGroupIpcPayloadOffsetDevice");
 }
 
 void TestHostStructure()
@@ -819,6 +844,7 @@ void TestHostStructure()
         "/tests/udma/demo/tilexr_udma_alltoall_group_simt.h");
     CHECK_CONTAINS(simt, "__simt_vf__ __aicore__");
     CHECK_CONTAINS(simt, "AllToAllGroupSimtBuildVf");
+    CHECK_CONTAINS(simt, "AllToAllGroupSimtCoResidentPeer");
     CHECK_CONTAINS(simt, "AllToAllGroupSimtPostPayloadVf");
     CHECK_CONTAINS(simt, "AllToAllGroupSimtPostSignalVf");
     CHECK_CONTAINS(simt, "asc_vf_call<");
@@ -826,6 +852,7 @@ void TestHostStructure()
     CHECK_CONTAINS(simt, "asc_atomic_add(");
     CHECK_NOT_CONTAINS(simt, "AscendC::Simt::VF_CALL");
     CHECK_NOT_CONTAINS(simt, "AscendC::Simt::ThreadBarrier");
+    CHECK_CONTAINS(demo, "grouped IPC loopback requires TILEXR_ENABLE_IPC=1");
     const size_t begin = demo.find("bool RunGroupedAllToAll(");
     const size_t end = demo.find("void Cleanup(", begin);
     const std::string grouped = begin == std::string::npos ? std::string() :
@@ -871,6 +898,7 @@ void TestHostStructure()
 int main()
 {
     TestSchedules();
+    TestIpcLoopbackLayout();
     TestPlan();
     TestChannelPolicy();
     TestScalePlanAndTraceCapacity();

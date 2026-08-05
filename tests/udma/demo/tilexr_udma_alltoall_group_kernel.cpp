@@ -38,6 +38,9 @@ constexpr uint32_t TILEXR_ALLTOALL_GROUP_SIGNAL_SOURCE_BYTES =
 constexpr uint32_t TILEXR_ALLTOALL_GROUP_CREDIT_STRIDE = 512U;
 constexpr uint32_t TILEXR_ALLTOALL_GROUP_CREDIT_WORDS =
     TILEXR_ALLTOALL_GROUP_CREDIT_STRIDE / sizeof(uint64_t);
+constexpr uint32_t TILEXR_ALLTOALL_GROUP_IPC_SIGNAL_STRIDE = 512U;
+constexpr uint32_t TILEXR_ALLTOALL_GROUP_IPC_SIGNAL_WORDS =
+    TILEXR_ALLTOALL_GROUP_IPC_SIGNAL_STRIDE / sizeof(uint64_t);
 static_assert(TILEXR_ALLTOALL_GROUP_CREDIT_STRIDE == TileXR::CREDIT_IPC_STRIDE,
     "grouped credit slot must match the runtime IPC layout");
 constexpr uint32_t TILEXR_ALLTOALL_GROUP_STAGE_CONFIG = 1U;
@@ -97,6 +100,33 @@ __aicore__ inline int32_t AllToAllGroupDevicePeer(
     return lane < halfWidth ?
         (rank + distance) % rankSize :
         (rank - distance + rankSize) % rankSize;
+}
+
+__aicore__ inline bool AllToAllGroupCoResidentPeerDevice(
+    int32_t rank, int32_t peer, int32_t localRankSize, uint32_t npuCount)
+{
+    return npuCount != 0U && localRankSize > static_cast<int32_t>(npuCount) &&
+        rank >= 0 && peer >= 0 && rank != peer &&
+        rank / localRankSize == peer / localRankSize &&
+        (rank % localRankSize) % static_cast<int32_t>(npuCount) ==
+            (peer % localRankSize) % static_cast<int32_t>(npuCount);
+}
+
+__aicore__ inline uint64_t AllToAllGroupIpcSignalOffsetDevice(
+    uint32_t slot, int32_t rankSize, int32_t sourceRank)
+{
+    return (static_cast<uint64_t>(slot) * static_cast<uint64_t>(rankSize) +
+        static_cast<uint64_t>(sourceRank)) *
+        TILEXR_ALLTOALL_GROUP_IPC_SIGNAL_STRIDE;
+}
+
+__aicore__ inline uint64_t AllToAllGroupIpcPayloadOffsetDevice(
+    uint32_t slot, int32_t rankSize, uint64_t bytesPerPeer,
+    int32_t sourceRank)
+{
+    return static_cast<uint64_t>(TileXR::IPC_DATA_OFFSET) +
+        (static_cast<uint64_t>(slot) * static_cast<uint64_t>(rankSize) +
+            static_cast<uint64_t>(sourceRank)) * bytesPerPeer;
 }
 
 __aicore__ inline uint64_t AllToAllGroupDeviceToken(
@@ -307,6 +337,48 @@ __aicore__ inline void AllToAllGroupCopyMte(
         AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
     }
     AscendC::PipeBarrier<PIPE_ALL>();
+}
+
+__aicore__ inline void AllToAllGroupPublishIpcToken(
+    __gm__ uint8_t* remoteBase, uint64_t signalOffset, uint64_t token,
+    AscendC::LocalTensor<uint8_t> relayLocal)
+{
+    auto tokenLocal = relayLocal.ReinterpretCast<uint64_t>();
+    tokenLocal.SetValue(0, token);
+    AscendC::SetFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID0);
+    AscendC::WaitFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID0);
+
+    AscendC::GlobalTensor<uint64_t> remoteSignal;
+    remoteSignal.SetGlobalBuffer(
+        reinterpret_cast<__gm__ uint64_t*>(remoteBase + signalOffset),
+        TILEXR_ALLTOALL_GROUP_IPC_SIGNAL_WORDS);
+    AscendC::DataCopy(
+        remoteSignal, tokenLocal, TILEXR_ALLTOALL_GROUP_IPC_SIGNAL_WORDS);
+    AscendC::SetFlag<AscendC::HardEvent::MTE3_S>(EVENT_ID0);
+    AscendC::WaitFlag<AscendC::HardEvent::MTE3_S>(EVENT_ID0);
+}
+
+__aicore__ inline void AllToAllGroupSendIpcLoopback(
+    const __gm__ TileXR::CommArgs* args, __gm__ int32_t* input,
+    int32_t peer, uint32_t slot, uint64_t bytesPerPeer,
+    int32_t chunkElementOffset, int32_t currentElements,
+    uint64_t expectedToken, AscendC::LocalTensor<uint8_t> relayLocal)
+{
+    auto remoteBase = args->peerMems[peer];
+    auto src = reinterpret_cast<__gm__ uint8_t*>(
+        input + static_cast<uint64_t>(peer) *
+            (bytesPerPeer / sizeof(int32_t)) + chunkElementOffset);
+    auto dst = remoteBase + AllToAllGroupIpcPayloadOffsetDevice(
+        slot, args->rankSize, bytesPerPeer, args->rank) +
+        static_cast<uint64_t>(chunkElementOffset) * sizeof(int32_t);
+    AllToAllGroupCopyMte(
+        dst, src, static_cast<uint32_t>(currentElements) * sizeof(int32_t),
+        relayLocal);
+    AllToAllGroupPublishIpcToken(
+        remoteBase,
+        AllToAllGroupIpcSignalOffsetDevice(
+            slot, args->rankSize, args->rank),
+        expectedToken, relayLocal);
 }
 
 __aicore__ inline uint32_t AllToAllGroupCopySdmaSubmit(
@@ -984,7 +1056,7 @@ __aicore__ inline bool AllToAllGroupRunSimtSend(
     const uint64_t* payloadOffsets, const uint64_t* signalOffsets,
     const uint64_t* creditOffsets,
     uint32_t routeStage, uint32_t multiChannel, uint32_t primaryRouteParts,
-    uint32_t groupWidth, uint32_t quietBatch,
+    uint32_t groupWidth, uint32_t quietBatch, uint32_t npuCount,
     AscendC::LocalTensor<uint8_t> relayLocal,
     __gm__ uint8_t* trace, uint32_t traceIteration)
 {
@@ -1047,6 +1119,29 @@ __aicore__ inline bool AllToAllGroupRunSimtSend(
             }
             const int32_t currentElements =
                 remaining < chunkElements ? remaining : chunkElements;
+            for (uint32_t lane = 0U; lane < groupWidth; ++lane) {
+                const int32_t peer = AllToAllGroupDevicePeer(
+                    args->rank, args->rankSize, group, lane, groupWidth);
+                if (!AllToAllGroupCoResidentPeerDevice(
+                        args->rank, peer, args->localRankSize, npuCount) ||
+                    !AllToAllGroupPeerInRouteStageDevice(
+                        args->rank, peer, routeStage)) {
+                    continue;
+                }
+                const uint64_t ipcSendBegin = AllToAllGroupTraceCycle(trace);
+                AllToAllGroupSendIpcLoopback(
+                    args, input, peer, slot,
+                    static_cast<uint64_t>(elementsPerPeer) * sizeof(int32_t),
+                    chunkElementOffset, currentElements,
+                    AllToAllGroupDeviceToken(invocationId, group, pass),
+                    relayLocal);
+                AllToAllGroupTraceRecordTask(
+                    trace, traceIteration, blockIdx, group, pass,
+                    TileXR::Demo::kAllToAllGroupTraceSendPutSignal,
+                    groupCount, passCount, peer,
+                    TileXR::Demo::kAllToAllGroupTraceNoQp,
+                    ipcSendBegin, AllToAllGroupTraceCycle(trace));
+            }
             for (uint32_t workerBegin = 0U;
                  workerBegin < TILEXR_ALLTOALL_GROUP_SEND_WORKERS;
                  workerBegin += batchLimit) {
@@ -1061,7 +1156,7 @@ __aicore__ inline bool AllToAllGroupRunSimtSend(
                     tokenBase, invocationId, group, pass, elementsPerPeer,
                     chunkElementOffset, currentElements, payloadOffsets[slot],
                     signalOffsets[slot], routeStage, multiChannel,
-                    primaryRouteParts, groupWidth);
+                    primaryRouteParts, groupWidth, npuCount);
                 for (uint32_t task = 0U; task < workerCount; ++task) {
                     if (batch->configStatus[task] != 0U) {
                         AllToAllGroupRecordError(
@@ -1126,7 +1221,7 @@ __aicore__ inline void AllToAllGroupKernelImpl(
     GM_ADDR groupTraceGM, uint32_t traceIteration,
     uint32_t routeStage, uint32_t multiChannel, uint32_t primaryRouteParts,
     uint32_t simtMode, uint32_t groupWidth, uint32_t quietBatch,
-    uint32_t prewarmSq)
+    uint32_t prewarmSq, uint32_t npuCount)
 {
     const uint32_t blockIdx = static_cast<uint32_t>(AscendC::GetBlockIdx());
     auto groupTrace = blockIdx < TileXR::Demo::kAllToAllGroupTraceCoreCount ?
@@ -1148,6 +1243,8 @@ __aicore__ inline void AllToAllGroupKernelImpl(
             copyoutWorkers != 32U && copyoutWorkers != 48U) ||
         routeStage > TILEXR_ALLTOALL_GROUP_ROUTE_STAGE_NO_COPY ||
         multiChannel > 1U || simtMode > 1U ||
+        npuCount == 0U ||
+        (args->localRankSize > static_cast<int32_t>(npuCount) && simtMode == 0U) ||
         (groupWidth != TILEXR_ALLTOALL_GROUP_DEFAULT_WIDTH &&
             groupWidth != TILEXR_ALLTOALL_GROUP_EXPERIMENTAL_WIDTH) ||
         quietBatch == 0U ||
@@ -1289,11 +1386,16 @@ __aicore__ inline void AllToAllGroupKernelImpl(
             if (!AllToAllGroupReceivePeerInRouteStageDevice(rank, peer, routeStage)) {
                 continue;
             }
+            const bool coResident = AllToAllGroupCoResidentPeerDevice(
+                rank, peer, args->localRankSize, npuCount);
             const bool crossNode =
                 rank / static_cast<int32_t>(TileXR::Demo::kAllToAllGroupRanksPerNode) !=
                 peer / static_cast<int32_t>(TileXR::Demo::kAllToAllGroupRanksPerNode);
             const bool remoteAssist =
                 AllToAllGroupRemoteAssistDevice(worker, copyoutWorkers);
+            if (coResident && remoteAssist) {
+                continue;
+            }
             if (remoteAssist && !crossNode) {
                 continue;
             }
@@ -1312,6 +1414,10 @@ __aicore__ inline void AllToAllGroupKernelImpl(
                 static_cast<uint32_t>(elementsPerPeer), primaryWeight,
                 secondaryWeight, primaryRouteParts,
                 primaryTotalElements, secondaryTotalElements);
+            if (coResident) {
+                primaryTotalElements = static_cast<uint32_t>(elementsPerPeer);
+                secondaryTotalElements = 0U;
+            }
             const uint32_t traceCore = copyoutWorkers < TILEXR_ALLTOALL_GROUP_SEND_CORES ?
                 sendWorkers + lane : blockIdx;
             const uint32_t passBegin = readyDrivenCopyout ? schedulerPass : 0U;
@@ -1364,6 +1470,9 @@ __aicore__ inline void AllToAllGroupKernelImpl(
                 auto secondarySignal = reinterpret_cast<__gm__ uint64_t*>(
                     reinterpret_cast<__gm__ uint8_t*>(primarySignal) +
                     TILEXR_ALLTOALL_GROUP_ROUTE_SIGNAL_STRIDE);
+                auto ipcSignal = reinterpret_cast<__gm__ uint64_t*>(
+                    args->peerMems[rank] +
+                    AllToAllGroupIpcSignalOffsetDevice(slot, rankSize, peer));
                 if (AllToAllGroupStageWaitsForSignalDevice(routeStage)) {
                     uint64_t observed = 0ULL;
                     const uint64_t waitBegin = AllToAllGroupTraceCycle(groupTrace);
@@ -1371,14 +1480,25 @@ __aicore__ inline void AllToAllGroupKernelImpl(
                         routeStage != TILEXR_ALLTOALL_GROUP_ROUTE_STAGE_SECONDARY;
                     const bool waitSecondary = secondaryElements != 0U &&
                         routeStage != TILEXR_ALLTOALL_GROUP_ROUTE_STAGE_PRIMARY;
-                    const bool ready = readyDrivenCopyout ?
-                        AllToAllGroupRouteTokensReadyMte(
-                            primarySignal, secondarySignal, waitPrimary, waitSecondary,
-                            expectedToken, relayLocal, observed) :
-                        AllToAllGroupWaitRouteTokensMte(
-                            primarySignal, secondarySignal, waitPrimary, waitSecondary,
-                            expectedToken, TILEXR_ALLTOALL_GROUP_WAIT_TIMEOUT_CYCLES,
-                            relayLocal, observed);
+                    const bool ready = coResident ?
+                        (readyDrivenCopyout ?
+                            AllToAllGroupLoadTokenMte(ipcSignal, relayLocal) >=
+                                expectedToken :
+                            AllToAllGroupWaitTokenMte(
+                                ipcSignal, expectedToken,
+                                TILEXR_ALLTOALL_GROUP_WAIT_TIMEOUT_CYCLES,
+                                relayLocal, observed)) :
+                        (readyDrivenCopyout ?
+                            AllToAllGroupRouteTokensReadyMte(
+                                primarySignal, secondarySignal, waitPrimary, waitSecondary,
+                                expectedToken, relayLocal, observed) :
+                            AllToAllGroupWaitRouteTokensMte(
+                                primarySignal, secondarySignal, waitPrimary, waitSecondary,
+                                expectedToken, TILEXR_ALLTOALL_GROUP_WAIT_TIMEOUT_CYCLES,
+                                relayLocal, observed));
+                    if (coResident && readyDrivenCopyout) {
+                        observed = ready ? expectedToken : 0ULL;
+                    }
                     if (!ready && readyDrivenCopyout) {
                         lastPendingGroup = group;
                         lastPendingPass = pass;
@@ -1437,10 +1557,16 @@ __aicore__ inline void AllToAllGroupKernelImpl(
                 }
                 const uint32_t copyBytes =
                     (copyElementEnd - copyElementBegin) * sizeof(int32_t);
-                auto relaySrc = registeredMemory + payloadOffsets[slot] +
-                    static_cast<uint64_t>(peer) * bytesPerPeer +
-                    static_cast<uint64_t>(chunkElementOffset + copyElementBegin) *
-                    sizeof(int32_t);
+                auto relaySrc = coResident ?
+                    args->peerMems[rank] +
+                        AllToAllGroupIpcPayloadOffsetDevice(
+                            slot, rankSize, bytesPerPeer, peer) +
+                        static_cast<uint64_t>(
+                            chunkElementOffset + copyElementBegin) * sizeof(int32_t) :
+                    registeredMemory + payloadOffsets[slot] +
+                        static_cast<uint64_t>(peer) * bytesPerPeer +
+                        static_cast<uint64_t>(
+                            chunkElementOffset + copyElementBegin) * sizeof(int32_t);
                 auto relayDst = reinterpret_cast<__gm__ uint8_t*>(
                     output + static_cast<uint64_t>(peer) * elementsPerPeer +
                     chunkElementOffset + copyElementBegin);
@@ -1585,7 +1711,7 @@ __aicore__ inline void AllToAllGroupKernelImpl(
                 invocationId, elementsPerPeer, chunkElements,
                 passCount, groupCount, payloadOffsets, signalOffsets,
                 creditOffsets, routeStage, multiChannel, primaryRouteParts,
-                groupWidth, quietBatch, relayLocal,
+                groupWidth, quietBatch, npuCount, relayLocal,
                 groupTrace, traceIteration)) {
             AllToAllGroupTraceRecordKernel(
                 groupTrace, traceIteration, blockIdx, kernelBegin,
@@ -1623,6 +1749,10 @@ __aicore__ inline void AllToAllGroupKernelImpl(
             continue;
         }
         if (!AllToAllGroupPeerInRouteStageDevice(rank, peer, routeStage)) {
+            continue;
+        }
+        if (AllToAllGroupCoResidentPeerDevice(
+                rank, peer, args->localRankSize, npuCount)) {
             continue;
         }
         uint32_t primaryQp = 0U;
@@ -1806,7 +1936,7 @@ extern "C" __global__ __aicore__ void tilexr_udma_all_to_all_group_kernel(
     GM_ADDR groupTraceGM, uint32_t traceIteration,
     uint32_t routeStage, uint32_t multiChannel, uint32_t primaryRouteParts,
     uint32_t simtMode, uint32_t groupWidth, uint32_t quietBatch,
-    uint32_t prewarmSq)
+    uint32_t prewarmSq, uint32_t npuCount)
 {
     AllToAllGroupKernelImpl<false, false>(
         commArgsGM, inputGM, outputGM, registeredMemoryGM, debugGM, invocationId,
@@ -1814,7 +1944,7 @@ extern "C" __global__ __aicore__ void tilexr_udma_all_to_all_group_kernel(
         payloadOffset0, payloadOffset1, signalOffset0, signalOffset1,
         0ULL, 0ULL,
         groupTraceGM, traceIteration, routeStage, multiChannel, primaryRouteParts,
-        simtMode, groupWidth, quietBatch, prewarmSq);
+        simtMode, groupWidth, quietBatch, prewarmSq, npuCount);
 }
 
 extern "C" __global__ __aicore__ void tilexr_udma_all_to_all_group_batch_kernel(
@@ -1827,7 +1957,7 @@ extern "C" __global__ __aicore__ void tilexr_udma_all_to_all_group_batch_kernel(
     GM_ADDR groupTraceGM, uint32_t traceIteration,
     uint32_t routeStage, uint32_t multiChannel, uint32_t primaryRouteParts,
     uint32_t simtMode, uint32_t groupWidth, uint32_t quietBatch,
-    uint32_t prewarmSq)
+    uint32_t prewarmSq, uint32_t npuCount)
 {
     AllToAllGroupKernelImpl<true, false>(
         commArgsGM, inputGM, outputGM, registeredMemoryGM, debugGM, invocationId,
@@ -1835,7 +1965,7 @@ extern "C" __global__ __aicore__ void tilexr_udma_all_to_all_group_batch_kernel(
         payloadOffset0, payloadOffset1, signalOffset0, signalOffset1,
         0ULL, 0ULL,
         groupTraceGM, traceIteration, routeStage, multiChannel, primaryRouteParts,
-        simtMode, groupWidth, quietBatch, prewarmSq);
+        simtMode, groupWidth, quietBatch, prewarmSq, npuCount);
 }
 
 extern "C" __global__ __aicore__ void tilexr_udma_all_to_all_group_credit_kernel(
@@ -1849,7 +1979,7 @@ extern "C" __global__ __aicore__ void tilexr_udma_all_to_all_group_credit_kernel
     GM_ADDR groupTraceGM, uint32_t traceIteration,
     uint32_t routeStage, uint32_t multiChannel, uint32_t primaryRouteParts,
     uint32_t simtMode, uint32_t groupWidth, uint32_t quietBatch,
-    uint32_t ingressWindow, uint32_t prewarmSq)
+    uint32_t ingressWindow, uint32_t prewarmSq, uint32_t npuCount)
 {
     AllToAllGroupKernelImpl<false, true>(
         commArgsGM, inputGM, outputGM, registeredMemoryGM, debugGM, invocationId,
@@ -1857,7 +1987,7 @@ extern "C" __global__ __aicore__ void tilexr_udma_all_to_all_group_credit_kernel
         payloadOffset0, payloadOffset1, signalOffset0, signalOffset1,
         creditOffset0, creditOffset1,
         groupTraceGM, traceIteration, routeStage, multiChannel, primaryRouteParts,
-        simtMode, groupWidth, quietBatch, prewarmSq);
+        simtMode, groupWidth, quietBatch, prewarmSq, npuCount);
 }
 
 extern "C" __global__ __aicore__ void tilexr_udma_all_to_all_group_batch_credit_kernel(
@@ -1871,7 +2001,7 @@ extern "C" __global__ __aicore__ void tilexr_udma_all_to_all_group_batch_credit_
     GM_ADDR groupTraceGM, uint32_t traceIteration,
     uint32_t routeStage, uint32_t multiChannel, uint32_t primaryRouteParts,
     uint32_t simtMode, uint32_t groupWidth, uint32_t quietBatch,
-    uint32_t ingressWindow, uint32_t prewarmSq)
+    uint32_t ingressWindow, uint32_t prewarmSq, uint32_t npuCount)
 {
     AllToAllGroupKernelImpl<true, true>(
         commArgsGM, inputGM, outputGM, registeredMemoryGM, debugGM, invocationId,
@@ -1879,7 +2009,7 @@ extern "C" __global__ __aicore__ void tilexr_udma_all_to_all_group_batch_credit_
         payloadOffset0, payloadOffset1, signalOffset0, signalOffset1,
         creditOffset0, creditOffset1,
         groupTraceGM, traceIteration, routeStage, multiChannel, primaryRouteParts,
-        simtMode, groupWidth, quietBatch, prewarmSq);
+        simtMode, groupWidth, quietBatch, prewarmSq, npuCount);
 }
 
 #include "tilexr_udma_alltoall_group_launcher.cpp"
