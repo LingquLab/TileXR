@@ -844,6 +844,7 @@ void TestHostStructure()
     CHECK_CONTAINS(demo, "TILEXR_DEMO_ALLTOALL_GROUP_ROUTE_STAGE");
     CHECK_CONTAINS(demo, "grouped single route stage complete");
     CHECK_CONTAINS(demo, "GetBarrierEndpoint(barrierSequence++)");
+    CHECK_CONTAINS(demo, "terminalBarrierRetryCount");
     CHECK_CONTAINS(demo, "TILEXR_DEMO_ALLTOALL_GROUP_USE_SECONDARY_ROUTE");
     CHECK_CONTAINS(demo, "TILEXR_DEMO_ALLTOALL_GROUP_CHANNEL_MODE");
     CHECK_CONTAINS(demo, "TILEXR_DEMO_ALLTOALL_GROUP_WIDTH");

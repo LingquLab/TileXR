@@ -368,7 +368,8 @@ int CreateBarrierServer(uint16_t port)
     return fd;
 }
 
-int ConnectBarrierServer(const std::string& host, uint16_t port)
+int ConnectBarrierServer(const std::string& host, uint16_t port,
+    int retryCount = kConnectRetryCount)
 {
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
@@ -377,7 +378,7 @@ int ConnectBarrierServer(const std::string& host, uint16_t port)
     }
     addr.sin_port = htons(port);
 
-    for (int attempt = 0; attempt < kConnectRetryCount; ++attempt) {
+    for (int attempt = 0; attempt < retryCount; ++attempt) {
         int fd = socket(AF_INET, SOCK_STREAM, 0);
         if (fd < 0) {
             return -1;
@@ -391,7 +392,8 @@ int ConnectBarrierServer(const std::string& host, uint16_t port)
     return -1;
 }
 
-bool DemoBarrierAll(int rank, int rankSize, const std::string& step)
+bool DemoBarrierAll(int rank, int rankSize, const std::string& step,
+    int connectRetryCount = kConnectRetryCount)
 {
     if (rankSize <= 1) {
         return true;
@@ -438,7 +440,8 @@ bool DemoBarrierAll(int rank, int rankSize, const std::string& step)
             return false;
         }
     } else {
-        int fd = ConnectBarrierServer(endpoint.host, endpoint.port);
+        int fd = ConnectBarrierServer(
+            endpoint.host, endpoint.port, connectRetryCount);
         if (fd < 0) {
             std::cerr << "[rank " << rank << "] ERROR: failed to connect demo barrier on "
                       << endpoint.host << ":" << endpoint.port << std::endl;
@@ -1408,8 +1411,12 @@ bool RunGroupedAllToAll(
         }
     }
 
-    if (singleRouteStage &&
-        !DemoBarrierAll(rank, rankSize, "grouped single route stage complete")) {
+    const int terminalBarrierRetryCount = std::max(kConnectRetryCount,
+        GetEnvInt("TILEXR_DEMO_TIMEOUT_SECONDS", 1800) *
+            1000 / kConnectRetrySleepMs);
+    if (singleRouteStage && !DemoBarrierAll(
+            rank, rankSize, "grouped single route stage complete",
+            terminalBarrierRetryCount)) {
         release();
         return false;
     }
