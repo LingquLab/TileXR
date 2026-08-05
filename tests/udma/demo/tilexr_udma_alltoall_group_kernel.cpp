@@ -1104,6 +1104,16 @@ __aicore__ inline bool AllToAllGroupRunSimtSend(
 
 } // namespace
 
+template <bool IngressCredit>
+__aicore__ inline void AllToAllGroupTerminalBarrier()
+{
+    if constexpr (IngressCredit) {
+        // Every block must reach the terminal barrier exactly once, including
+        // error paths, otherwise a peer block remains blocked in SyncAll.
+        AscendC::SyncAll();
+    }
+}
+
 template <bool BatchQuiet, bool IngressCredit>
 __aicore__ inline void AllToAllGroupKernelImpl(
     GM_ADDR commArgsGM, GM_ADDR inputGM, GM_ADDR outputGM,
@@ -1165,6 +1175,7 @@ __aicore__ inline void AllToAllGroupKernelImpl(
             0U, 0U, -1, 0U, 0U, 0ULL, 0ULL);
         AllToAllGroupTraceRecordKernel(groupTrace, traceIteration, blockIdx,
             kernelBegin, AllToAllGroupTraceCycle(groupTrace));
+        AllToAllGroupTerminalBarrier<IngressCredit>();
         return;
     }
 
@@ -1175,6 +1186,7 @@ __aicore__ inline void AllToAllGroupKernelImpl(
         if (priorError->valid != 0U) {
             AllToAllGroupTraceRecordKernel(groupTrace, traceIteration, blockIdx,
                 kernelBegin, AllToAllGroupTraceCycle(groupTrace));
+            AllToAllGroupTerminalBarrier<IngressCredit>();
             return;
         }
     }
@@ -1195,6 +1207,7 @@ __aicore__ inline void AllToAllGroupKernelImpl(
         if (!AllToAllGroupStageRunsReceiveDevice(routeStage)) {
             AllToAllGroupTraceRecordKernel(groupTrace, traceIteration, blockIdx,
                 kernelBegin, AllToAllGroupTraceCycle(groupTrace));
+            AllToAllGroupTerminalBarrier<IngressCredit>();
             return;
         }
         const uint32_t worker = blockIdx - sendWorkers;
@@ -1205,6 +1218,7 @@ __aicore__ inline void AllToAllGroupKernelImpl(
                 0U, 0U, -1, 0U, 0U, groupWidth, 0ULL);
             AllToAllGroupTraceRecordKernel(groupTrace, traceIteration, blockIdx,
                 kernelBegin, AllToAllGroupTraceCycle(groupTrace));
+            AllToAllGroupTerminalBarrier<IngressCredit>();
             return;
         }
         const uint32_t selfCopyWorkers = copyoutWorkers >= 32U ? 16U : copyoutWorkers;
@@ -1383,6 +1397,7 @@ __aicore__ inline void AllToAllGroupKernelImpl(
                             group, pass, peer, 0U, 0U, expectedToken, observed);
                         AllToAllGroupTraceRecordKernel(groupTrace, traceIteration, blockIdx,
                             kernelBegin, AllToAllGroupTraceCycle(groupTrace));
+                        AllToAllGroupTerminalBarrier<IngressCredit>();
                         return;
                     }
                     AllToAllGroupTraceRecordTask(
@@ -1502,6 +1517,7 @@ __aicore__ inline void AllToAllGroupKernelImpl(
                         AllToAllGroupTraceRecordKernel(
                             groupTrace, traceIteration, blockIdx, kernelBegin,
                             AllToAllGroupTraceCycle(groupTrace));
+                        AllToAllGroupTerminalBarrier<IngressCredit>();
                         return;
                     }
                 } else {
@@ -1538,12 +1554,13 @@ __aicore__ inline void AllToAllGroupKernelImpl(
                     AllToAllGroupTraceRecordKernel(
                         groupTrace, traceIteration, blockIdx, kernelBegin,
                         AllToAllGroupTraceCycle(groupTrace));
+                    AllToAllGroupTerminalBarrier<IngressCredit>();
                     return;
                 }
             }
         }
         if constexpr (IngressCredit) {
-            AscendC::SyncAll();
+            AllToAllGroupTerminalBarrier<IngressCredit>();
             AllToAllGroupPublishTerminalCredits(
                 args, rank, rankSize, invocationId, worker, copyoutWorkers,
                 groupCount, groupWidth, creditOffsets[slot], relayLocal);
@@ -1556,6 +1573,7 @@ __aicore__ inline void AllToAllGroupKernelImpl(
     if (!AllToAllGroupStageRunsSendDevice(routeStage)) {
         AllToAllGroupTraceRecordKernel(groupTrace, traceIteration, blockIdx,
             kernelBegin, AllToAllGroupTraceCycle(groupTrace));
+        AllToAllGroupTerminalBarrier<IngressCredit>();
         return;
     }
     if (simtMode != 0U) {
@@ -1572,10 +1590,11 @@ __aicore__ inline void AllToAllGroupKernelImpl(
             AllToAllGroupTraceRecordKernel(
                 groupTrace, traceIteration, blockIdx, kernelBegin,
                 AllToAllGroupTraceCycle(groupTrace));
+            AllToAllGroupTerminalBarrier<IngressCredit>();
             return;
         }
         if constexpr (IngressCredit) {
-            AscendC::SyncAll();
+            AllToAllGroupTerminalBarrier<IngressCredit>();
             for (uint32_t lane = 0U; lane < groupWidth; ++lane) {
                 if (!AllToAllGroupWaitTerminalCredit(
                         args, rank, rankSize, invocationId, lane,
@@ -1656,6 +1675,7 @@ __aicore__ inline void AllToAllGroupKernelImpl(
                         AllToAllGroupTraceRecordKernel(
                             groupTrace, traceIteration, blockIdx, kernelBegin,
                             AllToAllGroupTraceCycle(groupTrace));
+                        AllToAllGroupTerminalBarrier<IngressCredit>();
                         return;
                     }
                 }
@@ -1747,6 +1767,7 @@ __aicore__ inline void AllToAllGroupKernelImpl(
                         groupTrace, traceIteration, groupCount, passCount)) {
                     AllToAllGroupTraceRecordKernel(groupTrace, traceIteration, blockIdx,
                         kernelBegin, AllToAllGroupTraceCycle(groupTrace));
+                    AllToAllGroupTerminalBarrier<IngressCredit>();
                     return;
                 }
             }
@@ -1757,10 +1778,11 @@ __aicore__ inline void AllToAllGroupKernelImpl(
             groupCount, passCount)) {
         AllToAllGroupTraceRecordKernel(groupTrace, traceIteration, blockIdx,
             kernelBegin, AllToAllGroupTraceCycle(groupTrace));
+        AllToAllGroupTerminalBarrier<IngressCredit>();
         return;
     }
     if constexpr (IngressCredit) {
-        AscendC::SyncAll();
+        AllToAllGroupTerminalBarrier<IngressCredit>();
         if (workerRoute == 0U && !AllToAllGroupWaitTerminalCredit(
                 args, rank, rankSize, invocationId, lane, groupCount, passCount,
                 groupWidth, creditOffsets[slot], relayLocal,

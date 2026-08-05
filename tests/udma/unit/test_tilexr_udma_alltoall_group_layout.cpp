@@ -52,6 +52,17 @@ std::string ReadFile(const std::string& path)
     return out.str();
 }
 
+size_t CountOccurrences(const std::string& text, const std::string& needle)
+{
+    size_t count = 0U;
+    size_t offset = 0U;
+    while ((offset = text.find(needle, offset)) != std::string::npos) {
+        ++count;
+        offset += needle.size();
+    }
+    return count;
+}
+
 void CheckSchedule(int rankSize, uint32_t groupWidth = TileXR::Demo::kAllToAllGroupWidth)
 {
     for (int rank = 0; rank < rankSize; ++rank) {
@@ -716,7 +727,8 @@ void TestKernelStructure()
     CHECK_CONTAINS(kernel, "AllToAllGroupPublishTerminalCredits");
     CHECK_CONTAINS(kernel, "AllToAllGroupWaitTerminalCredit");
     CHECK_CONTAINS(kernel, "AllToAllGroupDeviceTerminalCreditToken");
-    CHECK_CONTAINS(kernel, "AscendC::SyncAll()");
+    CHECK_CONTAINS(kernel, "AllToAllGroupTerminalBarrier<IngressCredit>()");
+    CHECK_EQ(CountOccurrences(kernel, "AscendC::SyncAll()"), 1U);
     CHECK_CONTAINS(kernel, "AllToAllGroupRunSimtSend<IngressCredit>");
     CHECK_CONTAINS(kernel, "auto registry = TileXR::GetUDMARegistry(args)");
     CHECK_CONTAINS(kernel, "AllToAllGroupCreditOwnerDevice(worker)");
