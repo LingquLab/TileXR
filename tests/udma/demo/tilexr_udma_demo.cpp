@@ -1056,6 +1056,27 @@ bool RunGroupedAllToAll(
         return false;
     }
     const bool routeStages = routeStagesValue == 1;
+    const int routeStageValue = GetEnvInt(
+        "TILEXR_DEMO_ALLTOALL_GROUP_ROUTE_STAGE", -1);
+    if (routeStageValue < -1 ||
+        (routeStageValue >= 0 && !TileXR::Demo::AllToAllGroupValidRouteStage(
+            static_cast<uint32_t>(routeStageValue)))) {
+        std::cerr << "[rank " << rank
+                  << "] ERROR: TILEXR_DEMO_ALLTOALL_GROUP_ROUTE_STAGE must be -1 or 0..10, got "
+                  << routeStageValue << std::endl;
+        return false;
+    }
+    if (routeStages && routeStageValue >= 0) {
+        std::cerr << "[rank " << rank
+                  << "] ERROR: TILEXR_DEMO_ALLTOALL_GROUP_ROUTE_STAGES and "
+                     "TILEXR_DEMO_ALLTOALL_GROUP_ROUTE_STAGE cannot both be enabled"
+                  << std::endl;
+        return false;
+    }
+    const bool singleRouteStage = routeStageValue >= 0;
+    const auto selectedRouteStage = singleRouteStage ?
+        static_cast<TileXR::Demo::AllToAllGroupRouteStage>(routeStageValue) :
+        TileXR::Demo::AllToAllGroupRouteStage::kCombined;
     constexpr size_t kRouteStageCount = 10U;
     const std::array<TileXR::Demo::AllToAllGroupRouteStage, kRouteStageCount>
         stagedRouteStages {{
@@ -1260,7 +1281,8 @@ bool RunGroupedAllToAll(
         " quietBatch=" + std::to_string(quietBatch) +
         " ingressWindow=" + std::to_string(ingressWindow) +
         " prewarmSq=" + std::to_string(prewarmSq) +
-        " routeStages=" + std::to_string(routeStagesValue));
+        " routeStages=" + std::to_string(routeStagesValue) +
+        " routeStage=" + std::to_string(routeStageValue));
 
     if (routeStages &&
         !DemoBarrierAll(rank, rankSize, "grouped route stages ready")) {
@@ -1307,8 +1329,7 @@ bool RunGroupedAllToAll(
     std::array<double, kRouteStageCount> stageTotalUs {};
     if (!routeStages) {
         for (int iter = 0; iter < warmup; ++iter, ++invocationId) {
-            if (!launchGroupStage(
-                    TileXR::Demo::AllToAllGroupRouteStage::kCombined, nullptr, 0U)) {
+            if (!launchGroupStage(selectedRouteStage, nullptr, 0U)) {
                 release();
                 return false;
             }
@@ -1325,7 +1346,7 @@ bool RunGroupedAllToAll(
 
         const auto begin = std::chrono::steady_clock::now();
         for (int iter = 0; iter < repeat; ++iter, ++invocationId) {
-            if (!launchGroupStage(TileXR::Demo::AllToAllGroupRouteStage::kCombined,
+            if (!launchGroupStage(selectedRouteStage,
                     groupTraceDevices[0], static_cast<uint32_t>(iter))) {
                 release();
                 return false;
@@ -1387,8 +1408,10 @@ bool RunGroupedAllToAll(
 
     std::vector<int32_t> hostDebug(kErrorWordsPerCore * kErrorCoreCount, 0);
     const size_t debugBytes = hostDebug.size() * sizeof(int32_t);
-    bool copyOk = CopyDeviceToHost(
-        rank, hostOutput.data(), dataBytes, output, dataBytes, "grouped alltoall output") &&
+    const bool validateOutput = !singleRouteStage ||
+        selectedRouteStage == TileXR::Demo::AllToAllGroupRouteStage::kCombined;
+    bool copyOk = (!validateOutput || CopyDeviceToHost(
+        rank, hostOutput.data(), dataBytes, output, dataBytes, "grouped alltoall output")) &&
         CopyDeviceToHost(rank, hostDebug.data(), debugBytes, debug, debugBytes,
             "grouped alltoall debug");
     if (traceEnabled) {
@@ -1442,7 +1465,8 @@ bool RunGroupedAllToAll(
     }
 
     const bool valid = copyOk && debugOk &&
-        ValidateAllToAllData(rank, rankSize, hostOutput, elementsPerPeer);
+        (!validateOutput ||
+            ValidateAllToAllData(rank, rankSize, hostOutput, elementsPerPeer));
     release();
     return valid;
 }
