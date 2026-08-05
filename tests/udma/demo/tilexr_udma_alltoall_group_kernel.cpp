@@ -163,7 +163,7 @@ __aicore__ inline void AllToAllGroupQueueDiagCaptureQuiet(
     record->tailAtQuietBegin = tailAtBegin;
     record->expectedTail = expectedTail;
     record->completedTail = completedTail;
-    record->cqeSlot = cqeIndex & (TILEXR_UDMA_CQ_DEPTH - 1U);
+    record->cqeSlot = cqeIndex & (TileXR::TILEXR_UDMA_CQ_DEPTH - 1U);
     record->rawCqeWord = rawCqeWord;
     record->pollCount = pollCount;
     record->quietStatus = quietStatus;
@@ -336,10 +336,6 @@ __aicore__ inline void AllToAllGroupSelectRouteQps(
     uint32_t& primaryQp, uint32_t& secondaryQp,
     uint32_t& primaryWeight, uint32_t& secondaryWeight)
 {
-    if (queueDiag == nullptr) {
-        return TileXR::UDMAQuietStatusOnQp(
-            args, request.peer, request.qpIdx);
-    }
     auto udmaInfo = TileXR::GetUDMAInfo(args);
     const uint32_t qpCount = TileXR::UDMAGetLogicalQpNum(udmaInfo);
     primaryQp = 0U;
@@ -856,6 +852,10 @@ __aicore__ inline uint32_t AllToAllGroupQuietWithDiag(
     uint32_t blockIdx, uint32_t invocationId,
     const AllToAllGroupPendingQuiet& request, uint64_t quietBegin)
 {
+    if (queueDiag == nullptr) {
+        return TileXR::UDMAQuietStatusOnQp(
+            args, request.peer, request.qpIdx);
+    }
     auto udmaInfo = TileXR::GetUDMAInfo(args);
     auto wq = TileXR::UDMAGetWQCtx(udmaInfo, request.peer, request.qpIdx);
     auto cq = TileXR::UDMAGetSCQCtx(udmaInfo, request.peer, request.qpIdx);
@@ -875,7 +875,7 @@ __aicore__ inline uint32_t AllToAllGroupQuietWithDiag(
     const uint32_t cqeSize = 1U << cq->baseBkShift;
     auto cqeWord = reinterpret_cast<__gm__ uint32_t*>(
         cq->bufAddr + static_cast<uint64_t>(cqeSize) *
-            (cqeIndex & (TILEXR_UDMA_CQ_DEPTH - 1U)));
+            (cqeIndex & (TileXR::TILEXR_UDMA_CQ_DEPTH - 1U)));
     TileXR::UDMACleanCacheLines(
         reinterpret_cast<__gm__ uint8_t*>(cqeWord), sizeof(uint32_t));
     AllToAllGroupQueueDiagCaptureQuiet(
