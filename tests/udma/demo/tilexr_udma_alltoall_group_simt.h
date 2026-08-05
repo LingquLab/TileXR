@@ -157,8 +157,8 @@ __simt_callee__ inline bool AllToAllGroupSimtCoResidentPeer(
 
 __simt_vf__ __aicore__ LAUNCH_BOUND(kAllToAllGroupSimtThreads)
 inline void AllToAllGroupSimtBuildVf(
-    __ubuf__ AllToAllGroupSimtBatch* batch, uint32_t workerBegin,
-    uint32_t workerStride, uint32_t workerCount, const __gm__ CommArgs* args,
+    __ubuf__ AllToAllGroupSimtBatch* batch, uint32_t workerCount,
+    const __gm__ CommArgs* args,
     __gm__ TileXRUDMARegistry* registry, __gm__ int32_t* input,
     uint64_t tokenBase, uint32_t invocationId, uint32_t group, uint32_t pass,
     int32_t elementsPerPeer, int32_t chunkElementOffset,
@@ -170,8 +170,7 @@ inline void AllToAllGroupSimtBuildVf(
     if (slot < workerCount) {
         batch->active[slot] = 0U;
         batch->configStatus[slot] = 0U;
-        const uint32_t worker = workerBegin + slot * workerStride;
-        batch->worker[slot] = worker;
+        const uint32_t worker = batch->worker[slot];
         batch->queuePollCount[slot] = 0U;
         const uint32_t lane = worker % 16U;
         const uint32_t route = worker / 16U;
@@ -565,9 +564,9 @@ __aicore__ inline void AllToAllGroupSimtPostSignal(
     AscendC::PipeBarrier<PIPE_ALL>();
 }
 
-__aicore__ inline void AllToAllGroupSimtBuild(
-    __ubuf__ AllToAllGroupSimtBatch* batch, uint32_t workerBegin,
-    uint32_t workerStride, uint32_t workerCount, const __gm__ CommArgs* args,
+__aicore__ inline void AllToAllGroupSimtBuildPrepared(
+    __ubuf__ AllToAllGroupSimtBatch* batch, uint32_t workerCount,
+    const __gm__ CommArgs* args,
     __gm__ TileXRUDMARegistry* registry, __gm__ int32_t* input,
     uint64_t tokenBase, uint32_t invocationId, uint32_t group, uint32_t pass,
     int32_t elementsPerPeer, int32_t chunkElementOffset,
@@ -575,10 +574,10 @@ __aicore__ inline void AllToAllGroupSimtBuild(
     uint32_t routeStage, uint32_t multiChannel, uint32_t primaryRouteParts,
     uint32_t groupWidth, uint32_t npuCount)
 {
-    batch->sendCoreCount = workerStride;
+    AscendC::PipeBarrier<PIPE_ALL>();
     asc_vf_call<AllToAllGroupSimtBuildVf>(
         dim3{kAllToAllGroupSimtThreads, 1U, 1U}, batch,
-        workerBegin, workerStride, workerCount, args, registry, input, tokenBase,
+        workerCount, args, registry, input, tokenBase,
         invocationId, group, pass, elementsPerPeer, chunkElementOffset,
         currentElements, payloadOffset, signalOffset, routeStage,
         multiChannel, primaryRouteParts, groupWidth, npuCount);
