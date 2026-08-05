@@ -60,8 +60,11 @@ static_assert(sizeof(AllToAllGroupSimtBatch) <= 64U * 1024U,
 
 __simt_callee__ inline uint64_t AllToAllGroupSimtTraceCycle(uint32_t traceEnabled)
 {
-    return traceEnabled == 0U ? 0ULL :
-        static_cast<uint64_t>(AscendC::GetSystemCycle());
+    uint64_t cycle = 0ULL;
+    if (traceEnabled != 0U) {
+        asm volatile("MOV %0, SYS_CNT\n" : "+l"(cycle));
+    }
+    return cycle;
 }
 
 __aicore__ inline uint32_t AllToAllGroupSimtWqesForPhase(uint32_t phase)
