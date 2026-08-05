@@ -29,6 +29,8 @@ constexpr size_t kAllToAllGroupCreditSlotBytes =
     static_cast<size_t>(kAllToAllGroupMaxRankSize) * kAllToAllGroupCreditStride;
 constexpr uint32_t kAllToAllGroupSendCoreCount = 16U;
 constexpr uint32_t kAllToAllGroupSendWorkerCount = 32U;
+constexpr uint32_t kAllToAllGroupSimtSendWorkerCount = 1U;
+constexpr uint32_t kAllToAllGroupDcacheBytes = 64U * 1024U;
 constexpr uint32_t kAllToAllGroupMaxGroupCount = 64U;
 constexpr uint32_t kAllToAllGroupErrorWordsPerCore = 12U;
 constexpr uint32_t kAllToAllGroupErrorCoreCount = 64U;
@@ -138,7 +140,8 @@ inline bool AllToAllGroupValidCopyoutWorkers(uint32_t workers)
 
 inline uint32_t AllToAllGroupBlockDim(uint32_t sendWorkers, uint32_t copyoutWorkers)
 {
-    if (sendWorkers != kAllToAllGroupSendWorkerCount ||
+    if ((sendWorkers != kAllToAllGroupSendWorkerCount &&
+            sendWorkers != kAllToAllGroupSimtSendWorkerCount) ||
         !AllToAllGroupValidCopyoutWorkers(copyoutWorkers) ||
         sendWorkers + copyoutWorkers > kAllToAllGroupBlockDim) {
         return 0U;

@@ -65,8 +65,8 @@ extern int launch_tilexr_udma_all_to_all_group(
     uint64_t creditOffset0, uint64_t creditOffset1,
     GM_ADDR groupTrace, uint32_t traceIteration,
     uint32_t routeStage, uint32_t multiChannel, uint32_t primaryRouteParts,
-    uint32_t groupWidth, uint32_t quietBatch, uint32_t ingressWindow,
-    uint32_t prewarmSq);
+    uint32_t simtMode, uint32_t groupWidth, uint32_t quietBatch,
+    uint32_t ingressWindow, uint32_t prewarmSq);
 extern void launch_tilexr_udma_all_to_all_bigdata(
     uint32_t blockDim, void* stream, GM_ADDR commArgs, GM_ADDR input, GM_ADDR output,
     GM_ADDR udmaMem, GM_ADDR debug, GM_ADDR fullmeshTrace, uint32_t fullmeshTraceIteration,
@@ -1027,12 +1027,24 @@ bool RunGroupedAllToAll(
         TileXR::Demo::kAllToAllGroupAutoPrimaryParts :
         static_cast<uint32_t>(primaryRoutePartsValue);
 
+    const int simtModeValue = GetEnvInt(
+        "TILEXR_DEMO_ALLTOALL_GROUP_SIMT", 0);
+    if (simtModeValue != 0 && simtModeValue != 1) {
+        std::cerr << "[rank " << rank
+                  << "] ERROR: TILEXR_DEMO_ALLTOALL_GROUP_SIMT"
+                  << " must be 0 or 1, got " << simtModeValue << std::endl;
+        return false;
+    }
+    const uint32_t simtMode = static_cast<uint32_t>(simtModeValue);
+
     bool sdmaAvailable = false;
     if (!CheckTileXR(rank, "TileXRSDMAAvailable grouped alltoall",
             TileXRSDMAAvailable(comm, &sdmaAvailable))) {
         return false;
     }
-    constexpr uint32_t sendWorkers = TileXR::Demo::kAllToAllGroupSendWorkerCount;
+    const uint32_t sendWorkers = simtMode != 0U ?
+        TileXR::Demo::kAllToAllGroupSimtSendWorkerCount :
+        TileXR::Demo::kAllToAllGroupSendWorkerCount;
     const uint32_t copyoutWorkers = sdmaAvailable ? 1U : 32U;
     const int prewarmSqValue = GetEnvInt(
         "TILEXR_DEMO_ALLTOALL_GROUP_PREWARM_SQ", 0);
@@ -1252,6 +1264,7 @@ bool RunGroupedAllToAll(
         " channelMode=" + std::to_string(channelModeValue) +
         " multiChannel=" + std::to_string(multiChannel ? 1 : 0) +
         " primaryRouteParts=" + std::to_string(primaryRoutePartsValue) +
+        " simt=" + std::to_string(simtMode) +
         " sdmaAvailable=" + std::to_string(sdmaAvailable ? 1 : 0) +
         " sendWorkers=" + std::to_string(sendWorkers) +
         " copyoutWorkers=" + std::to_string(copyoutWorkers) +
@@ -1287,7 +1300,7 @@ bool RunGroupedAllToAll(
             reinterpret_cast<GM_ADDR>(trace), traceIteration,
             static_cast<uint32_t>(routeStage),
             multiChannel ? 1U : 0U, primaryRouteParts,
-            groupWidth, quietBatch,
+            simtMode, groupWidth, quietBatch,
             routeStage == TileXR::Demo::AllToAllGroupRouteStage::kCombined ?
                 ingressWindow : 0U,
             prewarmThisLaunch);

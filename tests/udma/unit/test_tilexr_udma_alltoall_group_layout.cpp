@@ -587,6 +587,9 @@ void TestCopyoutWorkerPolicy()
     CHECK_EQ(TileXR::Demo::AllToAllGroupValidCopyoutWorkers(12U), false);
     CHECK_EQ(TileXR::Demo::AllToAllGroupBlockDim(32U, 32U), 64U);
     CHECK_EQ(TileXR::Demo::AllToAllGroupBlockDim(32U, 1U), 33U);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupBlockDim(1U, 32U), 33U);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupBlockDim(1U, 1U), 2U);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupBlockDim(4U, 1U), 0U);
     CHECK_EQ(TileXR::Demo::AllToAllGroupBlockDim(16U, 48U), 0U);
     CHECK_EQ(TileXR::Demo::AllToAllGroupBlockDim(32U, 48U), 0U);
 
@@ -635,6 +638,7 @@ void TestKernelStructure()
     CHECK_CONTAINS(kernel, "tilexr_udma_all_to_all_group_kernel");
     CHECK_CONTAINS(kernel, "TILEXR_ALLTOALL_GROUP_SEND_CORES");
     CHECK_CONTAINS(kernel, "#include \"tilexr_udma_alltoall_group_route.h\"");
+    CHECK_CONTAINS(kernel, "#include \"tilexr_udma_alltoall_group_simt.h\"");
     CHECK_CONTAINS(kernel, "AllToAllGroupSelectRouteQps");
     CHECK_CONTAINS(kernel, "AllToAllGroupSplitByRouteDevice");
     CHECK_CONTAINS(kernel, "TILEXR_ALLTOALL_GROUP_ROUTE_SIGNAL_STRIDE");
@@ -674,10 +678,10 @@ void TestKernelStructure()
     CHECK_CONTAINS(kernel, "kAllToAllGroupTraceSdmaDsb");
     CHECK_CONTAINS(kernel, "kAllToAllGroupTraceSdmaDoorbell");
     CHECK_NOT_CONTAINS(kernel, "AllToAllGroupTraceRecordError");
-    CHECK_CONTAINS(kernel, "TILEXR_ALLTOALL_GROUP_SEND_WORKERS + copyoutWorkers");
+    CHECK_CONTAINS(kernel, "sendWorkers + copyoutWorkers");
     CHECK_CONTAINS(kernel,
         "const uint32_t traceCore = copyoutWorkers < TILEXR_ALLTOALL_GROUP_SEND_CORES");
-    CHECK_CONTAINS(kernel, "TILEXR_ALLTOALL_GROUP_SEND_WORKERS + lane : blockIdx");
+    CHECK_CONTAINS(kernel, "sendWorkers + lane : blockIdx");
     CHECK_CONTAINS(kernel, "UDMAPutNbiOnQpWithFlag<int32_t>");
     CHECK_CONTAINS(kernel, "UDMAPutNbiOnQpWithFlag<uint64_t>");
     CHECK_NOT_CONTAINS(kernel, "UDMAPutSignalNbiOnQp<int32_t>");
@@ -713,6 +717,8 @@ void TestKernelStructure()
     CHECK_CONTAINS(kernel, "AllToAllGroupWaitTerminalCredit");
     CHECK_CONTAINS(kernel, "AllToAllGroupDeviceTerminalCreditToken");
     CHECK_CONTAINS(kernel, "AscendC::SyncAll()");
+    CHECK_CONTAINS(kernel, "AllToAllGroupRunSimtSend<IngressCredit>");
+    CHECK_CONTAINS(kernel, "auto registry = TileXR::GetUDMARegistry(args)");
     CHECK_CONTAINS(kernel, "AllToAllGroupCreditOwnerDevice(worker)");
     CHECK_CONTAINS(kernel, "TILEXR_ALLTOALL_GROUP_STAGE_CREDIT_WAIT");
     CHECK_CONTAINS(kernel, "kAllToAllGroupTraceCreditWait");
@@ -742,21 +748,26 @@ void TestKernelStructure()
     CHECK_CONTAINS(kernel, "AllToAllGroupStageWaitsForSignalDevice(routeStage)");
     CHECK_CONTAINS(kernel, "observed >= expectedToken");
     CHECK_NOT_CONTAINS(kernel, "<<<");
-    CHECK_CONTAINS(launcher, "rtDevBinaryRegister");
-    CHECK_CONTAINS(launcher, "rtFunctionRegister");
+    CHECK_NOT_CONTAINS(launcher, "rtDevBinaryRegister");
+    CHECK_NOT_CONTAINS(launcher, "rtFunctionRegister");
+    CHECK_NOT_CONTAINS(launcher, "rtGetFunctionByName");
     CHECK_CONTAINS(launcher, "rtKernelLaunchWithFlagV2");
+    CHECK_CONTAINS(launcher, "tilexr_udma_all_to_all_group_kernel");
     CHECK_CONTAINS(launcher, "GroupedAllToAllKernelArgs");
     CHECK_CONTAINS(launcher, "sizeof(GroupedAllToAllKernelArgs) == 136U");
     CHECK_CONTAINS(launcher, "GroupedAllToAllCreditKernelArgs");
-    CHECK_CONTAINS(launcher, "sizeof(GroupedAllToAllCreditKernelArgs) == 152U");
+    CHECK_CONTAINS(launcher, "sizeof(GroupedAllToAllCreditKernelArgs) == 160U");
     CHECK_CONTAINS(launcher, "prewarmSq");
-    CHECK_CONTAINS(launcher, "TILEXR_GROUPED_ALLTOALL_BATCH_KERNEL_NAME");
-    CHECK_CONTAINS(launcher, "TILEXR_GROUPED_ALLTOALL_CREDIT_KERNEL_NAME");
-    CHECK_CONTAINS(launcher, "TILEXR_GROUPED_ALLTOALL_BATCH_CREDIT_KERNEL_NAME");
+    CHECK_CONTAINS(launcher, "tilexr_udma_all_to_all_group_batch_kernel<<<");
+    CHECK_CONTAINS(launcher, "tilexr_udma_all_to_all_group_credit_kernel<<<");
+    CHECK_CONTAINS(launcher,
+        "tilexr_udma_all_to_all_group_batch_credit_kernel<<<");
     CHECK_CONTAINS(launcher, "const bool useCredit = ingressWindow != 0U");
     CHECK_CONTAINS(launcher, "const bool useBatch = quietBatch != 1U");
-    CHECK_CONTAINS(launcher, "cfgInfo.schemMode = RT_SCHEM_MODE_NORMAL");
-    CHECK_NOT_CONTAINS(launcher, "<<<");
+    CHECK_CONTAINS(launcher, "ACL_DEV_ATTR_UBUF_PER_VECTOR_CORE");
+    CHECK_CONTAINS(launcher, "dynamicUbSize");
+    CHECK_CONTAINS(launcher, "kAllToAllGroupDcacheBytes");
+    CHECK_CONTAINS(launcher, "<<<");
     CHECK_NOT_CONTAINS(kernel, "UDMAPutSignalNbi<int32_t>");
     CHECK_NOT_CONTAINS(kernel, "elementsPerPeer) * lane /");
 }
@@ -782,12 +793,27 @@ void TestHostStructure()
     CHECK_CONTAINS(demo, "grouped ingress credit currently requires single pass");
     CHECK_CONTAINS(demo, "grouped ingress credit currently requires groupWidth=16");
     CHECK_CONTAINS(demo, "TILEXR_DEMO_ALLTOALL_GROUP_PRIMARY_ROUTE_PARTS");
+    CHECK_CONTAINS(demo, "TILEXR_DEMO_ALLTOALL_GROUP_SIMT");
+    CHECK_CONTAINS(demo, "kAllToAllGroupSimtSendWorkerCount");
     CHECK_CONTAINS(demo, "kAllToAllGroupSendWorkerCount");
     CHECK_CONTAINS(demo, "TileXRSDMAAvailable(comm, &sdmaAvailable)");
     CHECK_CONTAINS(demo,
         "const uint32_t copyoutWorkers = sdmaAvailable ? 1U : 32U");
     CHECK_CONTAINS(demo, "grouped alltoall registeredBytes=");
     CHECK_CONTAINS(demo, "grouped alltoall warmup=");
+
+    const std::string simt = ReadFile(
+        std::string(TILEXR_SOURCE_ROOT) +
+        "/tests/udma/demo/tilexr_udma_alltoall_group_simt.h");
+    CHECK_CONTAINS(simt, "__simt_vf__ __aicore__");
+    CHECK_CONTAINS(simt, "AllToAllGroupSimtBuildVf");
+    CHECK_CONTAINS(simt, "AllToAllGroupSimtPostPayloadVf");
+    CHECK_CONTAINS(simt, "AllToAllGroupSimtPostSignalVf");
+    CHECK_CONTAINS(simt, "asc_vf_call<");
+    CHECK_CONTAINS(simt, "asc_syncthreads()");
+    CHECK_CONTAINS(simt, "asc_atomic_add(");
+    CHECK_NOT_CONTAINS(simt, "AscendC::Simt::VF_CALL");
+    CHECK_NOT_CONTAINS(simt, "AscendC::Simt::ThreadBarrier");
     const size_t begin = demo.find("bool RunGroupedAllToAll(");
     const size_t end = demo.find("void Cleanup(", begin);
     const std::string grouped = begin == std::string::npos ? std::string() :
