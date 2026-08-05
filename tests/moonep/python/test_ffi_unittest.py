@@ -20,7 +20,9 @@ from tilexr_moonep.abi import (
     TileXRMoonEPPlanV1,
     TileXRMoonEPPlanningArgsV1,
     TileXRMoonEPPrefetchWeightArgsV1,
-    TileXRMoonEPReduceGradArgsV1,
+    TileXRMoonEPReduceGradArgsV2,
+    TileXRMoonEPReduceGradWorkspaceInfoV2,
+    TileXRMoonEPReduceGradWorkspaceQueryV2,
     TileXRMoonEPTensorV1,
 )
 from tilexr_moonep.runtime import TileXRMoonEPRuntime, _resolve_library
@@ -46,6 +48,9 @@ class FakeCDLLLoader:
         self.destroy_calls = 0
         self.planning_records = []
         self.stage_records = []
+        self.reduce_grad_records = []
+        self.register_calls = []
+        self.unregister_calls = []
         self.comm = self._comm_library()
         self.planner = FakeLibrary()
         self.moonep = self._moonep_library()
@@ -64,8 +69,21 @@ class FakeCDLLLoader:
             self.destroy_calls += 1
             return 0
 
+        def register(comm, pointer, byte_count, handle):
+            self.assert_scalar(comm, 0x1234)
+            ctypes.cast(handle, ctypes.POINTER(ctypes.c_uint32)).contents.value = 0
+            self.register_calls.append((pointer.value, byte_count.value))
+            return 0
+
+        def unregister(comm, handle):
+            self.assert_scalar(comm, 0x1234)
+            self.unregister_calls.append(handle.value)
+            return 0
+
         library.TileXRCommInitRankLocal = FakeFunction(init_rank_local)
         library.TileXRCommDestroy = FakeFunction(destroy)
+        library.TileXRUDMARegister = FakeFunction(register)
+        library.TileXRUDMAUnregister = FakeFunction(unregister)
         return library
 
     @staticmethod
@@ -76,11 +94,11 @@ class FakeCDLLLoader:
 
     def _moonep_library(self):
         library = FakeLibrary()
-        library.TileXRMoonEpGetAbiVersion = FakeFunction(lambda: 1)
+        library.TileXRMoonEpGetAbiVersion = FakeFunction(lambda: 2)
 
         def capabilities(native, stub):
-            ctypes.cast(native, ctypes.POINTER(ctypes.c_uint64)).contents.value = 1
-            ctypes.cast(stub, ctypes.POINTER(ctypes.c_uint64)).contents.value = 30
+            ctypes.cast(native, ctypes.POINTER(ctypes.c_uint64)).contents.value = 17
+            ctypes.cast(stub, ctypes.POINTER(ctypes.c_uint64)).contents.value = 14
             return 0
 
         def workspace(comm, s, k, e, workspace_bytes, capacity):
@@ -114,13 +132,13 @@ class FakeCDLLLoader:
             return 0
 
         library.TileXRMoonEpGetCapabilitiesV1 = FakeFunction(capabilities)
+        library.TileXRMoonEpGetCapabilitiesV2 = FakeFunction(capabilities)
         library.TileXRMoonEpPlanningGetWorkspaceSizeV1 = FakeFunction(workspace)
         library.TileXRMoonEpPlanningV1 = FakeFunction(planning)
         for name, args_type in (
             ("dispatch", TileXRMoonEPDispatchArgsV1),
             ("prefetch_weight", TileXRMoonEPPrefetchWeightArgsV1),
             ("combine", TileXRMoonEPCombineArgsV1),
-            ("reduce_grad", TileXRMoonEPReduceGradArgsV1),
         ):
             setattr(
                 library,
@@ -128,10 +146,56 @@ class FakeCDLLLoader:
                     "dispatch": "TileXRMoonEpDispatchV1",
                     "prefetch_weight": "TileXRMoonEpPrefetchWeightV1",
                     "combine": "TileXRMoonEpCombineV1",
-                    "reduce_grad": "TileXRMoonEpReduceGradV1",
                 }[name],
                 FakeFunction(self._stage_callback(name, args_type)),
             )
+
+        def reduce_grad_query(query_ptr, info_ptr):
+            query = ctypes.cast(
+                query_ptr, ctypes.POINTER(TileXRMoonEPReduceGradWorkspaceQueryV2)
+            ).contents
+            info = ctypes.cast(
+                info_ptr, ctypes.POINTER(TileXRMoonEPReduceGradWorkspaceInfoV2)
+            ).contents
+            descriptors = (query.gate.contents, query.up.contents, query.down.contents)
+            row_bytes = [
+                int(tensor.elementCount // tensor.shape[0]) * 4 for tensor in descriptors
+            ]
+            info.workspaceBytes = 0
+            info.workspaceAlignment = 512
+            info.udmaChunkBytes = 0
+            info.peerWindowBytes = 100 << 20
+            info.peerHalfBytes = 49 << 20
+            info.peerSlotStrideBytes = 1 << 20
+            info.blockDim = 64
+            for index, value in enumerate(row_bytes):
+                info.rowBytes[index] = value
+                info.transports[index] = 2 if value > (1 << 20) else 1
+            return 0
+
+        def reduce_grad(args_ptr, stream):
+            args = ctypes.cast(
+                args_ptr, ctypes.POINTER(TileXRMoonEPReduceGradArgsV2)
+            ).contents
+            self.reduce_grad_records.append(
+                {
+                    "stream": stream.value,
+                    "flags": args.flags,
+                    "wait_iterations": args.waitIterations,
+                    "workspace_bytes": args.workspaceBytes,
+                    "shapes": tuple(
+                        tuple(pointer.contents.shape[: pointer.contents.rank])
+                        for pointer in (args.gate, args.up, args.down)
+                    ),
+                    "status_shape": tuple(
+                        args.status.contents.shape[: args.status.contents.rank]
+                    ),
+                }
+            )
+            return 0
+
+        library.TileXRMoonEpReduceGradGetWorkspaceSizeV2 = FakeFunction(reduce_grad_query)
+        library.TileXRMoonEpReduceGradV2 = FakeFunction(reduce_grad)
         return library
 
     def _stage_callback(self, name, args_type):
@@ -169,6 +233,9 @@ class FfiAbiTests(unittest.TestCase):
         self.assertEqual(ctypes.sizeof(TileXRMoonEPPlanV1), 104)
         self.assertEqual(ctypes.sizeof(TileXRMoonEPPlanningArgsV1), 72)
         self.assertEqual(ctypes.sizeof(TileXRMoonEPDispatchArgsV1), 48)
+        self.assertEqual(ctypes.sizeof(TileXRMoonEPReduceGradWorkspaceQueryV2), 64)
+        self.assertEqual(ctypes.sizeof(TileXRMoonEPReduceGradWorkspaceInfoV2), 96)
+        self.assertEqual(ctypes.sizeof(TileXRMoonEPReduceGradArgsV2), 96)
         self.assertEqual(TileXRMoonEPTensorV1.shape.offset, 32)
         self.assertEqual(TileXRMoonEPPlanV1.dst.offset, 64)
         self.assertEqual(TileXRMoonEPPlanningArgsV1.flags.offset, 64)
@@ -234,8 +301,8 @@ class FfiAbiTests(unittest.TestCase):
             [Path(path).name for path, _ in loader.loads],
             ["libtile-comm.so", "libtilexr-moonep-planner.so", "libtilexr-moonep.so.1"],
         )
-        self.assertEqual(runtime.capabilities.stage_mask, 1)
-        self.assertEqual(runtime.capabilities.stub_mask, 30)
+        self.assertEqual(runtime.capabilities.stage_mask, 17)
+        self.assertEqual(runtime.capabilities.stub_mask, 14)
         self.assertFalse(runtime.capabilities.transport_performance_valid)
         self.assertEqual(loader.destroy_calls, 1)
         self.assertEqual(
@@ -260,9 +327,6 @@ class FfiAbiTests(unittest.TestCase):
                 "prefetch_weight",
                 "combine",
                 "combine",
-                "reduce_grad",
-                "reduce_grad",
-                "reduce_grad",
             ],
         )
         self.assertTrue(all(record["stream"] == 0xCAFE for record in loader.stage_records))
@@ -271,6 +335,19 @@ class FfiAbiTests(unittest.TestCase):
         self.assertEqual(loader.stage_records[1]["output_shape"], (8,))
         self.assertEqual(loader.stage_records[6]["input_shape"], (8,))
         self.assertEqual(loader.stage_records[6]["output_shape"], (4, 2))
+        self.assertEqual(
+            loader.reduce_grad_records,
+            [{
+                "stream": 0xCAFE,
+                "flags": 0,
+                "wait_iterations": 1234,
+                "workspace_bytes": 0,
+                "shapes": ((6, 8), (6, 8), (6, 8)),
+                "status_shape": (1,),
+            }],
+        )
+        self.assertEqual(loader.register_calls, [])
+        self.assertEqual(loader.unregister_calls, [])
 
     def test_versioned_planner_library_is_preferred(self):
         import tempfile

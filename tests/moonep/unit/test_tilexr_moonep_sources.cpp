@@ -75,7 +75,16 @@ int main()
 {
     const std::string header = ReadFile("src/include/tilexr_moonep.h");
     const std::string host = ReadFile("src/moonep/host/tilexr_moonep.cpp");
+    const std::string reduceHost =
+        ReadFile("src/moonep/reduce_grad/host/reduce_grad_host.cpp");
+    const std::string reduceLaunch =
+        ReadFile("src/moonep/reduce_grad/host/reduce_grad_launch.cpp");
+    const std::string reduceLayout =
+        ReadFile("src/moonep/reduce_grad/host/reduce_grad_layout.cpp");
+    const std::string reduceKernel =
+        ReadFile("src/moonep/reduce_grad/kernels/tilexr_moonep_reduce_grad_kernel.cpp");
     const std::string cmake = ReadFile("src/moonep/CMakeLists.txt");
+    const std::string reduceCmake = ReadFile("src/moonep/reduce_grad/CMakeLists.txt");
     const std::string testCmake = ReadFile("tests/moonep/CMakeLists.txt");
     const std::string flowDemo =
         ReadFile("tests/moonep/demo/tilexr_moonep_flow_demo.cpp");
@@ -84,6 +93,8 @@ int main()
     Contains("public header", header, "extern \"C\"");
     Contains("public header", header, "TileXRMoonEpTensorV1");
     Contains("public header", header, "TileXRMoonEpPlanV1");
+    Contains("public header", header, "TileXRMoonEpReduceGradArgsV2");
+    Contains("public header", header, "TileXRMoonEpReduceGradGetWorkspaceSizeV2");
     Excludes("public header", header, "tilexr_api.h");
     Excludes("public header", header, "std::");
 
@@ -94,15 +105,40 @@ int main()
     Contains("host", host, "ACL_MEMCPY_DEVICE_TO_DEVICE");
     Excludes("host", host, "aclrtSynchronizeStream");
 
+    Contains("ReduceGrad Host", reduceHost, "TileXRGetUDMARegistryHost");
+    Contains("ReduceGrad Host", reduceHost, "aclrtMemsetAsync");
+    Contains("ReduceGrad launch", reduceLaunch, "rtKernelLaunchWithFlagV2");
+    Contains("ReduceGrad launch", reduceLaunch, "cfgInfo.schemMode = 1");
+    Contains("ReduceGrad layout", reduceLayout, "TileXRMoonEpReduceGradPeerWindowBytes");
+    Contains("ReduceGrad layout", reduceLayout, "kReduceGradUdmaThresholdBytes");
+    Excludes("ReduceGrad layout", reduceLayout, "100 * 1024 * 1024");
+    Excludes("ReduceGrad layout", reduceLayout, "512 * 1024 * 1024");
+    Contains("ReduceGrad kernel", reduceKernel, "TileXR::DataAsFlagSend");
+    Contains("ReduceGrad kernel", reduceKernel, "TileXR::UDMAPutRegisteredSignalNbi");
+    Contains("ReduceGrad kernel", reduceKernel, "TileXR::UDMAQuietStatus");
+    Contains("ReduceGrad kernel", reduceKernel, "chunk - 2");
+    Contains("ReduceGrad kernel", reduceKernel, "localExpert * chunks + chunk");
+    Contains("ReduceGrad kernel", reduceKernel, "UdmaPollBackoff(attempt)");
+    Excludes("ReduceGrad kernel", reduceKernel, "rtKernelLaunch");
+    Excludes("ReduceGrad kernel", reduceKernel, "<<<");
+    Excludes("ReduceGrad kernel", reduceKernel, "reference/");
+
     Contains("CMake", cmake, "add_library(tilexr-moonep SHARED");
     Contains("CMake", cmake, "SOVERSION 1");
     Contains("CMake", cmake, "INSTALL_RPATH \"$ORIGIN\"");
     Contains("CMake", cmake, "tilexr-moonep-planner");
+    Contains("CMake", cmake, "tilexr_moonep_reduce_grad_kernel");
     Excludes("CMake", cmake, "devlib");
+    Contains("ReduceGrad CMake", reduceCmake, "--cce-aicore-arch=dav-c310-vec");
+    Contains("ReduceGrad CMake", reduceCmake, "${ARCH}-linux/asc/include");
+    Contains("ReduceGrad CMake", reduceCmake, "libtilexr_moonep_reduce_grad_kernel.so");
 
     Excludes("public header", Lower(header), "hccl");
     Excludes("host", Lower(host), "hccl");
     Excludes("CMake", Lower(cmake), "hccl");
+    Excludes("ReduceGrad Host", Lower(reduceHost), "hccl");
+    Excludes("ReduceGrad launch", Lower(reduceLaunch), "hccl");
+    Excludes("ReduceGrad kernel", Lower(reduceKernel), "hccl");
 
     Contains("test CMake", testCmake, "if(TARGET tilexr-moonep)");
     Contains("test CMake", testCmake, "add_executable(tilexr_moonep_flow_demo");

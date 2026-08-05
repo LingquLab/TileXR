@@ -89,6 +89,10 @@ def _append_case_overrides(command: list[str], args: argparse.Namespace) -> None
         value = getattr(args, name)
         if value is not None:
             command.extend((flag, str(value)))
+    for name in ("gate_grad_shape", "up_grad_shape", "down_grad_shape"):
+        value = getattr(args, name)
+        if value is not None:
+            command.extend((f"--{name.replace('_', '-')}", "x".join(map(str, value))))
     if args.correctness is True:
         command.append("--correctness")
     elif args.correctness is False:
@@ -107,6 +111,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--comm-id", default=None)
     parser.add_argument("--python", default=sys.executable)
     parser.add_argument("--wait-iterations", type=int, default=1_000_000)
+    parser.add_argument("--udma-chunk-bytes", type=int, default=0)
     parser.add_argument("--timeout-sec", type=float, default=1800.0)
     return parser
 
@@ -122,6 +127,8 @@ def _process_command(args: argparse.Namespace) -> list[str]:
         str(Path(args.output_dir).resolve()),
         "--wait-iterations",
         str(args.wait_iterations),
+        "--udma-chunk-bytes",
+        str(args.udma_chunk_bytes),
     ]
     if args.case_ids:
         command.extend(("--case-ids", args.case_ids))
@@ -133,8 +140,11 @@ def _process_command(args: argparse.Namespace) -> list[str]:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    if args.wait_iterations <= 0 or args.timeout_sec <= 0:
-        raise ValueError("wait_iterations and timeout_sec must be positive")
+    if args.wait_iterations <= 0 or args.timeout_sec <= 0 or args.udma_chunk_bytes < 0:
+        raise ValueError(
+            "wait_iterations and timeout_sec must be positive; "
+            "udma_chunk_bytes must be non-negative"
+        )
     topology = resolve_topology(
         physical_device_count=args.physical_device_count,
         ranks_per_device=args.ranks_per_device,

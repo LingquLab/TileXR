@@ -19,6 +19,9 @@ class BenchmarkCase:
     topk: int
     expert_count: int
     hidden_size: int
+    gate_grad_shape: tuple[int, ...] | None = None
+    up_grad_shape: tuple[int, ...] | None = None
+    down_grad_shape: tuple[int, ...] | None = None
     dtype: str = "bfloat16"
     seed: int = 1234
     warmup: int = 5
@@ -43,6 +46,14 @@ class BenchmarkCase:
             raise ValueError("warmup must be non-negative and iterations must be positive")
         if self.topk > self.expert_count:
             raise ValueError("topk cannot exceed expert_count")
+        for name in ("gate_grad_shape", "up_grad_shape", "down_grad_shape"):
+            shape = getattr(self, name)
+            if shape is None:
+                continue
+            normalized = tuple(int(value) for value in shape)
+            if not normalized or len(normalized) > 3 or any(value <= 0 for value in normalized):
+                raise ValueError(f"{name} must contain one to three positive dimensions")
+            object.__setattr__(self, name, normalized)
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, object]) -> "BenchmarkCase":
@@ -63,6 +74,10 @@ class BenchmarkCase:
 
     def as_dict(self) -> dict[str, object]:
         return asdict(self)
+
+    def reduce_grad_inner_shape(self, projection: str) -> tuple[int, ...]:
+        value = getattr(self, f"{projection}_grad_shape")
+        return (self.hidden_size,) if value is None else tuple(value)
 
 
 def load_cases(path: str | Path) -> list[BenchmarkCase]:
@@ -99,6 +114,9 @@ def apply_overrides(case: BenchmarkCase, args: argparse.Namespace) -> BenchmarkC
         "topk",
         "expert_count",
         "hidden_size",
+        "gate_grad_shape",
+        "up_grad_shape",
+        "down_grad_shape",
         "dtype",
         "seed",
         "warmup",
@@ -118,6 +136,9 @@ def build_case_parser(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--topk", type=int, default=None)
     parser.add_argument("--expert-count", type=int, default=None)
     parser.add_argument("--hidden-size", type=int, default=None)
+    parser.add_argument("--gate-grad-shape", type=_parse_shape, default=None)
+    parser.add_argument("--up-grad-shape", type=_parse_shape, default=None)
+    parser.add_argument("--down-grad-shape", type=_parse_shape, default=None)
     parser.add_argument("--dtype", choices=sorted(_DTYPES), default=None)
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--warmup", type=int, default=None)
@@ -126,3 +147,10 @@ def build_case_parser(parser: argparse.ArgumentParser) -> None:
     correctness.add_argument("--correctness", dest="correctness", action="store_true")
     correctness.add_argument("--no-correctness", dest="correctness", action="store_false")
     parser.set_defaults(correctness=None)
+
+
+def _parse_shape(value: str) -> tuple[int, ...]:
+    parts = tuple(int(item) for item in value.lower().replace("x", ",").split(",") if item)
+    if not parts or len(parts) > 3 or any(item <= 0 for item in parts):
+        raise argparse.ArgumentTypeError("gradient shape must be 1-3 positive dimensions")
+    return parts

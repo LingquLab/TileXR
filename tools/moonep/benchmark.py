@@ -117,6 +117,7 @@ def _oversubscribed_planning_barrier(buffer, case_id: str, epoch: int) -> None:
 
 
 def execute_iteration(buffer, inputs: dict[str, object], timer: DeviceEventTimer | None = None):
+    reset_gradients(inputs, buffer.context)
     if timer is not None:
         timer.start()
     plan = _timed_call(
@@ -224,25 +225,38 @@ def make_inputs(torch_module, case, context):
         down=torch_module.full((rows, case.hidden_size), 0.75, dtype=dtype, device=device),
     )
     gradients = ProjectionBuffers(
-        gate=torch_module.ones((rows, case.hidden_size), dtype=torch_module.float32, device=device),
-        up=torch_module.ones((rows, case.hidden_size), dtype=torch_module.float32, device=device),
-        down=torch_module.ones((rows, case.hidden_size), dtype=torch_module.float32, device=device),
-        gate_reduce=torch_module.zeros(
-            (rows, case.hidden_size),
+        gate=torch_module.ones(
+            (rows, *case.reduce_grad_inner_shape("gate")),
             dtype=torch_module.float32,
             device=device,
         ),
-        up_reduce=torch_module.zeros(
-            (rows, case.hidden_size),
+        up=torch_module.ones(
+            (rows, *case.reduce_grad_inner_shape("up")),
             dtype=torch_module.float32,
             device=device,
         ),
-        down_reduce=torch_module.zeros(
-            (rows, case.hidden_size),
+        down=torch_module.ones(
+            (rows, *case.reduce_grad_inner_shape("down")),
             dtype=torch_module.float32,
             device=device,
         ),
     )
+    gradient_patterns = {}
+    flat_patterns = {}
+    for name in ("gate", "up", "down"):
+        tensor = getattr(gradients, name)
+        inner_shape = tuple(int(value) for value in tensor.shape[1:])
+        row_elements = int(tensor[0].numel())
+        if row_elements not in flat_patterns:
+            flat_patterns[row_elements] = (
+                torch_module.arange(
+                    row_elements,
+                    dtype=torch_module.int32,
+                    device=device,
+                ).remainder(127).to(dtype=torch_module.float32)
+                / 128.0
+            )
+        gradient_patterns[name] = flat_patterns[row_elements].reshape(inner_shape)
     return {
         "topk_experts": route_ids,
         "tokens_per_expert": tokens_per_expert,
@@ -251,7 +265,26 @@ def make_inputs(torch_module, case, context):
         "projections": projections,
         "grad_output": torch_module.ones_like(hidden),
         "gradients": gradients,
+        "gradient_patterns": gradient_patterns,
     }
+
+
+def _gradient_row_base(context, projection_index: int, source_rank: int, row: int) -> float:
+    rows = context.expert_count + context.experts_per_rank
+    return float(((projection_index * context.planner_group_size + source_rank) * rows) + row)
+
+
+def reset_gradients(inputs, context) -> None:
+    for projection_index, name in enumerate(("gate", "up", "down")):
+        tensor = getattr(inputs["gradients"], name)
+        pattern = inputs["gradient_patterns"][name]
+        for row in range(int(tensor.shape[0])):
+            tensor[row].copy_(pattern)
+            tensor[row].add_(
+                _gradient_row_base(
+                    context, projection_index, context.planner_group_rank, row
+                )
+            )
 
 
 def _checksum(tensor) -> float:
@@ -352,20 +385,74 @@ def validate_stub_flow(torch_module, inputs, forward, backward, context) -> dict
             torch_module.equal(forward.route_weights, inputs["route_weights"])
         ),
         "backward_hidden_exact": bool(torch_module.equal(backward.hidden, expected_backward)),
-        "gate_reduce_copy_exact": bool(
-            torch_module.equal(inputs["gradients"].gate_reduce, inputs["gradients"].gate)
-        ),
-        "up_reduce_copy_exact": bool(
-            torch_module.equal(inputs["gradients"].up_reduce, inputs["gradients"].up)
-        ),
-        "down_reduce_copy_exact": bool(
-            torch_module.equal(inputs["gradients"].down_reduce, inputs["gradients"].down)
-        ),
     }
     failed = [name for name, passed in checks.items() if not passed]
     if failed:
         raise RuntimeError(f"native stub flow mismatch: {', '.join(failed)}")
     return checks
+
+
+def validate_reduce_grad(torch_module, inputs, plan, context) -> dict[str, bool]:
+    mapping = plan.experts_to_copy.cpu().tolist()
+    checks = {}
+    for projection_index, projection in enumerate(("gate", "up", "down")):
+        actual = getattr(inputs["gradients"], projection)
+        pattern = inputs["gradient_patterns"][projection]
+        projection_ok = True
+        for row in range(context.expert_count):
+            expected = pattern + _gradient_row_base(
+                context,
+                projection_index,
+                context.planner_group_rank,
+                row,
+            )
+            if row // context.experts_per_rank == context.planner_group_rank:
+                for source in range(context.planner_group_size):
+                    for slot in range(context.experts_per_rank):
+                        if int(mapping[source][slot]) == row:
+                            expected.add_(
+                                pattern + _gradient_row_base(
+                                    context,
+                                    projection_index,
+                                    source,
+                                    context.expert_count + slot,
+                                )
+                            )
+            projection_ok = projection_ok and bool(torch_module.equal(actual[row], expected))
+        for slot in range(context.experts_per_rank):
+            row = context.expert_count + slot
+            if int(mapping[context.planner_group_rank][slot]) >= 0:
+                expected = torch_module.zeros_like(pattern)
+            else:
+                expected = pattern + _gradient_row_base(
+                    context,
+                    projection_index,
+                    context.planner_group_rank,
+                    row,
+                )
+            projection_ok = projection_ok and bool(torch_module.equal(actual[row], expected))
+        checks[f"{projection}_owner_sum_nonowner_preserve_and_slot_cleanup"] = projection_ok
+    failed = [name for name, passed in checks.items() if not passed]
+    if failed:
+        raise RuntimeError(f"native ReduceGrad mismatch: {', '.join(failed)}")
+    return checks
+
+
+def reduce_grad_traffic(plan, context, info) -> dict[str, object]:
+    mapping = plan.experts_to_copy.cpu().tolist()
+    total = 0
+    cross_node = {"peer": 0, "udma": 0}
+    source_node = context.planner_group_rank // context.local_world_size
+    for slot in range(context.experts_per_rank):
+        expert = int(mapping[context.planner_group_rank][slot])
+        owner = expert // context.experts_per_rank if expert >= 0 else -1
+        if owner >= 0 and owner != context.planner_group_rank:
+            total += sum(int(value) for value in info.row_bytes)
+            owner_node = owner // context.local_world_size
+            if owner_node != source_node:
+                for row_bytes, transport in zip(info.row_bytes, info.transports):
+                    cross_node[transport] += int(row_bytes)
+    return {"transferred_bytes": total, "cross_node_transferred_bytes": cross_node}
 
 
 def _version_or_unknown(distribution: str) -> str:
@@ -435,9 +522,7 @@ def topology_metadata(context) -> dict[str, object]:
             "default_oversubscribed" if ranks_per_device == 2 else "default_native",
         ),
         "peer_memory_cross_node": context.node_count > 1,
-        "cross_node_validated": os.environ.get(
-            "TILEXR_MOONEP_CROSS_NODE_VALIDATED", "0"
-        ) == "1",
+        "cross_node_validated": False,
     }
 
 
@@ -488,7 +573,10 @@ def run_case(torch_module, case, args, root: Path) -> None:
             torch_module=torch_module,
         )
         buffer = TileXRMoonEPBuffer(
-            context, wait_iterations=args.wait_iterations, torch_module=torch_module
+            context,
+            wait_iterations=args.wait_iterations,
+            requested_udma_chunk_bytes=args.udma_chunk_bytes,
+            torch_module=torch_module,
         )
         capabilities = context.runtime.capabilities.as_dict()
         result["rank"] = context.global_rank
@@ -503,19 +591,37 @@ def run_case(torch_module, case, args, root: Path) -> None:
             planning_epoch += 1
             return execute_iteration(buffer, inputs, timer)
 
+        def coordinated_plan():
+            nonlocal planning_epoch
+            _oversubscribed_planning_barrier(buffer, case.case_id, planning_epoch)
+            planning_epoch += 1
+            return buffer.planning(inputs["topk_experts"], inputs["tokens_per_expert"])
+
         if int(inputs["tokens_per_expert"].sum().item()) != context.dispatched_capacity:
             raise RuntimeError("tokens_per_expert does not sum to S*K")
+        preparation_plan = coordinated_plan()
+        reduce_grad_info = buffer.prepare_reduce_grad(
+            preparation_plan, inputs["gradients"]
+        )
+        buffer.synchronize()
+        result["reduce_grad"] = reduce_grad_info.as_dict()
+        result["reduce_grad"]["udma_threshold_bytes"] = 1 << 20
+        result["reduce_grad"]["prepared_before_warmup"] = True
         validation = {"passed": True, "mode": "disabled"}
         if case.correctness:
             first = coordinated_iteration()
             validation = validate_plan(first[0], context)
             implementations = capabilities["implementations"]
-            stub_stages = ("dispatch", "prefetch_weight", "combine", "reduce_grad")
+            stub_stages = ("dispatch", "prefetch_weight", "combine")
             if all(implementations[stage] == "stub" for stage in stub_stages):
                 validation["stub_flow_checks"] = validate_stub_flow(
                     torch_module, inputs, first[1], first[2], context
                 )
-                validation["mode"] = "planner_cpu_oracle_and_stub_flow"
+                validation["mode"] = "planner_cpu_oracle_stub_flow_and_reduce_grad"
+            if implementations["reduce_grad"] == "native":
+                validation["reduce_grad_checks"] = validate_reduce_grad(
+                    torch_module, inputs, first[0], context
+                )
             first_checksum = _checksum(first[1].hidden) + _checksum(first[2].hidden)
             second = coordinated_iteration()
             second_checksum = _checksum(second[1].hidden) + _checksum(second[2].hidden)
@@ -532,12 +638,26 @@ def run_case(torch_module, case, args, root: Path) -> None:
             raise RuntimeError(
                 f"Planner device status is {int(warmup_plan.status.item())} during warmup"
             )
+        if warmup_plan is not None and int(warmup_plan.reduce_grad_status.item()) != 0:
+            raise RuntimeError(
+                "ReduceGrad device status is "
+                f"{int(warmup_plan.reduce_grad_status.item())} during warmup"
+            )
         samples = []
         for iteration in range(case.iterations):
             timer = DeviceEventTimer(torch_module)
             plan, forward, backward, timings = coordinated_iteration(timer)
             if int(plan.status.item()) != 0:
                 raise RuntimeError(f"Planner device status is {int(plan.status.item())}")
+            if int(plan.reduce_grad_status.item()) != 0:
+                raise RuntimeError(
+                    f"ReduceGrad device status is {int(plan.reduce_grad_status.item())}"
+                )
+            reduce_grad_traffic_info = reduce_grad_traffic(
+                plan, context, reduce_grad_info
+            )
+            transferred_bytes = int(reduce_grad_traffic_info["transferred_bytes"])
+            reduce_grad_us = float(timings["reduce_grad"])
             samples.append(
                 {
                     "iteration": iteration,
@@ -545,6 +665,14 @@ def run_case(torch_module, case, args, root: Path) -> None:
                     "checksums": {
                         "forward": _checksum(forward.hidden),
                         "backward": _checksum(backward.hidden),
+                    },
+                    "reduce_grad": {
+                        **reduce_grad_traffic_info,
+                        "effective_bandwidth_gbps": (
+                            transferred_bytes * 8.0 / reduce_grad_us / 1000.0
+                            if reduce_grad_us > 0.0
+                            else 0.0
+                        ),
                     },
                 }
             )
@@ -616,13 +744,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--install-prefix", default=None)
     parser.add_argument("--wait-iterations", type=int, default=1_000_000)
+    parser.add_argument(
+        "--udma-chunk-bytes",
+        type=int,
+        default=0,
+        help="ReduceGrad UDMA chunk bytes; zero selects the native 4 MiB default",
+    )
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    if args.wait_iterations <= 0:
-        raise ValueError("wait_iterations must be positive")
+    if args.wait_iterations <= 0 or args.udma_chunk_bytes < 0:
+        raise ValueError("wait_iterations must be positive and udma_chunk_bytes non-negative")
     if (
         int(os.environ.get("WORLD_SIZE", "1")) > 1
         and os.environ.get("TILEXR_MOONEP_MANAGED_LAUNCH") != "1"

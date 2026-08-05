@@ -15,7 +15,10 @@ from .abi import (
     TileXRMoonEPPlanV1,
     TileXRMoonEPPlanningArgsV1,
     TileXRMoonEPPrefetchWeightArgsV1,
-    TileXRMoonEPReduceGradArgsV1,
+    TileXRMoonEPReduceGradArgsV2,
+    TileXRMoonEPReduceGradTransport,
+    TileXRMoonEPReduceGradWorkspaceInfoV2,
+    TileXRMoonEPReduceGradWorkspaceQueryV2,
     TileXRMoonEPStage,
     TileXRMoonEPTensorV1,
     initialize_struct,
@@ -89,6 +92,37 @@ class NativeCapabilities:
         return (self.stage_mask & required) == required and self.stub_mask == 0
 
 
+@dataclass(frozen=True)
+class ReduceGradWorkspaceInfo:
+    workspace_bytes: int
+    workspace_alignment: int
+    udma_chunk_bytes: int
+    peer_window_bytes: int
+    peer_half_bytes: int
+    peer_slot_stride_bytes: int
+    row_bytes: tuple[int, int, int]
+    transports: tuple[str, str, str]
+    block_dim: int
+
+    @property
+    def uses_udma(self) -> bool:
+        return "udma" in self.transports
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "workspace_bytes": self.workspace_bytes,
+            "workspace_alignment": self.workspace_alignment,
+            "udma_chunk_bytes": self.udma_chunk_bytes,
+            "peer_window_bytes": self.peer_window_bytes,
+            "peer_half_bytes": self.peer_half_bytes,
+            "peer_slot_stride_bytes": self.peer_slot_stride_bytes,
+            "row_bytes": dict(zip(("gate", "up", "down"), self.row_bytes)),
+            "transports": dict(zip(("gate", "up", "down"), self.transports)),
+            "block_dim": self.block_dim,
+            "registration_in_timed_path": False,
+        }
+
+
 def _resolve_install_prefix(value: str | os.PathLike[str] | None) -> Path:
     if value is not None:
         return Path(value).resolve()
@@ -125,7 +159,7 @@ def _resolve_library(
 
 
 class TileXRMoonEPRuntime:
-    """Owns a TileXR communicator and calls the exact V1 ABI from tilexr_moonep.h."""
+    """Owns a TileXR communicator and calls the versioned MoonEP C ABI."""
 
     def __init__(
         self,
@@ -145,6 +179,9 @@ class TileXRMoonEPRuntime:
         self.install_prefix = _resolve_install_prefix(install_prefix)
         self._closed = False
         self._comm = ctypes.c_void_p()
+        self._udma_handle: ctypes.c_uint32 | None = None
+        self._udma_workspace_ptr = 0
+        self._udma_workspace_bytes = 0
         paths = dict(library_paths or {})
         comm_path = _resolve_library(
             ("libtile-comm.so",), "TILEXR_COMM_LIB", self.install_prefix, paths.get("comm")
@@ -182,6 +219,15 @@ class TileXRMoonEPRuntime:
         self._comm_lib.TileXRCommInitRankLocal.restype = ctypes.c_int
         self._comm_lib.TileXRCommDestroy.argtypes = [ctypes.c_void_p]
         self._comm_lib.TileXRCommDestroy.restype = ctypes.c_int
+        self._comm_lib.TileXRUDMARegister.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_size_t,
+            ctypes.POINTER(ctypes.c_uint32),
+        ]
+        self._comm_lib.TileXRUDMARegister.restype = ctypes.c_int
+        self._comm_lib.TileXRUDMAUnregister.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+        self._comm_lib.TileXRUDMAUnregister.restype = ctypes.c_int
         self._moonep_lib.TileXRMoonEpGetAbiVersion.argtypes = []
         self._moonep_lib.TileXRMoonEpGetAbiVersion.restype = ctypes.c_uint32
         self._moonep_lib.TileXRMoonEpGetCapabilitiesV1.argtypes = [
@@ -189,6 +235,11 @@ class TileXRMoonEPRuntime:
             ctypes.POINTER(ctypes.c_uint64),
         ]
         self._moonep_lib.TileXRMoonEpGetCapabilitiesV1.restype = ctypes.c_int
+        self._moonep_lib.TileXRMoonEpGetCapabilitiesV2.argtypes = [
+            ctypes.POINTER(ctypes.c_uint64),
+            ctypes.POINTER(ctypes.c_uint64),
+        ]
+        self._moonep_lib.TileXRMoonEpGetCapabilitiesV2.restype = ctypes.c_int
         self._moonep_lib.TileXRMoonEpPlanningGetWorkspaceSizeV1.argtypes = [
             ctypes.c_void_p,
             ctypes.c_int64,
@@ -203,12 +254,21 @@ class TileXRMoonEPRuntime:
             ("TileXRMoonEpDispatchV1", TileXRMoonEPDispatchArgsV1),
             ("TileXRMoonEpPrefetchWeightV1", TileXRMoonEPPrefetchWeightArgsV1),
             ("TileXRMoonEpCombineV1", TileXRMoonEPCombineArgsV1),
-            ("TileXRMoonEpReduceGradV1", TileXRMoonEPReduceGradArgsV1),
         )
         for name, args_type in symbols:
             function = getattr(self._moonep_lib, name)
             function.argtypes = [ctypes.POINTER(args_type), ctypes.c_void_p]
             function.restype = ctypes.c_int
+        self._moonep_lib.TileXRMoonEpReduceGradGetWorkspaceSizeV2.argtypes = [
+            ctypes.POINTER(TileXRMoonEPReduceGradWorkspaceQueryV2),
+            ctypes.POINTER(TileXRMoonEPReduceGradWorkspaceInfoV2),
+        ]
+        self._moonep_lib.TileXRMoonEpReduceGradGetWorkspaceSizeV2.restype = ctypes.c_int
+        self._moonep_lib.TileXRMoonEpReduceGradV2.argtypes = [
+            ctypes.POINTER(TileXRMoonEPReduceGradArgsV2),
+            ctypes.c_void_p,
+        ]
+        self._moonep_lib.TileXRMoonEpReduceGradV2.restype = ctypes.c_int
 
     def _check(self, operation: str, ret: int, detail: str = "") -> None:
         if int(ret) != TILEXR_SUCCESS:
@@ -224,10 +284,10 @@ class TileXRMoonEPRuntime:
             )
         native_stages = ctypes.c_uint64()
         stub_stages = ctypes.c_uint64()
-        ret = self._moonep_lib.TileXRMoonEpGetCapabilitiesV1(
+        ret = self._moonep_lib.TileXRMoonEpGetCapabilitiesV2(
             ctypes.byref(native_stages), ctypes.byref(stub_stages)
         )
-        self._check("TileXRMoonEpGetCapabilitiesV1", ret)
+        self._check("TileXRMoonEpGetCapabilitiesV2", ret)
         return NativeCapabilities(abi_version, int(native_stages.value), int(stub_stages.value))
 
     @property
@@ -392,26 +452,120 @@ class TileXRMoonEPRuntime:
                 stream_ptr,
             )
 
-    def reduce_grad(self, context, plan, gradients, stream_ptr: int) -> None:
-        for input_name, output_name in (
-            ("gate", "gate_reduce"),
-            ("up", "up_reduce"),
-            ("down", "down_reduce"),
-        ):
-            self._run_stage(
-                "TileXRMoonEpReduceGradV1",
-                TileXRMoonEPReduceGradArgsV1,
-                context,
-                plan,
-                getattr(gradients, input_name),
-                getattr(gradients, output_name),
-                stream_ptr,
+    def reduce_grad_workspace_info(
+        self,
+        context,
+        plan,
+        gradients,
+        *,
+        requested_udma_chunk_bytes: int = 0,
+    ) -> ReduceGradWorkspaceInfo:
+        plan_v1 = self._plan_v1(context, plan)
+        descriptors = [make_tensor_v1(getattr(gradients, name)) for name in ("gate", "up", "down")]
+        query = initialize_struct(TileXRMoonEPReduceGradWorkspaceQueryV2())
+        query.comm = void_p(self.comm_ptr)
+        query.plan = ctypes.pointer(plan_v1)
+        query.gate = ctypes.pointer(descriptors[0])
+        query.up = ctypes.pointer(descriptors[1])
+        query.down = ctypes.pointer(descriptors[2])
+        query.requestedUdmaChunkBytes = int(requested_udma_chunk_bytes)
+        query.flags = TILEXR_MOONEP_FLAG_NONE
+        info = initialize_struct(TileXRMoonEPReduceGradWorkspaceInfoV2())
+        ret = self._moonep_lib.TileXRMoonEpReduceGradGetWorkspaceSizeV2(
+            ctypes.byref(query), ctypes.byref(info)
+        )
+        self._check("TileXRMoonEpReduceGradGetWorkspaceSizeV2", ret)
+        transport_names = {
+            int(TileXRMoonEPReduceGradTransport.NONE): "none",
+            int(TileXRMoonEPReduceGradTransport.PEER): "peer",
+            int(TileXRMoonEPReduceGradTransport.UDMA): "udma",
+        }
+        try:
+            transports = tuple(transport_names[int(value)] for value in info.transports)
+        except KeyError as exc:
+            raise TileXRMoonEPError(
+                "TileXRMoonEpReduceGradGetWorkspaceSizeV2", -1,
+                f"unknown transport code {int(exc.args[0])}",
+            ) from exc
+        return ReduceGradWorkspaceInfo(
+            workspace_bytes=int(info.workspaceBytes),
+            workspace_alignment=int(info.workspaceAlignment),
+            udma_chunk_bytes=int(info.udmaChunkBytes),
+            peer_window_bytes=int(info.peerWindowBytes),
+            peer_half_bytes=int(info.peerHalfBytes),
+            peer_slot_stride_bytes=int(info.peerSlotStrideBytes),
+            row_bytes=tuple(int(value) for value in info.rowBytes),
+            transports=transports,
+            block_dim=int(info.blockDim),
+        )
+
+    def register_reduce_grad_workspace(self, workspace, required_bytes: int) -> None:
+        pointer = int(workspace.data_ptr())
+        available = tensor_nbytes(workspace)
+        if required_bytes <= 0 or available < required_bytes:
+            raise ValueError(
+                f"ReduceGrad workspace has {available} bytes, requires {required_bytes}"
             )
+        if self._udma_handle is not None:
+            if pointer == self._udma_workspace_ptr and available == self._udma_workspace_bytes:
+                return
+            raise RuntimeError("a different TileXR UDMA workspace is already registered")
+        handle = ctypes.c_uint32()
+        ret = self._comm_lib.TileXRUDMARegister(
+            void_p(self.comm_ptr), void_p(pointer), ctypes.c_size_t(available), ctypes.byref(handle)
+        )
+        self._check("TileXRUDMARegister", ret, f"workspace_bytes={available}")
+        self._udma_handle = handle
+        self._udma_workspace_ptr = pointer
+        self._udma_workspace_bytes = available
+
+    def unregister_reduce_grad_workspace(self) -> None:
+        if self._udma_handle is None:
+            return
+        ret = self._comm_lib.TileXRUDMAUnregister(
+            void_p(self.comm_ptr), ctypes.c_uint32(self._udma_handle.value)
+        )
+        self._check("TileXRUDMAUnregister", ret)
+        self._udma_handle = None
+        self._udma_workspace_ptr = 0
+        self._udma_workspace_bytes = 0
+
+    def reduce_grad(
+        self,
+        context,
+        plan,
+        gradients,
+        workspace,
+        stream_ptr: int,
+        wait_iterations: int,
+        *,
+        requested_udma_chunk_bytes: int = 0,
+    ) -> None:
+        plan_v1 = self._plan_v1(context, plan)
+        descriptors = [make_tensor_v1(getattr(gradients, name)) for name in ("gate", "up", "down")]
+        status = make_tensor_v1(plan.reduce_grad_status)
+        args = initialize_struct(TileXRMoonEPReduceGradArgsV2())
+        args.comm = void_p(self.comm_ptr)
+        args.plan = ctypes.pointer(plan_v1)
+        args.gate = ctypes.pointer(descriptors[0])
+        args.up = ctypes.pointer(descriptors[1])
+        args.down = ctypes.pointer(descriptors[2])
+        args.workspace = void_p(None if workspace is None else int(workspace.data_ptr()))
+        args.workspaceBytes = 0 if workspace is None else tensor_nbytes(workspace)
+        args.status = ctypes.pointer(status)
+        args.waitIterations = int(wait_iterations)
+        args.requestedUdmaChunkBytes = int(requested_udma_chunk_bytes)
+        args.flags = TILEXR_MOONEP_FLAG_NONE
+        ret = self._moonep_lib.TileXRMoonEpReduceGradV2(
+            ctypes.byref(args), void_p(stream_ptr)
+        )
+        self._check("TileXRMoonEpReduceGradV2", ret)
 
     def close(self) -> None:
         if self._closed:
             return
         if self._comm.value:
+            self.unregister_reduce_grad_workspace()
             ret = self._comm_lib.TileXRCommDestroy(self._comm)
             self._check("TileXRCommDestroy", ret, f"rank={self.rank}")
             self._comm = ctypes.c_void_p()

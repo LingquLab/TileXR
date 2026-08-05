@@ -23,10 +23,16 @@ from tilexr_moonep import ProjectionBuffers, TileXRMoonEPBuffer, TileXRMoonEPCon
 from tools.moonep.config import BenchmarkCase, load_cases
 from tools.moonep.benchmark import (
     _oversubscribed_planning_barrier,
+    build_parser as build_benchmark_parser,
     topology_metadata,
     validate_plan,
 )
-from tools.moonep.launcher import rank_to_device, resolve_topology
+from tools.moonep.launcher import (
+    _process_command,
+    build_parser as build_launcher_parser,
+    rank_to_device,
+    resolve_topology,
+)
 from tools.moonep.planner_reference import build_reference_plan, deterministic_all_topk
 from tools.moonep.rendezvous import completion_barrier, offset_host_port
 from tools.moonep.report import aggregate_rank_artifacts, write_json, write_jsonl
@@ -155,6 +161,97 @@ class MoonEPSmokeTests(unittest.TestCase):
         with self.assertRaises((AttributeError, TypeError)):
             forward.state.plan.epoch = 99
 
+    def test_reduce_grad_udma_workspace_is_registered_once_and_unregistered_after_quiesce(self):
+        torch, runtime, buffer = make_buffer()
+        plan = buffer.planning(
+            tensor((4, 2), torch.int32), tensor((4,), torch.int32)
+        )
+        threshold_elements = (1 << 20) // 4
+        gradients = ProjectionBuffers(
+            tensor((6, threshold_elements), torch.float32),
+            tensor((6, threshold_elements + 1), torch.float32),
+            tensor((6, 8), torch.float32),
+        )
+
+        original_register = runtime.register_reduce_grad_workspace
+
+        def checked_register(workspace, required_bytes):
+            self.assertEqual(torch.npu.synchronize_calls, [0, 0])
+            original_register(workspace, required_bytes)
+
+        runtime.register_reduce_grad_workspace = checked_register
+        info = buffer.prepare_reduce_grad(plan, gradients)
+        self.assertEqual(info.transports, ("peer", "udma", "peer"))
+        self.assertTrue(info.uses_udma)
+        self.assertIsNotNone(runtime.registered_workspace)
+        self.assertEqual(torch.npu.synchronize_calls, [0, 0])
+        self.assertEqual(
+            [call[0] for call in runtime.calls].count("register_reduce_grad_workspace"), 1
+        )
+
+        buffer.reduce_grad(plan, gradients)
+        self.assertEqual(runtime.reduce_grad_query_calls, 1)
+        self.assertEqual(
+            [call[0] for call in runtime.calls].count("register_reduce_grad_workspace"), 1
+        )
+        buffer.close()
+        self.assertIsNone(runtime.registered_workspace)
+        names = [call[0] for call in runtime.calls]
+        self.assertLess(
+            names.index("unregister_reduce_grad_workspace"), names.index("close")
+        )
+
+    def test_reduce_grad_registration_failure_invalidates_workspace_cache(self):
+        torch, runtime, buffer = make_buffer()
+        plan = buffer.planning(
+            tensor((4, 2), torch.int32), tensor((4,), torch.int32)
+        )
+        gradients = ProjectionBuffers(
+            tensor((6, (1 << 18) + 1), torch.float32),
+            tensor((6, 8), torch.float32),
+            tensor((6, 8), torch.float32),
+        )
+        buffer.prepare_reduce_grad(plan, gradients)
+        original_register = runtime.register_reduce_grad_workspace
+        buffer.requested_udma_chunk_bytes = 2 << 20
+
+        def fail_registration(workspace, required_bytes):
+            raise RuntimeError("injected registration failure")
+
+        runtime.register_reduce_grad_workspace = fail_registration
+        with self.assertRaisesRegex(RuntimeError, "injected registration failure"):
+            buffer.prepare_reduce_grad(plan, gradients)
+        runtime.register_reduce_grad_workspace = original_register
+        buffer.requested_udma_chunk_bytes = 0
+        buffer.prepare_reduce_grad(plan, gradients)
+        self.assertEqual(runtime.reduce_grad_query_calls, 3)
+        self.assertIsNotNone(runtime.registered_workspace)
+        buffer.close()
+
+    def test_reduce_grad_unregister_failure_can_be_retried(self):
+        torch, runtime, buffer = make_buffer()
+        plan = buffer.planning(
+            tensor((4, 2), torch.int32), tensor((4,), torch.int32)
+        )
+        gradients = ProjectionBuffers(
+            tensor((6, (1 << 18) + 1), torch.float32),
+            tensor((6, 8), torch.float32),
+            tensor((6, 8), torch.float32),
+        )
+        buffer.prepare_reduce_grad(plan, gradients)
+        original_unregister = runtime.unregister_reduce_grad_workspace
+
+        def fail_unregister():
+            raise RuntimeError("injected unregister failure")
+
+        runtime.unregister_reduce_grad_workspace = fail_unregister
+        with self.assertRaisesRegex(RuntimeError, "injected unregister failure"):
+            buffer.close()
+        self.assertFalse(runtime.closed)
+        runtime.unregister_reduce_grad_workspace = original_unregister
+        buffer.close()
+        self.assertTrue(runtime.closed)
+
     def test_strict_tensor_checks(self):
         torch, _, buffer = make_buffer()
         tpe = tensor((4,), torch.int32)
@@ -239,6 +336,18 @@ class MoonEPSmokeTests(unittest.TestCase):
                 encoding="utf-8",
             )
             self.assertEqual(load_cases(path)[0], BenchmarkCase("smoke", 32, 2, 8, 64))
+        shaped = BenchmarkCase.from_mapping(
+            {
+                "id": "shaped",
+                "S": 1,
+                "K": 1,
+                "E": 2,
+                "H": 4,
+                "gate_grad_shape": [7168, 3072],
+            }
+        )
+        self.assertEqual(shaped.reduce_grad_inner_shape("gate"), (7168, 3072))
+        self.assertEqual(shaped.reduce_grad_inner_shape("up"), (4,))
         with self.assertRaisesRegex(ValueError, "unknown benchmark case fields"):
             BenchmarkCase.from_mapping(
                 {"id": "bad", "S": 1, "K": 1, "E": 1, "H": 1, "mystery": 1}
@@ -284,9 +393,6 @@ class MoonEPSmokeTests(unittest.TestCase):
             )
 
     def test_planner_wait_budget_defaults_to_bounded_native_value(self):
-        from tools.moonep.benchmark import build_parser as build_benchmark_parser
-        from tools.moonep.launcher import build_parser as build_launcher_parser
-
         benchmark_args = build_benchmark_parser().parse_args(
             ["--cases", "cases.json", "--output-dir", "output"]
         )
@@ -295,6 +401,26 @@ class MoonEPSmokeTests(unittest.TestCase):
         )
         self.assertEqual(benchmark_args.wait_iterations, 1_000_000)
         self.assertEqual(launcher_args.wait_iterations, 1_000_000)
+
+    def test_launcher_forwards_reduce_grad_shapes_and_udma_chunk(self):
+        args = build_launcher_parser().parse_args(
+            [
+                "--cases",
+                "cases.json",
+                "--output-dir",
+                "output",
+                "--gate-grad-shape",
+                "7168x3072",
+                "--up-grad-shape",
+                "262145",
+                "--udma-chunk-bytes",
+                "2097152",
+            ]
+        )
+        command = _process_command(args)
+        self.assertEqual(command[command.index("--gate-grad-shape") + 1], "7168x3072")
+        self.assertEqual(command[command.index("--up-grad-shape") + 1], "262145")
+        self.assertEqual(command[command.index("--udma-chunk-bytes") + 1], "2097152")
 
     def test_completion_rendezvous_preserves_peer_window_teardown_order(self):
         def run_pair(*, client_quiesced=True, client_passed=True, stale=False):
@@ -535,11 +661,13 @@ class MoonEPSmokeTests(unittest.TestCase):
                     "TILEXR_PHYSICAL_DEVICE_COUNT": "8",
                     "TILEXR_RANKS_PER_DEVICE": "1",
                     "TILEXR_MOONEP_PLANNER_BLOCK_DIM": str(planner_size),
+                    "TILEXR_MOONEP_CROSS_NODE_VALIDATED": "1",
                 },
                 clear=False,
             ):
                 metadata = topology_metadata(context)
             self.assertEqual(metadata["planner_block_dim"], planner_size)
+            self.assertFalse(metadata["cross_node_validated"])
 
     def test_planner_cpu_oracle_rejects_corrupted_output(self):
         class Values:
@@ -657,6 +785,123 @@ class MoonEPSmokeTests(unittest.TestCase):
         self.assertFalse(summary["transport_performance_valid"])
         self.assertEqual(summary["performance_scope"], "oversubscribed_functional_only")
         self.assertIn("p50", summary["tokens_per_second"])
+
+    def test_reduce_grad_report_uses_summed_payload_and_max_rank_latency(self):
+        capabilities = {
+            "abi_version": 2,
+            "stage_mask": 31,
+            "stub_mask": 0,
+            "implementations": {
+                name: "native"
+                for name in ("planning", "dispatch", "prefetch_weight", "combine", "reduce_grad")
+            },
+            "transport_performance_valid": True,
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            case_dir = Path(directory) / "reduce"
+            for rank, (latency, payload) in enumerate(((10.0, 1000), (20.0, 3000))):
+                rank_dir = case_dir / f"rank_{rank}"
+                write_json(
+                    rank_dir / "result.json",
+                    {
+                        "status": "passed",
+                        "rank": rank,
+                        "case": {
+                            "case_id": "reduce",
+                            "tokens_per_rank": 1,
+                            "correctness": True,
+                        },
+                        "capabilities": capabilities,
+                        "reduce_grad": {"transports": {"gate": "udma"}},
+                        "topology": {
+                            "global_world_size": 2,
+                            "node_count": 2,
+                            "local_world_size": 1,
+                            "planner_group_size": 2,
+                            "lane_group_size": 1,
+                            "physical_device_count": 2,
+                            "ranks_per_device": 1,
+                            "oversubscribed": False,
+                            "planner_block_dim": 64,
+                            "planner_block_dim_source": "default_native",
+                            "peer_memory_cross_node": True,
+                            "cross_node_validated": False,
+                        },
+                        "validation": {
+                            "passed": True,
+                            "reduce_grad_checks": {"gate": True, "up": True, "down": True},
+                        },
+                    },
+                )
+                write_jsonl(
+                    rank_dir / "samples.jsonl",
+                    [
+                        {
+                            "iteration": 0,
+                            "timings_us": {"end_to_end": latency, "reduce_grad": latency},
+                            "reduce_grad": {
+                                "transferred_bytes": payload,
+                                "cross_node_transferred_bytes": {"peer": 0, "udma": payload},
+                            },
+                        }
+                    ],
+                )
+            summary = aggregate_rank_artifacts(case_dir, world_size=2)
+        self.assertTrue(summary["reduce_grad_performance_valid"])
+        self.assertTrue(summary["reduce_grad_cross_node_validated"])
+        self.assertEqual(summary["metrics_us"]["reduce_grad"]["p50"], 20.0)
+        self.assertEqual(
+            summary["reduce_grad_effective_bandwidth_gbps"]["p50"], 1.6
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            case_dir = Path(directory) / "zero-cross-node"
+            for rank in range(2):
+                rank_dir = case_dir / f"rank_{rank}"
+                result = {
+                    "status": "passed",
+                    "rank": rank,
+                    "case": {
+                        "case_id": "zero-cross-node",
+                        "tokens_per_rank": 1,
+                        "correctness": True,
+                    },
+                    "capabilities": capabilities,
+                    "reduce_grad": {"transports": {"gate": "udma"}},
+                    "topology": {
+                        "global_world_size": 2,
+                        "node_count": 2,
+                        "local_world_size": 1,
+                        "planner_group_size": 2,
+                        "lane_group_size": 1,
+                        "physical_device_count": 2,
+                        "ranks_per_device": 1,
+                        "oversubscribed": False,
+                        "planner_block_dim": 64,
+                        "planner_block_dim_source": "default_native",
+                        "peer_memory_cross_node": True,
+                        "cross_node_validated": False,
+                    },
+                    "validation": {
+                        "passed": True,
+                        "reduce_grad_checks": {"gate": True},
+                    },
+                }
+                write_json(rank_dir / "result.json", result)
+                write_jsonl(
+                    rank_dir / "samples.jsonl",
+                    [{
+                        "iteration": 0,
+                        "timings_us": {"end_to_end": 1.0, "reduce_grad": 1.0},
+                        "reduce_grad": {
+                            "transferred_bytes": 0,
+                            "cross_node_transferred_bytes": {"peer": 0, "udma": 0},
+                        },
+                    }],
+                )
+            zero_cross = aggregate_rank_artifacts(case_dir, world_size=2)
+        self.assertFalse(zero_cross["reduce_grad_cross_node_validated"])
+        self.assertFalse(zero_cross["reduce_grad_performance_valid"])
 
 
 if __name__ == "__main__":

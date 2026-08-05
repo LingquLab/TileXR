@@ -1,0 +1,62 @@
+[
+  {
+    "id": "reduce-grad-peer-threshold",
+    "S": 32,
+    "K": 2,
+    "E": 16,
+    "H": 64,
+    "gate_grad_shape": [262143],
+    "up_grad_shape": [262144],
+    "down_grad_shape": [257],
+    "dtype": "bfloat16",
+    "seed": 1234,
+    "warmup": 3,
+    "iters": 20,
+    "correctness": true
+  },
+  {
+    "id": "reduce-grad-mixed-threshold",
+    "S": 32,
+    "K": 2,
+    "E": 16,
+    "H": 64,
+    "gate_grad_shape": [262144],
+    "up_grad_shape": [262145],
+    "down_grad_shape": [4096],
+    "dtype": "bfloat16",
+    "seed": 1234,
+    "warmup": 3,
+    "iters": 20,
+    "correctness": true
+  },
+  {
+    "id": "reduce-grad-peer-two-half",
+    "S": 32,
+    "K": 2,
+    "E": 256,
+    "H": 64,
+    "gate_grad_shape": [262144],
+    "up_grad_shape": [4096],
+    "down_grad_shape": [4096],
+    "dtype": "bfloat16",
+    "seed": 1234,
+    "warmup": 3,
+    "iters": 20,
+    "correctness": true
+  },
+  {
+    "id": "reduce-grad-7168x3072",
+    "S": 16,
+    "K": 2,
+    "E": 8,
+    "H": 64,
+    "gate_grad_shape": [7168, 3072],
+    "up_grad_shape": [7168, 3072],
+    "down_grad_shape": [3072, 7168],
+    "dtype": "bfloat16",
+    "seed": 1234,
+    "warmup": 3,
+    "iters": 10,
+    "correctness": true
+  }
+]

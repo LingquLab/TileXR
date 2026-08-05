@@ -363,13 +363,18 @@ __aicore__ inline void UDMAPutRegisteredSignalNbi(
     UDMAPutSignalNbi<T>(args, targetRank, localSrc, byteOffset, byteCount, signalByteOffset, signal);
 }
 
-__aicore__ inline void UDMAQuiet(const __gm__ CommArgs* args, int targetRank)
+__aicore__ inline uint32_t UDMAQuietStatus(const __gm__ CommArgs* args, int targetRank)
 {
-    if (!UDMAEnabled(args)) return;
+    if (!UDMAEnabled(args)) return 0xFFU;
     __gm__ UDMAInfo* udmaInfo = GetUDMAInfo(args);
     __gm__ UDMAWQCtx* qpCtxEntry = UDMAGetWQCtx(udmaInfo, targetRank, 0);
     uint32_t wqeCnt = ld_dev(reinterpret_cast<__gm__ uint32_t*>(qpCtxEntry->wqeCntAddr), 0);
-    (void)UDMAPollCQ(udmaInfo, targetRank, 0, wqeCnt);
+    return UDMAPollCQ(udmaInfo, targetRank, 0, wqeCnt);
+}
+
+__aicore__ inline void UDMAQuiet(const __gm__ CommArgs* args, int targetRank)
+{
+    (void)UDMAQuietStatus(args, targetRank);
 }
 
 } // namespace TileXR
