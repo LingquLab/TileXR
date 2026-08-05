@@ -759,6 +759,7 @@ void TestKernelStructure()
     CHECK_CONTAINS(kernel,
         "UDMAQuietStatusOnQp(args, request.peer, request.qpIdx)");
     CHECK_CONTAINS(kernel, "state.pendingCount != quietBatch");
+    CHECK_CONTAINS(kernel, "quietStatus == 0xFFU");
     CHECK_CONTAINS(kernel, "template <bool BatchQuiet, bool IngressCredit>");
     CHECK_CONTAINS(kernel, "struct AllToAllGroupQuietState<true>");
     CHECK_CONTAINS(kernel, "AllToAllGroupQuietState<BatchQuiet> quietState");

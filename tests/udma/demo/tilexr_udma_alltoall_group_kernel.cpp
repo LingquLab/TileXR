@@ -754,8 +754,14 @@ __aicore__ inline bool AllToAllGroupCompleteQuiet(
     uint32_t groupCount, uint32_t passCount)
 {
     const uint64_t quietBegin = AllToAllGroupTraceCycle(trace);
-    const uint32_t quietStatus =
-        TileXR::UDMAQuietStatusOnQp(args, peer, selectedQp);
+    const uint64_t quietDeadlineBegin =
+        static_cast<uint64_t>(AscendC::GetSystemCycle());
+    uint32_t quietStatus = 0U;
+    do {
+        quietStatus = TileXR::UDMAQuietStatusOnQp(args, peer, selectedQp);
+    } while (quietStatus == 0xFFU &&
+        static_cast<uint64_t>(AscendC::GetSystemCycle()) - quietDeadlineBegin <
+            TILEXR_ALLTOALL_GROUP_WAIT_TIMEOUT_CYCLES);
     AllToAllGroupTraceRecordTask(
         trace, traceIteration, blockIdx, group, pass,
         TileXR::Demo::kAllToAllGroupTraceSendQuiet, groupCount, passCount,
