@@ -56,8 +56,8 @@ def kernel_span_offset(iteration, core):
     return HEADER_BYTES + (iteration * MAX_CORES + core) * CACHE_LINE_BYTES
 
 
-def simt_storage_core(worker):
-    return 0 if worker == 0 else 32 + worker
+def simt_storage_core(worker, send_core_count=1):
+    return worker if worker < send_core_count else 32 + worker
 
 
 def task_span_offset(
@@ -176,8 +176,9 @@ def read_rank_trace(path):
         if header["simt_thread_count"] not in (0, SIMT_THREAD_COUNT):
             raise ValueError(f"SIMT thread dimension mismatch in {path}")
         if (header["simt_thread_count"] != 0 and
-                (header["send_worker_count"] != 1 or
-                 header["active_core_count"] > 33)):
+                (header["send_worker_count"] not in (1, 2, 4, 8) or
+                 header["active_core_count"] < header["send_worker_count"] + 1 or
+                 header["active_core_count"] > header["send_worker_count"] + 32)):
             raise ValueError(f"SIMT trace core mapping mismatch in {path}")
     required = layout_bytes(
         header["iteration_count"], header["group_count"],
@@ -254,9 +255,12 @@ def build_chrome_trace(rank_traces):
             events.append(_metadata("thread_name", rank, core, f"core{core:02d} {role}"))
         for worker in range(simt_threads):
             route = "primary" if worker < LANE_COUNT else "secondary"
+            send_core = worker % header["send_worker_count"]
+            local_thread = worker // header["send_worker_count"]
             events.append(_metadata(
                 "thread_name", rank, SIMT_TID_BASE + worker,
-                f"core00/thread{worker:02d} send {route}"))
+                f"core{send_core:02d}/thread{local_thread:02d} "
+                f"worker{worker:02d} send {route}"))
         if single_receive_core:
             receive_core = header["send_worker_count"]
             for lane in range(LANE_COUNT):
@@ -327,8 +331,11 @@ def build_chrome_trace(rank_traces):
                                 offset_us,
                             ))
             for worker in range(simt_threads):
-                storage_core = simt_storage_core(worker)
+                storage_core = simt_storage_core(
+                    worker, header["send_worker_count"])
                 tid = SIMT_TID_BASE + worker
+                send_core = worker % header["send_worker_count"]
+                local_thread = worker // header["send_worker_count"]
                 for group in range(header["group_count"]):
                     for pass_index in range(header["pass_count"]):
                         for phase in (1, 2):
@@ -358,8 +365,9 @@ def build_chrome_trace(rank_traces):
                                     "iteration": iteration,
                                     "group": group,
                                     "pass": pass_index,
-                                    "core": 0,
+                                    "core": send_core,
                                     "thread": worker,
+                                    "localThread": local_thread,
                                     "lane": worker % LANE_COUNT,
                                     "route": "primary" if route == 0 else "secondary",
                                     "peer": peer,

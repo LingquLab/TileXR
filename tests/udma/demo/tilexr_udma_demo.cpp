@@ -66,7 +66,8 @@ extern int launch_tilexr_udma_all_to_all_group(
     GM_ADDR groupTrace, uint32_t traceIteration,
     uint32_t routeStage, uint32_t multiChannel, uint32_t primaryRouteParts,
     uint32_t simtMode, uint32_t groupWidth, uint32_t quietBatch,
-    uint32_t ingressWindow, uint32_t prewarmSq, uint32_t npuCount);
+    uint32_t ingressWindow, uint32_t prewarmSq, uint32_t npuCount,
+    uint32_t simtSendCores);
 extern void launch_tilexr_udma_all_to_all_bigdata(
     uint32_t blockDim, void* stream, GM_ADDR commArgs, GM_ADDR input, GM_ADDR output,
     GM_ADDR udmaMem, GM_ADDR debug, GM_ADDR fullmeshTrace, uint32_t fullmeshTraceIteration,
@@ -1083,13 +1084,29 @@ bool RunGroupedAllToAll(
         return false;
     }
 
+    const int simtSendCoresValue = GetEnvInt(
+        "TILEXR_DEMO_ALLTOALL_GROUP_SIMT_SEND_CORES",
+        static_cast<int>(TileXR::Demo::kAllToAllGroupDefaultSimtSendCoreCount));
+    if (simtSendCoresValue <= 0 ||
+        !TileXR::Demo::AllToAllGroupValidSimtSendCores(
+            static_cast<uint32_t>(simtSendCoresValue)) ||
+        (simtMode == 0U && simtSendCoresValue != 1)) {
+        std::cerr << "[rank " << rank
+                  << "] ERROR: TILEXR_DEMO_ALLTOALL_GROUP_SIMT_SEND_CORES"
+                  << " must be 1 when SIMT is disabled, or 1, 2, 4, 8 when"
+                  << " SIMT is enabled, got " << simtSendCoresValue << std::endl;
+        return false;
+    }
+    const uint32_t simtSendCores =
+        static_cast<uint32_t>(simtSendCoresValue);
+
     bool sdmaAvailable = false;
     if (!CheckTileXR(rank, "TileXRSDMAAvailable grouped alltoall",
             TileXRSDMAAvailable(comm, &sdmaAvailable))) {
         return false;
     }
     const uint32_t sendWorkers = simtMode != 0U ?
-        TileXR::Demo::kAllToAllGroupSimtSendWorkerCount :
+        simtSendCores :
         TileXR::Demo::kAllToAllGroupSendWorkerCount;
     const uint32_t copyoutWorkers = sdmaAvailable ? 1U : 32U;
     const int prewarmSqValue = GetEnvInt(
@@ -1321,6 +1338,7 @@ bool RunGroupedAllToAll(
         " multiChannel=" + std::to_string(multiChannel ? 1 : 0) +
         " primaryRouteParts=" + std::to_string(primaryRoutePartsValue) +
         " simt=" + std::to_string(simtMode) +
+        " simtSendCores=" + std::to_string(simtSendCores) +
         " sdmaAvailable=" + std::to_string(sdmaAvailable ? 1 : 0) +
         " sendWorkers=" + std::to_string(sendWorkers) +
         " copyoutWorkers=" + std::to_string(copyoutWorkers) +
@@ -1361,7 +1379,8 @@ bool RunGroupedAllToAll(
             simtMode, groupWidth, quietBatch,
             routeStage == TileXR::Demo::AllToAllGroupRouteStage::kCombined ?
                 ingressWindow : 0U,
-            prewarmThisLaunch, static_cast<uint32_t>(npuCount));
+            prewarmThisLaunch, static_cast<uint32_t>(npuCount),
+            simtSendCores);
         if (launchRet != 0) {
             std::cerr << "[rank " << rank
                       << "] rtKernelLaunchWithFlagV2 grouped failed: "

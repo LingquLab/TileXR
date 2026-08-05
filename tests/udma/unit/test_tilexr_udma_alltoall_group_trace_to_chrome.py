@@ -172,17 +172,17 @@ class GroupTraceConverterTest(unittest.TestCase):
             self.assertEqual(trace["otherData"]["displayTimeUnit"], "ns")
             json.loads(json.dumps(trace))
 
-    def test_renders_all_simt_workers_as_core0_threads(self):
+    def test_renders_simt_workers_on_four_send_cores(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "tilexr_group_trace_rank_0.bin"
             self.make_trace(
-                path, active_core_count=33, send_worker_count=1,
+                path, active_core_count=36, send_worker_count=4,
                 simt_thread_count=32)
             for worker, peer, route, byte_count in (
                     (0, 1, 0, 64 * 1024 * 1024),
                     (23, 8, 1, 16 * 1024 * 1024),
                     (30, 9, 1, 16 * 1024 * 1024)):
-                storage_core = MODULE.simt_storage_core(worker)
+                storage_core = MODULE.simt_storage_core(worker, 4)
                 for phase, begin, end in ((1, 1210, 1300), (2, 1300, 1500)):
                     self.write_at(
                         path,
@@ -199,14 +199,19 @@ class GroupTraceConverterTest(unittest.TestCase):
                 for event in trace["traceEvents"]
                 if event.get("name") == "thread_name"
             }
-            self.assertEqual(thread_names[64], "core00/thread00 send primary")
-            self.assertEqual(thread_names[87], "core00/thread23 send secondary")
-            self.assertEqual(thread_names[95], "core00/thread31 send secondary")
+            self.assertEqual(
+                thread_names[64], "core00/thread00 worker00 send primary")
+            self.assertEqual(
+                thread_names[87], "core03/thread05 worker23 send secondary")
+            self.assertEqual(
+                thread_names[95], "core03/thread07 worker31 send secondary")
             sends = [
                 event for event in trace["traceEvents"]
                 if event.get("name") == "send-put-signal" and event["tid"] >= 64]
             self.assertEqual({event["args"]["thread"] for event in sends}, {0, 23, 30})
             secondary = next(event for event in sends if event["args"]["thread"] == 23)
+            self.assertEqual(secondary["args"]["core"], 3)
+            self.assertEqual(secondary["args"]["localThread"], 5)
             self.assertEqual(secondary["args"]["peer"], 8)
             self.assertEqual(secondary["args"]["route"], "secondary")
             self.assertEqual(secondary["args"]["bytes"], 16 * 1024 * 1024)

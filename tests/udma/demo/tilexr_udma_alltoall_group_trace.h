@@ -76,9 +76,10 @@ struct AllToAllGroupTraceHeader {
     uint32_t reserved;
 };
 
-constexpr uint32_t AllToAllGroupTraceSimtStorageCore(uint32_t worker)
+constexpr uint32_t AllToAllGroupTraceSimtStorageCore(
+    uint32_t worker, uint32_t sendCoreCount = 1U)
 {
-    return worker == 0U ? 0U : 32U + worker;
+    return worker < sendCoreCount ? worker : 32U + worker;
 }
 
 constexpr size_t AllToAllGroupTraceKernelSpanOffset(uint32_t iteration, uint32_t core)
@@ -170,7 +171,10 @@ static_assert(sizeof(AllToAllGroupTraceTaskSpan) == 48U,
 static_assert(sizeof(AllToAllGroupTraceHeader) <= kAllToAllGroupTraceHeaderBytes,
     "group trace header must fit its region");
 static_assert(AllToAllGroupTraceSimtStorageCore(0U) == 0U &&
-    AllToAllGroupTraceSimtStorageCore(kAllToAllGroupTraceSimtThreadCount - 1U) == 63U,
+    AllToAllGroupTraceSimtStorageCore(
+        kAllToAllGroupTraceSimtThreadCount - 1U) == 63U &&
+    AllToAllGroupTraceSimtStorageCore(7U, 8U) == 7U &&
+    AllToAllGroupTraceSimtStorageCore(8U, 8U) == 40U,
     "SIMT trace workers must fit unused trace core slots");
 static_assert(AllToAllGroupTraceTaskSpanBaseOffset() < kAllToAllGroupTraceBytes,
     "group trace kernel spans must fit in trace storage");

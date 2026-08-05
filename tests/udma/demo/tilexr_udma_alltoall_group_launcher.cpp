@@ -37,6 +37,7 @@ struct alignas(8) GroupedAllToAllKernelArgs {
     uint32_t quietBatch;
     uint32_t prewarmSq;
     uint32_t npuCount;
+    uint32_t simtSendCores;
 };
 
 struct alignas(8) GroupedAllToAllCreditKernelArgs {
@@ -67,6 +68,7 @@ struct alignas(8) GroupedAllToAllCreditKernelArgs {
     uint32_t ingressWindow;
     uint32_t prewarmSq;
     uint32_t npuCount;
+    uint32_t simtSendCores;
 };
 
 static_assert(sizeof(GroupedAllToAllKernelArgs) == 144U,
@@ -77,7 +79,7 @@ static_assert(offsetof(GroupedAllToAllKernelArgs, groupTrace) == 96U,
     "grouped alltoall trace argument ABI changed");
 static_assert(offsetof(GroupedAllToAllKernelArgs, simtMode) == 120U,
     "grouped alltoall SIMT argument ABI changed");
-static_assert(sizeof(GroupedAllToAllCreditKernelArgs) == 160U,
+static_assert(sizeof(GroupedAllToAllCreditKernelArgs) == 168U,
     "grouped alltoall credit kernel argument ABI changed");
 static_assert(offsetof(GroupedAllToAllCreditKernelArgs, creditOffset0) == 96U,
     "grouped alltoall credit offset ABI changed");
@@ -89,6 +91,10 @@ static_assert(offsetof(GroupedAllToAllKernelArgs, npuCount) == 136U,
     "grouped alltoall NPU count ABI changed");
 static_assert(offsetof(GroupedAllToAllCreditKernelArgs, npuCount) == 156U,
     "grouped alltoall credit NPU count ABI changed");
+static_assert(offsetof(GroupedAllToAllKernelArgs, simtSendCores) == 140U,
+    "grouped alltoall SIMT send core count ABI changed");
+static_assert(offsetof(GroupedAllToAllCreditKernelArgs, simtSendCores) == 160U,
+    "grouped alltoall credit SIMT send core count ABI changed");
 
 } // namespace
 
@@ -103,7 +109,8 @@ int launch_tilexr_udma_all_to_all_group(
     uint8_t* groupTrace, uint32_t traceIteration,
     uint32_t routeStage, uint32_t multiChannel, uint32_t primaryRouteParts,
     uint32_t simtMode, uint32_t groupWidth, uint32_t quietBatch,
-    uint32_t ingressWindow, uint32_t prewarmSq, uint32_t npuCount)
+    uint32_t ingressWindow, uint32_t prewarmSq, uint32_t npuCount,
+    uint32_t simtSendCores)
 {
     const bool useCredit = ingressWindow != 0U;
     const bool useBatch = quietBatch != 1U;
@@ -116,7 +123,7 @@ int launch_tilexr_udma_all_to_all_group(
             payloadOffset0, payloadOffset1, signalOffset0, signalOffset1,
             creditOffset0, creditOffset1, groupTrace, traceIteration,
             routeStage, multiChannel, primaryRouteParts, simtMode, groupWidth,
-            quietBatch, ingressWindow, prewarmSq, npuCount,
+            quietBatch, ingressWindow, prewarmSq, npuCount, simtSendCores,
         };
     } else {
         args = {
@@ -125,7 +132,7 @@ int launch_tilexr_udma_all_to_all_group(
             payloadOffset0, payloadOffset1, signalOffset0, signalOffset1,
             groupTrace, traceIteration, routeStage, multiChannel,
             primaryRouteParts, simtMode, groupWidth, quietBatch, prewarmSq,
-            npuCount,
+            npuCount, simtSendCores,
         };
     }
 
@@ -171,7 +178,8 @@ int launch_tilexr_udma_all_to_all_group(
                 creditArgs.multiChannel, creditArgs.primaryRouteParts,
                 creditArgs.simtMode, creditArgs.groupWidth,
                 creditArgs.quietBatch, creditArgs.ingressWindow,
-                creditArgs.prewarmSq, creditArgs.npuCount);
+                creditArgs.prewarmSq, creditArgs.npuCount,
+                creditArgs.simtSendCores);
         } else {
             tilexr_udma_all_to_all_group_credit_kernel<<<
                 blockDim, dynamicUbSize, stream>>>(
@@ -187,7 +195,8 @@ int launch_tilexr_udma_all_to_all_group(
                 creditArgs.multiChannel, creditArgs.primaryRouteParts,
                 creditArgs.simtMode, creditArgs.groupWidth,
                 creditArgs.quietBatch, creditArgs.ingressWindow,
-                creditArgs.prewarmSq, creditArgs.npuCount);
+                creditArgs.prewarmSq, creditArgs.npuCount,
+                creditArgs.simtSendCores);
         }
     } else if (useBatch) {
         tilexr_udma_all_to_all_group_batch_kernel<<<
@@ -199,7 +208,7 @@ int launch_tilexr_udma_all_to_all_group(
             args.signalOffset1, args.groupTrace, args.traceIteration,
             args.routeStage, args.multiChannel, args.primaryRouteParts,
             args.simtMode, args.groupWidth, args.quietBatch, args.prewarmSq,
-            args.npuCount);
+            args.npuCount, args.simtSendCores);
     } else {
         tilexr_udma_all_to_all_group_kernel<<<
             blockDim, dynamicUbSize, stream>>>(
@@ -210,7 +219,7 @@ int launch_tilexr_udma_all_to_all_group(
             args.signalOffset1, args.groupTrace, args.traceIteration,
             args.routeStage, args.multiChannel, args.primaryRouteParts,
             args.simtMode, args.groupWidth, args.quietBatch, args.prewarmSq,
-            args.npuCount);
+            args.npuCount, args.simtSendCores);
     }
     return static_cast<int>(ACL_SUCCESS);
 }

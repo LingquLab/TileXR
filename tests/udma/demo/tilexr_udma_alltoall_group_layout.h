@@ -29,7 +29,7 @@ constexpr size_t kAllToAllGroupCreditSlotBytes =
     static_cast<size_t>(kAllToAllGroupMaxRankSize) * kAllToAllGroupCreditStride;
 constexpr uint32_t kAllToAllGroupSendCoreCount = 16U;
 constexpr uint32_t kAllToAllGroupSendWorkerCount = 32U;
-constexpr uint32_t kAllToAllGroupSimtSendWorkerCount = 1U;
+constexpr uint32_t kAllToAllGroupDefaultSimtSendCoreCount = 1U;
 constexpr uint32_t kAllToAllGroupDcacheBytes = 64U * 1024U;
 constexpr uint32_t kAllToAllGroupMaxGroupCount = 64U;
 constexpr uint32_t kAllToAllGroupErrorWordsPerCore = 12U;
@@ -188,10 +188,36 @@ inline bool AllToAllGroupValidCopyoutWorkers(uint32_t workers)
         workers == 32U || workers == 48U;
 }
 
+inline bool AllToAllGroupValidSimtSendCores(uint32_t sendCores)
+{
+    return sendCores == 1U || sendCores == 2U || sendCores == 4U ||
+        sendCores == 8U;
+}
+
+inline bool AllToAllGroupSimtOwnsLane(
+    uint32_t sendCore, uint32_t sendCores, uint32_t lane)
+{
+    return AllToAllGroupValidSimtSendCores(sendCores) &&
+        sendCore < sendCores && lane < kAllToAllGroupWidth &&
+        lane % sendCores == sendCore;
+}
+
+inline int32_t AllToAllGroupSimtWorker(
+    uint32_t sendCore, uint32_t sendCores, uint32_t assignment)
+{
+    if (!AllToAllGroupValidSimtSendCores(sendCores) ||
+        sendCore >= sendCores) {
+        return -1;
+    }
+    const uint32_t worker = sendCore + assignment * sendCores;
+    return worker < kAllToAllGroupSendWorkerCount ?
+        static_cast<int32_t>(worker) : -1;
+}
+
 inline uint32_t AllToAllGroupBlockDim(uint32_t sendWorkers, uint32_t copyoutWorkers)
 {
     if ((sendWorkers != kAllToAllGroupSendWorkerCount &&
-            sendWorkers != kAllToAllGroupSimtSendWorkerCount) ||
+            !AllToAllGroupValidSimtSendCores(sendWorkers)) ||
         !AllToAllGroupValidCopyoutWorkers(copyoutWorkers) ||
         sendWorkers + copyoutWorkers > kAllToAllGroupBlockDim) {
         return 0U;

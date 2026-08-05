@@ -621,9 +621,47 @@ void TestCopyoutWorkerPolicy()
     CHECK_EQ(TileXR::Demo::AllToAllGroupBlockDim(32U, 1U), 33U);
     CHECK_EQ(TileXR::Demo::AllToAllGroupBlockDim(1U, 32U), 33U);
     CHECK_EQ(TileXR::Demo::AllToAllGroupBlockDim(1U, 1U), 2U);
-    CHECK_EQ(TileXR::Demo::AllToAllGroupBlockDim(4U, 1U), 0U);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupBlockDim(2U, 1U), 3U);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupBlockDim(4U, 1U), 5U);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupBlockDim(8U, 1U), 9U);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupBlockDim(3U, 1U), 0U);
     CHECK_EQ(TileXR::Demo::AllToAllGroupBlockDim(16U, 48U), 0U);
     CHECK_EQ(TileXR::Demo::AllToAllGroupBlockDim(32U, 48U), 0U);
+
+    for (uint32_t sendCores : {1U, 2U, 4U, 8U}) {
+        CHECK_EQ(TileXR::Demo::AllToAllGroupValidSimtSendCores(sendCores), true);
+        std::set<uint32_t> workers;
+        for (uint32_t core = 0U; core < sendCores; ++core) {
+            uint32_t ownedLanes = 0U;
+            for (uint32_t lane = 0U;
+                 lane < TileXR::Demo::kAllToAllGroupWidth; ++lane) {
+                if (TileXR::Demo::AllToAllGroupSimtOwnsLane(
+                        core, sendCores, lane)) {
+                    ++ownedLanes;
+                }
+            }
+            CHECK_EQ(ownedLanes,
+                TileXR::Demo::kAllToAllGroupWidth / sendCores);
+            for (uint32_t assignment = 0U;; ++assignment) {
+                const int32_t worker = TileXR::Demo::AllToAllGroupSimtWorker(
+                    core, sendCores, assignment);
+                if (worker < 0) {
+                    break;
+                }
+                CHECK_EQ(workers.insert(static_cast<uint32_t>(worker)).second, true);
+                CHECK_EQ(static_cast<uint32_t>(worker) % sendCores, core);
+            }
+        }
+        CHECK_EQ(workers.size(),
+            static_cast<size_t>(TileXR::Demo::kAllToAllGroupSendWorkerCount));
+        CHECK_EQ(*workers.begin(), 0U);
+        CHECK_EQ(*workers.rbegin(),
+            TileXR::Demo::kAllToAllGroupSendWorkerCount - 1U);
+    }
+    CHECK_EQ(TileXR::Demo::AllToAllGroupValidSimtSendCores(0U), false);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupValidSimtSendCores(3U), false);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupSimtOwnsLane(2U, 2U, 0U), false);
+    CHECK_EQ(TileXR::Demo::AllToAllGroupSimtWorker(2U, 2U, 0U), -1);
 
     std::set<int32_t> lanes;
     for (uint32_t worker = 0U; worker < 8U; ++worker) {
@@ -751,6 +789,9 @@ void TestKernelStructure()
     CHECK_CONTAINS(kernel, "AllToAllGroupTerminalBarrier<IngressCredit>()");
     CHECK_EQ(CountOccurrences(kernel, "AscendC::SyncAll()"), 1U);
     CHECK_CONTAINS(kernel, "AllToAllGroupRunSimtSend<IngressCredit>");
+    CHECK_CONTAINS(kernel, "lane % sendCores != sendCore");
+    CHECK_CONTAINS(kernel, "workerBegin, sendCores, workerCount");
+    CHECK_CONTAINS(kernel, "lane % sendWorkers != blockIdx");
     CHECK_CONTAINS(kernel, "auto registry = TileXR::GetUDMARegistry(args)");
     CHECK_CONTAINS(kernel, "AllToAllGroupCreditOwnerDevice(worker)");
     CHECK_CONTAINS(kernel, "TILEXR_ALLTOALL_GROUP_STAGE_CREDIT_WAIT");
@@ -789,8 +830,9 @@ void TestKernelStructure()
     CHECK_CONTAINS(launcher, "GroupedAllToAllKernelArgs");
     CHECK_CONTAINS(launcher, "sizeof(GroupedAllToAllKernelArgs) == 144U");
     CHECK_CONTAINS(launcher, "GroupedAllToAllCreditKernelArgs");
-    CHECK_CONTAINS(launcher, "sizeof(GroupedAllToAllCreditKernelArgs) == 160U");
+    CHECK_CONTAINS(launcher, "sizeof(GroupedAllToAllCreditKernelArgs) == 168U");
     CHECK_CONTAINS(launcher, "uint32_t npuCount");
+    CHECK_CONTAINS(launcher, "uint32_t simtSendCores");
     CHECK_CONTAINS(launcher, "prewarmSq");
     CHECK_CONTAINS(launcher, "tilexr_udma_all_to_all_group_batch_kernel<<<");
     CHECK_CONTAINS(launcher, "tilexr_udma_all_to_all_group_credit_kernel<<<");
@@ -831,7 +873,8 @@ void TestHostStructure()
     CHECK_CONTAINS(demo, "grouped ingress credit currently requires groupWidth=16");
     CHECK_CONTAINS(demo, "TILEXR_DEMO_ALLTOALL_GROUP_PRIMARY_ROUTE_PARTS");
     CHECK_CONTAINS(demo, "TILEXR_DEMO_ALLTOALL_GROUP_SIMT");
-    CHECK_CONTAINS(demo, "kAllToAllGroupSimtSendWorkerCount");
+    CHECK_CONTAINS(demo, "TILEXR_DEMO_ALLTOALL_GROUP_SIMT_SEND_CORES");
+    CHECK_CONTAINS(demo, "kAllToAllGroupDefaultSimtSendCoreCount");
     CHECK_CONTAINS(demo, "kAllToAllGroupSendWorkerCount");
     CHECK_CONTAINS(demo, "TileXRSDMAAvailable(comm, &sdmaAvailable)");
     CHECK_CONTAINS(demo,
@@ -844,6 +887,9 @@ void TestHostStructure()
         "/tests/udma/demo/tilexr_udma_alltoall_group_simt.h");
     CHECK_CONTAINS(simt, "__simt_vf__ __aicore__");
     CHECK_CONTAINS(simt, "AllToAllGroupSimtBuildVf");
+    CHECK_CONTAINS(simt, "workerBegin + slot * workerStride");
+    CHECK_CONTAINS(simt,
+        "tokenBase + static_cast<uint64_t>(worker) * sizeof(uint64_t)");
     CHECK_CONTAINS(simt, "AllToAllGroupSimtCoResidentPeer");
     CHECK_CONTAINS(simt, "AllToAllGroupSimtPostPayloadVf");
     CHECK_CONTAINS(simt, "AllToAllGroupSimtPostSignalVf");
