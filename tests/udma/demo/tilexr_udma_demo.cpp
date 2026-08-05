@@ -1406,6 +1406,12 @@ bool RunGroupedAllToAll(
         }
     }
 
+    if (singleRouteStage &&
+        !DemoBarrierAll(rank, rankSize, "grouped single route stage complete")) {
+        release();
+        return false;
+    }
+
     std::vector<int32_t> hostDebug(kErrorWordsPerCore * kErrorCoreCount, 0);
     const size_t debugBytes = hostDebug.size() * sizeof(int32_t);
     const bool validateOutput = !singleRouteStage ||
