@@ -20,6 +20,7 @@ constexpr size_t kAllToAllGroupTraceHeaderBytes = 4096ULL;
 constexpr uint32_t kAllToAllGroupTraceMaxIterations = 50U;
 constexpr uint32_t kAllToAllGroupTraceCoreCount = 64U;
 constexpr uint32_t kAllToAllGroupTracePhaseCount = 12U;
+constexpr uint32_t kAllToAllGroupTraceSimtThreadCount = 32U;
 constexpr uint32_t kAllToAllGroupTraceNoQp = 0xFFFFFFFFU;
 constexpr uint64_t kAllToAllGroupTraceCyclesPerUs = 1000ULL;
 constexpr size_t kAllToAllGroupTraceCacheLineBytes = 128U;
@@ -169,7 +170,7 @@ static_assert(sizeof(AllToAllGroupTraceTaskSpan) == 48U,
 static_assert(sizeof(AllToAllGroupTraceHeader) <= kAllToAllGroupTraceHeaderBytes,
     "group trace header must fit its region");
 static_assert(AllToAllGroupTraceSimtStorageCore(0U) == 0U &&
-    AllToAllGroupTraceSimtStorageCore(31U) == 63U,
+    AllToAllGroupTraceSimtStorageCore(kAllToAllGroupTraceSimtThreadCount - 1U) == 63U,
     "SIMT trace workers must fit unused trace core slots");
 static_assert(AllToAllGroupTraceTaskSpanBaseOffset() < kAllToAllGroupTraceBytes,
     "group trace kernel spans must fit in trace storage");
