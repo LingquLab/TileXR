@@ -48,8 +48,12 @@ struct AllToAllGroupSimtBatch {
     uint32_t queueTaskBegin[kAllToAllGroupSimtMaxQueues];
     uint32_t queueTaskCount[kAllToAllGroupSimtMaxQueues];
     uint32_t queueHead[kAllToAllGroupSimtMaxQueues];
+    uint32_t queueHeadBefore[kAllToAllGroupSimtMaxQueues];
+    uint32_t queueWqeCntBefore[kAllToAllGroupSimtMaxQueues];
     uint32_t queueExpectedCount[kAllToAllGroupSimtMaxQueues];
+    uint32_t queueTailAtQuietBegin[kAllToAllGroupSimtMaxQueues];
     uint32_t queueCompletedTail[kAllToAllGroupSimtMaxQueues];
+    uint32_t queueRawCqeWord[kAllToAllGroupSimtMaxQueues];
     uint32_t queueQuietStatus[kAllToAllGroupSimtMaxQueues];
     uint32_t queuePollCount[kAllToAllGroupSimtMaxQueues];
 };
@@ -341,7 +345,7 @@ __simt_callee__ inline void AllToAllGroupSimtWriteWqe(
 __simt_vf__ __aicore__ LAUNCH_BOUND(kAllToAllGroupSimtThreads)
 inline void AllToAllGroupSimtPostVf(
     __ubuf__ AllToAllGroupSimtBatch* batch, uint32_t queueCount,
-    __gm__ UDMAInfo* udmaInfo)
+    __gm__ UDMAInfo* udmaInfo, uint32_t queueDiagEnabled)
 {
     const uint32_t thread = static_cast<uint32_t>(threadIdx.x);
     for (uint32_t queue = thread; queue < queueCount;
@@ -364,6 +368,10 @@ inline void AllToAllGroupSimtPostVf(
                 reinterpret_cast<__gm__ uint32_t*>(wq->wqeCntAddr));
         batch->queueHead[queue] = firstHead +
             taskCount * kAllToAllGroupSimtWqesPerTask;
+        if (queueDiagEnabled != 0U) {
+            batch->queueHeadBefore[queue] = firstHead;
+            batch->queueWqeCntBefore[queue] = wqeCount;
+        }
         batch->queueExpectedCount[queue] = wqeCount +
             taskCount * kAllToAllGroupSimtWqesPerTask;
         for (uint32_t offset = 0U; offset < taskCount; ++offset) {
@@ -393,7 +401,7 @@ inline void AllToAllGroupSimtPostVf(
 __simt_vf__ __aicore__ LAUNCH_BOUND(kAllToAllGroupSimtThreads)
 inline void AllToAllGroupSimtPostPayloadVf(
     __ubuf__ AllToAllGroupSimtBatch* batch, uint32_t queueCount,
-    __gm__ UDMAInfo* udmaInfo)
+    __gm__ UDMAInfo* udmaInfo, uint32_t queueDiagEnabled)
 {
     const uint32_t thread = static_cast<uint32_t>(threadIdx.x);
     for (uint32_t queue = thread; queue < queueCount;
@@ -414,6 +422,10 @@ inline void AllToAllGroupSimtPostPayloadVf(
             L1CacheType::NON_CACHEABLE>(
                 reinterpret_cast<__gm__ uint32_t*>(wq->wqeCntAddr));
         batch->queueHead[queue] = firstHead + taskCount;
+        if (queueDiagEnabled != 0U) {
+            batch->queueHeadBefore[queue] = firstHead;
+            batch->queueWqeCntBefore[queue] = wqeCount;
+        }
         batch->queueExpectedCount[queue] = wqeCount + taskCount;
         for (uint32_t offset = 0U; offset < taskCount; ++offset) {
             const uint32_t task = taskBegin + offset;
@@ -434,7 +446,7 @@ inline void AllToAllGroupSimtPostPayloadVf(
 __simt_vf__ __aicore__ LAUNCH_BOUND(kAllToAllGroupSimtThreads)
 inline void AllToAllGroupSimtPostSignalVf(
     __ubuf__ AllToAllGroupSimtBatch* batch, uint32_t queueCount,
-    __gm__ UDMAInfo* udmaInfo)
+    __gm__ UDMAInfo* udmaInfo, uint32_t queueDiagEnabled)
 {
     const uint32_t thread = static_cast<uint32_t>(threadIdx.x);
     for (uint32_t queue = thread; queue < queueCount;
@@ -455,6 +467,10 @@ inline void AllToAllGroupSimtPostSignalVf(
             L1CacheType::NON_CACHEABLE>(
                 reinterpret_cast<__gm__ uint32_t*>(wq->wqeCntAddr));
         batch->queueHead[queue] = firstHead + taskCount;
+        if (queueDiagEnabled != 0U) {
+            batch->queueHeadBefore[queue] = firstHead;
+            batch->queueWqeCntBefore[queue] = wqeCount;
+        }
         batch->queueExpectedCount[queue] = wqeCount + taskCount;
         for (uint32_t offset = 0U; offset < taskCount; ++offset) {
             const uint32_t task = taskBegin + offset;
@@ -475,7 +491,7 @@ inline void AllToAllGroupSimtPostSignalVf(
 __simt_vf__ __aicore__ LAUNCH_BOUND(kAllToAllGroupSimtThreads)
 inline void AllToAllGroupSimtQuietVf(
     __ubuf__ AllToAllGroupSimtBatch* batch, uint32_t queueCount,
-    __gm__ UDMAInfo* udmaInfo)
+    __gm__ UDMAInfo* udmaInfo, uint32_t queueDiagEnabled)
 {
     const uint32_t thread = static_cast<uint32_t>(threadIdx.x);
     for (uint32_t queue = thread; queue < queueCount;
@@ -494,6 +510,10 @@ inline void AllToAllGroupSimtQuietVf(
             L1CacheType::NON_CACHEABLE>(
                 reinterpret_cast<__gm__ uint32_t*>(wq->tailAddr));
         const uint32_t expected = batch->queueExpectedCount[queue];
+        if (queueDiagEnabled != 0U) {
+            batch->queueTailAtQuietBegin[queue] = curTail;
+            batch->queueRawCqeWord[queue] = 0U;
+        }
         uint32_t quietStatus = 0U;
         uint32_t pollCount = 0U;
         const uint32_t cqeSize = 1U << cq->baseBkShift;
@@ -516,16 +536,25 @@ inline void AllToAllGroupSimtQuietVf(
             }
             pollCount += retry < TILEXR_UDMA_MAX_RETRY_TIMES ? retry + 1U : retry;
             if (retry == TILEXR_UDMA_MAX_RETRY_TIMES) {
+                if (queueDiagEnabled != 0U) {
+                    batch->queueRawCqeWord[queue] = cqeWord;
+                }
                 quietStatus = 0xFFU;
                 break;
             }
             const uint32_t status = (cqeWord >> 24U) & 0xFFU;
             const uint32_t subStatus = (cqeWord >> 16U) & 0xFFU;
             if (status != 0U || subStatus != 0U) {
+                if (queueDiagEnabled != 0U) {
+                    batch->queueRawCqeWord[queue] = cqeWord;
+                }
                 quietStatus = (status << 8U) | subStatus;
                 break;
             }
             ++curTail;
+            if (queueDiagEnabled != 0U) {
+                batch->queueRawCqeWord[queue] = cqeWord;
+            }
         }
         batch->queueCompletedTail[queue] = curTail;
         batch->queueQuietStatus[queue] = quietStatus;
@@ -536,31 +565,31 @@ inline void AllToAllGroupSimtQuietVf(
 
 __aicore__ inline void AllToAllGroupSimtPost(
     __ubuf__ AllToAllGroupSimtBatch* batch, uint32_t queueCount,
-    __gm__ UDMAInfo* udmaInfo)
+    __gm__ UDMAInfo* udmaInfo, uint32_t queueDiagEnabled)
 {
     asc_vf_call<AllToAllGroupSimtPostVf>(
         dim3{kAllToAllGroupSimtThreads, 1U, 1U},
-        batch, queueCount, udmaInfo);
+        batch, queueCount, udmaInfo, queueDiagEnabled);
     AscendC::PipeBarrier<PIPE_ALL>();
 }
 
 __aicore__ inline void AllToAllGroupSimtPostPayload(
     __ubuf__ AllToAllGroupSimtBatch* batch, uint32_t queueCount,
-    __gm__ UDMAInfo* udmaInfo)
+    __gm__ UDMAInfo* udmaInfo, uint32_t queueDiagEnabled)
 {
     asc_vf_call<AllToAllGroupSimtPostPayloadVf>(
         dim3{kAllToAllGroupSimtThreads, 1U, 1U},
-        batch, queueCount, udmaInfo);
+        batch, queueCount, udmaInfo, queueDiagEnabled);
     AscendC::PipeBarrier<PIPE_ALL>();
 }
 
 __aicore__ inline void AllToAllGroupSimtPostSignal(
     __ubuf__ AllToAllGroupSimtBatch* batch, uint32_t queueCount,
-    __gm__ UDMAInfo* udmaInfo)
+    __gm__ UDMAInfo* udmaInfo, uint32_t queueDiagEnabled)
 {
     asc_vf_call<AllToAllGroupSimtPostSignalVf>(
         dim3{kAllToAllGroupSimtThreads, 1U, 1U},
-        batch, queueCount, udmaInfo);
+        batch, queueCount, udmaInfo, queueDiagEnabled);
     AscendC::PipeBarrier<PIPE_ALL>();
 }
 
@@ -586,11 +615,11 @@ __aicore__ inline void AllToAllGroupSimtBuildPrepared(
 
 __aicore__ inline void AllToAllGroupSimtQuiet(
     __ubuf__ AllToAllGroupSimtBatch* batch, uint32_t queueCount,
-    __gm__ UDMAInfo* udmaInfo)
+    __gm__ UDMAInfo* udmaInfo, uint32_t queueDiagEnabled)
 {
     asc_vf_call<AllToAllGroupSimtQuietVf>(
         dim3{kAllToAllGroupSimtThreads, 1U, 1U},
-        batch, queueCount, udmaInfo);
+        batch, queueCount, udmaInfo, queueDiagEnabled);
     AscendC::PipeBarrier<PIPE_ALL>();
 }
 

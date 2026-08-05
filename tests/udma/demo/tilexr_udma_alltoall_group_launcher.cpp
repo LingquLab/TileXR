@@ -38,6 +38,7 @@ struct alignas(8) GroupedAllToAllKernelArgs {
     uint32_t prewarmSq;
     uint32_t npuCount;
     uint32_t simtSendCores;
+    uint8_t* queueDiag;
 };
 
 struct alignas(8) GroupedAllToAllCreditKernelArgs {
@@ -69,9 +70,10 @@ struct alignas(8) GroupedAllToAllCreditKernelArgs {
     uint32_t prewarmSq;
     uint32_t npuCount;
     uint32_t simtSendCores;
+    uint8_t* queueDiag;
 };
 
-static_assert(sizeof(GroupedAllToAllKernelArgs) == 144U,
+static_assert(sizeof(GroupedAllToAllKernelArgs) == 152U,
     "grouped alltoall kernel argument ABI changed");
 static_assert(offsetof(GroupedAllToAllKernelArgs, payloadOffset0) == 64U,
     "grouped alltoall payload offset ABI changed");
@@ -79,7 +81,7 @@ static_assert(offsetof(GroupedAllToAllKernelArgs, groupTrace) == 96U,
     "grouped alltoall trace argument ABI changed");
 static_assert(offsetof(GroupedAllToAllKernelArgs, simtMode) == 120U,
     "grouped alltoall SIMT argument ABI changed");
-static_assert(sizeof(GroupedAllToAllCreditKernelArgs) == 168U,
+static_assert(sizeof(GroupedAllToAllCreditKernelArgs) == 176U,
     "grouped alltoall credit kernel argument ABI changed");
 static_assert(offsetof(GroupedAllToAllCreditKernelArgs, creditOffset0) == 96U,
     "grouped alltoall credit offset ABI changed");
@@ -110,7 +112,7 @@ int launch_tilexr_udma_all_to_all_group(
     uint32_t routeStage, uint32_t multiChannel, uint32_t primaryRouteParts,
     uint32_t simtMode, uint32_t groupWidth, uint32_t quietBatch,
     uint32_t ingressWindow, uint32_t prewarmSq, uint32_t npuCount,
-    uint32_t simtSendCores)
+    uint32_t simtSendCores, uint8_t* queueDiag)
 {
     const bool useCredit = ingressWindow != 0U;
     const bool useBatch = quietBatch != 1U;
@@ -124,6 +126,7 @@ int launch_tilexr_udma_all_to_all_group(
             creditOffset0, creditOffset1, groupTrace, traceIteration,
             routeStage, multiChannel, primaryRouteParts, simtMode, groupWidth,
             quietBatch, ingressWindow, prewarmSq, npuCount, simtSendCores,
+            queueDiag,
         };
     } else {
         args = {
@@ -132,7 +135,7 @@ int launch_tilexr_udma_all_to_all_group(
             payloadOffset0, payloadOffset1, signalOffset0, signalOffset1,
             groupTrace, traceIteration, routeStage, multiChannel,
             primaryRouteParts, simtMode, groupWidth, quietBatch, prewarmSq,
-            npuCount, simtSendCores,
+            npuCount, simtSendCores, queueDiag,
         };
     }
 
@@ -179,7 +182,7 @@ int launch_tilexr_udma_all_to_all_group(
                 creditArgs.simtMode, creditArgs.groupWidth,
                 creditArgs.quietBatch, creditArgs.ingressWindow,
                 creditArgs.prewarmSq, creditArgs.npuCount,
-                creditArgs.simtSendCores);
+                creditArgs.simtSendCores, creditArgs.queueDiag);
         } else {
             tilexr_udma_all_to_all_group_credit_kernel<<<
                 blockDim, dynamicUbSize, stream>>>(
@@ -196,7 +199,7 @@ int launch_tilexr_udma_all_to_all_group(
                 creditArgs.simtMode, creditArgs.groupWidth,
                 creditArgs.quietBatch, creditArgs.ingressWindow,
                 creditArgs.prewarmSq, creditArgs.npuCount,
-                creditArgs.simtSendCores);
+                creditArgs.simtSendCores, creditArgs.queueDiag);
         }
     } else if (useBatch) {
         tilexr_udma_all_to_all_group_batch_kernel<<<
@@ -208,7 +211,7 @@ int launch_tilexr_udma_all_to_all_group(
             args.signalOffset1, args.groupTrace, args.traceIteration,
             args.routeStage, args.multiChannel, args.primaryRouteParts,
             args.simtMode, args.groupWidth, args.quietBatch, args.prewarmSq,
-            args.npuCount, args.simtSendCores);
+            args.npuCount, args.simtSendCores, args.queueDiag);
     } else {
         tilexr_udma_all_to_all_group_kernel<<<
             blockDim, dynamicUbSize, stream>>>(
@@ -219,7 +222,7 @@ int launch_tilexr_udma_all_to_all_group(
             args.signalOffset1, args.groupTrace, args.traceIteration,
             args.routeStage, args.multiChannel, args.primaryRouteParts,
             args.simtMode, args.groupWidth, args.quietBatch, args.prewarmSq,
-            args.npuCount, args.simtSendCores);
+            args.npuCount, args.simtSendCores, args.queueDiag);
     }
     return static_cast<int>(ACL_SUCCESS);
 }

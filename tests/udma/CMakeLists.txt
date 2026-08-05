@@ -313,6 +313,7 @@ if(BUILD_TILEXR_UDMA_DEMO)
                 "${CMAKE_CURRENT_SOURCE_DIR}/demo/tilexr_udma_alltoall_group_kernel.cpp"
                 "${CMAKE_CURRENT_SOURCE_DIR}/demo/tilexr_udma_alltoall_group_launcher.cpp"
                 "${CMAKE_CURRENT_SOURCE_DIR}/demo/tilexr_udma_alltoall_group_layout.h"
+                "${CMAKE_CURRENT_SOURCE_DIR}/demo/tilexr_udma_alltoall_group_queue_diag.h"
                 "${CMAKE_CURRENT_SOURCE_DIR}/demo/tilexr_udma_alltoall_group_route.h"
                 "${CMAKE_CURRENT_SOURCE_DIR}/demo/tilexr_udma_alltoall_group_simt.h"
                 "${CMAKE_CURRENT_SOURCE_DIR}/demo/tilexr_udma_alltoall_group_trace.h"

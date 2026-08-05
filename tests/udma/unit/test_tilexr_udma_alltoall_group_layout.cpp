@@ -6,6 +6,7 @@
 #include <string>
 
 #include "demo/tilexr_udma_alltoall_group_layout.h"
+#include "demo/tilexr_udma_alltoall_group_queue_diag.h"
 #include "demo/tilexr_udma_alltoall_group_route.h"
 #include "demo/tilexr_udma_alltoall_group_trace.h"
 
@@ -761,16 +762,13 @@ void TestKernelStructure()
     CHECK_CONTAINS(kernel, "return state.pendingCount;");
     CHECK_CONTAINS(kernel, "AllToAllGroupPendingQuiet");
     CHECK_CONTAINS(kernel, "AllToAllGroupFlushQuiet");
-    CHECK_CONTAINS(kernel,
-        "UDMAQuietStatusOnQp(args, request.peer, request.qpIdx)");
+    CHECK_CONTAINS(kernel, "AllToAllGroupQuietWithDiag(");
     CHECK_CONTAINS(kernel, "state.pendingCount != quietBatch");
     CHECK_CONTAINS(kernel, "template <bool BatchQuiet, bool IngressCredit>");
     CHECK_CONTAINS(kernel, "struct AllToAllGroupQuietState<true>");
     CHECK_CONTAINS(kernel, "AllToAllGroupQuietState<BatchQuiet> quietState");
     CHECK_CONTAINS(kernel, "AllToAllGroupCompleteQuiet(");
     CHECK_CONTAINS(kernel, "AllToAllGroupFinishQuiet(");
-    CHECK_CONTAINS(kernel,
-        "UDMAQuietStatusOnQp(args, peer, selectedQp)");
     CHECK_CONTAINS(kernel, "tilexr_udma_all_to_all_group_batch_kernel");
     CHECK_CONTAINS(kernel, "tilexr_udma_all_to_all_group_credit_kernel");
     CHECK_CONTAINS(kernel, "tilexr_udma_all_to_all_group_batch_credit_kernel");
@@ -840,9 +838,9 @@ void TestKernelStructure()
     CHECK_CONTAINS(launcher, "rtKernelLaunchWithFlagV2");
     CHECK_CONTAINS(launcher, "tilexr_udma_all_to_all_group_kernel");
     CHECK_CONTAINS(launcher, "GroupedAllToAllKernelArgs");
-    CHECK_CONTAINS(launcher, "sizeof(GroupedAllToAllKernelArgs) == 144U");
+    CHECK_CONTAINS(launcher, "sizeof(GroupedAllToAllKernelArgs) == 152U");
     CHECK_CONTAINS(launcher, "GroupedAllToAllCreditKernelArgs");
-    CHECK_CONTAINS(launcher, "sizeof(GroupedAllToAllCreditKernelArgs) == 168U");
+    CHECK_CONTAINS(launcher, "sizeof(GroupedAllToAllCreditKernelArgs) == 176U");
     CHECK_CONTAINS(launcher, "uint32_t npuCount");
     CHECK_CONTAINS(launcher, "uint32_t simtSendCores");
     CHECK_CONTAINS(launcher, "prewarmSq");
@@ -867,6 +865,9 @@ void TestHostStructure()
 {
     const std::string demo = ReadFile(
         std::string(TILEXR_SOURCE_ROOT) + "/tests/udma/demo/tilexr_udma_demo.cpp");
+    const std::string kernel = ReadFile(
+        std::string(TILEXR_SOURCE_ROOT) +
+        "/tests/udma/demo/tilexr_udma_alltoall_group_kernel.cpp");
     CHECK_CONTAINS(demo, "#include \"tilexr_udma_alltoall_group_layout.h\"");
     CHECK_CONTAINS(demo, "testType == 8");
     CHECK_CONTAINS(demo, "RunGroupedAllToAll");
@@ -893,6 +894,14 @@ void TestHostStructure()
         "const uint32_t copyoutWorkers = sdmaAvailable ? 1U : 32U");
     CHECK_CONTAINS(demo, "grouped alltoall registeredBytes=");
     CHECK_CONTAINS(demo, "grouped alltoall warmup=");
+    CHECK_CONTAINS(demo, "TILEXR_UDMA_GROUP_QUEUE_DIAG");
+    CHECK_CONTAINS(demo, "TILEXR_UDMA_GROUP_QUEUE_DIAG_DIR");
+    CHECK_CONTAINS(demo, "WriteGroupQueueDiagJson");
+    CHECK_EQ(sizeof(TileXR::Demo::AllToAllGroupQueueDiagRecord), 312U);
+    CHECK_EQ(TileXR::Demo::kAllToAllGroupQueueDiagCoreCount, 64U);
+    CHECK_CONTAINS(kernel, "AllToAllGroupQueueDiagCapturePost");
+    CHECK_CONTAINS(kernel, "AllToAllGroupQueueDiagCaptureQuiet");
+    CHECK_CONTAINS(kernel, "record->frozen = 1U");
 
     const std::string simt = ReadFile(
         std::string(TILEXR_SOURCE_ROOT) +

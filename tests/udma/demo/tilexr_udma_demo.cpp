@@ -26,6 +26,7 @@
 #include "tilexr_types.h"
 #include "tilexr_udma_allreduce_layout.h"
 #include "tilexr_udma_alltoall_group_layout.h"
+#include "tilexr_udma_alltoall_group_queue_diag.h"
 #include "tilexr_udma_alltoall_group_route.h"
 #include "tilexr_udma_alltoall_group_trace.h"
 #include "tilexr_udma_alltoall_layout.h"
@@ -67,7 +68,7 @@ extern int launch_tilexr_udma_all_to_all_group(
     uint32_t routeStage, uint32_t multiChannel, uint32_t primaryRouteParts,
     uint32_t simtMode, uint32_t groupWidth, uint32_t quietBatch,
     uint32_t ingressWindow, uint32_t prewarmSq, uint32_t npuCount,
-    uint32_t simtSendCores);
+    uint32_t simtSendCores, GM_ADDR queueDiag);
 extern void launch_tilexr_udma_all_to_all_bigdata(
     uint32_t blockDim, void* stream, GM_ADDR commArgs, GM_ADDR input, GM_ADDR output,
     GM_ADDR udmaMem, GM_ADDR debug, GM_ADDR fullmeshTrace, uint32_t fullmeshTraceIteration,
@@ -276,6 +277,95 @@ bool WriteGroupTraceBinary(
         return false;
     }
     PrintStatus(rank, "grouped trace output=" + path + " bytes=" + std::to_string(data.size()));
+    return true;
+}
+
+bool WriteGroupQueueDiagJson(
+    int rank, const std::string& directory,
+    const std::vector<TileXR::Demo::AllToAllGroupQueueDiagRecord>& records)
+{
+    const std::string path = directory + "/tilexr_group_queue_diag_rank_" +
+        std::to_string(rank) + ".json";
+    std::ofstream output(path, std::ios::trunc);
+    if (!output.is_open()) {
+        std::cerr << "[rank " << rank
+                  << "] ERROR: open grouped queue diagnostic output failed path="
+                  << path << std::endl;
+        return false;
+    }
+    auto writeHex = [&](uint64_t value) {
+        output << "\"0x" << std::hex << value << std::dec << "\"";
+    };
+    output << "{\n  \"rank\": " << rank << ",\n  \"records\": [";
+    bool firstRecord = true;
+    for (const auto& record : records) {
+        if (record.valid == 0U) {
+            continue;
+        }
+        output << (firstRecord ? "\n" : ",\n") << "    {\n"
+               << "      \"core\": " << record.core << ",\n"
+               << "      \"mode\": \""
+               << (record.mode == TileXR::Demo::kAllToAllGroupQueueDiagModeSimt ?
+                    "simt" : "standard") << "\",\n"
+               << "      \"frozen\": " << record.frozen << ",\n"
+               << "      \"invocation\": " << record.invocation << ",\n"
+               << "      \"group\": " << record.group << ",\n"
+               << "      \"pass\": " << record.pass << ",\n"
+               << "      \"peer\": " << record.peer << ",\n"
+               << "      \"qp\": " << record.qp << ",\n"
+               << "      \"wqeCount\": " << record.wqeCount << ",\n"
+               << "      \"headBefore\": " << record.headBefore << ",\n"
+               << "      \"reservedBegin\": " << record.reservedBegin << ",\n"
+               << "      \"reservedEnd\": " << record.reservedEnd << ",\n"
+               << "      \"headAfter\": " << record.headAfter << ",\n"
+               << "      \"wqeCntBefore\": " << record.wqeCntBefore << ",\n"
+               << "      \"expectedWqeCnt\": " << record.expectedWqeCnt << ",\n"
+               << "      \"wqeCntAfter\": " << record.wqeCntAfter << ",\n"
+               << "      \"doorbellWritten\": " << record.doorbellWritten << ",\n"
+               << "      \"tailAtQuietBegin\": " << record.tailAtQuietBegin << ",\n"
+               << "      \"expectedTail\": " << record.expectedTail << ",\n"
+               << "      \"completedTail\": " << record.completedTail << ",\n"
+               << "      \"cqeSlot\": " << record.cqeSlot << ",\n"
+               << "      \"pollCount\": " << record.pollCount << ",\n"
+               << "      \"quietStatus\": " << record.quietStatus << ",\n"
+               << "      \"sqNumber\": " << record.sqNumber << ",\n"
+               << "      \"cqNumber\": " << record.cqNumber << ",\n"
+               << "      \"sqDepth\": " << record.sqDepth << ",\n"
+               << "      \"cqDepth\": " << record.cqDepth << ",\n"
+               << "      \"sqBufAddr\": ";
+        writeHex(record.sqBufAddr);
+        output << ",\n      \"headAddr\": "; writeHex(record.headAddr);
+        output << ",\n      \"wqeCntAddr\": "; writeHex(record.wqeCntAddr);
+        output << ",\n      \"sqDbAddr\": "; writeHex(record.sqDbAddr);
+        output << ",\n      \"cqBufAddr\": "; writeHex(record.cqBufAddr);
+        output << ",\n      \"cqTailAddr\": "; writeHex(record.cqTailAddr);
+        output << ",\n      \"cqDbAddr\": "; writeHex(record.cqDbAddr);
+        output << ",\n      \"quietBeginCycle\": " << record.quietBeginCycle
+               << ",\n      \"rawCqeWord\": ";
+        writeHex(record.rawCqeWord);
+        output << ",\n      \"payloadSqe\": [";
+        for (uint32_t word = 0U;
+             word < TileXR::Demo::kAllToAllGroupQueueDiagSqeWords; ++word) {
+            if (word != 0U) output << ", ";
+            writeHex(record.payloadSqe[word]);
+        }
+        output << "],\n      \"signalSqe\": [";
+        for (uint32_t word = 0U;
+             word < TileXR::Demo::kAllToAllGroupQueueDiagSqeWords; ++word) {
+            if (word != 0U) output << ", ";
+            writeHex(record.signalSqe[word]);
+        }
+        output << "]\n    }";
+        firstRecord = false;
+    }
+    output << "\n  ]\n}\n";
+    if (!output.good()) {
+        std::cerr << "[rank " << rank
+                  << "] ERROR: write grouped queue diagnostic output failed path="
+                  << path << std::endl;
+        return false;
+    }
+    PrintStatus(rank, "grouped queue diagnostic output=" + path);
     return true;
 }
 
@@ -1161,6 +1251,13 @@ bool RunGroupedAllToAll(
     const char* traceDirEnv = std::getenv("TILEXR_UDMA_GROUP_TRACE_DIR");
     const std::string traceDir = traceDirEnv != nullptr && traceDirEnv[0] != '\0' ?
         traceDirEnv : ".";
+    const bool queueDiagEnabled =
+        GetEnvInt("TILEXR_UDMA_GROUP_QUEUE_DIAG", 0) != 0;
+    const char* queueDiagDirEnv =
+        std::getenv("TILEXR_UDMA_GROUP_QUEUE_DIAG_DIR");
+    const std::string queueDiagDir =
+        queueDiagDirEnv != nullptr && queueDiagDirEnv[0] != '\0' ?
+        queueDiagDirEnv : traceDir;
     if (traceEnabled && !TileXR::Demo::AllToAllGroupTraceLayoutFits(
             static_cast<uint32_t>(repeat), plan.groupCount, plan.passCount)) {
         std::cerr << "[rank " << rank << "] ERROR: grouped trace dimensions exceed capacity"
@@ -1185,6 +1282,7 @@ bool RunGroupedAllToAll(
     VmmMultiRegionAllocation registeredVmm;
     std::array<void*, kRouteStageCount> groupTraceDevices {};
     std::array<std::vector<uint8_t>, kRouteStageCount> hostGroupTraces;
+    void* queueDiagDevice = nullptr;
     aclrtEvent stageStartEvent = nullptr;
     aclrtEvent stageEndEvent = nullptr;
     TileXRUDMAMemHandle handle = 0;
@@ -1215,6 +1313,10 @@ bool RunGroupedAllToAll(
                 aclrtFree(groupTraceDevice);
                 groupTraceDevice = nullptr;
             }
+        }
+        if (queueDiagDevice != nullptr) {
+            aclrtFree(queueDiagDevice);
+            queueDiagDevice = nullptr;
         }
         if (output != nullptr) {
             aclrtFree(output);
@@ -1255,6 +1357,20 @@ bool RunGroupedAllToAll(
             aclrtMemset(registeredMemory, plan.registeredBytes, 0, plan.registeredBytes))) {
         release();
         return false;
+    }
+
+    if (queueDiagEnabled) {
+        const size_t queueDiagBytes =
+            TileXR::Demo::kAllToAllGroupQueueDiagCoreCount *
+            sizeof(TileXR::Demo::AllToAllGroupQueueDiagRecord);
+        if (!CheckAcl(rank, "aclrtMalloc grouped queue diagnostic",
+                aclrtMalloc(&queueDiagDevice, queueDiagBytes,
+                    ACL_MEM_MALLOC_HUGE_FIRST)) ||
+            !CheckAcl(rank, "aclrtMemset grouped queue diagnostic",
+                aclrtMemset(queueDiagDevice, queueDiagBytes, 0, queueDiagBytes))) {
+            release();
+            return false;
+        }
     }
 
     if (traceEnabled) {
@@ -1350,6 +1466,9 @@ bool RunGroupedAllToAll(
         " npuCount=" + std::to_string(npuCount) +
         " ipcLoopback=" + std::to_string(ipcLoopback ? 1 : 0) +
         " routeStages=" + std::to_string(routeStagesValue));
+    PrintStatus(rank, "grouped queue diagnostic=" +
+        std::to_string(queueDiagEnabled ? 1 : 0) +
+        " dir=" + queueDiagDir);
 
     if (routeStages &&
         !DemoBarrierAll(rank, rankSize, "grouped route stages ready")) {
@@ -1380,7 +1499,7 @@ bool RunGroupedAllToAll(
             routeStage == TileXR::Demo::AllToAllGroupRouteStage::kCombined ?
                 ingressWindow : 0U,
             prewarmThisLaunch, static_cast<uint32_t>(npuCount),
-            simtSendCores);
+            simtSendCores, reinterpret_cast<GM_ADDR>(queueDiagDevice));
         if (launchRet != 0) {
             std::cerr << "[rank " << rank
                       << "] rtKernelLaunchWithFlagV2 grouped failed: "
@@ -1492,6 +1611,16 @@ bool RunGroupedAllToAll(
                 "grouped trace " + stageName) &&
                 WriteGroupTraceBinary(rank, traceDir, stageName, hostGroupTrace) && copyOk;
         }
+    }
+    if (queueDiagEnabled) {
+        std::vector<TileXR::Demo::AllToAllGroupQueueDiagRecord> hostQueueDiag(
+            TileXR::Demo::kAllToAllGroupQueueDiagCoreCount);
+        const size_t queueDiagBytes = hostQueueDiag.size() *
+            sizeof(TileXR::Demo::AllToAllGroupQueueDiagRecord);
+        copyOk = CopyDeviceToHost(
+            rank, hostQueueDiag.data(), queueDiagBytes, queueDiagDevice,
+            queueDiagBytes, "grouped queue diagnostic") &&
+            WriteGroupQueueDiagJson(rank, queueDiagDir, hostQueueDiag) && copyOk;
     }
     bool debugOk = true;
     for (uint32_t core = 0; core < kErrorCoreCount; ++core) {
