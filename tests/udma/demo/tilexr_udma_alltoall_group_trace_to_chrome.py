@@ -6,14 +6,17 @@ from pathlib import Path
 
 
 TRACE_MAGIC = 0x47545243
-TRACE_VERSION = 4
+TRACE_VERSION = 5
+TRACE_V4_VERSION = 4
 LEGACY_TRACE_VERSION = 1
 TRACE_BYTES = 128 * 1024 * 1024
 HEADER_BYTES = 4096
 MAX_ITERATIONS = 50
 MAX_CORES = 64
-SEND_WORKER_COUNT = 32
+DEFAULT_SEND_WORKER_COUNT = 32
 LANE_COUNT = 16
+SIMT_THREAD_COUNT = 32
+SIMT_TID_BASE = MAX_CORES
 PHASE_COUNT = 5
 TRACE_V2_PHASE_COUNT = 6
 TRACE_V3_PHASE_COUNT = 8
@@ -26,6 +29,7 @@ TASK_FORMAT = "<QQiI5I4x"
 LEGACY_TASK_BYTES = struct.calcsize(LEGACY_TASK_FORMAT)
 TASK_BYTES = struct.calcsize(TASK_FORMAT)
 HEADER_FORMAT = "<8I4Q"
+HEADER_V5_FORMAT = "<8I4Q4I"
 TASK_BASE_OFFSET = HEADER_BYTES + MAX_ITERATIONS * MAX_CORES * CACHE_LINE_BYTES
 NO_QP = 0xFFFFFFFF
 ITERATION_GAP_US = 1.0
@@ -48,6 +52,10 @@ PHASE_NAMES = (
 
 def kernel_span_offset(iteration, core):
     return HEADER_BYTES + (iteration * MAX_CORES + core) * CACHE_LINE_BYTES
+
+
+def simt_storage_core(worker):
+    return 0 if worker == 0 else 32 + worker
 
 
 def task_span_offset(
@@ -102,8 +110,12 @@ def read_rank_trace(path):
     if file_size != TRACE_BYTES:
         raise ValueError(f"invalid trace size {file_size} in {path}, expected {TRACE_BYTES}")
     with path.open("rb") as stream:
-        header_data = stream.read(struct.calcsize(HEADER_FORMAT))
-    fields = struct.unpack_from(HEADER_FORMAT, header_data, 0)
+        header_data = stream.read(struct.calcsize(HEADER_V5_FORMAT))
+    base_fields = struct.unpack_from(HEADER_FORMAT, header_data, 0)
+    version = base_fields[1]
+    fields = (
+        struct.unpack_from(HEADER_V5_FORMAT, header_data, 0)
+        if version == TRACE_VERSION else base_fields)
     header = {
         "magic": fields[0],
         "version": fields[1],
@@ -117,10 +129,15 @@ def read_rank_trace(path):
         "trace_bytes": fields[9],
         "kernel_span_offset": fields[10],
         "task_span_offset": fields[11],
+        "active_core_count": fields[12] if version == TRACE_VERSION else MAX_CORES,
+        "send_worker_count": (
+            fields[13] if version == TRACE_VERSION else DEFAULT_SEND_WORKER_COUNT),
+        "simt_thread_count": fields[14] if version == TRACE_VERSION else 0,
     }
     if header["magic"] != TRACE_MAGIC:
         raise ValueError(f"invalid trace magic in {path}")
-    if header["version"] not in (LEGACY_TRACE_VERSION, 2, 3, TRACE_VERSION):
+    if header["version"] not in (
+            LEGACY_TRACE_VERSION, 2, 3, TRACE_V4_VERSION, TRACE_VERSION):
         raise ValueError(f"unsupported trace version {header['version']} in {path}")
     if header["trace_bytes"] != TRACE_BYTES:
         raise ValueError(f"trace byte dimension mismatch in {path}")
@@ -128,22 +145,38 @@ def read_rank_trace(path):
         raise ValueError(f"iteration dimension mismatch in {path}")
     if header["group_count"] <= 0 or header["pass_count"] <= 0:
         raise ValueError(f"group/pass dimension mismatch in {path}")
-    expected_phase_count = {
-        LEGACY_TRACE_VERSION: PHASE_COUNT,
-        2: TRACE_V2_PHASE_COUNT,
-        3: TRACE_V3_PHASE_COUNT,
-        TRACE_VERSION: TRACE_V4_PHASE_COUNT,
+    expected_phase_counts = {
+        LEGACY_TRACE_VERSION: (PHASE_COUNT,),
+        2: (TRACE_V2_PHASE_COUNT,),
+        3: (6, TRACE_V3_PHASE_COUNT),
+        TRACE_V4_VERSION: (TRACE_V4_PHASE_COUNT,),
+        TRACE_VERSION: (TRACE_V4_PHASE_COUNT,),
     }[header["version"]]
-    task_format = TASK_FORMAT if header["version"] == TRACE_VERSION else LEGACY_TASK_FORMAT
-    task_bytes = TASK_BYTES if header["version"] == TRACE_VERSION else LEGACY_TASK_BYTES
+    task_format = (
+        TASK_FORMAT if header["version"] in (TRACE_V4_VERSION, TRACE_VERSION)
+        else LEGACY_TASK_FORMAT)
+    task_bytes = (
+        TASK_BYTES if header["version"] in (TRACE_V4_VERSION, TRACE_VERSION)
+        else LEGACY_TASK_BYTES)
     if (header["core_count"] != MAX_CORES or
-            header["phase_count"] != expected_phase_count):
+            header["phase_count"] not in expected_phase_counts):
         raise ValueError(f"core/phase dimension mismatch in {path}")
     if (header["kernel_span_offset"] != HEADER_BYTES or
             header["task_span_offset"] != TASK_BASE_OFFSET):
         raise ValueError(f"trace offset mismatch in {path}")
     if header["cycles_per_us"] == 0:
         raise ValueError(f"invalid cycle frequency in {path}")
+    if header["version"] == TRACE_VERSION:
+        if not 0 < header["active_core_count"] <= MAX_CORES:
+            raise ValueError(f"active core dimension mismatch in {path}")
+        if not 0 < header["send_worker_count"] <= header["active_core_count"]:
+            raise ValueError(f"send worker dimension mismatch in {path}")
+        if header["simt_thread_count"] not in (0, SIMT_THREAD_COUNT):
+            raise ValueError(f"SIMT thread dimension mismatch in {path}")
+        if (header["simt_thread_count"] != 0 and
+                (header["send_worker_count"] != 1 or
+                 header["active_core_count"] > 33)):
+            raise ValueError(f"SIMT trace core mapping mismatch in {path}")
     required = layout_bytes(
         header["iteration_count"], header["group_count"],
         header["pass_count"], header["phase_count"], task_bytes)
@@ -188,7 +221,7 @@ def build_chrome_trace(rank_traces):
                 _read_span(
                     rank_trace["data"], kernel_span_offset(iteration, core),
                     f"kernel rank={rank} iter={iteration} core={core}")
-                for core in range(MAX_CORES)
+                for core in range(header["active_core_count"])
             ]
             spans = [span for span in spans if span is not None]
             if not spans:
@@ -209,17 +242,23 @@ def build_chrome_trace(rank_traces):
         header = rank_trace["header"]
         data = rank_trace["data"]
         rank = header["rank"]
+        simt_threads = header["simt_thread_count"]
         sources.append(rank_trace["path"])
         events.append(_metadata("process_name", rank, 0, f"rank {rank}"))
-        for core in range(MAX_CORES):
-            role = "send" if core < SEND_WORKER_COUNT else "receive"
+        for core in range(header["active_core_count"]):
+            role = "send" if core < header["send_worker_count"] else "receive"
             events.append(_metadata("thread_name", rank, core, f"core{core:02d} {role}"))
+        for worker in range(simt_threads):
+            route = "primary" if worker < LANE_COUNT else "secondary"
+            events.append(_metadata(
+                "thread_name", rank, SIMT_TID_BASE + worker,
+                f"core00/thread{worker:02d} send {route}"))
 
         for iteration in range(header["iteration_count"]):
             base = bases[(rank, iteration)]
             offset_us = iteration_offsets[iteration]
-            for core in range(MAX_CORES):
-                role = "send" if core < SEND_WORKER_COUNT else "receive"
+            for core in range(header["active_core_count"]):
+                role = "send" if core < header["send_worker_count"] else "receive"
                 kernel = _read_span(
                     data, kernel_span_offset(iteration, core),
                     f"kernel rank={rank} iter={iteration} core={core}")
@@ -231,6 +270,8 @@ def build_chrome_trace(rank_traces):
                 for group in range(header["group_count"]):
                     for pass_index in range(header["pass_count"]):
                         for phase in range(header["phase_count"]):
+                            if simt_threads != 0 and core == 0 and phase in (1, 2):
+                                continue
                             label = (
                                 f"task rank={rank} iter={iteration} core={core} "
                                 f"group={group} pass={pass_index} phase={phase}")
@@ -269,6 +310,49 @@ def build_chrome_trace(rank_traces):
                                 PHASE_NAMES[phase], role, rank, core, begin, end, base,
                                 header["cycles_per_us"],
                                 task_args,
+                                offset_us,
+                            ))
+            for worker in range(simt_threads):
+                storage_core = simt_storage_core(worker)
+                tid = SIMT_TID_BASE + worker
+                for group in range(header["group_count"]):
+                    for pass_index in range(header["pass_count"]):
+                        for phase in (1, 2):
+                            label = (
+                                f"SIMT task rank={rank} iter={iteration} worker={worker} "
+                                f"group={group} pass={pass_index} phase={phase}")
+                            task = _read_task(
+                                data,
+                                task_span_offset(
+                                    iteration, storage_core, group, pass_index, phase,
+                                    header["group_count"], header["pass_count"],
+                                    header["phase_count"], header["task_bytes"]),
+                                label, header["task_format"], header["task_bytes"],
+                            )
+                            if task is None:
+                                continue
+                            (begin, end, peer, qp, task_worker, route,
+                             byte_count, _, _) = task
+                            if task_worker != worker or route > 1:
+                                raise ValueError(
+                                    f"invalid SIMT task metadata in {label}: "
+                                    f"worker={task_worker} route={route}")
+                            events.append(_event(
+                                PHASE_NAMES[phase], "send", rank, tid,
+                                begin, end, base, header["cycles_per_us"],
+                                {
+                                    "iteration": iteration,
+                                    "group": group,
+                                    "pass": pass_index,
+                                    "core": 0,
+                                    "thread": worker,
+                                    "lane": worker % LANE_COUNT,
+                                    "route": "primary" if route == 0 else "secondary",
+                                    "peer": peer,
+                                    "qp": None if qp == NO_QP else qp,
+                                    "bytes": byte_count,
+                                    "role": "send",
+                                },
                                 offset_us,
                             ))
     return {

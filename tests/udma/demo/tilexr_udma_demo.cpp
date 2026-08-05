@@ -1206,6 +1206,10 @@ bool RunGroupedAllToAll(
             header.traceBytes = TileXR::Demo::kAllToAllGroupTraceBytes;
             header.kernelSpanOffset = TileXR::Demo::kAllToAllGroupTraceHeaderBytes;
             header.taskSpanOffset = TileXR::Demo::AllToAllGroupTraceTaskSpanBaseOffset();
+            header.activeCoreCount = groupBlockDim;
+            header.sendWorkerCount = sendWorkers;
+            header.simtThreadCount = simtMode != 0U ?
+                TileXR::Demo::kAllToAllGroupSimtThreads : 0U;
             std::memcpy(hostGroupTrace.data(), &header, sizeof(header));
             if (!CheckAcl(rank, "aclrtMalloc grouped trace",
                     aclrtMalloc(&groupTraceDevices[traceIndex],

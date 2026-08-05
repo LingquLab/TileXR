@@ -31,17 +31,25 @@ class GroupTraceConverterTest(unittest.TestCase):
     def make_trace(
         self, path, *, rank=0, magic=None, iteration_count=1,
         group_count=1, pass_count=1, core_count=64,
-        version=None, phase_count=None,
+        version=None, phase_count=None, active_core_count=64,
+        send_worker_count=32, simt_thread_count=0,
     ):
         version = MODULE.TRACE_VERSION if version is None else version
         phase_count = (
             MODULE.CURRENT_PHASE_COUNT if phase_count is None else phase_count)
         task_format = (
-            MODULE.TASK_FORMAT if version == MODULE.TRACE_VERSION
+            MODULE.TASK_FORMAT
+            if version in (MODULE.TRACE_V4_VERSION, MODULE.TRACE_VERSION)
             else MODULE.LEGACY_TASK_FORMAT)
         task_bytes = struct.calcsize(task_format)
+        header_format = (
+            MODULE.HEADER_V5_FORMAT
+            if version == MODULE.TRACE_VERSION else MODULE.HEADER_FORMAT)
+        extra_header = (
+            (active_core_count, send_worker_count, simt_thread_count, 0)
+            if version == MODULE.TRACE_VERSION else ())
         header = struct.pack(
-            MODULE.HEADER_FORMAT,
+            header_format,
             MODULE.TRACE_MAGIC if magic is None else magic,
             version,
             rank,
@@ -54,6 +62,7 @@ class GroupTraceConverterTest(unittest.TestCase):
             MODULE.TRACE_BYTES,
             MODULE.HEADER_BYTES,
             MODULE.TASK_BASE_OFFSET,
+            *extra_header,
         )
         spans = (
             (32, 0, 0, 0, 1100, 1200, rank, MODULE.NO_QP),
@@ -84,7 +93,7 @@ class GroupTraceConverterTest(unittest.TestCase):
                     0, core, group, pass_index, phase, group_count, pass_count,
                     phase_count, task_bytes))
                 values = [begin, end, peer, qp]
-                if version == MODULE.TRACE_VERSION:
+                if version in (MODULE.TRACE_V4_VERSION, MODULE.TRACE_VERSION):
                     values.extend([0, 62, 0, 64, 33])
                 stream.write(struct.pack(task_format, *values))
 
@@ -162,6 +171,55 @@ class GroupTraceConverterTest(unittest.TestCase):
             self.assertEqual(receive["args"]["lane"], 0)
             self.assertEqual(trace["otherData"]["displayTimeUnit"], "ns")
             json.loads(json.dumps(trace))
+
+    def test_renders_all_simt_workers_as_core0_threads(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "tilexr_group_trace_rank_0.bin"
+            self.make_trace(
+                path, active_core_count=33, send_worker_count=1,
+                simt_thread_count=32)
+            for worker, peer, route, byte_count in (
+                    (0, 1, 0, 64 * 1024 * 1024),
+                    (23, 8, 1, 16 * 1024 * 1024),
+                    (30, 9, 1, 16 * 1024 * 1024)):
+                storage_core = MODULE.simt_storage_core(worker)
+                for phase, begin, end in ((1, 1210, 1300), (2, 1300, 1500)):
+                    self.write_at(
+                        path,
+                        MODULE.task_span_offset(
+                            0, storage_core, 0, 0, phase, 1, 1),
+                        struct.pack(
+                            MODULE.TASK_FORMAT, begin, end, peer, route,
+                            worker, route, byte_count, 0, 0))
+
+            trace = MODULE.build_chrome_trace([MODULE.read_rank_trace(path)])
+            thread_names = {
+                event["tid"]: event["args"]["name"]
+                for event in trace["traceEvents"]
+                if event.get("name") == "thread_name"
+            }
+            self.assertEqual(thread_names[64], "core00/thread00 send primary")
+            self.assertEqual(thread_names[87], "core00/thread23 send secondary")
+            self.assertEqual(thread_names[95], "core00/thread31 send secondary")
+            sends = [
+                event for event in trace["traceEvents"]
+                if event.get("name") == "send-put-signal" and event["tid"] >= 64]
+            self.assertEqual({event["args"]["thread"] for event in sends}, {0, 23, 30})
+            secondary = next(event for event in sends if event["args"]["thread"] == 23)
+            self.assertEqual(secondary["args"]["peer"], 8)
+            self.assertEqual(secondary["args"]["route"], "secondary")
+            self.assertEqual(secondary["args"]["bytes"], 16 * 1024 * 1024)
+
+    def test_reads_version_four_trace(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "version4.bin"
+            self.make_trace(path, version=MODULE.TRACE_V4_VERSION)
+
+            rank_trace = MODULE.read_rank_trace(path)
+
+            self.assertEqual(rank_trace["header"]["active_core_count"], 64)
+            self.assertEqual(rank_trace["header"]["send_worker_count"], 32)
+            self.assertEqual(rank_trace["header"]["simt_thread_count"], 0)
 
     def test_reads_suffixed_stage_trace(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -14,7 +14,7 @@ namespace TileXR {
 namespace Demo {
 
 constexpr uint32_t kAllToAllGroupTraceMagic = 0x47545243U; // "GTRC"
-constexpr uint32_t kAllToAllGroupTraceVersion = 4U;
+constexpr uint32_t kAllToAllGroupTraceVersion = 5U;
 constexpr size_t kAllToAllGroupTraceBytes = 128ULL * 1024ULL * 1024ULL;
 constexpr size_t kAllToAllGroupTraceHeaderBytes = 4096ULL;
 constexpr uint32_t kAllToAllGroupTraceMaxIterations = 50U;
@@ -69,7 +69,16 @@ struct AllToAllGroupTraceHeader {
     uint64_t traceBytes;
     uint64_t kernelSpanOffset;
     uint64_t taskSpanOffset;
+    uint32_t activeCoreCount;
+    uint32_t sendWorkerCount;
+    uint32_t simtThreadCount;
+    uint32_t reserved;
 };
+
+constexpr uint32_t AllToAllGroupTraceSimtStorageCore(uint32_t worker)
+{
+    return worker == 0U ? 0U : 32U + worker;
+}
 
 constexpr size_t AllToAllGroupTraceKernelSpanOffset(uint32_t iteration, uint32_t core)
 {
@@ -159,6 +168,9 @@ static_assert(sizeof(AllToAllGroupTraceTaskSpan) == 48U,
     "group trace task span layout changed");
 static_assert(sizeof(AllToAllGroupTraceHeader) <= kAllToAllGroupTraceHeaderBytes,
     "group trace header must fit its region");
+static_assert(AllToAllGroupTraceSimtStorageCore(0U) == 0U &&
+    AllToAllGroupTraceSimtStorageCore(31U) == 63U,
+    "SIMT trace workers must fit unused trace core slots");
 static_assert(AllToAllGroupTraceTaskSpanBaseOffset() < kAllToAllGroupTraceBytes,
     "group trace kernel spans must fit in trace storage");
 
