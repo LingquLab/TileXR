@@ -17,6 +17,8 @@ DEFAULT_SEND_WORKER_COUNT = 32
 LANE_COUNT = 16
 SIMT_THREAD_COUNT = 32
 SIMT_TID_BASE = MAX_CORES
+RECEIVE_LANE_TID_BASE = SIMT_TID_BASE + SIMT_THREAD_COUNT
+RECEIVE_LANE_PHASES = (3, 4, 6, 7, 8, 9, 10, 11)
 PHASE_COUNT = 5
 TRACE_V2_PHASE_COUNT = 6
 TRACE_V3_PHASE_COUNT = 8
@@ -243,6 +245,8 @@ def build_chrome_trace(rank_traces):
         data = rank_trace["data"]
         rank = header["rank"]
         simt_threads = header["simt_thread_count"]
+        single_receive_core = (
+            header["active_core_count"] == header["send_worker_count"] + 1)
         sources.append(rank_trace["path"])
         events.append(_metadata("process_name", rank, 0, f"rank {rank}"))
         for core in range(header["active_core_count"]):
@@ -253,6 +257,12 @@ def build_chrome_trace(rank_traces):
             events.append(_metadata(
                 "thread_name", rank, SIMT_TID_BASE + worker,
                 f"core00/thread{worker:02d} send {route}"))
+        if single_receive_core:
+            receive_core = header["send_worker_count"]
+            for lane in range(LANE_COUNT):
+                events.append(_metadata(
+                    "thread_name", rank, RECEIVE_LANE_TID_BASE + lane,
+                    f"core{receive_core:02d}/receive-lane{lane:02d}"))
 
         for iteration in range(header["iteration_count"]):
             base = bases[(rank, iteration)]
@@ -271,6 +281,10 @@ def build_chrome_trace(rank_traces):
                     for pass_index in range(header["pass_count"]):
                         for phase in range(header["phase_count"]):
                             if simt_threads != 0 and core == 0 and phase in (1, 2):
+                                continue
+                            if (single_receive_core and
+                                    core == header["send_worker_count"] and
+                                    phase in RECEIVE_LANE_PHASES):
                                 continue
                             label = (
                                 f"task rank={rank} iter={iteration} core={core} "
@@ -356,6 +370,56 @@ def build_chrome_trace(rank_traces):
                                 },
                                 offset_us,
                             ))
+            if single_receive_core:
+                receive_core = header["send_worker_count"]
+                for lane in range(LANE_COUNT):
+                    storage_core = receive_core + lane
+                    tid = RECEIVE_LANE_TID_BASE + lane
+                    for group in range(header["group_count"]):
+                        for pass_index in range(header["pass_count"]):
+                            for phase in RECEIVE_LANE_PHASES:
+                                label = (
+                                    f"receive task rank={rank} iter={iteration} "
+                                    f"lane={lane} group={group} pass={pass_index} "
+                                    f"phase={phase}")
+                                task = _read_task(
+                                    data,
+                                    task_span_offset(
+                                        iteration, storage_core, group, pass_index,
+                                        phase, header["group_count"],
+                                        header["pass_count"], header["phase_count"],
+                                        header["task_bytes"]),
+                                    label, header["task_format"],
+                                    header["task_bytes"],
+                                )
+                                if task is None:
+                                    continue
+                                (begin, end, peer, qp, sdma_head, sdma_tail,
+                                 sdma_new_tail, sdma_depth, sdma_generation) = task
+                                task_args = {
+                                    "iteration": iteration,
+                                    "group": group,
+                                    "pass": pass_index,
+                                    "core": receive_core,
+                                    "lane": lane,
+                                    "peer": peer,
+                                    "qp": None if qp == NO_QP else qp,
+                                    "role": "receive",
+                                }
+                                if sdma_depth != 0:
+                                    task_args.update({
+                                        "sdmaHead": sdma_head,
+                                        "sdmaTail": sdma_tail,
+                                        "sdmaNewTail": sdma_new_tail,
+                                        "sdmaDepth": sdma_depth,
+                                        "sdmaGeneration": sdma_generation,
+                                        "sdmaWrapped": sdma_new_tail < sdma_tail,
+                                    })
+                                events.append(_event(
+                                    PHASE_NAMES[phase], "receive", rank, tid,
+                                    begin, end, base, header["cycles_per_us"],
+                                    task_args, offset_us,
+                                ))
     return {
         "traceEvents": events,
         "otherData": {

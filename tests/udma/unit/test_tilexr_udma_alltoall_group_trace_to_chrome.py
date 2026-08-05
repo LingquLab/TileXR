@@ -216,6 +216,41 @@ class GroupTraceConverterTest(unittest.TestCase):
                 event["args"].get("thread") == 23)
             self.assertEqual(quiet["args"]["cqPolls"], 17)
 
+    def test_renders_single_sdma_core_receive_lanes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "tilexr_group_trace_rank_0.bin"
+            self.make_trace(
+                path, active_core_count=2, send_worker_count=1,
+                simt_thread_count=0)
+            self.write_at(
+                path, MODULE.kernel_span_offset(0, 1),
+                struct.pack("<QQ", 1000, 3000))
+            for lane, peer in ((0, 1), (8, 15), (14, 9)):
+                storage_core = 1 + lane
+                for phase, begin, end in ((3, 1400, 1500), (4, 1500, 1700)):
+                    self.write_at(
+                        path,
+                        MODULE.task_span_offset(
+                            0, storage_core, 0, 0, phase, 1, 1),
+                        struct.pack(
+                            MODULE.TASK_FORMAT, begin, end, peer, MODULE.NO_QP,
+                            0, 0, 0, 0, 0))
+
+            trace = MODULE.build_chrome_trace([MODULE.read_rank_trace(path)])
+            thread_names = {
+                event["tid"]: event["args"]["name"]
+                for event in trace["traceEvents"]
+                if event.get("name") == "thread_name"
+            }
+            self.assertEqual(thread_names[96], "core01/receive-lane00")
+            self.assertEqual(thread_names[111], "core01/receive-lane15")
+            copies = [
+                event for event in trace["traceEvents"]
+                if event.get("name") == "receive-copy"]
+            self.assertEqual({event["args"]["lane"] for event in copies}, {0, 8, 14})
+            self.assertEqual({event["args"]["peer"] for event in copies}, {1, 9, 15})
+            self.assertTrue(all(event["tid"] >= 96 for event in copies))
+
     def test_reads_version_four_trace(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "version4.bin"
