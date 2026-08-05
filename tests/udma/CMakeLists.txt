@@ -144,6 +144,7 @@ target_include_directories(test_tilexr_sock_exchange_layout PRIVATE
 target_include_directories(test_tilexr_udma_transport_layout PRIVATE
     ${TILEXR_ROOT}/src/include
     ${TILEXR_ROOT}/src/comm
+    ${CMAKE_CURRENT_SOURCE_DIR}/demo
 )
 
 target_compile_definitions(test_tilexr_udma_transport_layout PRIVATE

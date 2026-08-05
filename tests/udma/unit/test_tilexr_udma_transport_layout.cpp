@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "udma/tilexr_udma_layout.h"
+#include "tilexr_udma_alltoall_group_layout.h"
 
 #ifndef TILEXR_SOURCE_ROOT
 #define TILEXR_SOURCE_ROOT "."
@@ -187,6 +188,32 @@ void TestSharedQpLaneMatchesGroupedPeerOrder()
     CHECK_EQ(TileXR::UDMASharedQpLane(0, 56, 64, 16), 15U);
     CHECK_EQ(TileXR::UDMASharedQpLane(0, 32, 64, 16), 7U);
     CHECK_EQ(TileXR::UDMASharedQpLane(0, 0, 64, 16), 16U);
+}
+
+void TestSharedQpLaneMatchesBalanced128Schedule()
+{
+    constexpr int rankSize = 128;
+    constexpr uint32_t groupWidth = TileXR::Demo::kAllToAllGroupWidth;
+    const uint32_t groupCount =
+        TileXR::Demo::AllToAllGroupCount(rankSize, groupWidth);
+    for (int rank = 0; rank < rankSize; ++rank) {
+        for (uint32_t group = 0U; group < groupCount; ++group) {
+            bool used[16] = {};
+            for (uint32_t lane = 0U; lane < groupWidth; ++lane) {
+                const int peer = TileXR::Demo::AllToAllGroupPeer(
+                    rank, rankSize, group, lane, groupWidth);
+                if (peer < 0) {
+                    continue;
+                }
+                const uint32_t sharedLane =
+                    TileXR::UDMASharedQpLane(rank, peer, rankSize, groupWidth);
+                CHECK_EQ(sharedLane, lane);
+                CHECK_TRUE(sharedLane < groupWidth);
+                CHECK_TRUE(!used[sharedLane]);
+                used[sharedLane] = true;
+            }
+        }
+    }
 }
 
 void TestSharedQpLanesAreUniqueWithinEveryGroup()
@@ -448,6 +475,7 @@ int main()
     TestMultiRouteQpMappingRejectsEmptyInputs();
     TestMultiRouteQpWeightsUseRouteBandwidth();
     TestSharedQpLaneMatchesGroupedPeerOrder();
+    TestSharedQpLaneMatchesBalanced128Schedule();
     TestSharedQpLanesAreUniqueWithinEveryGroup();
     TestSharedQpPoolIsIndependentOfRegions();
     TestSharedQpIndexUsesLaneOnly();

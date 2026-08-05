@@ -158,6 +158,34 @@ uint32_t UDMASharedQpLane(
         return laneCount;
     }
 
+    if (rankSize == 128 && laneCount == 16) {
+        constexpr int partitionSize = 64;
+        const int rankPartition = rank / partitionSize;
+        const int peerPartition = peer / partitionSize;
+        const uint32_t rankInPartition = static_cast<uint32_t>(rank % partitionSize);
+        const uint32_t peerInPartition = static_cast<uint32_t>(peer % partitionSize);
+        const uint32_t forward =
+            (peerInPartition + partitionSize - rankInPartition) % partitionSize;
+        if (rankPartition == peerPartition) {
+            if (forward <= partitionSize / 2) {
+                return (forward - 1U) % 4U;
+            }
+            const uint32_t backward = partitionSize - forward;
+            return 4U + (backward - 1U) % 4U;
+        }
+        if (forward == 0U) {
+            return 8U;
+        }
+        if (forward < partitionSize / 2) {
+            return 8U + forward % 4U;
+        }
+        if (forward == partitionSize / 2) {
+            return 12U;
+        }
+        const uint32_t backward = partitionSize - forward;
+        return 12U + backward % 4U;
+    }
+
     const uint32_t lanesPerDirection = laneCount / 2;
     const uint32_t forward = static_cast<uint32_t>((peer - rank + rankSize) % rankSize);
     const uint32_t backward = static_cast<uint32_t>(rankSize) - forward;
