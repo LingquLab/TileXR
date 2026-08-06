@@ -6,6 +6,7 @@
 #ifndef TILEXR_UDMA_LAYOUT_H
 #define TILEXR_UDMA_LAYOUT_H
 
+#include <cstddef>
 #include <cstdint>
 #include <vector>
 
@@ -18,6 +19,7 @@ constexpr int TILEXR_UDMA_LAYOUT_INVALID = -3;
 
 int BuildUDMAInfoImage(
     uintptr_t deviceBase,
+    uint32_t qpNum,
     const std::vector<UDMAWQCtx>& sq,
     const std::vector<UDMAWQCtx>& rq,
     const std::vector<UDMACQCtx>& scq,

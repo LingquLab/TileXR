@@ -9,6 +9,8 @@ project(TileXR_UDMA_Tests)
 # 使用 C++14
 set(CMAKE_CXX_STANDARD 14)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+include(CTest)
+enable_testing()
 option(BUILD_TILEXR_UDMA_DEMO "Build TileXR UDMA communication demo with Ascend C kernel" ON)
 set(TILEXR_UDMA_DEMO_SOC_TYPE "Ascend950" CACHE STRING "SOC type used for the TileXR UDMA demo kernel")
 
@@ -73,6 +75,19 @@ target_include_directories(test_tilexr_udma_registry PRIVATE
     ${TILEXR_ROOT}/src/include
 )
 
+add_executable(test_tilexr_udma_device_api
+    unit/test_tilexr_udma_device_api.cpp
+)
+
+target_compile_definitions(test_tilexr_udma_device_api PRIVATE
+    TILEXR_UDMA_FORCE_ENABLE
+)
+
+target_include_directories(test_tilexr_udma_device_api PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/unit/stubs
+    ${TILEXR_ROOT}/src/include
+)
+
 add_executable(test_tilexr_udma_transport_layout
     unit/test_tilexr_udma_transport_layout.cpp
     ${TILEXR_ROOT}/src/comm/udma/tilexr_udma_layout.cpp
@@ -80,6 +95,24 @@ add_executable(test_tilexr_udma_transport_layout
 
 target_include_directories(test_tilexr_udma_transport_layout PRIVATE
     ${TILEXR_ROOT}/src/include
+    ${TILEXR_ROOT}/src/comm
+)
+
+add_executable(test_tilexr_udma_route_config
+    unit/test_tilexr_udma_route_config.cpp
+    ${TILEXR_ROOT}/src/comm/udma/tilexr_udma_config.cpp
+)
+
+target_include_directories(test_tilexr_udma_route_config PRIVATE
+    ${TILEXR_ROOT}/src/comm
+)
+
+add_executable(test_tilexr_udma_rootinfo_parser
+    unit/test_tilexr_udma_rootinfo_parser.cpp
+    ${TILEXR_ROOT}/src/comm/udma/tilexr_udma_root_info.cpp
+)
+
+target_include_directories(test_tilexr_udma_rootinfo_parser PRIVATE
     ${TILEXR_ROOT}/src/comm
 )
 
@@ -114,10 +147,21 @@ target_link_libraries(test_tilexr_udma
 set(INSTALL_TARGETS
     test_tilexr_udma
     test_tilexr_udma_registry
+    test_tilexr_udma_device_api
     test_tilexr_udma_transport_layout
+    test_tilexr_udma_route_config
+    test_tilexr_udma_rootinfo_parser
     test_tilexr_udma_demo_sources
     test_tilexr_udma_source_guard
 )
+
+add_test(NAME test_tilexr_udma_registry COMMAND test_tilexr_udma_registry)
+add_test(NAME test_tilexr_udma_device_api COMMAND test_tilexr_udma_device_api)
+add_test(NAME test_tilexr_udma_transport_layout COMMAND test_tilexr_udma_transport_layout)
+add_test(NAME test_tilexr_udma_route_config COMMAND test_tilexr_udma_route_config)
+add_test(NAME test_tilexr_udma_rootinfo_parser COMMAND test_tilexr_udma_rootinfo_parser)
+add_test(NAME test_tilexr_udma_demo_sources COMMAND test_tilexr_udma_demo_sources)
+add_test(NAME test_tilexr_udma_source_guard COMMAND test_tilexr_udma_source_guard)
 
 if(BUILD_TILEXR_UDMA_DEMO)
     find_program(BISHENG_EXECUTABLE bisheng)

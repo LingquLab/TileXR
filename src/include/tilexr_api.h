@@ -43,6 +43,8 @@ int TileXRUDMARegister(TileXRCommPtr comm, GM_ADDR localPtr, size_t bytes, TileX
 
 int TileXRUDMAUnregister(TileXRCommPtr comm, TileXRUDMAMemHandle handle);
 
+int TileXRUDMAGetQpCount(TileXRCommPtr comm, uint32_t *qpCount);
+
 int TileXRGetUDMARegistryDev(TileXRCommPtr comm, GM_ADDR &registryPtr);
 
 int TileXRGetUDMARegistryHost(TileXRCommPtr comm, const TileXR::TileXRUDMARegistry **registry);

@@ -168,6 +168,19 @@ int TileXRUDMAUnregister(TileXRCommPtr comm, TileXRUDMAMemHandle handle)
     return c->UnregisterUDMAMemory(handle);
 }
 
+int TileXRUDMAGetQpCount(TileXRCommPtr comm, uint32_t *qpCount)
+{
+    if (qpCount != nullptr) {
+        *qpCount = 0;
+    }
+    if (comm == nullptr || qpCount == nullptr) {
+        TILEXR_LOG(ERROR) << "TileXRUDMAGetQpCount invalid input";
+        return TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    auto* c = static_cast<TileXRComm *>(comm);
+    return c->GetUDMAQpCount(qpCount);
+}
+
 int TileXRGetUDMARegistryDev(TileXRCommPtr comm, GM_ADDR &registryPtr)
 {
     if (comm == nullptr) {

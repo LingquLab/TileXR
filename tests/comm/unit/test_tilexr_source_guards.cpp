@@ -192,6 +192,7 @@ void TestChipMapCoversObservedAscend950Variants()
     CheckContains(path, text, "{\"Ascend950PR\", ChipName::CHIP_950PR}");
     CheckContains(path, text, "{\"Ascend950PR_9589\", ChipName::CHIP_950PR}");
     CheckContains(path, text, "{\"Ascend950PR_9599\", ChipName::CHIP_950PR}");
+    CheckContains(path, text, "chipName.find(\"Ascend950DT_\") == 0");
     CheckContains(path, text, "chipName == ChipName::CHIP_950;");
     CheckContains(path, text, "std::string(value) == \"pid\"");
     CheckContains(path, text, "std::string(value) == \"sdid\"");
@@ -200,6 +201,10 @@ void TestChipMapCoversObservedAscend950Variants()
     const std::string commPath = "src/comm/tilexr_comm.cpp";
     const auto commText = ReadFile(commPath);
     CheckContains(commPath, commText, "TILEXR_IPC_PID_MODE");
+    CheckContains(commPath, commText, "TILEXR_ENABLE_IPC");
+    CheckContains(commPath, commText, "IsEnvEnabled(\"TILEXR_ENABLE_IPC\", true)");
+    CheckContains(commPath, commText, "allIpcEnabled");
+    CheckContains(commPath, commText, "TILEXR_ENABLE_IPC must match on every rank");
     CheckContains(commPath, commText, "UsePidOnlyIpcForPeer");
     CheckContains(commPath, commText, "rtSetIpcMemPid");
     CheckContains(commPath, commText, "rtSetIpcMemorySuperPodPid");

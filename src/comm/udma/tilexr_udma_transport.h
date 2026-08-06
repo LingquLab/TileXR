@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <map>
 #include <memory>
+#include <tuple>
 #include <vector>
 
 #include "comm_args.h"
@@ -18,6 +19,7 @@
 #include "tilexr_udma_types.h"
 #include "udma/tilexr_hccp_defs.h"
 #include "udma/tilexr_hccp_loader.h"
+#include "udma/tilexr_udma_config.h"
 #include "udma/tilexr_udma_layout.h"
 
 namespace TileXR {
@@ -27,8 +29,11 @@ class TileXRSockExchange;
 struct TileXRUDMATransportOptions {
     int rank = 0;
     int rankSize = 0;
+    int localRankSize = 0;
     int devId = 0;
+    bool nonPinRegistration = false;
     TileXRSockExchange* exchange = nullptr;
+    UDMAQpConfig qpConfig;
 };
 
 class TileXRUDMATransport {
@@ -39,30 +44,63 @@ public:
     TileXRUDMATransport& operator=(const TileXRUDMATransport&) = delete;
 
     int Init(const TileXRUDMATransportOptions& options);
-    int RegisterMemory(GM_ADDR localPtr, size_t bytes);
+    int PrepareMemory(GM_ADDR localPtr, size_t bytes);
+    GM_ADDR GetPreparedUDMAInfoDev() const;
+    int CommitPreparedMemory();
+    int AbortPreparedMemory();
+    int CleanupRetiredMemory();
+    int CleanupAllMemory();
     int UnregisterMemory(GM_ADDR localPtr);
     void Shutdown();
 
     bool IsAvailable() const;
     GM_ADDR GetUDMAInfoDev() const;
+    GM_ADDR GetBaseUDMAInfoDev() const;
+    GM_ADDR GetRegisteredMemoryPtr() const;
+    size_t GetRegisteredMemoryBytes() const;
+    bool HasMemoryCleanupPending() const;
+    uint32_t GetQpCount() const;
 
 private:
     struct PerEidState;
+    struct PerPeerQpState;
+    struct RegistrationState;
 
+    int AgreeInitStatus(int localStatus) const;
+    int AgreeEidCount() const;
     int OpenDevice();
     int BuildRoutes();
+    int BuildLegacyRoutes(const std::vector<DevEidInfo>& devEids);
+    int BuildExplicitRoutes(const std::vector<DevEidInfo>& devEids);
     int CreateContexts();
     int CreateQueues();
+    int CreateLegacyQueues();
+    int CreateExplicitQueues();
     int ImportQueues();
+    int ImportLegacyQueues();
+    int ImportExplicitQueues();
     int RefreshUDMAInfo();
-    int RegisterMemoryOnContexts(GM_ADDR localPtr, size_t bytes);
-    int ExchangeAndImportMemory();
+    int BuildQueueImages(std::vector<UDMAWQCtx>& sq, std::vector<UDMAWQCtx>& rq,
+        std::vector<UDMACQCtx>& scq, std::vector<UDMACQCtx>& rcq,
+        std::vector<UDMAMemInfo>& mem) const;
+    int BuildRegistrationUDMAInfo(RegistrationState& registration);
+    int RegisterMemoryOnContexts(RegistrationState& registration);
+    int ExchangeAndImportMemory(RegistrationState& registration);
+    int AgreeRegistrationStatus(int localStatus) const;
+    int CleanupLocalRegistrations(std::map<uint32_t, RegMemResultInfo>& byEid);
+    int CleanupRemoteImports(RegistrationState& registration);
+    int CleanupRegistration(RegistrationState& registration);
+    int CleanupRegistrationPtr(std::unique_ptr<RegistrationState>& registration);
+    int FreeDeviceInfo(GM_ADDR& infoDev) const;
     int AllocDeviceScalar(void** ptr, size_t bytes) const;
     void FreeDeviceScalar(void*& ptr) const;
-    void CleanupQueues();
-    void CleanupMemory();
+    int CleanupQueues();
     void CleanupContexts();
     uint32_t FallbackLocalEid() const;
+    const PerPeerQpState* GetPeerQpState(int peer, uint32_t qpIdx) const;
+    PerPeerQpState* GetPeerQpState(int peer, uint32_t qpIdx);
+    const PerPeerQpState* GetFallbackQpState(uint32_t qpIdx) const;
+    size_t RouteIndex(int peer, uint32_t qpIdx) const;
 
     TileXRHccpLoader loader_;
     TileXRUDMATransportOptions options_ {};
@@ -78,14 +116,19 @@ private:
     std::map<int, uint32_t> peerLocalEid_;
     std::map<int, uint32_t> peerRemoteEid_;
     std::map<uint32_t, PerEidState> states_;
+    std::vector<std::unique_ptr<PerPeerQpState>> peerQpStates_;
+    std::vector<uint32_t> localRouteByPeerQp_;
+    std::vector<uint32_t> remoteRouteByPeerQp_;
     std::map<uint32_t, HccpEid> localEidByEid_;
-    MemoryRegionMap registeredMem_;
-    std::vector<void*> remoteMemHandles_;
-    std::map<uint32_t, UDMAMemInfo> localMemInfoByEid_;
+    std::unique_ptr<RegistrationState> activeRegistration_;
+    std::unique_ptr<RegistrationState> preparedRegistration_;
+    std::vector<std::unique_ptr<RegistrationState>> retiredRegistrations_;
     GM_ADDR udmaInfoDev_ = nullptr;
+    GM_ADDR baseUDMAInfoDev_ = nullptr;
     GM_ADDR eidTableDev_ = nullptr;
     uint32_t udmaInfoSize_ = 0;
-    GM_ADDR registeredPtr_ = nullptr;
+    uint32_t qpCount_ = 1;
+    bool explicitConfig_ = false;
 };
 
 } // namespace TileXR

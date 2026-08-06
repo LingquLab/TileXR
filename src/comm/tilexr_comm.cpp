@@ -13,6 +13,7 @@
 #include "udma/tilexr_udma_context.h"
 
 #include <acl/acl_rt.h>
+#include <algorithm>
 #include <chrono>
 #include <cstdlib>
 #include <vector>
@@ -52,6 +53,27 @@ static map<string, int[TILEXR_MAX_RANK_SIZE]> g_devList;
 static std::mutex g_mtx;
 static std::mutex g_sdmaMtx;
 static bool g_sdmaUnavailable = false;
+
+namespace {
+
+bool IsEnvEnabled(const char* name, bool defaultValue)
+{
+    const char* value = std::getenv(name);
+    if (value == nullptr || value[0] == '\0') {
+        return defaultValue;
+    }
+    const std::string text(value);
+    if (text == "0" || text == "false" || text == "FALSE" || text == "off" || text == "OFF") {
+        return false;
+    }
+    if (text == "1" || text == "true" || text == "TRUE" || text == "on" || text == "ON") {
+        return true;
+    }
+    TILEXR_LOG(WARN) << name << " has invalid value '" << text << "', using default " << defaultValue;
+    return defaultValue;
+}
+
+} // namespace
 
 
 // 如果是互联的链路，返回false； 对910B2C那些不互联的链路，返回true
@@ -137,7 +159,11 @@ int TileXRComm::InitUDMA()
     TileXRUDMAContextOptions options {};
     options.rank = rank_;
     options.rankSize = rankSize_;
+    options.localRankSize = static_cast<int>(localRankSize_);
     options.devId = devId_;
+    options.nonPinRegistration =
+        physicalInfo_.chipName == ChipName::CHIP_950 ||
+        physicalInfo_.chipName == ChipName::CHIP_950PR;
     options.exchange = socketExchange_;
     options.threadMode = !uid_.empty();
     options.updateCommArgs = &TileXRComm::ApplyUDMACommArgsStateCallback;
@@ -350,6 +376,19 @@ int TileXRComm::UnregisterUDMAMemory(TileXRUDMAMemHandle handle)
     return udmaContext_->UnregisterMemory(handle);
 }
 
+int TileXRComm::GetUDMAQpCount(uint32_t *qpCount) const
+{
+    if (qpCount == nullptr) {
+        return TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    *qpCount = 0;
+    if (udmaContext_ == nullptr || !udmaContext_->IsAvailable()) {
+        return TILEXR_ERROR_NOT_SUPPORT;
+    }
+    *qpCount = udmaContext_->GetQpCount();
+    return *qpCount == 0 ? TILEXR_ERROR_NOT_SUPPORT : TILEXR_SUCCESS;
+}
+
 GM_ADDR TileXRComm::GetUDMARegistryPtr() const
 {
     return udmaContext_ == nullptr ? nullptr : udmaContext_->GetRegistryDev();
@@ -448,13 +487,31 @@ int TileXRComm::Init()
         return TILEXR_ERROR_INTERNAL;
     }
 
-    TILEXR_LOG(DEBUG) << "Prepare to InitCommMem localRankSize_ -> " << localRankSize_ << ", localRank_ -> " << localRank_;
-    if (InitCommMem() != TILEXR_SUCCESS) {
-        TILEXR_LOG(ERROR) << "InitCommMem failed!";
-        return TILEXR_ERROR_INTERNAL;
+    const int32_t localIpcEnabled = IsEnvEnabled("TILEXR_ENABLE_IPC", true) ? 1 : 0;
+    std::vector<int32_t> allIpcEnabled(rankSize_, -1);
+    ret = socketExchange_->AllGather(&localIpcEnabled, 1, allIpcEnabled.data());
+    if (ret != TILEXR_SUCCESS) {
+        TILEXR_LOG(ERROR) << "Failed to agree TILEXR_ENABLE_IPC across ranks: " << ret;
+        return ret;
     }
-    TILEXR_LOG(DEBUG) << "InitCommMem " << rank_ << "/" << rankSize_ << ", localRank_ : " << localRank_ <<
-            ", localRankSize_ : " << localRankSize_ << " success";
+    if (std::any_of(allIpcEnabled.begin(), allIpcEnabled.end(),
+            [localIpcEnabled](int32_t enabled) { return enabled != localIpcEnabled; })) {
+        TILEXR_LOG(ERROR) << "TILEXR_ENABLE_IPC must match on every rank";
+        return TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+
+    if (localIpcEnabled != 0) {
+        TILEXR_LOG(DEBUG) << "Prepare to InitCommMem localRankSize_ -> " << localRankSize_
+                          << ", localRank_ -> " << localRank_;
+        if (InitCommMem() != TILEXR_SUCCESS) {
+            TILEXR_LOG(ERROR) << "InitCommMem failed!";
+            return TILEXR_ERROR_INTERNAL;
+        }
+        TILEXR_LOG(DEBUG) << "InitCommMem " << rank_ << "/" << rankSize_ << ", localRank_ : " << localRank_
+                          << ", localRankSize_ : " << localRankSize_ << " success";
+    } else {
+        TILEXR_LOG(INFO) << "TileXR IPC memory disabled by TILEXR_ENABLE_IPC";
+    }
 
     // 新增：初始化 UDMA
     ret = InitUDMA();
