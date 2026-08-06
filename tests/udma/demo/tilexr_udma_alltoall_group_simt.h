@@ -22,6 +22,7 @@ constexpr uint32_t kAllToAllGroupSimtWqesPerTask = 2U;
 constexpr uint32_t kAllToAllGroupSimtPostCombined = 0U;
 constexpr uint32_t kAllToAllGroupSimtPostPayload = 1U;
 constexpr uint32_t kAllToAllGroupSimtPostSignal = 2U;
+constexpr uint32_t kAllToAllGroupSimtCreditScratchBytes = 512U;
 
 struct AllToAllGroupSimtBatch {
     uint32_t sendCoreCount;
@@ -42,6 +43,7 @@ struct AllToAllGroupSimtBatch {
     uint32_t worker[kAllToAllGroupSimtMaxTasks];
     uint32_t group[kAllToAllGroupSimtMaxTasks];
     uint32_t pass[kAllToAllGroupSimtMaxTasks];
+    uint64_t postBegin[kAllToAllGroupSimtMaxTasks];
     uint32_t reservedHead[kAllToAllGroupSimtMaxTasks];
     uint32_t queuePeer[kAllToAllGroupSimtMaxQueues];
     uint32_t queueQpIdx[kAllToAllGroupSimtMaxQueues];
@@ -54,8 +56,15 @@ struct AllToAllGroupSimtBatch {
     uint32_t queuePollCount[kAllToAllGroupSimtMaxQueues];
 };
 
-static_assert(sizeof(AllToAllGroupSimtBatch) <= 64U * 1024U,
-    "grouped AllToAll SIMT batch must fit in the relay UB buffer");
+constexpr uint32_t kAllToAllGroupSimtBatchStorageBytes =
+    (sizeof(AllToAllGroupSimtBatch) +
+        kAllToAllGroupSimtCreditScratchBytes - 1U) /
+        kAllToAllGroupSimtCreditScratchBytes *
+        kAllToAllGroupSimtCreditScratchBytes;
+
+static_assert(kAllToAllGroupSimtBatchStorageBytes +
+        kAllToAllGroupSimtCreditScratchBytes <= 64U * 1024U,
+    "grouped AllToAll SIMT batch and credit scratch must fit in relay UB");
 
 __aicore__ inline uint32_t AllToAllGroupSimtWqesForPhase(uint32_t phase)
 {
@@ -157,7 +166,8 @@ __simt_callee__ inline bool AllToAllGroupSimtCoResidentPeer(
 
 __simt_vf__ __aicore__ LAUNCH_BOUND(kAllToAllGroupSimtThreads)
 inline void AllToAllGroupSimtBuildVf(
-    __ubuf__ AllToAllGroupSimtBatch* batch, uint32_t workerCount,
+    __ubuf__ AllToAllGroupSimtBatch* batch, uint32_t taskBase,
+    uint32_t workerCount,
     const __gm__ CommArgs* args,
     __gm__ TileXRUDMARegistry* registry, __gm__ int32_t* input,
     uint64_t tokenBase, uint32_t invocationId, uint32_t group, uint32_t pass,
@@ -166,8 +176,9 @@ inline void AllToAllGroupSimtBuildVf(
     uint32_t routeStage, uint32_t multiChannel, uint32_t primaryRouteParts,
     uint32_t groupWidth, uint32_t npuCount)
 {
-    const uint32_t slot = static_cast<uint32_t>(threadIdx.x);
-    if (slot < workerCount) {
+    const uint32_t thread = static_cast<uint32_t>(threadIdx.x);
+    if (thread < workerCount) {
+        const uint32_t slot = taskBase + thread;
         batch->active[slot] = 0U;
         batch->configStatus[slot] = 0U;
         const uint32_t worker = batch->worker[slot];
@@ -340,11 +351,13 @@ __simt_callee__ inline void AllToAllGroupSimtWriteWqe(
 
 __simt_vf__ __aicore__ LAUNCH_BOUND(kAllToAllGroupSimtThreads)
 inline void AllToAllGroupSimtPostVf(
-    __ubuf__ AllToAllGroupSimtBatch* batch, uint32_t queueCount,
+    __ubuf__ AllToAllGroupSimtBatch* batch, uint32_t queueBegin,
+    uint32_t queueCount,
     __gm__ UDMAInfo* udmaInfo)
 {
     const uint32_t thread = static_cast<uint32_t>(threadIdx.x);
-    for (uint32_t queue = thread; queue < queueCount;
+    for (uint32_t queue = queueBegin + thread;
+         queue < queueBegin + queueCount;
          queue += kAllToAllGroupSimtThreads) {
         if (batch->active[queue] == 0U) {
             continue;
@@ -392,11 +405,13 @@ inline void AllToAllGroupSimtPostVf(
 
 __simt_vf__ __aicore__ LAUNCH_BOUND(kAllToAllGroupSimtThreads)
 inline void AllToAllGroupSimtPostPayloadVf(
-    __ubuf__ AllToAllGroupSimtBatch* batch, uint32_t queueCount,
+    __ubuf__ AllToAllGroupSimtBatch* batch, uint32_t queueBegin,
+    uint32_t queueCount,
     __gm__ UDMAInfo* udmaInfo)
 {
     const uint32_t thread = static_cast<uint32_t>(threadIdx.x);
-    for (uint32_t queue = thread; queue < queueCount;
+    for (uint32_t queue = queueBegin + thread;
+         queue < queueBegin + queueCount;
          queue += kAllToAllGroupSimtThreads) {
         if (batch->active[queue] == 0U) {
             continue;
@@ -433,11 +448,13 @@ inline void AllToAllGroupSimtPostPayloadVf(
 
 __simt_vf__ __aicore__ LAUNCH_BOUND(kAllToAllGroupSimtThreads)
 inline void AllToAllGroupSimtPostSignalVf(
-    __ubuf__ AllToAllGroupSimtBatch* batch, uint32_t queueCount,
+    __ubuf__ AllToAllGroupSimtBatch* batch, uint32_t queueBegin,
+    uint32_t queueCount,
     __gm__ UDMAInfo* udmaInfo)
 {
     const uint32_t thread = static_cast<uint32_t>(threadIdx.x);
-    for (uint32_t queue = thread; queue < queueCount;
+    for (uint32_t queue = queueBegin + thread;
+         queue < queueBegin + queueCount;
          queue += kAllToAllGroupSimtThreads) {
         if (batch->active[queue] == 0U) {
             continue;
@@ -535,37 +552,41 @@ inline void AllToAllGroupSimtQuietVf(
 }
 
 __aicore__ inline void AllToAllGroupSimtPost(
-    __ubuf__ AllToAllGroupSimtBatch* batch, uint32_t queueCount,
+    __ubuf__ AllToAllGroupSimtBatch* batch, uint32_t queueBegin,
+    uint32_t queueCount,
     __gm__ UDMAInfo* udmaInfo)
 {
     asc_vf_call<AllToAllGroupSimtPostVf>(
         dim3{kAllToAllGroupSimtThreads, 1U, 1U},
-        batch, queueCount, udmaInfo);
+        batch, queueBegin, queueCount, udmaInfo);
     AscendC::PipeBarrier<PIPE_ALL>();
 }
 
 __aicore__ inline void AllToAllGroupSimtPostPayload(
-    __ubuf__ AllToAllGroupSimtBatch* batch, uint32_t queueCount,
+    __ubuf__ AllToAllGroupSimtBatch* batch, uint32_t queueBegin,
+    uint32_t queueCount,
     __gm__ UDMAInfo* udmaInfo)
 {
     asc_vf_call<AllToAllGroupSimtPostPayloadVf>(
         dim3{kAllToAllGroupSimtThreads, 1U, 1U},
-        batch, queueCount, udmaInfo);
+        batch, queueBegin, queueCount, udmaInfo);
     AscendC::PipeBarrier<PIPE_ALL>();
 }
 
 __aicore__ inline void AllToAllGroupSimtPostSignal(
-    __ubuf__ AllToAllGroupSimtBatch* batch, uint32_t queueCount,
+    __ubuf__ AllToAllGroupSimtBatch* batch, uint32_t queueBegin,
+    uint32_t queueCount,
     __gm__ UDMAInfo* udmaInfo)
 {
     asc_vf_call<AllToAllGroupSimtPostSignalVf>(
         dim3{kAllToAllGroupSimtThreads, 1U, 1U},
-        batch, queueCount, udmaInfo);
+        batch, queueBegin, queueCount, udmaInfo);
     AscendC::PipeBarrier<PIPE_ALL>();
 }
 
 __aicore__ inline void AllToAllGroupSimtBuildPrepared(
-    __ubuf__ AllToAllGroupSimtBatch* batch, uint32_t workerCount,
+    __ubuf__ AllToAllGroupSimtBatch* batch, uint32_t taskBase,
+    uint32_t workerCount,
     const __gm__ CommArgs* args,
     __gm__ TileXRUDMARegistry* registry, __gm__ int32_t* input,
     uint64_t tokenBase, uint32_t invocationId, uint32_t group, uint32_t pass,
@@ -577,7 +598,7 @@ __aicore__ inline void AllToAllGroupSimtBuildPrepared(
     AscendC::PipeBarrier<PIPE_ALL>();
     asc_vf_call<AllToAllGroupSimtBuildVf>(
         dim3{kAllToAllGroupSimtThreads, 1U, 1U}, batch,
-        workerCount, args, registry, input, tokenBase,
+        taskBase, workerCount, args, registry, input, tokenBase,
         invocationId, group, pass, elementsPerPeer, chunkElementOffset,
         currentElements, payloadOffset, signalOffset, routeStage,
         multiChannel, primaryRouteParts, groupWidth, npuCount);

@@ -799,6 +799,12 @@ void TestKernelStructure()
     CHECK_CONTAINS(simtSend, "AllToAllGroupLoadCreditMte");
     CHECK_CONTAINS(simtSend, "madeProgress");
     CHECK_CONTAINS(simtSend, "noProgressBegin");
+    CHECK_CONTAINS(kernel, "AllToAllGroupRunSimtReadyPost");
+    CHECK_CONTAINS(kernel, "AllToAllGroupPostSimtRange");
+    CHECK_CONTAINS(kernel, "quietBatch >= TileXR::Demo::kAllToAllGroupSimtMaxTasks");
+    CHECK_CONTAINS(kernel, "batch, rangeBegin, rangeCount");
+    CHECK_CONTAINS(kernel, "groupCount, 1U, false");
+    CHECK_CONTAINS(kernel, "kAllToAllGroupSimtBatchStorageBytes");
     CHECK_NOT_CONTAINS(simtSend, "AllToAllGroupWaitCreditMte(");
     CHECK_CONTAINS(kernel, "AllToAllGroupSimtBuildPrepared");
     CHECK_CONTAINS(kernel, "lane % sendWorkers != blockIdx");
@@ -910,6 +916,9 @@ void TestHostStructure()
     CHECK_CONTAINS(simt, "AllToAllGroupSimtBuildVf");
     CHECK_CONTAINS(simt, "const uint32_t worker = batch->worker[slot]");
     CHECK_CONTAINS(simt, "AllToAllGroupSimtBuildPrepared");
+    CHECK_CONTAINS(simt, "uint32_t taskBase");
+    CHECK_CONTAINS(simt, "uint32_t queueBegin");
+    CHECK_CONTAINS(simt, "kAllToAllGroupSimtCreditScratchBytes");
     CHECK_CONTAINS(simt,
         "tokenBase + static_cast<uint64_t>(worker) * sizeof(uint64_t)");
     CHECK_CONTAINS(simt, "AllToAllGroupSimtCoResidentPeer");

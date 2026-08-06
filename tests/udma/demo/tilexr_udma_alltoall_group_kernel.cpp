@@ -1014,28 +1014,35 @@ __aicore__ inline bool AllToAllGroupFinishQuiet(
         trace, traceIteration, groupCount, passCount);
 }
 
-__aicore__ inline bool AllToAllGroupFlushSimt(
+__aicore__ inline void AllToAllGroupPostSimtRange(
     const __gm__ TileXR::CommArgs* args,
     __ubuf__ TileXR::Demo::AllToAllGroupSimtBatch* batch,
-    uint32_t& taskCount, uint32_t& queueCount,
-    __gm__ int32_t* debug, uint32_t blockIdx,
-    __gm__ TileXR::Demo::AllToAllGroupQueueDiagRecord* queueDiag,
-    uint32_t invocationId,
-    __gm__ uint8_t* trace, uint32_t traceIteration,
+    uint32_t taskBegin, uint32_t taskCount,
+    uint32_t queueBegin, uint32_t queueCount, bool payloadOnly,
+    __gm__ int32_t* debug, __gm__ uint8_t* trace, uint32_t traceIteration,
     uint32_t groupCount, uint32_t passCount)
 {
     if (taskCount == 0U) {
-        queueCount = 0U;
-        return true;
+        return;
     }
     auto udmaInfo = TileXR::GetUDMAInfo(args);
     const uint64_t postBegin = AllToAllGroupTraceCycle(trace);
+    for (uint32_t task = taskBegin; task < taskBegin + taskCount; ++task) {
+        batch->postBegin[task] = postBegin;
+    }
     TileXR::UDMACleanCacheLines(
         reinterpret_cast<__gm__ uint8_t*>(debug) +
             TILEXR_ALLTOALL_GROUP_ERROR_BYTES,
-        static_cast<uint64_t>(taskCount) * sizeof(uint64_t));
-    TileXR::Demo::AllToAllGroupSimtPost(batch, queueCount, udmaInfo);
-    for (uint32_t task = 0U; task < taskCount; ++task) {
+        static_cast<uint64_t>(TileXR::Demo::kAllToAllGroupSimtMaxTasks) *
+            sizeof(uint64_t));
+    if (payloadOnly) {
+        TileXR::Demo::AllToAllGroupSimtPostPayload(
+            batch, queueBegin, queueCount, udmaInfo);
+    } else {
+        TileXR::Demo::AllToAllGroupSimtPost(
+            batch, queueBegin, queueCount, udmaInfo);
+    }
+    for (uint32_t task = taskBegin; task < taskBegin + taskCount; ++task) {
         if (batch->active[task] == 0U) {
             continue;
         }
@@ -1046,9 +1053,11 @@ __aicore__ inline bool AllToAllGroupFlushSimt(
             wq->bufAddr + static_cast<uint64_t>(wqeSize) *
                 (batch->reservedHead[task] % wq->depth));
         TileXR::UDMACleanCacheLines(
-            wqeAddr, wqeSize * TileXR::Demo::kAllToAllGroupSimtWqesPerTask);
+            wqeAddr, wqeSize * (payloadOnly ? 1U :
+                TileXR::Demo::kAllToAllGroupSimtWqesPerTask));
     }
-    for (uint32_t queue = 0U; queue < queueCount; ++queue) {
+    for (uint32_t queue = queueBegin;
+         queue < queueBegin + queueCount; ++queue) {
         if (batch->active[queue] == 0U) {
             continue;
         }
@@ -1061,14 +1070,38 @@ __aicore__ inline bool AllToAllGroupFlushSimt(
         st_dev(batch->queueExpectedCount[queue],
             reinterpret_cast<__gm__ uint32_t*>(wq->wqeCntAddr), 0);
     }
-    const uint64_t postEnd = AllToAllGroupTraceCycle(trace);
-    for (uint32_t task = 0U; task < taskCount; ++task) {
-        if (batch->active[task] != 0U) {
-            AllToAllGroupTraceRecordSimtTask(
-                trace, traceIteration, batch, task,
-                TileXR::Demo::kAllToAllGroupTraceSendPutSignal,
-                groupCount, passCount, postBegin, postEnd);
+    if (!payloadOnly) {
+        const uint64_t postEnd = AllToAllGroupTraceCycle(trace);
+        for (uint32_t task = taskBegin; task < taskBegin + taskCount; ++task) {
+            if (batch->active[task] != 0U) {
+                AllToAllGroupTraceRecordSimtTask(
+                    trace, traceIteration, batch, task,
+                    TileXR::Demo::kAllToAllGroupTraceSendPutSignal,
+                    groupCount, passCount, postBegin, postEnd);
+            }
         }
+    }
+}
+
+__aicore__ inline bool AllToAllGroupFlushSimt(
+    const __gm__ TileXR::CommArgs* args,
+    __ubuf__ TileXR::Demo::AllToAllGroupSimtBatch* batch,
+    uint32_t& taskCount, uint32_t& queueCount,
+    __gm__ int32_t* debug, uint32_t blockIdx,
+    __gm__ TileXR::Demo::AllToAllGroupQueueDiagRecord* queueDiag,
+    uint32_t invocationId,
+    __gm__ uint8_t* trace, uint32_t traceIteration,
+    uint32_t groupCount, uint32_t passCount, bool postBeforeQuiet = true)
+{
+    if (taskCount == 0U) {
+        queueCount = 0U;
+        return true;
+    }
+    auto udmaInfo = TileXR::GetUDMAInfo(args);
+    if (postBeforeQuiet) {
+        AllToAllGroupPostSimtRange(
+            args, batch, 0U, taskCount, 0U, queueCount, false,
+            debug, trace, traceIteration, groupCount, passCount);
     }
     const uint64_t quietBegin = AllToAllGroupTraceCycle(trace);
     TileXR::Demo::AllToAllGroupSimtQuiet(batch, queueCount, udmaInfo);
@@ -1166,10 +1199,10 @@ __aicore__ inline bool AllToAllGroupFlushSplitSimt(
     }
     if (postPhase == TileXR::Demo::kAllToAllGroupSimtPostPayload) {
         TileXR::Demo::AllToAllGroupSimtPostPayload(
-            batch, queueCount, udmaInfo);
+            batch, 0U, queueCount, udmaInfo);
     } else {
         TileXR::Demo::AllToAllGroupSimtPostSignal(
-            batch, queueCount, udmaInfo);
+            batch, 0U, queueCount, udmaInfo);
     }
     for (uint32_t task = 0U; task < taskCount; ++task) {
         if (batch->active[task] == 0U) {
@@ -1304,7 +1337,7 @@ __aicore__ inline bool AllToAllGroupFlushPreparedSimtSend(
 {
     batch->sendCoreCount = sendCores;
     TileXR::Demo::AllToAllGroupSimtBuildPrepared(
-        batch, workerCount, args, registry, input,
+        batch, 0U, workerCount, args, registry, input,
         reinterpret_cast<uint64_t>(reinterpret_cast<__gm__ uint8_t*>(debug) +
             TILEXR_ALLTOALL_GROUP_ERROR_BYTES),
         invocationId, group, pass, elementsPerPeer, chunkElementOffset,
@@ -1343,6 +1376,192 @@ __aicore__ inline bool AllToAllGroupFlushPreparedSimtSend(
         trace, traceIteration, groupCount, passCount);
 }
 
+__aicore__ inline bool AllToAllGroupRunSimtReadyPost(
+    const __gm__ TileXR::CommArgs* args, __gm__ int32_t* input,
+    __gm__ TileXR::TileXRUDMARegistry* registry, __gm__ int32_t* debug,
+    __ubuf__ TileXR::Demo::AllToAllGroupSimtBatch* batch,
+    uint32_t blockIdx, uint32_t invocationId,
+    __gm__ TileXR::Demo::AllToAllGroupQueueDiagRecord* queueDiag,
+    int32_t elementsPerPeer, uint32_t groupCount,
+    const uint64_t* payloadOffsets, const uint64_t* signalOffsets,
+    const uint64_t* creditOffsets,
+    uint32_t routeStage, uint32_t multiChannel, uint32_t primaryRouteParts,
+    uint32_t groupWidth, uint32_t npuCount,
+    uint32_t sendCore, uint32_t sendCores,
+    AscendC::LocalTensor<uint8_t> relayLocal,
+    __gm__ uint8_t* trace, uint32_t traceIteration)
+{
+    const uint32_t slot = invocationId & 1U;
+    const int32_t currentElements = elementsPerPeer;
+    for (uint32_t group = 0U; group < groupCount; ++group) {
+        uint32_t postedMask = 0U;
+        uint32_t ownedLaneCount = 0U;
+        uint32_t postedLaneCount = 0U;
+        uint32_t taskCount = 0U;
+        uint32_t queueCount = 0U;
+        uint64_t creditWaitBegin = 0ULL;
+        uint64_t aggregatePostBegin = 0ULL;
+        int32_t lastPendingPeer = -1;
+        uint64_t lastExpectedCredit = 0ULL;
+        uint64_t lastObservedCredit = 0ULL;
+        for (uint32_t lane = 0U; lane < groupWidth; ++lane) {
+            if (lane % sendCores != sendCore) {
+                continue;
+            }
+            ++ownedLaneCount;
+            if (AllToAllGroupDevicePeer(
+                    args->rank, args->rankSize, group, lane, groupWidth) < 0) {
+                postedMask |= 1U << lane;
+                ++postedLaneCount;
+            }
+        }
+        uint64_t noProgressBegin =
+            static_cast<uint64_t>(AscendC::GetSystemCycle());
+        while (postedLaneCount < ownedLaneCount) {
+            uint32_t readyLanes[TILEXR_ALLTOALL_GROUP_DEFAULT_WIDTH];
+            uint32_t readyLaneCount = 0U;
+            for (uint32_t lane = 0U; lane < groupWidth; ++lane) {
+                if (lane % sendCores != sendCore ||
+                    (postedMask & (1U << lane)) != 0U) {
+                    continue;
+                }
+                const int32_t peer = AllToAllGroupDevicePeer(
+                    args->rank, args->rankSize, group, lane, groupWidth);
+                if (group != 0U) {
+                    if (creditWaitBegin == 0ULL) {
+                        creditWaitBegin = AllToAllGroupTraceCycle(trace);
+                    }
+                    const uint64_t expectedCredit =
+                        AllToAllGroupDeviceToken(invocationId, group, 0U);
+                    auto credit = reinterpret_cast<__gm__ uint64_t*>(
+                        args->creditMems[args->rank] + creditOffsets[slot] +
+                        static_cast<uint64_t>(peer) *
+                            TILEXR_ALLTOALL_GROUP_CREDIT_STRIDE);
+                    const uint64_t observedCredit =
+                        AllToAllGroupLoadCreditMte(credit, relayLocal);
+                    if (observedCredit < expectedCredit) {
+                        lastPendingPeer = peer;
+                        lastExpectedCredit = expectedCredit;
+                        lastObservedCredit = observedCredit;
+                        continue;
+                    }
+                }
+                readyLanes[readyLaneCount++] = lane;
+            }
+            if (readyLaneCount == 0U) {
+                if (static_cast<uint64_t>(AscendC::GetSystemCycle()) -
+                        noProgressBegin >=
+                    TILEXR_ALLTOALL_GROUP_WAIT_TIMEOUT_CYCLES) {
+                    AllToAllGroupRecordError(
+                        debug, blockIdx, TILEXR_ALLTOALL_GROUP_STAGE_CREDIT_WAIT,
+                        group, 0U, lastPendingPeer, 0U, 0U,
+                        lastExpectedCredit, lastObservedCredit);
+                    return false;
+                }
+                continue;
+            }
+
+            for (uint32_t ready = 0U; ready < readyLaneCount; ++ready) {
+                const uint32_t lane = readyLanes[ready];
+                const int32_t peer = AllToAllGroupDevicePeer(
+                    args->rank, args->rankSize, group, lane, groupWidth);
+                if (AllToAllGroupCoResidentPeerDevice(
+                        args->rank, peer, args->localRankSize, npuCount) &&
+                    AllToAllGroupPeerInRouteStageDevice(
+                        args->rank, peer, routeStage)) {
+                    const uint64_t ipcSendBegin = AllToAllGroupTraceCycle(trace);
+                    AllToAllGroupSendIpcLoopback(
+                        args, input, peer, slot,
+                        static_cast<uint64_t>(elementsPerPeer) * sizeof(int32_t),
+                        0, currentElements,
+                        AllToAllGroupDeviceToken(invocationId, group, 0U),
+                        relayLocal);
+                    const uint32_t traceCore = lane < sendCores ?
+                        lane : 32U + lane;
+                    AllToAllGroupTraceRecordTask(
+                        trace, traceIteration, traceCore, group, 0U,
+                        TileXR::Demo::kAllToAllGroupTraceSendPutSignal,
+                        groupCount, 1U, peer,
+                        TileXR::Demo::kAllToAllGroupTraceNoQp,
+                        ipcSendBegin, AllToAllGroupTraceCycle(trace),
+                        lane, 0U, static_cast<uint32_t>(currentElements) *
+                            sizeof(int32_t), 0U);
+                }
+            }
+
+            const uint32_t rangeBegin = taskCount;
+            for (uint32_t route = 0U; route < 2U; ++route) {
+                for (uint32_t ready = 0U; ready < readyLaneCount; ++ready) {
+                    batch->worker[taskCount++] = readyLanes[ready] +
+                        route * TILEXR_ALLTOALL_GROUP_SEND_CORES;
+                }
+            }
+            const uint32_t rangeCount = taskCount - rangeBegin;
+            batch->sendCoreCount = sendCores;
+            TileXR::Demo::AllToAllGroupSimtBuildPrepared(
+                batch, rangeBegin, rangeCount, args, registry, input,
+                reinterpret_cast<uint64_t>(
+                    reinterpret_cast<__gm__ uint8_t*>(debug) +
+                    TILEXR_ALLTOALL_GROUP_ERROR_BYTES),
+                invocationId, group, 0U, elementsPerPeer, 0,
+                currentElements, payloadOffsets[slot], signalOffsets[slot],
+                routeStage, multiChannel, primaryRouteParts,
+                groupWidth, npuCount);
+            for (uint32_t task = rangeBegin; task < taskCount; ++task) {
+                if (batch->configStatus[task] != 0U) {
+                    AllToAllGroupRecordError(
+                        debug, blockIdx, TILEXR_ALLTOALL_GROUP_STAGE_CONFIG,
+                        group, 0U, static_cast<int32_t>(batch->peer[task]),
+                        batch->qpIdx[task], batch->configStatus[task],
+                        batch->configRegionBytes[task],
+                        batch->configOffset[task]);
+                    return false;
+                }
+            }
+            if (aggregatePostBegin == 0ULL) {
+                aggregatePostBegin = AllToAllGroupTraceCycle(trace);
+            }
+            AllToAllGroupPostSimtRange(
+                args, batch, rangeBegin, rangeCount,
+                queueCount, rangeCount, registry->regionCount > 1U,
+                debug, trace, traceIteration, groupCount, 1U);
+            queueCount += rangeCount;
+            for (uint32_t ready = 0U; ready < readyLaneCount; ++ready) {
+                postedMask |= 1U << readyLanes[ready];
+                ++postedLaneCount;
+            }
+            noProgressBegin = static_cast<uint64_t>(AscendC::GetSystemCycle());
+        }
+
+        if (taskCount != 0U) {
+            if (registry->regionCount > 1U) {
+                if (!AllToAllGroupFlushSplitSimt(
+                        args, batch, taskCount, queueCount, debug, blockIdx,
+                        queueDiag, invocationId, trace, traceIteration,
+                        groupCount, 1U,
+                        TileXR::Demo::kAllToAllGroupSimtPostSignal,
+                        true, true, aggregatePostBegin)) {
+                    return false;
+                }
+            } else if (!AllToAllGroupFlushSimt(
+                    args, batch, taskCount, queueCount, debug, blockIdx,
+                    queueDiag, invocationId, trace, traceIteration,
+                    groupCount, 1U, false)) {
+                return false;
+            }
+        }
+        if (group != 0U) {
+            AllToAllGroupTraceRecordTask(
+                trace, traceIteration, blockIdx, group, 0U,
+                TileXR::Demo::kAllToAllGroupTraceCreditWait,
+                groupCount, 1U, -1,
+                TileXR::Demo::kAllToAllGroupTraceNoQp,
+                creditWaitBegin, AllToAllGroupTraceCycle(trace));
+        }
+    }
+    return true;
+}
+
 template <bool IngressCredit>
 __aicore__ inline bool AllToAllGroupRunSimtSend(
     const __gm__ TileXR::CommArgs* args, __gm__ int32_t* input,
@@ -1360,6 +1579,18 @@ __aicore__ inline bool AllToAllGroupRunSimtSend(
     AscendC::LocalTensor<uint8_t> relayLocal,
     __gm__ uint8_t* trace, uint32_t traceIteration)
 {
+    if constexpr (IngressCredit) {
+        if (passCount == 1U &&
+            quietBatch >= TileXR::Demo::kAllToAllGroupSimtMaxTasks &&
+            args->localRankSize <= static_cast<int32_t>(npuCount)) {
+            return AllToAllGroupRunSimtReadyPost(
+                args, input, registry, debug, batch, blockIdx, invocationId,
+                queueDiag, elementsPerPeer, groupCount, payloadOffsets,
+                signalOffsets, creditOffsets, routeStage, multiChannel,
+                primaryRouteParts, groupWidth, npuCount, sendCore, sendCores,
+                relayLocal, trace, traceIteration);
+        }
+    }
     const uint32_t slot = invocationId & 1U;
     const uint32_t batchLimit =
         quietBatch < TileXR::Demo::kAllToAllGroupSimtMaxTasks ?
@@ -2063,13 +2294,15 @@ __aicore__ inline void AllToAllGroupKernelImpl(
         auto registry = TileXR::GetUDMARegistry(args);
         auto simtBatch = reinterpret_cast<__ubuf__
             TileXR::Demo::AllToAllGroupSimtBatch*>(relayLocal.GetPhyAddr());
+        AscendC::LocalTensor<uint8_t> simtScratch = relayLocal[
+            TileXR::Demo::kAllToAllGroupSimtBatchStorageBytes];
         if (!AllToAllGroupRunSimtSend<IngressCredit>(
                 args, input, registry, debug, simtBatch, blockIdx,
                 invocationId, queueDiag, elementsPerPeer, chunkElements,
                 passCount, groupCount, payloadOffsets, signalOffsets,
                 creditOffsets, routeStage, multiChannel, primaryRouteParts,
                 groupWidth, quietBatch, npuCount, blockIdx, sendWorkers,
-                relayLocal,
+                simtScratch,
                 groupTrace, traceIteration)) {
             AllToAllGroupTraceRecordKernel(
                 groupTrace, traceIteration, blockIdx, kernelBegin,
