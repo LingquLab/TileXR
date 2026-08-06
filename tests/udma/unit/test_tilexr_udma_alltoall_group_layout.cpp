@@ -809,10 +809,15 @@ void TestKernelStructure()
         std::string() : kernel.substr(readyPostBegin,
             readyPostEnd == std::string::npos ? std::string::npos :
                 readyPostEnd - readyPostBegin);
-    CHECK_CONTAINS(readyPost, "AllToAllGroupFlushPreparedSimtSend(");
-    CHECK_CONTAINS(readyPost, "workerCount, sendCores, blockIdx");
-    CHECK_NOT_CONTAINS(readyPost, "aggregatePostBegin");
-    CHECK_NOT_CONTAINS(readyPost, "AllToAllGroupPostSimtRange(");
+    CHECK_CONTAINS(readyPost, "const uint32_t rangeBegin = taskCount;");
+    CHECK_CONTAINS(readyPost, "AllToAllGroupSimtBuildPrepared(");
+    CHECK_CONTAINS(readyPost, "AllToAllGroupPostSimtRange(");
+    CHECK_CONTAINS(readyPost, "queueCount, rangeCount, false");
+    CHECK_CONTAINS(readyPost, "taskCount != 0U && !AllToAllGroupFlushSimt(");
+    CHECK_CONTAINS(readyPost, "groupCount, 1U, false");
+    CHECK_NOT_CONTAINS(readyPost, "AllToAllGroupFlushPreparedSimtSend(");
+    CHECK_EQ(CountOccurrences(readyPost, "AllToAllGroupPostSimtRange("), 1U);
+    CHECK_EQ(CountOccurrences(readyPost, "AllToAllGroupFlushSimt("), 1U);
     CHECK_CONTAINS(kernel, "kAllToAllGroupSimtBatchStorageBytes");
     CHECK_NOT_CONTAINS(simtSend, "AllToAllGroupWaitCreditMte(");
     CHECK_CONTAINS(kernel, "AllToAllGroupSimtBuildPrepared");
