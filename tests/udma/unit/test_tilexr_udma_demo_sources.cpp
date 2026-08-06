@@ -138,9 +138,6 @@ int main()
     CheckContains(kernelPath, kernel, "return allQpsSucceeded;");
     CheckContains(kernelPath, kernel, "TILEXR_UDMA_SQE_FLAG_ORDERED_COMPLETION");
     CheckContains(kernelPath, kernel, "qpIdx * elementsPerQp");
-    CheckContains(kernelPath, kernel, "TileXRUDMAQueueStateIndependent");
-    CheckContains(kernelPath, kernel, "lhsSq->wqeCntAddr != rhsSq->wqeCntAddr");
-    CheckContains(kernelPath, kernel, "lhsCq->dbAddr != rhsCq->dbAddr");
     CheckContains(demoPath, demo, "ExpectedDataValue(qpIdx, srcRank)");
     CheckContains(demoPath, demo, "per-QP completion status");
     CheckContains(demoPath, demo, "ValidateKernelDebug");

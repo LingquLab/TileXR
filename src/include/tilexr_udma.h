@@ -79,7 +79,10 @@ __aicore__ inline bool UDMARankValid(const __gm__ CommArgs* args, int peer)
 __aicore__ inline bool UDMAQueueOperationValid(
     const __gm__ CommArgs* args, int peer, uint32_t qpIdx)
 {
-    return UDMARankValid(args, peer) && UDMAQpValid(args, qpIdx);
+    if (!UDMARankValid(args, peer)) {
+        return false;
+    }
+    return UDMAQpValid(args, qpIdx);
 }
 
 __aicore__ inline __gm__ UDMAInfo* GetUDMAInfo(const __gm__ CommArgs* args)
@@ -325,9 +328,11 @@ __aicore__ inline void UDMAFillWrappedNotifyData(
         UDMAGetSqLogicalAddr(qpCtxEntry, curHead, baseOffset + 28U)), 0);
 }
 
-__aicore__ inline void UDMAFillSqeCtx(
+// BiSheng must not outline the posting chain: late device-call arguments can be corrupted.
+template <UDMAOpcode opcode>
+__attribute__((always_inline)) inline __aicore__ void UDMAFillSqeCtx(
     __gm__ UDMASqeCtx* sqeCtx, __gm__ uint8_t* remoteAddr, __gm__ UDMAMemInfo* remoteMemInfo,
-    uint32_t curHead, UDMAOpcode opcode, uint32_t sqeFlag)
+    uint32_t curHead, uint32_t sqeFlag)
 {
     sqeCtx->sqeBbIdx = curHead % TILEXR_UDMA_SQ_BB_COUNT;
     sqeCtx->opcode = static_cast<uint32_t>(opcode);
@@ -386,20 +391,37 @@ __aicore__ inline void UDMACleanWrappedWqe(
     }
 }
 
-__aicore__ inline uint32_t UDMAValidatePostSend(
-    __gm__ UDMAInfo* udmaInfo, __gm__ uint8_t* remoteAddr, __gm__ uint8_t* localAddr,
-    uint32_t qpIdx, uint64_t messageLen, UDMAOpcode opcode, uint32_t sqeFlag,
-    __gm__ UDMAWQCtx* qpCtxEntry)
+template <UDMAOpcode opcode>
+__attribute__((always_inline)) inline __aicore__ uint32_t UDMAValidatePostSend(
+    __gm__ UDMAInfo* udmaInfo, __gm__ uint8_t* remoteAddr,
+    __gm__ uint8_t* localAddr, uint32_t qpIdx, uint64_t messageLen,
+    uint32_t sqeFlag, __gm__ UDMAWQCtx* qpCtxEntry)
 {
-    if (udmaInfo == nullptr || qpIdx >= udmaInfo->qpNum || udmaInfo->sqPtr == 0U ||
-        udmaInfo->memPtr == 0U || remoteAddr == nullptr ||
-        (localAddr == nullptr && messageLen != 0U) || messageLen > 0xFFFFFFFFULL ||
-        (sqeFlag & TILEXR_UDMA_SQE_FLAG_COMPLETION) == 0U ||
-        (opcode != UDMAOpcode::WRITE && opcode != UDMAOpcode::READ &&
-         opcode != UDMAOpcode::WRITE_WITH_NOTIFY) ||
-        qpCtxEntry == nullptr || qpCtxEntry->bufAddr == 0U || qpCtxEntry->headAddr == 0U ||
-        qpCtxEntry->tailAddr == 0U || qpCtxEntry->wqeCntAddr == 0U || qpCtxEntry->dbAddr == 0U ||
-        qpCtxEntry->depth != TILEXR_UDMA_SQ_BB_COUNT || qpCtxEntry->baseBkShift >= 32U) {
+    if (udmaInfo == nullptr || qpIdx >= udmaInfo->qpNum ||
+        udmaInfo->sqPtr == 0U || udmaInfo->memPtr == 0U) {
+        return TILEXR_UDMA_STATUS_INVALID;
+    }
+    if (remoteAddr == nullptr) {
+        return TILEXR_UDMA_STATUS_INVALID;
+    }
+    if (localAddr == nullptr && messageLen != 0U) {
+        return TILEXR_UDMA_STATUS_INVALID;
+    }
+    if (messageLen > 0xFFFFFFFFULL) {
+        return TILEXR_UDMA_STATUS_INVALID;
+    }
+    if ((sqeFlag & TILEXR_UDMA_SQE_FLAG_COMPLETION) == 0U) {
+        return TILEXR_UDMA_STATUS_INVALID;
+    }
+    if (opcode != UDMAOpcode::WRITE && opcode != UDMAOpcode::READ &&
+        opcode != UDMAOpcode::WRITE_WITH_NOTIFY) {
+        return TILEXR_UDMA_STATUS_INVALID;
+    }
+    if (qpCtxEntry == nullptr || qpCtxEntry->bufAddr == 0U ||
+        qpCtxEntry->headAddr == 0U || qpCtxEntry->tailAddr == 0U ||
+        qpCtxEntry->wqeCntAddr == 0U || qpCtxEntry->dbAddr == 0U ||
+        qpCtxEntry->depth != TILEXR_UDMA_SQ_BB_COUNT ||
+        qpCtxEntry->baseBkShift >= 32U) {
         return TILEXR_UDMA_STATUS_INVALID;
     }
 
@@ -425,18 +447,24 @@ __aicore__ inline uint32_t UDMAValidatePostSend(
     return TILEXR_UDMA_STATUS_SUCCESS;
 }
 
-__aicore__ inline uint32_t UDMAPostSend(
-    __gm__ UDMAInfo* udmaInfo, __gm__ uint8_t* remoteAddr, __gm__ uint8_t* localAddr,
-    uint32_t pe, uint32_t qpIdx, uint64_t messageLen, UDMAOpcode opcode,
-    const UDMASignalParams* signalParams, uint32_t sqeFlag, bool ringDoorbell)
+template <UDMAOpcode opcode, bool ringDoorbell>
+__attribute__((always_inline)) inline __aicore__ uint32_t UDMAPostSend(
+    __gm__ UDMAInfo* udmaInfo, __gm__ uint8_t* remoteAddr,
+    __gm__ uint8_t* localAddr, uint32_t pe, uint32_t qpIdx, uint64_t messageLen,
+    const UDMASignalParams* signalParams, uint32_t sqeFlag)
 {
     if (udmaInfo == nullptr || udmaInfo->qpNum == 0U ||
-        udmaInfo->qpNum > TILEXR_UDMA_DEVICE_MAX_QP_COUNT || qpIdx >= udmaInfo->qpNum || udmaInfo->sqPtr == 0U) {
+        udmaInfo->qpNum > TILEXR_UDMA_DEVICE_MAX_QP_COUNT || qpIdx >= udmaInfo->qpNum ||
+        udmaInfo->sqPtr == 0U) {
+        return TILEXR_UDMA_STATUS_INVALID;
+    }
+    if (opcode == UDMAOpcode::WRITE_WITH_NOTIFY &&
+        (signalParams == nullptr || signalParams->sigAddr == nullptr)) {
         return TILEXR_UDMA_STATUS_INVALID;
     }
     __gm__ UDMAWQCtx* qpCtxEntry = UDMAGetWQCtx(udmaInfo, pe, qpIdx);
-    uint32_t validation = UDMAValidatePostSend(
-        udmaInfo, remoteAddr, localAddr, qpIdx, messageLen, opcode, sqeFlag, qpCtxEntry);
+    uint32_t validation = UDMAValidatePostSend<opcode>(
+        udmaInfo, remoteAddr, localAddr, qpIdx, messageLen, sqeFlag, qpCtxEntry);
     if (validation == TILEXR_UDMA_STATUS_SQ_FULL && ringDoorbell) {
         const uint32_t submittedHead =
             ld_dev(reinterpret_cast<__gm__ uint32_t*>(qpCtxEntry->headAddr), 0);
@@ -447,8 +475,8 @@ __aicore__ inline uint32_t UDMAPostSend(
         if (reclaimStatus != TILEXR_UDMA_STATUS_SUCCESS) {
             return reclaimStatus;
         }
-        validation = UDMAValidatePostSend(
-            udmaInfo, remoteAddr, localAddr, qpIdx, messageLen, opcode, sqeFlag, qpCtxEntry);
+        validation = UDMAValidatePostSend<opcode>(
+            udmaInfo, remoteAddr, localAddr, qpIdx, messageLen, sqeFlag, qpCtxEntry);
     }
     if (validation != TILEXR_UDMA_STATUS_SUCCESS) {
         return validation;
@@ -464,7 +492,7 @@ __aicore__ inline uint32_t UDMAPostSend(
     __gm__ uint8_t* wqeAddr =
         reinterpret_cast<__gm__ uint8_t*>(qpCtxEntry->bufAddr + wqeSize * (curHead % TILEXR_UDMA_SQ_BB_COUNT));
     __gm__ UDMASqeCtx* sqeCtx = reinterpret_cast<__gm__ UDMASqeCtx*>(wqeAddr);
-    UDMAFillSqeCtx(sqeCtx, remoteAddr, remoteMemInfo, curHead, opcode, sqeFlag);
+    UDMAFillSqeCtx<opcode>(sqeCtx, remoteAddr, remoteMemInfo, curHead, sqeFlag);
 
     if (opcode == UDMAOpcode::WRITE_WITH_NOTIFY) {
         UDMAFillWrappedNotifyData(qpCtxEntry, curHead, remoteMemInfo->tid,
@@ -488,17 +516,23 @@ __aicore__ inline uint32_t UDMAPostSend(
     return TILEXR_UDMA_STATUS_SUCCESS;
 }
 
-__aicore__ inline uint32_t UDMAWrite(
+__attribute__((always_inline)) inline __aicore__ uint32_t UDMAWrite(
     const __gm__ CommArgs* args, __gm__ uint8_t* remoteAddr, __gm__ uint8_t* localAddr,
     uint32_t pe, uint32_t qpIdx, uint64_t messageLen,
     uint32_t sqeFlag = TILEXR_UDMA_SQE_FLAG_ORDERED_COMPLETION, bool ringDoorbell = true)
 {
-    if (TILEXR_UDMA_ARCH_SUPPORTED && UDMAQueueOperationValid(
-            args, static_cast<int>(pe), qpIdx)) {
-        return UDMAPostSend(GetUDMAInfo(args), remoteAddr, localAddr, pe, qpIdx, messageLen,
-            UDMAOpcode::WRITE, nullptr, sqeFlag, ringDoorbell);
+    if (!TILEXR_UDMA_ARCH_SUPPORTED) {
+        return TILEXR_UDMA_STATUS_INVALID;
     }
-    return TILEXR_UDMA_STATUS_INVALID;
+    if (!UDMAQueueOperationValid(args, static_cast<int>(pe), qpIdx)) {
+        return TILEXR_UDMA_STATUS_INVALID;
+    }
+    if (ringDoorbell) {
+        return UDMAPostSend<UDMAOpcode::WRITE, true>(GetUDMAInfo(args), remoteAddr,
+            localAddr, pe, qpIdx, messageLen, nullptr, sqeFlag);
+    }
+    return UDMAPostSend<UDMAOpcode::WRITE, false>(GetUDMAInfo(args), remoteAddr,
+        localAddr, pe, qpIdx, messageLen, nullptr, sqeFlag);
 }
 
 __aicore__ inline uint32_t UDMARead(
@@ -507,8 +541,9 @@ __aicore__ inline uint32_t UDMARead(
 {
     if (TILEXR_UDMA_ARCH_SUPPORTED && UDMAQueueOperationValid(
             args, static_cast<int>(pe), qpIdx)) {
-        return UDMAPostSend(GetUDMAInfo(args), remoteAddr, localAddr, pe, qpIdx, messageLen,
-            UDMAOpcode::READ, nullptr, TILEXR_UDMA_SQE_FLAG_ORDERED_COMPLETION, true);
+        return UDMAPostSend<UDMAOpcode::READ, true>(GetUDMAInfo(args), remoteAddr,
+            localAddr, pe, qpIdx, messageLen, nullptr,
+            TILEXR_UDMA_SQE_FLAG_ORDERED_COMPLETION);
     }
     return TILEXR_UDMA_STATUS_INVALID;
 }
@@ -522,26 +557,34 @@ __aicore__ inline uint32_t UDMAWriteNotify(
         if (signalParams == nullptr || signalParams->sigAddr == nullptr) {
             return TILEXR_UDMA_STATUS_INVALID;
         }
-        return UDMAPostSend(GetUDMAInfo(args), remoteAddr, localAddr, pe, qpIdx, messageLen,
-            UDMAOpcode::WRITE_WITH_NOTIFY, signalParams,
-            TILEXR_UDMA_SQE_FLAG_ORDERED_COMPLETION, true);
+        return UDMAPostSend<UDMAOpcode::WRITE_WITH_NOTIFY, true>(GetUDMAInfo(args),
+            remoteAddr, localAddr, pe, qpIdx, messageLen, signalParams,
+            TILEXR_UDMA_SQE_FLAG_ORDERED_COMPLETION);
     }
     return TILEXR_UDMA_STATUS_INVALID;
 }
 
-__aicore__ inline bool UDMARegisteredOperationValid(
+__attribute__((always_inline)) inline __aicore__ bool UDMARegisteredOperationValid(
     const __gm__ CommArgs* args, int peer, uint32_t qpIdx, uint64_t byteOffset, uint64_t byteCount)
 {
-    if (!UDMARegistryEnabled(args) || !UDMARankValid(args, peer) || !UDMAQpValid(args, qpIdx)) {
+    if (!UDMARegistryEnabled(args)) {
+        return false;
+    }
+    if (!UDMARankValid(args, peer)) {
+        return false;
+    }
+    if (!UDMAQpValid(args, qpIdx)) {
         return false;
     }
     const __gm__ TileXRUDMARegistry* registry = GetUDMARegistry(args);
-    return registry->rankSize == static_cast<uint32_t>(args->rankSize) &&
-        UDMARegisteredRangeValid(registry, peer, byteOffset, byteCount);
+    if (registry->rankSize != static_cast<uint32_t>(args->rankSize)) {
+        return false;
+    }
+    return UDMARegisteredRangeValid(registry, peer, byteOffset, byteCount);
 }
 
 template <typename T>
-__aicore__ inline uint32_t UDMAPutNbiOnQpWithFlagDeferred(
+__attribute__((always_inline)) inline __aicore__ uint32_t UDMAPutNbiOnQpWithFlagDeferred(
     const __gm__ CommArgs* args, int targetRank, uint32_t qpIdx,
     const __gm__ T* localSrc, uint64_t byteOffset, uint32_t byteCount, uint32_t sqeFlag)
 {
@@ -559,7 +602,7 @@ __aicore__ inline uint32_t UDMAPutNbiOnQpWithFlagDeferred(
 }
 
 template <typename T>
-__aicore__ inline uint32_t UDMAPutNbiOnQpWithFlag(
+__attribute__((always_inline)) inline __aicore__ uint32_t UDMAPutNbiOnQpWithFlag(
     const __gm__ CommArgs* args, int targetRank, uint32_t qpIdx,
     const __gm__ T* localSrc, uint64_t byteOffset, uint32_t byteCount, uint32_t sqeFlag)
 {

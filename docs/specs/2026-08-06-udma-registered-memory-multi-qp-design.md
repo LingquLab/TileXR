@@ -15,8 +15,9 @@ UDMA hardware. Hardware acceptance is performed on Ascend950PR hosts
 
 ## Fixed Decisions
 
-1. An unset multi-QP configuration preserves the existing single-QP transport,
-   including its current topology fallback behavior.
+1. An unset multi-QP configuration preserves the single-QP transport. Same-node
+   peers use topology routing; cross-node peers prefer the first deterministic
+   aggregate EID and fall back to the first EID only when route data is unavailable.
 2. Explicit multi-QP configuration is process-level, read during communicator
    initialization from `TILEXR_UDMA_QP_ROUTE_SPEC`.
 3. The number of comma-separated route rules is the requested QP count. The
@@ -117,7 +118,9 @@ are allowed. Missing topology data or a missing exact port-count match makes
 explicit configuration unavailable; no arbitrary EID fallback is allowed.
 
 The legacy path remains separate. When the variable is unset or empty it uses
-one QP and retains the existing fallback-to-first-EID behavior.
+one QP. Same-node peers retain topology selection. Cross-node peers select the
+lowest-index RootInfo EID whose port count is greater than one, then fall back
+to the first device EID only when RootInfo cannot provide an aggregate route.
 
 ### Cross-Rank Agreement
 
@@ -424,7 +427,8 @@ multi-QP mode never silently reports success with fewer QPs or substituted EIDs.
 - Preserve C++14 and CANN 9.1 compatibility.
 - Preserve the current `UDMAInfo`, `CommArgs`, and registry binary layouts.
 - Preserve current no-QP device wrapper behavior through QP0 forwarding.
-- Preserve legacy single-QP routing when the new variable is unset or empty.
+- Preserve the legacy single-QP interface when the new variable is unset or empty;
+  use topology for same-node peers and an aggregate EID for cross-node peers.
 - Keep UDMA and SDMA best-effort capabilities independent.
 - Keep active targets independent of `reference/` sources.
 - Do not add CANN `${ARCH}-linux/devlib` to runtime RPATH or RUNPATH.

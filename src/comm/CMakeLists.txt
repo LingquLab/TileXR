@@ -150,7 +150,6 @@ target_link_directories(tile-comm
         PRIVATE
         ${ASCEND_DRIVER_PATH}/lib64/driver
         ${ASCEND_HOME_PATH}/${ARCH}-linux/lib64
-        ${ASCEND_HOME_PATH}/${ARCH}-linux/devlib
 )
 
 target_link_libraries(tile-comm

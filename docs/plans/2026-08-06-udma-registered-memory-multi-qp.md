@@ -162,7 +162,8 @@ RootInfo metadata, retryable MR ownership, and a dynamic image builder.
 - Pass `localRankSize` into transport options and distinguish same-node and
   cross-node peers.
 - Store local and remote routes as checked rank-major/QP-minor matrices.
-- Keep the unset/empty legacy single-QP path and its existing fallback.
+- Keep the unset/empty legacy single-QP path; use topology for same-node peers,
+  prefer a deterministic aggregate EID across nodes, and retain first-EID fallback.
 - In explicit mode, resolve `topology` or exact `port_count:N` selectors
   strictly and deterministically; allow duplicate selectors.
 - Add `PerPeerQpState` ownership for channel, CQ, local/imported QP, scalars,

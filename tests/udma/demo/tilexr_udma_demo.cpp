@@ -33,8 +33,6 @@ namespace {
 constexpr int32_t kDefaultElementsPerRank = 16;
 constexpr uint64_t kSignalValue = 1000;
 constexpr size_t kDebugWords = 16;
-constexpr size_t kDebugLocalTokenWord = 14;
-constexpr size_t kDebugSgeTokenWord = 15;
 constexpr int32_t kDemoMagic = 0x5444554d;
 constexpr size_t kDebugQpCountWord = 5;
 constexpr size_t kDebugQpStatusBaseWord = 6;
@@ -755,14 +753,10 @@ int main(int argc, char** argv)
     }
 
     std::cout << "[rank " << rank << "] debug words:";
-    for (size_t i = 0; i < hostDebug.size(); ++i) {
+    for (size_t i = 0; i < std::min(kDebugQpStatusBaseWord + actualQpCount, hostDebug.size()); ++i) {
         std::cout << " d" << i << "=" << hostDebug[i];
     }
     std::cout << std::endl;
-    std::cout << "[rank " << rank << "] UDMA token trace: local="
-              << static_cast<uint32_t>(hostDebug[kDebugLocalTokenWord])
-              << " sge=" << static_cast<uint32_t>(hostDebug[kDebugSgeTokenWord])
-              << std::endl;
 
     bool ok = ValidateKernelDebug(rank, rankSize, actualQpCount, elementsPerRank, hostDebug);
     ok = ValidateData(rank, rankSize, actualQpCount, hostData, elementsPerRank) && ok;

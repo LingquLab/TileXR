@@ -10,73 +10,6 @@ constexpr int32_t TILEXR_UDMA_DEMO_MAGIC = 0x5444554d; // "TDUM"
 constexpr uint32_t TILEXR_UDMA_DEMO_MAX_QPS = 8U;
 constexpr uint32_t TILEXR_UDMA_DEMO_QP_COUNT_WORD = 5U;
 constexpr uint32_t TILEXR_UDMA_DEMO_QP_STATUS_BASE_WORD = 6U;
-constexpr uint32_t TILEXR_UDMA_DEMO_LOCAL_TOKEN_WORD = 14U;
-constexpr uint32_t TILEXR_UDMA_DEMO_SGE_TOKEN_WORD = 15U;
-constexpr uint32_t TILEXR_UDMA_DEMO_QP_EQUAL_MASK_BASE_WORD = 9U;
-constexpr uint32_t TILEXR_UDMA_DEMO_POST_VALIDATION_WORD = 11U;
-
-__aicore__ inline uint32_t TileXRUDMAPostValidationMask(
-    const __gm__ TileXR::CommArgs* args, int32_t peer, uint32_t qpIdx,
-    const __gm__ int32_t* localSrc, uint64_t byteOffset, uint32_t byteCount)
-{
-    uint32_t mask = 0U;
-    mask |= !TileXR::UDMARegistryEnabled(args) ? 1U << 0U : 0U;
-    mask |= !TileXR::UDMARankValid(args, peer) ? 1U << 1U : 0U;
-    mask |= !TileXR::UDMAQpValid(args, qpIdx) ? 1U << 2U : 0U;
-    const __gm__ TileXR::TileXRUDMARegistry* registry = TileXR::GetUDMARegistry(args);
-    mask |= registry->rankSize != static_cast<uint32_t>(args->rankSize) ? 1U << 3U : 0U;
-    mask |= !TileXR::UDMARegisteredRangeValid(
-        registry, peer, byteOffset, byteCount) ? 1U << 4U : 0U;
-    mask |= localSrc == nullptr && byteCount != 0U ? 1U << 5U : 0U;
-    __gm__ uint8_t* remoteAddr = TileXR::UDMARegisteredRemoteAddr(
-        registry, peer, byteOffset);
-    mask |= remoteAddr == nullptr ? 1U << 6U : 0U;
-    __gm__ TileXR::UDMAInfo* udmaInfo = TileXR::GetUDMAInfo(args);
-    mask |= udmaInfo == nullptr || udmaInfo->sqPtr == 0U || udmaInfo->memPtr == 0U
-        ? 1U << 7U : 0U;
-    __gm__ TileXR::UDMAWQCtx* qpCtx = TileXR::UDMAGetWQCtx(
-        udmaInfo, static_cast<uint32_t>(peer), qpIdx);
-    mask |= qpCtx->bufAddr == 0U ? 1U << 8U : 0U;
-    mask |= qpCtx->headAddr == 0U ? 1U << 9U : 0U;
-    mask |= qpCtx->tailAddr == 0U ? 1U << 10U : 0U;
-    mask |= qpCtx->wqeCntAddr == 0U ? 1U << 11U : 0U;
-    mask |= qpCtx->dbAddr == 0U ? 1U << 12U : 0U;
-    mask |= qpCtx->depth != TileXR::TILEXR_UDMA_SQ_BB_COUNT ? 1U << 13U : 0U;
-    mask |= qpCtx->baseBkShift >= 32U ? 1U << 14U : 0U;
-    if (qpCtx->baseBkShift < 32U) {
-        mask |= (1U << qpCtx->baseBkShift) <
-            sizeof(TileXR::UDMASqeCtx) + sizeof(TileXR::UDMASgeCtx) ? 1U << 15U : 0U;
-    }
-    __gm__ TileXR::UDMAMemInfo* remoteMem = TileXR::UDMAGetRemoteMemInfo(
-        udmaInfo, static_cast<uint32_t>(peer), qpIdx);
-    mask |= remoteMem->eidAddr == 0U ? 1U << 16U : 0U;
-    const uint32_t head = ld_dev(
-        reinterpret_cast<__gm__ uint32_t*>(qpCtx->headAddr), 0);
-    const uint32_t tail = ld_dev(
-        reinterpret_cast<__gm__ uint32_t*>(qpCtx->tailAddr), 0);
-    mask |= head - tail > qpCtx->depth ? 1U << 17U : 0U;
-    return mask;
-}
-
-__aicore__ inline uint32_t TileXRUDMAQueueStateEqualMask(
-    __gm__ TileXR::UDMAInfo* udmaInfo, uint32_t peer, uint32_t lhsQp, uint32_t rhsQp)
-{
-    __gm__ TileXR::UDMAWQCtx* lhsSq = TileXR::UDMAGetWQCtx(udmaInfo, peer, lhsQp);
-    __gm__ TileXR::UDMAWQCtx* rhsSq = TileXR::UDMAGetWQCtx(udmaInfo, peer, rhsQp);
-    __gm__ TileXR::UDMACQCtx* lhsCq = TileXR::UDMAGetSCQCtx(udmaInfo, peer, lhsQp);
-    __gm__ TileXR::UDMACQCtx* rhsCq = TileXR::UDMAGetSCQCtx(udmaInfo, peer, rhsQp);
-    uint32_t mask = 0U;
-    mask |= lhsSq->bufAddr == rhsSq->bufAddr ? 1U << 0U : 0U;
-    mask |= lhsSq->headAddr == rhsSq->headAddr ? 1U << 1U : 0U;
-    mask |= lhsSq->tailAddr == rhsSq->tailAddr ? 1U << 2U : 0U;
-    mask |= lhsSq->wqeCntAddr == rhsSq->wqeCntAddr ? 1U << 3U : 0U;
-    mask |= lhsSq->dbAddr == rhsSq->dbAddr ? 1U << 4U : 0U;
-    mask |= lhsCq->bufAddr == rhsCq->bufAddr ? 1U << 5U : 0U;
-    mask |= lhsCq->headAddr == rhsCq->headAddr ? 1U << 6U : 0U;
-    mask |= lhsCq->tailAddr == rhsCq->tailAddr ? 1U << 7U : 0U;
-    mask |= lhsCq->dbAddr == rhsCq->dbAddr ? 1U << 8U : 0U;
-    return mask;
-}
 
 __aicore__ inline bool TileXRUDMAMultiQpAllGather(
     const __gm__ TileXR::CommArgs* args, __gm__ int32_t* data, __gm__ int32_t* debug,
@@ -100,7 +33,6 @@ __aicore__ inline bool TileXRUDMAMultiQpAllGather(
     }
 
     uint32_t qpStatus[TILEXR_UDMA_DEMO_MAX_QPS] = {};
-    __gm__ TileXR::UDMAInfo* udmaInfo = TileXR::GetUDMAInfo(args);
     const uint64_t elementsPerQp = static_cast<uint64_t>(rankSize) * static_cast<uint64_t>(elementsPerRank);
     const uint32_t segmentBytes = static_cast<uint32_t>(elementsPerRank) * sizeof(int32_t);
     for (int32_t peer = 0; peer < rankSize; ++peer) {
@@ -108,48 +40,15 @@ __aicore__ inline bool TileXRUDMAMultiQpAllGather(
             continue;
         }
 
-        for (uint32_t qpIdx = 1U; qpIdx < qpCount; ++qpIdx) {
-            for (uint32_t previousQp = 0U; previousQp < qpIdx; ++previousQp) {
-                const uint32_t equalMask = TileXRUDMAQueueStateEqualMask(
-                    udmaInfo, static_cast<uint32_t>(peer), previousQp, qpIdx);
-                if (debug != nullptr && previousQp == 0U &&
-                    peer == (rank == 0 ? 1 : 0)) {
-                    debug[TILEXR_UDMA_DEMO_QP_EQUAL_MASK_BASE_WORD + qpIdx - 1U] =
-                        static_cast<int32_t>(equalMask);
-                }
-                if (equalMask != 0U) {
-                    qpStatus[previousQp] = TileXR::TILEXR_UDMA_STATUS_INVALID;
-                    qpStatus[qpIdx] = TileXR::TILEXR_UDMA_STATUS_INVALID;
-                }
-            }
-        }
         for (uint32_t qpIdx = 0U; qpIdx < qpCount; ++qpIdx) {
             if (qpStatus[qpIdx] != TileXR::TILEXR_UDMA_STATUS_SUCCESS) {
                 continue;
             }
             const uint64_t elementOffset =
                 qpIdx * elementsPerQp + static_cast<uint64_t>(rank) * elementsPerRank;
-            if (debug != nullptr && qpIdx == 0U && peer == (rank == 0 ? 1 : 0)) {
-                debug[TILEXR_UDMA_DEMO_POST_VALIDATION_WORD] = static_cast<int32_t>(
-                    TileXRUDMAPostValidationMask(args, peer, qpIdx, data + elementOffset,
-                        elementOffset * sizeof(int32_t), segmentBytes));
-            }
             qpStatus[qpIdx] = TileXR::UDMAPutNbiOnQpWithFlagDeferred<int32_t>(
                 args, peer, qpIdx, data + elementOffset, elementOffset * sizeof(int32_t), segmentBytes,
                 TileXR::TILEXR_UDMA_SQE_FLAG_ORDERED_COMPLETION);
-            if (debug != nullptr && qpIdx == 0U) {
-                __gm__ TileXR::UDMAWQCtx* qpCtx =
-                    TileXR::UDMAGetWQCtx(udmaInfo, static_cast<uint32_t>(peer), qpIdx);
-                const uint32_t head = ld_dev(
-                    reinterpret_cast<__gm__ uint32_t*>(qpCtx->headAddr), 0);
-                __gm__ TileXR::UDMASgeCtx* sge = reinterpret_cast<__gm__ TileXR::UDMASgeCtx*>(
-                    TileXR::UDMAGetSqLogicalAddr(
-                        qpCtx, head - 1U, sizeof(TileXR::UDMASqeCtx)));
-                debug[TILEXR_UDMA_DEMO_LOCAL_TOKEN_WORD] =
-                    static_cast<int32_t>(qpCtx->localTokenId);
-                debug[TILEXR_UDMA_DEMO_SGE_TOKEN_WORD] =
-                    static_cast<int32_t>(sge->tokenId);
-            }
         }
         for (uint32_t qpIdx = 0U; qpIdx < qpCount; ++qpIdx) {
             if (qpStatus[qpIdx] == TileXR::TILEXR_UDMA_STATUS_SUCCESS) {

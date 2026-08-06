@@ -324,6 +324,10 @@ void TestUDMAMultiQpHostTransportContract()
     const auto device = ReadFile(devicePath);
     CheckContains(devicePath, device,
                   "UDMAFillSgeCtx(sgeCtx, messageLen, localAddr, qpCtxEntry->localTokenId)");
+    CheckContains(devicePath, device,
+                  "__attribute__((always_inline)) inline __aicore__ void UDMAFillSqeCtx");
+    CheckContains(devicePath, device,
+                  "__attribute__((always_inline)) inline __aicore__ uint32_t UDMAPostSend");
 }
 
 void TestPublicHeadersDoNotExposeUDMAContext()
