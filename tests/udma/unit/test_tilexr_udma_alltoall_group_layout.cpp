@@ -800,10 +800,19 @@ void TestKernelStructure()
     CHECK_CONTAINS(simtSend, "madeProgress");
     CHECK_CONTAINS(simtSend, "noProgressBegin");
     CHECK_CONTAINS(kernel, "AllToAllGroupRunSimtReadyPost");
-    CHECK_CONTAINS(kernel, "AllToAllGroupPostSimtRange");
     CHECK_CONTAINS(kernel, "quietBatch >= TileXR::Demo::kAllToAllGroupSimtMaxTasks");
-    CHECK_CONTAINS(kernel, "batch, rangeBegin, rangeCount");
-    CHECK_CONTAINS(kernel, "groupCount, 1U, false");
+    const size_t readyPostBegin = kernel.find(
+        "__aicore__ inline bool AllToAllGroupRunSimtReadyPost");
+    const size_t readyPostEnd = kernel.find(
+        "template <bool IngressCredit>", readyPostBegin);
+    const std::string readyPost = readyPostBegin == std::string::npos ?
+        std::string() : kernel.substr(readyPostBegin,
+            readyPostEnd == std::string::npos ? std::string::npos :
+                readyPostEnd - readyPostBegin);
+    CHECK_CONTAINS(readyPost, "AllToAllGroupFlushPreparedSimtSend(");
+    CHECK_CONTAINS(readyPost, "workerCount, sendCores, blockIdx");
+    CHECK_NOT_CONTAINS(readyPost, "aggregatePostBegin");
+    CHECK_NOT_CONTAINS(readyPost, "AllToAllGroupPostSimtRange(");
     CHECK_CONTAINS(kernel, "kAllToAllGroupSimtBatchStorageBytes");
     CHECK_NOT_CONTAINS(simtSend, "AllToAllGroupWaitCreditMte(");
     CHECK_CONTAINS(kernel, "AllToAllGroupSimtBuildPrepared");
