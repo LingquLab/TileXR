@@ -260,17 +260,6 @@ class TorchNpuMoonEPBackend:
             )
             dst[route_index] = destination * d.nvsh + local_offset
 
-        for token in range(d.tokens_per_rank):
-            seen_destinations: set[int] = set()
-            for topk_index in range(d.topk):
-                route_index = token * d.topk + topk_index
-                raw = int(dst[route_index].item())
-                destination = raw // d.nvsh
-                if destination in seen_destinations:
-                    dst[route_index] = -raw - 1
-                else:
-                    seen_destinations.add(destination)
-
         return MoonEPPlan(
             dimensions=d,
             dst=dst,

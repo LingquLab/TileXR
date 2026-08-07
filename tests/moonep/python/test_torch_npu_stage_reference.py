@@ -93,11 +93,11 @@ def test_two_rank_imbalanced_case_dispatches_a_three_duplicate_group() -> None:
     ]
     assert torch.equal(
         plans[0].dst,
-        torch.tensor([8, -10, -11, -12, 12, 0, -3, -6], dtype=torch.int32),
+        torch.tensor([8, 9, 10, 11, 12, 0, 2, 5], dtype=torch.int32),
     )
     assert torch.equal(
         plans[1].dst,
-        torch.tensor([13, 1, -4, -7, 14, -16, 4, -8], dtype=torch.int32),
+        torch.tensor([13, 1, 3, 6, 14, 15, 4, 7], dtype=torch.int32),
     )
     assert [int(plan.cu_seqlens[-1].item()) for plan in plans] == [8, 8]
     assert torch.equal(
