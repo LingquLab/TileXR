@@ -40,8 +40,12 @@ int main()
         "Unexpected PlanningArgsV1 size");
     static_assert(sizeof(TileXRMoonEpDispatchArgsV1) == 48,
         "Unexpected DispatchArgsV1 size");
-    static_assert(sizeof(TileXRMoonEpDispatchArgsV1) == sizeof(TileXRMoonEpPrefetchWeightArgsV1),
-        "Stub argument layouts must match");
+    static_assert(sizeof(TileXRMoonEpPrefetchWeightArgsV1) == 56,
+        "Unexpected PrefetchWeightArgsV1 size");
+    static_assert(offsetof(TileXRMoonEpPrefetchWeightArgsV1, gate) == 24,
+        "Unexpected PrefetchWeightArgsV1 gate offset");
+    static_assert(offsetof(TileXRMoonEpPrefetchWeightArgsV1, flags) == 48,
+        "Unexpected PrefetchWeightArgsV1 flags offset");
     static_assert(sizeof(TileXRMoonEpDispatchArgsV1) == sizeof(TileXRMoonEpCombineArgsV1),
         "Stub argument layouts must match");
     static_assert(sizeof(TileXRMoonEpDispatchArgsV1) == sizeof(TileXRMoonEpReduceGradArgsV1),

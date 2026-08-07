@@ -5,6 +5,8 @@
     "K": 2,
     "E": 16,
     "H": 64,
+    "expert_shape": [64],
+    "route_pattern": "biased",
     "dtype": "bfloat16",
     "seed": 1234,
     "warmup": 2,

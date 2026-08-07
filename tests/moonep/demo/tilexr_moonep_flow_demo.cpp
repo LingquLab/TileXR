@@ -33,7 +33,7 @@ struct Options {
     int64_t s = 8;
     int64_t k = 2;
     int64_t experts = 16;
-    int64_t hidden = 8;
+    int64_t hidden = 32;
     uint64_t waitIterations = 1000000;
 };
 
@@ -49,6 +49,8 @@ struct RuntimeResources {
     bool deviceSet = false;
     aclrtStream stream = nullptr;
     TileXRCommPtr comm = nullptr;
+    TileXRUDMAMemHandle udmaHandle = 0;
+    bool udmaRegistered = false;
     std::vector<void *> allocations;
 };
 
@@ -136,7 +138,7 @@ bool ParseOptions(int argc, char **argv, Options *options)
         "TILEXR_MOONEP_FLOW_EXPERTS",
         worldEnv > 0 && worldEnv <= std::numeric_limits<int64_t>::max() / 2 ?
             worldEnv * 2 : 0);
-    options->hidden = EnvInt64("TILEXR_MOONEP_FLOW_H", 8);
+    options->hidden = EnvInt64("TILEXR_MOONEP_FLOW_H", 32);
     options->waitIterations =
         EnvUint64("TILEXR_MOONEP_PLANNER_WAIT_ITERATIONS", 1000000);
 
@@ -207,7 +209,8 @@ bool ValidateOptions(const Options &options, uint64_t *routeCount,
         options.rank >= options.world || options.physicalDeviceCount <= 0 ||
         options.device < 0 || options.device >= options.physicalDeviceCount ||
         options.s <= 0 || options.k < 2 || options.experts <= 0 ||
-        options.hidden <= 0 || options.experts % options.world != 0 ||
+        options.hidden <= 0 || options.hidden % 32 != 0 ||
+        options.experts % options.world != 0 ||
         options.k > options.experts || options.waitIterations == 0) {
         return false;
     }
@@ -553,6 +556,11 @@ bool Cleanup(RuntimeResources *resources)
         ok = CheckAcl(resources->rank, "cleanup stream synchronize",
             aclrtSynchronizeStream(resources->stream)) && ok;
     }
+    if (resources->udmaRegistered && resources->comm != nullptr) {
+        ok = CheckTileXR(resources->rank, "TileXRUDMAUnregister",
+            TileXRUDMAUnregister(resources->comm, resources->udmaHandle)) && ok;
+        resources->udmaRegistered = false;
+    }
     for (std::vector<void *>::reverse_iterator it = resources->allocations.rbegin();
          it != resources->allocations.rend(); ++it) {
         if (*it != nullptr) {
@@ -619,6 +627,14 @@ TileXRMoonEpTensorV1 Tensor2D(void *data, uint64_t elements,
     tensor.rank = 2;
     tensor.shape[0] = dim0;
     tensor.shape[1] = dim1;
+    return tensor;
+}
+
+TileXRMoonEpTensorV1 ProjectionTensor(void *data, uint64_t elements,
+                                     int64_t dim0, int64_t dim1)
+{
+    TileXRMoonEpTensorV1 tensor = Tensor2D(data, elements, dim0, dim1);
+    tensor.dtype = TILEXR_MOONEP_DTYPE_FLOAT16;
     return tensor;
 }
 
@@ -698,13 +714,15 @@ bool RunFlow(const Options &options, RuntimeResources *resources,
     uint64_t stubStages = 0;
     const uint64_t expectedStubs =
         static_cast<uint64_t>(TILEXR_MOONEP_STAGE_DISPATCH) |
-        static_cast<uint64_t>(TILEXR_MOONEP_STAGE_PREFETCH_WEIGHT) |
         static_cast<uint64_t>(TILEXR_MOONEP_STAGE_COMBINE) |
         static_cast<uint64_t>(TILEXR_MOONEP_STAGE_REDUCE_GRAD);
+    const uint64_t expectedNative =
+        static_cast<uint64_t>(TILEXR_MOONEP_STAGE_PLANNING) |
+        static_cast<uint64_t>(TILEXR_MOONEP_STAGE_PREFETCH_WEIGHT);
     if (TileXRMoonEpGetAbiVersion() != TILEXR_MOONEP_ABI_VERSION_V1 ||
         !CheckTileXR(rank, "TileXRMoonEpGetCapabilitiesV1",
             TileXRMoonEpGetCapabilitiesV1(&nativeStages, &stubStages)) ||
-        nativeStages != TILEXR_MOONEP_STAGE_PLANNING || stubStages != expectedStubs) {
+        nativeStages != expectedNative || stubStages != expectedStubs) {
         std::cerr << "[rank " << rank << "] unexpected native/stub capabilities"
                   << " native=" << nativeStages << " stub=" << stubStages << std::endl;
         return false;
@@ -735,8 +753,6 @@ bool RunFlow(const Options &options, RuntimeResources *resources,
 
     const std::vector<int32_t> forwardInput =
         MakePattern(tokenHiddenCount, static_cast<int64_t>(rank + 1) * 100003);
-    const std::vector<int32_t> prefetchInput =
-        MakePattern(expertHiddenCount, static_cast<int64_t>(rank + 1) * 200003);
     const std::vector<int32_t> backwardInput =
         MakePattern(tokenHiddenCount, static_cast<int64_t>(rank + 1) * 300007);
     const std::vector<int32_t> reduceInput =
@@ -752,8 +768,7 @@ bool RunFlow(const Options &options, RuntimeResources *resources,
     DeviceBuffer plannerStatus;
     DeviceBuffer forwardInputDev;
     DeviceBuffer forwardDispatchDev;
-    DeviceBuffer prefetchInputDev;
-    DeviceBuffer prefetchOutputDev;
+    DeviceBuffer prefetchArena;
     DeviceBuffer forwardCombineDev;
     DeviceBuffer backwardInputDev;
     DeviceBuffer backwardDispatchDev;
@@ -771,8 +786,8 @@ bool RunFlow(const Options &options, RuntimeResources *resources,
         !AllocateInt32(resources, 1, "planner status", &plannerStatus) ||
         !AllocateInt32(resources, tokenHiddenCount, "forward input", &forwardInputDev) ||
         !AllocateInt32(resources, routeHiddenCount, "forward dispatch", &forwardDispatchDev) ||
-        !AllocateInt32(resources, expertHiddenCount, "prefetch input", &prefetchInputDev) ||
-        !AllocateInt32(resources, expertHiddenCount, "prefetch output", &prefetchOutputDev) ||
+        !Allocate(resources, 6 * expertHiddenCount * sizeof(uint16_t),
+            "packed prefetch arena", &prefetchArena) ||
         !AllocateInt32(resources, tokenHiddenCount, "forward combine", &forwardCombineDev) ||
         !AllocateInt32(resources, tokenHiddenCount, "backward input", &backwardInputDev) ||
         !AllocateInt32(resources, routeHiddenCount, "backward dispatch", &backwardDispatchDev) ||
@@ -787,16 +802,39 @@ bool RunFlow(const Options &options, RuntimeResources *resources,
         return false;
     }
 
+    const uint64_t projectionElements = 2 * expertHiddenCount;
+    std::vector<uint16_t> prefetchHost(static_cast<size_t>(6 * expertHiddenCount), UINT16_MAX);
+    for (uint32_t projection = 0; projection < 3; ++projection) {
+        for (int64_t localExpert = 0; localExpert < b; ++localExpert) {
+            const uint16_t value = static_cast<uint16_t>(
+                projection * 1000 + rank * b + localExpert + 1);
+            const uint64_t row = projection * projectionElements +
+                static_cast<uint64_t>(localExpert) * options.hidden;
+            std::fill(prefetchHost.begin() + static_cast<ptrdiff_t>(row),
+                prefetchHost.begin() + static_cast<ptrdiff_t>(row + options.hidden), value);
+        }
+    }
+
     const std::vector<int32_t> statusSentinel(1, -1);
     if (!CopyHostToDevice(rank, topk, routing, "topk") ||
         !CopyHostToDevice(rank, tpe, tokensPerExpert, "tokens per expert") ||
         !CopyHostToDevice(rank, plannerStatus, statusSentinel, "planner status sentinel") ||
         !CopyHostToDevice(rank, forwardInputDev, forwardInput, "forward input") ||
-        !CopyHostToDevice(rank, prefetchInputDev, prefetchInput, "prefetch input") ||
         !CopyHostToDevice(rank, backwardInputDev, backwardInput, "backward input") ||
         !CopyHostToDevice(rank, reduceInputDev, reduceInput, "reduce input")) {
         return false;
     }
+    if (!CheckAcl(rank, "copy H2D packed prefetch arena",
+            aclrtMemcpy(prefetchArena.data, static_cast<size_t>(prefetchArena.bytes),
+                prefetchHost.data(), static_cast<size_t>(prefetchArena.bytes),
+                ACL_MEMCPY_HOST_TO_DEVICE)) ||
+        !CheckTileXR(rank, "TileXRUDMARegister packed prefetch arena",
+            TileXRUDMARegister(resources->comm,
+                reinterpret_cast<GM_ADDR>(prefetchArena.data),
+                static_cast<size_t>(prefetchArena.bytes), &resources->udmaHandle))) {
+        return false;
+    }
+    resources->udmaRegistered = true;
 
     TileXRMoonEpPlanV1 plan {};
     plan.structSize = sizeof(plan);
@@ -839,13 +877,23 @@ bool RunFlow(const Options &options, RuntimeResources *resources,
         StageArgs<TileXRMoonEpDispatchArgsV1>(
             resources->comm, &plan, &forwardInputTensor, &forwardDispatchTensor);
 
-    TileXRMoonEpTensorV1 prefetchInputTensor =
-        Tensor2D(prefetchInputDev.data, expertHiddenCount, b, options.hidden);
-    TileXRMoonEpTensorV1 prefetchOutputTensor =
-        Tensor2D(prefetchOutputDev.data, expertHiddenCount, b, options.hidden);
-    TileXRMoonEpPrefetchWeightArgsV1 prefetch =
-        StageArgs<TileXRMoonEpPrefetchWeightArgsV1>(
-            resources->comm, &plan, &prefetchInputTensor, &prefetchOutputTensor);
+    uint8_t *prefetchBase = reinterpret_cast<uint8_t *>(prefetchArena.data);
+    const uint64_t projectionBytes = projectionElements * sizeof(uint16_t);
+    TileXRMoonEpTensorV1 gate = ProjectionTensor(
+        prefetchBase, projectionElements, 2 * b, options.hidden);
+    TileXRMoonEpTensorV1 up = ProjectionTensor(
+        prefetchBase + projectionBytes, projectionElements, 2 * b, options.hidden);
+    TileXRMoonEpTensorV1 down = ProjectionTensor(
+        prefetchBase + 2 * projectionBytes, projectionElements, 2 * b, options.hidden);
+    TileXRMoonEpPrefetchWeightArgsV1 prefetch {};
+    prefetch.structSize = sizeof(prefetch);
+    prefetch.abiVersion = TILEXR_MOONEP_ABI_VERSION_V1;
+    prefetch.comm = resources->comm;
+    prefetch.plan = &plan;
+    prefetch.gate = &gate;
+    prefetch.up = &up;
+    prefetch.down = &down;
+    prefetch.flags = TILEXR_MOONEP_FLAG_NONE;
 
     TileXRMoonEpTensorV1 forwardCombineTensor =
         Tensor2D(forwardCombineDev.data, tokenHiddenCount, options.s, options.hidden);
@@ -898,7 +946,7 @@ bool RunFlow(const Options &options, RuntimeResources *resources,
     std::vector<int32_t> statusHost(1);
     std::vector<int32_t> cuHost(static_cast<size_t>(groupCount));
     std::vector<int32_t> forwardDispatchHost(static_cast<size_t>(routeHiddenCount));
-    std::vector<int32_t> prefetchOutputHost(static_cast<size_t>(expertHiddenCount));
+    std::vector<int32_t> expertsToCopyHost(static_cast<size_t>(expertsToCopyCount));
     std::vector<int32_t> forwardCombineHost(static_cast<size_t>(tokenHiddenCount));
     std::vector<int32_t> backwardDispatchHost(static_cast<size_t>(routeHiddenCount));
     std::vector<int32_t> backwardCombineHost(static_cast<size_t>(tokenHiddenCount));
@@ -907,8 +955,8 @@ bool RunFlow(const Options &options, RuntimeResources *resources,
         !CopyDeviceToHost(rank, &cuHost, cu, "cu") ||
         !CopyDeviceToHost(rank, &forwardDispatchHost, forwardDispatchDev,
             "forward dispatch") ||
-        !CopyDeviceToHost(rank, &prefetchOutputHost, prefetchOutputDev,
-            "prefetch output") ||
+        !CopyDeviceToHost(rank, &expertsToCopyHost, expertsToCopy,
+            "experts to copy") ||
         !CopyDeviceToHost(rank, &forwardCombineHost, forwardCombineDev,
             "forward combine") ||
         !CopyDeviceToHost(rank, &backwardDispatchHost, backwardDispatchDev,
@@ -917,6 +965,12 @@ bool RunFlow(const Options &options, RuntimeResources *resources,
             "backward combine") ||
         !CopyDeviceToHost(rank, &reduceOutputHost, reduceOutputDev,
             "reduce output")) {
+        return false;
+    }
+    if (!CheckAcl(rank, "copy D2H packed prefetch arena",
+            aclrtMemcpy(prefetchHost.data(), static_cast<size_t>(prefetchArena.bytes),
+                prefetchArena.data, static_cast<size_t>(prefetchArena.bytes),
+                ACL_MEMCPY_DEVICE_TO_HOST))) {
         return false;
     }
 
@@ -938,8 +992,24 @@ bool RunFlow(const Options &options, RuntimeResources *resources,
     }
     correct = CheckPrefixAndZeroTail(
         rank, "forward dispatch", forwardDispatchHost, forwardInput) && correct;
-    correct = CheckEqual(
-        rank, "prefetch weight", prefetchOutputHost, prefetchInput) && correct;
+    for (uint32_t projection = 0; projection < 3; ++projection) {
+        for (int64_t slot = 0; slot < b; ++slot) {
+            const int32_t expert = expertsToCopyHost[
+                static_cast<size_t>(rank * b + slot)];
+            const uint16_t expected = expert < 0 ? UINT16_MAX :
+                static_cast<uint16_t>(projection * 1000 + expert + 1);
+            const uint64_t row = projection * projectionElements +
+                static_cast<uint64_t>(b + slot) * options.hidden;
+            for (int64_t column = 0; column < options.hidden; ++column) {
+                if (prefetchHost[static_cast<size_t>(row + column)] != expected) {
+                    std::cerr << "[rank " << rank << "] prefetch mismatch projection="
+                              << projection << " slot=" << slot << std::endl;
+                    correct = false;
+                    break;
+                }
+            }
+        }
+    }
     correct = CheckEqual(
         rank, "forward combine", forwardCombineHost, forwardInput) && correct;
     correct = CheckPrefixAndZeroTail(
@@ -964,7 +1034,7 @@ bool RunFlow(const Options &options, RuntimeResources *resources,
                   << " planner_status=" << statusHost[0]
                   << " cu_last=" << cuHost.back()
                   << " planning=native"
-                  << " dispatch=stub prefetch_weight=stub"
+                  << " dispatch=stub prefetch_weight=native_udma"
                   << " combine=stub reduce_grad=stub"
                   << " torch_validated=false"
                   << " transport_performance_valid=false"

@@ -63,7 +63,14 @@ int main()
     ok &= Require(kernel, "BuildLocalHistogram", "planner histogram phase missing");
     ok &= Require(kernel, "BuildExpertLayout", "planner layout phase missing");
     ok &= Require(kernel, "BuildDst", "planner dst phase missing");
-    ok &= Require(hostLaunch, "rtKernelLaunchWithFlagV2", "Planner Runtime V2 launch missing");
+    ok &= Require(hostLaunch, "launch_tilexr_moonep_planner_kernel",
+        "Planner generated launch wrapper call missing");
+    ok &= Reject(hostLaunch, "rtKernelLaunchWithFlagV2",
+        "Planner bypasses the generated launch wrapper");
+    ok &= Require(kernel, "launch_tilexr_moonep_planner_kernel",
+        "Planner generated launch wrapper missing");
+    ok &= Require(kernel, "<<<blockDim, nullptr, stream>>>",
+        "Planner kernel launch syntax missing");
     ok &= Require(kernel, "WaitReadyFlag", "bounded planner ready poll missing");
     ok &= Require(readyPolling, "DataCacheCleanAndInvalid",
         "Planner ready poll cache invalidation missing");
@@ -91,7 +98,6 @@ int main()
     ok &= Reject(publicHeader, "zeroFillRanges", "Planner public ABI still exposes cleanup ranges");
     ok &= Reject(publicHeader, "TileXRMoonEpPlanner(", "legacy unversioned Planner ABI present");
     ok &= Reject(kernel, "truncated", "Planner kernel contains a truncated migration artifact");
-    ok &= Reject(kernel, "<<<", "Planner still uses compiler kernel launch syntax");
     ok &= Reject(kernel, "rtKernelLaunch", "Planner kernel still contains host launch code");
 
     ok &= Require(launcher, "rank % physical_device_count",
