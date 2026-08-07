@@ -46,9 +46,9 @@ public:
     int64_t NextMagic();
     int RegisterUDMAMemory(GM_ADDR localPtr, size_t bytes, TileXRUDMAMemHandle *handle);
     int UnregisterUDMAMemory(TileXRUDMAMemHandle handle);
+    int GetUDMAQpCount(uint32_t *qpCount) const;
     GM_ADDR GetUDMARegistryPtr() const;
     const TileXRUDMARegistry* GetUDMARegistryHost() const;
-    uint32_t GetUDMAQpNum() const;
     bool IsSDMAAvailable() const;
     GM_ADDR GetSDMAWorkspacePtr() const;
     SDMAInitStatus GetSDMAInitStatus() const;

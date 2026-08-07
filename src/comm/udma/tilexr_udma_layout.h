@@ -6,6 +6,7 @@
 #ifndef TILEXR_UDMA_LAYOUT_H
 #define TILEXR_UDMA_LAYOUT_H
 
+#include <cstddef>
 #include <cstdint>
 #include <vector>
 
@@ -26,10 +27,6 @@ int BuildUDMAInfoImage(
     const std::vector<UDMAMemInfo>& mem,
     UDMAInfo& info,
     std::vector<uint8_t>& bytes);
-
-bool IsSupportedUDMAQpNum(uint32_t qpNum);
-
-int ParseUDMAQpNum(const char* value, uint32_t& qpNum);
 
 } // namespace TileXR
 

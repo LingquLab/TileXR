@@ -62,7 +62,7 @@ file(WRITE "${TILEXR_MOONEP_FAKE_INCLUDE_DIR}/tilexr_api.h"
 "int TileXRGetCommArgsHost(TileXRCommPtr comm, TileXR::CommArgs *&commArgs);\n"
 "int TileXRGetCommArgsDev(TileXRCommPtr comm, GM_ADDR &commArgs);\n"
 "int TileXRGetUDMARegistryHost(TileXRCommPtr comm, const TileXR::TileXRUDMARegistry **registry);\n"
-"int TileXRGetUDMAQpNum(TileXRCommPtr comm, uint32_t *qpNum);\n"
+"int TileXRUDMAGetQpCount(TileXRCommPtr comm, uint32_t *qpCount);\n"
 "}\n"
 "#endif\n"
 "#endif\n")

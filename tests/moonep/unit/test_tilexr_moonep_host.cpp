@@ -705,7 +705,7 @@ extern "C" int TileXRGetUDMARegistryHost(TileXRCommPtr,
     return g_registryReturn;
 }
 
-extern "C" int TileXRGetUDMAQpNum(TileXRCommPtr, uint32_t *qpNum)
+extern "C" int TileXRUDMAGetQpCount(TileXRCommPtr, uint32_t *qpNum)
 {
     *qpNum = g_qpNum;
     return g_qpReturn;

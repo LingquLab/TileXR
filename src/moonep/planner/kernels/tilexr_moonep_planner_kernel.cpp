@@ -993,3 +993,20 @@ extern "C" __global__ __aicore__ void tilexr_moonep_planner_kernel(GM_ADDR commA
         groupTotalsOffset, magic);
     op.Process();
 }
+
+extern "C" void launch_tilexr_moonep_planner_kernel(uint32_t blockDim, void *stream,
+    GM_ADDR commArgs, GM_ADDR topkExpertIds, GM_ADDR tokensPerExpert, GM_ADDR workspace,
+    GM_ADDR dst, GM_ADDR cuSeqlens, GM_ADDR expertsToCopy, GM_ADDR remoteStats,
+    GM_ADDR plannerStatus, int64_t s, int64_t k, int64_t expertCount,
+    int64_t expertsPerRank, int64_t routeCount, int64_t dispatchedCapacity,
+    uint64_t waitIterations, uint64_t tpePrefixOffset, uint64_t blockHistogramOffset,
+    uint64_t allocPrefixOffset, uint64_t expertOffsetsOffset, uint64_t zOffset,
+    uint64_t groupTotalsOffset, int64_t magic)
+{
+    tilexr_moonep_planner_kernel<<<blockDim, nullptr, stream>>>(
+        commArgs, topkExpertIds, tokensPerExpert, workspace, dst, cuSeqlens,
+        expertsToCopy, remoteStats, plannerStatus, s, k, expertCount, expertsPerRank,
+        routeCount, dispatchedCapacity, waitIterations, tpePrefixOffset,
+        blockHistogramOffset, allocPrefixOffset, expertOffsetsOffset, zOffset,
+        groupTotalsOffset, magic);
+}

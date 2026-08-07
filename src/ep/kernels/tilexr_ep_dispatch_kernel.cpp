@@ -336,14 +336,15 @@ __aicore__ inline GM_ADDR TileXREpDispatchWriteWindow(GM_ADDR sendWindow, GM_ADD
     return sendWindow;
 }
 
-__aicore__ inline void TileXREpPublishUdmaSlots(const __gm__ TileXR::CommArgs *args, GM_ADDR localWindow,
+__aicore__ inline void TileXREpPublishUdmaSlots(const __gm__ TileXR::CommArgs *args,
+    const AscendC::LocalTensor<uint8_t> &wqeScratch, GM_ADDR localWindow,
     int32_t rank, int32_t rankSize, int64_t slotBytes)
 {
     for (int32_t dstRank = 0; dstRank < rankSize; ++dstRank) {
         if (dstRank == rank) {
             continue;
         }
-        TileXR::UDMAPutNbi<uint8_t>(args, dstRank,
+        TileXR::UDMAPutNbi<uint8_t>(args, wqeScratch, dstRank,
             reinterpret_cast<__gm__ uint8_t *>(localWindow + SlotOffset(dstRank, slotBytes)),
             SlotOffset(rank, slotBytes), static_cast<uint32_t>(slotBytes));
         TileXR::UDMAQuiet(args, dstRank);
@@ -351,13 +352,14 @@ __aicore__ inline void TileXREpPublishUdmaSlots(const __gm__ TileXR::CommArgs *a
 }
 
 __aicore__ inline void TileXREpPullUdmaSlots(
-    const __gm__ TileXR::CommArgs *args, GM_ADDR localWindow, int32_t rank, int32_t rankSize, int64_t slotBytes)
+    const __gm__ TileXR::CommArgs *args, const AscendC::LocalTensor<uint8_t> &wqeScratch,
+    GM_ADDR localWindow, int32_t rank, int32_t rankSize, int64_t slotBytes)
 {
     for (int32_t srcRank = 0; srcRank < rankSize; ++srcRank) {
         if (srcRank == rank) {
             continue;
         }
-        TileXR::UDMAGetNbi<uint8_t>(args, srcRank,
+        TileXR::UDMAGetNbi<uint8_t>(args, wqeScratch, srcRank,
             reinterpret_cast<__gm__ uint8_t *>(localWindow + SlotOffset(srcRank, slotBytes)),
             SlotOffset(rank, slotBytes), static_cast<uint32_t>(slotBytes));
         TileXR::UDMAQuiet(args, srcRank);
@@ -390,7 +392,8 @@ __aicore__ inline int32_t TileXREpGlobalDstRankForTp(
 }
 
 __aicore__ inline void TileXREpNotifyUdmaReady(
-    const __gm__ TileXR::CommArgs *args, GM_ADDR localWindow, int32_t rank, int32_t rankSize,
+    const __gm__ TileXR::CommArgs *args, const AscendC::LocalTensor<uint8_t> &wqeScratch,
+    GM_ADDR localWindow, int32_t rank, int32_t rankSize,
     int32_t localRankSize, int64_t totalBytes, int64_t magic, int64_t slotBytes,
     AscendC::TBuf<AscendC::QuePosition::VECCALC> &tBuf)
 {
@@ -401,12 +404,12 @@ __aicore__ inline void TileXREpNotifyUdmaReady(
         if (!TileXREpUsesUdmaPeer(rank, peer, localRankSize)) {
             continue;
         }
-        TileXR::UDMAPutNbi<uint8_t>(args, peer,
+        TileXR::UDMAPutNbi<uint8_t>(args, wqeScratch, peer,
             reinterpret_cast<__gm__ uint8_t *>(localWindow + SlotOffset(peer, slotBytes)),
             static_cast<uint64_t>(UDMARecvWindowOffset(totalBytes) + SlotOffset(rank, slotBytes)),
             static_cast<uint32_t>(slotBytes));
         TileXR::UDMAQuiet(args, peer);
-        TileXR::UDMAPutNbi<uint8_t>(args, peer,
+        TileXR::UDMAPutNbi<uint8_t>(args, wqeScratch, peer,
             reinterpret_cast<__gm__ uint8_t *>(localWindow + UDMAReadyOffset(totalBytes, rank)),
             signalOffset, static_cast<uint32_t>(sizeof(uint64_t)));
         TileXR::UDMAQuiet(args, peer);
@@ -414,7 +417,8 @@ __aicore__ inline void TileXREpNotifyUdmaReady(
 }
 
 __aicore__ inline void TileXREpNotifyAllUdmaReady(
-    const __gm__ TileXR::CommArgs *args, GM_ADDR localWindow, int32_t rank, int32_t rankSize,
+    const __gm__ TileXR::CommArgs *args, const AscendC::LocalTensor<uint8_t> &wqeScratch,
+    GM_ADDR localWindow, int32_t rank, int32_t rankSize,
     int64_t totalBytes, int64_t magic, int64_t slotBytes)
 {
     const uint64_t ready = TileXREpReadyValue(magic);
@@ -423,7 +427,7 @@ __aicore__ inline void TileXREpNotifyAllUdmaReady(
         if (peer == rank) {
             continue;
         }
-        TileXR::UDMAPutSignalNbi<uint8_t>(args, peer,
+        TileXR::UDMAPutSignalNbi<uint8_t>(args, wqeScratch, peer,
             reinterpret_cast<__gm__ uint8_t *>(localWindow + SlotOffset(peer, slotBytes)),
             static_cast<uint64_t>(UDMARecvWindowOffset(totalBytes) + SlotOffset(rank, slotBytes)),
             static_cast<uint32_t>(slotBytes), signalOffset, ready);
@@ -743,7 +747,9 @@ extern "C" __global__ __aicore__ void tilexr_ep_dispatch_kernel(GM_ADDR commArgs
 
         AscendC::TPipe pipe;
         AscendC::TBuf<AscendC::QuePosition::VECCALC> tBuf;
+        AscendC::TBuf<AscendC::QuePosition::VECCALC> udmaWqeBuf;
         pipe.InitBuffer(tBuf, kEpUbBytes);
+        pipe.InitBuffer(udmaWqeBuf, TileXR::TILEXR_UDMA_WQE_SCRATCH_BYTES);
         SyncCollectives sync;
         sync.Init(rank, rankSize, shareAddrs, tBuf);
 
@@ -780,7 +786,8 @@ extern "C" __global__ __aicore__ void tilexr_ep_dispatch_kernel(GM_ADDR commArgs
         }
         TileXREpFlushDispatchSlotHeaders(localWindow, rankSize, slotBytes, tBuf);
         if (useUdmaWindow) {
-            TileXREpPullUdmaSlots(args, localWindow, rank, rankSize, slotBytes);
+            TileXREpPullUdmaSlots(
+                args, udmaWqeBuf.Get<uint8_t>(), localWindow, rank, rankSize, slotBytes);
         } else {
             sync.SetInnerFlag(static_cast<int32_t>(magic), TileXREp::kEpStepDispatchReady);
             for (int32_t peer = 0; peer < rankSize; ++peer) {
@@ -886,7 +893,9 @@ extern "C" __global__ __aicore__ void tilexr_ep_dispatch_cross_node_kernel(GM_AD
 
         AscendC::TPipe pipe;
         AscendC::TBuf<AscendC::QuePosition::VECCALC> tBuf;
+        AscendC::TBuf<AscendC::QuePosition::VECCALC> udmaWqeBuf;
         pipe.InitBuffer(tBuf, kEpUbBytes);
+        pipe.InitBuffer(udmaWqeBuf, TileXR::TILEXR_UDMA_WQE_SCRATCH_BYTES);
 
         GM_ADDR sendWindow = workspaceGM;
         GM_ADDR recvWindow = workspaceGM + UDMARecvWindowOffset(totalBytes);
@@ -930,11 +939,12 @@ extern "C" __global__ __aicore__ void tilexr_ep_dispatch_cross_node_kernel(GM_AD
         }
 
         if (localRankSize <= 1) {
-            TileXREpNotifyAllUdmaReady(args, sendWindow, rank, rankSize, totalBytes, magic, slotBytes);
+            TileXREpNotifyAllUdmaReady(args, udmaWqeBuf.Get<uint8_t>(),
+                sendWindow, rank, rankSize, totalBytes, magic, slotBytes);
             TileXREpWaitAllUdmaReady(workspaceGM, rank, rankSize, totalBytes, magic, tBuf);
         } else {
-            TileXREpNotifyUdmaReady(args, sendWindow, rank, rankSize, localRankSize, totalBytes, magic, slotBytes,
-                tBuf);
+            TileXREpNotifyUdmaReady(args, udmaWqeBuf.Get<uint8_t>(), sendWindow,
+                rank, rankSize, localRankSize, totalBytes, magic, slotBytes, tBuf);
         }
 
         auto epRecvCountsOut = reinterpret_cast<__gm__ int32_t *>(epRecvCountsOutGM);

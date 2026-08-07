@@ -12,6 +12,7 @@ constexpr uint32_t kStatusInvalidRuntime = 2101;
 constexpr uint32_t kStatusInvalidExpert = 2102;
 constexpr uint32_t kStatusLocalExpert = 2103;
 constexpr uint32_t kStatusCqErrorBase = 2200;
+constexpr uint32_t kStatusSubmitErrorBase = 2300;
 
 class PrefetchWeightKernel {
 public:
@@ -41,6 +42,7 @@ public:
         worker_ = static_cast<uint32_t>(get_block_idx()) * subBlockCount +
             static_cast<uint32_t>(get_subblockid());
         workerCount_ = static_cast<uint32_t>(get_block_num()) * subBlockCount;
+        pipe_.InitBuffer(wqeBuf_, TileXR::TILEXR_UDMA_WQE_SCRATCH_BYTES);
     }
 
     __aicore__ inline void Process()
@@ -104,6 +106,7 @@ private:
 
     __aicore__ inline void SubmitReads(uint64_t usedPeers[2], uint32_t &workerStatus)
     {
+        auto wqeScratch = wqeBuf_.Get<uint8_t>();
         const int64_t globalExpertCount =
             static_cast<int64_t>(expertsPerRank_) * rankSize_;
         const int64_t planRow = static_cast<int64_t>(rank_) * expertsPerRank_;
@@ -133,8 +136,12 @@ private:
                     static_cast<uint64_t>(localExpert) * rowBytes_[projection];
                 __gm__ uint8_t *destination = projections_[projection] +
                     static_cast<uint64_t>(expertsPerRank_ + slot) * rowBytes_[projection];
-                TileXR::UDMAGetNbiQp<uint8_t>(args_, owner, worker_, destination,
-                    sourceOffset, rowBytes_[projection]);
+                const uint32_t submitStatus = TileXR::UDMAGetNbiOnQp<uint8_t>(
+                    args_, wqeScratch, owner, worker_, destination, sourceOffset,
+                    rowBytes_[projection]);
+                if (submitStatus != TileXR::TILEXR_UDMA_STATUS_SUCCESS && workerStatus == 0) {
+                    workerStatus = kStatusSubmitErrorBase + (submitStatus & 0xFFU);
+                }
             }
         }
     }
@@ -148,9 +155,9 @@ private:
                 continue;
             }
             completedAny = true;
-            const uint32_t cqStatus = TileXR::UDMAQuietQpStatus(args_, peer, worker_);
+            const uint32_t cqStatus = TileXR::UDMAQuietStatusOnQp(args_, peer, worker_);
             if (cqStatus != 0 && workerStatus == 0) {
-                workerStatus = kStatusCqErrorBase + cqStatus;
+                workerStatus = kStatusCqErrorBase + (cqStatus & 0xFFU);
             }
         }
         if (completedAny) {
@@ -174,6 +181,8 @@ private:
     uint32_t qpNum_ = 0;
     uint32_t worker_ = 0;
     uint32_t workerCount_ = 0;
+    AscendC::TPipe pipe_;
+    AscendC::TBuf<AscendC::QuePosition::VECCALC> wqeBuf_;
 };
 
 } // namespace Kernel
@@ -190,4 +199,17 @@ extern "C" __global__ __aicore__ void tilexr_moonep_prefetch_weight_kernel(
         gateOffset, upOffset, downOffset, gateRowBytes, upRowBytes, downRowBytes,
         rank, rankSize, expertsPerRank, qpNum);
     op.Process();
+}
+
+extern "C" void launch_tilexr_moonep_prefetch_weight_kernel(uint32_t blockDim,
+    void *stream, GM_ADDR commArgs, GM_ADDR expertsToCopy, GM_ADDR gate, GM_ADDR up,
+    GM_ADDR down, GM_ADDR status, uint64_t gateOffset, uint64_t upOffset,
+    uint64_t downOffset, uint32_t gateRowBytes, uint32_t upRowBytes,
+    uint32_t downRowBytes, int32_t rank, int32_t rankSize, int32_t expertsPerRank,
+    uint32_t qpNum)
+{
+    tilexr_moonep_prefetch_weight_kernel<<<blockDim, nullptr, stream>>>(
+        commArgs, expertsToCopy, gate, up, down, status, gateOffset, upOffset,
+        downOffset, gateRowBytes, upRowBytes, downRowBytes, rank, rankSize,
+        expertsPerRank, qpNum);
 }

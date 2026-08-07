@@ -13,14 +13,86 @@ class ReferencePlan:
     remote_stats: tuple[int, ...]
 
 
-def deterministic_all_topk(
-    rank_size: int, tokens_per_rank: int, topk: int, expert_count: int
+def _hash32(value: int) -> int:
+    value &= 0xFFFFFFFF
+    value ^= value >> 16
+    value = (value * 0x7FEB352D) & 0xFFFFFFFF
+    value ^= value >> 15
+    value = (value * 0x846CA68B) & 0xFFFFFFFF
+    return (value ^ (value >> 16)) & 0xFFFFFFFF
+
+
+def deterministic_rank_topk(
+    rank_size: int,
+    tokens_per_rank: int,
+    topk: int,
+    expert_count: int,
+    *,
+    rank: int,
+    pattern: str = "balanced",
+    seed: int = 1234,
 ) -> tuple[int, ...]:
+    if (
+        rank_size <= 0
+        or rank < 0
+        or rank >= rank_size
+        or tokens_per_rank <= 0
+        or topk <= 0
+        or expert_count <= 0
+        or expert_count % rank_size != 0
+    ):
+        raise ValueError("invalid deterministic routing dimensions")
+    experts_per_rank = expert_count // rank_size
     route_count = tokens_per_rank * topk
+    routes = []
+    for token in range(tokens_per_rank):
+        duplicate_base = _hash32(seed + rank * tokens_per_rank + token) % expert_count
+        for topk_index in range(topk):
+            route = token * topk + topk_index
+            if pattern == "balanced":
+                expert = (route + rank * topk) % expert_count
+            elif pattern == "all_local":
+                expert = rank * experts_per_rank + route % experts_per_rank
+            elif pattern == "all_remote":
+                owner = (rank + 1) % rank_size
+                expert = owner * experts_per_rank + route % experts_per_rank
+            elif pattern == "duplicate":
+                expert = duplicate_base
+            elif pattern == "biased":
+                expert = (
+                    route % experts_per_rank
+                    if (route + rank) % 5 != 0
+                    else _hash32(seed + rank * route_count + route) % expert_count
+                )
+            elif pattern == "sparse":
+                expert = 0
+            else:
+                raise ValueError(f"unsupported deterministic route pattern: {pattern}")
+            routes.append(expert)
+    return tuple(routes)
+
+
+def deterministic_all_topk(
+    rank_size: int,
+    tokens_per_rank: int,
+    topk: int,
+    expert_count: int,
+    *,
+    pattern: str = "balanced",
+    seed: int = 1234,
+) -> tuple[int, ...]:
     return tuple(
-        (route + source * topk) % expert_count
-        for source in range(rank_size)
-        for route in range(route_count)
+        expert
+        for rank in range(rank_size)
+        for expert in deterministic_rank_topk(
+            rank_size,
+            tokens_per_rank,
+            topk,
+            expert_count,
+            rank=rank,
+            pattern=pattern,
+            seed=seed,
+        )
     )
 
 

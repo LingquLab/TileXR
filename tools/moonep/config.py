@@ -9,7 +9,31 @@ from typing import Iterable, Mapping
 
 
 _DTYPES = {"bfloat16", "float16"}
+_ROUTE_PATTERNS = {
+    "all_local",
+    "all_remote",
+    "balanced",
+    "biased",
+    "duplicate",
+    "sparse",
+}
 _CASE_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
+def parse_expert_shape(value: object) -> tuple[int, ...]:
+    if isinstance(value, str):
+        parts = [item.strip() for item in value.lower().split("x") if item.strip()]
+    elif isinstance(value, (list, tuple)):
+        parts = list(value)
+    else:
+        raise ValueError("expert_shape must be a list or an AxB[xC] string")
+    try:
+        shape = tuple(int(item) for item in parts)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("expert_shape dimensions must be integers") from exc
+    if not 1 <= len(shape) <= 3 or any(dimension <= 0 for dimension in shape):
+        raise ValueError("expert_shape must contain one to three positive dimensions")
+    return shape
 
 
 @dataclass(frozen=True)
@@ -24,6 +48,8 @@ class BenchmarkCase:
     warmup: int = 5
     iterations: int = 20
     correctness: bool = True
+    expert_shape: tuple[int, ...] | None = None
+    route_pattern: str = "balanced"
 
     def __post_init__(self) -> None:
         if (
@@ -43,6 +69,13 @@ class BenchmarkCase:
             raise ValueError("warmup must be non-negative and iterations must be positive")
         if self.topk > self.expert_count:
             raise ValueError("topk cannot exceed expert_count")
+        shape = (self.hidden_size,) if self.expert_shape is None else self.expert_shape
+        object.__setattr__(self, "expert_shape", parse_expert_shape(shape))
+        if self.route_pattern not in _ROUTE_PATTERNS:
+            raise ValueError(
+                f"route_pattern must be one of {sorted(_ROUTE_PATTERNS)}, "
+                f"got {self.route_pattern}"
+            )
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, object]) -> "BenchmarkCase":
@@ -55,6 +88,8 @@ class BenchmarkCase:
             "iters": "iterations",
         }
         normalized = {aliases.get(key, key): value for key, value in raw.items()}
+        if "expert_shape" in normalized:
+            normalized["expert_shape"] = parse_expert_shape(normalized["expert_shape"])
         allowed = set(cls.__dataclass_fields__)
         unknown = sorted(set(normalized) - allowed)
         if unknown:
@@ -62,7 +97,9 @@ class BenchmarkCase:
         return cls(**normalized)
 
     def as_dict(self) -> dict[str, object]:
-        return asdict(self)
+        value = asdict(self)
+        value["expert_shape"] = list(self.expert_shape or ())
+        return value
 
 
 def load_cases(path: str | Path) -> list[BenchmarkCase]:
@@ -104,6 +141,8 @@ def apply_overrides(case: BenchmarkCase, args: argparse.Namespace) -> BenchmarkC
         "warmup",
         "iterations",
         "correctness",
+        "expert_shape",
+        "route_pattern",
     ):
         value = getattr(args, name, None)
         if value is not None:
@@ -118,7 +157,9 @@ def build_case_parser(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--topk", type=int, default=None)
     parser.add_argument("--expert-count", type=int, default=None)
     parser.add_argument("--hidden-size", type=int, default=None)
+    parser.add_argument("--expert-shape", type=parse_expert_shape, default=None)
     parser.add_argument("--dtype", choices=sorted(_DTYPES), default=None)
+    parser.add_argument("--route-pattern", choices=sorted(_ROUTE_PATTERNS), default=None)
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--warmup", type=int, default=None)
     parser.add_argument("--iterations", type=int, default=None)

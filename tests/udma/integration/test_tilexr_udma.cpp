@@ -6,6 +6,7 @@
  */
 
 #include <cstdlib>
+#include <cstdint>
 #include <iostream>
 #include <unistd.h>
 
@@ -157,6 +158,35 @@ void test_comm_args_device_pointer(TileXRCommPtr comm)
     cout << "CommArgs device pointer: " << static_cast<void*>(commArgsDev) << endl;
 }
 
+void test_udma_qp_count(TileXRCommPtr comm)
+{
+    TEST_CASE("UDMA QP Count");
+
+    uint32_t qpCount = UINT32_MAX;
+    int ret = TileXRUDMAGetQpCount(nullptr, &qpCount);
+    TEST_ASSERT(ret == TileXR::TILEXR_ERROR_PARA_CHECK_FAIL,
+        "TileXRUDMAGetQpCount should reject a null communicator");
+    TEST_ASSERT(qpCount == 0, "A failed QP query should clear its output");
+
+    ret = TileXRUDMAGetQpCount(comm, nullptr);
+    TEST_ASSERT(ret == TileXR::TILEXR_ERROR_PARA_CHECK_FAIL,
+        "TileXRUDMAGetQpCount should reject a null output");
+
+    TileXR::CommArgs* commArgs = get_host_comm_args(comm);
+    qpCount = UINT32_MAX;
+    ret = TileXRUDMAGetQpCount(comm, &qpCount);
+    const bool udmaEnabled = commArgs != nullptr &&
+        (commArgs->extraFlag & TileXR::ExtraFlag::UDMA) != 0;
+    if (udmaEnabled) {
+        TEST_ASSERT(ret == TileXR::TILEXR_SUCCESS, "Enabled UDMA should report its QP count");
+        TEST_ASSERT(qpCount > 0, "Enabled UDMA should report at least one QP");
+    } else {
+        TEST_ASSERT(ret == TileXR::TILEXR_ERROR_NOT_SUPPORT,
+            "Unavailable UDMA should return not-supported");
+        TEST_ASSERT(qpCount == 0, "Unavailable UDMA should report zero QPs");
+    }
+}
+
 void test_multi_rank_peer_visibility(TileXRCommPtr comm, int rankSize)
 {
     TEST_CASE("Multi-Rank Peer Visibility");
@@ -215,6 +245,7 @@ int main(int argc, char** argv)
     if (comm != nullptr) {
         test_comm_args_initialization(comm, rank, rankSize);
         test_comm_args_device_pointer(comm);
+        test_udma_qp_count(comm);
         test_multi_rank_peer_visibility(comm, rankSize);
     }
     destroy_comm(comm);

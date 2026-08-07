@@ -173,6 +173,7 @@ class FakeRuntime:
         self.world_size = world_size
         self.calls = []
         self.closed = False
+        self.udma_qp_count = 1
         self.capabilities = NativeCapabilities(
             abi_version=2,
             stage_mask=5,

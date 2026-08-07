@@ -10,6 +10,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <limits>
 #include <string>
 #include <thread>
 #include <vector>
@@ -26,26 +27,81 @@ extern void launch_tilexr_udma_all_gather(
     uint32_t blockDim, void* stream, GM_ADDR commArgs, GM_ADDR data, GM_ADDR debug, int32_t elementsPerRank);
 extern void launch_tilexr_udma_put_signal(
     uint32_t blockDim, void* stream, GM_ADDR commArgs, GM_ADDR data, GM_ADDR signals, GM_ADDR debug,
-    int32_t elementsPerRank, uint64_t signal);
+    int32_t elementsPerRank, uint64_t signalByteOffset, uint64_t signal);
 
 namespace {
 constexpr int32_t kDefaultElementsPerRank = 16;
 constexpr uint64_t kSignalValue = 1000;
 constexpr size_t kDebugWords = 16;
+constexpr int32_t kDemoMagic = 0x5444554d;
+constexpr size_t kDebugQpCountWord = 5;
+constexpr size_t kDebugQpStatusBaseWord = 6;
 constexpr int kDefaultCommPort = 10067;
 constexpr int kDemoBarrierPortOffset = 97;
-constexpr size_t kUdmaRegistrationAlignment = 2 * 1024 * 1024;
+constexpr size_t kDefaultRegisteredBytes = 2097152;
+constexpr uint32_t kMaxExpectedQpCount = 8;
 constexpr int kConnectRetryCount = 500;
 constexpr int kConnectRetrySleepMs = 10;
+static_assert(kDebugQpStatusBaseWord + kMaxExpectedQpCount <= kDebugWords,
+    "UDMA demo debug buffer must hold every per-QP status");
 
 struct BarrierEndpoint {
+    std::string host;
     uint16_t port;
+    bool valid;
 };
 
 int GetEnvInt(const char* name, int defaultValue)
 {
     const char* value = std::getenv(name);
     return value == nullptr ? defaultValue : std::atoi(value);
+}
+
+bool ParseUnsignedEnv(const char* name, uint64_t defaultValue, uint64_t maxValue, uint64_t& result)
+{
+    const char* value = std::getenv(name);
+    if (value == nullptr) {
+        result = defaultValue;
+        return true;
+    }
+    if (value[0] == '\0') {
+        std::cerr << "ERROR: " << name << " must be a non-empty decimal integer" << std::endl;
+        return false;
+    }
+    for (const char* cursor = value; *cursor != '\0'; ++cursor) {
+        if (*cursor < '0' || *cursor > '9') {
+            std::cerr << "ERROR: " << name << " must be a decimal integer, got '" << value << "'" << std::endl;
+            return false;
+        }
+    }
+
+    errno = 0;
+    char* end = nullptr;
+    unsigned long long parsed = std::strtoull(value, &end, 10);
+    if (errno == ERANGE || end == value || *end != '\0' || parsed > maxValue) {
+        std::cerr << "ERROR: " << name << " is out of range, got '" << value << "'" << std::endl;
+        return false;
+    }
+    result = static_cast<uint64_t>(parsed);
+    return true;
+}
+
+bool CheckedMultiply(size_t lhs, size_t rhs, size_t& result)
+{
+    if (lhs != 0 && rhs > std::numeric_limits<size_t>::max() / lhs) {
+        return false;
+    }
+    result = lhs * rhs;
+    return true;
+}
+
+bool CheckedAdd(size_t lhs, size_t rhs, size_t& result)
+{
+    if (rhs > std::numeric_limits<size_t>::max() - lhs) {
+        return false;
+    }
+    result = lhs + rhs;
+    return true;
 }
 
 int GetDeviceIdFromEnv(int rank, int npuCount, int firstNpu)
@@ -151,12 +207,24 @@ bool CopyDeviceToHost(int rank, void* dst, size_t dstSize, const void* src, size
 
 BarrierEndpoint GetBarrierEndpoint()
 {
+    std::string host = "127.0.0.1";
     int basePort = kDefaultCommPort;
-    const char* commId = std::getenv("TILEXR_COMM_ID");
-    if (commId != nullptr) {
-        std::string value(commId);
+    const char* configured = std::getenv("TILEXR_DEMO_BARRIER_ADDR");
+    if (configured == nullptr || configured[0] == '\0') {
+        configured = std::getenv("TILEXR_COMM_ID");
+    }
+    if (configured != nullptr && configured[0] != '\0') {
+        std::string value(configured);
         size_t colon = value.rfind(':');
-        if (colon != std::string::npos && colon + 1 < value.size()) {
+        if (colon == std::string::npos || colon == 0 || colon + 1 >= value.size()) {
+            return BarrierEndpoint{"", 0, false};
+        }
+        host = value.substr(0, colon);
+        in_addr parsedAddr {};
+        if (inet_pton(AF_INET, host.c_str(), &parsedAddr) != 1) {
+            return BarrierEndpoint{"", 0, false};
+        }
+        if (colon + 1 < value.size()) {
             basePort = std::atoi(value.c_str() + colon + 1);
         }
     }
@@ -164,7 +232,7 @@ BarrierEndpoint GetBarrierEndpoint()
     if (barrierPort <= 0 || barrierPort > 65535) {
         barrierPort = kDefaultCommPort + kDemoBarrierPortOffset;
     }
-    return BarrierEndpoint{static_cast<uint16_t>(barrierPort)};
+    return BarrierEndpoint{host, static_cast<uint16_t>(barrierPort), true};
 }
 
 bool SendAll(int fd, const void* data, size_t bytes)
@@ -220,7 +288,7 @@ int CreateBarrierServer(uint16_t port)
     }
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_addr.s_addr = htonl(INADDR_ANY);
     addr.sin_port = htons(port);
     if (bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0 ||
         listen(fd, SOMAXCONN) != 0) {
@@ -230,11 +298,13 @@ int CreateBarrierServer(uint16_t port)
     return fd;
 }
 
-int ConnectBarrierServer(uint16_t port)
+int ConnectBarrierServer(const std::string& host, uint16_t port)
 {
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (inet_pton(AF_INET, host.c_str(), &addr.sin_addr) != 1) {
+        return -1;
+    }
     addr.sin_port = htons(port);
 
     for (int attempt = 0; attempt < kConnectRetryCount; ++attempt) {
@@ -251,21 +321,33 @@ int ConnectBarrierServer(uint16_t port)
     return -1;
 }
 
-bool DemoBarrierAll(int rank, int rankSize, const std::string& step)
+bool DemoBarrierAll(
+    int rank, int rankSize, const std::string& step, bool localSuccess = true, bool* allSucceeded = nullptr)
 {
     if (rankSize <= 1) {
+        if (allSucceeded != nullptr) {
+            *allSucceeded = localSuccess;
+        }
         return true;
     }
 
     BarrierEndpoint endpoint = GetBarrierEndpoint();
-    PrintStatus(rank, "demo tcp barrier begin: " + step + " port=" + std::to_string(endpoint.port));
-    constexpr uint8_t kArrive = 1;
-    constexpr uint8_t kRelease = 2;
+    if (!endpoint.valid) {
+        std::cerr << "[rank " << rank << "] ERROR: invalid TILEXR_DEMO_BARRIER_ADDR" << std::endl;
+        return false;
+    }
+    PrintStatus(rank, "demo tcp barrier begin: " + step + " endpoint=" + endpoint.host + ":" +
+        std::to_string(endpoint.port));
+    constexpr uint8_t kArriveFailure = 0;
+    constexpr uint8_t kArriveSuccess = 1;
+    constexpr uint8_t kReleaseSuccess = 2;
+    constexpr uint8_t kReleaseFailure = 3;
+    bool globalSuccess = localSuccess;
 
     if (rank == 0) {
         int serverFd = CreateBarrierServer(endpoint.port);
         if (serverFd < 0) {
-            std::cerr << "[rank " << rank << "] ERROR: failed to create demo barrier server on 127.0.0.1:"
+            std::cerr << "[rank " << rank << "] ERROR: failed to create demo barrier server on 0.0.0.0:"
                       << endpoint.port << ", errno=" << errno << std::endl;
             return false;
         }
@@ -279,15 +361,18 @@ bool DemoBarrierAll(int rank, int rankSize, const std::string& step)
                 break;
             }
             uint8_t token = 0;
-            if (!RecvAll(clientFd, &token, sizeof(token)) || token != kArrive) {
+            if (!RecvAll(clientFd, &token, sizeof(token)) ||
+                (token != kArriveSuccess && token != kArriveFailure)) {
                 close(clientFd);
                 ok = false;
                 break;
             }
+            globalSuccess = globalSuccess && token == kArriveSuccess;
             clients.push_back(clientFd);
         }
+        const uint8_t release = globalSuccess ? kReleaseSuccess : kReleaseFailure;
         for (int clientFd : clients) {
-            ok = SendAll(clientFd, &kRelease, sizeof(kRelease)) && ok;
+            ok = SendAll(clientFd, &release, sizeof(release)) && ok;
             close(clientFd);
         }
         close(serverFd);
@@ -296,48 +381,90 @@ bool DemoBarrierAll(int rank, int rankSize, const std::string& step)
             return false;
         }
     } else {
-        int fd = ConnectBarrierServer(endpoint.port);
+        int fd = ConnectBarrierServer(endpoint.host, endpoint.port);
         if (fd < 0) {
-            std::cerr << "[rank " << rank << "] ERROR: failed to connect demo barrier on 127.0.0.1:"
+            std::cerr << "[rank " << rank << "] ERROR: failed to connect demo barrier on " << endpoint.host << ":"
                       << endpoint.port << std::endl;
             return false;
         }
         uint8_t release = 0;
-        bool ok = SendAll(fd, &kArrive, sizeof(kArrive)) &&
-            RecvAll(fd, &release, sizeof(release)) && release == kRelease;
+        const uint8_t arrive = localSuccess ? kArriveSuccess : kArriveFailure;
+        bool ok = SendAll(fd, &arrive, sizeof(arrive)) && RecvAll(fd, &release, sizeof(release)) &&
+            (release == kReleaseSuccess || release == kReleaseFailure);
         close(fd);
         if (!ok) {
             std::cerr << "[rank " << rank << "] ERROR: demo barrier failed at " << step << std::endl;
             return false;
         }
+        globalSuccess = release == kReleaseSuccess;
+    }
+    if (allSucceeded != nullptr) {
+        *allSucceeded = globalSuccess;
     }
     PrintStatus(rank, "demo tcp barrier end: " + step);
     return true;
 }
 
-bool ValidateData(int rank, int rankSize, const std::vector<int32_t>& data, int32_t elementsPerRank)
+int32_t ExpectedDataValue(uint32_t qpIdx, int srcRank)
+{
+    return static_cast<int32_t>(100000U * qpIdx + 1000U + static_cast<uint32_t>(srcRank));
+}
+
+bool ValidateData(
+    int rank, int rankSize, uint32_t qpCount, const std::vector<int32_t>& data, int32_t elementsPerRank)
 {
     bool ok = true;
-    for (int srcRank = 0; srcRank < rankSize; ++srcRank) {
-        int32_t expected = 1000 + srcRank;
-        for (int32_t i = 0; i < elementsPerRank; ++i) {
-            size_t offset = static_cast<size_t>(srcRank) * elementsPerRank + i;
-            if (data[offset] != expected) {
-                std::cerr << "[rank " << rank << "] DATA MISMATCH at segment=" << srcRank
-                          << " elem=" << i << " offset=" << offset
-                          << " got=" << data[offset] << " expected=" << expected << std::endl;
-                ok = false;
-                break;
+    const size_t elementsPerQp = static_cast<size_t>(rankSize) * elementsPerRank;
+    for (uint32_t qpIdx = 0; qpIdx < qpCount; ++qpIdx) {
+        for (int srcRank = 0; srcRank < rankSize; ++srcRank) {
+            const int32_t expected = ExpectedDataValue(qpIdx, srcRank);
+            for (int32_t i = 0; i < elementsPerRank; ++i) {
+                const size_t offset = static_cast<size_t>(qpIdx) * elementsPerQp +
+                    static_cast<size_t>(srcRank) * elementsPerRank + i;
+                if (data[offset] != expected) {
+                    std::cerr << "[rank " << rank << "] DATA MISMATCH at qp=" << qpIdx
+                              << " segment=" << srcRank << " elem=" << i << " offset=" << offset
+                              << " got=" << data[offset] << " expected=" << expected << std::endl;
+                    ok = false;
+                    break;
+                }
             }
         }
     }
 
     std::cout << "[rank " << rank << "] result sample:";
-    for (int srcRank = 0; srcRank < rankSize; ++srcRank) {
-        size_t offset = static_cast<size_t>(srcRank) * elementsPerRank;
-        std::cout << " seg" << srcRank << "=" << data[offset];
+    for (uint32_t qpIdx = 0; qpIdx < qpCount; ++qpIdx) {
+        for (int srcRank = 0; srcRank < rankSize; ++srcRank) {
+            const size_t offset = static_cast<size_t>(qpIdx) * elementsPerQp +
+                static_cast<size_t>(srcRank) * elementsPerRank;
+            std::cout << " qp" << qpIdx << "/seg" << srcRank << "=" << data[offset];
+        }
     }
     std::cout << std::endl;
+    return ok;
+}
+
+bool ValidateKernelDebug(
+    int rank, int rankSize, uint32_t qpCount, int32_t elementsPerRank, const std::vector<int32_t>& debug)
+{
+    if (debug.size() < kDebugQpStatusBaseWord + qpCount) {
+        std::cerr << "[rank " << rank << "] ERROR: debug buffer is too small for " << qpCount << " QPs"
+                  << std::endl;
+        return false;
+    }
+    bool ok = debug[0] == kDemoMagic && debug[1] == rank && debug[2] == rankSize && debug[3] == 1 &&
+        debug[4] == elementsPerRank && debug[kDebugQpCountWord] == static_cast<int32_t>(qpCount);
+    std::cout << "[rank " << rank << "] per-QP completion status:";
+    for (uint32_t qpIdx = 0; qpIdx < qpCount; ++qpIdx) {
+        const uint32_t status = static_cast<uint32_t>(debug[kDebugQpStatusBaseWord + qpIdx]);
+        std::cout << " qp" << qpIdx << "=" << status;
+        ok = status == 0U && ok;
+    }
+    std::cout << std::endl;
+    if (!ok) {
+        std::cerr << "[rank " << rank << "] ERROR: invalid kernel metadata or per-QP completion status"
+                  << std::endl;
+    }
     return ok;
 }
 
@@ -362,6 +489,9 @@ bool ValidateSignals(int rank, int rankSize, const std::vector<uint64_t>& signal
 void Cleanup(
     TileXRCommPtr comm, aclrtStream stream, void* registeredMemory, int32_t* debug, int rank, int deviceId)
 {
+    if (comm != nullptr) {
+        CheckTileXR(rank, "TileXRCommDestroy", TileXRCommDestroy(comm));
+    }
     if (registeredMemory != nullptr) {
         PrintStatus(rank, "aclrtFree registered memory");
         aclrtFree(registeredMemory);
@@ -369,9 +499,6 @@ void Cleanup(
     if (debug != nullptr) {
         PrintStatus(rank, "aclrtFree debug");
         aclrtFree(debug);
-    }
-    if (comm != nullptr) {
-        CheckTileXR(rank, "TileXRCommDestroy", TileXRCommDestroy(comm));
     }
     if (stream != nullptr) {
         CheckAcl(rank, "aclrtDestroyStream", aclrtDestroyStream(stream));
@@ -386,11 +513,47 @@ int main(int argc, char** argv)
     int argIndex = 1;
     int rankSize = argc > argIndex ? std::atoi(argv[argIndex++]) : GetRankSizeFromEnv();
     int rank = argc > argIndex ? std::atoi(argv[argIndex++]) : GetRankFromEnv();
-    int testType = argc > argIndex ? std::atoi(argv[argIndex++]) : 0;
-    int32_t elementsPerRank = argc > argIndex ? std::atoi(argv[argIndex++]) : kDefaultElementsPerRank;
+    int testType = argc > argIndex ? std::atoi(argv[argIndex++]) : GetEnvInt("TILEXR_DEMO_TEST_TYPE", 0);
+    int32_t elementsPerRank = argc > argIndex ? std::atoi(argv[argIndex++]) :
+        GetEnvInt("TILEXR_DEMO_ELEMENTS_PER_RANK", kDefaultElementsPerRank);
     int npuCount = argc > argIndex ? std::atoi(argv[argIndex++]) : GetEnvInt("TILEXR_DEMO_NPUS", 8);
     int firstNpu = argc > argIndex ? std::atoi(argv[argIndex++]) : GetEnvInt("TILEXR_DEMO_FIRST_NPU", 0);
+
+    uint64_t expectUdmaValue = 0;
+    uint64_t expectedQpCountValue = 0;
+    uint64_t registeredBytesValue = 0;
+    uint64_t reregisterValue = 0;
+    if (!ParseUnsignedEnv("TILEXR_DEMO_EXPECT_UDMA", 1, 1, expectUdmaValue) ||
+        !ParseUnsignedEnv("TILEXR_DEMO_EXPECT_QP_COUNT", expectUdmaValue == 0 ? 0 : 1,
+            kMaxExpectedQpCount, expectedQpCountValue) ||
+        !ParseUnsignedEnv("TILEXR_DEMO_REGISTERED_BYTES", kDefaultRegisteredBytes,
+            static_cast<uint64_t>(std::numeric_limits<size_t>::max()), registeredBytesValue) ||
+        !ParseUnsignedEnv("TILEXR_DEMO_REREGISTER", 1, 1, reregisterValue)) {
+        return 2;
+    }
+    const bool expectUdma = expectUdmaValue != 0;
+    const uint32_t expectedQpCount = static_cast<uint32_t>(expectedQpCountValue);
+    const size_t registeredBytes = static_cast<size_t>(registeredBytesValue);
+    const bool reregister = reregisterValue != 0;
+    if ((expectUdma && expectedQpCount == 0) || (!expectUdma && expectedQpCount != 0)) {
+        std::cerr << "ERROR: TILEXR_DEMO_EXPECT_QP_COUNT must be positive when UDMA is expected and zero "
+                  << "when UDMA is expected to be unavailable" << std::endl;
+        return 2;
+    }
+    if (registeredBytes == 0) {
+        std::cerr << "ERROR: TILEXR_DEMO_REGISTERED_BYTES must be positive" << std::endl;
+        return 2;
+    }
+    if (rankSize <= 0 || rank < 0 || rank >= rankSize || elementsPerRank <= 0 || npuCount <= 0 || firstNpu < 0 ||
+        testType < 0 || testType > 1) {
+        std::cerr << "ERROR: invalid rank, rank size, test type, element count, or NPU count" << std::endl;
+        return 2;
+    }
     int deviceId = GetDeviceIdFromEnv(rank, npuCount, firstNpu);
+    if (deviceId < 0) {
+        std::cerr << "ERROR: resolved NPU device id must be non-negative" << std::endl;
+        return 2;
+    }
 
     std::cout << "========================================" << std::endl;
     std::cout << "  TileXR UDMA Communication Demo" << std::endl;
@@ -398,6 +561,9 @@ int main(int argc, char** argv)
     std::cout << "[rank " << rank << "] argv: rankSize=" << rankSize << " rank=" << rank
               << " testType=" << testType << " elementsPerRank=" << elementsPerRank
               << " npuCount=" << npuCount << " firstNpu=" << firstNpu << std::endl;
+    std::cout << "[rank " << rank << "] validation: expectUDMA=" << expectUdma
+              << " expectedQpCount=" << expectedQpCount << " registeredBytes=" << registeredBytes
+              << " reregister=" << reregister << std::endl;
     std::cout << "[rank " << rank << "] PID=" << getpid()
               << " TILEXR_COMM_ID=" << (std::getenv("TILEXR_COMM_ID") ? std::getenv("TILEXR_COMM_ID") : "<unset>")
               << " LD_LIBRARY_PATH=" << (std::getenv("LD_LIBRARY_PATH") ? std::getenv("LD_LIBRARY_PATH") : "<unset>")
@@ -439,20 +605,69 @@ int main(int argc, char** argv)
     }
     PrintCommArgs(rank, *commArgsHost, commArgsDev);
 
-    if ((commArgsHost->extraFlag & TileXR::ExtraFlag::UDMA) == 0 || commArgsHost->udmaInfoPtr == nullptr) {
+    uint32_t actualQpCount = std::numeric_limits<uint32_t>::max();
+    int qpCountRet = TileXRUDMAGetQpCount(comm, &actualQpCount);
+    const bool udmaFlagPublished = (commArgsHost->extraFlag & TileXR::ExtraFlag::UDMA) != 0;
+    const bool udmaInfoPublished = commArgsHost->udmaInfoPtr != nullptr;
+    std::cout << "[rank " << rank << "] TileXRUDMAGetQpCount ret=" << qpCountRet
+              << " qpCount=" << actualQpCount << " flagPublished=" << udmaFlagPublished
+              << " infoPublished=" << udmaInfoPublished << std::endl;
+
+    if (!expectUdma) {
+        if (udmaFlagPublished || udmaInfoPublished || qpCountRet != TileXR::TILEXR_ERROR_NOT_SUPPORT ||
+            actualQpCount != 0) {
+            std::cerr << "[rank " << rank << "] ERROR: expected UDMA to be unavailable without a published "
+                      << "capability, ret=" << qpCountRet << " qpCount=" << actualQpCount << std::endl;
+            Cleanup(comm, stream, registeredMemory, debug, rank, deviceId);
+            return 1;
+        }
+        std::cout << "[rank " << rank
+                  << "] TileXR UDMA unavailable as expected: capability unpublished, not-supported, qpCount=0"
+                  << std::endl;
+        Cleanup(comm, stream, registeredMemory, debug, rank, deviceId);
+        return 0;
+    }
+
+    if (!udmaFlagPublished || !udmaInfoPublished) {
         std::cerr << "[rank " << rank << "] ERROR: TileXR UDMA is not enabled. "
                   << "Check A5/Ascend950 hardware support, CANN/driver setup, and LD_LIBRARY_PATH." << std::endl;
         Cleanup(comm, stream, registeredMemory, debug, rank, deviceId);
         return 1;
     }
+    if (qpCountRet != TileXR::TILEXR_SUCCESS || actualQpCount != expectedQpCount) {
+        std::cerr << "[rank " << rank << "] ERROR: unexpected UDMA QP count, ret=" << qpCountRet
+                  << " got=" << actualQpCount << " expected=" << expectedQpCount << std::endl;
+        Cleanup(comm, stream, registeredMemory, debug, rank, deviceId);
+        return 1;
+    }
+    PrintStatus(rank, "TileXR UDMA QP count matched expected value " + std::to_string(expectedQpCount));
 
-    size_t dataCount = static_cast<size_t>(rankSize) * elementsPerRank;
-    size_t dataBytes = dataCount * sizeof(int32_t);
-    size_t signalBytes = static_cast<size_t>(rankSize) * sizeof(uint64_t);
-    size_t signalOffset = dataBytes;
-    size_t payloadBytes = dataBytes + signalBytes;
-    size_t registeredBytes = ((payloadBytes + kUdmaRegistrationAlignment - 1) / kUdmaRegistrationAlignment) *
-        kUdmaRegistrationAlignment;
+    size_t elementsPerQp = 0;
+    size_t dataCount = 0;
+    size_t segmentBytes = 0;
+    size_t dataBytes = 0;
+    size_t signalBytes = 0;
+    size_t signalOffset = 0;
+    size_t payloadBytes = 0;
+    if (!CheckedMultiply(static_cast<size_t>(rankSize), static_cast<size_t>(elementsPerRank), elementsPerQp) ||
+        !CheckedMultiply(static_cast<size_t>(actualQpCount), elementsPerQp, dataCount) ||
+        !CheckedMultiply(static_cast<size_t>(elementsPerRank), sizeof(int32_t), segmentBytes) ||
+        segmentBytes > std::numeric_limits<uint32_t>::max() ||
+        !CheckedMultiply(dataCount, sizeof(int32_t), dataBytes) ||
+        !CheckedMultiply(static_cast<size_t>(rankSize), sizeof(uint64_t), signalBytes) ||
+        !CheckedAdd(dataBytes, (alignof(uint64_t) - dataBytes % alignof(uint64_t)) % alignof(uint64_t),
+            signalOffset) ||
+        !CheckedAdd(signalOffset, signalBytes, payloadBytes)) {
+        std::cerr << "[rank " << rank << "] ERROR: demo payload size overflow" << std::endl;
+        Cleanup(comm, stream, registeredMemory, debug, rank, deviceId);
+        return 1;
+    }
+    if (registeredBytes < payloadBytes) {
+        std::cerr << "[rank " << rank << "] ERROR: TILEXR_DEMO_REGISTERED_BYTES=" << registeredBytes
+                  << " is smaller than payloadBytes=" << payloadBytes << std::endl;
+        Cleanup(comm, stream, registeredMemory, debug, rank, deviceId);
+        return 1;
+    }
     if (!CheckAcl(rank, "aclrtMalloc debug", aclrtMalloc(reinterpret_cast<void**>(&debug),
             kDebugWords * sizeof(int32_t), ACL_MEM_MALLOC_HUGE_FIRST)) ||
         !CheckAcl(rank, "aclrtMalloc registered memory", aclrtMalloc(&registeredMemory,
@@ -474,16 +689,17 @@ int main(int argc, char** argv)
     PrintCommArgs(rank, *commArgsHost, commArgsDev);
 
     std::vector<int32_t> hostData(dataCount, -1);
-    std::fill(hostData.begin() + static_cast<size_t>(rank) * elementsPerRank,
-              hostData.begin() + static_cast<size_t>(rank + 1) * elementsPerRank,
-              1000 + rank);
+    for (uint32_t qpIdx = 0; qpIdx < actualQpCount; ++qpIdx) {
+        const size_t begin = static_cast<size_t>(qpIdx) * elementsPerQp +
+            static_cast<size_t>(rank) * elementsPerRank;
+        std::fill(hostData.begin() + begin, hostData.begin() + begin + elementsPerRank,
+            ExpectedDataValue(qpIdx, rank));
+    }
     std::vector<uint64_t> hostSignals(static_cast<size_t>(rankSize), 0);
     std::vector<int32_t> hostDebug(kDebugWords, 0);
 
-    if (!CopyHostToDevice(rank, data, dataCount * sizeof(int32_t),
-            hostData.data(), dataCount * sizeof(int32_t), "data") ||
-        !CopyHostToDevice(rank, signals, hostSignals.size() * sizeof(uint64_t),
-            hostSignals.data(), hostSignals.size() * sizeof(uint64_t), "signals") ||
+    if (!CopyHostToDevice(rank, data, dataBytes, hostData.data(), dataBytes, "data") ||
+        !CopyHostToDevice(rank, signals, signalBytes, hostSignals.data(), signalBytes, "signals") ||
         !CopyHostToDevice(rank, debug, hostDebug.size() * sizeof(int32_t),
             hostDebug.data(), hostDebug.size() * sizeof(int32_t), "debug")) {
         if (udmaRegistered) {
@@ -504,7 +720,7 @@ int main(int argc, char** argv)
     if (testType == 1) {
         launch_tilexr_udma_put_signal(
             1, stream, commArgsDev, reinterpret_cast<GM_ADDR>(data), reinterpret_cast<GM_ADDR>(signals),
-            reinterpret_cast<GM_ADDR>(debug), elementsPerRank, kSignalValue);
+            reinterpret_cast<GM_ADDR>(debug), elementsPerRank, signalOffset, kSignalValue);
     } else {
         launch_tilexr_udma_all_gather(
             1, stream, commArgsDev, reinterpret_cast<GM_ADDR>(data), reinterpret_cast<GM_ADDR>(debug),
@@ -525,10 +741,8 @@ int main(int argc, char** argv)
         return 1;
     }
 
-    if (!CopyDeviceToHost(rank, hostData.data(), dataCount * sizeof(int32_t),
-            data, dataCount * sizeof(int32_t), "data") ||
-        !CopyDeviceToHost(rank, hostSignals.data(), hostSignals.size() * sizeof(uint64_t),
-            signals, hostSignals.size() * sizeof(uint64_t), "signals") ||
+    if (!CopyDeviceToHost(rank, hostData.data(), dataBytes, data, dataBytes, "data") ||
+        !CopyDeviceToHost(rank, hostSignals.data(), signalBytes, signals, signalBytes, "signals") ||
         !CopyDeviceToHost(rank, hostDebug.data(), hostDebug.size() * sizeof(int32_t),
             debug, hostDebug.size() * sizeof(int32_t), "debug")) {
         if (udmaRegistered) {
@@ -539,19 +753,66 @@ int main(int argc, char** argv)
     }
 
     std::cout << "[rank " << rank << "] debug words:";
-    for (size_t i = 0; i < std::min<size_t>(5, hostDebug.size()); ++i) {
+    for (size_t i = 0; i < std::min(kDebugQpStatusBaseWord + actualQpCount, hostDebug.size()); ++i) {
         std::cout << " d" << i << "=" << hostDebug[i];
     }
     std::cout << std::endl;
 
-    bool ok = ValidateData(rank, rankSize, hostData, elementsPerRank);
+    bool ok = ValidateKernelDebug(rank, rankSize, actualQpCount, elementsPerRank, hostDebug);
+    ok = ValidateData(rank, rankSize, actualQpCount, hostData, elementsPerRank) && ok;
     if (testType == 1) {
         ok = ValidateSignals(rank, rankSize, hostSignals) && ok;
     }
 
+    bool allRanksValidated = false;
+    if (!DemoBarrierAll(rank, rankSize, "all ranks validated demo data", ok, &allRanksValidated)) {
+        if (udmaRegistered) {
+            CheckTileXR(rank, "TileXRUDMAUnregister", TileXRUDMAUnregister(comm, udmaHandle));
+        }
+        Cleanup(comm, stream, registeredMemory, debug, rank, deviceId);
+        return 1;
+    }
+    ok = allRanksValidated;
+
     if (udmaRegistered) {
-        CheckTileXR(rank, "TileXRUDMAUnregister", TileXRUDMAUnregister(comm, udmaHandle));
-        udmaRegistered = false;
+        int unregisterRet = TileXRUDMAUnregister(comm, udmaHandle);
+        bool unregisterOk = CheckTileXR(rank, "TileXRUDMAUnregister", unregisterRet);
+        udmaRegistered = !unregisterOk;
+        ok = unregisterOk && ok;
+    }
+    bool allRanksReadyForReregister = false;
+    if (reregister &&
+        !DemoBarrierAll(rank, rankSize, "all ranks completed initial unregister", ok, &allRanksReadyForReregister)) {
+        Cleanup(comm, stream, registeredMemory, debug, rank, deviceId);
+        return 1;
+    }
+    if (reregister) {
+        ok = allRanksReadyForReregister;
+    }
+    if (ok && reregister) {
+        int registerRet = TileXRUDMARegister(
+            comm, static_cast<GM_ADDR>(registeredMemory), registeredBytes, &udmaHandle);
+        bool registerOk = CheckTileXR(rank, "TileXRUDMARegister(re-register)", registerRet);
+        udmaRegistered = registerOk;
+        ok = registerOk && ok;
+        if (udmaRegistered) {
+            int unregisterRet = TileXRUDMAUnregister(comm, udmaHandle);
+            bool unregisterOk = CheckTileXR(rank, "TileXRUDMAUnregister(re-register)", unregisterRet);
+            udmaRegistered = !unregisterOk;
+            ok = unregisterOk && ok;
+        }
+        if (ok) {
+            PrintStatus(rank, "TileXR UDMA re-register lifecycle success");
+        }
+    }
+    bool allRanksPassedLifecycle = false;
+    if (reregister && allRanksReadyForReregister &&
+        !DemoBarrierAll(rank, rankSize, "all ranks completed re-register lifecycle", ok, &allRanksPassedLifecycle)) {
+        Cleanup(comm, stream, registeredMemory, debug, rank, deviceId);
+        return 1;
+    }
+    if (reregister && allRanksReadyForReregister) {
+        ok = allRanksPassedLifecycle;
     }
     Cleanup(comm, stream, registeredMemory, debug, rank, deviceId);
     if (!ok) {

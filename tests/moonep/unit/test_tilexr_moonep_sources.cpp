@@ -102,12 +102,23 @@ int main()
     Excludes("host", host, "aclrtSynchronizeStream");
     Contains("host", host, "BuildPrefetchWeightLayout");
     Contains("host", host, "LaunchPrefetchWeight");
+    Contains("host", host, "TileXRUDMAGetQpCount");
+    Excludes("host", host, "TileXRGetUDMAQpNum");
     Excludes("host", host, "StubStage::PrefetchWeight");
 
-    Contains("launch", launch, "rtKernelLaunchWithFlagV2");
+    Contains("launch", launch, "launch_tilexr_moonep_prefetch_weight_kernel");
     Contains("launch", launch, "layout.blockDim");
-    Contains("kernel", kernel, "UDMAGetNbiQp<uint8_t>");
-    Contains("kernel", kernel, "UDMAQuietQpStatus");
+    Excludes("launch", launch, "rtKernelLaunchWithFlagV2");
+    Contains("kernel", kernel, "launch_tilexr_moonep_prefetch_weight_kernel");
+    Contains("kernel", kernel, "<<<blockDim, nullptr, stream>>>");
+    Contains("kernel", kernel,
+        "pipe_.InitBuffer(wqeBuf_, TileXR::TILEXR_UDMA_WQE_SCRATCH_BYTES)");
+    Contains("kernel", kernel, "auto wqeScratch = wqeBuf_.Get<uint8_t>()");
+    Contains("kernel", kernel, "UDMAGetNbiOnQp<uint8_t>");
+    Contains("kernel", kernel, "args_, wqeScratch, owner, worker_");
+    Contains("kernel", kernel, "UDMAQuietStatusOnQp");
+    Excludes("kernel", kernel, "UDMAGetNbiQp");
+    Excludes("kernel", kernel, "UDMAQuietQpStatus");
     Contains("kernel", kernel, "AtomicCas");
     Excludes("kernel", kernel, "aclrtMemcpy");
     Excludes("kernel", Lower(kernel), "hccl");

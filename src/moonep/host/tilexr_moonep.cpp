@@ -371,7 +371,7 @@ extern "C" int TileXRMoonEpPrefetchWeightV2(
     if (TileXRGetCommArgsHost(args->comm, commArgs) != TILEXR_MOONEP_SUCCESS ||
         TileXRGetCommArgsDev(args->comm, devArgs) != TILEXR_MOONEP_SUCCESS ||
         TileXRGetUDMARegistryHost(args->comm, &registry) != TILEXR_MOONEP_SUCCESS ||
-        TileXRGetUDMAQpNum(args->comm, &qpNum) != TILEXR_MOONEP_SUCCESS ||
+        TileXRUDMAGetQpCount(args->comm, &qpNum) != TILEXR_MOONEP_SUCCESS ||
         commArgs == nullptr || devArgs == nullptr || registry == nullptr) {
         return TILEXR_MOONEP_ERROR_NOT_SUPPORTED;
     }

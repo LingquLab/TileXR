@@ -17,6 +17,7 @@ from .report import aggregate_rank_artifacts, write_json
 
 
 PLANNER_BLOCK_DIM_ENV = "TILEXR_MOONEP_PLANNER_BLOCK_DIM"
+UDMA_QP_ROUTE_SPEC_ENV = "TILEXR_UDMA_QP_ROUTE_SPEC"
 
 
 def resolve_topology(
@@ -62,10 +63,32 @@ def resolve_topology(
     }
 
 
-def rank_to_device(rank: int, physical_device_count: int) -> int:
+def rank_to_device(
+    rank: int,
+    physical_device_count: int,
+    device_ids: tuple[int, ...] | None = None,
+) -> int:
     if rank < 0 or physical_device_count <= 0:
         raise ValueError("rank must be non-negative and physical_device_count positive")
+    if device_ids is not None:
+        if len(device_ids) != physical_device_count:
+            raise ValueError("device id count must match physical_device_count")
+        return device_ids[rank % physical_device_count]
     return rank % physical_device_count
+
+
+def _parse_device_ids(value: str | None) -> tuple[int, ...] | None:
+    if value is None or not value.strip():
+        return None
+    try:
+        device_ids = tuple(int(item.strip()) for item in value.split(",") if item.strip())
+    except ValueError as exc:
+        raise ValueError("device ids must be comma-separated non-negative integers") from exc
+    if not device_ids or any(item < 0 for item in device_ids):
+        raise ValueError("device ids must be comma-separated non-negative integers")
+    if len(device_ids) != len(set(device_ids)):
+        raise ValueError("device ids must be unique")
+    return device_ids
 
 
 def _unused_local_comm_id() -> str:
@@ -81,7 +104,9 @@ def _append_case_overrides(command: list[str], args: argparse.Namespace) -> None
         "topk": "--topk",
         "expert_count": "--expert-count",
         "hidden_size": "--hidden-size",
+        "expert_shape": "--expert-shape",
         "dtype": "--dtype",
+        "route_pattern": "--route-pattern",
         "seed": "--seed",
         "warmup": "--warmup",
         "iterations": "--iterations",
@@ -89,11 +114,19 @@ def _append_case_overrides(command: list[str], args: argparse.Namespace) -> None
     for name, flag in names.items():
         value = getattr(args, name)
         if value is not None:
+            if name == "expert_shape":
+                value = "x".join(str(dimension) for dimension in value)
             command.extend((flag, str(value)))
     if args.correctness is True:
         command.append("--correctness")
     elif args.correctness is False:
         command.append("--no-correctness")
+
+
+def _prefetch_route_spec(worker_count: int) -> str:
+    if worker_count not in (1, 2, 4, 8):
+        raise ValueError("prefetch worker count must be chosen from 1,2,4,8")
+    return ",".join("topology" for _ in range(worker_count))
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -102,6 +135,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--install-prefix", default=None)
     parser.add_argument("--physical-device-count", type=int, default=8)
+    parser.add_argument(
+        "--device-ids",
+        default=None,
+        help="ordered comma-separated physical device ids; overrides the device count",
+    )
     parser.add_argument("--ranks-per-device", type=int, choices=(1, 2), default=1)
     parser.add_argument("--world-size", type=int, default=None)
     parser.add_argument("--planner-block-dim", type=int, default=None)
@@ -140,12 +178,19 @@ def _process_command(args: argparse.Namespace) -> list[str]:
 def _run_once(args: argparse.Namespace, prefetch_workers: int | None):
     if args.wait_iterations <= 0 or args.timeout_sec <= 0:
         raise ValueError("wait_iterations and timeout_sec must be positive")
+    device_ids = _parse_device_ids(args.device_ids)
+    physical_device_count = (
+        len(device_ids) if device_ids is not None else args.physical_device_count
+    )
     topology = resolve_topology(
-        physical_device_count=args.physical_device_count,
+        physical_device_count=physical_device_count,
         ranks_per_device=args.ranks_per_device,
         world_size=args.world_size,
         planner_block_dim=args.planner_block_dim,
         environment=os.environ,
+    )
+    topology["device_ids"] = (
+        list(device_ids) if device_ids is not None else list(range(physical_device_count))
     )
     world_size = int(topology["logical_world_size"])
     cases = [
@@ -182,6 +227,19 @@ def _run_once(args: argparse.Namespace, prefetch_workers: int | None):
         "launch_id": launch_id,
         "command": _process_command(args),
         "prefetch_workers": prefetch_workers,
+        "udma_qp_route_spec": (
+            _prefetch_route_spec(prefetch_workers)
+            if prefetch_workers is not None
+            else os.environ.get(UDMA_QP_ROUTE_SPEC_ENV)
+        ),
+        "case_comm_ids": {
+            case.case_id: offset_host_port(comm_id, offset=index)
+            for index, case in enumerate(cases)
+        },
+        "case_barrier_addrs": {
+            case.case_id: offset_host_port(barrier_addr, offset=index)
+            for index, case in enumerate(cases)
+        },
     }
     write_json(output_dir / "launcher_metadata.json", metadata)
 
@@ -203,6 +261,9 @@ def _run_once(args: argparse.Namespace, prefetch_workers: int | None):
     base_env["TILEXR_MOONEP_LAUNCH_SECRET"] = launch_secret
     base_env["TILEXR_MOONEP_MANAGED_LAUNCH"] = "1"
     base_env["TILEXR_PHYSICAL_DEVICE_COUNT"] = str(topology["physical_device_count"])
+    base_env["TILEXR_DEVICE_IDS"] = ",".join(
+        str(item) for item in topology["device_ids"]
+    )
     base_env["TILEXR_RANKS_PER_DEVICE"] = str(topology["ranks_per_device"])
     base_env["TILEXR_OVERSUBSCRIBED"] = "1" if topology["oversubscribed"] else "0"
     base_env["TILEXR_MOONEP_PLANNER_BLOCK_DIM_SOURCE"] = str(
@@ -210,7 +271,7 @@ def _run_once(args: argparse.Namespace, prefetch_workers: int | None):
     )
     base_env[PLANNER_BLOCK_DIM_ENV] = str(topology["planner_block_dim"])
     if prefetch_workers is not None:
-        base_env["TILEXR_UDMA_QP_NUM"] = str(prefetch_workers)
+        base_env[UDMA_QP_ROUTE_SPEC_ENV] = _prefetch_route_spec(prefetch_workers)
         base_env["TILEXR_MOONEP_PREFETCH_BLOCK_DIM"] = str(prefetch_workers)
 
     command = _process_command(args)
@@ -218,7 +279,7 @@ def _run_once(args: argparse.Namespace, prefetch_workers: int | None):
     try:
         for rank in range(world_size):
             env = base_env.copy()
-            device = rank_to_device(rank, args.physical_device_count)
+            device = rank_to_device(rank, physical_device_count, device_ids)
             env["RANK"] = str(rank)
             env["LOCAL_RANK"] = str(device)
             env["TILEXR_PLANNER_GROUP_RANK"] = str(rank)
@@ -301,14 +362,23 @@ def main(argv: list[str] | None = None) -> int:
     output_root = Path(args.output_dir).resolve()
     output_root.mkdir(parents=True, exist_ok=True)
     results = []
-    for workers in candidates:
+    for candidate_index, workers in enumerate(candidates):
         candidate_args = copy.copy(args)
         candidate_args.output_dir = str(output_root / f"prefetch_workers_{workers}")
+        if args.comm_id:
+            candidate_args.comm_id = offset_host_port(
+                args.comm_id, offset=candidate_index * 257
+            )
         summaries = _run_once(candidate_args, workers)
         p50_values = [
             float(summary["metrics_us"]["prefetch_weight"]["p50"])
             for summary in summaries.values()
+            if summary["prefetch_weight_performance_valid"]
         ]
+        if not p50_values:
+            raise RuntimeError(
+                f"prefetch worker {workers} produced no valid data-plane samples"
+            )
         results.append(
             {
                 "workers": workers,

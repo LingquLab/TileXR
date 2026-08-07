@@ -50,5 +50,7 @@ Optional CMake switches are `TILEXR_BUILD_COLLECTIVES`, `TILEXR_BUILD_EP`, `TILE
 - Treat `reference/` as comparison-only; active targets must not include or link sources from it.
 - UDMA and SDMA are best-effort capabilities. Communicator initialization must preserve existing paths when either is unavailable.
 - `TileXRUDMARegister` is unsupported in `InitThread`; UDMA targets must be registered ordinary device memory, not `peerMems[]`.
+- UDMA WQEs must be assembled entirely in UB and published to the SQ through MTE3. Never construct or patch an SQ WQE with scalar or direct-GM stores.
+- Ring a UDMA doorbell only with `st_dev`, after the corresponding MTE3 WQE write has completed. Scalar stores must never be used for doorbells.
 - Never put `${ASCEND_HOME_PATH}/${ARCH}-linux/devlib` in runtime RPATH/RUNPATH; runtime must resolve the real driver HAL.
 - Host, simulator, and 910B fallback tests do not prove UDMA data-plane transfer. Keep validation claims scoped to the hardware actually exercised.

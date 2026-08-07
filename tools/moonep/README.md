@@ -24,6 +24,13 @@ Only the `prefetch_weight` stage timing is native UDMA transport evidence.
 Other stub-stage timings validate invocation, stream ordering, shapes, and
 lifecycle only.
 
+Cases may set `expert_shape` to one to three dimensions after the leading
+expert row and choose a deterministic `route_pattern` from `balanced`,
+`biased`, `duplicate`, `sparse`, `all_local`, or `all_remote`. The default
+remains `[H]` with balanced routing for compatibility. Use biased or sparse
+routing when a run must prove remote PrefetchWeight reads; a balanced or local
+case can legitimately produce no active remote slots.
+
 The Torch setup packs locally owned source weights and destination slots as
 three aligned `[2*B,...]` views in one allocation, synchronizes source packing,
 and registers that allocation once before warmup. Measured PrefetchWeight calls
@@ -52,6 +59,9 @@ and authenticates each case with an HMAC secret that is never sent or written
 to artifacts. Teardown is released only after every rank proves local
 quiescence. Any case failure is propagated to all ranks; an unquiesced worker
 keeps its communicator open for launcher-coordinated termination.
+Each case and each worker-sweep candidate uses a distinct communication and
+completion-rendezvous port derived from the requested base endpoint, preventing
+rapid communicator teardown and recreation from reusing a stale socket.
 
 ## 8 Physical NPUs
 
@@ -65,6 +75,9 @@ python tools/moonep/run_benchmark.py \
 ```
 
 One rank per device defaults `TILEXR_MOONEP_PLANNER_BLOCK_DIM=64`.
+Hosts with non-contiguous available devices can pass `--device-ids 2,3`; the
+ordered list overrides `--physical-device-count`, drives `LOCAL_RANK`, and is
+recorded in launcher, rank, and summary topology metadata.
 
 Use a worker sweep instead of assuming one AIV/QP is optimal. Every candidate
 recreates the communicator and its independent QPs before measurement:
@@ -81,10 +94,20 @@ python tools/moonep/run_benchmark.py \
 Candidates are limited to `1,2,4,8` and must not exceed `B=E/R` for any
 selected case. `prefetch_sweep_summary.json` records each cross-rank p50 and the
 recommended worker count. Cases with larger B can sweep all four candidates.
-For a single fixed configuration, `--prefetch-workers N` sets both
-`TILEXR_UDMA_QP_NUM=N` and `TILEXR_MOONEP_PREFETCH_BLOCK_DIM=N` before
-communicator initialization. The transport's compatibility default remains one
-QP until target A5/Ascend950 measurements select a project-wide default.
+For a single fixed configuration, `--prefetch-workers N` emits `N` repeated
+`topology` rules in `TILEXR_UDMA_QP_ROUTE_SPEC` and sets
+`TILEXR_MOONEP_PREFETCH_BLOCK_DIM=N` before communicator initialization. The
+transport's compatibility default remains one QP until target A5/Ascend950
+measurements select a project-wide default. Rank and summary artifacts record
+the QP count queried from the initialized communicator, not only the requested
+route count.
+
+`tools/moonep/cases/prefetch_validation.json` contains BF16/FP16 route coverage
+and the 512x512, 1024x3072, and 3584x3072 BF16 expert shapes. Rank results
+record active slots and transferred bytes. Aggregation sums bytes across ranks,
+uses the per-iteration maximum rank latency, and reports p50/p90/p99 effective
+GB/s. `prefetch_weight_performance_valid` is true only when at least one remote
+slot was transferred; zero-transfer cases remain correctness evidence only.
 
 ## 16 Logical Ranks on 8 NPUs
 

@@ -83,11 +83,13 @@ def aggregate_rank_artifacts(
         "planner_group_size",
         "lane_group_size",
         "physical_device_count",
+        "device_ids",
         "ranks_per_device",
         "oversubscribed",
         "planner_block_dim",
         "planner_block_dim_source",
         "udma_qp_num",
+        "udma_qp_route_spec",
         "prefetch_block_dim",
         "peer_memory_cross_node",
         "cross_node_validated",
@@ -104,6 +106,21 @@ def aggregate_rank_artifacts(
         if topology != reference_topology:
             raise ValueError(f"rank {rank} topology metadata differs from rank 0")
 
+    prefetch_validations = [
+        result.get("validation", {}).get("prefetch_weight", {})
+        for result in rank_results
+    ]
+    active_slots_per_rank = [
+        int(item.get("active_slots", 0)) for item in prefetch_validations
+    ]
+    transferred_bytes_per_rank = [
+        int(item.get("transferred_bytes", 0)) for item in prefetch_validations
+    ]
+    row_bytes = dict(prefetch_validations[0].get("row_bytes", {}))
+    for rank, item in enumerate(prefetch_validations[1:], start=1):
+        if dict(item.get("row_bytes", {})) != row_bytes:
+            raise ValueError(f"rank {rank} PrefetchWeight row-byte metadata differs")
+
     iteration_count = next(iter(counts))
     metric_names = set(rank_samples[0][0]["timings_us"])
     maxima: list[dict[str, object]] = []
@@ -113,9 +130,27 @@ def aggregate_rank_artifacts(
                 raise ValueError(f"rank {rank} sample iteration ordering is invalid")
             if set(samples[iteration]["timings_us"]) != metric_names:
                 raise ValueError("timing metric names differ across ranks")
+            sample_bytes = int(
+                samples[iteration].get(
+                    "prefetch_weight_transferred_bytes",
+                    transferred_bytes_per_rank[rank],
+                )
+            )
+            if sample_bytes != transferred_bytes_per_rank[rank]:
+                raise ValueError(
+                    f"rank {rank} PrefetchWeight byte metadata differs at iteration "
+                    f"{iteration}"
+                )
         maxima.append(
             {
                 "iteration": iteration,
+                "prefetch_weight_transferred_bytes": sum(
+                    int(rank_samples[rank][iteration].get(
+                        "prefetch_weight_transferred_bytes",
+                        transferred_bytes_per_rank[rank],
+                    ))
+                    for rank in range(world_size)
+                ),
                 "timings_us": {
                     name: max(
                         float(rank_samples[rank][iteration]["timings_us"][name])
@@ -141,6 +176,8 @@ def aggregate_rank_artifacts(
     cross_node_validated = bool(
         first["topology"].get("cross_node_validated", False)
     )
+    transferred_bytes_per_iteration = sum(transferred_bytes_per_rank)
+    prefetch_weight_data_plane_exercised = transferred_bytes_per_iteration > 0
     transport_performance_valid = bool(
         capabilities["transport_performance_valid"]
         and not oversubscribed
@@ -150,6 +187,7 @@ def aggregate_rank_artifacts(
         capabilities["implementations"].get("prefetch_weight") == "native"
         and not oversubscribed
         and (not peer_memory_cross_node or cross_node_validated)
+        and prefetch_weight_data_plane_exercised
     )
     if oversubscribed:
         performance_scope = "oversubscribed_functional_only"
@@ -159,6 +197,8 @@ def aggregate_rank_artifacts(
         performance_scope = "transport"
     elif prefetch_weight_performance_valid:
         performance_scope = "native_prefetch_only"
+    elif capabilities["implementations"].get("prefetch_weight") == "native":
+        performance_scope = "native_prefetch_no_transfer"
     else:
         performance_scope = "stub_contract_only"
     summary = {
@@ -167,11 +207,13 @@ def aggregate_rank_artifacts(
         "case": first["case"],
         "logical_world_size": world_size,
         "physical_device_count": first["topology"]["physical_device_count"],
+        "device_ids": first["topology"].get("device_ids"),
         "ranks_per_device": first["topology"]["ranks_per_device"],
         "oversubscribed": oversubscribed,
         "planner_block_dim": first["topology"].get("planner_block_dim"),
         "planner_block_dim_source": first["topology"].get("planner_block_dim_source"),
         "udma_qp_num": first["topology"].get("udma_qp_num"),
+        "udma_qp_route_spec": first["topology"].get("udma_qp_route_spec"),
         "prefetch_block_dim": first["topology"].get("prefetch_block_dim"),
         "capabilities": capabilities,
         "transport_performance_valid": transport_performance_valid,
@@ -185,6 +227,26 @@ def aggregate_rank_artifacts(
         },
         "cross_rank_max_samples": maxima,
         "metrics_us": metrics,
+    }
+    effective_gbps = []
+    if "prefetch_weight" in metric_names:
+        for sample in maxima:
+            duration = float(sample["timings_us"]["prefetch_weight"])
+            effective_gbps.append(
+                float(sample["prefetch_weight_transferred_bytes"]) / duration / 1000.0
+                if duration > 0.0
+                else 0.0
+            )
+    summary["prefetch_weight"] = {
+        "expert_shape": first["case"].get("expert_shape"),
+        "dtype": first["case"].get("dtype"),
+        "row_bytes": row_bytes,
+        "active_slots_per_rank": active_slots_per_rank,
+        "total_active_slots": sum(active_slots_per_rank),
+        "transferred_bytes_per_rank": transferred_bytes_per_rank,
+        "transferred_bytes_per_iteration": transferred_bytes_per_iteration,
+        "data_plane_exercised": prefetch_weight_data_plane_exercised,
+        "effective_gbps": _metric_summary(effective_gbps) if effective_gbps else None,
     }
     tokens_per_rank = int(first["case"]["tokens_per_rank"])
     throughput = []
@@ -200,9 +262,15 @@ def aggregate_rank_artifacts(
     with (root / "summary.csv").open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(
             handle,
-            fieldnames=("metric", "min", "max", "mean", "p50", "p90", "p99"),
+            fieldnames=("metric", "unit", "min", "max", "mean", "p50", "p90", "p99"),
         )
         writer.writeheader()
         for name, values in metrics.items():
-            writer.writerow({"metric": name, **values})
+            writer.writerow({"metric": name, "unit": "us", **values})
+        if effective_gbps:
+            writer.writerow({
+                "metric": "prefetch_weight_effective",
+                "unit": "GB/s",
+                **summary["prefetch_weight"]["effective_gbps"],
+            })
     return summary

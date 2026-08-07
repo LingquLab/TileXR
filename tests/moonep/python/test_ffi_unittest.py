@@ -79,10 +79,16 @@ class FakeCDLLLoader:
             self.unregister_calls.append(handle.value)
             return 0
 
+        def get_qp_count(comm, output):
+            self.assert_scalar(comm, 0x1234)
+            ctypes.cast(output, ctypes.POINTER(ctypes.c_uint32)).contents.value = 4
+            return 0
+
         library.TileXRCommInitRankLocal = FakeFunction(init_rank_local)
         library.TileXRCommDestroy = FakeFunction(destroy)
         library.TileXRUDMARegister = FakeFunction(register)
         library.TileXRUDMAUnregister = FakeFunction(unregister)
+        library.TileXRUDMAGetQpCount = FakeFunction(get_qp_count)
         return library
 
     @staticmethod
@@ -277,6 +283,7 @@ class FfiAbiTests(unittest.TestCase):
         self.assertEqual(runtime.capabilities.stage_mask, 5)
         self.assertEqual(runtime.capabilities.stub_mask, 26)
         self.assertFalse(runtime.capabilities.transport_performance_valid)
+        self.assertEqual(runtime.udma_qp_count, 4)
         self.assertEqual(loader.destroy_calls, 1)
         self.assertEqual(
             loader.planning_records,

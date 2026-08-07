@@ -70,6 +70,8 @@ ChipName GetChipName()
         curChipName = it->second;
     } else if (chipName.find("Ascend950PR_") == 0) {
         curChipName = ChipName::CHIP_950PR;
+    } else if (chipName.find("Ascend950DT_") == 0) {
+        curChipName = ChipName::CHIP_950;
     } else {
         TILEXR_LOG(WARN) << "There is no commitment to the supported chip types yet," <<
                       " and it is not certain whether the functions will work properly.";

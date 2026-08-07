@@ -172,6 +172,7 @@ class TileXRMoonEPRuntime:
         self._check(
             "TileXRCommInitRankLocal", ret, f"rank={self.rank} world_size={self.world_size}"
         )
+        self.udma_qp_count = self._query_udma_qp_count()
         self.capabilities = self._query_capabilities()
 
     def _configure_symbols(self) -> None:
@@ -192,6 +193,11 @@ class TileXRMoonEPRuntime:
         self._comm_lib.TileXRUDMARegister.restype = ctypes.c_int
         self._comm_lib.TileXRUDMAUnregister.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
         self._comm_lib.TileXRUDMAUnregister.restype = ctypes.c_int
+        self._comm_lib.TileXRUDMAGetQpCount.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_uint32),
+        ]
+        self._comm_lib.TileXRUDMAGetQpCount.restype = ctypes.c_int
         self._moonep_lib.TileXRMoonEpGetAbiVersion.argtypes = []
         self._moonep_lib.TileXRMoonEpGetAbiVersion.restype = ctypes.c_uint32
         self._moonep_lib.TileXRMoonEpGetCapabilitiesV1.argtypes = [
@@ -239,6 +245,13 @@ class TileXRMoonEPRuntime:
         )
         self._check("TileXRMoonEpGetCapabilitiesV1", ret)
         return NativeCapabilities(abi_version, int(native_stages.value), int(stub_stages.value))
+
+    def _query_udma_qp_count(self) -> int:
+        qp_count = ctypes.c_uint32()
+        ret = self._comm_lib.TileXRUDMAGetQpCount(
+            void_p(self.comm_ptr), ctypes.byref(qp_count)
+        )
+        return int(qp_count.value) if int(ret) == TILEXR_SUCCESS else 0
 
     @property
     def comm_ptr(self) -> int:

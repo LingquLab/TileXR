@@ -22,12 +22,24 @@ from fakes import FakeRuntime, FakeStream, FakeTensor, FakeTorch
 from tilexr_moonep import ProjectionBuffers, TileXRMoonEPBuffer, TileXRMoonEPContext
 from tools.moonep.config import BenchmarkCase, load_cases
 from tools.moonep.benchmark import (
+    _case_endpoint,
+    _expert_row_broadcast_shape,
     _oversubscribed_planning_barrier,
     topology_metadata,
     validate_plan,
 )
-from tools.moonep.launcher import _parse_prefetch_workers, rank_to_device, resolve_topology
-from tools.moonep.planner_reference import build_reference_plan, deterministic_all_topk
+from tools.moonep.launcher import (
+    _parse_device_ids,
+    _parse_prefetch_workers,
+    _prefetch_route_spec,
+    rank_to_device,
+    resolve_topology,
+)
+from tools.moonep.planner_reference import (
+    build_reference_plan,
+    deterministic_all_topk,
+    deterministic_rank_topk,
+)
 from tools.moonep.rendezvous import completion_barrier, offset_host_port
 from tools.moonep.report import aggregate_rank_artifacts, write_json, write_jsonl
 
@@ -65,8 +77,14 @@ class MoonEPSmokeTests(unittest.TestCase):
     def test_prefetch_worker_candidates_are_explicit_and_bounded(self):
         self.assertEqual(_parse_prefetch_workers(None), [])
         self.assertEqual(_parse_prefetch_workers("1,2,8"), [1, 2, 8])
+        self.assertEqual(_prefetch_route_spec(1), "topology")
+        self.assertEqual(
+            _prefetch_route_spec(4), "topology,topology,topology,topology"
+        )
         with self.assertRaisesRegex(ValueError, "chosen from"):
             _parse_prefetch_workers("1,3")
+        with self.assertRaisesRegex(ValueError, "chosen from"):
+            _prefetch_route_spec(3)
         with self.assertRaisesRegex(ValueError, "unique"):
             _parse_prefetch_workers("2,2")
 
@@ -247,14 +265,29 @@ class MoonEPSmokeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "cases.json"
             path.write_text(
-                json.dumps([{"id": "smoke", "S": 32, "K": 2, "E": 8, "H": 64}]),
+                json.dumps([{
+                    "id": "smoke",
+                    "S": 32,
+                    "K": 2,
+                    "E": 8,
+                    "H": 64,
+                    "expert_shape": [512, 512],
+                    "route_pattern": "biased",
+                }]),
                 encoding="utf-8",
             )
-            self.assertEqual(load_cases(path)[0], BenchmarkCase("smoke", 32, 2, 8, 64))
+            case = load_cases(path)[0]
+            self.assertEqual(case.expert_shape, (512, 512))
+            self.assertEqual(case.route_pattern, "biased")
+            self.assertEqual(case.as_dict()["expert_shape"], [512, 512])
         with self.assertRaisesRegex(ValueError, "unknown benchmark case fields"):
             BenchmarkCase.from_mapping(
                 {"id": "bad", "S": 1, "K": 1, "E": 1, "H": 1, "mystery": 1}
             )
+        with self.assertRaisesRegex(ValueError, "expert_shape"):
+            BenchmarkCase("bad-shape", 1, 1, 1, 1, expert_shape=(1, 2, 3, 4))
+        with self.assertRaisesRegex(ValueError, "route_pattern"):
+            BenchmarkCase("bad-pattern", 1, 1, 1, 1, route_pattern="random")
         for unsafe in (".", "..", "../escape", "bad name"):
             with self.assertRaisesRegex(ValueError, "case_id"):
                 BenchmarkCase(unsafe, 1, 1, 1, 1)
@@ -269,6 +302,13 @@ class MoonEPSmokeTests(unittest.TestCase):
         self.assertTrue(topology["oversubscribed"])
         self.assertEqual(topology["planner_block_dim"], 32)
         self.assertEqual([rank_to_device(rank, 8) for rank in range(16)], list(range(8)) * 2)
+        self.assertEqual(_parse_device_ids("2,3"), (2, 3))
+        self.assertEqual(
+            [rank_to_device(rank, 2, (2, 3)) for rank in range(4)],
+            [2, 3, 2, 3],
+        )
+        with self.assertRaisesRegex(ValueError, "device ids"):
+            _parse_device_ids("2,2")
         native = resolve_topology(
             physical_device_count=8,
             ranks_per_device=1,
@@ -286,6 +326,58 @@ class MoonEPSmokeTests(unittest.TestCase):
                 planner_block_dim=8,
                 environment={},
             )
+
+    def test_benchmark_route_patterns_are_deterministic_and_auditable(self):
+        self.assertEqual(_case_endpoint("127.0.0.1:19001", 0), "127.0.0.1:19001")
+        self.assertEqual(_case_endpoint("127.0.0.1:19001", 2), "127.0.0.1:19003")
+        self.assertEqual(_expert_row_broadcast_shape(8, (8, 512)), (8, 1))
+        self.assertEqual(_expert_row_broadcast_shape(8, (8, 512, 512)), (8, 1, 1))
+        self.assertEqual(
+            _expert_row_broadcast_shape(8, (8, 2, 512, 512)), (8, 1, 1, 1)
+        )
+        dimensions = {
+            "rank_size": 2,
+            "tokens_per_rank": 8,
+            "topk": 2,
+            "expert_count": 8,
+            "seed": 17,
+        }
+        for pattern in (
+            "balanced",
+            "biased",
+            "duplicate",
+            "all_local",
+            "all_remote",
+            "sparse",
+        ):
+            all_routes = deterministic_all_topk(pattern=pattern, **dimensions)
+            by_rank = tuple(
+                expert
+                for rank in range(dimensions["rank_size"])
+                for expert in deterministic_rank_topk(
+                    rank=rank, pattern=pattern, **dimensions
+                )
+            )
+            self.assertEqual(all_routes, by_rank)
+            self.assertTrue(
+                all(0 <= expert < dimensions["expert_count"] for expert in all_routes)
+            )
+        sparse = build_reference_plan(
+            rank=1,
+            all_topk=deterministic_all_topk(pattern="sparse", **dimensions),
+            **{key: dimensions[key] for key in (
+                "rank_size", "tokens_per_rank", "topk", "expert_count"
+            )},
+        )
+        self.assertIn(0, sparse.experts_to_copy)
+        self.assertIn(-1, sparse.experts_to_copy)
+        duplicate = deterministic_rank_topk(
+            rank=0, pattern="duplicate", **dimensions
+        )
+        self.assertTrue(any(
+            duplicate[index] == duplicate[index + 1]
+            for index in range(0, len(duplicate), dimensions["topk"])
+        ))
         with self.assertRaisesRegex(ValueError, "blockDim <= 64"):
             resolve_topology(
                 physical_device_count=8,
@@ -702,7 +794,15 @@ class MoonEPSmokeTests(unittest.TestCase):
                         "udma_qp_num": 4,
                         "prefetch_block_dim": 4,
                     },
-                    "validation": {"passed": True},
+                    "validation": {
+                        "passed": True,
+                        "prefetch_weight": {
+                            "passed": True,
+                            "active_slots": 2,
+                            "row_bytes": {"gate": 512, "up": 1024, "down": 1024},
+                            "transferred_bytes": 5120,
+                        },
+                    },
                 },
             )
             write_jsonl(
@@ -710,6 +810,7 @@ class MoonEPSmokeTests(unittest.TestCase):
                 [{
                     "iteration": 0,
                     "timings_us": {"end_to_end": 20.0, "prefetch_weight": 3.0},
+                    "prefetch_weight_transferred_bytes": 5120,
                 }],
             )
             summary = aggregate_rank_artifacts(case_dir, world_size=1)
@@ -717,6 +818,14 @@ class MoonEPSmokeTests(unittest.TestCase):
         self.assertTrue(summary["prefetch_weight_performance_valid"])
         self.assertEqual(summary["performance_scope"], "native_prefetch_only")
         self.assertEqual(summary["metrics_us"]["prefetch_weight"]["p50"], 3.0)
+        self.assertTrue(summary["prefetch_weight"]["data_plane_exercised"])
+        self.assertEqual(
+            summary["prefetch_weight"]["transferred_bytes_per_iteration"], 5120
+        )
+        self.assertAlmostEqual(
+            summary["prefetch_weight"]["effective_gbps"]["p50"],
+            5120.0 / 3.0 / 1000.0,
+        )
 
 
 if __name__ == "__main__":

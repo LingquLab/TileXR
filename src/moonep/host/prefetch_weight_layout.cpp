@@ -5,8 +5,6 @@
 #include <cstdlib>
 #include <limits>
 
-#include "tilexr_udma_types.h"
-
 namespace TileXRMoonEp {
 namespace {
 
@@ -32,7 +30,7 @@ bool DTypeBytes(uint32_t dtype, uint64_t &bytes)
 bool SupportedWorkerCount(uint32_t value)
 {
     return value == 1 || value == 2 || value == 4 ||
-        value == TileXR::TILEXR_UDMA_MAX_QP_NUM;
+        value == kPrefetchWeightMaxWorkers;
 }
 
 bool ParseWorkerOverride(const char *value, uint32_t &workers)
