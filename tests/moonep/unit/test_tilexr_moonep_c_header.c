@@ -10,6 +10,9 @@ int main(void)
     TileXRMoonEpPrefetchWeightArgsV1 prefetch = {0};
     TileXRMoonEpCombineArgsV1 combine = {0};
     TileXRMoonEpReduceGradArgsV1 reduce = {0};
+    TileXRMoonEpReduceGradWorkspaceQueryV2 query = {0};
+    TileXRMoonEpReduceGradWorkspaceInfoV2 info = {0};
+    TileXRMoonEpReduceGradArgsV2 reduceV2 = {0};
 
     tensor.structSize = (uint32_t)sizeof(tensor);
     tensor.abiVersion = TILEXR_MOONEP_ABI_VERSION_V1;
@@ -23,10 +26,17 @@ int main(void)
     dispatch.hiddenSh = &tensor;
     prefetch.gate = &tensor;
     combine.hiddenNvsh = &tensor;
-    reduce.fullGateGrad = &tensor;
+    reduce.input = &tensor;
+    reduce.output = &tensor;
+    query.abiVersion = TILEXR_MOONEP_ABI_VERSION_V2;
+    info.abiVersion = TILEXR_MOONEP_ABI_VERSION_V2;
+    reduceV2.abiVersion = TILEXR_MOONEP_ABI_VERSION_V2;
 
     return tensor.dtype == TILEXR_MOONEP_DTYPE_FLOAT16 &&
         plan.nvS == 1 && dispatch.hiddenSh == &tensor &&
         prefetch.gate == &tensor && combine.hiddenNvsh == &tensor &&
-        reduce.fullGateGrad == &tensor ? 0 : 1;
+        reduce.input == &tensor && reduce.output == &tensor &&
+        query.abiVersion == TILEXR_MOONEP_ABI_VERSION_V2 &&
+        info.abiVersion == TILEXR_MOONEP_ABI_VERSION_V2 &&
+        reduceV2.abiVersion == TILEXR_MOONEP_ABI_VERSION_V2 ? 0 : 1;
 }

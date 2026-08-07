@@ -45,7 +45,8 @@ STAGE_ORDER = (
     "reduce_grad",
 )
 
-REDUCE_GRAD_STATUS_SUCCESS = 5000
+FINAL_SHARED_STATUS_SUCCESS = 3000
+REDUCE_GRAD_STATUS_SUCCESS = 0
 
 
 def _hold_unsafe_teardown(
@@ -604,7 +605,7 @@ def run_case(torch_module, case, args, root: Path) -> None:
                 first[0],
                 context,
                 first[1],
-                expected_status=REDUCE_GRAD_STATUS_SUCCESS,
+                expected_status=FINAL_SHARED_STATUS_SUCCESS,
             )
             implementations = capabilities["implementations"]
             stub_stages = ("dispatch", "prefetch_weight", "combine", "reduce_grad")
@@ -629,19 +630,34 @@ def run_case(torch_module, case, args, root: Path) -> None:
             warmup_plan = coordinated_iteration()[0]
         if (
             warmup_plan is not None
-            and int(warmup_plan.status.item()) != REDUCE_GRAD_STATUS_SUCCESS
+            and int(warmup_plan.status.item()) != FINAL_SHARED_STATUS_SUCCESS
         ):
             raise RuntimeError(
                 f"MoonEP device status is {int(warmup_plan.status.item())} during "
-                f"warmup, expected {REDUCE_GRAD_STATUS_SUCCESS}"
+                f"warmup, expected {FINAL_SHARED_STATUS_SUCCESS}"
+            )
+        if (
+            warmup_plan is not None
+            and int(warmup_plan.reduce_grad_status.item()) != REDUCE_GRAD_STATUS_SUCCESS
+        ):
+            raise RuntimeError(
+                "MoonEP ReduceGrad device status is "
+                f"{int(warmup_plan.reduce_grad_status.item())} during warmup, "
+                f"expected {REDUCE_GRAD_STATUS_SUCCESS}"
             )
         samples = []
         for iteration in range(case.iterations):
             timer = DeviceEventTimer(torch_module)
             plan, _, forward, _, backward, timings = coordinated_iteration(timer)
-            if int(plan.status.item()) != REDUCE_GRAD_STATUS_SUCCESS:
+            if int(plan.status.item()) != FINAL_SHARED_STATUS_SUCCESS:
                 raise RuntimeError(
                     f"MoonEP device status is {int(plan.status.item())}, expected "
+                    f"{FINAL_SHARED_STATUS_SUCCESS}"
+                )
+            if int(plan.reduce_grad_status.item()) != REDUCE_GRAD_STATUS_SUCCESS:
+                raise RuntimeError(
+                    "MoonEP ReduceGrad device status is "
+                    f"{int(plan.reduce_grad_status.item())}, expected "
                     f"{REDUCE_GRAD_STATUS_SUCCESS}"
                 )
             samples.append(

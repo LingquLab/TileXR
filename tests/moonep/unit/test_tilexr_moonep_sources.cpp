@@ -92,10 +92,11 @@ int main()
         ReadFile("src/moonep/common/moonep_stage_host.h");
     const std::string prefetchHost =
         ReadFile("src/moonep/prefetch_weight/host/prefetch_weight_host.cpp");
+    const std::string reduceHost =
+        ReadFile("src/moonep/reduce_grad/host/reduce_grad_host.cpp");
     const std::vector<std::string> nativeStageHosts = {
         ReadFile("src/moonep/dispatch/host/dispatch_host.cpp"),
         ReadFile("src/moonep/combine/host/combine_host.cpp"),
-        ReadFile("src/moonep/reduce_grad/host/reduce_grad_host.cpp"),
     };
 
     Contains("public header", header, "extern \"C\"");
@@ -119,10 +120,10 @@ int main()
     Excludes("host combine stub", host,
         "RunLocalStub(args, stream, StubStage::Combine)");
     Contains("host", host, "TileXRMoonEpRunPrefetchWeightV1");
-    Contains("host", host, "TileXRMoonEpRunReduceGradV1");
-    Excludes("host", host, "aclrtMemsetAsync");
-    Excludes("host", host, "aclrtMemcpyAsync");
-    Excludes("host", host, "ACL_MEMCPY_DEVICE_TO_DEVICE");
+    Contains("host", host, "RunReduceGradV1Stub");
+    Contains("host", host, "aclrtMemsetAsync");
+    Contains("host", host, "aclrtMemcpyAsync");
+    Contains("host", host, "ACL_MEMCPY_DEVICE_TO_DEVICE");
     Excludes("host", host, "aclrtSynchronizeStream");
 
     Contains("CMake", cmake, "add_library(tilexr-moonep SHARED");
@@ -211,13 +212,21 @@ int main()
     Excludes("prefetch Host", prefetchHost, "peerMems");
     Excludes("prefetch Host", prefetchHost, "localRankSize !=");
     Contains("prefetch Host", prefetchHost, "TileXRGetUDMARegistryHost");
+    Contains("ReduceGrad Host", reduceHost, "TileXRMoonEpPrepareReduceGradLayout");
+    Contains("ReduceGrad Host", reduceHost, "TileXRMoonEpReduceGradV2");
+    Excludes("ReduceGrad Host", reduceHost, "moonep_stage_host.h");
 
     Contains("test CMake", testCmake, "if(TARGET tilexr-moonep)");
     Contains("test CMake", testCmake, "add_executable(tilexr_moonep_flow_demo");
     Contains("test CMake", testCmake, "tilexr-moonep");
+    Contains("test CMake", testCmake, "tilexr-moonep-reduce-grad");
     Contains("flow demo", flowDemo, "TileXRCommInitRankLocal");
     Contains("flow demo", flowDemo, "TileXRUDMARegister prefetch arena");
     Contains("flow demo", flowDemo, "TileXRUDMAUnregister prefetch arena");
+    Contains("flow demo", flowDemo, "TileXRMoonEpGetCapabilitiesV2");
+    Contains("flow demo", flowDemo, "TileXRMoonEpReduceGradGetWorkspaceSizeV2");
+    Contains("flow demo", flowDemo, "TILEXR_MOONEP_REDUCE_GRAD_TRANSPORT_PEER");
+    Excludes("flow demo", flowDemo, "TileXRMoonEpReduceGradV1(&reduceGrad");
     Contains("flow demo", flowDemo, "nvS != static_cast<int64_t>(routeCount)");
     Contains("flow demo", flowDemo, "planning_status=");
     Contains("flow demo", flowDemo, "dispatch_status=");
@@ -239,12 +248,13 @@ int main()
     Contains("flow demo", flowDemo, "transport_performance_valid=false");
     CheckOrdered("native flow", flowDemo, {
         "TileXRMoonEpPlanningV1(&planning",
+        "TileXRMoonEpReduceGradGetWorkspaceSizeV2(",
         "TileXRMoonEpDispatchV1(&forwardDispatch",
         "TileXRMoonEpPrefetchWeightV1(&prefetch",
         "TileXRMoonEpCombineV1(&forwardCombine",
         "TileXRMoonEpDispatchV1(&backwardDispatch",
         "TileXRMoonEpCombineV1(&backwardCombine",
-        "TileXRMoonEpReduceGradV1(&reduceGrad",
+        "TileXRMoonEpReduceGradV2(&reduceGrad",
     });
     CheckOrdered("native flow cleanup", flowDemo, {
         "\"local completion synchronize\"",

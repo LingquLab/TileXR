@@ -38,6 +38,7 @@ set(TILEXR_MOONEP_REDUCE_GRAD_KERNEL_INCLUDES
     -I${ASCEND_HOME_PATH}/compiler/tikcpp/tikcfw
     -I${ASCEND_HOME_PATH}/compiler/tikcpp/tikcfw/impl
     -I${ASCEND_HOME_PATH}/compiler/tikcpp/tikcfw/interface
+    -I${ASCEND_HOME_PATH}/${ARCH}-linux/asc/include
     -I${ASCEND_HOME_PATH}/${ARCH}-linux/ascendc/include
     -I${ASCEND_HOME_PATH}/${ARCH}-linux/include
     -I${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc
@@ -64,11 +65,9 @@ tilexr_add_moonep_kernel(tilexr_moonep_reduce_grad_kernel
 )
 
 add_library(tilexr-moonep-reduce-grad SHARED
-    ${CMAKE_SOURCE_DIR}/src/moonep/common/moonep_kernel_registration.cpp
     host/reduce_grad_layout.cpp
     host/reduce_grad_host.cpp
     host/reduce_grad_launch.cpp
-    host/tilexr_moonep_reduce_grad.cpp
     ${TILEXR_MOONEP_REDUCE_GRAD_KERNEL_EMBED_CPP}
 )
 add_dependencies(tilexr-moonep-reduce-grad tilexr_moonep_reduce_grad_kernel)
@@ -85,7 +84,6 @@ target_include_directories(tilexr-moonep-reduce-grad
 target_link_directories(tilexr-moonep-reduce-grad PRIVATE
     ${ASCEND_DRIVER_PATH}/lib64/driver
     ${ASCEND_HOME_PATH}/${ARCH}-linux/lib64
-    ${ASCEND_HOME_PATH}/${ARCH}-linux/devlib
 )
 target_link_libraries(tilexr-moonep-reduce-grad PRIVATE tile-comm ascendcl runtime)
 set_target_properties(tilexr-moonep-reduce-grad PROPERTIES

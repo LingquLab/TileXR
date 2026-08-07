@@ -1,49 +1,429 @@
 #include <cstdint>
-#include <cstdlib>
 #include <iostream>
+#include <limits>
 #include <string>
 
+#include "acl/acl_rt.h"
+#include "comm_args.h"
 #include "reduce_grad_host.h"
-#include "reduce_grad_launch.h"
-#include "moonep_peer_window.h"
+#include "tilexr_api.h"
+#include "tilexr_moonep.h"
 #include "tilexr_types.h"
+#include "tilexr_udma_reg.h"
+
+#ifndef UINTPTR_C
+#define UINTPTR_C(value) static_cast<uintptr_t>(value)
+#endif
 
 namespace {
-int failures = 0;
-int hostRet = 0, devRet = 0, magicRet = 0, launchRet = 0;
-int launchCalls = 0;
-int64_t nextMagic = 81;
-TileXR::CommArgs commArgs {};
-GM_ADDR devArgs = reinterpret_cast<GM_ADDR>(uintptr_t {0x9000});
-TileXRMoonEp::ReduceGradParams seenParams {};
-TileXRMoonEp::ReduceGradLaunchContext seenContext {};
-void Check(bool value, const std::string &message) { if (!value) { std::cerr << message << '\n'; ++failures; } }
-void Status(const char *name, int value, int expected) { if (value != expected) { std::cerr << name << ": " << value << " != " << expected << '\n'; ++failures; } }
-void Reset() { hostRet = devRet = magicRet = launchRet = 0; launchCalls = 0; nextMagic = 81; commArgs = TileXR::CommArgs {}; commArgs.rank = 0; commArgs.localRank = 0; commArgs.rankSize = 2; commArgs.localRankSize = 2; commArgs.extraFlag = TileXR::ExtraFlag::TOPO_910A5; commArgs.peerMems[0] = reinterpret_cast<GM_ADDR>(uintptr_t {0x100000}); commArgs.peerMems[1] = reinterpret_cast<GM_ADDR>(uintptr_t {0x200000}); devArgs = reinterpret_cast<GM_ADDR>(uintptr_t {0x9000}); }
-TileXRMoonEpPlanV1 Plan() { TileXRMoonEpPlanV1 p {}; p.structSize = sizeof(p); p.abiVersion = 1; p.n = 4; p.r = 2; p.e = 8; p.b = 2; p.nvS = 8; p.k = 2; p.dst = reinterpret_cast<void *>(uintptr_t {0x3000}); p.expertsToCopy = reinterpret_cast<void *>(uintptr_t {0x3100}); p.zeroFillRanges = reinterpret_cast<void *>(uintptr_t {0x3200}); p.remoteStats = reinterpret_cast<void *>(uintptr_t {0x3300}); p.dupGroups = reinterpret_cast<void *>(uintptr_t {0x3400}); p.dupLoffs = reinterpret_cast<void *>(uintptr_t {0x3500}); p.dupCounts = reinterpret_cast<void *>(uintptr_t {0x3600}); p.status = reinterpret_cast<void *>(uintptr_t {0x3700}); return p; }
-TileXRMoonEpTensorV1 Full(uintptr_t ptr, int64_t h, int64_t hp) { TileXRMoonEpTensorV1 t {}; t.structSize = sizeof(t); t.abiVersion = 1; t.data = reinterpret_cast<void *>(ptr); t.dtype = TILEXR_MOONEP_DTYPE_FLOAT32; t.rank = 3; t.shape[0] = 10; t.shape[1] = h; t.shape[2] = hp; t.elementCount = static_cast<uint64_t>(10 * h * hp); return t; }
-TileXRMoonEpTensorV1 Buffer(uintptr_t ptr, int64_t h, int64_t hp) { TileXRMoonEpTensorV1 t {}; t.structSize = sizeof(t); t.abiVersion = 1; t.data = reinterpret_cast<void *>(ptr); t.dtype = TILEXR_MOONEP_DTYPE_FLOAT32; t.rank = 4; t.shape[0] = 2; t.shape[1] = 2; t.shape[2] = h; t.shape[3] = hp; t.elementCount = static_cast<uint64_t>(4 * h * hp); return t; }
 
-void TestLaunch()
+int g_failures = 0;
+int g_launchCalls = 0;
+int g_memsetCalls = 0;
+int g_synchronizeCalls = 0;
+aclError g_synchronizeReturn = ACL_SUCCESS;
+int g_commHostReturn = TileXR::TILEXR_SUCCESS;
+int g_commDevReturn = TileXR::TILEXR_SUCCESS;
+int g_registryReturn = TileXR::TILEXR_SUCCESS;
+int g_qpCountReturn = TileXR::TILEXR_SUCCESS;
+int g_launchReturn = TileXR::TILEXR_SUCCESS;
+int g_qpCountCalls = 0;
+uint32_t g_qpCount = 3;
+TileXR::CommArgs g_commArgs {};
+TileXR::TileXRUDMARegistry g_registry {};
+GM_ADDR g_commDev = reinterpret_cast<GM_ADDR>(UINTPTR_C(0x800000));
+TileXRMoonEp::ReduceGradLayout g_launchedLayout {};
+
+void Check(bool condition, const std::string &message)
 {
-    Reset(); auto plan = Plan(); auto gate = Full(0x4000, 2, 3); auto up = Full(0x5000, 4, 2); auto down = Full(0x6000, 2, 5); auto gateBuf = Buffer(0x7000, 2, 3); auto upBuf = Buffer(0x8000, 4, 2); auto downBuf = Buffer(0xa000, 2, 5);
-    TileXRMoonEpReduceGradArgsV1 a {}; a.structSize = sizeof(a); a.abiVersion = 1; a.comm = reinterpret_cast<TileXRCommPtr>(uintptr_t {0x1000}); a.plan = &plan; a.fullGateGrad = &gate; a.fullUpGrad = &up; a.fullDownGrad = &down; a.gateReduceBuffer = &gateBuf; a.upReduceBuffer = &upBuf; a.downReduceBuffer = &downBuf;
-    auto stream = reinterpret_cast<aclrtStream>(uintptr_t {0xb000});
-    Status("reduce launch", TileXRMoonEp::TileXRMoonEpRunReduceGradV1(&a, stream), 0);
-    Check(launchCalls == 1 && seenParams.expertsToCopy == plan.expertsToCopy && seenParams.fullGateGrad == gate.data && seenParams.gateReduceBuffer == gateBuf.data && seenParams.fullUpGrad == up.data && seenParams.upReduceBuffer == upBuf.data && seenParams.fullDownGrad == down.data && seenParams.downReduceBuffer == downBuf.data && seenParams.status == plan.status, "reduce launch arguments mismatch");
-    Check(seenContext.layout.gate.rowBytes == 24 && seenContext.layout.gate.chunkStride == 32 && seenContext.layout.gate.payloadBytes == 64 && seenContext.layout.up.rowBytes == 32 && seenContext.layout.down.rowBytes == 40 && seenContext.layout.iterationCount == 3, "reduce layout mismatch");
-    gateBuf.shape[1] = 1;
-    Status("reduce buffer shape", TileXRMoonEp::TileXRMoonEpRunReduceGradV1(&a, stream), TILEXR_MOONEP_ERROR_INVALID_ARGUMENT);
-    gateBuf = Buffer(0x7000, 2, 3); a.flags = 1;
-    Status("reduce flags", TileXRMoonEp::TileXRMoonEpRunReduceGradV1(&a, stream), TILEXR_MOONEP_ERROR_INVALID_ARGUMENT);
-    a.flags = 0; commArgs.extraFlag = 0;
-    Status("reduce topology", TileXRMoonEp::TileXRMoonEpRunReduceGradV1(&a, stream), TILEXR_MOONEP_ERROR_NOT_SUPPORTED);
-    Reset(); launchRet = -88;
-    Status("reduce launch failure", TileXRMoonEp::TileXRMoonEpRunReduceGradV1(&a, stream), -88);
+    if (!condition) {
+        std::cerr << message << std::endl;
+        ++g_failures;
+    }
 }
+
+void CheckStatus(const std::string &label, int actual, int expected)
+{
+    if (actual != expected) {
+        std::cerr << label << " returned " << actual << ", expected " << expected << std::endl;
+        ++g_failures;
+    }
 }
-extern "C" int TileXRGetCommArgsHost(TileXRCommPtr, TileXR::CommArgs *&out) { out = hostRet == 0 ? &commArgs : nullptr; return hostRet; }
-extern "C" int TileXRGetCommArgsDev(TileXRCommPtr, GM_ADDR &out) { out = devRet == 0 ? devArgs : nullptr; return devRet; }
-extern "C" int TileXRCommNextMagic(TileXRCommPtr, int64_t *out) { if (magicRet == 0) *out = nextMagic; return magicRet; }
-namespace TileXRMoonEp { int TileXRMoonEpLaunchReduceGradKernel(const ReduceGradParams &p, const ReduceGradLaunchContext &c) { ++launchCalls; seenParams = p; seenContext = c; return launchRet; } }
-int main() { TestLaunch(); return failures == 0 ? EXIT_SUCCESS : EXIT_FAILURE; }
+
+TileXRMoonEpPlanV1 Plan()
+{
+    TileXRMoonEpPlanV1 plan {};
+    plan.structSize = sizeof(plan);
+    plan.abiVersion = TILEXR_MOONEP_ABI_VERSION_V1;
+    plan.n = 4;
+    plan.k = 2;
+    plan.e = 4;
+    plan.b = 2;
+    plan.r = 2;
+    plan.nvS = 4;
+    plan.dst = reinterpret_cast<void *>(UINTPTR_C(0x11000));
+    plan.expertsToCopy = reinterpret_cast<void *>(UINTPTR_C(0x13000));
+    plan.remoteStats = reinterpret_cast<void *>(UINTPTR_C(0x14000));
+    plan.status = reinterpret_cast<void *>(UINTPTR_C(0x15000));
+    return plan;
+}
+
+TileXRMoonEpTensorV1 Gradient(void *data, uint64_t rowElements)
+{
+    TileXRMoonEpTensorV1 tensor {};
+    tensor.structSize = sizeof(tensor);
+    tensor.abiVersion = TILEXR_MOONEP_ABI_VERSION_V1;
+    tensor.data = data;
+    tensor.elementCount = 6 * rowElements;
+    tensor.dtype = TILEXR_MOONEP_DTYPE_FLOAT32;
+    tensor.rank = 2;
+    tensor.shape[0] = 6;
+    tensor.shape[1] = static_cast<int64_t>(rowElements);
+    return tensor;
+}
+
+TileXRMoonEpTensorV1 Status()
+{
+    TileXRMoonEpTensorV1 tensor {};
+    tensor.structSize = sizeof(tensor);
+    tensor.abiVersion = TILEXR_MOONEP_ABI_VERSION_V1;
+    tensor.data = reinterpret_cast<void *>(UINTPTR_C(0x16000));
+    tensor.elementCount = 1;
+    tensor.dtype = TILEXR_MOONEP_DTYPE_INT32;
+    tensor.rank = 1;
+    tensor.shape[0] = 1;
+    return tensor;
+}
+
+void Reset()
+{
+    g_launchCalls = 0;
+    g_memsetCalls = 0;
+    g_synchronizeCalls = 0;
+    g_synchronizeReturn = ACL_SUCCESS;
+    g_commHostReturn = TileXR::TILEXR_SUCCESS;
+    g_commDevReturn = TileXR::TILEXR_SUCCESS;
+    g_registryReturn = TileXR::TILEXR_SUCCESS;
+    g_qpCountReturn = TileXR::TILEXR_SUCCESS;
+    g_launchReturn = TileXR::TILEXR_SUCCESS;
+    g_qpCountCalls = 0;
+    g_qpCount = 3;
+    g_launchedLayout = TileXRMoonEp::ReduceGradLayout {};
+    g_commArgs = TileXR::CommArgs {};
+    g_commArgs.rank = 0;
+    g_commArgs.localRank = 0;
+    g_commArgs.rankSize = 2;
+    g_commArgs.localRankSize = 2;
+    g_commArgs.extraFlag = TileXR::ExtraFlag::TOPO_910A5;
+    g_commArgs.peerMems[0] = reinterpret_cast<GM_ADDR>(UINTPTR_C(0x200000));
+    g_commArgs.peerMems[1] = reinterpret_cast<GM_ADDR>(UINTPTR_C(0x300000));
+    g_registry = TileXR::TileXRUDMARegistry {};
+    g_registry.rankSize = 2;
+    g_registry.regionCount = 1;
+}
+
+TileXRMoonEpReduceGradWorkspaceInfoV2 Query(
+    TileXRMoonEpPlanV1 *plan, TileXRMoonEpTensorV1 *gate,
+    TileXRMoonEpTensorV1 *up, TileXRMoonEpTensorV1 *down, int expected)
+{
+    TileXRMoonEpReduceGradWorkspaceQueryV2 query {};
+    query.structSize = sizeof(query);
+    query.abiVersion = TILEXR_MOONEP_ABI_VERSION_V2;
+    query.comm = reinterpret_cast<TileXRCommPtr>(UINTPTR_C(0x1000));
+    query.plan = plan;
+    query.gate = gate;
+    query.up = up;
+    query.down = down;
+    TileXRMoonEpReduceGradWorkspaceInfoV2 info {};
+    info.structSize = sizeof(info);
+    info.abiVersion = TILEXR_MOONEP_ABI_VERSION_V2;
+    CheckStatus("workspace query", TileXRMoonEpReduceGradGetWorkspaceSizeV2(&query, &info), expected);
+    return info;
+}
+
+TileXRMoonEpReduceGradArgsV2 Args(TileXRMoonEpPlanV1 *plan,
+    TileXRMoonEpTensorV1 *gate, TileXRMoonEpTensorV1 *up,
+    TileXRMoonEpTensorV1 *down, TileXRMoonEpTensorV1 *status)
+{
+    TileXRMoonEpReduceGradArgsV2 args {};
+    args.structSize = sizeof(args);
+    args.abiVersion = TILEXR_MOONEP_ABI_VERSION_V2;
+    args.comm = reinterpret_cast<TileXRCommPtr>(UINTPTR_C(0x1000));
+    args.plan = plan;
+    args.gate = gate;
+    args.up = up;
+    args.down = down;
+    args.status = status;
+    args.waitIterations = 1000;
+    return args;
+}
+
+void TestPeerOnly()
+{
+    Reset();
+    TileXRMoonEpPlanV1 plan = Plan();
+    TileXRMoonEpTensorV1 gate = Gradient(reinterpret_cast<void *>(UINTPTR_C(0x400000)), 64);
+    TileXRMoonEpTensorV1 up = Gradient(reinterpret_cast<void *>(UINTPTR_C(0x500000)), 128);
+    TileXRMoonEpTensorV1 down = Gradient(reinterpret_cast<void *>(UINTPTR_C(0x600000)), 256);
+    TileXRMoonEpTensorV1 status = Status();
+    const auto info = Query(&plan, &gate, &up, &down, TileXR::TILEXR_SUCCESS);
+    Check(info.workspaceBytes == 0 && info.udmaChunkBytes == 0,
+        "peer-only query must not request UDMA workspace");
+    Check(info.transports[0] == TILEXR_MOONEP_REDUCE_GRAD_TRANSPORT_PEER &&
+        info.transports[1] == TILEXR_MOONEP_REDUCE_GRAD_TRANSPORT_PEER &&
+        info.transports[2] == TILEXR_MOONEP_REDUCE_GRAD_TRANSPORT_PEER,
+        "peer-only query selected the wrong transport");
+
+    auto args = Args(&plan, &gate, &up, &down, &status);
+    aclrtStream stream = reinterpret_cast<aclrtStream>(UINTPTR_C(0x700000));
+    CheckStatus("peer launch", TileXRMoonEpReduceGradV2(&args, stream), TileXR::TILEXR_SUCCESS);
+    Check(g_memsetCalls == 1 && g_launchCalls == 1,
+        "peer launch must initialize status and launch exactly once");
+    Check(g_qpCountCalls == 0,
+        "peer-only query and launch must not query UDMA QPs");
+}
+
+void TestMixedUdma()
+{
+    Reset();
+    g_commArgs.localRankSize = 1;
+    TileXRMoonEpPlanV1 plan = Plan();
+    const uint64_t thresholdElements = TILEXR_MOONEP_REDUCE_GRAD_UDMA_THRESHOLD_BYTES / sizeof(float);
+    TileXRMoonEpTensorV1 gate = Gradient(reinterpret_cast<void *>(UINTPTR_C(0x400000)), thresholdElements);
+    TileXRMoonEpTensorV1 up = Gradient(reinterpret_cast<void *>(UINTPTR_C(0x500000)), thresholdElements + 1);
+    TileXRMoonEpTensorV1 down = Gradient(reinterpret_cast<void *>(UINTPTR_C(0x600000)), 256);
+    TileXRMoonEpTensorV1 status = Status();
+    const auto info = Query(&plan, &gate, &up, &down, TileXR::TILEXR_SUCCESS);
+    Check(info.transports[0] == TILEXR_MOONEP_REDUCE_GRAD_TRANSPORT_PEER &&
+        info.transports[1] == TILEXR_MOONEP_REDUCE_GRAD_TRANSPORT_UDMA,
+        "mixed query threshold selection mismatch");
+    Check(info.workspaceBytes > 0 &&
+        info.workspaceBytes % TileXRMoonEp::kReduceGradUdmaWorkspaceAlignment == 0 &&
+        info.workspaceAlignment == TileXRMoonEp::kReduceGradUdmaWorkspaceAlignment,
+        "mixed query must return aligned UDMA workspace");
+    Check(g_qpCountCalls == 1,
+        "mixed query must obtain the negotiated UDMA QP count");
+
+    void *workspace = reinterpret_cast<void *>(UINTPTR_C(0x1000000));
+    g_commArgs.extraFlag |= TileXR::ExtraFlag::UDMA;
+    g_commArgs.udmaInfoPtr = reinterpret_cast<GM_ADDR>(UINTPTR_C(0x17000));
+    g_commArgs.udmaRegistryPtr = reinterpret_cast<GM_ADDR>(UINTPTR_C(0x18000));
+    for (int rank = 0; rank < 2; ++rank) {
+        g_registry.regions[rank].base = rank == 0 ? static_cast<GM_ADDR>(workspace) :
+            reinterpret_cast<GM_ADDR>(UINTPTR_C(0x2000000));
+        g_registry.regions[rank].bytes = info.workspaceBytes;
+    }
+
+    auto args = Args(&plan, &gate, &up, &down, &status);
+    args.workspace = workspace;
+    args.workspaceBytes = info.workspaceBytes;
+    aclrtStream stream = reinterpret_cast<aclrtStream>(UINTPTR_C(0x700000));
+    CheckStatus("mixed launch", TileXRMoonEpReduceGradV2(&args, stream), TileXR::TILEXR_SUCCESS);
+    Check(g_launchCalls == 1 &&
+        g_launchedLayout.transports[TileXRMoonEp::kReduceGradUp] ==
+            TILEXR_MOONEP_REDUCE_GRAD_TRANSPORT_UDMA &&
+        g_launchedLayout.udmaQpCount == g_qpCount,
+        "cross-node mixed launch did not preserve transport selection");
+    Check(g_qpCountCalls == 2,
+        "mixed launch must obtain the negotiated UDMA QP count");
+
+    g_registry.regions[1].base += 512;
+    CheckStatus("misaligned peer workspace", TileXRMoonEpReduceGradV2(&args, stream),
+        TileXR::TILEXR_ERROR_PARA_CHECK_FAIL);
+    Check(g_launchCalls == 1, "misaligned peer workspace must not launch");
+    g_registry.regions[1].base -= 512;
+    g_registry.regions[1].bytes += TileXRMoonEp::kReduceGradUdmaWorkspaceAlignment;
+    CheckStatus("mismatched peer workspace bytes", TileXRMoonEpReduceGradV2(&args, stream),
+        TileXR::TILEXR_ERROR_PARA_CHECK_FAIL);
+    Check(g_launchCalls == 1, "mismatched peer workspace bytes must not launch");
+    g_registry.regions[1].bytes = info.workspaceBytes;
+
+    g_commArgs.extraFlag &= ~TileXR::ExtraFlag::UDMA;
+    CheckStatus("missing UDMA", TileXRMoonEpReduceGradV2(&args, stream),
+        TileXR::TILEXR_ERROR_NOT_INITIALIZED);
+    Check(g_launchCalls == 1, "missing UDMA must not launch");
+
+    g_commArgs.extraFlag |= TileXR::ExtraFlag::UDMA;
+    const int qpCallsBeforeFailureChecks = g_qpCountCalls;
+    g_qpCountReturn = -92;
+    (void)Query(&plan, &gate, &up, &down, -92);
+    Check(g_qpCountCalls == qpCallsBeforeFailureChecks + 1,
+        "UDMA QP query failure must be observed by workspace preparation");
+
+    g_qpCountReturn = TileXR::TILEXR_SUCCESS;
+    g_qpCount = 0;
+    (void)Query(&plan, &gate, &up, &down, TileXR::TILEXR_ERROR_NOT_INITIALIZED);
+    g_qpCount = TileXRMoonEp::kReduceGradMaxUdmaQpCount + 1;
+    (void)Query(&plan, &gate, &up, &down, TileXR::TILEXR_ERROR_NOT_INITIALIZED);
+    Check(g_qpCountCalls == qpCallsBeforeFailureChecks + 3,
+        "invalid UDMA QP counts must be validated after every query");
+}
+
+void TestSingleRankLargeRowsDoNotRequireUdma()
+{
+    Reset();
+    g_commArgs.rankSize = 1;
+    g_commArgs.localRankSize = 1;
+    g_registryReturn = TileXR::TILEXR_ERROR_NOT_INITIALIZED;
+    TileXRMoonEpPlanV1 plan = Plan();
+    plan.r = 1;
+    plan.b = plan.e;
+    const uint64_t largeRow =
+        TILEXR_MOONEP_REDUCE_GRAD_UDMA_THRESHOLD_BYTES / sizeof(float) + 1;
+    TileXRMoonEpTensorV1 gate = Gradient(
+        reinterpret_cast<void *>(UINTPTR_C(0x400000)), largeRow);
+    TileXRMoonEpTensorV1 up = Gradient(
+        reinterpret_cast<void *>(UINTPTR_C(0x500000)), largeRow + 1);
+    TileXRMoonEpTensorV1 down = Gradient(
+        reinterpret_cast<void *>(UINTPTR_C(0x600000)), largeRow + 2);
+    TileXRMoonEpTensorV1 *gradients[] = {&gate, &up, &down};
+    for (TileXRMoonEpTensorV1 *tensor : gradients) {
+        tensor->shape[0] = plan.e + plan.b;
+        tensor->elementCount = static_cast<uint64_t>(tensor->shape[0]) *
+            static_cast<uint64_t>(tensor->shape[1]);
+    }
+    TileXRMoonEpTensorV1 status = Status();
+    const auto info = Query(&plan, &gate, &up, &down, TileXR::TILEXR_SUCCESS);
+    Check(info.workspaceBytes == 0 && info.udmaChunkBytes == 0,
+        "single-rank large-row query must not request UDMA workspace");
+    Check(info.transports[0] == TILEXR_MOONEP_REDUCE_GRAD_TRANSPORT_PEER &&
+        info.transports[1] == TILEXR_MOONEP_REDUCE_GRAD_TRANSPORT_PEER &&
+        info.transports[2] == TILEXR_MOONEP_REDUCE_GRAD_TRANSPORT_PEER,
+        "single-rank large-row query must select the local peer path");
+
+    auto args = Args(&plan, &gate, &up, &down, &status);
+    aclrtStream stream = reinterpret_cast<aclrtStream>(UINTPTR_C(0x700000));
+    CheckStatus("single-rank large-row launch", TileXRMoonEpReduceGradV2(&args, stream),
+        TileXR::TILEXR_SUCCESS);
+    Check(g_launchCalls == 1,
+        "single-rank large-row launch must not consult an unavailable UDMA registry");
+}
+
+void TestLaunchFailureDrainsEnqueuedStatusReset()
+{
+    Reset();
+    TileXRMoonEpPlanV1 plan = Plan();
+    TileXRMoonEpTensorV1 gate = Gradient(reinterpret_cast<void *>(UINTPTR_C(0x400000)), 64);
+    TileXRMoonEpTensorV1 up = Gradient(reinterpret_cast<void *>(UINTPTR_C(0x500000)), 64);
+    TileXRMoonEpTensorV1 down = Gradient(reinterpret_cast<void *>(UINTPTR_C(0x600000)), 64);
+    TileXRMoonEpTensorV1 status = Status();
+    auto args = Args(&plan, &gate, &up, &down, &status);
+    aclrtStream stream = reinterpret_cast<aclrtStream>(UINTPTR_C(0x700000));
+
+    g_launchReturn = TileXR::TILEXR_ERROR_NOT_SUPPORT;
+    CheckStatus("launch failure", TileXRMoonEpReduceGradV2(&args, stream),
+        TileXR::TILEXR_ERROR_NOT_SUPPORT);
+    Check(g_memsetCalls == 1 && g_launchCalls == 1 && g_synchronizeCalls == 1,
+        "launch failure must drain the enqueued status reset");
+
+    g_synchronizeReturn = -91;
+    CheckStatus("launch failure with drain failure", TileXRMoonEpReduceGradV2(&args, stream),
+        TileXR::TILEXR_ERROR_MKIRT);
+    Check(g_memsetCalls == 2 && g_launchCalls == 2 && g_synchronizeCalls == 2,
+        "stream drain failure must be reported after a failed launch");
+}
+
+void TestValidation()
+{
+    Reset();
+    TileXRMoonEpPlanV1 plan = Plan();
+    TileXRMoonEpTensorV1 gate = Gradient(reinterpret_cast<void *>(UINTPTR_C(0x400000)), 64);
+    TileXRMoonEpTensorV1 up = Gradient(reinterpret_cast<void *>(UINTPTR_C(0x500000)), 64);
+    TileXRMoonEpTensorV1 down = Gradient(reinterpret_cast<void *>(UINTPTR_C(0x600000)), 64);
+    TileXRMoonEpTensorV1 status = Status();
+    auto args = Args(&plan, &gate, &up, &down, &status);
+    aclrtStream stream = reinterpret_cast<aclrtStream>(UINTPTR_C(0x700000));
+
+    gate.dtype = TILEXR_MOONEP_DTYPE_FLOAT16;
+    CheckStatus("gradient dtype", TileXRMoonEpReduceGradV2(&args, stream),
+        TileXR::TILEXR_ERROR_PARA_CHECK_FAIL);
+    gate.dtype = TILEXR_MOONEP_DTYPE_FLOAT32;
+    g_commArgs.peerMems[1] = nullptr;
+    CheckStatus("missing peer", TileXRMoonEpReduceGradV2(&args, stream),
+        TileXR::TILEXR_ERROR_NOT_INITIALIZED);
+    g_commArgs.peerMems[1] = reinterpret_cast<GM_ADDR>(UINTPTR_C(0x300000));
+    g_commArgs.extraFlag = 0;
+    CheckStatus("wrong architecture", TileXRMoonEpReduceGradV2(&args, stream),
+        TileXR::TILEXR_ERROR_NOT_SUPPORT);
+
+    Reset();
+    plan = Plan();
+    plan.e = std::numeric_limits<int64_t>::max();
+    plan.b = std::numeric_limits<int64_t>::max();
+    plan.r = 1;
+    g_commArgs.rankSize = 1;
+    g_commArgs.localRankSize = 1;
+    (void)Query(&plan, &gate, &up, &down, TileXR::TILEXR_ERROR_PARA_CHECK_FAIL);
+}
+
+} // namespace
+
+extern "C" int TileXRGetCommArgsHost(TileXRCommPtr, TileXR::CommArgs *&commArgs)
+{
+    commArgs = g_commHostReturn == TileXR::TILEXR_SUCCESS ? &g_commArgs : nullptr;
+    return g_commHostReturn;
+}
+
+extern "C" int TileXRGetCommArgsDev(TileXRCommPtr, GM_ADDR &commArgs)
+{
+    commArgs = g_commDevReturn == TileXR::TILEXR_SUCCESS ? g_commDev : nullptr;
+    return g_commDevReturn;
+}
+
+extern "C" int TileXRGetUDMARegistryHost(TileXRCommPtr,
+    const TileXR::TileXRUDMARegistry **registry)
+{
+    if (registry != nullptr) {
+        *registry = g_registryReturn == TileXR::TILEXR_SUCCESS ? &g_registry : nullptr;
+    }
+    return g_registryReturn;
+}
+
+extern "C" int TileXRUDMAGetQpCount(TileXRCommPtr, uint32_t *qpCount)
+{
+    ++g_qpCountCalls;
+    if (qpCount != nullptr) {
+        *qpCount = g_qpCount;
+    }
+    return g_qpCountReturn;
+}
+
+extern "C" aclError aclrtMemsetAsync(void *, size_t, int32_t, size_t, aclrtStream)
+{
+    ++g_memsetCalls;
+    return ACL_SUCCESS;
+}
+
+extern "C" aclError aclrtMemcpyAsync(void *, size_t, const void *, size_t,
+    aclrtMemcpyKind, aclrtStream)
+{
+    return ACL_SUCCESS;
+}
+
+extern "C" aclError aclrtSynchronizeStream(aclrtStream)
+{
+    ++g_synchronizeCalls;
+    return g_synchronizeReturn;
+}
+
+namespace TileXRMoonEp {
+
+int TileXRMoonEpLaunchReduceGradKernel(const ReduceGradParams &,
+    const ReduceGradLaunchContext &context)
+{
+    ++g_launchCalls;
+    g_launchedLayout = context.layout;
+    return g_launchReturn;
+}
+
+} // namespace TileXRMoonEp
+
+int main()
+{
+    TestPeerOnly();
+    TestMixedUdma();
+    TestSingleRankLargeRowsDoNotRequireUdma();
+    TestLaunchFailureDrainsEnqueuedStatusReset();
+    TestValidation();
+    return g_failures == 0 ? 0 : 1;
+}

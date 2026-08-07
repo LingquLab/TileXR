@@ -92,6 +92,8 @@ int main()
     const std::string reduceKernel = ReadFile(
         "src/moonep/reduce_grad/kernels/tilexr_moonep_reduce_grad_kernel.cpp");
     const std::string reduceCmake = ReadFile("src/moonep/reduce_grad/CMakeLists.txt");
+    const std::string dataAsFlag = ReadFile("src/include/tilexr_data_as_flag.h");
+    const std::string udma = ReadFile("src/include/tilexr_udma.h");
     const std::string registration =
         ReadFile("src/moonep/common/moonep_kernel_registration.h");
     const std::string registrationImpl =
@@ -212,34 +214,47 @@ int main()
     Contains("prefetch cmake", prefetchCmake, "MoonEpKernel.cmake");
     Excludes("prefetch cmake", prefetchCmake, "libtilexr_moonep_prefetch_weight_kernel.so");
     Contains("prefetch kernel", Lower(prefetchKernel), "udma");
-    Contains("reduce launch", reduceLaunch, "#include \"moonep_kernel_launch.h\"");
-    Contains("reduce launch", reduceLaunch, "LaunchRegisteredMoonEpKernel(");
-    Excludes("reduce launch", reduceLaunch, "rtKernelLaunchWithFlagV2");
-    Contains("reduce launch", reduceLaunch, "kReduceGradKernelSignature");
+    Contains("reduce launch", reduceLaunch, "rtDevBinaryRegister");
+    Contains("reduce launch", reduceLaunch, "rtFunctionRegister");
+    Contains("reduce launch", reduceLaunch, "rtKernelLaunchWithFlagV2");
+    Contains("reduce launch", reduceLaunch, "EnsureReduceGradKernelRegistered");
+    Excludes("reduce launch", reduceLaunch, "LaunchMoonEpKernel(");
     Contains("reduce kernel", reduceKernel,
         "extern \"C\" __global__ __aicore__ void tilexr_moonep_reduce_grad_kernel");
-    Contains("reduce kernel", reduceKernel, "AccumulateOwned");
-    Contains("reduce kernel", reduceKernel, "sourceRank");
+    Contains("reduce kernel", reduceKernel, "RunSender");
+    Contains("reduce kernel", reduceKernel, "RunReceiver");
+    Excludes("reduce kernel", reduceKernel, "reduceBuffers_");
+    Contains("reduce kernel", reduceKernel, "DataAsFlagSend");
+    Contains("reduce kernel", reduceKernel, "DataAsFlagCheckBatchCleared");
     Contains("reduce kernel", reduceKernel, "AscendC::Add");
-    Contains("reduce kernel", reduceKernel, "ClearLocalLiveSlots");
-    Contains("reduce kernel", reduceKernel, "DataCacheCleanAndInvalid");
+    Contains("reduce kernel", reduceKernel, "UDMAPutRegisteredSignalNbiOnQp");
+    Contains("reduce kernel", reduceKernel, "UDMAQuietStatusOnQp");
+    Excludes("reduce kernel", reduceKernel,
+        "tilexr_moonep_reduce_grad_status_kernel");
+    Excludes("reduce kernel", reduceKernel, "kReduceGradDeviceStatusSuccess");
+    Contains("reduce Host", reduceHost, "TileXRMoonEpReduceGradV2");
+    Contains("DataAsFlag helper", dataAsFlag, "DataAsFlagCheckBatchCleared");
+    Contains("UDMA helper", udma, "UDMAPutRegisteredSignalNbiOnQp");
+    Contains("UDMA helper", udma, "UDMAWriteNotify");
+    Contains("UDMA doorbell", udma, "st_dev");
     Excludes("reduce kernel", reduceKernel, "<<<");
     Excludes("reduce launch", reduceLaunch, "launch_tilexr_moonep_reduce_grad_kernel");
     Contains("reduce cmake", reduceCmake, "MoonEpKernel.cmake");
+    Contains("reduce cmake", reduceCmake, "${ARCH}-linux/asc/include");
     Excludes("reduce cmake", reduceCmake, "libtilexr_moonep_reduce_grad_kernel.so");
-    Excludes("reduce kernel", Lower(reduceKernel), "udma");
     Contains("registration", registration, "kPlannerKernelSignature");
     Contains("registration", registration, "kDispatchKernelSignature");
     Contains("registration", registration, "kCombineKernelSignature");
     Contains("registration", registration, "kPrefetchWeightKernelSignature");
     Contains("registration", registration, "kReduceGradKernelSignature");
+    Excludes("registration", registration, "kReduceGradStatusKernelSignature");
 
-    const std::string activeIpc = Lower(plannerHost + plannerKernel + dispatchCommon +
+    const std::string ipcStages = Lower(plannerHost + plannerKernel + dispatchCommon +
         dispatchHost + dispatchLaunch + dispatchKernel + combineCommon + combineHost +
-        combineLaunch + combineKernel + reduceHost + reduceLaunch + reduceKernel +
         stageHost + kernelLaunch);
-    Excludes("IPC MoonEP sources", activeIpc, "udma");
-    const std::string active = activeIpc + Lower(prefetchHost + prefetchLaunch + prefetchKernel);
+    Excludes("IPC-only MoonEP stages", ipcStages, "udma");
+    const std::string active = Lower(ipcStages + prefetchHost + prefetchLaunch +
+        prefetchKernel + reduceHost + reduceLaunch + reduceKernel);
     Excludes("active MoonEP sources", active, "3rdparty/moonep");
     Excludes("active MoonEP sources", active, "reference/");
     Excludes("active MoonEP sources", active, "src/ep");

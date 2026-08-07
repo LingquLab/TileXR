@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <limits>
 
+#include "acl/acl_rt.h"
 #include "tilexr_api.h"
 #include "tilexr_moonep_planner.h"
 
@@ -20,9 +21,6 @@ int TileXRMoonEpRunCombineV1(
     const TileXRMoonEpCombineArgsV1 *args, aclrtStream stream);
 int TileXRMoonEpRunPrefetchWeightV1(
     const TileXRMoonEpPrefetchWeightArgsV1 *args, aclrtStream stream);
-int TileXRMoonEpRunReduceGradV1(
-    const TileXRMoonEpReduceGradArgsV1 *args, aclrtStream stream);
-
 } // namespace TileXRMoonEp
 
 namespace {
@@ -30,9 +28,11 @@ namespace {
 const uint64_t kNativeStages = static_cast<uint64_t>(TILEXR_MOONEP_STAGE_PLANNING) |
     static_cast<uint64_t>(TILEXR_MOONEP_STAGE_DISPATCH) |
     static_cast<uint64_t>(TILEXR_MOONEP_STAGE_PREFETCH_WEIGHT) |
-    static_cast<uint64_t>(TILEXR_MOONEP_STAGE_COMBINE) |
+    static_cast<uint64_t>(TILEXR_MOONEP_STAGE_COMBINE);
+const uint64_t kStubStages = static_cast<uint64_t>(TILEXR_MOONEP_STAGE_REDUCE_GRAD);
+const uint64_t kNativeStagesV2 = kNativeStages |
     static_cast<uint64_t>(TILEXR_MOONEP_STAGE_REDUCE_GRAD);
-const uint64_t kStubStages = 0;
+const uint64_t kStubStagesV2 = 0;
 
 bool CheckedMultiply(uint64_t lhs, uint64_t rhs, uint64_t *result)
 {
@@ -75,6 +75,48 @@ bool Int32Tensor2D(const TileXRMoonEpTensorV1 *tensor, int64_t dim0, int64_t dim
 {
     return TensorHeaderValid(tensor) && tensor->dtype == TILEXR_MOONEP_DTYPE_INT32 &&
         tensor->rank == 2 && tensor->shape[0] == dim0 && tensor->shape[1] == dim1;
+}
+
+bool TensorBytes(const TileXRMoonEpTensorV1 *tensor, size_t *bytes)
+{
+    if (bytes == nullptr || !TensorHeaderValid(tensor)) {
+        return false;
+    }
+    uint64_t elementBytes = 0;
+    switch (tensor->dtype) {
+        case TILEXR_MOONEP_DTYPE_INT32:
+        case TILEXR_MOONEP_DTYPE_FLOAT32:
+            elementBytes = 4;
+            break;
+        case TILEXR_MOONEP_DTYPE_FLOAT16:
+        case TILEXR_MOONEP_DTYPE_BFLOAT16:
+            elementBytes = 2;
+            break;
+        default:
+            return false;
+    }
+    uint64_t total = 0;
+    if (!CheckedMultiply(tensor->elementCount, elementBytes, &total) ||
+        total > static_cast<uint64_t>(std::numeric_limits<size_t>::max())) {
+        return false;
+    }
+    *bytes = static_cast<size_t>(total);
+    return true;
+}
+
+bool TensorDescriptorsEqual(const TileXRMoonEpTensorV1 &lhs,
+    const TileXRMoonEpTensorV1 &rhs)
+{
+    if (lhs.elementCount != rhs.elementCount || lhs.dtype != rhs.dtype ||
+        lhs.rank != rhs.rank) {
+        return false;
+    }
+    for (uint32_t dim = 0; dim < TILEXR_MOONEP_MAX_TENSOR_RANK; ++dim) {
+        if (lhs.shape[dim] != rhs.shape[dim]) {
+            return false;
+        }
+    }
+    return true;
 }
 
 bool PlanValid(const TileXRMoonEpPlanV1 *plan, int64_t *s, int64_t *tokenPadding)
@@ -130,11 +172,62 @@ int ValidateCommPlan(TileXRCommPtr comm, const TileXRMoonEpPlanV1 *plan,
     return TILEXR_MOONEP_SUCCESS;
 }
 
+int RunReduceGradV1Stub(const TileXRMoonEpReduceGradArgsV1 *args,
+    aclrtStream stream)
+{
+    if (args == nullptr || args->structSize < sizeof(*args) ||
+        args->abiVersion != TILEXR_MOONEP_ABI_VERSION_V1 || args->comm == nullptr ||
+        args->flags != TILEXR_MOONEP_FLAG_NONE || stream == nullptr ||
+        args->plan == nullptr || args->input == nullptr || args->output == nullptr) {
+        return TILEXR_MOONEP_ERROR_INVALID_ARGUMENT;
+    }
+
+    int64_t s = 0;
+    int64_t tokenPadding = 0;
+    const int commRet = ValidateCommPlan(args->comm, args->plan, &s, &tokenPadding);
+    if (commRet != TILEXR_MOONEP_SUCCESS) {
+        return commRet;
+    }
+
+    size_t inputBytes = 0;
+    size_t outputBytes = 0;
+    if (!TensorBytes(args->input, &inputBytes) ||
+        !TensorBytes(args->output, &outputBytes) ||
+        args->input->dtype != args->output->dtype ||
+        args->input->elementCount != args->output->elementCount) {
+        return TILEXR_MOONEP_ERROR_INVALID_ARGUMENT;
+    }
+    if (args->input->data == args->output->data) {
+        return TensorDescriptorsEqual(*args->input, *args->output) ?
+            TILEXR_MOONEP_SUCCESS : TILEXR_MOONEP_ERROR_INVALID_ARGUMENT;
+    }
+
+    aclError ret = aclrtMemsetAsync(
+        args->output->data, outputBytes, 0, outputBytes, stream);
+    if (ret != ACL_SUCCESS) {
+        return TILEXR_MOONEP_ERROR_INTERNAL;
+    }
+    ret = aclrtMemcpyAsync(args->output->data, outputBytes, args->input->data,
+        inputBytes, ACL_MEMCPY_DEVICE_TO_DEVICE, stream);
+    return ret == ACL_SUCCESS ? TILEXR_MOONEP_SUCCESS : TILEXR_MOONEP_ERROR_INTERNAL;
+}
+
 } // namespace
 
 extern "C" uint32_t TileXRMoonEpGetAbiVersion(void)
 {
-    return TILEXR_MOONEP_ABI_VERSION_V1;
+    return TILEXR_MOONEP_ABI_VERSION_V2;
+}
+
+extern "C" int TileXRMoonEpGetCapabilitiesV2(uint64_t *nativeStages,
+    uint64_t *stubStages)
+{
+    if (nativeStages == nullptr || stubStages == nullptr) {
+        return TILEXR_MOONEP_ERROR_INVALID_ARGUMENT;
+    }
+    *nativeStages = kNativeStagesV2;
+    *stubStages = kStubStagesV2;
+    return TILEXR_MOONEP_SUCCESS;
 }
 
 extern "C" int TileXRMoonEpGetCapabilitiesV1(uint64_t *nativeStages, uint64_t *stubStages)
@@ -250,5 +343,5 @@ extern "C" int TileXRMoonEpCombineV1(const TileXRMoonEpCombineArgsV1 *args,
 extern "C" int TileXRMoonEpReduceGradV1(const TileXRMoonEpReduceGradArgsV1 *args,
     aclrtStream stream)
 {
-    return TileXRMoonEp::TileXRMoonEpRunReduceGradV1(args, stream);
+    return RunReduceGradV1Stub(args, stream);
 }

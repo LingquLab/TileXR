@@ -3,40 +3,16 @@
 
 #include <cstdint>
 
-#include "tilexr_moonep.h"
+#include "reduce_grad_common.h"
 
 namespace TileXRMoonEp {
 
-struct ReduceGradProjectionLayout {
-    int64_t rowBytes = 0;
-    int64_t chunkBytes = 0;
-    int64_t chunkStride = 0;
-    int64_t chunkCount = 0;
-    uint64_t payloadBytes = 0;
-};
+uint64_t TileXRMoonEpReduceGradPeerWindowBytes();
 
-struct ReduceGradLayout {
-    int64_t rank = 0;
-    int64_t world = 0;
-    int64_t e = 0;
-    int64_t b = 0;
-    int64_t expertsPerRank = 0;
-    int64_t blockDim = 0;
-    int64_t iterationCount = 0;
-    ReduceGradProjectionLayout gate {};
-    ReduceGradProjectionLayout up {};
-    ReduceGradProjectionLayout down {};
-};
-
-int TileXRMoonEpBuildReduceGradLayout(int64_t commRank, int64_t commWorld,
-    const TileXRMoonEpPlanV1 *plan,
-    const TileXRMoonEpTensorV1 *fullGateGrad,
-    const TileXRMoonEpTensorV1 *fullUpGrad,
-    const TileXRMoonEpTensorV1 *fullDownGrad,
-    const TileXRMoonEpTensorV1 *gateReduceBuffer,
-    const TileXRMoonEpTensorV1 *upReduceBuffer,
-    const TileXRMoonEpTensorV1 *downReduceBuffer,
-    uint64_t flags, ReduceGradLayout *layout);
+int TileXRMoonEpBuildReduceGradLayout(int64_t rank, int64_t rankSize,
+    int64_t expertCount, const uint64_t rowElements[kReduceGradProjectionCount],
+    uint64_t peerWindowBytes, uint64_t requestedUdmaChunkBytes,
+    ReduceGradLayout *out);
 
 } // namespace TileXRMoonEp
 

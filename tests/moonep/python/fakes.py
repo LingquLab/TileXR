@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import sys
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -46,9 +47,11 @@ class FakeTensor:
         self._storage_offset = int(storage_offset)
         self._item = 0
         self.masked_fill_calls = []
-        allocation_bytes = max(64, self.numel() * self.element_size())
-        self._ptr = (FakeTensor._next_ptr + 63) // 64 * 64
-        FakeTensor._next_ptr = self._ptr + (allocation_bytes + 63) // 64 * 64
+        self.copy_calls = []
+        self.zero_calls = []
+        allocation_bytes = max(512, self.numel() * self.element_size())
+        self._ptr = (FakeTensor._next_ptr + 511) // 512 * 512
+        FakeTensor._next_ptr = self._ptr + (allocation_bytes + 511) // 512 * 512
 
     def is_contiguous(self):
         return self._contiguous
@@ -78,24 +81,46 @@ class FakeTensor:
         result = FakeTensor(shape, self.dtype, self.device,
             storage_offset=self._storage_offset)
         result._ptr = self._ptr
+        result._base = getattr(self, "_base", self)
+        result.masked_fill_calls = self.masked_fill_calls
+        result.copy_calls = self.copy_calls
+        result.zero_calls = self.zero_calls
         return result
 
     def narrow(self, dim, start, length):
+        dim = int(dim)
+        start = int(start)
+        length = int(length)
+        if dim < 0 or dim >= len(self.shape):
+            raise ValueError("FakeTensor.narrow dimension is out of bounds")
+        if start < 0 or length < 0 or start + length > self.shape[dim]:
+            raise ValueError("FakeTensor.narrow range is out of bounds")
         shape = list(self.shape)
-        shape[int(dim)] = int(length)
-        stride = math.prod(self.shape[int(dim) + 1:])
+        shape[dim] = length
+        stride = math.prod(self.shape[dim + 1:])
         result = FakeTensor(
             shape,
             self.dtype,
             self.device,
-            storage_offset=self._storage_offset + int(start) * stride,
+            storage_offset=self._storage_offset + start * stride,
         )
-        result._ptr = self._ptr + int(start) * stride * self.element_size()
+        result._ptr = self._ptr + start * stride * self.element_size()
+        result._base = getattr(self, "_base", self)
+        result.masked_fill_calls = self.masked_fill_calls
+        result.copy_calls = self.copy_calls
+        result.zero_calls = self.zero_calls
         return result
 
     def __getitem__(self, item):
+        if isinstance(item, int):
+            index = item + self.shape[0] if item < 0 else item
+            if index < 0 or index >= self.shape[0]:
+                raise IndexError("FakeTensor index is out of bounds")
+            result = self.narrow(0, index, 1)
+            result.shape = self.shape[1:]
+            return result
         if not isinstance(item, slice):
-            raise TypeError("FakeTensor only supports first-dimension slices")
+            raise TypeError("FakeTensor only supports integer or slice indexing on dim 0")
         start, stop, step = item.indices(self.shape[0])
         if step != 1:
             raise TypeError("FakeTensor slice step must be one")
@@ -103,15 +128,6 @@ class FakeTensor:
 
     def clone(self):
         return FakeTensor(self.shape, self.dtype, self.device)
-
-    def copy_(self, other):
-        if self.shape != other.shape or self.dtype != other.dtype:
-            raise ValueError("FakeTensor copy_ contract mismatch")
-        return self
-
-    def fill_(self, value):
-        self._item = value
-        return self
 
     def to(self, *, dtype):
         return FakeTensor(self.shape, dtype, self.device)
@@ -134,8 +150,22 @@ class FakeTensor:
     def contiguous(self):
         return self
 
+    def copy_(self, other):
+        if not isinstance(other, FakeTensor):
+            raise TypeError("FakeTensor.copy_ requires another FakeTensor")
+        if self.shape != other.shape or self.dtype != other.dtype or self.device != other.device:
+            raise ValueError("FakeTensor.copy_ source and destination must match")
+        self.copy_calls.append((self.data_ptr(), other.data_ptr(), self.shape))
+        self._item = other._item
+        return self
+
     def zero_(self):
         self._item = 0
+        self.zero_calls.append((self.data_ptr(), self.shape))
+        return self
+
+    def fill_(self, value):
+        self._item = value
         return self
 
 
@@ -178,6 +208,12 @@ class FakeTorch:
     def empty(shape, *, dtype, device):
         return FakeTensor(shape, dtype, device)
 
+    @staticmethod
+    def zeros(shape, *, dtype, device):
+        value = FakeTensor(shape, dtype, device)
+        value._item = 0
+        return value
+
 
 class FakeRuntime:
     def __init__(
@@ -187,19 +223,56 @@ class FakeRuntime:
         *,
         write_status_markers=False,
         fail_dispatch_calls=0,
+        udma_qp_count=1,
     ):
         self.rank = rank
         self.world_size = world_size
         self.write_status_markers = bool(write_status_markers)
         self.fail_dispatch_calls = int(fail_dispatch_calls)
+        self._udma_qp_count = int(udma_qp_count)
         self.calls = []
         self.closed = False
         self.udma_handles = []
         self.capabilities = NativeCapabilities(
-            abi_version=1,
+            abi_version=2,
             stage_mask=31,
             stub_mask=0,
         )
+        self.registered_workspace = None
+        self.reduce_grad_query_calls = 0
+        self._reduce_grad_lock = threading.RLock()
+        self._reduce_grad_owner_token = None
+
+    @property
+    def udma_qp_count(self):
+        return self._udma_qp_count
+
+    def _acquire_reduce_grad(self, owner_token):
+        with self._reduce_grad_lock:
+            if self.closed:
+                raise RuntimeError("cannot launch ReduceGrad on a closed TileXR MoonEP runtime")
+            if self._reduce_grad_owner_token is not None:
+                raise RuntimeError(
+                    "ReduceGrad is already in flight on this TileXR MoonEP runtime; "
+                    "synchronize the owning buffer before launching another ReduceGrad"
+                )
+            self._reduce_grad_owner_token = owner_token
+
+    def _release_reduce_grad(self, owner_token):
+        with self._reduce_grad_lock:
+            if self._reduce_grad_owner_token is not owner_token:
+                raise RuntimeError("ReduceGrad owner token mismatch")
+            self._reduce_grad_owner_token = None
+
+    def _require_reduce_grad_workspace_owner(self, owner_token, operation):
+        if (
+            self._reduce_grad_owner_token is not None
+            and self._reduce_grad_owner_token is not owner_token
+        ):
+            raise RuntimeError(
+                f"{operation} cannot modify the ReduceGrad workspace while another "
+                "ReduceGrad is in flight"
+            )
 
     def planning_workspace_size(self, context):
         self.calls.append(("planning_workspace_size", None))
@@ -295,11 +368,81 @@ class FakeRuntime:
         if self.write_status_markers:
             plan.status._item = 3000
 
-    def reduce_grad(self, context, plan, gradients, stream):
-        self.calls.append(("reduce_grad", plan, gradients, stream))
-        if self.write_status_markers:
-            plan.status._item = 5000
+    def reduce_grad_workspace_info(
+        self, context, plan, gradients, *, requested_udma_chunk_bytes=0
+    ):
+        from tilexr_moonep.runtime import ReduceGradWorkspaceInfo
+
+        row_bytes = tuple(
+            int(getattr(gradients, name).numel() // getattr(gradients, name).shape[0]) * 4
+            for name in ("gate", "up", "down")
+        )
+        transports = tuple("udma" if value > (1 << 20) else "peer" for value in row_bytes)
+        workspace_bytes = 4096 if "udma" in transports else 0
+        self.reduce_grad_query_calls += 1
+        return ReduceGradWorkspaceInfo(
+            workspace_bytes=workspace_bytes,
+            workspace_alignment=2 << 20,
+            udma_chunk_bytes=2 << 20 if workspace_bytes else 0,
+            peer_window_bytes=100 << 20,
+            peer_half_bytes=49 << 20,
+            peer_slot_stride_bytes=1 << 20,
+            row_bytes=row_bytes,
+            transports=transports,
+            block_dim=64,
+        )
+
+    def register_reduce_grad_workspace(
+        self, workspace, required_bytes, *, owner_token=None
+    ):
+        with self._reduce_grad_lock:
+            self._require_reduce_grad_workspace_owner(
+                owner_token, "register_reduce_grad_workspace"
+            )
+            self.registered_workspace = workspace
+            self.calls.append(("register_reduce_grad_workspace", required_bytes))
+
+    def unregister_reduce_grad_workspace(self, *, owner_token=None):
+        with self._reduce_grad_lock:
+            self._require_reduce_grad_workspace_owner(
+                owner_token, "unregister_reduce_grad_workspace"
+            )
+            if self.registered_workspace is not None:
+                self.calls.append(("unregister_reduce_grad_workspace", None))
+            self.registered_workspace = None
+
+    def reduce_grad(
+        self,
+        context,
+        plan,
+        gradients,
+        workspace,
+        stream,
+        wait_iterations,
+        *,
+        requested_udma_chunk_bytes=0,
+    ):
+        self.calls.append(
+            (
+                "reduce_grad",
+                plan,
+                gradients,
+                workspace,
+                stream,
+                wait_iterations,
+                requested_udma_chunk_bytes,
+            )
+        )
+        plan.reduce_grad_status._item = 0
 
     def close(self):
-        self.closed = True
-        self.calls.append(("close", None))
+        with self._reduce_grad_lock:
+            if self._reduce_grad_owner_token is not None:
+                raise RuntimeError(
+                    "cannot close TileXR MoonEP runtime while ReduceGrad is in flight; "
+                    "synchronize the owning buffer first"
+                )
+            if self.closed:
+                return
+            self.closed = True
+            self.calls.append(("close", None))

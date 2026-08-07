@@ -7,6 +7,7 @@ from tilexr_moonep import (
     TileXRMoonEPBuffer,
     TileXRMoonEPContext,
 )
+from tilexr_moonep.abi import TILEXR_MOONEP_ABI_VERSION
 
 from .contracts import (
     BackendUnavailableError,
@@ -298,9 +299,10 @@ def _validate_context(
     capabilities = getattr(context.runtime, "capabilities", None)
     if capabilities is None:
         raise BackendUnavailableError("TileXR runtime does not expose MoonEP capabilities")
-    if int(getattr(capabilities, "abi_version", 0)) != 1:
+    if int(getattr(capabilities, "abi_version", 0)) != TILEXR_MOONEP_ABI_VERSION:
         raise BackendUnavailableError(
-            f"TileXR MoonEP ABI V1 is required, got {capabilities.abi_version}"
+            f"TileXR MoonEP ABI V{TILEXR_MOONEP_ABI_VERSION} is required, "
+            f"got {capabilities.abi_version}"
         )
     for stage in _STAGES:
         implementation = capabilities.implementation(stage)

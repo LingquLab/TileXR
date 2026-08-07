@@ -15,6 +15,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(TILEXR_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../..")
 set(TILEXR_MOONEP_FAKE_INCLUDE_DIR "${CMAKE_CURRENT_BINARY_DIR}/fake_include")
 file(MAKE_DIRECTORY "${TILEXR_MOONEP_FAKE_INCLUDE_DIR}/acl")
+file(MAKE_DIRECTORY "${TILEXR_MOONEP_FAKE_INCLUDE_DIR}/runtime")
 
 file(WRITE "${TILEXR_MOONEP_FAKE_INCLUDE_DIR}/acl/acl_base.h"
 "#ifndef TILEXR_MOONEP_TEST_ACL_BASE_H\n"
@@ -38,6 +39,28 @@ file(WRITE "${TILEXR_MOONEP_FAKE_INCLUDE_DIR}/acl/acl_rt.h"
 "#ifdef __cplusplus\n}\n#endif\n"
 "#endif\n")
 
+file(WRITE "${TILEXR_MOONEP_FAKE_INCLUDE_DIR}/runtime/kernel.h"
+"#ifndef TILEXR_MOONEP_TEST_RUNTIME_KERNEL_H\n"
+"#define TILEXR_MOONEP_TEST_RUNTIME_KERNEL_H\n"
+"#include <stddef.h>\n"
+"#include <stdint.h>\n"
+"typedef char char_t;\n"
+"typedef int32_t rtError_t;\n"
+"typedef void *rtStream_t;\n"
+"typedef struct rtDevBinary { uint32_t magic; uint32_t version; const void *data; uint64_t length; } rtDevBinary_t;\n"
+"typedef struct rtArgsEx { void *args; size_t argsSize; } rtArgsEx_t;\n"
+"typedef struct rtSmDesc { uint32_t reserved; } rtSmDesc_t;\n"
+"typedef struct rtTaskCfgInfo { uint32_t schemMode; } rtTaskCfgInfo_t;\n"
+"#define RT_ERROR_NONE 0\n"
+"#define RT_DEV_BINARY_MAGIC_ELF_AIVEC 0x41415246U\n"
+"#ifdef __cplusplus\nextern \"C\" {\n#endif\n"
+"rtError_t rtDevBinaryRegister(const rtDevBinary_t *binary, void **handle);\n"
+"rtError_t rtDevBinaryUnRegister(void *handle);\n"
+"rtError_t rtFunctionRegister(void *handle, const void *signature, const char_t *name, const void *kernelInfoExt, uint32_t flags);\n"
+"rtError_t rtKernelLaunchWithFlagV2(const void *signature, uint32_t blockDim, rtArgsEx_t *argsInfo, rtSmDesc_t *smDesc, rtStream_t stream, uint32_t flags, const rtTaskCfgInfo_t *cfgInfo);\n"
+"#ifdef __cplusplus\n}\n#endif\n"
+"#endif\n")
+
 file(WRITE "${TILEXR_MOONEP_FAKE_INCLUDE_DIR}/tilexr_moonep_planner.h"
 "#ifndef TILEXR_MOONEP_TEST_PLANNER_H\n"
 "#define TILEXR_MOONEP_TEST_PLANNER_H\n"
@@ -55,24 +78,16 @@ file(WRITE "${TILEXR_MOONEP_FAKE_INCLUDE_DIR}/tilexr_moonep_planner.h"
 file(WRITE "${TILEXR_MOONEP_FAKE_INCLUDE_DIR}/tilexr_api.h"
 "#ifndef TILEXR_MOONEP_TEST_TILEXR_API_H\n"
 "#define TILEXR_MOONEP_TEST_TILEXR_API_H\n"
-"#include <stdint.h>\n"
 "#ifdef __cplusplus\n"
-"using GM_ADDR = uint8_t *;\n"
-"namespace TileXR {\n"
-"constexpr int TILEXR_MAX_RANK_SIZE = 128;\n"
-"struct ExtraFlag { static constexpr uint32_t TOPO_910A5 = 1u << 6; static constexpr uint32_t UDMA = 1u << 10; };\n"
-"struct CommArgs { int rank; int localRank; int rankSize; int localRankSize; uint32_t extraFlag; GM_ADDR peerMems[TILEXR_MAX_RANK_SIZE]; GM_ADDR udmaInfoPtr; GM_ADDR udmaRegistryPtr; };\n"
-"struct TileXRUDMARegionDesc { GM_ADDR base; uint64_t bytes; };\n"
-"struct TileXRUDMARegistry { uint32_t magic = 0x54585255U; uint32_t version = 1; uint32_t rankSize = 0; uint32_t regionCount = 0; TileXRUDMARegionDesc regions[TILEXR_MAX_RANK_SIZE] = {}; };\n"
-"inline bool UDMARegistryValid(const TileXRUDMARegistry *r, int size) { return r != nullptr && r->magic == 0x54585255U && r->version == 1 && size >= 0 && r->rankSize == static_cast<uint32_t>(size) && r->rankSize <= TILEXR_MAX_RANK_SIZE && r->regionCount == 1; }\n"
-"inline bool UDMARegionContains(const TileXRUDMARegistry *r, int rank, uint64_t offset, uint64_t bytes) { return UDMARegistryValid(r, r == nullptr ? 0 : static_cast<int>(r->rankSize)) && rank >= 0 && static_cast<uint32_t>(rank) < r->rankSize && r->regions[rank].base != nullptr && offset <= r->regions[rank].bytes && bytes <= r->regions[rank].bytes - offset; }\n"
-"}\n"
+"#include \"comm_args.h\"\n"
+"#include \"tilexr_udma_reg.h\"\n"
 "extern \"C\" {\n"
 "typedef void *TileXRCommPtr;\n"
 "int TileXRGetCommArgsHost(TileXRCommPtr comm, TileXR::CommArgs *&commArgs);\n"
 "int TileXRGetCommArgsDev(TileXRCommPtr comm, GM_ADDR &commArgs);\n"
-"int TileXRCommNextMagic(TileXRCommPtr comm, int64_t *magic);\n"
+"int TileXRGetUDMARegistryHost(TileXRCommPtr comm, const TileXR::TileXRUDMARegistry **registry);\n"
 "int TileXRUDMAGetQpCount(TileXRCommPtr comm, uint32_t *qpCount);\n"
+"int TileXRCommNextMagic(TileXRCommPtr comm, int64_t *magic);\n"
 "int TileXRGetUDMARegistryHost(TileXRCommPtr comm, const TileXR::TileXRUDMARegistry **registry);\n"
 "}\n"
 "#endif\n"
@@ -190,15 +205,32 @@ target_include_directories(test_tilexr_moonep_prefetch_weight_host PRIVATE
     ${TILEXR_ROOT}/src/moonep/prefetch_weight/common
     ${TILEXR_ROOT}/src/moonep/prefetch_weight/host)
 
+add_executable(test_tilexr_moonep_reduce_grad_layout
+    unit/test_tilexr_moonep_reduce_grad_layout.cpp
+    ${TILEXR_ROOT}/src/moonep/reduce_grad/host/reduce_grad_layout.cpp
+)
+target_include_directories(test_tilexr_moonep_reduce_grad_layout PRIVATE
+    ${TILEXR_MOONEP_TEST_INCLUDE_DIRS}
+    ${TILEXR_ROOT}/src/moonep/reduce_grad/common
+    ${TILEXR_ROOT}/src/moonep/reduce_grad/host)
+
 add_executable(test_tilexr_moonep_reduce_grad_host
     unit/test_tilexr_moonep_reduce_grad_host.cpp
     ${TILEXR_ROOT}/src/moonep/reduce_grad/host/reduce_grad_layout.cpp
     ${TILEXR_ROOT}/src/moonep/reduce_grad/host/reduce_grad_host.cpp
-    ${TILEXR_ROOT}/src/moonep/reduce_grad/host/tilexr_moonep_reduce_grad.cpp
 )
 target_include_directories(test_tilexr_moonep_reduce_grad_host PRIVATE
     ${TILEXR_MOONEP_TEST_INCLUDE_DIRS}
     ${TILEXR_ROOT}/src/moonep/common
+    ${TILEXR_ROOT}/src/moonep/reduce_grad/common
+    ${TILEXR_ROOT}/src/moonep/reduce_grad/host)
+
+add_executable(test_tilexr_moonep_reduce_grad_launch
+    unit/test_tilexr_moonep_reduce_grad_launch.cpp
+    ${TILEXR_ROOT}/src/moonep/reduce_grad/host/reduce_grad_launch.cpp
+)
+target_include_directories(test_tilexr_moonep_reduce_grad_launch PRIVATE
+    ${TILEXR_MOONEP_TEST_INCLUDE_DIRS}
     ${TILEXR_ROOT}/src/moonep/reduce_grad/common
     ${TILEXR_ROOT}/src/moonep/reduce_grad/host)
 
@@ -216,8 +248,9 @@ add_test(NAME test_tilexr_moonep_dispatch_urma_schedule
 add_test(NAME test_tilexr_moonep_dispatch_host COMMAND test_tilexr_moonep_dispatch_host)
 add_test(NAME test_tilexr_moonep_combine_host COMMAND test_tilexr_moonep_combine_host)
 add_test(NAME test_tilexr_moonep_prefetch_weight_host COMMAND test_tilexr_moonep_prefetch_weight_host)
+add_test(NAME test_tilexr_moonep_reduce_grad_layout COMMAND test_tilexr_moonep_reduce_grad_layout)
 add_test(NAME test_tilexr_moonep_reduce_grad_host COMMAND test_tilexr_moonep_reduce_grad_host)
-
+add_test(NAME test_tilexr_moonep_reduce_grad_launch COMMAND test_tilexr_moonep_reduce_grad_launch)
 if(TARGET tilexr-moonep)
     add_executable(tilexr_moonep_flow_demo
         demo/tilexr_moonep_flow_demo.cpp
@@ -234,6 +267,7 @@ if(TARGET tilexr-moonep)
     )
     target_link_libraries(tilexr_moonep_flow_demo PRIVATE
         tilexr-moonep
+        tilexr-moonep-reduce-grad
         tile-comm
         ascendcl
         runtime

@@ -186,8 +186,13 @@ class TileXRCorrectnessAdapterTests(unittest.TestCase):
         self.assertIs(native_reduce.gate, full_grads.gate)
         self.assertIs(native_reduce.gate_reduce, reduce_buffers.gate)
         self.assertIs(native_reduce.down_reduce, reduce_buffers.down)
+        for _, full_tensor in full_grads.items():
+            self.assertEqual(len(full_tensor.copy_calls), 1)
         for _, reduce_tensor in reduce_buffers.items():
             self.assertEqual(reduce_tensor.masked_fill_calls, [])
+            self.assertEqual(len(reduce_tensor.zero_calls), 1)
+        native_plan = backend._native_plans[id(plan)].native
+        self.assertEqual(native_plan.reduce_grad_status.item(), 0)
         backend.synchronize()
         backend.close()
         lifecycle = [call[0] for call in runtime.calls]
@@ -279,7 +284,7 @@ class TileXRCorrectnessFactoryTests(unittest.TestCase):
         backend.close()
 
     def test_factory_rejects_missing_native_stage_and_closes_context(self):
-        self.runtime.capabilities = NativeCapabilities(1, 31, 1)
+        self.runtime.capabilities = NativeCapabilities(2, 31, 1)
         with self.assertRaisesRegex(BackendUnavailableError, "planning.*stub"):
             self._create()
         self.assertTrue(self.runtime.closed)

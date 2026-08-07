@@ -1,405 +1,689 @@
 #include "kernel_operator.h"
-
 #include <cstdint>
 
 #include "comm_args.h"
 #include "reduce_grad_common.h"
-#include "tilexr_sync.h"
+#include "tilexr_data_as_flag.h"
+#include "tilexr_udma.h"
 
 namespace TileXRMoonEp {
 namespace Kernel {
 
-__aicore__ inline int64_t MinInt64(int64_t lhs, int64_t rhs)
+constexpr uint32_t kPeerBatchRecords = 64;
+constexpr uint32_t kIoBufferBytes = 32 * 1024;
+constexpr uint32_t kFlagBufferBytes = 32 * 1024;
+constexpr uint32_t kClearBufferBytes = 4 * 1024;
+constexpr uint32_t kUdmaPollBackoffMax = 256;
+
+template <AscendC::HardEvent event>
+__aicore__ inline void SyncEvent()
+{
+    const AscendC::TEventID eventId = GetTPipePtr()->FetchEventID(event);
+    AscendC::SetFlag<event>(eventId);
+    AscendC::WaitFlag<event>(eventId);
+}
+
+__aicore__ inline uint64_t MinU64(uint64_t lhs, uint64_t rhs)
 {
     return lhs < rhs ? lhs : rhs;
 }
 
-__aicore__ inline void CopyBytesGmToGm(GM_ADDR dstAddr, GM_ADDR srcAddr,
-    AscendC::TBuf<AscendC::QuePosition::VECCALC> &workBuf, int64_t bytes)
+__aicore__ inline uint64_t CeilDivU64(uint64_t value, uint64_t divisor)
 {
-    AscendC::LocalTensor<uint8_t> local = workBuf.Get<uint8_t>();
-    AscendC::GlobalTensor<uint8_t> src;
-    AscendC::GlobalTensor<uint8_t> dst;
-    src.SetGlobalBuffer(reinterpret_cast<__gm__ uint8_t *>(srcAddr), bytes);
-    dst.SetGlobalBuffer(reinterpret_cast<__gm__ uint8_t *>(dstAddr), bytes);
-    for (int64_t copied = 0; copied < bytes; copied += kMoonEpReduceGradTileBytes) {
-        const int64_t tileBytes = MinInt64(bytes - copied, kMoonEpReduceGradTileBytes);
-        AscendC::DataCopyExtParams params {1, static_cast<uint32_t>(tileBytes), 0, 0, 0};
-        AscendC::DataCopyPadExtParams<uint8_t> pad {false, 0, 0, 0};
-        AscendC::DataCopyPad(local, src[copied], params, pad);
-        AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE3>(EVENT_ID0);
-        AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE3>(EVENT_ID0);
-        AscendC::DataCopyPad(dst[copied], local, params);
-        AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
-        AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
-    }
-    AscendC::PipeBarrier<PIPE_ALL>();
+    return divisor == 0 ? 0 : value / divisor + (value % divisor == 0 ? 0 : 1);
 }
 
 class ReduceGradKernel {
 public:
     __aicore__ inline void Init(GM_ADDR commArgs, GM_ADDR expertsToCopy,
-        GM_ADDR fullGateGrad, GM_ADDR fullUpGrad, GM_ADDR fullDownGrad,
-        GM_ADDR gateReduceBuffer, GM_ADDR upReduceBuffer, GM_ADDR downReduceBuffer,
-        GM_ADDR status, int64_t e, int64_t b, int64_t expertsPerRank,
-        int64_t gateRowBytes, int64_t gateChunkBytes, int64_t gateChunkStride,
-        int64_t gateChunkCount, int64_t upRowBytes, int64_t upChunkBytes,
-        int64_t upChunkStride, int64_t upChunkCount, int64_t downRowBytes,
-        int64_t downChunkBytes, int64_t downChunkStride, int64_t downChunkCount,
-        int64_t iterationCount, uint64_t waitIterations, int64_t magic)
+        GM_ADDR gate, GM_ADDR up, GM_ADDR down, GM_ADDR workspace, GM_ADDR status,
+        int64_t rank, int64_t rankSize, int64_t expertCount,
+        int64_t expertsPerRank, int64_t controlBlockCount,
+        uint64_t gateRowElements, uint64_t upRowElements,
+        uint64_t downRowElements, uint64_t gateRowBytes, uint64_t upRowBytes,
+        uint64_t downRowBytes, uint32_t gateTransport, uint32_t upTransport,
+        uint32_t downTransport, uint32_t udmaQpCount, uint64_t peerRecordBaseOffset,
+        uint64_t peerHalfBytes, uint64_t peerSlotStrideBytes,
+        uint64_t peerChunkPayloadBytes, uint64_t udmaStateOffset,
+        uint64_t udmaOutboundOffset, uint64_t udmaInboundOffset,
+        uint64_t udmaChunkBytes, uint64_t workspaceBytes,
+        uint64_t waitIterations, int64_t magic)
     {
         args_ = reinterpret_cast<__gm__ TileXR::CommArgs *>(commArgs);
-        expertsToCopyAddr_ = expertsToCopy;
-        fullGrads_[0] = fullGateGrad;
-        fullGrads_[1] = fullUpGrad;
-        fullGrads_[2] = fullDownGrad;
-        reduceBuffers_[0] = gateReduceBuffer;
-        reduceBuffers_[1] = upReduceBuffer;
-        reduceBuffers_[2] = downReduceBuffer;
-        rowBytes_[0] = gateRowBytes;
-        rowBytes_[1] = upRowBytes;
-        rowBytes_[2] = downRowBytes;
-        chunkBytes_[0] = gateChunkBytes;
-        chunkBytes_[1] = upChunkBytes;
-        chunkBytes_[2] = downChunkBytes;
-        chunkStrides_[0] = gateChunkStride;
-        chunkStrides_[1] = upChunkStride;
-        chunkStrides_[2] = downChunkStride;
-        chunkCounts_[0] = gateChunkCount;
-        chunkCounts_[1] = upChunkCount;
-        chunkCounts_[2] = downChunkCount;
-        statusAddr_ = status;
-        e_ = e;
-        b_ = b;
+        expertsToCopy_ = reinterpret_cast<__gm__ int32_t *>(expertsToCopy);
+        gradients_[kReduceGradGate] = gate;
+        gradients_[kReduceGradUp] = up;
+        gradients_[kReduceGradDown] = down;
+        workspace_ = workspace;
+        status_ = reinterpret_cast<__gm__ int32_t *>(status);
+        rank_ = rank;
+        rankSize_ = rankSize;
+        expertCount_ = expertCount;
         expertsPerRank_ = expertsPerRank;
-        iterationCount_ = iterationCount;
+        controlBlockCount_ = controlBlockCount;
+        rowElements_[kReduceGradGate] = gateRowElements;
+        rowElements_[kReduceGradUp] = upRowElements;
+        rowElements_[kReduceGradDown] = downRowElements;
+        rowBytes_[kReduceGradGate] = gateRowBytes;
+        rowBytes_[kReduceGradUp] = upRowBytes;
+        rowBytes_[kReduceGradDown] = downRowBytes;
+        transports_[kReduceGradGate] = gateTransport;
+        transports_[kReduceGradUp] = upTransport;
+        transports_[kReduceGradDown] = downTransport;
+        udmaQpCount_ = udmaQpCount;
+        peerRecordBaseOffset_ = peerRecordBaseOffset;
+        peerHalfBytes_ = peerHalfBytes;
+        peerSlotStrideBytes_ = peerSlotStrideBytes;
+        peerChunkPayloadBytes_ = peerChunkPayloadBytes;
+        udmaStateOffset_ = udmaStateOffset;
+        udmaOutboundOffset_ = udmaOutboundOffset;
+        udmaInboundOffset_ = udmaInboundOffset;
+        udmaChunkBytes_ = udmaChunkBytes;
+        workspaceBytes_ = workspaceBytes;
         waitIterations_ = waitIterations;
         magic_ = magic;
-        if (args_ == nullptr) {
-            return;
-        }
-        rank_ = args_->rank;
-        rankSize_ = args_->rankSize;
-        for (int32_t peer = 0; peer < rankSize_; ++peer) {
-            shareAddrs_[peer] = args_->peerMems[peer];
-        }
-        pipe_.InitBuffer(syncBuf_, kMoonEpSyncUbBytes);
-        pipe_.InitBuffer(sourceBuf_, kMoonEpReduceGradTileBytes);
-        pipe_.InitBuffer(accumulatorBuf_, kMoonEpReduceGradTileBytes);
-        sync_.Init(rank_, rankSize_, shareAddrs_, syncBuf_);
-        initialized_ = true;
+
+        const int64_t subBlockCount = static_cast<int64_t>(get_subblockdim());
+        blockIdx_ = static_cast<int64_t>(get_block_idx()) * subBlockCount +
+            static_cast<int64_t>(get_subblockid());
+        blockCount_ = static_cast<int64_t>(get_block_num()) * subBlockCount;
+        receiverCount_ = blockCount_ - controlBlockCount_;
+
+        pipe_.InitBuffer(ioBuf_, kIoBufferBytes);
+        pipe_.InitBuffer(accumBuf_, kIoBufferBytes);
+        pipe_.InitBuffer(flagBuf_, kFlagBufferBytes);
+        pipe_.InitBuffer(clearBuf_, kClearBufferBytes);
+        pipe_.InitBuffer(udmaWqeBuf_, TileXR::TILEXR_UDMA_WQE_SCRATCH_BYTES);
     }
 
     __aicore__ inline void Process()
     {
-        if (!Valid() || AscendC::GetBlockIdx() != 0 || !ValidateExpertPlan()) {
+        if (args_ == nullptr || expertsToCopy_ == nullptr || status_ == nullptr ||
+            rank_ < 0 || rank_ >= rankSize_ || rankSize_ <= 0 || expertCount_ <= 0 ||
+            expertsPerRank_ <= 0 || receiverCount_ <= 0 || magic_ <= 0 ||
+            (UsesUdma() && (udmaQpCount_ == 0 ||
+                udmaQpCount_ > kReduceGradMaxUdmaQpCount ||
+                TileXR::UDMAQpCount(args_) != udmaQpCount_))) {
+            SetStatus(kReduceGradDeviceInvalidState);
             return;
         }
-        localWindow_ = shareAddrs_[rank_] + TileXR::IPC_DATA_OFFSET;
-        int64_t iteration = 0;
-        for (int32_t projection = 0; projection < 3; ++projection) {
-            for (int64_t chunk = 0; chunk < chunkCounts_[projection]; ++chunk) {
-                const int64_t chunkOffset = chunk * chunkBytes_[projection];
-                const int64_t bytesThisChunk = MinInt64(
-                    rowBytes_[projection] - chunkOffset, chunkBytes_[projection]);
-                PublishLocalSlots(projection, chunkOffset, bytesThisChunk);
-                PublishStep(kMoonEpReduceGradReadyStep + static_cast<int32_t>(iteration * 3));
-                if (!WaitAllPeers(kMoonEpReduceGradReadyStep +
-                        static_cast<int32_t>(iteration * 3))) {
-                    return;
-                }
-                if (!AccumulateOwned(projection, chunkOffset, bytesThisChunk)) {
-                    return;
-                }
-                PublishStep(kMoonEpReduceGradDrainedStep +
-                    static_cast<int32_t>(iteration * 3));
-                if (!WaitAllPeers(kMoonEpReduceGradDrainedStep +
-                        static_cast<int32_t>(iteration * 3))) {
-                    return;
-                }
-                ClearLocalLiveSlots(projection, chunkOffset, bytesThisChunk);
-                ++iteration;
-            }
+        if (blockIdx_ < controlBlockCount_) {
+            RunSender();
+        } else {
+            RunReceiver();
         }
-        if (iteration != iterationCount_) {
-            Fail(kMoonEpReduceGradStatusInvalidPlan);
-            return;
-        }
-        StoreStatus(kMoonEpReduceGradStatusSuccess);
     }
 
 private:
-    __aicore__ inline bool Valid() const
+    __aicore__ inline void SetStatus(int32_t value)
     {
-        return initialized_ && expertsToCopyAddr_ != nullptr && statusAddr_ != nullptr &&
-            fullGrads_[0] != nullptr && fullGrads_[1] != nullptr &&
-            fullGrads_[2] != nullptr && reduceBuffers_[0] != nullptr &&
-            reduceBuffers_[1] != nullptr && reduceBuffers_[2] != nullptr &&
-            rank_ >= 0 && rank_ < rankSize_ && e_ > 0 && b_ > 0 &&
-            expertsPerRank_ > 0 && e_ == expertsPerRank_ * rankSize_ &&
-            rowBytes_[0] > 0 && rowBytes_[1] > 0 && rowBytes_[2] > 0 &&
-            chunkBytes_[0] > 0 && chunkBytes_[1] > 0 && chunkBytes_[2] > 0 &&
-            chunkStrides_[0] >= chunkBytes_[0] &&
-            chunkStrides_[1] >= chunkBytes_[1] &&
-            chunkStrides_[2] >= chunkBytes_[2] &&
-            chunkCounts_[0] > 0 && chunkCounts_[1] > 0 && chunkCounts_[2] > 0 &&
-            iterationCount_ > 0 && waitIterations_ > 0 && magic_ > 0;
+        status_[0] = value;
     }
 
-    __aicore__ inline int32_t LoadInt(GM_ADDR address)
+    __aicore__ inline int32_t ExpertForSlot(int64_t sourceRank, int64_t slot) const
     {
-        AscendC::LocalTensor<int32_t> local = sourceBuf_.Get<int32_t>();
-        AscendC::GlobalTensor<int32_t> src;
-        src.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(address), 1);
-        AscendC::DataCopyExtParams params {1, sizeof(int32_t), 0, 0, 0};
-        AscendC::DataCopyPadExtParams<int32_t> pad {false, 0, 0, 0};
-        AscendC::DataCopyPad(local, src, params, pad);
-        AscendC::SetFlag<AscendC::HardEvent::MTE2_S>(EVENT_ID0);
-        AscendC::WaitFlag<AscendC::HardEvent::MTE2_S>(EVENT_ID0);
-        return local.GetValue(0);
+        return expertsToCopy_[sourceRank * expertsPerRank_ + slot];
     }
 
-    __aicore__ inline void StoreInt(GM_ADDR address, int32_t value)
+    __aicore__ inline int64_t OwnerForExpert(int32_t expert) const
     {
-        AscendC::LocalTensor<int32_t> local = sourceBuf_.Get<int32_t>();
-        AscendC::GlobalTensor<int32_t> dst;
-        dst.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(address), 1);
-        local.SetValue(0, value);
-        AscendC::SetFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID0);
-        AscendC::WaitFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID0);
-        AscendC::DataCopyExtParams params {1, sizeof(int32_t), 0, 0, 0};
-        AscendC::DataCopyPad(dst, local, params);
-        AscendC::SetFlag<AscendC::HardEvent::MTE3_S>(EVENT_ID0);
-        AscendC::WaitFlag<AscendC::HardEvent::MTE3_S>(EVENT_ID0);
+        return expert < 0 ? -1 : static_cast<int64_t>(expert) / expertsPerRank_;
     }
 
-    __aicore__ inline int32_t LoadExpert(int64_t sourceRank, int64_t slot)
+    __aicore__ inline uint64_t ChunkBytes(uint32_t projection) const
     {
-        return LoadInt(expertsToCopyAddr_ +
-            (sourceRank * b_ + slot) * sizeof(int32_t));
+        return transports_[projection] == kReduceGradTransportPeer ?
+            peerChunkPayloadBytes_ : udmaChunkBytes_;
     }
 
-    __aicore__ inline bool ValidateExpertPlan()
+    __aicore__ inline uint64_t ChunkCount(uint32_t projection) const
     {
-        for (int32_t source = 0; source < rankSize_; ++source) {
-            for (int64_t slot = 0; slot < b_; ++slot) {
-                const int32_t expert = LoadExpert(source, slot);
-                if (expert < -1 || expert >= e_) {
-                    Fail(kMoonEpReduceGradStatusInvalidPlan);
-                    return false;
-                }
+        return CeilDivU64(rowBytes_[projection], ChunkBytes(projection));
+    }
+
+    __aicore__ inline uint64_t Sequence(uint32_t projection, int64_t slot,
+        uint64_t chunk) const
+    {
+        uint64_t ordinal = 1;
+        for (uint32_t q = 0; q < projection; ++q) {
+            if (transports_[q] == kReduceGradTransportUdma) {
+                ordinal += static_cast<uint64_t>(expertsPerRank_) * ChunkCount(q);
             }
         }
-        return true;
+        ordinal += static_cast<uint64_t>(slot) * ChunkCount(projection) + chunk;
+        return (static_cast<uint64_t>(static_cast<uint32_t>(magic_)) << 32) |
+            static_cast<uint32_t>(ordinal);
     }
 
-    __aicore__ inline void PublishLocalSlots(
-        int32_t projection, int64_t chunkOffset, int64_t bytesThisChunk)
+    __aicore__ inline bool UsesUdma() const
     {
-        for (int64_t slot = 0; slot < b_; ++slot) {
-            CopyBytesGmToGm(localWindow_ + slot * chunkStrides_[projection],
-                reduceBuffers_[projection] +
-                    (static_cast<int64_t>(rank_) * b_ + slot) *
-                        rowBytes_[projection] + chunkOffset,
-                sourceBuf_, bytesThisChunk);
+        for (uint32_t projection = 0; projection < kReduceGradProjectionCount; ++projection) {
+            if (transports_[projection] == kReduceGradTransportUdma) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    __aicore__ inline uint32_t UDMAQpFor(uint32_t projection, int64_t slot,
+        uint64_t chunk) const
+    {
+        const uint32_t ordinal = static_cast<uint32_t>(Sequence(projection, slot, chunk));
+        return (ordinal - 1U) % udmaQpCount_;
+    }
+
+    __aicore__ inline int64_t ControlPeer() const
+    {
+        return blockIdx_ >= rank_ ? blockIdx_ + 1 : blockIdx_;
+    }
+
+    __aicore__ inline GM_ADDR PeerRecord(int64_t owner, int64_t source,
+        int64_t slot, uint64_t chunk) const
+    {
+        const uint64_t stage = chunk & 1U;
+        const uint64_t slotIndex = static_cast<uint64_t>(source * expertsPerRank_ + slot);
+        return args_->peerMems[owner] + TileXR::IPC_DATA_OFFSET +
+            peerRecordBaseOffset_ + stage * peerHalfBytes_ +
+            slotIndex * peerSlotStrideBytes_;
+    }
+
+    __aicore__ inline uint64_t UDMAPeerStateOffset(int64_t peer) const
+    {
+        return udmaStateOffset_ + static_cast<uint64_t>(peer) * kReduceGradUdmaPeerStateBytes;
+    }
+
+    __aicore__ inline uint64_t UDMAReadyOffset(int64_t source, uint64_t stage) const
+    {
+        return UDMAPeerStateOffset(source) + kReduceGradUdmaReadyOffset +
+            stage * kReduceGradUdmaSignalStageStride;
+    }
+
+    __aicore__ inline uint64_t UDMACompletionOffset(int64_t source, uint64_t stage) const
+    {
+        return UDMAPeerStateOffset(source) + kReduceGradUdmaCompletionOffset +
+            stage * kReduceGradUdmaSignalStageStride;
+    }
+
+    __aicore__ inline uint64_t UDMAPollScratchOffset(int64_t peer, uint64_t stage) const
+    {
+        return UDMAPeerStateOffset(peer) + kReduceGradUdmaPollScratchOffset +
+            stage * kReduceGradUdmaSignalStageStride;
+    }
+
+    __aicore__ inline uint64_t UDMAOutboundOffset(int64_t target, uint64_t stage) const
+    {
+        return udmaOutboundOffset_ +
+            (static_cast<uint64_t>(target) * 2 + stage) * udmaChunkBytes_;
+    }
+
+    __aicore__ inline uint64_t UDMAInboundOffset(int64_t source, uint64_t stage) const
+    {
+        return udmaInboundOffset_ +
+            (static_cast<uint64_t>(source) * 2 + stage) * udmaChunkBytes_;
+    }
+
+    __aicore__ inline uint64_t LoadSignal(GM_ADDR address)
+    {
+        TileXR::UDMACleanCacheLines(reinterpret_cast<__gm__ uint8_t *>(address), sizeof(uint64_t));
+        AscendC::PipeBarrier<PIPE_ALL>();
+        return reinterpret_cast<__gm__ uint64_t *>(address)[0];
+    }
+
+    __aicore__ inline void UdmaPollBackoff(uint64_t attempt)
+    {
+        const uint32_t shift = static_cast<uint32_t>(attempt >> 4) > 8U ?
+            8U : static_cast<uint32_t>(attempt >> 4);
+        const uint32_t spins = 1U << shift;
+        for (volatile uint32_t spin = 0; spin < spins && spin < kUdmaPollBackoffMax;
+            ++spin) {
+            __asm__ __volatile__("");
         }
     }
 
-    __aicore__ inline bool AccumulateOwned(
-        int32_t projection, int64_t chunkOffset, int64_t bytesThisChunk)
+    __aicore__ inline void StoreSignal(GM_ADDR address, uint64_t value)
     {
-        if (bytesThisChunk % sizeof(float) != 0) {
-            Fail(kMoonEpReduceGradStatusInvalidPlan);
+        reinterpret_cast<__gm__ uint64_t *>(address)[0] = value;
+        AscendC::PipeBarrier<PIPE_ALL>();
+        TileXR::UDMACleanCacheLines(reinterpret_cast<__gm__ uint8_t *>(address), sizeof(uint64_t));
+        AscendC::PipeBarrier<PIPE_ALL>();
+    }
+
+    __aicore__ inline bool WaitUdmaReady(int64_t source, uint64_t stage, uint64_t sequence)
+    {
+        GM_ADDR ready = workspace_ + UDMAReadyOffset(source, stage);
+        for (uint64_t attempt = 0; attempt < waitIterations_; ++attempt) {
+            if (LoadSignal(ready) == sequence) {
+                return true;
+            }
+        }
+        SetStatus(kReduceGradDevicePeerTimeout);
+        return false;
+    }
+
+    __aicore__ inline bool WaitUdmaCompletion(int64_t target, uint32_t qpIdx,
+        uint64_t stage, uint64_t sequence)
+    {
+        const uint64_t remoteOffset = UDMACompletionOffset(rank_, stage);
+        GM_ADDR localScratch = workspace_ + UDMAPollScratchOffset(target, stage);
+        AscendC::LocalTensor<uint8_t> wqeScratch = udmaWqeBuf_.Get<uint8_t>();
+        for (uint64_t attempt = 0; attempt < waitIterations_; ++attempt) {
+            const uint32_t getStatus = TileXR::UDMAGetNbiOnQp<uint8_t>(args_, wqeScratch,
+                static_cast<int>(target), qpIdx,
+                reinterpret_cast<__gm__ uint8_t *>(localScratch), remoteOffset,
+                static_cast<uint32_t>(sizeof(uint64_t)));
+            if (getStatus != TileXR::TILEXR_UDMA_STATUS_SUCCESS ||
+                TileXR::UDMAQuietStatusOnQp(args_, static_cast<int>(target), qpIdx) !=
+                    TileXR::TILEXR_UDMA_STATUS_SUCCESS) {
+                SetStatus(kReduceGradDeviceUdmaCqError);
+                return false;
+            }
+            if (LoadSignal(localScratch) == sequence) {
+                return true;
+            }
+            UdmaPollBackoff(attempt);
+        }
+        SetStatus(kReduceGradDevicePeerTimeout);
+        return false;
+    }
+
+    __aicore__ inline bool WaitPeerRecords(GM_ADDR recordBase, uint64_t payloadBytes,
+        bool ready)
+    {
+        AscendC::LocalTensor<uint8_t> flags = flagBuf_.Get<uint8_t>();
+        const uint32_t totalRecords = TileXR::DataAsFlagBlockCountForPayloadBytes(payloadBytes);
+        const uint32_t capacity = TileXR::DataAsFlagMaxCheckBlocks(kFlagBufferBytes);
+        if (totalRecords == 0 || capacity == 0) {
+            SetStatus(kReduceGradDeviceInvalidState);
             return false;
         }
-        const int64_t elements = bytesThisChunk / sizeof(float);
-        AscendC::LocalTensor<float> source = sourceBuf_.Get<float>();
-        AscendC::LocalTensor<float> accumulator = accumulatorBuf_.Get<float>();
-        for (int64_t localExpert = 0; localExpert < expertsPerRank_; ++localExpert) {
-            const int64_t expert = static_cast<int64_t>(rank_) * expertsPerRank_ + localExpert;
-            for (int64_t tileOffset = 0; tileOffset < elements;
-                tileOffset += kMoonEpReduceGradTileElements) {
-                const int64_t tileElements = MinInt64(
-                    elements - tileOffset, kMoonEpReduceGradTileElements);
-                AscendC::GlobalTensor<float> grad;
-                grad.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(
-                    fullGrads_[projection] + expert * rowBytes_[projection] + chunkOffset) +
-                    tileOffset, tileElements);
-                AscendC::DataCopyExtParams params {
-                    1, static_cast<uint32_t>(tileElements * sizeof(float)), 0, 0, 0
-                };
-                AscendC::DataCopyPadExtParams<float> pad {false, 0, 0, 0};
-                AscendC::DataCopyPad(accumulator, grad, params, pad);
-                AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID0);
-                AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID0);
+        uint32_t record = 0;
+        while (record < totalRecords) {
+            const uint32_t batch = MinU64(totalRecords - record, capacity);
+            bool matched = false;
+            for (uint64_t attempt = 0; attempt < waitIterations_; ++attempt) {
+                matched = ready ? TileXR::DataAsFlagCheckBatch(
+                    reinterpret_cast<__gm__ uint8_t *>(recordBase), record, batch, flags) :
+                    TileXR::DataAsFlagCheckBatchCleared(
+                        reinterpret_cast<__gm__ uint8_t *>(recordBase), record, batch, flags);
+                if (matched) {
+                    break;
+                }
+            }
+            if (!matched) {
+                SetStatus(kReduceGradDevicePeerTimeout);
+                return false;
+            }
+            record += batch;
+        }
+        return true;
+    }
 
-                for (int32_t sourceRank = 0; sourceRank < rankSize_; ++sourceRank) {
-                    for (int64_t slot = 0; slot < b_; ++slot) {
-                        if (LoadExpert(sourceRank, slot) != expert) {
-                            continue;
+    __aicore__ inline void CopyDense(GM_ADDR destination, GM_ADDR source, uint64_t bytes)
+    {
+        AscendC::LocalTensor<uint8_t> local = ioBuf_.Get<uint8_t>();
+        uint64_t offset = 0;
+        while (offset < bytes) {
+            const uint32_t batch = static_cast<uint32_t>(MinU64(bytes - offset, kIoBufferBytes));
+            AscendC::GlobalTensor<uint8_t> sourceGlobal;
+            sourceGlobal.SetGlobalBuffer(reinterpret_cast<__gm__ uint8_t *>(source + offset));
+            AscendC::DataCopyExtParams inParams {1U, batch, 0U, 0U, 0U};
+            AscendC::DataCopyPadExtParams<uint8_t> pad {false, 0U, 0U, 0U};
+            AscendC::DataCopyPad(local, sourceGlobal, inParams, pad);
+            SyncEvent<AscendC::HardEvent::MTE2_MTE3>();
+            AscendC::GlobalTensor<uint8_t> destinationGlobal;
+            destinationGlobal.SetGlobalBuffer(reinterpret_cast<__gm__ uint8_t *>(destination + offset));
+            AscendC::DataCopyPad(destinationGlobal, local, inParams);
+            SyncEvent<AscendC::HardEvent::MTE3_MTE2>();
+            offset += batch;
+        }
+    }
+
+    __aicore__ inline void ZeroDense(GM_ADDR destination, uint64_t bytes)
+    {
+        AscendC::LocalTensor<float> local = ioBuf_.Get<float>();
+        uint64_t offset = 0;
+        while (offset < bytes) {
+            const uint32_t batch = static_cast<uint32_t>(MinU64(bytes - offset, kIoBufferBytes));
+            AscendC::Duplicate(local, 0.0f, batch / sizeof(float));
+            SyncEvent<AscendC::HardEvent::V_MTE3>();
+            AscendC::GlobalTensor<float> destinationGlobal;
+            destinationGlobal.SetGlobalBuffer(
+                reinterpret_cast<__gm__ float *>(destination + offset));
+            AscendC::DataCopyExtParams outParams {1U, batch, 0U, 0U, 0U};
+            AscendC::DataCopyPad(destinationGlobal, local, outParams);
+            SyncEvent<AscendC::HardEvent::MTE3_S>();
+            offset += batch;
+        }
+    }
+
+    __aicore__ inline void AddDense(GM_ADDR destination, GM_ADDR source, uint64_t bytes)
+    {
+        AscendC::LocalTensor<float> input = ioBuf_.Get<float>();
+        AscendC::LocalTensor<float> output = accumBuf_.Get<float>();
+        uint64_t offset = 0;
+        while (offset < bytes) {
+            const uint32_t batch = static_cast<uint32_t>(MinU64(bytes - offset, kIoBufferBytes));
+            AscendC::GlobalTensor<float> inputGlobal;
+            inputGlobal.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(source + offset));
+            AscendC::GlobalTensor<float> outputGlobal;
+            outputGlobal.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(destination + offset));
+            AscendC::DataCopyExtParams inParams {1U, batch, 0U, 0U, 0U};
+            AscendC::DataCopyPadExtParams<float> pad {false, 0U, 0U, 0U};
+            AscendC::DataCopyPad(input, inputGlobal, inParams, pad);
+            AscendC::DataCopyPad(output, outputGlobal, inParams, pad);
+            SyncEvent<AscendC::HardEvent::MTE2_V>();
+            AscendC::Add(output, output, input, batch / sizeof(float));
+            SyncEvent<AscendC::HardEvent::V_MTE3>();
+            AscendC::DataCopyPad(outputGlobal, output, inParams);
+            SyncEvent<AscendC::HardEvent::MTE3_S>();
+            offset += batch;
+        }
+    }
+
+    __aicore__ inline bool AddPeerPacked(GM_ADDR destination, GM_ADDR recordBase,
+        uint64_t payloadBytes)
+    {
+        if (!WaitPeerRecords(recordBase, payloadBytes, true)) {
+            return false;
+        }
+        AscendC::LocalTensor<float> input = ioBuf_.Get<float>();
+        AscendC::LocalTensor<float> output = accumBuf_.Get<float>();
+        AscendC::LocalTensor<float> clear = clearBuf_.Get<float>();
+        const uint32_t totalRecords = TileXR::DataAsFlagBlockCountForPayloadBytes(payloadBytes);
+        uint32_t record = 0;
+        while (record < totalRecords) {
+            const uint32_t records = static_cast<uint32_t>(MinU64(
+                totalRecords - record, kPeerBatchRecords));
+            const uint64_t payloadOffset = static_cast<uint64_t>(record) *
+                TileXR::DATA_AS_FLAG_PAYLOAD_BYTES;
+            const uint32_t batchBytes = static_cast<uint32_t>(MinU64(
+                payloadBytes - payloadOffset,
+                static_cast<uint64_t>(records) * TileXR::DATA_AS_FLAG_PAYLOAD_BYTES));
+
+            AscendC::GlobalTensor<float> packedGlobal;
+            packedGlobal.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(
+                recordBase + static_cast<uint64_t>(record) * TileXR::DATA_AS_FLAG_BLOCK_BYTES));
+            AscendC::DataCopyExtParams packedParams {
+                static_cast<uint16_t>(records), TileXR::DATA_AS_FLAG_PAYLOAD_BYTES,
+                TileXR::DATA_AS_FLAG_FLAG_BYTES, 0U, 0U};
+            AscendC::DataCopyPadExtParams<float> pad {false, 0U, 0U, 0U};
+            AscendC::DataCopyPad(input, packedGlobal, packedParams, pad);
+
+            AscendC::GlobalTensor<float> outputGlobal;
+            outputGlobal.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(
+                destination + payloadOffset));
+            AscendC::DataCopyExtParams outputParams {1U, batchBytes, 0U, 0U, 0U};
+            AscendC::DataCopyPad(output, outputGlobal, outputParams, pad);
+            SyncEvent<AscendC::HardEvent::MTE2_V>();
+            AscendC::Add(output, output, input, batchBytes / sizeof(float));
+            SyncEvent<AscendC::HardEvent::V_MTE3>();
+            AscendC::DataCopyPad(outputGlobal, output, outputParams);
+            SyncEvent<AscendC::HardEvent::MTE3_S>();
+
+            AscendC::Duplicate(clear, 0.0f,
+                records * TileXR::DATA_AS_FLAG_FLAG_FLOATS);
+            SyncEvent<AscendC::HardEvent::V_MTE3>();
+            AscendC::GlobalTensor<float> flagsGlobal;
+            flagsGlobal.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(
+                recordBase + static_cast<uint64_t>(record) * TileXR::DATA_AS_FLAG_BLOCK_BYTES +
+                TileXR::DATA_AS_FLAG_FLAG_OFFSET_BYTES));
+            AscendC::DataCopyExtParams clearParams {
+                static_cast<uint16_t>(records), TileXR::DATA_AS_FLAG_FLAG_BYTES,
+                0U, TileXR::DATA_AS_FLAG_PAYLOAD_BYTES, 0U};
+            AscendC::DataCopyPad(flagsGlobal, clear, clearParams);
+            SyncEvent<AscendC::HardEvent::MTE3_S>();
+            record += records;
+        }
+        return true;
+    }
+
+    __aicore__ inline bool SendPeerChunk(int64_t target, int64_t slot,
+        uint32_t projection, uint64_t chunk, GM_ADDR source, uint64_t bytes)
+    {
+        GM_ADDR record = PeerRecord(target, rank_, slot, chunk);
+        if (!WaitPeerRecords(record, bytes, false)) {
+            return false;
+        }
+        AscendC::LocalTensor<uint8_t> local = ioBuf_.Get<uint8_t>();
+        TileXR::DataAsFlagInit(local);
+        return TileXR::DataAsFlagSend(reinterpret_cast<__gm__ uint8_t *>(record),
+            reinterpret_cast<__gm__ uint8_t *>(source), bytes, local) != 0;
+    }
+
+    __aicore__ inline bool PostUdmaChunk(int64_t target, int64_t slot,
+        uint32_t projection, uint64_t chunk, GM_ADDR source, uint64_t bytes)
+    {
+        const uint64_t stage = chunk & 1U;
+        const uint64_t outboundOffset = UDMAOutboundOffset(target, stage);
+        GM_ADDR outbound = workspace_ + outboundOffset;
+        CopyDense(outbound, source, bytes);
+        TileXR::UDMACleanCacheLines(
+            reinterpret_cast<__gm__ uint8_t *>(outbound), bytes);
+        AscendC::PipeBarrier<PIPE_ALL>();
+        const uint64_t sequence = Sequence(projection, slot, chunk);
+        const uint32_t qpIdx = UDMAQpFor(projection, slot, chunk);
+        AscendC::LocalTensor<uint8_t> wqeScratch = udmaWqeBuf_.Get<uint8_t>();
+        const uint32_t putStatus = TileXR::UDMAPutRegisteredSignalNbiOnQp<uint8_t>(
+            args_, wqeScratch, static_cast<int>(target), qpIdx,
+            reinterpret_cast<__gm__ uint8_t *>(outbound),
+            UDMAInboundOffset(rank_, stage), static_cast<uint32_t>(bytes),
+            UDMAReadyOffset(rank_, stage), sequence);
+        if (putStatus != TileXR::TILEXR_UDMA_STATUS_SUCCESS ||
+            TileXR::UDMAQuietStatusOnQp(args_, static_cast<int>(target), qpIdx) !=
+                TileXR::TILEXR_UDMA_STATUS_SUCCESS) {
+            SetStatus(kReduceGradDeviceUdmaCqError);
+            return false;
+        }
+        return true;
+    }
+
+    __aicore__ inline bool CompleteChunk(int64_t target, int64_t slot,
+        uint32_t projection, uint64_t chunk, GM_ADDR source, uint64_t bytes)
+    {
+        bool complete = false;
+        if (transports_[projection] == kReduceGradTransportPeer) {
+            complete = WaitPeerRecords(
+                PeerRecord(target, rank_, slot, chunk), bytes, false);
+        } else {
+            const uint32_t qpIdx = UDMAQpFor(projection, slot, chunk);
+            complete = WaitUdmaCompletion(
+                target, qpIdx, chunk & 1U, Sequence(projection, slot, chunk));
+        }
+        if (!complete) {
+            return false;
+        }
+        ZeroDense(source, bytes);
+        return true;
+    }
+
+    __aicore__ inline void RunSender()
+    {
+        const int64_t target = ControlPeer();
+        if (target < 0 || target >= rankSize_) {
+            SetStatus(kReduceGradDeviceInvalidState);
+            return;
+        }
+        for (uint32_t projection = 0; projection < kReduceGradProjectionCount; ++projection) {
+            const uint64_t chunkBytes = ChunkBytes(projection);
+            const uint64_t chunks = ChunkCount(projection);
+            if (chunkBytes == 0 || chunks == 0) {
+                SetStatus(kReduceGradDeviceInvalidState);
+                return;
+            }
+            for (int64_t slot = 0; slot < expertsPerRank_; ++slot) {
+                const int32_t expert = ExpertForSlot(rank_, slot);
+                if (expert < 0) {
+                    continue;
+                }
+                if (expert >= expertCount_) {
+                    SetStatus(kReduceGradDeviceInvalidState);
+                    return;
+                }
+                if (OwnerForExpert(expert) != target) {
+                    continue;
+                }
+                GM_ADDR sourceRow = gradients_[projection] +
+                    static_cast<uint64_t>(expertCount_ + slot) * rowBytes_[projection];
+                for (uint64_t chunk = 0; chunk < chunks; ++chunk) {
+                    if (chunk >= 2) {
+                        const uint64_t completedChunk = chunk - 2;
+                        const uint64_t completedOffset = completedChunk * chunkBytes;
+                        const uint64_t completedBytes = MinU64(
+                            rowBytes_[projection] - completedOffset, chunkBytes);
+                        if (!CompleteChunk(target, slot, projection, completedChunk,
+                                sourceRow + completedOffset, completedBytes)) {
+                            return;
                         }
-                        AscendC::GlobalTensor<float> remote;
-                        remote.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(
-                            shareAddrs_[sourceRank] + TileXR::IPC_DATA_OFFSET +
-                            slot * chunkStrides_[projection]) + tileOffset, tileElements);
-                        AscendC::DataCopyPad(source, remote, params, pad);
-                        AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID0);
-                        AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID0);
-                        AscendC::Add(accumulator, accumulator, source,
-                            static_cast<int32_t>(tileElements));
-                        AscendC::PipeBarrier<PIPE_V>();
+                    }
+                    const uint64_t offset = chunk * chunkBytes;
+                    const uint64_t bytes = MinU64(rowBytes_[projection] - offset, chunkBytes);
+                    const bool ok = transports_[projection] ==
+                            kReduceGradTransportPeer ?
+                        SendPeerChunk(target, slot, projection, chunk, sourceRow + offset, bytes) :
+                        PostUdmaChunk(target, slot, projection, chunk, sourceRow + offset, bytes);
+                    if (!ok) {
+                        return;
                     }
                 }
-                AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
-                AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
-                AscendC::DataCopyPad(grad, accumulator, params);
-                AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0);
-                AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0);
+                const uint64_t drainBegin = chunks > 2 ? chunks - 2 : 0;
+                for (uint64_t chunk = drainBegin; chunk < chunks; ++chunk) {
+                    const uint64_t offset = chunk * chunkBytes;
+                    const uint64_t bytes = MinU64(rowBytes_[projection] - offset, chunkBytes);
+                    if (!CompleteChunk(target, slot, projection, chunk,
+                            sourceRow + offset, bytes)) {
+                        return;
+                    }
+                }
             }
         }
-        AscendC::PipeBarrier<PIPE_ALL>();
-        return true;
     }
 
-    __aicore__ inline void ClearLocalLiveSlots(
-        int32_t projection, int64_t chunkOffset, int64_t bytesThisChunk)
+    __aicore__ inline void RunReceiver()
     {
-        AscendC::LocalTensor<float> zeros = sourceBuf_.Get<float>();
-        const int64_t elements = bytesThisChunk / sizeof(float);
-        for (int64_t slot = 0; slot < b_; ++slot) {
-            if (LoadExpert(rank_, slot) < 0) {
-                continue;
-            }
-            AscendC::GlobalTensor<float> destination;
-            destination.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(
-                reduceBuffers_[projection] +
-                    (static_cast<int64_t>(rank_) * b_ + slot) * rowBytes_[projection] +
-                    chunkOffset), elements);
-            for (int64_t tileOffset = 0; tileOffset < elements;
-                tileOffset += kMoonEpReduceGradTileElements) {
-                const int64_t tileElements = MinInt64(
-                    elements - tileOffset, kMoonEpReduceGradTileElements);
-                AscendC::Duplicate(zeros, 0.0f, static_cast<int32_t>(tileElements));
-                AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
-                AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
-                AscendC::DataCopyExtParams params {
-                    1, static_cast<uint32_t>(tileElements * sizeof(float)), 0, 0, 0
-                };
-                AscendC::DataCopyPad(destination[tileOffset], zeros, params);
-                AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0);
-                AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0);
+        const int64_t receiverIndex = blockIdx_ - controlBlockCount_;
+        for (uint32_t projection = 0; projection < kReduceGradProjectionCount; ++projection) {
+            const uint64_t chunkBytes = ChunkBytes(projection);
+            const uint64_t chunks = ChunkCount(projection);
+            for (int64_t source = 0; source < rankSize_; ++source) {
+                for (int64_t slot = 0; slot < expertsPerRank_; ++slot) {
+                    const int32_t expert = ExpertForSlot(source, slot);
+                    if (expert < 0) {
+                        continue;
+                    }
+                    if (expert >= expertCount_) {
+                        SetStatus(kReduceGradDeviceInvalidState);
+                        return;
+                    }
+                    if (OwnerForExpert(expert) != rank_) {
+                        continue;
+                    }
+                    GM_ADDR outputRow = gradients_[projection] +
+                        static_cast<uint64_t>(expert) * rowBytes_[projection];
+                    const uint64_t localExpert = static_cast<uint64_t>(
+                        expert - rank_ * expertsPerRank_);
+                    for (uint64_t chunk = 0; chunk < chunks; ++chunk) {
+                        // A slot's two stage records are reused across every projection and
+                        // chunk, so one receiver must consume them in sender order.
+                        const uint64_t workIndex = localExpert;
+                        if (static_cast<int64_t>(
+                                workIndex % static_cast<uint64_t>(receiverCount_)) !=
+                            receiverIndex) {
+                            continue;
+                        }
+                        const uint64_t offset = chunk * chunkBytes;
+                        const uint64_t bytes = MinU64(rowBytes_[projection] - offset, chunkBytes);
+                        if (source == rank_) {
+                            GM_ADDR sourceRow = gradients_[projection] +
+                                static_cast<uint64_t>(expertCount_ + slot) * rowBytes_[projection];
+                            AddDense(outputRow + offset, sourceRow + offset, bytes);
+                            ZeroDense(sourceRow + offset, bytes);
+                        } else if (transports_[projection] ==
+                            kReduceGradTransportPeer) {
+                            if (!AddPeerPacked(outputRow + offset,
+                                    PeerRecord(rank_, source, slot, chunk), bytes)) {
+                                return;
+                            }
+                        } else {
+                            const uint64_t stage = chunk & 1U;
+                            const uint64_t sequence = Sequence(projection, slot, chunk);
+                            if (!WaitUdmaReady(source, stage, sequence)) {
+                                return;
+                            }
+                            GM_ADDR inbound = workspace_ + UDMAInboundOffset(source, stage);
+                            TileXR::UDMACleanCacheLines(
+                                reinterpret_cast<__gm__ uint8_t *>(inbound), bytes);
+                            AscendC::PipeBarrier<PIPE_ALL>();
+                            AddDense(outputRow + offset, inbound, bytes);
+                            StoreSignal(workspace_ + UDMACompletionOffset(source, stage), sequence);
+                        }
+                    }
+                }
             }
         }
-        AscendC::PipeBarrier<PIPE_ALL>();
     }
 
-    __aicore__ inline void StoreStatus(int32_t status)
-    {
-        StoreInt(statusAddr_, status);
-    }
-
-    __aicore__ inline void PublishStep(int32_t step)
-    {
-        AscendC::PipeBarrier<PIPE_ALL>();
-        sync_.SetInnerFlag(static_cast<int32_t>(magic_), step);
-    }
-
-    __aicore__ inline int32_t WaitPeerStep(int32_t peer, int32_t expectedStep)
-    {
-        AscendC::GlobalTensor<int64_t> flag;
-        flag.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t *>(shareAddrs_[peer]),
-            FLAG_UNIT_INT_NUM);
-        const int64_t expectedMagic =
-            static_cast<int64_t>(static_cast<int32_t>(magic_)) << MAGIC_OFFSET;
-        for (uint64_t iteration = 0; iteration < waitIterations_; ++iteration) {
-            AscendC::DataCacheCleanAndInvalid<int64_t,
-                AscendC::CacheLine::SINGLE_CACHE_LINE,
-                AscendC::DcciDst::CACHELINE_OUT>(flag);
-            const int64_t value = flag.GetValue(0);
-            if ((value & MAGIC_MASK) != (expectedMagic & MAGIC_MASK)) {
-                continue;
-            }
-            const int32_t step = static_cast<int32_t>(value & ~MAGIC_MASK);
-            if (step == expectedStep) {
-                return 0;
-            }
-            if (step == kMoonEpReduceGradFailedStep) {
-                return 1;
-            }
-        }
-        return 2;
-    }
-
-    __aicore__ inline bool WaitAllPeers(int32_t expectedStep)
-    {
-        for (int32_t offset = 0; offset < rankSize_; ++offset) {
-            const int32_t peer = (rank_ + offset) % rankSize_;
-            const int32_t result = WaitPeerStep(peer, expectedStep);
-            if (result == 1) {
-                Fail(kMoonEpReduceGradStatusRemoteFailureBase + peer);
-                return false;
-            }
-            if (result == 2) {
-                Fail(kMoonEpReduceGradStatusTimeoutBase + peer);
-                return false;
-            }
-        }
-        return true;
-    }
-
-    __aicore__ inline void Fail(int32_t status)
-    {
-        StoreStatus(status);
-        PublishStep(kMoonEpReduceGradFailedStep);
-    }
-
-    __gm__ TileXR::CommArgs *args_ = nullptr;
-    int32_t rank_ = 0;
-    int32_t rankSize_ = 0;
-    int64_t e_ = 0;
-    int64_t b_ = 0;
-    int64_t expertsPerRank_ = 0;
-    int64_t iterationCount_ = 0;
-    uint64_t waitIterations_ = 0;
-    int64_t magic_ = 0;
-    bool initialized_ = false;
-    GM_ADDR expertsToCopyAddr_ = nullptr;
-    GM_ADDR fullGrads_[3] = {};
-    GM_ADDR reduceBuffers_[3] = {};
-    int64_t rowBytes_[3] = {};
-    int64_t chunkBytes_[3] = {};
-    int64_t chunkStrides_[3] = {};
-    int64_t chunkCounts_[3] = {};
-    GM_ADDR statusAddr_ = nullptr;
-    GM_ADDR localWindow_ = nullptr;
-    GM_ADDR shareAddrs_[TileXR::TILEXR_MAX_RANK_SIZE] = {};
+    __gm__ TileXR::CommArgs *args_{nullptr};
+    __gm__ int32_t *expertsToCopy_{nullptr};
+    GM_ADDR gradients_[kReduceGradProjectionCount] = {};
+    GM_ADDR workspace_{nullptr};
+    __gm__ int32_t *status_{nullptr};
+    int64_t rank_{0};
+    int64_t rankSize_{0};
+    int64_t expertCount_{0};
+    int64_t expertsPerRank_{0};
+    int64_t controlBlockCount_{0};
+    int64_t blockIdx_{0};
+    int64_t blockCount_{0};
+    int64_t receiverCount_{0};
+    uint64_t rowElements_[kReduceGradProjectionCount] = {};
+    uint64_t rowBytes_[kReduceGradProjectionCount] = {};
+    uint32_t transports_[kReduceGradProjectionCount] = {};
+    uint32_t udmaQpCount_{0};
+    uint64_t peerRecordBaseOffset_{0};
+    uint64_t peerHalfBytes_{0};
+    uint64_t peerSlotStrideBytes_{0};
+    uint64_t peerChunkPayloadBytes_{0};
+    uint64_t udmaStateOffset_{0};
+    uint64_t udmaOutboundOffset_{0};
+    uint64_t udmaInboundOffset_{0};
+    uint64_t udmaChunkBytes_{0};
+    uint64_t workspaceBytes_{0};
+    uint64_t waitIterations_{0};
+    int64_t magic_{0};
     AscendC::TPipe pipe_;
-    AscendC::TBuf<AscendC::QuePosition::VECCALC> syncBuf_;
-    AscendC::TBuf<AscendC::QuePosition::VECCALC> sourceBuf_;
-    AscendC::TBuf<AscendC::QuePosition::VECCALC> accumulatorBuf_;
-    SyncCollectives sync_;
+    AscendC::TBuf<AscendC::QuePosition::VECCALC> ioBuf_;
+    AscendC::TBuf<AscendC::QuePosition::VECCALC> accumBuf_;
+    AscendC::TBuf<AscendC::QuePosition::VECCALC> flagBuf_;
+    AscendC::TBuf<AscendC::QuePosition::VECCALC> clearBuf_;
+    AscendC::TBuf<AscendC::QuePosition::VECCALC> udmaWqeBuf_;
 };
 
 } // namespace Kernel
 } // namespace TileXRMoonEp
 
 extern "C" __global__ __aicore__ void tilexr_moonep_reduce_grad_kernel(
-    GM_ADDR commArgs, GM_ADDR expertsToCopy, GM_ADDR fullGateGrad,
-    GM_ADDR fullUpGrad, GM_ADDR fullDownGrad, GM_ADDR gateReduceBuffer,
-    GM_ADDR upReduceBuffer, GM_ADDR downReduceBuffer, GM_ADDR status,
-    int64_t e, int64_t b, int64_t expertsPerRank, int64_t gateRowBytes,
-    int64_t gateChunkBytes, int64_t gateChunkStride, int64_t gateChunkCount,
-    int64_t upRowBytes, int64_t upChunkBytes, int64_t upChunkStride,
-    int64_t upChunkCount, int64_t downRowBytes, int64_t downChunkBytes,
-    int64_t downChunkStride, int64_t downChunkCount, int64_t iterationCount,
+    GM_ADDR commArgs, GM_ADDR expertsToCopy, GM_ADDR gate, GM_ADDR up, GM_ADDR down,
+    GM_ADDR workspace, GM_ADDR status, int64_t rank, int64_t rankSize,
+    int64_t expertCount, int64_t expertsPerRank, int64_t controlBlockCount,
+    uint64_t gateRowElements, uint64_t upRowElements, uint64_t downRowElements,
+    uint64_t gateRowBytes, uint64_t upRowBytes, uint64_t downRowBytes,
+    uint32_t gateTransport, uint32_t upTransport, uint32_t downTransport,
+    uint32_t udmaQpCount, uint64_t peerRecordBaseOffset, uint64_t peerHalfBytes,
+    uint64_t peerSlotStrideBytes, uint64_t peerChunkPayloadBytes,
+    uint64_t udmaStateOffset, uint64_t udmaOutboundOffset,
+    uint64_t udmaInboundOffset, uint64_t udmaChunkBytes, uint64_t workspaceBytes,
     uint64_t waitIterations, int64_t magic)
 {
-    TileXRMoonEp::Kernel::ReduceGradKernel op;
-    op.Init(commArgs, expertsToCopy, fullGateGrad, fullUpGrad, fullDownGrad,
-        gateReduceBuffer, upReduceBuffer, downReduceBuffer, status, e, b,
-        expertsPerRank, gateRowBytes, gateChunkBytes, gateChunkStride, gateChunkCount,
-        upRowBytes, upChunkBytes, upChunkStride, upChunkCount, downRowBytes,
-        downChunkBytes, downChunkStride, downChunkCount, iterationCount,
-        waitIterations, magic);
-    op.Process();
+    if constexpr (g_coreType == AscendC::AIV) {
+        TileXRMoonEp::Kernel::ReduceGradKernel op;
+        op.Init(commArgs, expertsToCopy, gate, up, down, workspace, status, rank,
+            rankSize, expertCount, expertsPerRank, controlBlockCount,
+            gateRowElements, upRowElements, downRowElements, gateRowBytes,
+            upRowBytes, downRowBytes, gateTransport, upTransport, downTransport,
+            udmaQpCount,
+            peerRecordBaseOffset, peerHalfBytes, peerSlotStrideBytes,
+            peerChunkPayloadBytes, udmaStateOffset, udmaOutboundOffset,
+            udmaInboundOffset, udmaChunkBytes, workspaceBytes, waitIterations, magic);
+        op.Process();
+    }
 }

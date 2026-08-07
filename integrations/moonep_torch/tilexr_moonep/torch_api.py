@@ -9,7 +9,6 @@ from .runtime import TileXRMoonEPRuntime
 
 _COMBINE_STATUS_SUCCESS = 3000
 _PREFETCH_WEIGHT_STATUS_SUCCESS = 4000
-_REDUCE_GRAD_STATUS_SUCCESS = 5000
 
 
 def _torch():
@@ -163,6 +162,7 @@ class MoonEPPlan:
     dup_loffs: Any
     dup_counts: Any
     status: Any
+    reduce_grad_status: Any
     workspace: Any
     n: int
     tokens_per_rank: int
@@ -442,6 +442,7 @@ class TileXRMoonEPBuffer:
         context: TileXRMoonEPContext,
         *,
         wait_iterations: int = 1_000_000,
+        requested_udma_chunk_bytes: int = 0,
         torch_module=None,
     ):
         if wait_iterations <= 0:
@@ -449,15 +450,26 @@ class TileXRMoonEPBuffer:
         self.context = context
         self.runtime = context.runtime
         self.wait_iterations = int(wait_iterations)
+        self.requested_udma_chunk_bytes = int(requested_udma_chunk_bytes)
+        if self.requested_udma_chunk_bytes < 0:
+            raise ValueError("requested_udma_chunk_bytes must be non-negative")
         self._torch = torch_module or _torch()
         self._closed = False
         self._epoch = 0
         self._bound_stream_ptr: int | None = None
         self._pending_refs: list[tuple[Any, ...]] = []
         self._pending_plans: list[MoonEPPlan] = []
+        self._pending_reduce_plans: list[MoonEPPlan] = []
         self._pending_statuses: dict[int, int] = {}
         self._plans_needing_dedup: dict[int, MoonEPPlan] = {}
         self._registered_projections: ProjectionBuffers | None = None
+        self._reduce_grad_owner_token = object()
+        self._reduce_grad_token_held = False
+        self._reduce_grad_inflight = False
+        self._reduce_grad_workspace = None
+        self._reduce_grad_workspace_allocation = None
+        self._reduce_grad_signature = None
+        self._reduce_grad_info = None
         self._quiesced = True
         if context.dtype not in (self._torch.bfloat16, self._torch.float16):
             raise TypeError(
@@ -504,6 +516,23 @@ class TileXRMoonEPBuffer:
             dtype=dtype,
             device=f"npu:{self.context.device_index}",
         )
+
+    def _zeros(self, shape: tuple[int, ...], dtype):
+        return self._torch.zeros(
+            shape,
+            dtype=dtype,
+            device=f"npu:{self.context.device_index}",
+        )
+
+    def _aligned_workspace(self, size_bytes: int, alignment: int):
+        if size_bytes <= 0 or alignment <= 0:
+            raise ValueError("ReduceGrad workspace size and alignment must be positive")
+        allocation = self._zeros((size_bytes + alignment - 1,), self._torch.uint8)
+        offset = (-int(allocation.data_ptr())) % alignment
+        workspace = allocation.narrow(0, offset, size_bytes)
+        if int(workspace.data_ptr()) % alignment != 0:
+            raise RuntimeError("failed to align ReduceGrad UDMA workspace")
+        return workspace, allocation
 
     def _record_event(self):
         stream = self._torch.npu.current_stream()
@@ -553,6 +582,7 @@ class TileXRMoonEPBuffer:
             ("plan.dup_loffs", plan.dup_loffs, (c.nv_s,)),
             ("plan.dup_counts", plan.dup_counts, (2,)),
             ("plan.status", plan.status, (1,)),
+            ("plan.reduce_grad_status", plan.reduce_grad_status, (1,)),
         ):
             _validate_tensor(
                 self._torch,
@@ -602,6 +632,7 @@ class TileXRMoonEPBuffer:
             dup_loffs=self._empty((c.nv_s,), self._torch.int32),
             dup_counts=self._empty((2,), self._torch.int32),
             status=self._empty((1,), self._torch.int32),
+            reduce_grad_status=self._zeros((1,), self._torch.int32),
             workspace=self._empty((workspace_bytes,), self._torch.uint8),
             n=c.route_count,
             tokens_per_rank=c.tokens_per_rank,
@@ -726,6 +757,8 @@ class TileXRMoonEPBuffer:
             tensor_shape = _shape(tensor)
             if len(tensor_shape) < 2 or len(tensor_shape) > 4:
                 raise ValueError(f"projection.{name} rank must be in [2, 4]")
+            if any(value <= 0 for value in tensor_shape[1:]):
+                raise ValueError(f"projection.{name} must be non-empty")
             expected_rows = (
                 c.expert_count + c.prefetch_slots
                 if reduce else 2 * c.experts_per_rank
@@ -741,6 +774,13 @@ class TileXRMoonEPBuffer:
                 raise ValueError(f"projection.{name} must be 64-byte aligned")
         if not reduce:
             return
+        legacy_buffers = [
+            getattr(buffers, name) for name in ("gate_reduce", "up_reduce", "down_reduce")
+        ]
+        if all(value is None for value in legacy_buffers):
+            return
+        if any(value is None for value in legacy_buffers):
+            raise ValueError("legacy ReduceGrad buffers must be all provided or all omitted")
         for full_name, reduce_name in (
             ("gate", "gate_reduce"),
             ("up", "up_reduce"),
@@ -854,6 +894,61 @@ class TileXRMoonEPBuffer:
         event = self._record_event() if async_finish else None
         return hidden_sh, route_weights_sk, event
 
+    def prepare_reduce_grad(
+        self,
+        plan: MoonEPPlan,
+        gradients: ProjectionBuffers,
+        *,
+        _owner_token: object | None = None,
+    ):
+        self._require_open()
+        self._validate_plan(plan)
+        self._validate_projection_buffers(gradients, reduce=True)
+        shape_signature = (
+            tuple(_shape(getattr(gradients, name)) for name in ("gate", "up", "down")),
+            self.requested_udma_chunk_bytes,
+        )
+        if self._reduce_grad_signature == shape_signature:
+            return self._reduce_grad_info
+
+        info = self.runtime.reduce_grad_workspace_info(
+            self.context,
+            plan,
+            gradients,
+            requested_udma_chunk_bytes=self.requested_udma_chunk_bytes,
+        )
+        if self._reduce_grad_signature is not None:
+            if not self._quiesced:
+                self.synchronize()
+            self.runtime.unregister_reduce_grad_workspace(owner_token=_owner_token)
+            self._reduce_grad_workspace = None
+            self._reduce_grad_workspace_allocation = None
+            self._reduce_grad_signature = None
+            self._reduce_grad_info = None
+
+        if info.uses_udma:
+            if not self._quiesced:
+                self.synchronize()
+            workspace, allocation = self._aligned_workspace(
+                info.workspace_bytes, info.workspace_alignment
+            )
+            self.quiesce()
+            self.runtime.register_reduce_grad_workspace(
+                workspace, info.workspace_bytes, owner_token=_owner_token
+            )
+            self._reduce_grad_workspace = workspace
+            self._reduce_grad_workspace_allocation = allocation
+        else:
+            self._reduce_grad_workspace = None
+            self._reduce_grad_workspace_allocation = None
+        self._reduce_grad_signature = shape_signature
+        self._reduce_grad_info = info
+        return info
+
+    @property
+    def reduce_grad_info(self):
+        return self._reduce_grad_info
+
     def reduce_grad(
         self,
         plan: MoonEPPlan | None = None,
@@ -876,10 +971,48 @@ class TileXRMoonEPBuffer:
             down_reduce_buffer,
         )
         self._validate_projection_buffers(gradients, reduce=True)
-        self._retain(plan, gradients)
-        self.runtime.reduce_grad(self.context, plan, gradients, self._stream_ptr())
-        self._expect_status(plan, _REDUCE_GRAD_STATUS_SUCCESS)
-        return self._record_event() if async_finish else None
+        legacy_names = ("gate_reduce", "up_reduce", "down_reduce")
+        legacy_buffers = [getattr(gradients, name) for name in legacy_names]
+        if all(value is not None for value in legacy_buffers):
+            begin = self.context.expert_count
+            end = begin + self.context.prefetch_slots
+            for full_name, reduce_name in zip(("gate", "up", "down"), legacy_names):
+                getattr(gradients, full_name)[begin:end].copy_(
+                    getattr(gradients, reduce_name)[self.context.planner_group_rank]
+                )
+
+        self.runtime._acquire_reduce_grad(self._reduce_grad_owner_token)
+        self._reduce_grad_token_held = True
+        retained = False
+        try:
+            self.prepare_reduce_grad(
+                plan, gradients, _owner_token=self._reduce_grad_owner_token
+            )
+            self._retain(plan, gradients, self._reduce_grad_workspace)
+            retained = True
+            if all(existing is not plan for existing in self._pending_reduce_plans):
+                self._pending_reduce_plans.append(plan)
+            self.runtime.reduce_grad(
+                self.context,
+                plan,
+                gradients,
+                self._reduce_grad_workspace,
+                self._stream_ptr(),
+                self.wait_iterations,
+                requested_udma_chunk_bytes=self.requested_udma_chunk_bytes,
+            )
+            self._reduce_grad_inflight = True
+            if all(value is not None for value in legacy_buffers):
+                for value in legacy_buffers:
+                    value[self.context.planner_group_rank].zero_()
+            return self._record_event() if async_finish else None
+        except Exception:
+            if retained:
+                self._quiesced = False
+            if not self._reduce_grad_inflight and self._reduce_grad_token_held:
+                self.runtime._release_reduce_grad(self._reduce_grad_owner_token)
+                self._reduce_grad_token_held = False
+            raise
 
     @staticmethod
     def _unwrap_expert_result(value) -> tuple[Any, Any]:
@@ -981,33 +1114,45 @@ class TileXRMoonEPBuffer:
         self._require_open()
         if not self._quiesced:
             raise RuntimeError("check_pending_status requires a successful quiesce")
-        statuses = []
-        for plan in self._pending_plans:
-            statuses.append(
-                (
-                    plan.epoch,
-                    int(plan.status.item()),
-                    self._pending_statuses.get(id(plan), 0),
+        try:
+            statuses = []
+            for plan in self._pending_plans:
+                expected = self._pending_statuses.get(id(plan))
+                if expected is None:
+                    continue
+                statuses.append(
+                    (
+                        plan.epoch,
+                        int(plan.status.item()),
+                        expected,
+                    )
                 )
-            )
-        self._pending_refs.clear()
-        self._pending_plans.clear()
-        self._pending_statuses.clear()
-        self._bound_stream_ptr = None
-        self.context.release_stream(self)
-        failed = [
-            (epoch, status, expected)
-            for epoch, status, expected in statuses
-            if status != expected
-        ]
-        if failed:
-            if any(status in (2005, 2006, 2007) for _, status, _ in failed):
-                self.context.mark_poisoned()
-            details = ", ".join(
-                f"epoch {epoch}: actual {status}, expected {expected}"
-                for epoch, status, expected in failed
-            )
-            raise RuntimeError(f"MoonEP device status failures: {details}")
+            for plan in self._pending_reduce_plans:
+                statuses.append((plan.epoch, int(plan.reduce_grad_status.item()), 0))
+            self._pending_refs.clear()
+            self._pending_plans.clear()
+            self._pending_reduce_plans.clear()
+            self._pending_statuses.clear()
+            self._bound_stream_ptr = None
+            self.context.release_stream(self)
+            failed = [
+                (epoch, status, expected)
+                for epoch, status, expected in statuses
+                if status != expected
+            ]
+            if failed:
+                if any(status in (2005, 2006, 2007) for _, status, _ in failed):
+                    self.context.mark_poisoned()
+                details = ", ".join(
+                    f"epoch {epoch}: actual {status}, expected {expected}"
+                    for epoch, status, expected in failed
+                )
+                raise RuntimeError(f"MoonEP device status failures: {details}")
+        finally:
+            if self._reduce_grad_inflight:
+                self.runtime._release_reduce_grad(self._reduce_grad_owner_token)
+                self._reduce_grad_inflight = False
+                self._reduce_grad_token_held = False
 
     def synchronize(self) -> None:
         self.quiesce()
@@ -1024,22 +1169,28 @@ class TileXRMoonEPBuffer:
             sync_error = exc
         try:
             try:
-                if self._registered_projections is not None:
-                    projections = self._registered_projections
-                    if projections.udma_handle is not None:
-                        self.runtime.udma_unregister(projections.udma_handle)
-                        projections.udma_handle = None
-                    self._registered_projections = None
+                self.runtime.unregister_reduce_grad_workspace()
             finally:
-                self.context.detach_buffer(self)
-                self.context.close()
+                try:
+                    if self._registered_projections is not None:
+                        projections = self._registered_projections
+                        if projections.udma_handle is not None:
+                            self.runtime.udma_unregister(projections.udma_handle)
+                            projections.udma_handle = None
+                        self._registered_projections = None
+                finally:
+                    self.context.detach_buffer(self)
+                    self.context.close()
         finally:
             self._closed = True
             self._pending_refs.clear()
             self._pending_plans.clear()
+            self._pending_reduce_plans.clear()
             self._pending_statuses.clear()
             self._plans_needing_dedup.clear()
             self._registered_projections = None
+            self._reduce_grad_workspace = None
+            self._reduce_grad_workspace_allocation = None
         if sync_error is not None:
             raise sync_error
 

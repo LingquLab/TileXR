@@ -26,9 +26,6 @@ constexpr int32_t kMoonEpCombineFailedStep = 113;
 constexpr int32_t kMoonEpPrefetchWeightReadyStep = 401;
 constexpr int32_t kMoonEpPrefetchWeightDrainedStep = 402;
 constexpr int32_t kMoonEpPrefetchWeightFailedStep = 403;
-constexpr int32_t kMoonEpReduceGradReadyStep = 501;
-constexpr int32_t kMoonEpReduceGradDrainedStep = 502;
-constexpr int32_t kMoonEpReduceGradFailedStep = 503;
 
 constexpr int32_t kMoonEpDispatchStatusSuccess = 2000;
 constexpr int32_t kMoonEpDispatchStatusInvalidRoute = 2001;
@@ -42,11 +39,6 @@ constexpr int32_t kMoonEpPrefetchWeightStatusSuccess = 4000;
 constexpr int32_t kMoonEpPrefetchWeightStatusInvalidPlan = 4001;
 constexpr int32_t kMoonEpPrefetchWeightStatusRemoteFailureBase = 4100;
 constexpr int32_t kMoonEpPrefetchWeightStatusTimeoutBase = 4200;
-constexpr int32_t kMoonEpReduceGradStatusSuccess = 5000;
-constexpr int32_t kMoonEpReduceGradStatusInvalidPlan = 5001;
-constexpr int32_t kMoonEpReduceGradStatusRemoteFailureBase = 5100;
-constexpr int32_t kMoonEpReduceGradStatusTimeoutBase = 5200;
-
 } // namespace TileXRMoonEp
 
 #endif // TILEXR_MOONEP_PEER_WINDOW_H

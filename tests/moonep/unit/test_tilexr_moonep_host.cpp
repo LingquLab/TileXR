@@ -4,6 +4,7 @@
 #include <limits>
 #include <string>
 
+#include "acl/acl_rt.h"
 #include "tilexr_api.h"
 #include "tilexr_moonep.h"
 
@@ -17,7 +18,6 @@ int dispatchReturn = TILEXR_MOONEP_SUCCESS;
 int dispatchUrmaReturn = TILEXR_MOONEP_SUCCESS;
 int combineReturn = TILEXR_MOONEP_SUCCESS;
 int prefetchReturn = TILEXR_MOONEP_SUCCESS;
-int reduceReturn = TILEXR_MOONEP_SUCCESS;
 int queryCalls = 0;
 int plannerCalls = 0;
 int dispatchCalls = 0;
@@ -25,7 +25,6 @@ int dispatchUrmaCalls = 0;
 int dispatchWorkspaceQueryCalls = 0;
 int combineCalls = 0;
 int prefetchCalls = 0;
-int reduceCalls = 0;
 uint64_t queryWorkspaceBytes = 512;
 int64_t queryNvS = 12;
 TileXR::CommArgs commArgs {};
@@ -70,9 +69,9 @@ void Reset()
 {
     commReturn = queryReturn = plannerReturn = dispatchReturn = dispatchUrmaReturn = combineReturn =
         TILEXR_MOONEP_SUCCESS;
-    prefetchReturn = reduceReturn = TILEXR_MOONEP_SUCCESS;
+    prefetchReturn = TILEXR_MOONEP_SUCCESS;
     queryCalls = plannerCalls = dispatchCalls = dispatchUrmaCalls =
-        dispatchWorkspaceQueryCalls = combineCalls = prefetchCalls = reduceCalls = 0;
+        dispatchWorkspaceQueryCalls = combineCalls = prefetchCalls = 0;
     queryWorkspaceBytes = 512;
     queryNvS = 12;
     commArgs = TileXR::CommArgs {};
@@ -161,7 +160,7 @@ TileXRMoonEpPlanningArgsV1 PlanningArgs(TileXRMoonEpPlanV1 *plan,
 void TestAbiAndCapabilities()
 {
     Reset();
-    Check(TileXRMoonEpGetAbiVersion() == TILEXR_MOONEP_ABI_VERSION_V1,
+    Check(TileXRMoonEpGetAbiVersion() == TILEXR_MOONEP_ABI_VERSION_V2,
         "ABI version mismatch");
     uint64_t nativeStages = 0;
     uint64_t stubStages = 0;
@@ -169,9 +168,17 @@ void TestAbiAndCapabilities()
         TILEXR_MOONEP_SUCCESS);
     Check(nativeStages == (TILEXR_MOONEP_STAGE_PLANNING |
         TILEXR_MOONEP_STAGE_DISPATCH | TILEXR_MOONEP_STAGE_PREFETCH_WEIGHT |
-        TILEXR_MOONEP_STAGE_COMBINE | TILEXR_MOONEP_STAGE_REDUCE_GRAD),
+        TILEXR_MOONEP_STAGE_COMBINE),
         "native capability mask mismatch");
-    Check(stubStages == 0, "stub capability mask mismatch");
+    Check(stubStages == TILEXR_MOONEP_STAGE_REDUCE_GRAD,
+        "stub capability mask mismatch");
+    CheckStatus("V2 capabilities", TileXRMoonEpGetCapabilitiesV2(
+        &nativeStages, &stubStages), TILEXR_MOONEP_SUCCESS);
+    Check(nativeStages == (TILEXR_MOONEP_STAGE_PLANNING |
+        TILEXR_MOONEP_STAGE_DISPATCH | TILEXR_MOONEP_STAGE_PREFETCH_WEIGHT |
+        TILEXR_MOONEP_STAGE_COMBINE | TILEXR_MOONEP_STAGE_REDUCE_GRAD),
+        "V2 native capability mask mismatch");
+    Check(stubStages == 0, "V2 stub capability mask mismatch");
 }
 
 void TestWorkspaceQuery()
@@ -292,8 +299,13 @@ void TestStageDelegation()
     reduce.abiVersion = TILEXR_MOONEP_ABI_VERSION_V1;
     reduce.comm = reinterpret_cast<TileXRCommPtr>(uintptr_t {0x1000});
     reduce.plan = &plan;
-    CheckStatus("reduce", TileXRMoonEpReduceGradV1(&reduce, stream), reduceReturn);
-    Check(reduceCalls == 1, "reduce delegation mismatch");
+    TileXRMoonEpTensorV1 gradient = Tensor(
+        reinterpret_cast<void *>(uintptr_t {0x8000}),
+        TILEXR_MOONEP_DTYPE_FLOAT32, 2, 2, 2, 4);
+    reduce.input = &gradient;
+    reduce.output = &gradient;
+    CheckStatus("reduce V1 stub", TileXRMoonEpReduceGradV1(&reduce, stream),
+        TILEXR_MOONEP_SUCCESS);
 }
 
 } // namespace
@@ -329,6 +341,23 @@ extern "C" int TileXRMoonEpPlannerV3(const int32_t *topk, const int32_t *tpe,
         workspace, workspaceBytes, dst, cuSeqlens, expertsToCopy, zeroFillRanges,
         remoteStats, dupCounts, status, waitIterations, stream};
     return plannerReturn;
+}
+
+extern "C" aclError aclrtMemsetAsync(
+    void *, size_t, int32_t, size_t, aclrtStream)
+{
+    return ACL_SUCCESS;
+}
+
+extern "C" aclError aclrtMemcpyAsync(
+    void *, size_t, const void *, size_t, aclrtMemcpyKind, aclrtStream)
+{
+    return ACL_SUCCESS;
+}
+
+extern "C" aclError aclrtSynchronizeStream(aclrtStream)
+{
+    return ACL_SUCCESS;
 }
 
 namespace TileXRMoonEp {
@@ -374,12 +403,6 @@ int TileXRMoonEpRunPrefetchWeightV1(
     return prefetchReturn;
 }
 
-int TileXRMoonEpRunReduceGradV1(
-    const TileXRMoonEpReduceGradArgsV1 *, aclrtStream)
-{
-    ++reduceCalls;
-    return reduceReturn;
-}
 } // namespace TileXRMoonEp
 
 int main()

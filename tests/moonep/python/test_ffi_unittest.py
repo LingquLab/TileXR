@@ -21,6 +21,9 @@ from tilexr_moonep.abi import (
     TileXRMoonEPPlanningArgsV1,
     TileXRMoonEPPrefetchWeightArgsV1,
     TileXRMoonEPReduceGradArgsV1,
+    TileXRMoonEPReduceGradArgsV2,
+    TileXRMoonEPReduceGradWorkspaceInfoV2,
+    TileXRMoonEPReduceGradWorkspaceQueryV2,
     TileXRMoonEPTensorV1,
 )
 from tilexr_moonep.runtime import TileXRMoonEPRuntime, _resolve_library
@@ -48,6 +51,9 @@ class FakeCDLLLoader:
         self.next_udma_handle = 7
         self.planning_records = []
         self.stage_records = []
+        self.reduce_grad_records = []
+        self.register_calls = []
+        self.unregister_calls = []
         self.comm = self._comm_library()
         self.planner = FakeLibrary()
         self.moonep = self._moonep_library()
@@ -78,17 +84,27 @@ class FakeCDLLLoader:
             self.next_udma_handle += 1
             ctypes.cast(output, ctypes.POINTER(ctypes.c_uint32)).contents.value = handle
             self.lifecycle_calls.append(("register", size, handle))
+            self.register_calls.append((address.value, size))
             return 0
 
         def unregister(comm, handle):
             self.assert_scalar(comm, 0x1234)
-            self.lifecycle_calls.append(("unregister", int(handle.value)))
+            value = handle.value if hasattr(handle, "value") else handle
+            value = int(value)
+            self.lifecycle_calls.append(("unregister", value))
+            self.unregister_calls.append(value)
+            return 0
+
+        def get_qp_count(comm, qp_count):
+            self.assert_scalar(comm, 0x1234)
+            ctypes.cast(qp_count, ctypes.POINTER(ctypes.c_uint32)).contents.value = 3
             return 0
 
         library.TileXRCommInitRankLocal = FakeFunction(init_rank_local)
         library.TileXRCommDestroy = FakeFunction(destroy)
         library.TileXRUDMARegister = FakeFunction(register)
         library.TileXRUDMAUnregister = FakeFunction(unregister)
+        library.TileXRUDMAGetQpCount = FakeFunction(get_qp_count)
         return library
 
     @staticmethod
@@ -99,7 +115,7 @@ class FakeCDLLLoader:
 
     def _moonep_library(self):
         library = FakeLibrary()
-        library.TileXRMoonEpGetAbiVersion = FakeFunction(lambda: 1)
+        library.TileXRMoonEpGetAbiVersion = FakeFunction(lambda: 2)
 
         def capabilities(native, stub):
             ctypes.cast(native, ctypes.POINTER(ctypes.c_uint64)).contents.value = 31
@@ -154,6 +170,7 @@ class FakeCDLLLoader:
             return 0
 
         library.TileXRMoonEpGetCapabilitiesV1 = FakeFunction(capabilities)
+        library.TileXRMoonEpGetCapabilitiesV2 = FakeFunction(capabilities)
         library.TileXRMoonEpPlanningGetWorkspaceSizeV1 = FakeFunction(workspace)
         library.TileXRMoonEpDispatchGetWorkspaceSizeV1 = FakeFunction(dispatch_workspace)
         library.TileXRMoonEpPlanningV1 = FakeFunction(planning)
@@ -161,7 +178,6 @@ class FakeCDLLLoader:
             ("dispatch", TileXRMoonEPDispatchArgsV1),
             ("prefetch_weight", TileXRMoonEPPrefetchWeightArgsV1),
             ("combine", TileXRMoonEPCombineArgsV1),
-            ("reduce_grad", TileXRMoonEPReduceGradArgsV1),
         ):
             setattr(
                 library,
@@ -169,10 +185,52 @@ class FakeCDLLLoader:
                     "dispatch": "TileXRMoonEpDispatchV1",
                     "prefetch_weight": "TileXRMoonEpPrefetchWeightV1",
                     "combine": "TileXRMoonEpCombineV1",
-                    "reduce_grad": "TileXRMoonEpReduceGradV1",
                 }[name],
                 FakeFunction(self._stage_callback(name, args_type)),
             )
+        def reduce_grad_query(query_ptr, info_ptr):
+            query = ctypes.cast(
+                query_ptr, ctypes.POINTER(TileXRMoonEPReduceGradWorkspaceQueryV2)
+            ).contents
+            info = ctypes.cast(
+                info_ptr, ctypes.POINTER(TileXRMoonEPReduceGradWorkspaceInfoV2)
+            ).contents
+            descriptors = (query.gate.contents, query.up.contents, query.down.contents)
+            info.workspaceBytes = 0
+            info.workspaceAlignment = 2 << 20
+            info.udmaChunkBytes = 0
+            info.peerWindowBytes = 100 << 20
+            info.peerHalfBytes = 49 << 20
+            info.peerSlotStrideBytes = 1 << 20
+            info.blockDim = 64
+            for index, tensor_value in enumerate(descriptors):
+                info.rowBytes[index] = int(
+                    tensor_value.elementCount // tensor_value.shape[0]
+                ) * 4
+                info.transports[index] = 1
+            return 0
+
+        def reduce_grad(args_ptr, stream):
+            args = ctypes.cast(
+                args_ptr, ctypes.POINTER(TileXRMoonEPReduceGradArgsV2)
+            ).contents
+            self.reduce_grad_records.append({
+                "stream": stream.value,
+                "flags": args.flags,
+                "wait_iterations": args.waitIterations,
+                "workspace_bytes": args.workspaceBytes,
+                "shapes": tuple(
+                    tuple(pointer.contents.shape[: pointer.contents.rank])
+                    for pointer in (args.gate, args.up, args.down)
+                ),
+                "status_shape": tuple(
+                    args.status.contents.shape[: args.status.contents.rank]
+                ),
+            })
+            return 0
+
+        library.TileXRMoonEpReduceGradGetWorkspaceSizeV2 = FakeFunction(reduce_grad_query)
+        library.TileXRMoonEpReduceGradV2 = FakeFunction(reduce_grad)
         return library
 
     def _stage_callback(self, name, args_type):
@@ -183,10 +241,6 @@ class FakeCDLLLoader:
                 "dispatch": ("hiddenSh", "routeWeightsSk", "hiddenNvsh", "routeWeightsNvs"),
                 "prefetch_weight": ("gate", "up", "down"),
                 "combine": ("hiddenNvsh", "routeWeightsNvs", "hiddenSh", "routeWeightsSk"),
-                "reduce_grad": (
-                    "fullGateGrad", "fullUpGrad", "fullDownGrad",
-                    "gateReduceBuffer", "upReduceBuffer", "downReduceBuffer",
-                ),
             }[name]
             shapes = {}
             for field in fields:
@@ -222,7 +276,10 @@ class FfiAbiTests(unittest.TestCase):
         self.assertEqual(ctypes.sizeof(TileXRMoonEPDispatchArgsV1), 80)
         self.assertEqual(ctypes.sizeof(TileXRMoonEPPrefetchWeightArgsV1), 56)
         self.assertEqual(ctypes.sizeof(TileXRMoonEPCombineArgsV1), 64)
-        self.assertEqual(ctypes.sizeof(TileXRMoonEPReduceGradArgsV1), 80)
+        self.assertEqual(ctypes.sizeof(TileXRMoonEPReduceGradArgsV1), 48)
+        self.assertEqual(ctypes.sizeof(TileXRMoonEPReduceGradWorkspaceQueryV2), 64)
+        self.assertEqual(ctypes.sizeof(TileXRMoonEPReduceGradWorkspaceInfoV2), 96)
+        self.assertEqual(ctypes.sizeof(TileXRMoonEPReduceGradArgsV2), 96)
         self.assertEqual(TileXRMoonEPTensorV1.shape.offset, 32)
         self.assertEqual(TileXRMoonEPPlanV1.dst.offset, 56)
         self.assertEqual(TileXRMoonEPPlanV1.status.offset, 112)
@@ -287,21 +344,16 @@ class FfiAbiTests(unittest.TestCase):
             tensor((6, 2, 4), torch.float32),
             tensor((6, 4, 3), torch.float32),
             tensor((6, 3, 2), torch.float32),
-            tensor((2, 2, 2, 4), torch.float32),
-            tensor((2, 2, 4, 3), torch.float32),
-            tensor((2, 2, 3, 2), torch.float32),
         )
         buffer.reduce_grad(
             plan,
             full_gate_grad=gradients.gate,
             full_up_grad=gradients.up,
             full_down_grad=gradients.down,
-            gate_reduce_buffer=gradients.gate_reduce,
-            up_reduce_buffer=gradients.up_reduce,
-            down_reduce_buffer=gradients.down_reduce,
         )
         self.assertEqual(tuple(cu_seqlens.shape), (6,))
-        plan.status._item = 5000
+        plan.status._item = 3000
+        plan.reduce_grad_status._item = 0
         buffer.close()
 
         self.assertEqual(
@@ -338,7 +390,7 @@ class FfiAbiTests(unittest.TestCase):
         )
         self.assertEqual(
             [record["name"] for record in loader.stage_records],
-            ["dispatch", "prefetch_weight", "combine", "reduce_grad"],
+            ["dispatch", "prefetch_weight", "combine"],
         )
         self.assertTrue(all(record["stream"] == 0xCAFE for record in loader.stage_records))
         self.assertEqual(loader.stage_records[0]["flags"], 0)
@@ -347,9 +399,19 @@ class FfiAbiTests(unittest.TestCase):
         self.assertEqual(loader.stage_records[0]["shapes"]["routeWeightsNvs"], (12,))
         self.assertEqual(loader.stage_records[1]["shapes"]["up"], (4, 4, 8))
         self.assertEqual(loader.stage_records[2]["shapes"]["routeWeightsSk"], (4, 2))
+        self.assertEqual(loader.reduce_grad_records, [{
+            "stream": 0xCAFE,
+            "flags": 0,
+            "wait_iterations": 1234,
+            "workspace_bytes": 0,
+            "shapes": ((6, 2, 4), (6, 4, 3), (6, 3, 2)),
+            "status_shape": (1,),
+        }])
         self.assertEqual(
-            loader.stage_records[3]["shapes"]["gateReduceBuffer"], (2, 2, 2, 4)
+            [byte_count for _, byte_count in loader.register_calls],
+            [2 * 1024 * 1024, 768],
         )
+        self.assertEqual(loader.unregister_calls, [8, 7])
 
     def test_versioned_planner_library_is_preferred(self):
         import tempfile

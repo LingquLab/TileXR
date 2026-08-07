@@ -30,8 +30,8 @@ constexpr int32_t kExpectedPlanningStatusSuccess = 0;
 constexpr int32_t kExpectedDispatchStatusSuccess = 2000;
 constexpr int32_t kExpectedCombineStatusSuccess = 3000;
 constexpr int32_t kExpectedPrefetchStatusSuccess = 4000;
-constexpr int32_t kExpectedReduceGradStatusSuccess = 5000;
 constexpr uint64_t kPrefetchWeightAlignment = 64;
+constexpr int32_t kExpectedReduceGradStatusSuccess = 0;
 
 struct Options {
     int world = 8;
@@ -853,24 +853,6 @@ TileXRMoonEpTensorV1 Tensor3D(void *data, uint64_t elements,
     return tensor;
 }
 
-TileXRMoonEpTensorV1 Tensor4D(void *data, uint64_t elements,
-                             int64_t dim0, int64_t dim1, int64_t dim2,
-                             int64_t dim3, uint32_t dtype)
-{
-    TileXRMoonEpTensorV1 tensor {};
-    tensor.structSize = sizeof(tensor);
-    tensor.abiVersion = TILEXR_MOONEP_ABI_VERSION_V1;
-    tensor.data = data;
-    tensor.elementCount = elements;
-    tensor.dtype = dtype;
-    tensor.rank = 4;
-    tensor.shape[0] = dim0;
-    tensor.shape[1] = dim1;
-    tensor.shape[2] = dim2;
-    tensor.shape[3] = dim3;
-    return tensor;
-}
-
 template <typename T>
 bool CheckEqual(int rank, const std::string &name,
                 const std::vector<T> &actual, const std::vector<T> &expected)
@@ -934,9 +916,9 @@ bool RunFlow(const Options &options, RuntimeResources *resources,
         static_cast<uint64_t>(TILEXR_MOONEP_STAGE_PREFETCH_WEIGHT) |
         static_cast<uint64_t>(TILEXR_MOONEP_STAGE_COMBINE) |
         static_cast<uint64_t>(TILEXR_MOONEP_STAGE_REDUCE_GRAD);
-    if (TileXRMoonEpGetAbiVersion() != TILEXR_MOONEP_ABI_VERSION_V1 ||
-        !CheckTileXR(rank, "TileXRMoonEpGetCapabilitiesV1",
-            TileXRMoonEpGetCapabilitiesV1(&nativeStages, &stubStages)) ||
+    if (TileXRMoonEpGetAbiVersion() != TILEXR_MOONEP_ABI_VERSION_V2 ||
+        !CheckTileXR(rank, "TileXRMoonEpGetCapabilitiesV2",
+            TileXRMoonEpGetCapabilitiesV2(&nativeStages, &stubStages)) ||
         nativeStages != expectedNative || stubStages != 0) {
         std::cerr << "[rank " << rank << "] unexpected native/stub capabilities"
                   << " native=" << nativeStages << " stub=" << stubStages << std::endl;
@@ -1024,11 +1006,11 @@ bool RunFlow(const Options &options, RuntimeResources *resources,
         upWeightElements, INT64_C(210011) + rank * INT64_C(1013));
     const std::vector<uint16_t> downWeight = MakeBfloatPattern(
         downWeightElements, INT64_C(220009) + rank * INT64_C(1019));
-    const std::vector<float> gateGrad = MakeFloatPattern(
+    std::vector<float> gateGrad = MakeFloatPattern(
         gateFullElements, INT64_C(10000) + rank * INT64_C(100));
-    const std::vector<float> upGrad = MakeFloatPattern(
+    std::vector<float> upGrad = MakeFloatPattern(
         upFullElements, INT64_C(20000) + rank * INT64_C(100));
-    const std::vector<float> downGrad = MakeFloatPattern(
+    std::vector<float> downGrad = MakeFloatPattern(
         downFullElements, INT64_C(30000) + rank * INT64_C(100));
     std::vector<float> gateReduce(static_cast<size_t>(gateReduceElements), -101.0F);
     std::vector<float> upReduce(static_cast<size_t>(upReduceElements), -102.0F);
@@ -1050,6 +1032,21 @@ bool RunFlow(const Options &options, RuntimeResources *resources,
                 static_cast<float>(300 + rank * 10 + slot + column % 7U);
         }
     }
+    const auto packLocalReduce = [&](std::vector<float> *full,
+        const std::vector<float> &reduce, uint64_t rowElements) {
+        for (int64_t slot = 0; slot < b; ++slot) {
+            const size_t source = (static_cast<size_t>(rank) * static_cast<size_t>(b) +
+                static_cast<size_t>(slot)) * rowElements;
+            const size_t destination = (static_cast<size_t>(options.experts) +
+                static_cast<size_t>(slot)) * rowElements;
+            std::copy(reduce.begin() + static_cast<ptrdiff_t>(source),
+                reduce.begin() + static_cast<ptrdiff_t>(source + rowElements),
+                full->begin() + static_cast<ptrdiff_t>(destination));
+        }
+    };
+    packLocalReduce(&gateGrad, gateReduce, gateRowElements);
+    packLocalReduce(&upGrad, upReduce, upRowElements);
+    packLocalReduce(&downGrad, downReduce, downRowElements);
 
     DeviceBuffer topk;
     DeviceBuffer tpe;
@@ -1079,9 +1076,7 @@ bool RunFlow(const Options &options, RuntimeResources *resources,
     DeviceBuffer gateGradDev;
     DeviceBuffer upGradDev;
     DeviceBuffer downGradDev;
-    DeviceBuffer gateReduceDev;
-    DeviceBuffer upReduceDev;
-    DeviceBuffer downReduceDev;
+    DeviceBuffer reduceGradStatus;
 
     if (!AllocateInt32(resources, routeCount, "topk", &topk) ||
         !AllocateInt32(resources, options.experts, "tokens per expert", &tpe) ||
@@ -1116,9 +1111,7 @@ bool RunFlow(const Options &options, RuntimeResources *resources,
         !AllocateTyped<float>(resources, gateFullElements, "gate grad", &gateGradDev) ||
         !AllocateTyped<float>(resources, upFullElements, "up grad", &upGradDev) ||
         !AllocateTyped<float>(resources, downFullElements, "down grad", &downGradDev) ||
-        !AllocateTyped<float>(resources, gateReduceElements, "gate reduce", &gateReduceDev) ||
-        !AllocateTyped<float>(resources, upReduceElements, "up reduce", &upReduceDev) ||
-        !AllocateTyped<float>(resources, downReduceElements, "down reduce", &downReduceDev)) {
+        !AllocateInt32(resources, 1, "ReduceGrad status", &reduceGradStatus)) {
         return false;
     }
     gateWeightDev.data = prefetchWeightArena.data;
@@ -1146,9 +1139,8 @@ bool RunFlow(const Options &options, RuntimeResources *resources,
         !CopyHostToDeviceTyped(rank, gateGradDev, gateGrad, "gate grad") ||
         !CopyHostToDeviceTyped(rank, upGradDev, upGrad, "up grad") ||
         !CopyHostToDeviceTyped(rank, downGradDev, downGrad, "down grad") ||
-        !CopyHostToDeviceTyped(rank, gateReduceDev, gateReduce, "gate reduce") ||
-        !CopyHostToDeviceTyped(rank, upReduceDev, upReduce, "up reduce") ||
-        !CopyHostToDeviceTyped(rank, downReduceDev, downReduce, "down reduce")) {
+        !CopyHostToDevice(rank, reduceGradStatus, statusSentinel,
+            "ReduceGrad status sentinel")) {
         return false;
     }
     if ((reinterpret_cast<uintptr_t>(prefetchWeightArena.data) &
@@ -1287,26 +1279,31 @@ bool RunFlow(const Options &options, RuntimeResources *resources,
     TileXRMoonEpTensorV1 downGradTensor = Tensor3D(downGradDev.data,
         downFullElements, groupCount, static_cast<int64_t>(downRowElements), 1,
         TILEXR_MOONEP_DTYPE_FLOAT32);
-    TileXRMoonEpTensorV1 gateReduceTensor = Tensor4D(gateReduceDev.data,
-        gateReduceElements, options.world, b, options.hidden, 1,
-        TILEXR_MOONEP_DTYPE_FLOAT32);
-    TileXRMoonEpTensorV1 upReduceTensor = Tensor4D(upReduceDev.data,
-        upReduceElements, options.world, b, options.hidden, 2,
-        TILEXR_MOONEP_DTYPE_FLOAT32);
-    TileXRMoonEpTensorV1 downReduceTensor = Tensor4D(downReduceDev.data,
-        downReduceElements, options.world, b, static_cast<int64_t>(downRowElements), 1,
-        TILEXR_MOONEP_DTYPE_FLOAT32);
-    TileXRMoonEpReduceGradArgsV1 reduceGrad {};
+    TileXRMoonEpTensorV1 reduceGradStatusTensor = Tensor1D(
+        reduceGradStatus.data, 1, 1, TILEXR_MOONEP_DTYPE_INT32);
+    TileXRMoonEpReduceGradWorkspaceQueryV2 reduceGradQuery {};
+    reduceGradQuery.structSize = sizeof(reduceGradQuery);
+    reduceGradQuery.abiVersion = TILEXR_MOONEP_ABI_VERSION_V2;
+    reduceGradQuery.comm = resources->comm;
+    reduceGradQuery.plan = &plan;
+    reduceGradQuery.gate = &gateGradTensor;
+    reduceGradQuery.up = &upGradTensor;
+    reduceGradQuery.down = &downGradTensor;
+    reduceGradQuery.flags = TILEXR_MOONEP_FLAG_NONE;
+    TileXRMoonEpReduceGradWorkspaceInfoV2 reduceGradInfo {};
+    reduceGradInfo.structSize = sizeof(reduceGradInfo);
+    reduceGradInfo.abiVersion = TILEXR_MOONEP_ABI_VERSION_V2;
+    TileXRMoonEpReduceGradArgsV2 reduceGrad {};
     reduceGrad.structSize = sizeof(reduceGrad);
-    reduceGrad.abiVersion = TILEXR_MOONEP_ABI_VERSION_V1;
+    reduceGrad.abiVersion = TILEXR_MOONEP_ABI_VERSION_V2;
     reduceGrad.comm = resources->comm;
     reduceGrad.plan = &plan;
-    reduceGrad.fullGateGrad = &gateGradTensor;
-    reduceGrad.fullUpGrad = &upGradTensor;
-    reduceGrad.fullDownGrad = &downGradTensor;
-    reduceGrad.gateReduceBuffer = &gateReduceTensor;
-    reduceGrad.upReduceBuffer = &upReduceTensor;
-    reduceGrad.downReduceBuffer = &downReduceTensor;
+    reduceGrad.gate = &gateGradTensor;
+    reduceGrad.up = &upGradTensor;
+    reduceGrad.down = &downGradTensor;
+    reduceGrad.status = &reduceGradStatusTensor;
+    reduceGrad.waitIterations = options.waitIterations;
+    reduceGrad.flags = TILEXR_MOONEP_FLAG_NONE;
 
     if (!CheckTileXR(rank, "Planning",
             TileXRMoonEpPlanningV1(&planning, resources->stream)) ||
@@ -1320,6 +1317,21 @@ bool RunFlow(const Options &options, RuntimeResources *resources,
     if (!CopyDeviceToHost(rank, &cuHost, cu, "cu") ||
         !CopyDeviceToHost(rank, &expertsToCopyHost, expertsToCopy,
             "experts to copy")) {
+        return false;
+    }
+    if (!CheckTileXR(rank, "TileXRMoonEpReduceGradGetWorkspaceSizeV2",
+            TileXRMoonEpReduceGradGetWorkspaceSizeV2(
+                &reduceGradQuery, &reduceGradInfo)) ||
+        reduceGradInfo.workspaceBytes != 0 ||
+        reduceGradInfo.transports[0] != TILEXR_MOONEP_REDUCE_GRAD_TRANSPORT_PEER ||
+        reduceGradInfo.transports[1] != TILEXR_MOONEP_REDUCE_GRAD_TRANSPORT_PEER ||
+        reduceGradInfo.transports[2] != TILEXR_MOONEP_REDUCE_GRAD_TRANSPORT_PEER) {
+        std::cerr << "[rank " << rank
+                  << "] flow demo requires the peer-only ReduceGrad V2 path"
+                  << " workspace_bytes=" << reduceGradInfo.workspaceBytes
+                  << " transports=" << reduceGradInfo.transports[0] << ","
+                  << reduceGradInfo.transports[1] << ","
+                  << reduceGradInfo.transports[2] << std::endl;
         return false;
     }
     if (!CheckTileXR(rank, "Dispatch forward",
@@ -1345,9 +1357,9 @@ bool RunFlow(const Options &options, RuntimeResources *resources,
         !CheckStageCompletion(rank, "combine_backward", kExpectedCombineStatusSuccess,
             plannerStatus, resources->stream) ||
         !CheckTileXR(rank, "ReduceGrad",
-            TileXRMoonEpReduceGradV1(&reduceGrad, resources->stream)) ||
+            TileXRMoonEpReduceGradV2(&reduceGrad, resources->stream)) ||
         !CheckStageCompletion(rank, "reduce_grad", kExpectedReduceGradStatusSuccess,
-            plannerStatus, resources->stream)) {
+            reduceGradStatus, resources->stream)) {
         return false;
     }
 
@@ -1363,9 +1375,6 @@ bool RunFlow(const Options &options, RuntimeResources *resources,
     std::vector<float> gateGradHost(static_cast<size_t>(gateFullElements));
     std::vector<float> upGradHost(static_cast<size_t>(upFullElements));
     std::vector<float> downGradHost(static_cast<size_t>(downFullElements));
-    std::vector<float> gateReduceHost(static_cast<size_t>(gateReduceElements));
-    std::vector<float> upReduceHost(static_cast<size_t>(upReduceElements));
-    std::vector<float> downReduceHost(static_cast<size_t>(downReduceElements));
     if (!CopyDeviceToHostTyped(rank, &forwardDispatchHost, forwardDispatchDev,
             "forward dispatch") ||
         !CopyDeviceToHostTyped(rank, &gateWeightHost, gateWeightDev, "gate weight") ||
@@ -1383,10 +1392,7 @@ bool RunFlow(const Options &options, RuntimeResources *resources,
             "backward combine") ||
         !CopyDeviceToHostTyped(rank, &gateGradHost, gateGradDev, "gate grad") ||
         !CopyDeviceToHostTyped(rank, &upGradHost, upGradDev, "up grad") ||
-        !CopyDeviceToHostTyped(rank, &downGradHost, downGradDev, "down grad") ||
-        !CopyDeviceToHostTyped(rank, &gateReduceHost, gateReduceDev, "gate reduce") ||
-        !CopyDeviceToHostTyped(rank, &upReduceHost, upReduceDev, "up reduce") ||
-        !CopyDeviceToHostTyped(rank, &downReduceHost, downReduceDev, "down reduce")) {
+        !CopyDeviceToHostTyped(rank, &downGradHost, downGradDev, "down grad")) {
         return false;
     }
 
@@ -1464,6 +1470,17 @@ bool RunFlow(const Options &options, RuntimeResources *resources,
                 }
             }
         }
+        for (int64_t slot = 0; slot < b; ++slot) {
+            const size_t planIndex = static_cast<size_t>(rank) *
+                static_cast<size_t>(b) + static_cast<size_t>(slot);
+            if (expertsToCopyHost[planIndex] < 0) {
+                continue;
+            }
+            const size_t begin = (static_cast<size_t>(options.experts) +
+                static_cast<size_t>(slot)) * rowElements;
+            std::fill(expected.begin() + static_cast<ptrdiff_t>(begin),
+                expected.begin() + static_cast<ptrdiff_t>(begin + rowElements), 0.0F);
+        }
         return expected;
     };
     const std::vector<float> expectedGateGrad = buildExpectedGrad(
@@ -1472,28 +1489,6 @@ bool RunFlow(const Options &options, RuntimeResources *resources,
         upGrad, upRowElements, 200);
     const std::vector<float> expectedDownGrad = buildExpectedGrad(
         downGrad, downRowElements, 300);
-
-    const auto buildExpectedReduce = [&](const std::vector<float> &initial,
-        uint64_t rowElements) {
-        std::vector<float> expected = initial;
-        for (int64_t slot = 0; slot < b; ++slot) {
-            const size_t planIndex = static_cast<size_t>(rank) *
-                static_cast<size_t>(b) + static_cast<size_t>(slot);
-            if (expertsToCopyHost[planIndex] < 0) {
-                continue;
-            }
-            const size_t begin = planIndex * rowElements;
-            std::fill(expected.begin() + static_cast<ptrdiff_t>(begin),
-                expected.begin() + static_cast<ptrdiff_t>(begin + rowElements), 0.0F);
-        }
-        return expected;
-    };
-    const std::vector<float> expectedGateReduce = buildExpectedReduce(
-        gateReduce, gateRowElements);
-    const std::vector<float> expectedUpReduce = buildExpectedReduce(
-        upReduce, upRowElements);
-    const std::vector<float> expectedDownReduce = buildExpectedReduce(
-        downReduce, downRowElements);
 
     correct = CheckEqual(
         rank, "forward dispatch", forwardDispatchHost, expectedForwardDispatch) && correct;
@@ -1513,12 +1508,6 @@ bool RunFlow(const Options &options, RuntimeResources *resources,
     correct = CheckEqual(rank, "reduce gate grad", gateGradHost, expectedGateGrad) && correct;
     correct = CheckEqual(rank, "reduce up grad", upGradHost, expectedUpGrad) && correct;
     correct = CheckEqual(rank, "reduce down grad", downGradHost, expectedDownGrad) && correct;
-    correct = CheckEqual(rank, "clear gate reduce", gateReduceHost,
-        expectedGateReduce) && correct;
-    correct = CheckEqual(rank, "clear up reduce", upReduceHost,
-        expectedUpReduce) && correct;
-    correct = CheckEqual(rank, "clear down reduce", downReduceHost,
-        expectedDownReduce) && correct;
 
     if (correct) {
         const bool oversubscribed = options.world > options.physicalDeviceCount;
@@ -1537,6 +1526,7 @@ bool RunFlow(const Options &options, RuntimeResources *resources,
                   << " prefetch_weight_status=" << kExpectedPrefetchStatusSuccess
                   << " combine_status=" << kExpectedCombineStatusSuccess
                   << " reduce_grad_status=" << kExpectedReduceGradStatusSuccess
+                  << " reduce_grad_transport=peer"
                   << " cu_last=" << cuHost.back()
                   << " planning=native"
                   << " dispatch=native prefetch_weight=native_udma_registered"
