@@ -70,7 +70,7 @@
     <mxCell id="b5a" value="CANN 9.1.0 — ACL / Runtime APIs" style="rounded=1;whiteSpace=wrap;fillColor=#ffffff;strokeColor=#9673a6;fontFamily=Comic Sans MS;" vertex="1" parent="b5">
       <mxGeometry x="30" y="38" width="440" height="40" as="geometry"/>
     </mxCell>
-    <mxCell id="b5b" value="Driver HAL (libascend_hal.so) — driver &#8805; 25.5.0" style="rounded=1;whiteSpace=wrap;fillColor=#ffffff;strokeColor=#9673a6;fontFamily=Comic Sans MS;" vertex="1" parent="b5">
+    <mxCell id="b5b" value="Driver HAL (libascend_hal.so) — driver &#8805; 25.1.rc1" style="rounded=1;whiteSpace=wrap;fillColor=#ffffff;strokeColor=#9673a6;fontFamily=Comic Sans MS;" vertex="1" parent="b5">
       <mxGeometry x="510" y="38" width="440" height="40" as="geometry"/>
     </mxCell>
 

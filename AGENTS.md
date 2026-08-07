@@ -6,7 +6,7 @@ Ask the user to install missing `ascendc-development` or `superpowers-neo` skill
 
 TileXR is a C++14 communication runtime for Huawei Ascend NPUs. It provides tile-level synchronization, optional collectives and EP libraries, IPC/MTE communication, registered-memory UDMA, and opt-in local SDMA.
 
-- Current build target: CANN 9.1.0 and NPU driver 25.5.0 or later.
+- Current build target: CANN 9.1.0 and NPU driver 25.1.rc1 or later.
 - Core runtime targets Ascend 910B and 910A5. UDMA data-plane validation requires A5 / Ascend950 / 950 hardware.
 
 ## Key Paths

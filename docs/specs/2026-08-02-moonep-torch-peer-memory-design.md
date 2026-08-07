@@ -24,7 +24,7 @@ Planner, peer-memory, no-HCCL, forward/backward, and no-padding decisions.
 
 ## Evidence and Target
 
-- Active repository target: C++14, CANN 9.1.0, driver 25.5.0 or later.
+- Active repository target: C++14, CANN 9.1.0, driver 25.1.rc1 or later.
 - Temporary Planner source: the implementation developed in worktree `9a27`.
   The unpadded direct-launch interface uses new
   `TileXRMoonEpPlannerGetWorkspaceSizeV2` and `TileXRMoonEpPlannerV2`
@@ -36,9 +36,9 @@ Planner, peer-memory, no-HCCL, forward/backward, and no-padding decisions.
 - Development host: `root@141.61.49.192`, with 8 visible Ascend950PR devices,
   CANN 9.1.0, and deployed Planner libraries under
   `/home/d00520898/TileXR-MoonEP-Planner/install/lib64`.
-- The development host reports driver `25.1.rc1.b188`, below the repository's
-  supported 25.5.0 baseline. Results from it are development evidence, not a
-  supported-environment release claim.
+- The development host reports driver `25.1.rc1.b188`, which meets the
+  repository's supported 25.1.rc1 baseline. Results from it remain development
+  evidence rather than a release-validation claim.
 - The host's default Python 3.13 environment has neither `torch` nor
   `torch-npu`. A matching isolated environment is a prerequisite for real
   Torch-NPU validation.

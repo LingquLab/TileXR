@@ -46,22 +46,35 @@ require_root() {
 version_at_least() {
     local actual="$1"
     local minimum="$2"
-    local actual_major actual_minor actual_patch
-    local minimum_major minimum_minor minimum_patch
+    local actual_major actual_minor actual_stage actual_number
+    local minimum_major minimum_minor minimum_stage minimum_number
 
-    [[ "${actual}" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]] || return 1
+    [[ "${actual}" =~ ^([0-9]+)\.([0-9]+)\.((rc)([0-9]+)(\.b[0-9]+)?|([0-9]+))$ ]] || return 1
     actual_major=$((10#${BASH_REMATCH[1]}))
     actual_minor=$((10#${BASH_REMATCH[2]}))
-    actual_patch=$((10#${BASH_REMATCH[3]}))
-    [[ "${minimum}" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]] || return 1
+    if [[ "${BASH_REMATCH[4]}" == rc ]]; then
+        actual_stage=0
+        actual_number=$((10#${BASH_REMATCH[5]}))
+    else
+        actual_stage=1
+        actual_number=$((10#${BASH_REMATCH[7]}))
+    fi
+    [[ "${minimum}" =~ ^([0-9]+)\.([0-9]+)\.((rc)([0-9]+)(\.b[0-9]+)?|([0-9]+))$ ]] || return 1
     minimum_major=$((10#${BASH_REMATCH[1]}))
     minimum_minor=$((10#${BASH_REMATCH[2]}))
-    minimum_patch=$((10#${BASH_REMATCH[3]}))
+    if [[ "${BASH_REMATCH[4]}" == rc ]]; then
+        minimum_stage=0
+        minimum_number=$((10#${BASH_REMATCH[5]}))
+    else
+        minimum_stage=1
+        minimum_number=$((10#${BASH_REMATCH[7]}))
+    fi
 
     (( actual_major > minimum_major ||
        (actual_major == minimum_major && actual_minor > minimum_minor) ||
        (actual_major == minimum_major && actual_minor == minimum_minor &&
-        actual_patch >= minimum_patch) ))
+        (actual_stage > minimum_stage ||
+         (actual_stage == minimum_stage && actual_number >= minimum_number))) ))
 }
 
 ci_primary_group_has_non_root_gid() {

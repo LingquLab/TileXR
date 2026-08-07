@@ -183,8 +183,8 @@ evidence without modifying the existing deployment.
 - The 16-rank oversubscribed case proves logical-rank call paths and indexing,
   not 16-card throughput.
 - A single host cannot validate cross-node peer-memory ordering.
-- Driver `25.1.rc1.b188` evidence is development-only because it is below the
-  repository's supported 25.5.0 baseline.
+- Driver `25.1.rc1.b188` meets the repository's supported 25.1.rc1 baseline;
+  evidence remains development-only until the full release validation passes.
 
 ## Final Verification
 

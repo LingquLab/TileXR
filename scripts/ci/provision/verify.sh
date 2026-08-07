@@ -33,8 +33,8 @@ check_driver_version() {
     local driver_version
     driver_version="$(awk -F= '$1 == "Version" {print $2; exit}' \
         /usr/local/Ascend/driver/version.info 2>/dev/null)" || driver_version=""
-    if ! version_at_least "${driver_version}" 25.5.0; then
-        echo "ERROR: driver >= 25.5.0 is required, found ${driver_version:-unknown}" >&2
+    if ! version_at_least "${driver_version}" 25.1.rc1; then
+        echo "ERROR: driver >= 25.1.rc1 is required, found ${driver_version:-unknown}" >&2
         return 1
     fi
 }

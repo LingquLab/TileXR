@@ -16,7 +16,7 @@ Expected:
 
 - CANN 9.1.0 environment is visible through `ASCEND_HOME_PATH`.
 - `scripts/common_env.sh` detects architecture and SOC information.
-- NPU driver version is 25.5.0 or later.
+- NPU driver version is 25.1.rc1 or later.
 
 ## Build Core Runtime
 

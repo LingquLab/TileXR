@@ -33,7 +33,7 @@ Instead of stalling every rank at coarse barriers, TileXR splits a phase into ti
 ## System Requirements
 
 - **User**: root access or membership in the Ascend driver user group is typically required for CANN runfile installation and NPU device operations
-- **NPU driver**: 25.5.0 or later, check with `npu-smi info`
+- **NPU driver**: 25.1.rc1 or later, check with `npu-smi info`
 - **CANN**: current build scripts and CMake are aligned to CANN 9.1.0
 - **Core supported chips**: Ascend 910B, 910A5
 - **UDMA runtime validation target**: A5 / Ascend950 / 950 only
