@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <iomanip>
 #include <iostream>
 #include <limits>
 #include <string>
@@ -486,6 +487,20 @@ bool ValidateSignals(int rank, int rankSize, const std::vector<uint64_t>& signal
     return ok;
 }
 
+void LaunchDemoKernel(int testType, aclrtStream stream, GM_ADDR commArgsDev, int32_t* data,
+    uint64_t* signals, int32_t* debug, int32_t elementsPerRank, size_t signalOffset)
+{
+    if (testType == 1) {
+        launch_tilexr_udma_put_signal(
+            1, stream, commArgsDev, reinterpret_cast<GM_ADDR>(data), reinterpret_cast<GM_ADDR>(signals),
+            reinterpret_cast<GM_ADDR>(debug), elementsPerRank, signalOffset, kSignalValue);
+    } else {
+        launch_tilexr_udma_all_gather(
+            1, stream, commArgsDev, reinterpret_cast<GM_ADDR>(data), reinterpret_cast<GM_ADDR>(debug),
+            elementsPerRank);
+    }
+}
+
 void Cleanup(
     TileXRCommPtr comm, aclrtStream stream, void* registeredMemory, int32_t* debug, int rank, int deviceId)
 {
@@ -523,18 +538,31 @@ int main(int argc, char** argv)
     uint64_t expectedQpCountValue = 0;
     uint64_t registeredBytesValue = 0;
     uint64_t reregisterValue = 0;
+    uint64_t warmupItersValue = 0;
+    uint64_t timedItersValue = 0;
     if (!ParseUnsignedEnv("TILEXR_DEMO_EXPECT_UDMA", 1, 1, expectUdmaValue) ||
         !ParseUnsignedEnv("TILEXR_DEMO_EXPECT_QP_COUNT", expectUdmaValue == 0 ? 0 : 1,
             kMaxExpectedQpCount, expectedQpCountValue) ||
         !ParseUnsignedEnv("TILEXR_DEMO_REGISTERED_BYTES", kDefaultRegisteredBytes,
             static_cast<uint64_t>(std::numeric_limits<size_t>::max()), registeredBytesValue) ||
-        !ParseUnsignedEnv("TILEXR_DEMO_REREGISTER", 1, 1, reregisterValue)) {
+        !ParseUnsignedEnv("TILEXR_DEMO_REREGISTER", 1, 1, reregisterValue) ||
+        !ParseUnsignedEnv("TILEXR_DEMO_WARMUP_ITERS", 0, std::numeric_limits<uint32_t>::max(),
+            warmupItersValue) ||
+        !ParseUnsignedEnv("TILEXR_DEMO_TIMED_ITERS", 0, std::numeric_limits<uint32_t>::max(),
+            timedItersValue)) {
         return 2;
     }
     const bool expectUdma = expectUdmaValue != 0;
     const uint32_t expectedQpCount = static_cast<uint32_t>(expectedQpCountValue);
     const size_t registeredBytes = static_cast<size_t>(registeredBytesValue);
     const bool reregister = reregisterValue != 0;
+    const uint32_t warmupIters = static_cast<uint32_t>(warmupItersValue);
+    const uint32_t timedIters = static_cast<uint32_t>(timedItersValue);
+    if (timedIters == 0U) {
+        std::cerr << "ERROR: TILEXR_DEMO_TIMED_ITERS must be positive" << std::endl;
+        return 2;
+    }
+    const bool perfEnabled = warmupIters > 0U || timedIters > 1U;
     if ((expectUdma && expectedQpCount == 0) || (!expectUdma && expectedQpCount != 0)) {
         std::cerr << "ERROR: TILEXR_DEMO_EXPECT_QP_COUNT must be positive when UDMA is expected and zero "
                   << "when UDMA is expected to be unavailable" << std::endl;
@@ -564,6 +592,8 @@ int main(int argc, char** argv)
     std::cout << "[rank " << rank << "] validation: expectUDMA=" << expectUdma
               << " expectedQpCount=" << expectedQpCount << " registeredBytes=" << registeredBytes
               << " reregister=" << reregister << std::endl;
+    std::cout << "[rank " << rank << "] perf: enabled=" << perfEnabled
+              << " warmupIters=" << warmupIters << " timedIters=" << timedIters << std::endl;
     std::cout << "[rank " << rank << "] PID=" << getpid()
               << " TILEXR_COMM_ID=" << (std::getenv("TILEXR_COMM_ID") ? std::getenv("TILEXR_COMM_ID") : "<unset>")
               << " LD_LIBRARY_PATH=" << (std::getenv("LD_LIBRARY_PATH") ? std::getenv("LD_LIBRARY_PATH") : "<unset>")
@@ -716,24 +746,131 @@ int main(int argc, char** argv)
         return 1;
     }
 
-    PrintStatus(rank, testType == 1 ? "launch put-signal kernel" : "launch all-gather kernel");
-    if (testType == 1) {
-        launch_tilexr_udma_put_signal(
-            1, stream, commArgsDev, reinterpret_cast<GM_ADDR>(data), reinterpret_cast<GM_ADDR>(signals),
-            reinterpret_cast<GM_ADDR>(debug), elementsPerRank, signalOffset, kSignalValue);
+    bool kernelRunOk = true;
+    if (!perfEnabled) {
+        PrintStatus(rank, testType == 1 ? "launch put-signal kernel" : "launch all-gather kernel");
+        LaunchDemoKernel(testType, stream, commArgsDev, data, signals, debug, elementsPerRank, signalOffset);
+        kernelRunOk = CheckAcl(rank, "aclrtSynchronizeStream", aclrtSynchronizeStream(stream));
     } else {
-        launch_tilexr_udma_all_gather(
-            1, stream, commArgsDev, reinterpret_cast<GM_ADDR>(data), reinterpret_cast<GM_ADDR>(debug),
-            elementsPerRank);
+        PrintStatus(rank, "launch perf warmup kernels: iterations=" + std::to_string(warmupIters));
+        for (uint32_t iter = 0; iter < warmupIters; ++iter) {
+            LaunchDemoKernel(testType, stream, commArgsDev, data, signals, debug, elementsPerRank, signalOffset);
+        }
+        const bool warmupOk = CheckAcl(rank, "aclrtSynchronizeStream perf warmup", aclrtSynchronizeStream(stream));
+        bool allRanksWarmedUp = false;
+        if (!DemoBarrierAll(rank, rankSize, "all ranks completed perf warmup", warmupOk, &allRanksWarmedUp) ||
+            !allRanksWarmedUp) {
+            if (udmaRegistered) {
+                CheckTileXR(rank, "TileXRUDMAUnregister", TileXRUDMAUnregister(comm, udmaHandle));
+            }
+            Cleanup(comm, stream, registeredMemory, debug, rank, deviceId);
+            return 1;
+        }
+
+        aclrtEvent startEvent = nullptr;
+        aclrtEvent stopEvent = nullptr;
+        bool perfSetupOk = CheckAcl(rank, "aclrtCreateEvent perf start", aclrtCreateEvent(&startEvent));
+        if (perfSetupOk) {
+            perfSetupOk = CheckAcl(rank, "aclrtCreateEvent perf stop", aclrtCreateEvent(&stopEvent));
+        }
+        bool allRanksReadyForPerf = false;
+        if (!DemoBarrierAll(rank, rankSize, "all ranks ready for timed perf", perfSetupOk,
+                &allRanksReadyForPerf) || !allRanksReadyForPerf) {
+            if (startEvent != nullptr) {
+                (void)aclrtDestroyEvent(startEvent);
+            }
+            if (stopEvent != nullptr) {
+                (void)aclrtDestroyEvent(stopEvent);
+            }
+            if (udmaRegistered) {
+                CheckTileXR(rank, "TileXRUDMAUnregister", TileXRUDMAUnregister(comm, udmaHandle));
+            }
+            Cleanup(comm, stream, registeredMemory, debug, rank, deviceId);
+            return 1;
+        }
+
+        float elapsedMs = 0.0F;
+        const auto wallStart = std::chrono::steady_clock::now();
+        bool perfRunOk = CheckAcl(rank, "aclrtRecordEvent perf start", aclrtRecordEvent(startEvent, stream));
+        if (perfRunOk) {
+            for (uint32_t iter = 0; iter < timedIters; ++iter) {
+                LaunchDemoKernel(testType, stream, commArgsDev, data, signals, debug, elementsPerRank, signalOffset);
+            }
+            perfRunOk = CheckAcl(rank, "aclrtRecordEvent perf stop", aclrtRecordEvent(stopEvent, stream));
+        }
+        if (perfRunOk) {
+            perfRunOk = CheckAcl(rank, "aclrtSynchronizeEvent perf stop", aclrtSynchronizeEvent(stopEvent));
+        }
+        const auto wallStop = std::chrono::steady_clock::now();
+        const double wallElapsedMs =
+            std::chrono::duration<double, std::milli>(wallStop - wallStart).count();
+        if (!perfRunOk) {
+            (void)CheckAcl(rank, "aclrtSynchronizeStream perf fallback", aclrtSynchronizeStream(stream));
+        }
+        if (perfRunOk) {
+            perfRunOk = CheckAcl(rank, "aclrtEventElapsedTime perf",
+                aclrtEventElapsedTime(&elapsedMs, startEvent, stopEvent));
+        }
+        if (perfRunOk && elapsedMs <= 0.0F) {
+            std::cerr << "[rank " << rank << "] ERROR: perf elapsed time must be positive, got "
+                      << elapsedMs << " ms" << std::endl;
+            perfRunOk = false;
+        }
+        if (perfRunOk && wallElapsedMs <= 0.0) {
+            std::cerr << "[rank " << rank << "] ERROR: perf wall time must be positive, got "
+                      << wallElapsedMs << " ms" << std::endl;
+            perfRunOk = false;
+        }
+
+        bool eventCleanupOk = true;
+        if (startEvent != nullptr) {
+            eventCleanupOk = CheckAcl(rank, "aclrtDestroyEvent perf start", aclrtDestroyEvent(startEvent)) &&
+                eventCleanupOk;
+        }
+        if (stopEvent != nullptr) {
+            eventCleanupOk = CheckAcl(rank, "aclrtDestroyEvent perf stop", aclrtDestroyEvent(stopEvent)) &&
+                eventCleanupOk;
+        }
+
+        size_t bytesPerPeer = 0;
+        size_t bytesPerIter = 0;
+        const size_t transfersPerPeer = static_cast<size_t>(actualQpCount) + (testType == 1 ? 1U : 0U);
+        if (perfRunOk &&
+            (!CheckedMultiply(static_cast<size_t>(rankSize - 1), segmentBytes, bytesPerPeer) ||
+             !CheckedMultiply(bytesPerPeer, transfersPerPeer, bytesPerIter))) {
+            std::cerr << "[rank " << rank << "] ERROR: perf byte count overflow" << std::endl;
+            perfRunOk = false;
+        }
+        if (perfRunOk) {
+            const double txGBps = static_cast<double>(bytesPerIter) * static_cast<double>(timedIters) /
+                (static_cast<double>(elapsedMs) * 1.0e6);
+            const double wallTxGBps = static_cast<double>(bytesPerIter) * static_cast<double>(timedIters) /
+                (wallElapsedMs * 1.0e6);
+            std::cout << "TILEXR_UDMA_PERF"
+                      << " rank=" << rank
+                      << " device=" << deviceId
+                      << " qp_count=" << actualQpCount
+                      << " bytes_per_iter=" << bytesPerIter
+                      << " iterations=" << timedIters
+                      << " elapsed_ms=" << std::fixed << std::setprecision(3) << elapsedMs
+                      << " tx_GBps=" << std::setprecision(6) << txGBps
+                      << " wall_elapsed_ms=" << std::setprecision(3) << wallElapsedMs
+                      << " wall_tx_GBps=" << std::setprecision(6) << wallTxGBps
+                      << std::defaultfloat << std::endl;
+        }
+        kernelRunOk = perfRunOk && eventCleanupOk;
     }
-    if (!CheckAcl(rank, "aclrtSynchronizeStream", aclrtSynchronizeStream(stream))) {
+
+    bool allRanksCompletedKernels = false;
+    if (!DemoBarrierAll(rank, rankSize, "all ranks completed demo kernels", kernelRunOk,
+            &allRanksCompletedKernels)) {
         if (udmaRegistered) {
             CheckTileXR(rank, "TileXRUDMAUnregister", TileXRUDMAUnregister(comm, udmaHandle));
         }
         Cleanup(comm, stream, registeredMemory, debug, rank, deviceId);
         return 1;
     }
-    if (!DemoBarrierAll(rank, rankSize, "all ranks completed demo kernels")) {
+    if (!allRanksCompletedKernels) {
         if (udmaRegistered) {
             CheckTileXR(rank, "TileXRUDMAUnregister", TileXRUDMAUnregister(comm, udmaHandle));
         }

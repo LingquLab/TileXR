@@ -21,6 +21,8 @@ EXPECT_UDMA="${TILEXR_DEMO_EXPECT_UDMA:-1}"
 EXPECT_QP_COUNT="${TILEXR_DEMO_EXPECT_QP_COUNT:-}"
 REGISTERED_BYTES="${TILEXR_DEMO_REGISTERED_BYTES:-2097152}"
 REREGISTER="${TILEXR_DEMO_REREGISTER:-1}"
+WARMUP_ITERS="${TILEXR_DEMO_WARMUP_ITERS:-0}"
+TIMED_ITERS="${TILEXR_DEMO_TIMED_ITERS:-1}"
 TIMEOUT_SECONDS="${TILEXR_DEMO_TIMEOUT_SECONDS:-300}"
 CASE_NAME=""
 UNSET_QP_ROUTE_SPEC=0
@@ -49,6 +51,8 @@ Options:
   --registered-bytes <N> Register exactly N bytes (default: 2097152)
   --reregister <0|1>     Enable or disable the register/unregister reuse probe (default: 1)
   --no-reregister        Disable the register/unregister reuse probe
+  --warmup-iters <N>     Warmup kernel launches before measured runs (default: 0)
+  --iterations <N>       Timed kernel launches (default: 1)
   --timeout <seconds>    Bound the complete MPI run (default: 300)
   --help                 Show this help
 EOF
@@ -128,6 +132,14 @@ while [[ $# -gt 0 ]]; do
             REREGISTER=0
             shift
             ;;
+        --warmup-iters)
+            WARMUP_ITERS="$2"
+            shift 2
+            ;;
+        --iterations)
+            TIMED_ITERS="$2"
+            shift 2
+            ;;
         --timeout)
             TIMEOUT_SECONDS="$2"
             shift 2
@@ -202,6 +214,14 @@ if [[ ! "${REREGISTER}" =~ ^[01]$ ]]; then
     echo "--reregister must be 0 or 1" >&2
     exit 2
 fi
+if [[ ! "${WARMUP_ITERS}" =~ ^[0-9]+$ ]]; then
+    echo "--warmup-iters must be a non-negative decimal integer" >&2
+    exit 2
+fi
+if [[ ! "${TIMED_ITERS}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "--iterations must be a positive decimal integer" >&2
+    exit 2
+fi
 if [[ ! "${TIMEOUT_SECONDS}" =~ ^[1-9][0-9]*$ ]]; then
     echo "--timeout must be a positive decimal integer" >&2
     exit 2
@@ -236,6 +256,8 @@ export TILEXR_DEMO_EXPECT_UDMA="${EXPECT_UDMA}"
 export TILEXR_DEMO_EXPECT_QP_COUNT="${EXPECT_QP_COUNT}"
 export TILEXR_DEMO_REGISTERED_BYTES="${REGISTERED_BYTES}"
 export TILEXR_DEMO_REREGISTER="${REREGISTER}"
+export TILEXR_DEMO_WARMUP_ITERS="${WARMUP_ITERS}"
+export TILEXR_DEMO_TIMED_ITERS="${TIMED_ITERS}"
 export TILEXR_ENABLE_IPC="${TILEXR_ENABLE_IPC:-0}"
 export TILEXR_ENABLE_SDMA="${TILEXR_ENABLE_SDMA:-0}"
 export LD_LIBRARY_PATH="${TILEXR_ROOT}/install/lib64:${TILEXR_ROOT}/install/lib:${INSTALL_DIR}/lib64:${INSTALL_DIR}/lib:${LD_LIBRARY_PATH:-}"
@@ -263,6 +285,8 @@ MPI_ARGS=(
     -genv TILEXR_DEMO_EXPECT_QP_COUNT "${TILEXR_DEMO_EXPECT_QP_COUNT}"
     -genv TILEXR_DEMO_REGISTERED_BYTES "${TILEXR_DEMO_REGISTERED_BYTES}"
     -genv TILEXR_DEMO_REREGISTER "${TILEXR_DEMO_REREGISTER}"
+    -genv TILEXR_DEMO_WARMUP_ITERS "${TILEXR_DEMO_WARMUP_ITERS}"
+    -genv TILEXR_DEMO_TIMED_ITERS "${TILEXR_DEMO_TIMED_ITERS}"
     -genv TILEXR_ENABLE_IPC "${TILEXR_ENABLE_IPC}"
     -genv TILEXR_ENABLE_SDMA "${TILEXR_ENABLE_SDMA}"
     -genv LD_LIBRARY_PATH "${LD_LIBRARY_PATH}"

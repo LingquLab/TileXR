@@ -45,10 +45,16 @@ bash demo/run_tilexr_udma_data_channel_probe_mpi.sh \
   --npu-count 4 \
   --first-npu 0 \
   --test-type 0 \
-  --elements 16
+  --elements 16 \
+  --warmup-iters 5 \
+  --iterations 20
 ```
 
 Run again with `--test-type 1` to validate UDMA put-signal. Add `--require-sdma` if the test should also fail when TileXR SDMA is unavailable. This probe validates the cross-node UDMA/SDMA data-channel prerequisites; it does not mean EP dispatch itself has a cross-node backend.
+
+Use `--warmup-iters <N>` to run unmeasured warmup launches and `--iterations <N>` to select the measured launch count. Their defaults are `0` and `1`, respectively, which preserves the original single-launch behavior. The same values may be supplied through `TILEXR_DEMO_WARMUP_ITERS` and `TILEXR_DEMO_TIMED_ITERS`.
+
+For a reproducible two-card, eight-port-per-card throughput procedure and measured results, see [UDMA Dual-Card Bandwidth Validation](../../../docs/UDMA_DUAL_CARD_BANDWIDTH_VALIDATION.md).
 
 Run this demo only on A5 / Ascend950 / 950 hardware. Builds or smoke tests on other Ascend chips are not valid UDMA runtime validation.
 
