@@ -56,8 +56,10 @@ class MoonEPDimensions:
             raise ContractError("topk cannot exceed expert_count")
         if self.topk > 32:
             raise ContractError("topk cannot exceed upstream kmask limit 32")
-        if self.prefetch_slots > self.experts_per_rank:
-            raise ContractError("prefetch_slots cannot exceed experts_per_rank")
+        if self.prefetch_slots != self.experts_per_rank:
+            raise ContractError(
+                "PR93 PrefetchWeight requires prefetch_slots == experts_per_rank"
+            )
         if self.world_size * self.nvsh > 2**31 - 1:
             raise ContractError("encoded destination range exceeds signed int32")
 

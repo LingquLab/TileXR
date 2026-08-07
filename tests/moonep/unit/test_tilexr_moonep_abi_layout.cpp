@@ -52,7 +52,7 @@ int main()
         "Unexpected DispatchArgsV1 route-weight output offset");
     static_assert(sizeof(TileXRMoonEpPrefetchWeightArgsV1) == 56,
         "Unexpected PrefetchWeightArgsV1 size");
-    static_assert(offsetof(TileXRMoonEpPrefetchWeightArgsV1, fullGateWeight) == 24,
+    static_assert(offsetof(TileXRMoonEpPrefetchWeightArgsV1, gate) == 24,
         "Unexpected PrefetchWeightArgsV1 gate offset");
     static_assert(sizeof(TileXRMoonEpCombineArgsV1) == 64,
         "Unexpected CombineArgsV1 size");

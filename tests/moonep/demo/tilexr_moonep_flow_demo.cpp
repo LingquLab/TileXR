@@ -31,6 +31,7 @@ constexpr int32_t kExpectedDispatchStatusSuccess = 2000;
 constexpr int32_t kExpectedCombineStatusSuccess = 3000;
 constexpr int32_t kExpectedPrefetchStatusSuccess = 4000;
 constexpr int32_t kExpectedReduceGradStatusSuccess = 5000;
+constexpr uint64_t kPrefetchWeightAlignment = 64;
 
 struct Options {
     int world = 8;
@@ -56,6 +57,8 @@ struct RuntimeResources {
     bool deviceSet = false;
     aclrtStream stream = nullptr;
     TileXRCommPtr comm = nullptr;
+    bool udmaRegistered = false;
+    TileXRUDMAMemHandle udmaHandle = 0;
     std::vector<void *> allocations;
 };
 
@@ -207,6 +210,16 @@ bool CheckedAdd(uint64_t lhs, uint64_t rhs, uint64_t *result)
     return true;
 }
 
+bool CheckedAlignUp(uint64_t value, uint64_t alignment, uint64_t *result)
+{
+    if (result == nullptr || alignment == 0 ||
+        value > std::numeric_limits<uint64_t>::max() - (alignment - 1)) {
+        return false;
+    }
+    *result = ((value + alignment - 1) / alignment) * alignment;
+    return true;
+}
+
 bool CountBytes(uint64_t elements, uint64_t *bytes)
 {
     return CheckedMultiply(elements, sizeof(int32_t), bytes) &&
@@ -230,7 +243,8 @@ bool ValidateOptions(const Options &options, uint64_t *routeCount,
         options.rank >= options.world || options.physicalDeviceCount <= 0 ||
         options.device < 0 || options.device >= options.physicalDeviceCount ||
         options.s <= 0 || options.k < 2 || options.experts <= 0 ||
-        options.hidden <= 0 || options.experts % options.world != 0 ||
+        options.hidden <= 0 || options.hidden % 32 != 0 ||
+        options.experts % options.world != 0 ||
         options.k > options.experts || options.waitIterations == 0) {
         return false;
     }
@@ -618,6 +632,28 @@ bool Cleanup(RuntimeResources *resources)
         ok = CheckAcl(resources->rank, "cleanup stream synchronize",
             aclrtSynchronizeStream(resources->stream)) && ok;
     }
+    if (resources->udmaRegistered && resources->comm != nullptr) {
+        const int unregisterRet =
+            TileXRUDMAUnregister(resources->comm, resources->udmaHandle);
+        ok = CheckTileXR(resources->rank, "TileXRUDMAUnregister prefetch arena",
+            unregisterRet) && ok;
+        if (unregisterRet == TILEXR_MOONEP_SUCCESS) {
+            resources->udmaRegistered = false;
+            resources->udmaHandle = 0;
+        }
+    }
+    if (resources->comm != nullptr) {
+        const int destroyRet = TileXRCommDestroy(resources->comm);
+        ok = CheckTileXR(resources->rank, "TileXRCommDestroy", destroyRet) && ok;
+        if (destroyRet == TILEXR_MOONEP_SUCCESS) {
+            resources->comm = nullptr;
+            resources->udmaRegistered = false;
+            resources->udmaHandle = 0;
+        }
+    }
+    if (resources->comm != nullptr) {
+        return false;
+    }
     for (std::vector<void *>::reverse_iterator it = resources->allocations.rbegin();
          it != resources->allocations.rend(); ++it) {
         if (*it != nullptr) {
@@ -625,11 +661,6 @@ bool Cleanup(RuntimeResources *resources)
         }
     }
     resources->allocations.clear();
-    if (resources->comm != nullptr) {
-        ok = CheckTileXR(resources->rank, "TileXRCommDestroy",
-            TileXRCommDestroy(resources->comm)) && ok;
-        resources->comm = nullptr;
-    }
     if (resources->stream != nullptr) {
         ok = CheckAcl(resources->rank, "aclrtDestroyStream",
             aclrtDestroyStream(resources->stream)) && ok;
@@ -941,6 +972,7 @@ bool RunFlow(const Options &options, RuntimeResources *resources,
         MakeBfloatPattern(tokenHiddenCount, static_cast<int64_t>(rank + 1) * 300007);
     const std::vector<float> routeWeights = MakeRouteWeights(routeCount, rank);
 
+    const uint64_t weightRows = 2U * static_cast<uint64_t>(b);
     const uint64_t fullRows = groupCount;
     const uint64_t gateRowElements = static_cast<uint64_t>(options.hidden);
     uint64_t upRowElements = 0;
@@ -948,12 +980,18 @@ bool RunFlow(const Options &options, RuntimeResources *resources,
     uint64_t gateFullElements = 0;
     uint64_t upFullElements = 0;
     uint64_t downFullElements = 0;
+    uint64_t gateWeightElements = 0;
+    uint64_t upWeightElements = 0;
+    uint64_t downWeightElements = 0;
     uint64_t gateReduceElements = 0;
     uint64_t upReduceElements = 0;
     uint64_t downReduceElements = 0;
     if (!CheckedMultiply(gateRowElements, 2U, &upRowElements) ||
         !CheckedMultiply(gateRowElements, 2U, &downRowElements) ||
         upRowElements > static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) ||
+        !CheckedMultiply(weightRows, gateRowElements, &gateWeightElements) ||
+        !CheckedMultiply(weightRows, upRowElements, &upWeightElements) ||
+        !CheckedMultiply(weightRows, downRowElements, &downWeightElements) ||
         !CheckedMultiply(fullRows, gateRowElements, &gateFullElements) ||
         !CheckedMultiply(fullRows, upRowElements, &upFullElements) ||
         !CheckedMultiply(fullRows, downRowElements, &downFullElements) ||
@@ -962,12 +1000,30 @@ bool RunFlow(const Options &options, RuntimeResources *resources,
         !CheckedMultiply(expertsToCopyCount, downRowElements, &downReduceElements)) {
         return false;
     }
+    uint64_t gateWeightBytes = 0;
+    uint64_t upWeightBytes = 0;
+    uint64_t downWeightBytes = 0;
+    uint64_t upWeightOffset = 0;
+    uint64_t downWeightOffset = 0;
+    uint64_t prefetchArenaBytes = 0;
+    uint64_t gateEnd = 0;
+    uint64_t upEnd = 0;
+    if (!CountTypedBytes<uint16_t>(gateWeightElements, &gateWeightBytes) ||
+        !CountTypedBytes<uint16_t>(upWeightElements, &upWeightBytes) ||
+        !CountTypedBytes<uint16_t>(downWeightElements, &downWeightBytes) ||
+        !CheckedAdd(0, gateWeightBytes, &gateEnd) ||
+        !CheckedAlignUp(gateEnd, kPrefetchWeightAlignment, &upWeightOffset) ||
+        !CheckedAdd(upWeightOffset, upWeightBytes, &upEnd) ||
+        !CheckedAlignUp(upEnd, kPrefetchWeightAlignment, &downWeightOffset) ||
+        !CheckedAdd(downWeightOffset, downWeightBytes, &prefetchArenaBytes)) {
+        return false;
+    }
     const std::vector<uint16_t> gateWeight = MakeBfloatPattern(
-        gateFullElements, INT64_C(200003) + rank * INT64_C(1009));
+        gateWeightElements, INT64_C(200003) + rank * INT64_C(1009));
     const std::vector<uint16_t> upWeight = MakeBfloatPattern(
-        upFullElements, INT64_C(210011) + rank * INT64_C(1013));
+        upWeightElements, INT64_C(210011) + rank * INT64_C(1013));
     const std::vector<uint16_t> downWeight = MakeBfloatPattern(
-        downFullElements, INT64_C(220009) + rank * INT64_C(1019));
+        downWeightElements, INT64_C(220009) + rank * INT64_C(1019));
     const std::vector<float> gateGrad = MakeFloatPattern(
         gateFullElements, INT64_C(10000) + rank * INT64_C(100));
     const std::vector<float> upGrad = MakeFloatPattern(
@@ -1009,6 +1065,7 @@ bool RunFlow(const Options &options, RuntimeResources *resources,
     DeviceBuffer plannerStatus;
     DeviceBuffer forwardInputDev;
     DeviceBuffer forwardDispatchDev;
+    DeviceBuffer prefetchWeightArena;
     DeviceBuffer gateWeightDev;
     DeviceBuffer upWeightDev;
     DeviceBuffer downWeightDev;
@@ -1042,9 +1099,7 @@ bool RunFlow(const Options &options, RuntimeResources *resources,
             "forward input", &forwardInputDev) ||
         !AllocateTyped<uint16_t>(resources, routeHiddenCount,
             "forward dispatch", &forwardDispatchDev) ||
-        !AllocateTyped<uint16_t>(resources, gateFullElements, "gate weight", &gateWeightDev) ||
-        !AllocateTyped<uint16_t>(resources, upFullElements, "up weight", &upWeightDev) ||
-        !AllocateTyped<uint16_t>(resources, downFullElements, "down weight", &downWeightDev) ||
+        !Allocate(resources, prefetchArenaBytes, "prefetch weight arena", &prefetchWeightArena) ||
         !AllocateTyped<uint16_t>(resources, tokenHiddenCount,
             "forward combine", &forwardCombineDev) ||
         !AllocateTyped<float>(resources, routeCount, "route weights", &routeWeightsDev) ||
@@ -1066,12 +1121,18 @@ bool RunFlow(const Options &options, RuntimeResources *resources,
         !AllocateTyped<float>(resources, downReduceElements, "down reduce", &downReduceDev)) {
         return false;
     }
+    gateWeightDev.data = prefetchWeightArena.data;
+    gateWeightDev.bytes = gateWeightBytes;
+    upWeightDev.data = static_cast<uint8_t *>(prefetchWeightArena.data) + upWeightOffset;
+    upWeightDev.bytes = upWeightBytes;
+    downWeightDev.data =
+        static_cast<uint8_t *>(prefetchWeightArena.data) + downWeightOffset;
+    downWeightDev.bytes = downWeightBytes;
     if ((reinterpret_cast<uintptr_t>(workspace.data) & static_cast<uintptr_t>(31)) != 0) {
         std::cerr << "[rank " << rank << "] planner workspace is not 32-byte aligned"
                   << std::endl;
         return false;
     }
-
     const std::vector<int32_t> statusSentinel(1, -1);
     if (!CopyHostToDevice(rank, topk, routing, "topk") ||
         !CopyHostToDevice(rank, tpe, tokensPerExpert, "tokens per expert") ||
@@ -1090,6 +1151,16 @@ bool RunFlow(const Options &options, RuntimeResources *resources,
         !CopyHostToDeviceTyped(rank, downReduceDev, downReduce, "down reduce")) {
         return false;
     }
+    if ((reinterpret_cast<uintptr_t>(prefetchWeightArena.data) &
+            static_cast<uintptr_t>(kPrefetchWeightAlignment - 1)) != 0 ||
+        !CheckTileXR(rank, "TileXRUDMARegister prefetch arena",
+            TileXRUDMARegister(resources->comm,
+                static_cast<GM_ADDR>(prefetchWeightArena.data),
+                static_cast<size_t>(prefetchWeightArena.bytes),
+                &resources->udmaHandle))) {
+        return false;
+    }
+    resources->udmaRegistered = true;
 
     TileXRMoonEpPlanV1 plan {};
     plan.structSize = sizeof(plan);
@@ -1151,20 +1222,22 @@ bool RunFlow(const Options &options, RuntimeResources *resources,
     forwardDispatch.flags = TILEXR_MOONEP_FLAG_BUILD_DEDUP;
 
     TileXRMoonEpTensorV1 gateWeightTensor = Tensor3D(gateWeightDev.data,
-        gateFullElements, groupCount, options.hidden, 1, TILEXR_MOONEP_DTYPE_BFLOAT16);
+        gateWeightElements, weightRows, options.hidden, 1,
+        TILEXR_MOONEP_DTYPE_BFLOAT16);
     TileXRMoonEpTensorV1 upWeightTensor = Tensor3D(upWeightDev.data,
-        upFullElements, groupCount, options.hidden, 2, TILEXR_MOONEP_DTYPE_BFLOAT16);
+        upWeightElements, weightRows, options.hidden, 2,
+        TILEXR_MOONEP_DTYPE_BFLOAT16);
     TileXRMoonEpTensorV1 downWeightTensor = Tensor3D(downWeightDev.data,
-        downFullElements, groupCount, static_cast<int64_t>(downRowElements), 1,
+        downWeightElements, weightRows, static_cast<int64_t>(downRowElements), 1,
         TILEXR_MOONEP_DTYPE_BFLOAT16);
     TileXRMoonEpPrefetchWeightArgsV1 prefetch {};
     prefetch.structSize = sizeof(prefetch);
     prefetch.abiVersion = TILEXR_MOONEP_ABI_VERSION_V1;
     prefetch.comm = resources->comm;
     prefetch.plan = &plan;
-    prefetch.fullGateWeight = &gateWeightTensor;
-    prefetch.fullUpWeight = &upWeightTensor;
-    prefetch.fullDownWeight = &downWeightTensor;
+    prefetch.gate = &gateWeightTensor;
+    prefetch.up = &upWeightTensor;
+    prefetch.down = &downWeightTensor;
 
     TileXRMoonEpTensorV1 forwardCombineTensor =
         Tensor2D(forwardCombineDev.data, tokenHiddenCount, options.s, options.hidden,
@@ -1279,9 +1352,9 @@ bool RunFlow(const Options &options, RuntimeResources *resources,
     }
 
     std::vector<uint16_t> forwardDispatchHost(static_cast<size_t>(routeHiddenCount));
-    std::vector<uint16_t> gateWeightHost(static_cast<size_t>(gateFullElements));
-    std::vector<uint16_t> upWeightHost(static_cast<size_t>(upFullElements));
-    std::vector<uint16_t> downWeightHost(static_cast<size_t>(downFullElements));
+    std::vector<uint16_t> gateWeightHost(static_cast<size_t>(gateWeightElements));
+    std::vector<uint16_t> upWeightHost(static_cast<size_t>(upWeightElements));
+    std::vector<uint16_t> downWeightHost(static_cast<size_t>(downWeightElements));
     std::vector<uint16_t> forwardCombineHost(static_cast<size_t>(tokenHiddenCount));
     std::vector<float> dispatchedRouteWeightsHost(static_cast<size_t>(routeCount));
     std::vector<float> combinedRouteWeightsHost(static_cast<size_t>(routeCount));
@@ -1356,9 +1429,9 @@ bool RunFlow(const Options &options, RuntimeResources *resources,
             }
             const int owner = expert / static_cast<int32_t>(b);
             const std::vector<uint16_t> ownerValues = MakeBfloatPattern(
-                fullRows * rowElements, seedBase + owner * rankStride);
-            const size_t source = static_cast<size_t>(expert) * rowElements;
-            const size_t destination = (static_cast<size_t>(options.experts) +
+                weightRows * rowElements, seedBase + owner * rankStride);
+            const size_t source = static_cast<size_t>(expert % b) * rowElements;
+            const size_t destination = (static_cast<size_t>(b) +
                 static_cast<size_t>(slot)) * rowElements;
             std::copy(ownerValues.begin() + static_cast<ptrdiff_t>(source),
                 ownerValues.begin() + static_cast<ptrdiff_t>(source + rowElements),
@@ -1466,7 +1539,7 @@ bool RunFlow(const Options &options, RuntimeResources *resources,
                   << " reduce_grad_status=" << kExpectedReduceGradStatusSuccess
                   << " cu_last=" << cuHost.back()
                   << " planning=native"
-                  << " dispatch=native prefetch_weight=native"
+                  << " dispatch=native prefetch_weight=native_udma_registered"
                   << " combine=native reduce_grad=native"
                   << " torch_validated=false"
                   << " transport_performance_valid=false"

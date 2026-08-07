@@ -137,17 +137,23 @@ them.
 ### PrefetchWeight
 
 ```text
-fullGateWeight    BF16 [E+B, ...]
-fullUpWeight      BF16 [E+B, ...]
-fullDownWeight    BF16 [E+B, ...]
+gate              FP16/BF16 [2B, ...]
+up                FP16/BF16 [2B, ...]
+down              FP16/BF16 [2B, ...]
 plan              saved Plan V1
 flags
 ```
 
-Each projection may have different trailing dimensions but must be contiguous and have
-rank 3. For destination slot `b`, `expertsToCopy[rank,b]` selects a global expert row.
-The operator copies it into row `E+b`. A `-1` slot remains unchanged. All three tensors
-are updated in place.
+PrefetchWeight follows the PR93 registered-memory layout. `B` must equal `E/R`.
+Each projection may have different trailing dimensions, must be contiguous with rank
+2 through 4, and must have a 64-byte-aligned base and expert-row size. The three
+non-overlapping projection views reside in one flat ordinary-device-memory allocation
+that is registered once with `TileXRUDMARegister`; `peerMems[]` is not used.
+
+Rows `[0,B)` hold the current rank's local experts. For destination slot `b`,
+`expertsToCopy[rank,b]` selects a global expert, its owner row is `expert % B`, and
+UDMA writes it into row `B+b`. A `-1` slot remains unchanged. Cleanup synchronizes
+outstanding work, unregisters the allocation, and only then destroys the communicator.
 
 ### Combine
 
@@ -203,17 +209,19 @@ unused `-1` slots remain unchanged.
 
 ## Transport and Kernel Protocols
 
-All new and modified kernels use same-host `CommArgs::peerMems[] + IPC_DATA_OFFSET` on
-the A5/Ascend950 path. The first implementation is correctness-oriented and uses
-bounded magic-tagged synchronization.
+Dispatch, Combine, and ReduceGrad use same-host
+`CommArgs::peerMems[] + IPC_DATA_OFFSET` on the A5/Ascend950 path. Their first
+implementation is correctness-oriented and uses bounded magic-tagged synchronization.
+PrefetchWeight instead uses PR93 registered-memory UDMA and does not require local and
+global rank counts to match.
 
 Dispatch and Combine choose a hidden-row chunk such that `NvS * chunkBytes` fits in the
 100 MiB peer data window. They iterate chunks rather than rejecting a tensor merely
 because the complete `[NvS,H]` payload exceeds the window.
 
-PrefetchWeight processes one projection, slot, and row chunk at a time. The owner of a
-requested expert publishes that chunk to the destination rank's peer window; the
-destination drains it into row `E+b` after a ready barrier.
+PrefetchWeight submits one UDMA GET for each projection and live slot, using the
+requesting worker's QP. Each worker waits for the peers it used before the stage
+publishes success status `4000`.
 
 ReduceGrad processes one projection and row chunk at a time. Every rank publishes all
 of its local `B` reduce-slot chunks into its own peer window. Owner ranks consume sources
@@ -251,8 +259,9 @@ The TileXR facade adopts upstream-facing method shapes:
 - `dispatch(hidden_sh, route_weights_sk=None, topk_experts_sk=None,
   tokens_per_expert=None, plan=None, async_finish=False, *,
   inter_rank_sync=True, zero_copy=False)`
-- `prefetch_weight(plan, async_finish=False, *, full_gate_weight,
-  full_up_weight, full_down_weight)`
+- `prefetch_weight(plan, projections, async_finish=False)` after constructing a
+  compact owner with `ProjectionBuffers.from_local_weights(...)` and registering it
+  with `register_projection_buffers(...)`
 - `combine(plan, hidden_nvsh, route_weights_nvs=None, async_finish=False,
   inter_rank_sync=True, *, zero_copy=False)`
 - `reduce_grad(plan, async_finish=False, full_gate_grad, full_up_grad,

@@ -116,12 +116,15 @@ class MoonEPSmokeTests(unittest.TestCase):
         self.assertEqual(buffer.synchronize_calls, 1)
 
     def test_forward_backward_order_and_plan_reuse(self):
-        torch, runtime, buffer = make_buffer()
-        projection = ProjectionBuffers(
-            tensor((6, 2, 4), torch.bfloat16),
-            tensor((6, 4, 3), torch.bfloat16),
-            tensor((6, 3, 2), torch.bfloat16),
+        torch, runtime, buffer = make_buffer(write_status_markers=True)
+        projection = ProjectionBuffers.from_local_weights(
+            buffer.context,
+            tensor((2, 4, 8), torch.bfloat16),
+            tensor((2, 4, 8), torch.bfloat16),
+            tensor((2, 8, 4), torch.bfloat16),
+            torch_module=torch,
         )
+        buffer.register_projection_buffers(projection)
 
         def expert_forward(dispatched, plan, projections):
             runtime.calls.append(("expert_forward", plan))
@@ -157,10 +160,12 @@ class MoonEPSmokeTests(unittest.TestCase):
             expert_backward=expert_backward,
             gradients=gradients,
         )
+        buffer.close()
         names = [item[0] for item in runtime.calls if item[0] != "planning_workspace_size"]
         self.assertEqual(
             names,
             [
+                "udma_register",
                 "planning",
                 "dispatch",
                 "prefetch_weight",
@@ -170,6 +175,8 @@ class MoonEPSmokeTests(unittest.TestCase):
                 "expert_backward",
                 "combine",
                 "reduce_grad",
+                "udma_unregister",
+                "close",
             ],
         )
         self.assertIs(backward.plan, forward.state.plan)
@@ -291,12 +298,15 @@ class MoonEPSmokeTests(unittest.TestCase):
         self.assertEqual(plan.status.item(), 2000)
         buffer.synchronize()
 
-        buffer.prefetch_weight(
-            plan,
-            full_gate_weight=tensor((6, 2, 4), torch.bfloat16),
-            full_up_weight=tensor((6, 4, 3), torch.bfloat16),
-            full_down_weight=tensor((6, 3, 2), torch.bfloat16),
+        projection = ProjectionBuffers.from_local_weights(
+            buffer.context,
+            tensor((2, 4, 8), torch.bfloat16),
+            tensor((2, 4, 8), torch.bfloat16),
+            tensor((2, 8, 4), torch.bfloat16),
+            torch_module=torch,
         )
+        buffer.register_projection_buffers(projection)
+        buffer.prefetch_weight(plan, projection)
         self.assertEqual(plan.status.item(), 4000)
         buffer.synchronize()
 
@@ -390,23 +400,21 @@ class MoonEPSmokeTests(unittest.TestCase):
         hccl_init = benchmark_source.index("torch." + "distributed.init_process_group")
         self.assertLess(mode_guard, hccl_init)
 
-    def test_projection_must_be_non_empty_rank_three(self):
+    def test_projection_rank_must_be_in_supported_range(self):
         torch, _, buffer = make_buffer()
         plan, _ = buffer.planning(
             tensor((4, 2), torch.int32), tensor((4,), torch.int32)
         )
-        bad = ProjectionBuffers(
-            tensor((6, 2, 4), torch.bfloat16),
-            tensor((6, 8), torch.bfloat16),
-            tensor((6, 3, 2), torch.bfloat16),
-        )
-        with self.assertRaisesRegex(ValueError, "rank-3"):
-            buffer.prefetch_weight(
-                plan,
-                full_gate_weight=bad.gate,
-                full_up_weight=bad.up,
-                full_down_weight=bad.down,
+        for bad_shape in ((4,), (4, 1, 1, 1, 32)):
+            bad = ProjectionBuffers(
+                tensor((4, 4, 8), torch.bfloat16),
+                tensor(bad_shape, torch.bfloat16),
+                tensor((4, 8, 4), torch.bfloat16),
             )
+            with self.subTest(shape=bad_shape), self.assertRaisesRegex(
+                ValueError, "rank must be in \\[2, 4\\]"
+            ):
+                buffer.prefetch_weight(plan, bad)
 
     def test_json_case_and_oversubscribed_topology(self):
         with tempfile.TemporaryDirectory() as directory:

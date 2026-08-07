@@ -59,9 +59,10 @@ tilexr_add_moonep_kernel(tilexr_moonep_prefetch_weight_kernel
     INCLUDES ${TILEXR_MOONEP_PREFETCH_WEIGHT_KERNEL_INCLUDES}
     DEPENDS
         "${CMAKE_CURRENT_SOURCE_DIR}/common/prefetch_weight_common.h"
-        "${CMAKE_SOURCE_DIR}/src/moonep/common/moonep_peer_window.h"
         "${CMAKE_SOURCE_DIR}/src/include/comm_args.h"
-        "${CMAKE_SOURCE_DIR}/src/include/tilexr_sync.h"
+        "${CMAKE_SOURCE_DIR}/src/include/tilexr_udma.h"
+        "${CMAKE_SOURCE_DIR}/src/include/tilexr_udma_reg.h"
+        "${CMAKE_SOURCE_DIR}/src/include/tilexr_udma_types.h"
 )
 
 add_library(tilexr-moonep-prefetch-weight SHARED

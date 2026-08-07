@@ -46,8 +46,9 @@ class FakeTensor:
         self._storage_offset = int(storage_offset)
         self._item = 0
         self.masked_fill_calls = []
-        self._ptr = FakeTensor._next_ptr
-        FakeTensor._next_ptr += max(64, self.numel() * self.element_size())
+        allocation_bytes = max(64, self.numel() * self.element_size())
+        self._ptr = (FakeTensor._next_ptr + 63) // 64 * 64
+        FakeTensor._next_ptr = self._ptr + (allocation_bytes + 63) // 64 * 64
 
     def is_contiguous(self):
         return self._contiguous
@@ -74,7 +75,43 @@ class FakeTensor:
     def reshape(self, *shape):
         if len(shape) == 1 and isinstance(shape[0], tuple):
             shape = shape[0]
-        return FakeTensor(shape, self.dtype, self.device)
+        result = FakeTensor(shape, self.dtype, self.device,
+            storage_offset=self._storage_offset)
+        result._ptr = self._ptr
+        return result
+
+    def narrow(self, dim, start, length):
+        shape = list(self.shape)
+        shape[int(dim)] = int(length)
+        stride = math.prod(self.shape[int(dim) + 1:])
+        result = FakeTensor(
+            shape,
+            self.dtype,
+            self.device,
+            storage_offset=self._storage_offset + int(start) * stride,
+        )
+        result._ptr = self._ptr + int(start) * stride * self.element_size()
+        return result
+
+    def __getitem__(self, item):
+        if not isinstance(item, slice):
+            raise TypeError("FakeTensor only supports first-dimension slices")
+        start, stop, step = item.indices(self.shape[0])
+        if step != 1:
+            raise TypeError("FakeTensor slice step must be one")
+        return self.narrow(0, start, stop - start)
+
+    def clone(self):
+        return FakeTensor(self.shape, self.dtype, self.device)
+
+    def copy_(self, other):
+        if self.shape != other.shape or self.dtype != other.dtype:
+            raise ValueError("FakeTensor copy_ contract mismatch")
+        return self
+
+    def fill_(self, value):
+        self._item = value
+        return self
 
     def to(self, *, dtype):
         return FakeTensor(self.shape, dtype, self.device)
@@ -153,6 +190,7 @@ class FakeRuntime:
         self.fail_dispatch_calls = int(fail_dispatch_calls)
         self.calls = []
         self.closed = False
+        self.udma_handles = []
         self.capabilities = NativeCapabilities(
             abi_version=1,
             stage_mask=31,
@@ -204,6 +242,16 @@ class FakeRuntime:
         self.calls.append(("prefetch_weight", plan, projections, stream))
         if self.write_status_markers:
             plan.status._item = 4000
+
+    def udma_register(self, tensor):
+        self.calls.append(("udma_register", tensor))
+        handle = len(self.udma_handles) + 1
+        self.udma_handles.append(handle)
+        return handle
+
+    def udma_unregister(self, handle):
+        self.calls.append(("udma_unregister", int(handle)))
+        self.udma_handles.remove(int(handle))
 
     def combine(
         self,

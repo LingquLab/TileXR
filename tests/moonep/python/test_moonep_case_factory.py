@@ -116,8 +116,8 @@ def test_manual_two_rank_case_starts_with_all_routes_on_rank_zero_experts() -> N
         case.prefetch_slots,
         case.token_padding,
         case.routing_pattern,
-    ) == (2, 2, 4, 2, 2, 1, 1, "skewed")
-    dimensions = MoonEPDimensions(0, 2, 2, 2, 4, 1, 1, 2, 2)
+    ) == (2, 2, 4, 2, 2, 2, 1, "skewed")
+    dimensions = MoonEPDimensions(0, 2, 2, 2, 4, 2, 1, 2, 2)
     generated = make_correctness_case(
         torch, dimensions, routing_pattern=case.routing_pattern
     )
@@ -140,14 +140,14 @@ def test_manual_two_rank_case_combines_imbalance_and_three_duplicates() -> None:
         case.prefetch_slots,
         case.token_padding,
         case.routing_pattern,
-    ) == (2, 4, 8, 2, 2, 2, 1, "imbalanced_duplicates")
+    ) == (2, 4, 8, 2, 2, 4, 1, "imbalanced_duplicates")
 
     expected = (
         torch.tensor([[4, 5, 6, 7], [0, 1, 2, 3]], dtype=torch.int32),
         torch.tensor([[0, 1, 2, 3], [0, 1, 2, 3]], dtype=torch.int32),
     )
     for rank in range(2):
-        dimensions = MoonEPDimensions(rank, 2, 2, 4, 8, 2, 1, 2, 2)
+        dimensions = MoonEPDimensions(rank, 2, 2, 4, 8, 4, 1, 2, 2)
         generated = make_correctness_case(
             torch, dimensions, routing_pattern=case.routing_pattern
         )
@@ -157,7 +157,7 @@ def test_manual_two_rank_case_combines_imbalance_and_three_duplicates() -> None:
         [
             make_correctness_case(
                 torch,
-                MoonEPDimensions(rank, 2, 2, 4, 8, 2, 1, 2, 2),
+                MoonEPDimensions(rank, 2, 2, 4, 8, 4, 1, 2, 2),
                 routing_pattern=case.routing_pattern,
             ).tokens_per_expert
             for rank in range(2)

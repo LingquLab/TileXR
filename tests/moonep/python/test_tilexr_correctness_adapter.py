@@ -37,7 +37,7 @@ def dimensions() -> MoonEPDimensions:
         prefetch_slots=2,
         token_padding=4,
         hidden_size=4,
-        intermediate_size=3,
+        intermediate_size=8,
     )
 
 
@@ -156,9 +156,13 @@ class TileXRCorrectnessAdapterTests(unittest.TestCase):
         native_prefetch = [
             call for call in runtime.calls if call[0] == "prefetch_weight"
         ][-1][2]
-        self.assertIs(native_prefetch.gate, projections.gate)
-        self.assertIs(native_prefetch.up, projections.up)
-        self.assertIs(native_prefetch.down, projections.down)
+        self.assertIsNot(native_prefetch.gate, projections.gate)
+        self.assertIsNot(native_prefetch.up, projections.up)
+        self.assertIsNot(native_prefetch.down, projections.down)
+        self.assertEqual(native_prefetch.gate.shape, (4, 4, 8))
+        self.assertEqual(native_prefetch.down.shape, (4, 8, 4))
+        self.assertIsNotNone(native_prefetch.backing)
+        self.assertEqual(native_prefetch.udma_handle, 1)
         backend.synchronize()
 
         expert_output = tensor((dimensions().nvsh, 4), torch.bfloat16)
@@ -170,9 +174,9 @@ class TileXRCorrectnessAdapterTests(unittest.TestCase):
         backend.synchronize()
 
         full_grads = ProjectionTensors(
-            tensor((6, 4, 3), torch.float32),
-            tensor((6, 4, 3), torch.float32),
-            tensor((6, 3, 4), torch.float32),
+            tensor((6, 4, 8), torch.float32),
+            tensor((6, 4, 8), torch.float32),
+            tensor((6, 8, 4), torch.float32),
         )
         reduce_buffers = projection_tensors(torch, reduce=True)
         reduced = backend.reduce_grad(plan, full_grads, reduce_buffers)
@@ -186,6 +190,8 @@ class TileXRCorrectnessAdapterTests(unittest.TestCase):
             self.assertEqual(reduce_tensor.masked_fill_calls, [])
         backend.synchronize()
         backend.close()
+        lifecycle = [call[0] for call in runtime.calls]
+        self.assertLess(lifecycle.index("udma_unregister"), lifecycle.index("close"))
 
     def test_unknown_or_cloned_plan_is_rejected(self):
         torch, runtime, _, backend = make_backend()

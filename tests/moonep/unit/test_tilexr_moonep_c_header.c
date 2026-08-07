@@ -21,12 +21,12 @@ int main(void)
     dispatch.structSize = (uint32_t)sizeof(dispatch);
     dispatch.abiVersion = TILEXR_MOONEP_ABI_VERSION_V1;
     dispatch.hiddenSh = &tensor;
-    prefetch.fullGateWeight = &tensor;
+    prefetch.gate = &tensor;
     combine.hiddenNvsh = &tensor;
     reduce.fullGateGrad = &tensor;
 
     return tensor.dtype == TILEXR_MOONEP_DTYPE_FLOAT16 &&
         plan.nvS == 1 && dispatch.hiddenSh == &tensor &&
-        prefetch.fullGateWeight == &tensor && combine.hiddenNvsh == &tensor &&
+        prefetch.gate == &tensor && combine.hiddenNvsh == &tensor &&
         reduce.fullGateGrad == &tensor ? 0 : 1;
 }

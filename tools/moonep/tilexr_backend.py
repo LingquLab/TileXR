@@ -59,6 +59,7 @@ class TileXRMoonEPBackend:
         self.dimensions = dimensions
         self.buffer = buffer
         self._native_plans: dict[int, _NativePlanEntry] = {}
+        self._registered_projections: ProjectionBuffers | None = None
         self._closed = False
 
     def _require_open(self) -> None:
@@ -157,12 +158,32 @@ class TileXRMoonEPBackend:
         validate_projections(
             projections, self.dimensions, self.torch, dtype=self.torch.bfloat16
         )
-        self.buffer.prefetch_weight(
-            entry.native,
-            full_gate_weight=projections.gate,
-            full_up_weight=projections.up,
-            full_down_weight=projections.down,
+        d = self.dimensions
+        local_begin = d.rank * d.experts_per_rank
+        local_end = local_begin + d.experts_per_rank
+        local_sources = tuple(
+            getattr(projections, name)[local_begin:local_end].clone()
+            for name in ("gate", "up", "down")
         )
+        if self._registered_projections is None:
+            self._registered_projections = ProjectionBuffers.from_local_weights(
+                self.buffer.context,
+                *local_sources,
+                torch_module=self.torch,
+            )
+            self.buffer.register_projection_buffers(self._registered_projections)
+        else:
+            for name, source in zip(("gate", "up", "down"), local_sources):
+                getattr(self._registered_projections, name).narrow(
+                    0, 0, d.experts_per_rank
+                ).copy_(source)
+        packed = self.buffer.prefetch_weight(entry.native, self._registered_projections)
+        for name in ("gate", "up", "down"):
+            getattr(projections, name).narrow(
+                0, d.expert_count, d.experts_per_rank
+            ).copy_(getattr(packed, name).narrow(
+                0, d.experts_per_rank, d.experts_per_rank
+            ))
         return PrefetchResult(projections)
 
     def combine(

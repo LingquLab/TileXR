@@ -97,9 +97,9 @@ class TileXRMoonEPPrefetchWeightArgsV1(ctypes.Structure):
         ("abiVersion", ctypes.c_uint32),
         ("comm", ctypes.c_void_p),
         ("plan", ctypes.POINTER(TileXRMoonEPPlanV1)),
-        ("fullGateWeight", ctypes.POINTER(TileXRMoonEPTensorV1)),
-        ("fullUpWeight", ctypes.POINTER(TileXRMoonEPTensorV1)),
-        ("fullDownWeight", ctypes.POINTER(TileXRMoonEPTensorV1)),
+        ("gate", ctypes.POINTER(TileXRMoonEPTensorV1)),
+        ("up", ctypes.POINTER(TileXRMoonEPTensorV1)),
+        ("down", ctypes.POINTER(TileXRMoonEPTensorV1)),
         ("flags", ctypes.c_uint64),
     ]
 

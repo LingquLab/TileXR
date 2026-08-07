@@ -4,33 +4,35 @@
 #include <cstdint>
 
 #include "tilexr_moonep.h"
+#include "tilexr_api.h"
 
 namespace TileXRMoonEp {
 
-struct PrefetchProjectionLayout {
-    int64_t rowBytes = 0;
-    int64_t chunkBytes = 0;
-    int64_t chunkCount = 0;
+constexpr uint32_t kPrefetchWeightMaxWorkers = 8;
+constexpr uint32_t kPrefetchWeightAlignment = 64;
+
+struct PrefetchWeightProjectionLayout {
+    GM_ADDR localBase = nullptr;
+    uint64_t registryOffset = 0;
+    uint32_t rowBytes = 0;
 };
 
 struct PrefetchWeightLayout {
-    int64_t rank = 0;
-    int64_t world = 0;
-    int64_t e = 0;
-    int64_t b = 0;
+    PrefetchWeightProjectionLayout gate {};
+    PrefetchWeightProjectionLayout up {};
+    PrefetchWeightProjectionLayout down {};
     int64_t expertsPerRank = 0;
-    int64_t blockDim = 0;
-    int64_t iterationCount = 0;
-    PrefetchProjectionLayout gate {};
-    PrefetchProjectionLayout up {};
-    PrefetchProjectionLayout down {};
+    int32_t rank = 0;
+    int32_t rankSize = 0;
+    uint32_t qpNum = 0;
+    uint32_t blockDim = 0;
 };
 
-int TileXRMoonEpBuildPrefetchWeightLayout(int64_t commRank, int64_t commWorld,
-    const TileXRMoonEpPlanV1 *plan, const TileXRMoonEpTensorV1 *fullGateWeight,
-    const TileXRMoonEpTensorV1 *fullUpWeight,
-    const TileXRMoonEpTensorV1 *fullDownWeight, uint64_t flags,
-    PrefetchWeightLayout *layout);
+int TileXRMoonEpBuildPrefetchWeightLayout(
+    const TileXRMoonEpPrefetchWeightArgsV1 &args,
+    const TileXR::CommArgs &commArgs,
+    const TileXR::TileXRUDMARegistry &registry, uint32_t qpNum,
+    const char *blockDimOverride, PrefetchWeightLayout *layout);
 
 } // namespace TileXRMoonEp
 

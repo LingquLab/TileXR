@@ -44,6 +44,7 @@ class FakeCDLLLoader:
     def __init__(self):
         self.loads = []
         self.destroy_calls = 0
+        self.lifecycle_calls = []
         self.planning_records = []
         self.stage_records = []
         self.comm = self._comm_library()
@@ -62,10 +63,28 @@ class FakeCDLLLoader:
         def destroy(comm):
             self.assert_scalar(comm, 0x1234)
             self.destroy_calls += 1
+            self.lifecycle_calls.append("destroy")
+            return 0
+
+        def register(comm, address, byte_count, output):
+            self.assert_scalar(comm, 0x1234)
+            self.assert_scalar(byte_count, 768)
+            if not address.value:
+                raise AssertionError("invalid UDMA registration")
+            ctypes.cast(output, ctypes.POINTER(ctypes.c_uint32)).contents.value = 7
+            self.lifecycle_calls.append("register")
+            return 0
+
+        def unregister(comm, handle):
+            self.assert_scalar(comm, 0x1234)
+            self.assert_scalar(handle, 7)
+            self.lifecycle_calls.append("unregister")
             return 0
 
         library.TileXRCommInitRankLocal = FakeFunction(init_rank_local)
         library.TileXRCommDestroy = FakeFunction(destroy)
+        library.TileXRUDMARegister = FakeFunction(register)
+        library.TileXRUDMAUnregister = FakeFunction(unregister)
         return library
 
     @staticmethod
@@ -88,7 +107,7 @@ class FakeCDLLLoader:
             self.assert_scalar(s, 4)
             self.assert_scalar(k, 2)
             self.assert_scalar(e, 4)
-            self.assert_scalar(b, 1)
+            self.assert_scalar(b, 2)
             self.assert_scalar(token_padding, 2)
             ctypes.cast(workspace_bytes, ctypes.POINTER(ctypes.c_uint64)).contents.value = 256
             ctypes.cast(capacity, ctypes.POINTER(ctypes.c_int64)).contents.value = 12
@@ -143,7 +162,7 @@ class FakeCDLLLoader:
             plan = args.plan.contents
             fields = {
                 "dispatch": ("hiddenSh", "routeWeightsSk", "hiddenNvsh", "routeWeightsNvs"),
-                "prefetch_weight": ("fullGateWeight", "fullUpWeight", "fullDownWeight"),
+                "prefetch_weight": ("gate", "up", "down"),
                 "combine": ("hiddenNvsh", "routeWeightsNvs", "hiddenSh", "routeWeightsSk"),
                 "reduce_grad": (
                     "fullGateGrad", "fullUpGrad", "fullDownGrad",
@@ -224,7 +243,7 @@ class FfiAbiTests(unittest.TestCase):
             expert_count=4,
             dtype=torch.bfloat16,
             token_padding=2,
-            prefetch_slots=1,
+            prefetch_slots=2,
         )
         buffer = TileXRMoonEPBuffer(context, wait_iterations=1234, torch_module=torch)
         hidden_nvsh, route_weights_nvs, cu_seqlens, plan = buffer.dispatch(
@@ -233,25 +252,23 @@ class FfiAbiTests(unittest.TestCase):
             tensor((4, 2), torch.int32),
             tensor((4,), torch.int32),
         )
-        projections = ProjectionBuffers(
-            tensor((5, 2, 4), torch.bfloat16),
-            tensor((5, 4, 3), torch.bfloat16),
-            tensor((5, 3, 2), torch.bfloat16),
+        projections = ProjectionBuffers.from_local_weights(
+            context,
+            tensor((2, 4, 8), torch.bfloat16),
+            tensor((2, 4, 8), torch.bfloat16),
+            tensor((2, 8, 4), torch.bfloat16),
+            torch_module=torch,
         )
-        buffer.prefetch_weight(
-            plan,
-            full_gate_weight=projections.gate,
-            full_up_weight=projections.up,
-            full_down_weight=projections.down,
-        )
+        buffer.register_projection_buffers(projections)
+        buffer.prefetch_weight(plan, projections)
         buffer.combine(plan, hidden_nvsh, route_weights_nvs)
         gradients = ProjectionBuffers(
-            tensor((5, 2, 4), torch.float32),
-            tensor((5, 4, 3), torch.float32),
-            tensor((5, 3, 2), torch.float32),
-            tensor((2, 1, 2, 4), torch.float32),
-            tensor((2, 1, 4, 3), torch.float32),
-            tensor((2, 1, 3, 2), torch.float32),
+            tensor((6, 2, 4), torch.float32),
+            tensor((6, 4, 3), torch.float32),
+            tensor((6, 3, 2), torch.float32),
+            tensor((2, 2, 2, 4), torch.float32),
+            tensor((2, 2, 4, 3), torch.float32),
+            tensor((2, 2, 3, 2), torch.float32),
         )
         buffer.reduce_grad(
             plan,
@@ -262,7 +279,7 @@ class FfiAbiTests(unittest.TestCase):
             up_reduce_buffer=gradients.up_reduce,
             down_reduce_buffer=gradients.down_reduce,
         )
-        self.assertEqual(tuple(cu_seqlens.shape), (5,))
+        self.assertEqual(tuple(cu_seqlens.shape), (6,))
         plan.status._item = 5000
         buffer.close()
 
@@ -275,6 +292,7 @@ class FfiAbiTests(unittest.TestCase):
         self.assertTrue(runtime.capabilities.transport_correctness_valid)
         self.assertFalse(runtime.capabilities.transport_performance_valid)
         self.assertEqual(loader.destroy_calls, 1)
+        self.assertEqual(loader.lifecycle_calls, ["register", "unregister", "destroy"])
         self.assertEqual(
             loader.planning_records,
             [{
@@ -284,8 +302,8 @@ class FfiAbiTests(unittest.TestCase):
                 "flags": 0,
                 "topk_shape": (4, 2),
                 "tpe_shape": (4,),
-                "cu_shape": (5,),
-                "plan": (8, 2, 4, 1, 12, 2),
+                "cu_shape": (6,),
+                "plan": (8, 2, 4, 2, 12, 2),
             }],
         )
         self.assertEqual(
@@ -297,10 +315,10 @@ class FfiAbiTests(unittest.TestCase):
         self.assertTrue(all(record["flags"] == 0 for record in loader.stage_records[1:]))
         self.assertEqual(loader.stage_records[0]["shapes"]["hiddenNvsh"], (12, 8))
         self.assertEqual(loader.stage_records[0]["shapes"]["routeWeightsNvs"], (12,))
-        self.assertEqual(loader.stage_records[1]["shapes"]["fullUpWeight"], (5, 4, 3))
+        self.assertEqual(loader.stage_records[1]["shapes"]["up"], (4, 4, 8))
         self.assertEqual(loader.stage_records[2]["shapes"]["routeWeightsSk"], (4, 2))
         self.assertEqual(
-            loader.stage_records[3]["shapes"]["gateReduceBuffer"], (2, 1, 2, 4)
+            loader.stage_records[3]["shapes"]["gateReduceBuffer"], (2, 2, 2, 4)
         )
 
     def test_versioned_planner_library_is_preferred(self):

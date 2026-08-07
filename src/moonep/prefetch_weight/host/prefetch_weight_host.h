@@ -10,9 +10,9 @@ namespace TileXRMoonEp {
 struct PrefetchWeightParams {
     TileXRCommPtr comm = nullptr;
     const int32_t *expertsToCopy = nullptr;
-    void *fullGateWeight = nullptr;
-    void *fullUpWeight = nullptr;
-    void *fullDownWeight = nullptr;
+    void *gate = nullptr;
+    void *up = nullptr;
+    void *down = nullptr;
     int32_t *status = nullptr;
     aclrtStream stream = nullptr;
 };
@@ -21,8 +21,6 @@ struct PrefetchWeightLaunchContext {
     TileXR::CommArgs *hostArgs = nullptr;
     GM_ADDR devArgs = nullptr;
     PrefetchWeightLayout layout {};
-    uint64_t waitIterations = 0;
-    int64_t magic = 0;
 };
 
 int TileXRMoonEpPreparePrefetchWeightLaunch(

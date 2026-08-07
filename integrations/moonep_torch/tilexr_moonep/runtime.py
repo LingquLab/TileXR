@@ -189,6 +189,15 @@ class TileXRMoonEPRuntime:
         self._comm_lib.TileXRCommInitRankLocal.restype = ctypes.c_int
         self._comm_lib.TileXRCommDestroy.argtypes = [ctypes.c_void_p]
         self._comm_lib.TileXRCommDestroy.restype = ctypes.c_int
+        self._comm_lib.TileXRUDMARegister.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_size_t,
+            ctypes.POINTER(ctypes.c_uint32),
+        ]
+        self._comm_lib.TileXRUDMARegister.restype = ctypes.c_int
+        self._comm_lib.TileXRUDMAUnregister.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+        self._comm_lib.TileXRUDMAUnregister.restype = ctypes.c_int
         self._moonep_lib.TileXRMoonEpGetAbiVersion.argtypes = []
         self._moonep_lib.TileXRMoonEpGetAbiVersion.restype = ctypes.c_uint32
         self._moonep_lib.TileXRMoonEpGetCapabilitiesV1.argtypes = [
@@ -371,14 +380,29 @@ class TileXRMoonEPRuntime:
         args = initialize_struct(TileXRMoonEPPrefetchWeightArgsV1())
         args.comm = void_p(self.comm_ptr)
         args.plan = ctypes.pointer(plan_v1)
-        args.fullGateWeight = ctypes.pointer(gate)
-        args.fullUpWeight = ctypes.pointer(up)
-        args.fullDownWeight = ctypes.pointer(down)
+        args.gate = ctypes.pointer(gate)
+        args.up = ctypes.pointer(up)
+        args.down = ctypes.pointer(down)
         args.flags = TILEXR_MOONEP_FLAG_NONE
         ret = self._moonep_lib.TileXRMoonEpPrefetchWeightV1(
             ctypes.byref(args), void_p(stream_ptr)
         )
         self._check("TileXRMoonEpPrefetchWeightV1", ret)
+
+    def udma_register(self, tensor) -> int:
+        handle = ctypes.c_uint32()
+        ret = self._comm_lib.TileXRUDMARegister(
+            void_p(self.comm_ptr), tensor_ptr(tensor), tensor_nbytes(tensor),
+            ctypes.byref(handle)
+        )
+        self._check("TileXRUDMARegister", ret, f"bytes={tensor_nbytes(tensor)}")
+        return int(handle.value)
+
+    def udma_unregister(self, handle: int) -> None:
+        ret = self._comm_lib.TileXRUDMAUnregister(
+            void_p(self.comm_ptr), ctypes.c_uint32(int(handle))
+        )
+        self._check("TileXRUDMAUnregister", ret, f"handle={int(handle)}")
 
     def combine(
         self,

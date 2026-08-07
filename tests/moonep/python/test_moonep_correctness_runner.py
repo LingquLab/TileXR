@@ -126,7 +126,7 @@ def test_reference_and_identical_candidate_pass_all_stage_gates(tmp_path) -> Non
 def test_manual_small_reference_passes_and_writes_complete_readable_boundaries(
     tmp_path,
 ) -> None:
-    small = MoonEPDimensions(0, 1, 2, 2, 4, 1, 1, 2, 2)
+    small = MoonEPDimensions(0, 1, 2, 2, 4, 4, 1, 2, 2)
     case = make_correctness_case(torch, small, routing_pattern="skewed")
     dump_dir = tmp_path / "tensor_dumps"
     report = CorrectnessRunner(

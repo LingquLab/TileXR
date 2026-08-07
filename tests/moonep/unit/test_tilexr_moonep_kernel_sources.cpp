@@ -201,15 +201,17 @@ int main()
     Contains("prefetch kernel", prefetchKernel,
         "extern \"C\" __global__ __aicore__ void tilexr_moonep_prefetch_weight_kernel");
     Contains("prefetch kernel", prefetchKernel, "expertsToCopy");
-    Contains("prefetch kernel", prefetchKernel, "PublishOwners");
-    Contains("prefetch kernel", prefetchKernel, "e_ + slot");
-    Contains("prefetch kernel", prefetchKernel, "CopyBytesGmToGm");
+    Contains("prefetch kernel", prefetchKernel, "expertsPerRank_ + slot");
+    Contains("prefetch kernel", prefetchKernel, "localExpert");
+    Excludes("prefetch kernel", prefetchKernel, "e_ + slot");
+    Contains("prefetch kernel", prefetchKernel, "UDMAGetNbiOnQp");
+    Contains("prefetch kernel", prefetchKernel, "UDMAQuietStatusOnQp");
     Contains("prefetch kernel", prefetchKernel, "DataCacheCleanAndInvalid");
     Excludes("prefetch kernel", prefetchKernel, "<<<");
     Excludes("prefetch launch", prefetchLaunch, "launch_tilexr_moonep_prefetch_weight_kernel");
     Contains("prefetch cmake", prefetchCmake, "MoonEpKernel.cmake");
     Excludes("prefetch cmake", prefetchCmake, "libtilexr_moonep_prefetch_weight_kernel.so");
-    Excludes("prefetch kernel", Lower(prefetchKernel), "udma");
+    Contains("prefetch kernel", Lower(prefetchKernel), "udma");
     Contains("reduce launch", reduceLaunch, "#include \"moonep_kernel_launch.h\"");
     Contains("reduce launch", reduceLaunch, "LaunchRegisteredMoonEpKernel(");
     Excludes("reduce launch", reduceLaunch, "rtKernelLaunchWithFlagV2");
@@ -232,11 +234,12 @@ int main()
     Contains("registration", registration, "kPrefetchWeightKernelSignature");
     Contains("registration", registration, "kReduceGradKernelSignature");
 
-    const std::string active = Lower(plannerHost + plannerKernel + dispatchCommon +
+    const std::string activeIpc = Lower(plannerHost + plannerKernel + dispatchCommon +
         dispatchHost + dispatchLaunch + dispatchKernel + combineCommon + combineHost +
-        combineLaunch + combineKernel + prefetchHost + prefetchLaunch + prefetchKernel +
-        reduceHost + reduceLaunch + reduceKernel + stageHost + kernelLaunch);
-    Excludes("active MoonEP sources", active, "udma");
+        combineLaunch + combineKernel + reduceHost + reduceLaunch + reduceKernel +
+        stageHost + kernelLaunch);
+    Excludes("IPC MoonEP sources", activeIpc, "udma");
+    const std::string active = activeIpc + Lower(prefetchHost + prefetchLaunch + prefetchKernel);
     Excludes("active MoonEP sources", active, "3rdparty/moonep");
     Excludes("active MoonEP sources", active, "reference/");
     Excludes("active MoonEP sources", active, "src/ep");

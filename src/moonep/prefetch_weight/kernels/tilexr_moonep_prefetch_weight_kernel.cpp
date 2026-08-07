@@ -4,296 +4,215 @@
 
 #include "comm_args.h"
 #include "prefetch_weight_common.h"
-#include "tilexr_sync.h"
+#include "tilexr_udma.h"
 
 namespace TileXRMoonEp {
 namespace Kernel {
 
-__aicore__ inline int64_t MinInt64(int64_t lhs, int64_t rhs)
-{
-    return lhs < rhs ? lhs : rhs;
-}
-
-__aicore__ inline void CopyBytesGmToGm(GM_ADDR dstAddr, GM_ADDR srcAddr,
-    AscendC::TBuf<AscendC::QuePosition::VECCALC> &workBuf, int64_t bytes)
-{
-    AscendC::LocalTensor<uint8_t> local = workBuf.Get<uint8_t>();
-    AscendC::GlobalTensor<uint8_t> src;
-    AscendC::GlobalTensor<uint8_t> dst;
-    src.SetGlobalBuffer(reinterpret_cast<__gm__ uint8_t *>(srcAddr), bytes);
-    dst.SetGlobalBuffer(reinterpret_cast<__gm__ uint8_t *>(dstAddr), bytes);
-    for (int64_t copied = 0; copied < bytes; copied += kMoonEpWorkUbBytes) {
-        const int64_t tileBytes = MinInt64(bytes - copied, kMoonEpWorkUbBytes);
-        AscendC::DataCopyExtParams params {1, static_cast<uint32_t>(tileBytes), 0, 0, 0};
-        AscendC::DataCopyPadExtParams<uint8_t> pad {false, 0, 0, 0};
-        AscendC::DataCopyPad(local, src[copied], params, pad);
-        AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE3>(EVENT_ID0);
-        AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE3>(EVENT_ID0);
-        AscendC::DataCopyPad(dst[copied], local, params);
-        AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
-        AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
-    }
-    AscendC::PipeBarrier<PIPE_ALL>();
-}
+constexpr uint32_t kMaxTrackedRankSize = 1024;
+constexpr uint32_t kUsedPeerWordCount = kMaxTrackedRankSize / 64;
 
 class PrefetchWeightKernel {
 public:
     __aicore__ inline void Init(GM_ADDR commArgs, GM_ADDR expertsToCopy,
-        GM_ADDR fullGateWeight, GM_ADDR fullUpWeight, GM_ADDR fullDownWeight,
-        GM_ADDR status, int64_t e, int64_t b, int64_t expertsPerRank,
-        int64_t gateRowBytes, int64_t gateChunkBytes, int64_t gateChunkCount,
-        int64_t upRowBytes, int64_t upChunkBytes, int64_t upChunkCount,
-        int64_t downRowBytes, int64_t downChunkBytes, int64_t downChunkCount,
-        int64_t iterationCount, uint64_t waitIterations, int64_t magic)
+        GM_ADDR gate, GM_ADDR up, GM_ADDR down, GM_ADDR status,
+        uint64_t gateOffset, uint64_t upOffset, uint64_t downOffset,
+        uint32_t gateRowBytes, uint32_t upRowBytes, uint32_t downRowBytes,
+        int32_t rank, int32_t rankSize, int64_t expertsPerRank, uint32_t qpNum)
     {
         args_ = reinterpret_cast<__gm__ TileXR::CommArgs *>(commArgs);
-        expertsToCopyAddr_ = expertsToCopy;
-        weights_[0] = fullGateWeight;
-        weights_[1] = fullUpWeight;
-        weights_[2] = fullDownWeight;
+        expertsToCopy_ = reinterpret_cast<__gm__ int32_t *>(expertsToCopy);
+        projections_[0] = reinterpret_cast<__gm__ uint8_t *>(gate);
+        projections_[1] = reinterpret_cast<__gm__ uint8_t *>(up);
+        projections_[2] = reinterpret_cast<__gm__ uint8_t *>(down);
+        offsets_[0] = gateOffset;
+        offsets_[1] = upOffset;
+        offsets_[2] = downOffset;
         rowBytes_[0] = gateRowBytes;
         rowBytes_[1] = upRowBytes;
         rowBytes_[2] = downRowBytes;
-        chunkBytes_[0] = gateChunkBytes;
-        chunkBytes_[1] = upChunkBytes;
-        chunkBytes_[2] = downChunkBytes;
-        chunkCounts_[0] = gateChunkCount;
-        chunkCounts_[1] = upChunkCount;
-        chunkCounts_[2] = downChunkCount;
-        statusAddr_ = status;
-        e_ = e;
-        b_ = b;
+        status_ = reinterpret_cast<__gm__ uint32_t *>(status);
         expertsPerRank_ = expertsPerRank;
-        iterationCount_ = iterationCount;
-        waitIterations_ = waitIterations;
-        magic_ = magic;
-        if (args_ == nullptr) {
-            return;
-        }
-        rank_ = args_->rank;
-        rankSize_ = args_->rankSize;
-        for (int32_t peer = 0; peer < rankSize_; ++peer) {
-            shareAddrs_[peer] = args_->peerMems[peer];
-        }
-        pipe_.InitBuffer(syncBuf_, kMoonEpSyncUbBytes);
-        pipe_.InitBuffer(workBuf_, kMoonEpWorkUbBytes);
-        sync_.Init(rank_, rankSize_, shareAddrs_, syncBuf_);
-        initialized_ = true;
+        rank_ = rank;
+        rankSize_ = rankSize;
+        qpNum_ = qpNum;
+        const uint32_t subBlockCount = static_cast<uint32_t>(get_subblockdim());
+        worker_ = static_cast<uint32_t>(get_block_idx()) * subBlockCount +
+            static_cast<uint32_t>(get_subblockid());
+        workerCount_ = static_cast<uint32_t>(get_block_num()) * subBlockCount;
+        pipe_.InitBuffer(wqeBuf_, TileXR::TILEXR_UDMA_WQE_SCRATCH_BYTES);
     }
 
     __aicore__ inline void Process()
     {
-        if (!Valid() || AscendC::GetBlockIdx() != 0) {
-            return;
+        InitializeStatus();
+        AscendC::SyncAll<true>();
+
+        uint64_t usedPeers[kUsedPeerWordCount] = {};
+        uint32_t workerStatus = ValidateRuntime();
+        if (workerStatus == 0) {
+            SubmitReads(usedPeers, workerStatus);
+            CompleteReads(usedPeers, workerStatus);
         }
-        localWindow_ = shareAddrs_[rank_] + TileXR::IPC_DATA_OFFSET;
-        int64_t iteration = 0;
-        for (int32_t projection = 0; projection < 3; ++projection) {
-            for (int64_t slot = 0; slot < b_; ++slot) {
-                for (int64_t chunk = 0; chunk < chunkCounts_[projection]; ++chunk) {
-                    const int64_t chunkOffset = chunk * chunkBytes_[projection];
-                    const int64_t bytesThisChunk = MinInt64(
-                        rowBytes_[projection] - chunkOffset, chunkBytes_[projection]);
-                    if (!PublishOwners(projection, slot, chunkOffset, bytesThisChunk)) {
-                        return;
-                    }
-                    PublishStep(kMoonEpPrefetchWeightReadyStep +
-                        static_cast<int32_t>(iteration * 3));
-                    if (!WaitAllPeers(kMoonEpPrefetchWeightReadyStep +
-                            static_cast<int32_t>(iteration * 3))) {
-                        return;
-                    }
-                    const int32_t expert = LoadExpert(rank_, slot);
-                    if (expert >= 0) {
-                        CopyBytesGmToGm(weights_[projection] +
-                                (e_ + slot) * rowBytes_[projection] + chunkOffset,
-                            localWindow_, workBuf_, bytesThisChunk);
-                    }
-                    PublishStep(kMoonEpPrefetchWeightDrainedStep +
-                        static_cast<int32_t>(iteration * 3));
-                    if (!WaitAllPeers(kMoonEpPrefetchWeightDrainedStep +
-                            static_cast<int32_t>(iteration * 3))) {
-                        return;
-                    }
-                    ++iteration;
-                }
-            }
+        if (workerStatus != 0) {
+            (void)AscendC::AtomicCas(status_, static_cast<uint32_t>(0), workerStatus);
         }
-        if (iteration != iterationCount_) {
-            Fail(kMoonEpPrefetchWeightStatusInvalidPlan);
-            return;
+        AscendC::SyncAll<true>();
+        if (worker_ == 0) {
+            (void)AscendC::AtomicCas(status_, static_cast<uint32_t>(0),
+                kPrefetchWeightStatusSuccess);
         }
-        StoreStatus(kMoonEpPrefetchWeightStatusSuccess);
+        AscendC::SyncAll<true>();
     }
 
 private:
-    __aicore__ inline bool Valid() const
+    __aicore__ inline void InitializeStatus()
     {
-        return initialized_ && expertsToCopyAddr_ != nullptr && statusAddr_ != nullptr &&
-            weights_[0] != nullptr && weights_[1] != nullptr && weights_[2] != nullptr &&
-            rank_ >= 0 && rank_ < rankSize_ && e_ > 0 && b_ > 0 &&
-            expertsPerRank_ > 0 && e_ == expertsPerRank_ * rankSize_ &&
-            rowBytes_[0] > 0 && rowBytes_[1] > 0 && rowBytes_[2] > 0 &&
-            chunkBytes_[0] > 0 && chunkBytes_[1] > 0 && chunkBytes_[2] > 0 &&
-            chunkCounts_[0] > 0 && chunkCounts_[1] > 0 && chunkCounts_[2] > 0 &&
-            iterationCount_ > 0 && waitIterations_ > 0 && magic_ > 0;
+        if (worker_ == 0) {
+            StoreStatus(0);
+        }
     }
 
-    __aicore__ inline int32_t LoadInt(GM_ADDR address)
+    __aicore__ inline void StoreStatus(uint32_t value)
     {
-        AscendC::LocalTensor<int32_t> local = workBuf_.Get<int32_t>();
-        AscendC::GlobalTensor<int32_t> src;
-        src.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(address), 1);
-        AscendC::DataCopyExtParams params {1, sizeof(int32_t), 0, 0, 0};
-        AscendC::DataCopyPadExtParams<int32_t> pad {false, 0, 0, 0};
-        AscendC::DataCopyPad(local, src, params, pad);
-        AscendC::SetFlag<AscendC::HardEvent::MTE2_S>(EVENT_ID0);
-        AscendC::WaitFlag<AscendC::HardEvent::MTE2_S>(EVENT_ID0);
-        return local.GetValue(0);
+        status_[0] = value;
+        AscendC::GlobalTensor<uint32_t> statusGm;
+        statusGm.SetGlobalBuffer(status_, 1);
+        AscendC::DataCacheCleanAndInvalid<uint32_t,
+            AscendC::CacheLine::SINGLE_CACHE_LINE,
+            AscendC::DcciDst::CACHELINE_OUT>(statusGm);
     }
 
-    __aicore__ inline void StoreInt(GM_ADDR address, int32_t value)
+    __aicore__ inline uint32_t ValidateRuntime() const
     {
-        AscendC::LocalTensor<int32_t> local = workBuf_.Get<int32_t>();
-        AscendC::GlobalTensor<int32_t> dst;
-        dst.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(address), 1);
-        local.SetValue(0, value);
-        AscendC::SetFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID0);
-        AscendC::WaitFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID0);
-        AscendC::DataCopyExtParams params {1, sizeof(int32_t), 0, 0, 0};
-        AscendC::DataCopyPad(dst, local, params);
-        AscendC::SetFlag<AscendC::HardEvent::MTE3_S>(EVENT_ID0);
-        AscendC::WaitFlag<AscendC::HardEvent::MTE3_S>(EVENT_ID0);
+        if (args_ == nullptr || status_ == nullptr || expertsToCopy_ == nullptr ||
+            projections_[0] == nullptr || projections_[1] == nullptr ||
+            projections_[2] == nullptr || rowBytes_[0] == 0 || rowBytes_[1] == 0 ||
+            rowBytes_[2] == 0 || expertsPerRank_ <= 0 ||
+            rank_ < 0 || rank_ >= rankSize_ ||
+            rankSize_ > static_cast<int32_t>(kMaxTrackedRankSize) ||
+            workerCount_ == 0 || worker_ >= workerCount_ || worker_ >= qpNum_ ||
+            !TileXR::UDMARegistryEnabled(args_) || args_->rank != rank_ ||
+            args_->rankSize != rankSize_) {
+            return kPrefetchWeightStatusInvalidRuntime;
+        }
+        __gm__ TileXR::UDMAInfo *info = TileXR::GetUDMAInfo(args_);
+        return info->qpNum == qpNum_ ? 0 : kPrefetchWeightStatusInvalidRuntime;
     }
 
-    __aicore__ inline int32_t LoadExpert(int64_t rank, int64_t slot)
+    __aicore__ inline void MarkPeer(
+        uint64_t usedPeers[kUsedPeerWordCount], int32_t peer) const
     {
-        return LoadInt(expertsToCopyAddr_ + (rank * b_ + slot) * sizeof(int32_t));
+        usedPeers[static_cast<uint32_t>(peer) >> 6] |=
+            static_cast<uint64_t>(1) << (static_cast<uint32_t>(peer) & 63U);
     }
 
-    __aicore__ inline bool PublishOwners(int32_t projection, int64_t slot,
-        int64_t chunkOffset, int64_t bytesThisChunk)
+    __aicore__ inline bool PeerUsed(
+        const uint64_t usedPeers[kUsedPeerWordCount], int32_t peer) const
     {
-        for (int32_t destination = 0; destination < rankSize_; ++destination) {
-            const int32_t expert = LoadExpert(destination, slot);
-            if (expert == -1) {
+        return (usedPeers[static_cast<uint32_t>(peer) >> 6] &
+            (static_cast<uint64_t>(1) << (static_cast<uint32_t>(peer) & 63U))) != 0;
+    }
+
+    __aicore__ inline void SubmitReads(
+        uint64_t usedPeers[kUsedPeerWordCount], uint32_t &workerStatus)
+    {
+        auto wqeScratch = wqeBuf_.Get<uint8_t>();
+        const int64_t globalExpertCount = expertsPerRank_ * rankSize_;
+        const int64_t planRow = static_cast<int64_t>(rank_) * expertsPerRank_;
+        for (int64_t slot = static_cast<int64_t>(worker_); slot < expertsPerRank_;
+             slot += static_cast<int64_t>(workerCount_)) {
+            const int32_t expert = expertsToCopy_[planRow + slot];
+            if (expert < 0) {
                 continue;
             }
-            if (expert < 0 || expert >= e_) {
-                Fail(kMoonEpPrefetchWeightStatusInvalidPlan);
-                return false;
-            }
-            if (expert / expertsPerRank_ == rank_) {
-                CopyBytesGmToGm(shareAddrs_[destination] + TileXR::IPC_DATA_OFFSET,
-                    weights_[projection] + static_cast<int64_t>(expert) *
-                        rowBytes_[projection] + chunkOffset,
-                    workBuf_, bytesThisChunk);
-            }
-        }
-        AscendC::PipeBarrier<PIPE_ALL>();
-        return true;
-    }
-
-    __aicore__ inline void StoreStatus(int32_t status)
-    {
-        StoreInt(statusAddr_, status);
-    }
-
-    __aicore__ inline void PublishStep(int32_t step)
-    {
-        AscendC::PipeBarrier<PIPE_ALL>();
-        sync_.SetInnerFlag(static_cast<int32_t>(magic_), step);
-    }
-
-    __aicore__ inline int32_t WaitPeerStep(int32_t peer, int32_t expectedStep)
-    {
-        AscendC::GlobalTensor<int64_t> flag;
-        flag.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t *>(shareAddrs_[peer]),
-            FLAG_UNIT_INT_NUM);
-        const int64_t expectedMagic =
-            static_cast<int64_t>(static_cast<int32_t>(magic_)) << MAGIC_OFFSET;
-        for (uint64_t iteration = 0; iteration < waitIterations_; ++iteration) {
-            AscendC::DataCacheCleanAndInvalid<int64_t,
-                AscendC::CacheLine::SINGLE_CACHE_LINE,
-                AscendC::DcciDst::CACHELINE_OUT>(flag);
-            const int64_t value = flag.GetValue(0);
-            if ((value & MAGIC_MASK) != (expectedMagic & MAGIC_MASK)) {
+            if (static_cast<int64_t>(expert) >= globalExpertCount) {
+                if (workerStatus == 0) {
+                    workerStatus = kPrefetchWeightStatusInvalidExpert;
+                }
                 continue;
             }
-            const int32_t step = static_cast<int32_t>(value & ~MAGIC_MASK);
-            if (step == expectedStep) {
-                return 0;
+            const int32_t owner = expert / static_cast<int32_t>(expertsPerRank_);
+            if (owner == rank_) {
+                if (workerStatus == 0) {
+                    workerStatus = kPrefetchWeightStatusLocalExpert;
+                }
+                continue;
             }
-            if (step == kMoonEpPrefetchWeightFailedStep) {
-                return 1;
+            const int32_t localExpert =
+                expert % static_cast<int32_t>(expertsPerRank_);
+            MarkPeer(usedPeers, owner);
+            for (uint32_t projection = 0; projection < 3; ++projection) {
+                const uint64_t sourceOffset = offsets_[projection] +
+                    static_cast<uint64_t>(localExpert) * rowBytes_[projection];
+                __gm__ uint8_t *destination = projections_[projection] +
+                    static_cast<uint64_t>(expertsPerRank_ + slot) *
+                        rowBytes_[projection];
+                const uint32_t submitStatus = TileXR::UDMAGetNbiOnQp<uint8_t>(
+                    args_, wqeScratch, owner, worker_, destination, sourceOffset,
+                    rowBytes_[projection]);
+                if (submitStatus != TileXR::TILEXR_UDMA_STATUS_SUCCESS &&
+                    workerStatus == 0) {
+                    workerStatus = kPrefetchWeightStatusSubmitErrorBase +
+                        (submitStatus & 0xFFU);
+                }
             }
         }
-        return 2;
     }
 
-    __aicore__ inline bool WaitAllPeers(int32_t expectedStep)
+    __aicore__ inline void CompleteReads(
+        const uint64_t usedPeers[kUsedPeerWordCount], uint32_t &workerStatus)
     {
-        for (int32_t offset = 0; offset < rankSize_; ++offset) {
-            const int32_t peer = (rank_ + offset) % rankSize_;
-            const int32_t result = WaitPeerStep(peer, expectedStep);
-            if (result == 1) {
-                Fail(kMoonEpPrefetchWeightStatusRemoteFailureBase + peer);
-                return false;
+        bool completedAny = false;
+        for (int32_t peer = 0; peer < rankSize_; ++peer) {
+            if (!PeerUsed(usedPeers, peer)) {
+                continue;
             }
-            if (result == 2) {
-                Fail(kMoonEpPrefetchWeightStatusTimeoutBase + peer);
-                return false;
+            completedAny = true;
+            const uint32_t cqStatus = TileXR::UDMAQuietStatusOnQp(args_, peer, worker_);
+            if (cqStatus != 0 && workerStatus == 0) {
+                workerStatus = kPrefetchWeightStatusCqErrorBase + (cqStatus & 0xFFU);
             }
         }
-        return true;
-    }
-
-    __aicore__ inline void Fail(int32_t status)
-    {
-        StoreStatus(status);
-        PublishStep(kMoonEpPrefetchWeightFailedStep);
+        if (completedAny) {
+            AscendC::GlobalTensor<uint64_t> cache;
+            cache.SetGlobalBuffer(reinterpret_cast<__gm__ uint64_t *>(0), 1);
+            AscendC::DataCacheCleanAndInvalid<uint64_t,
+                AscendC::CacheLine::ENTIRE_DATA_CACHE,
+                AscendC::DcciDst::CACHELINE_OUT>(cache);
+        }
     }
 
     __gm__ TileXR::CommArgs *args_ = nullptr;
+    __gm__ int32_t *expertsToCopy_ = nullptr;
+    __gm__ uint8_t *projections_[3] = {nullptr, nullptr, nullptr};
+    __gm__ uint32_t *status_ = nullptr;
+    uint64_t offsets_[3] = {0, 0, 0};
+    uint32_t rowBytes_[3] = {0, 0, 0};
+    int64_t expertsPerRank_ = 0;
     int32_t rank_ = 0;
     int32_t rankSize_ = 0;
-    int64_t e_ = 0;
-    int64_t b_ = 0;
-    int64_t expertsPerRank_ = 0;
-    int64_t iterationCount_ = 0;
-    uint64_t waitIterations_ = 0;
-    int64_t magic_ = 0;
-    bool initialized_ = false;
-    GM_ADDR expertsToCopyAddr_ = nullptr;
-    GM_ADDR weights_[3] = {};
-    int64_t rowBytes_[3] = {};
-    int64_t chunkBytes_[3] = {};
-    int64_t chunkCounts_[3] = {};
-    GM_ADDR statusAddr_ = nullptr;
-    GM_ADDR localWindow_ = nullptr;
-    GM_ADDR shareAddrs_[TileXR::TILEXR_MAX_RANK_SIZE] = {};
+    uint32_t qpNum_ = 0;
+    uint32_t worker_ = 0;
+    uint32_t workerCount_ = 0;
     AscendC::TPipe pipe_;
-    AscendC::TBuf<AscendC::QuePosition::VECCALC> syncBuf_;
-    AscendC::TBuf<AscendC::QuePosition::VECCALC> workBuf_;
-    SyncCollectives sync_;
+    AscendC::TBuf<AscendC::QuePosition::VECCALC> wqeBuf_;
 };
 
 } // namespace Kernel
 } // namespace TileXRMoonEp
 
 extern "C" __global__ __aicore__ void tilexr_moonep_prefetch_weight_kernel(
-    GM_ADDR commArgs, GM_ADDR expertsToCopy, GM_ADDR fullGateWeight,
-    GM_ADDR fullUpWeight, GM_ADDR fullDownWeight, GM_ADDR status, int64_t e,
-    int64_t b, int64_t expertsPerRank, int64_t gateRowBytes,
-    int64_t gateChunkBytes, int64_t gateChunkCount, int64_t upRowBytes,
-    int64_t upChunkBytes, int64_t upChunkCount, int64_t downRowBytes,
-    int64_t downChunkBytes, int64_t downChunkCount, int64_t iterationCount,
-    uint64_t waitIterations, int64_t magic)
+    GM_ADDR commArgs, GM_ADDR expertsToCopy, GM_ADDR gate, GM_ADDR up, GM_ADDR down,
+    GM_ADDR status, uint64_t gateOffset, uint64_t upOffset, uint64_t downOffset,
+    uint64_t gateRowBytes, uint64_t upRowBytes, uint64_t downRowBytes,
+    int64_t rank, int64_t rankSize, int64_t expertsPerRank, uint64_t qpNum)
 {
     TileXRMoonEp::Kernel::PrefetchWeightKernel op;
-    op.Init(commArgs, expertsToCopy, fullGateWeight, fullUpWeight, fullDownWeight,
-        status, e, b, expertsPerRank, gateRowBytes, gateChunkBytes, gateChunkCount,
-        upRowBytes, upChunkBytes, upChunkCount, downRowBytes, downChunkBytes,
-        downChunkCount, iterationCount, waitIterations, magic);
+    op.Init(commArgs, expertsToCopy, gate, up, down, status,
+        gateOffset, upOffset, downOffset, static_cast<uint32_t>(gateRowBytes),
+        static_cast<uint32_t>(upRowBytes), static_cast<uint32_t>(downRowBytes),
+        static_cast<int32_t>(rank), static_cast<int32_t>(rankSize),
+        expertsPerRank, static_cast<uint32_t>(qpNum));
     op.Process();
 }

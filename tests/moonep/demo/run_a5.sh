@@ -13,11 +13,11 @@ rank_size="${1:-8}"
 s="${2:-8}"
 k="${3:-2}"
 experts="${4:-$((rank_size * 2))}"
-hidden="${5:-8}"
+hidden="${5:-32}"
 physical_device_count="${6:-$((rank_size < 8 ? rank_size : 8))}"
 
 if ((rank_size <= 0 || rank_size > 128 || physical_device_count <= 0 ||
-     s <= 0 || k < 2 || experts <= 0 || hidden <= 0 ||
+     s <= 0 || k < 2 || experts <= 0 || hidden <= 0 || hidden % 32 != 0 ||
      experts % rank_size != 0)); then
     echo "invalid rank/dimension configuration" >&2
     exit 2
@@ -39,6 +39,7 @@ fi
 
 export TILEXR_PHYSICAL_DEVICE_COUNT="${physical_device_count}"
 export TILEXR_COMM_ID="${TILEXR_COMM_ID:-127.0.0.1:10201}"
+export TILEXR_ENABLE_UDMA=1
 export LD_LIBRARY_PATH="${TILEXR_INSTALL_PREFIX}/lib64:${TILEXR_INSTALL_PREFIX}/lib:${LD_LIBRARY_PATH:-}"
 
 binary="${TILEXR_MOONEP_FLOW_BIN:-${TILEXR_INSTALL_PREFIX}/bin/tilexr_moonep_flow_demo}"
@@ -49,7 +50,7 @@ fi
 
 log_dir="${TILEXR_MOONEP_FLOW_LOG_DIR:-${SCRIPT_DIR}/../logs/flow_$(date +%Y%m%d_%H%M%S)}"
 mkdir -p "${log_dir}"
-echo "logical_ranks=${rank_size} physical_devices=${physical_device_count} ranks_per_device=${ranks_per_device} oversubscribed=${oversubscribed} block_dim=${TILEXR_MOONEP_PLANNER_BLOCK_DIM} torch_validated=false transport_performance_valid=false" |
+echo "logical_ranks=${rank_size} physical_devices=${physical_device_count} ranks_per_device=${ranks_per_device} oversubscribed=${oversubscribed} block_dim=${TILEXR_MOONEP_PLANNER_BLOCK_DIM} prefetch_transport=udma_registered torch_validated=false transport_performance_valid=false" |
     tee "${log_dir}/run_metadata.txt"
 
 pids=()

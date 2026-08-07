@@ -1,83 +1,164 @@
 #include "prefetch_weight_layout.h"
 
+#include <cerrno>
+#include <climits>
+#include <cstdlib>
 #include <limits>
 
-#include "comm_args.h"
-#include "moonep_peer_window.h"
 #include "moonep_stage_layout.h"
 
 namespace TileXRMoonEp {
 namespace {
 
-bool BuildProjection(const TileXRMoonEpTensorV1 *tensor, int64_t rows,
-    PrefetchProjectionLayout *projection)
+bool SupportedWorkerCount(uint32_t value)
 {
-    if (projection == nullptr || !Layout::TensorHeaderValid(tensor) ||
-        tensor->dtype != TILEXR_MOONEP_DTYPE_BFLOAT16 || tensor->rank != 3 ||
-        tensor->shape[0] != rows) {
+    return value == 1 || value == 2 || value == 4 ||
+        value == kPrefetchWeightMaxWorkers;
+}
+
+bool ParseWorkerOverride(const char *value, uint32_t *workers)
+{
+    if (workers == nullptr) {
         return false;
     }
-    uint64_t rowElements = 0;
-    uint64_t rowBytes = 0;
-    if (!Layout::CheckedMul(static_cast<uint64_t>(tensor->shape[1]),
-            static_cast<uint64_t>(tensor->shape[2]), &rowElements) ||
-        !Layout::CheckedMul(rowElements, sizeof(uint16_t), &rowBytes) || rowBytes == 0 ||
-        rowBytes > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
+    if (value == nullptr || value[0] == '\0') {
+        return true;
+    }
+    errno = 0;
+    char *end = nullptr;
+    const unsigned long parsed = std::strtoul(value, &end, 10);
+    if (errno != 0 || end == value || *end != '\0' || parsed > UINT32_MAX ||
+        !SupportedWorkerCount(static_cast<uint32_t>(parsed))) {
         return false;
     }
-    const uint64_t maxChunk = (static_cast<uint64_t>(TileXR::IPC_BUFF_MAX_SIZE) /
-        kMoonEpStageAlignment) * kMoonEpStageAlignment;
-    const uint64_t chunkBytes = rowBytes < maxChunk ? rowBytes : maxChunk;
-    const uint64_t chunkCount = (rowBytes - 1) / chunkBytes + 1;
-    if (chunkBytes == 0 || chunkCount > static_cast<uint64_t>(
-            std::numeric_limits<int64_t>::max())) {
-        return false;
-    }
-    projection->rowBytes = static_cast<int64_t>(rowBytes);
-    projection->chunkBytes = static_cast<int64_t>(chunkBytes);
-    projection->chunkCount = static_cast<int64_t>(chunkCount);
+    *workers = static_cast<uint32_t>(parsed);
     return true;
+}
+
+bool BuildProjection(const TileXRMoonEpTensorV1 *tensor, int64_t expertsPerRank,
+    int32_t localRank,
+    const TileXR::TileXRUDMARegistry &registry,
+    PrefetchWeightProjectionLayout *projection, uint64_t *rangeEnd)
+{
+    if (projection == nullptr || rangeEnd == nullptr ||
+        !Layout::TensorHeaderValid(tensor) ||
+        (tensor->dtype != TILEXR_MOONEP_DTYPE_FLOAT16 &&
+            tensor->dtype != TILEXR_MOONEP_DTYPE_BFLOAT16) ||
+        tensor->rank < 2 || tensor->rank > TILEXR_MOONEP_MAX_TENSOR_RANK ||
+        expertsPerRank <= 0 || tensor->shape[0] != 2 * expertsPerRank) {
+        return false;
+    }
+
+    uint64_t rowBytes = 0;
+    uint64_t tensorBytes = 0;
+    if (!Layout::CheckedMul(tensor->elementCount, sizeof(uint16_t), &tensorBytes) ||
+        tensorBytes % static_cast<uint64_t>(2 * expertsPerRank) != 0) {
+        return false;
+    }
+    rowBytes = tensorBytes / static_cast<uint64_t>(2 * expertsPerRank);
+    if (rowBytes == 0 || rowBytes > UINT32_MAX ||
+        rowBytes % kPrefetchWeightAlignment != 0) {
+        return false;
+    }
+
+    const uintptr_t regionBase =
+        reinterpret_cast<uintptr_t>(registry.regions[localRank].base);
+    const uintptr_t tensorBase = reinterpret_cast<uintptr_t>(tensor->data);
+    if (regionBase == 0 || tensorBase < regionBase ||
+        tensorBase % kPrefetchWeightAlignment != 0) {
+        return false;
+    }
+    const uint64_t offset = static_cast<uint64_t>(tensorBase - regionBase);
+    uint64_t sourceBytes = 0;
+    if (offset % kPrefetchWeightAlignment != 0 ||
+        !Layout::CheckedMul(static_cast<uint64_t>(expertsPerRank), rowBytes,
+            &sourceBytes) ||
+        !TileXR::UDMARegionContains(&registry, localRank, offset, tensorBytes)) {
+        return false;
+    }
+    for (uint32_t peer = 0; peer < registry.rankSize; ++peer) {
+        if (!TileXR::UDMARegionContains(&registry, static_cast<int>(peer),
+                offset, sourceBytes)) {
+            return false;
+        }
+    }
+    if (offset > std::numeric_limits<uint64_t>::max() - tensorBytes) {
+        return false;
+    }
+
+    projection->localBase = static_cast<GM_ADDR>(tensor->data);
+    projection->registryOffset = offset;
+    projection->rowBytes = static_cast<uint32_t>(rowBytes);
+    *rangeEnd = offset + tensorBytes;
+    return true;
+}
+
+bool RangesOverlap(uint64_t lhsBegin, uint64_t lhsEnd,
+    uint64_t rhsBegin, uint64_t rhsEnd)
+{
+    return lhsBegin < rhsEnd && rhsBegin < lhsEnd;
 }
 
 } // namespace
 
-int TileXRMoonEpBuildPrefetchWeightLayout(int64_t commRank, int64_t commWorld,
-    const TileXRMoonEpPlanV1 *plan, const TileXRMoonEpTensorV1 *fullGateWeight,
-    const TileXRMoonEpTensorV1 *fullUpWeight,
-    const TileXRMoonEpTensorV1 *fullDownWeight, uint64_t flags,
-    PrefetchWeightLayout *layout)
+int TileXRMoonEpBuildPrefetchWeightLayout(
+    const TileXRMoonEpPrefetchWeightArgsV1 &args,
+    const TileXR::CommArgs &commArgs,
+    const TileXR::TileXRUDMARegistry &registry, uint32_t qpNum,
+    const char *blockDimOverride, PrefetchWeightLayout *layout)
 {
     if (layout == nullptr) {
         return TILEXR_MOONEP_ERROR_INVALID_ARGUMENT;
     }
     *layout = PrefetchWeightLayout {};
     int64_t s = 0;
-    if (flags != TILEXR_MOONEP_FLAG_NONE ||
-        !Layout::PlanValid(commRank, commWorld, plan, &s)) {
+    if (args.flags != TILEXR_MOONEP_FLAG_NONE ||
+        !Layout::PlanValid(commArgs.rank, commArgs.rankSize, args.plan, &s) ||
+        args.plan->e > INT32_MAX || args.plan->b > INT32_MAX ||
+        args.plan->b != args.plan->e / args.plan->r ||
+        (commArgs.extraFlag & TileXR::ExtraFlag::UDMA) == 0 ||
+        commArgs.udmaInfoPtr == nullptr || commArgs.udmaRegistryPtr == nullptr ||
+        !TileXR::UDMARegistryValid(&registry, commArgs.rankSize) ||
+        commArgs.rank < 0 || commArgs.rank >= commArgs.rankSize ||
+        !SupportedWorkerCount(qpNum) || qpNum > kPrefetchWeightMaxWorkers) {
         return TILEXR_MOONEP_ERROR_INVALID_ARGUMENT;
     }
 
     PrefetchWeightLayout next {};
-    if (!BuildProjection(fullGateWeight, plan->e + plan->b, &next.gate) ||
-        !BuildProjection(fullUpWeight, plan->e + plan->b, &next.up) ||
-        !BuildProjection(fullDownWeight, plan->e + plan->b, &next.down)) {
+    uint64_t gateEnd = 0;
+    uint64_t upEnd = 0;
+    uint64_t downEnd = 0;
+    if (args.gate == nullptr || args.up == nullptr || args.down == nullptr ||
+        args.gate->dtype != args.up->dtype || args.gate->dtype != args.down->dtype ||
+        !BuildProjection(args.gate, args.plan->b, commArgs.rank,
+            registry, &next.gate, &gateEnd) ||
+        !BuildProjection(args.up, args.plan->b, commArgs.rank,
+            registry, &next.up, &upEnd) ||
+        !BuildProjection(args.down, args.plan->b, commArgs.rank,
+            registry, &next.down, &downEnd) ||
+        RangesOverlap(next.gate.registryOffset, gateEnd,
+            next.up.registryOffset, upEnd) ||
+        RangesOverlap(next.gate.registryOffset, gateEnd,
+            next.down.registryOffset, downEnd) ||
+        RangesOverlap(next.up.registryOffset, upEnd,
+            next.down.registryOffset, downEnd)) {
         return TILEXR_MOONEP_ERROR_INVALID_ARGUMENT;
     }
-    uint64_t chunks = 0;
-    if (!Layout::CheckedAdd(static_cast<uint64_t>(next.gate.chunkCount),
-            static_cast<uint64_t>(next.up.chunkCount), &chunks) ||
-        !Layout::CheckedAdd(chunks, static_cast<uint64_t>(next.down.chunkCount), &chunks) ||
-        !Layout::CheckedMul(chunks, static_cast<uint64_t>(plan->b), &chunks) ||
-        chunks > static_cast<uint64_t>(std::numeric_limits<int32_t>::max() - 500) / 3U) {
+
+    const bool hasOverride = blockDimOverride != nullptr && blockDimOverride[0] != '\0';
+    uint32_t workers = qpNum;
+    if (!ParseWorkerOverride(blockDimOverride, &workers) || workers > qpNum ||
+        (hasOverride && workers > static_cast<uint32_t>(args.plan->b))) {
         return TILEXR_MOONEP_ERROR_INVALID_ARGUMENT;
     }
-    next.rank = commRank;
-    next.world = commWorld;
-    next.e = plan->e;
-    next.b = plan->b;
-    next.expertsPerRank = plan->e / plan->r;
-    next.blockDim = kMoonEpStageAivBlockCount;
-    next.iterationCount = static_cast<int64_t>(chunks);
+    while (workers > static_cast<uint32_t>(args.plan->b)) {
+        workers >>= 1;
+    }
+    next.expertsPerRank = args.plan->b;
+    next.rank = commArgs.rank;
+    next.rankSize = commArgs.rankSize;
+    next.qpNum = qpNum;
+    next.blockDim = workers;
     *layout = next;
     return TILEXR_MOONEP_SUCCESS;
 }

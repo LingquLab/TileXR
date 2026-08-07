@@ -23,39 +23,36 @@ int TileXRMoonEpLaunchPrefetchWeightKernel(
     struct PrefetchWeightKernelArgs {
         GM_ADDR commArgs;
         GM_ADDR expertsToCopy;
-        GM_ADDR fullGateWeight;
-        GM_ADDR fullUpWeight;
-        GM_ADDR fullDownWeight;
+        GM_ADDR gate;
+        GM_ADDR up;
+        GM_ADDR down;
         GM_ADDR status;
-        int64_t e;
-        int64_t b;
+        uint64_t gateOffset;
+        uint64_t upOffset;
+        uint64_t downOffset;
+        uint64_t gateRowBytes;
+        uint64_t upRowBytes;
+        uint64_t downRowBytes;
+        int64_t rank;
+        int64_t rankSize;
         int64_t expertsPerRank;
-        int64_t gateRowBytes;
-        int64_t gateChunkBytes;
-        int64_t gateChunkCount;
-        int64_t upRowBytes;
-        int64_t upChunkBytes;
-        int64_t upChunkCount;
-        int64_t downRowBytes;
-        int64_t downChunkBytes;
-        int64_t downChunkCount;
-        int64_t iterationCount;
-        uint64_t waitIterations;
-        int64_t magic;
+        uint64_t qpNum;
     } args {
         context.devArgs,
         reinterpret_cast<GM_ADDR>(const_cast<int32_t *>(params.expertsToCopy)),
-        reinterpret_cast<GM_ADDR>(params.fullGateWeight),
-        reinterpret_cast<GM_ADDR>(params.fullUpWeight),
-        reinterpret_cast<GM_ADDR>(params.fullDownWeight),
-        reinterpret_cast<GM_ADDR>(params.status), context.layout.e, context.layout.b,
-        context.layout.expertsPerRank, context.layout.gate.rowBytes,
-        context.layout.gate.chunkBytes, context.layout.gate.chunkCount,
-        context.layout.up.rowBytes, context.layout.up.chunkBytes,
-        context.layout.up.chunkCount, context.layout.down.rowBytes,
-        context.layout.down.chunkBytes, context.layout.down.chunkCount,
-        context.layout.iterationCount, context.waitIterations, context.magic
+        reinterpret_cast<GM_ADDR>(params.gate),
+        reinterpret_cast<GM_ADDR>(params.up),
+        reinterpret_cast<GM_ADDR>(params.down),
+        reinterpret_cast<GM_ADDR>(params.status), context.layout.gate.registryOffset,
+        context.layout.up.registryOffset, context.layout.down.registryOffset,
+        context.layout.gate.rowBytes, context.layout.up.rowBytes,
+        context.layout.down.rowBytes, context.layout.rank,
+        context.layout.rankSize, context.layout.expertsPerRank,
+        context.layout.qpNum
     };
+
+    static_assert(sizeof(PrefetchWeightKernelArgs) == 16U * sizeof(uint64_t),
+        "PrefetchWeight kernel argument ABI changed");
 
     return LaunchRegisteredMoonEpKernel(g_prefetchWeightRegistration,
         TileXRMoonEpPrefetchWeightKernelBinaryData,

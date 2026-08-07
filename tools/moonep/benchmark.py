@@ -149,13 +149,20 @@ def execute_iteration(
     _timed_call(
         timer,
         "prefetch_weight",
-        lambda: buffer.prefetch_weight(
-            plan,
-            full_gate_weight=inputs["projections"].gate,
-            full_up_weight=inputs["projections"].up,
-            full_down_weight=inputs["projections"].down,
-        ),
+        lambda: buffer.prefetch_weight(plan, inputs["projections"]),
     )
+
+    zero = torch_module.zeros_like(cu_seqlens[:1])
+    counts = torch_module.cat((zero, cu_seqlens))
+    counts = counts[1:] - counts[:-1]
+    local_begin = buffer.context.planner_group_rank * buffer.context.experts_per_rank
+    local_end = local_begin + buffer.context.experts_per_rank
+    slot_begin = buffer.context.expert_count
+    compact_counts = torch_module.cat(
+        (counts[local_begin:local_end], counts[slot_begin:slot_begin +
+            buffer.context.experts_per_rank])
+    )
+    compact_cu_seqlens = compact_counts.cumsum(dim=0, dtype=cu_seqlens.dtype)
 
     expert_output = _timed_call(
         timer,
@@ -163,7 +170,7 @@ def execute_iteration(
         lambda: run_expert_forward(
             torch_module,
             hidden_nvsh,
-            cu_seqlens,
+            compact_cu_seqlens,
             inputs["projections"],
             route_weights_nvs,
             torch_npu_module=torch_npu_module,
@@ -253,6 +260,12 @@ def make_inputs(torch_module, case, context):
         if case.intermediate_size is not None
         else int(case.hidden_size)
     )
+    local_gate_up_shape = (
+        context.experts_per_rank, case.hidden_size, intermediate_size
+    )
+    local_down_shape = (
+        context.experts_per_rank, intermediate_size, case.hidden_size
+    )
     gate_up_shape = (rows, case.hidden_size, intermediate_size)
     down_shape = (rows, intermediate_size, case.hidden_size)
     gate_up_reduce_shape = (
@@ -267,10 +280,12 @@ def make_inputs(torch_module, case, context):
         intermediate_size,
         case.hidden_size,
     )
-    projections = ProjectionBuffers(
-        gate=torch_module.full(gate_up_shape, 0.5, dtype=dtype, device=device),
-        up=torch_module.full(gate_up_shape, 0.25, dtype=dtype, device=device),
-        down=torch_module.full(down_shape, 0.75, dtype=dtype, device=device),
+    projections = ProjectionBuffers.from_local_weights(
+        context,
+        torch_module.full(local_gate_up_shape, 0.5, dtype=dtype, device=device),
+        torch_module.full(local_gate_up_shape, 0.25, dtype=dtype, device=device),
+        torch_module.full(local_down_shape, 0.75, dtype=dtype, device=device),
+        torch_module=torch_module,
     )
     gradients = ProjectionBuffers(
         gate=torch_module.ones(gate_up_shape, dtype=torch_module.float32, device=device),
@@ -552,6 +567,7 @@ def run_case(torch_module, case, args, root: Path) -> None:
         result["capabilities"] = capabilities
         result["topology"] = topology_metadata(context)
         inputs = make_inputs(torch_module, case, context)
+        buffer.register_projection_buffers(inputs["projections"])
         planning_epoch = 0
 
         def coordinated_iteration(timer=None):

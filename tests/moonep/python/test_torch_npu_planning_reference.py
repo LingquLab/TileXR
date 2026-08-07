@@ -85,7 +85,7 @@ def test_planning_rejects_inconsistent_tokens_per_expert() -> None:
 
 def test_two_rank_skewed_case_rebalances_owner_load_and_prefetches_remote_expert() -> None:
     small = [
-        MoonEPDimensions(rank, 2, 2, 2, 4, 1, 1, 2, 2)
+        MoonEPDimensions(rank, 2, 2, 2, 4, 2, 1, 2, 2)
         for rank in range(2)
     ]
     cases = [
@@ -113,7 +113,7 @@ def test_two_rank_skewed_case_rebalances_owner_load_and_prefetches_remote_expert
     assert [int(plan.cu_seqlens[-1].item()) for plan in plans] == [4, 4]
     assert torch.equal(
         plans[0].experts_to_copy,
-        torch.tensor([[-1], [0]], dtype=torch.int32),
+        torch.tensor([[-1, -1], [0, -1]], dtype=torch.int32),
     )
     assert torch.equal(plans[0].remote_stats, torch.tensor([0, 1], dtype=torch.int32))
     assert torch.equal(plans[1].remote_stats, torch.tensor([1, 0], dtype=torch.int32))

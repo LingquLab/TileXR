@@ -47,7 +47,13 @@ class IterationTorchNpu:
 
 class IterationBuffer:
     def __init__(self) -> None:
-        self.context = SimpleNamespace(nv_s=4, prefetch_slots=1)
+        self.context = SimpleNamespace(
+            nv_s=4,
+            prefetch_slots=1,
+            planner_group_rank=0,
+            experts_per_rank=1,
+            expert_count=1,
+        )
         self.hidden = torch.arange(8, dtype=torch.float32).reshape(4, 2).to(torch.bfloat16)
         self.route_weights = torch.tensor([0.5, 1.0, 0.0, 0.0], dtype=torch.float32)
         self.group_list = torch.tensor([1, 2], dtype=torch.int32)

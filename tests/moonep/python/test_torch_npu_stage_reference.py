@@ -70,7 +70,7 @@ def dispatch_all(cases, plans):
 
 def test_two_rank_imbalanced_case_dispatches_a_three_duplicate_group() -> None:
     small = [
-        MoonEPDimensions(rank, 2, 2, 4, 8, 2, 1, 2, 2)
+        MoonEPDimensions(rank, 2, 2, 4, 8, 4, 1, 2, 2)
         for rank in range(2)
     ]
     cases = [
@@ -102,7 +102,9 @@ def test_two_rank_imbalanced_case_dispatches_a_three_duplicate_group() -> None:
     assert [int(plan.cu_seqlens[-1].item()) for plan in plans] == [8, 8]
     assert torch.equal(
         plans[0].experts_to_copy,
-        torch.tensor([[-1, -1], [0, 1]], dtype=torch.int32),
+        torch.tensor(
+            [[-1, -1, -1, -1], [0, 1, -1, -1]], dtype=torch.int32
+        ),
     )
 
     all_dst = torch.stack([plan.dst for plan in plans])

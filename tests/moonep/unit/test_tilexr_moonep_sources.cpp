@@ -86,10 +86,11 @@ int main()
     const std::string flowRunner = ReadFile("tests/moonep/demo/run_a5.sh");
     const std::string stageHost =
         ReadFile("src/moonep/common/moonep_stage_host.h");
+    const std::string prefetchHost =
+        ReadFile("src/moonep/prefetch_weight/host/prefetch_weight_host.cpp");
     const std::vector<std::string> nativeStageHosts = {
         ReadFile("src/moonep/dispatch/host/dispatch_host.cpp"),
         ReadFile("src/moonep/combine/host/combine_host.cpp"),
-        ReadFile("src/moonep/prefetch_weight/host/prefetch_weight_host.cpp"),
         ReadFile("src/moonep/reduce_grad/host/reduce_grad_host.cpp"),
     };
 
@@ -184,11 +185,19 @@ int main()
         Excludes("native stage Host", *it, "bool LocalityValid(");
         Excludes("native stage Host", *it, "bool PeerWindowsReady(");
     }
+    Excludes("prefetch Host", prefetchHost, "moonep_stage_host.h");
+    Excludes("prefetch Host", prefetchHost, "PrepareStageHost(");
+    Excludes("prefetch Host", prefetchHost, "PrepareStageDevice(");
+    Excludes("prefetch Host", prefetchHost, "peerMems");
+    Excludes("prefetch Host", prefetchHost, "localRankSize !=");
+    Contains("prefetch Host", prefetchHost, "TileXRGetUDMARegistryHost");
 
     Contains("test CMake", testCmake, "if(TARGET tilexr-moonep)");
     Contains("test CMake", testCmake, "add_executable(tilexr_moonep_flow_demo");
     Contains("test CMake", testCmake, "tilexr-moonep");
     Contains("flow demo", flowDemo, "TileXRCommInitRankLocal");
+    Contains("flow demo", flowDemo, "TileXRUDMARegister prefetch arena");
+    Contains("flow demo", flowDemo, "TileXRUDMAUnregister prefetch arena");
     Contains("flow demo", flowDemo, "nvS != static_cast<int64_t>(routeCount)");
     Contains("flow demo", flowDemo, "planning_status=");
     Contains("flow demo", flowDemo, "dispatch_status=");
@@ -224,6 +233,7 @@ int main()
     });
     Contains("flow demo", flowDemo, "TILEXR_MOONEP_FLOW_BARRIER_ADDR");
     Contains("flow runner", flowRunner, "block_dim=$((64 / ranks_per_device))");
+    Contains("flow runner", flowRunner, "export TILEXR_ENABLE_UDMA=1");
     Contains("flow runner", flowRunner, "${SCRIPT_DIR}/tilexr_moonep_flow_demo");
     Contains("flow runner", flowRunner, "device=$((rank % physical_device_count))");
     Contains("flow runner", flowRunner, "TILEXR_MOONEP_PLANNER_BLOCK_DIM");
