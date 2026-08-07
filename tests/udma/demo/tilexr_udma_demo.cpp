@@ -236,6 +236,31 @@ BarrierEndpoint GetBarrierEndpoint()
     return BarrierEndpoint{host, static_cast<uint16_t>(barrierPort), true};
 }
 
+BarrierEndpoint GetPerfBarrierEndpoint()
+{
+    const char* configured = std::getenv("TILEXR_DEMO_PERF_BARRIER_ADDR");
+    if (configured == nullptr || configured[0] == '\0') {
+        return BarrierEndpoint{"", 0, false};
+    }
+    std::string value(configured);
+    const size_t colon = value.rfind(':');
+    if (colon == std::string::npos || colon == 0 || colon + 1 >= value.size()) {
+        return BarrierEndpoint{"", 0, false};
+    }
+    const std::string host = value.substr(0, colon);
+    in_addr parsedAddr {};
+    if (inet_pton(AF_INET, host.c_str(), &parsedAddr) != 1) {
+        return BarrierEndpoint{"", 0, false};
+    }
+    errno = 0;
+    char* end = nullptr;
+    const long port = std::strtol(value.c_str() + colon + 1, &end, 10);
+    if (errno == ERANGE || end == value.c_str() + colon + 1 || *end != '\0' || port <= 0 || port > 65535) {
+        return BarrierEndpoint{"", 0, false};
+    }
+    return BarrierEndpoint{host, static_cast<uint16_t>(port), true};
+}
+
 bool SendAll(int fd, const void* data, size_t bytes)
 {
     const auto* ptr = static_cast<const uint8_t*>(data);
@@ -323,16 +348,24 @@ int ConnectBarrierServer(const std::string& host, uint16_t port)
 }
 
 bool DemoBarrierAll(
-    int rank, int rankSize, const std::string& step, bool localSuccess = true, bool* allSucceeded = nullptr)
+    int rank, int rankSize, const std::string& step, bool localSuccess = true, bool* allSucceeded = nullptr,
+    const BarrierEndpoint* endpointOverride = nullptr, int participantRank = -1, int participantCount = -1)
 {
-    if (rankSize <= 1) {
+    const int barrierRank = participantRank >= 0 ? participantRank : rank;
+    const int barrierSize = participantCount >= 0 ? participantCount : rankSize;
+    if (barrierRank < 0 || barrierSize <= 0 || barrierRank >= barrierSize) {
+        std::cerr << "[rank " << rank << "] ERROR: invalid demo barrier participant "
+                  << barrierRank << "/" << barrierSize << std::endl;
+        return false;
+    }
+    if (barrierSize <= 1) {
         if (allSucceeded != nullptr) {
             *allSucceeded = localSuccess;
         }
         return true;
     }
 
-    BarrierEndpoint endpoint = GetBarrierEndpoint();
+    const BarrierEndpoint endpoint = endpointOverride == nullptr ? GetBarrierEndpoint() : *endpointOverride;
     if (!endpoint.valid) {
         std::cerr << "[rank " << rank << "] ERROR: invalid TILEXR_DEMO_BARRIER_ADDR" << std::endl;
         return false;
@@ -345,7 +378,7 @@ bool DemoBarrierAll(
     constexpr uint8_t kReleaseFailure = 3;
     bool globalSuccess = localSuccess;
 
-    if (rank == 0) {
+    if (barrierRank == 0) {
         int serverFd = CreateBarrierServer(endpoint.port);
         if (serverFd < 0) {
             std::cerr << "[rank " << rank << "] ERROR: failed to create demo barrier server on 0.0.0.0:"
@@ -353,9 +386,9 @@ bool DemoBarrierAll(
             return false;
         }
         std::vector<int> clients;
-        clients.reserve(static_cast<size_t>(rankSize - 1));
+        clients.reserve(static_cast<size_t>(barrierSize - 1));
         bool ok = true;
-        for (int i = 1; i < rankSize; ++i) {
+        for (int i = 1; i < barrierSize; ++i) {
             int clientFd = accept(serverFd, nullptr, nullptr);
             if (clientFd < 0) {
                 ok = false;
@@ -540,6 +573,8 @@ int main(int argc, char** argv)
     uint64_t reregisterValue = 0;
     uint64_t warmupItersValue = 0;
     uint64_t timedItersValue = 0;
+    uint64_t perfBarrierRankBaseValue = 0;
+    uint64_t perfBarrierSizeValue = 0;
     if (!ParseUnsignedEnv("TILEXR_DEMO_EXPECT_UDMA", 1, 1, expectUdmaValue) ||
         !ParseUnsignedEnv("TILEXR_DEMO_EXPECT_QP_COUNT", expectUdmaValue == 0 ? 0 : 1,
             kMaxExpectedQpCount, expectedQpCountValue) ||
@@ -548,8 +583,12 @@ int main(int argc, char** argv)
         !ParseUnsignedEnv("TILEXR_DEMO_REREGISTER", 1, 1, reregisterValue) ||
         !ParseUnsignedEnv("TILEXR_DEMO_WARMUP_ITERS", 0, std::numeric_limits<uint32_t>::max(),
             warmupItersValue) ||
-        !ParseUnsignedEnv("TILEXR_DEMO_TIMED_ITERS", 0, std::numeric_limits<uint32_t>::max(),
-            timedItersValue)) {
+        !ParseUnsignedEnv("TILEXR_DEMO_TIMED_ITERS", 1, std::numeric_limits<uint32_t>::max(),
+            timedItersValue) ||
+        !ParseUnsignedEnv("TILEXR_DEMO_PERF_BARRIER_RANK_BASE", 0,
+            static_cast<uint64_t>(std::numeric_limits<int>::max()), perfBarrierRankBaseValue) ||
+        !ParseUnsignedEnv("TILEXR_DEMO_PERF_BARRIER_SIZE", 0,
+            static_cast<uint64_t>(std::numeric_limits<int>::max()), perfBarrierSizeValue)) {
         return 2;
     }
     const bool expectUdma = expectUdmaValue != 0;
@@ -558,6 +597,8 @@ int main(int argc, char** argv)
     const bool reregister = reregisterValue != 0;
     const uint32_t warmupIters = static_cast<uint32_t>(warmupItersValue);
     const uint32_t timedIters = static_cast<uint32_t>(timedItersValue);
+    const int perfBarrierRankBase = static_cast<int>(perfBarrierRankBaseValue);
+    const int perfBarrierSize = static_cast<int>(perfBarrierSizeValue);
     if (timedIters == 0U) {
         std::cerr << "ERROR: TILEXR_DEMO_TIMED_ITERS must be positive" << std::endl;
         return 2;
@@ -577,6 +618,21 @@ int main(int argc, char** argv)
         std::cerr << "ERROR: invalid rank, rank size, test type, element count, or NPU count" << std::endl;
         return 2;
     }
+    const char* perfBarrierAddrValue = std::getenv("TILEXR_DEMO_PERF_BARRIER_ADDR");
+    const bool perfBarrierAddrSet = perfBarrierAddrValue != nullptr && perfBarrierAddrValue[0] != '\0';
+    const bool perfBarrierEnabled = perfBarrierSize > 0;
+    if (perfBarrierAddrSet != perfBarrierEnabled || (!perfBarrierEnabled && perfBarrierRankBase != 0) ||
+        (perfBarrierEnabled && (!perfEnabled || perfBarrierRankBase > perfBarrierSize - rankSize))) {
+        std::cerr << "ERROR: performance barrier requires an address, performance mode, and a participant range "
+                  << "within TILEXR_DEMO_PERF_BARRIER_SIZE" << std::endl;
+        return 2;
+    }
+    const BarrierEndpoint perfBarrierEndpoint = perfBarrierEnabled ? GetPerfBarrierEndpoint() :
+        BarrierEndpoint{"", 0, false};
+    if (perfBarrierEnabled && !perfBarrierEndpoint.valid) {
+        std::cerr << "ERROR: invalid TILEXR_DEMO_PERF_BARRIER_ADDR" << std::endl;
+        return 2;
+    }
     int deviceId = GetDeviceIdFromEnv(rank, npuCount, firstNpu);
     if (deviceId < 0) {
         std::cerr << "ERROR: resolved NPU device id must be non-negative" << std::endl;
@@ -593,7 +649,13 @@ int main(int argc, char** argv)
               << " expectedQpCount=" << expectedQpCount << " registeredBytes=" << registeredBytes
               << " reregister=" << reregister << std::endl;
     std::cout << "[rank " << rank << "] perf: enabled=" << perfEnabled
-              << " warmupIters=" << warmupIters << " timedIters=" << timedIters << std::endl;
+              << " warmupIters=" << warmupIters << " timedIters=" << timedIters
+              << " barrierEnabled=" << perfBarrierEnabled;
+    if (perfBarrierEnabled) {
+        std::cout << " barrierParticipant=" << perfBarrierRankBase + rank << "/" << perfBarrierSize
+                  << " barrierEndpoint=" << perfBarrierEndpoint.host << ":" << perfBarrierEndpoint.port;
+    }
+    std::cout << std::endl;
     std::cout << "[rank " << rank << "] PID=" << getpid()
               << " TILEXR_COMM_ID=" << (std::getenv("TILEXR_COMM_ID") ? std::getenv("TILEXR_COMM_ID") : "<unset>")
               << " LD_LIBRARY_PATH=" << (std::getenv("LD_LIBRARY_PATH") ? std::getenv("LD_LIBRARY_PATH") : "<unset>")
@@ -788,9 +850,22 @@ int main(int argc, char** argv)
             Cleanup(comm, stream, registeredMemory, debug, rank, deviceId);
             return 1;
         }
+        if (perfBarrierEnabled &&
+            !DemoBarrierAll(rank, rankSize, "all communicators ready for timed perf", true, nullptr,
+                &perfBarrierEndpoint, perfBarrierRankBase + rank, perfBarrierSize)) {
+            (void)aclrtDestroyEvent(startEvent);
+            (void)aclrtDestroyEvent(stopEvent);
+            if (udmaRegistered) {
+                CheckTileXR(rank, "TileXRUDMAUnregister", TileXRUDMAUnregister(comm, udmaHandle));
+            }
+            Cleanup(comm, stream, registeredMemory, debug, rank, deviceId);
+            return 1;
+        }
 
         float elapsedMs = 0.0F;
         const auto wallStart = std::chrono::steady_clock::now();
+        const auto wallStartNs =
+            std::chrono::duration_cast<std::chrono::nanoseconds>(wallStart.time_since_epoch()).count();
         bool perfRunOk = CheckAcl(rank, "aclrtRecordEvent perf start", aclrtRecordEvent(startEvent, stream));
         if (perfRunOk) {
             for (uint32_t iter = 0; iter < timedIters; ++iter) {
@@ -802,6 +877,8 @@ int main(int argc, char** argv)
             perfRunOk = CheckAcl(rank, "aclrtSynchronizeEvent perf stop", aclrtSynchronizeEvent(stopEvent));
         }
         const auto wallStop = std::chrono::steady_clock::now();
+        const auto wallStopNs =
+            std::chrono::duration_cast<std::chrono::nanoseconds>(wallStop.time_since_epoch()).count();
         const double wallElapsedMs =
             std::chrono::duration<double, std::milli>(wallStop - wallStart).count();
         if (!perfRunOk) {
@@ -854,6 +931,8 @@ int main(int argc, char** argv)
                       << " iterations=" << timedIters
                       << " elapsed_ms=" << std::fixed << std::setprecision(3) << elapsedMs
                       << " tx_GBps=" << std::setprecision(6) << txGBps
+                      << " wall_start_ns=" << wallStartNs
+                      << " wall_stop_ns=" << wallStopNs
                       << " wall_elapsed_ms=" << std::setprecision(3) << wallElapsedMs
                       << " wall_tx_GBps=" << std::setprecision(6) << wallTxGBps
                       << std::defaultfloat << std::endl;

@@ -23,6 +23,9 @@ REGISTERED_BYTES="${TILEXR_DEMO_REGISTERED_BYTES:-2097152}"
 REREGISTER="${TILEXR_DEMO_REREGISTER:-1}"
 WARMUP_ITERS="${TILEXR_DEMO_WARMUP_ITERS:-0}"
 TIMED_ITERS="${TILEXR_DEMO_TIMED_ITERS:-1}"
+PERF_BARRIER_ADDR="${TILEXR_DEMO_PERF_BARRIER_ADDR:-}"
+PERF_BARRIER_RANK_BASE="${TILEXR_DEMO_PERF_BARRIER_RANK_BASE:-0}"
+PERF_BARRIER_SIZE="${TILEXR_DEMO_PERF_BARRIER_SIZE:-0}"
 TIMEOUT_SECONDS="${TILEXR_DEMO_TIMEOUT_SECONDS:-300}"
 CASE_NAME=""
 UNSET_QP_ROUTE_SPEC=0
@@ -53,6 +56,9 @@ Options:
   --no-reregister        Disable the register/unregister reuse probe
   --warmup-iters <N>     Warmup kernel launches before measured runs (default: 0)
   --iterations <N>       Timed kernel launches (default: 1)
+  --perf-barrier-addr <ip:port> Shared timed-window barrier endpoint
+  --perf-barrier-rank-base <N>  First global participant id for this MPI job (default: 0)
+  --perf-barrier-size <N>       Total participants across synchronized MPI jobs (default: 0, disabled)
   --timeout <seconds>    Bound the complete MPI run (default: 300)
   --help                 Show this help
 EOF
@@ -140,6 +146,18 @@ while [[ $# -gt 0 ]]; do
             TIMED_ITERS="$2"
             shift 2
             ;;
+        --perf-barrier-addr)
+            PERF_BARRIER_ADDR="$2"
+            shift 2
+            ;;
+        --perf-barrier-rank-base)
+            PERF_BARRIER_RANK_BASE="$2"
+            shift 2
+            ;;
+        --perf-barrier-size)
+            PERF_BARRIER_SIZE="$2"
+            shift 2
+            ;;
         --timeout)
             TIMEOUT_SECONDS="$2"
             shift 2
@@ -222,6 +240,20 @@ if [[ ! "${TIMED_ITERS}" =~ ^[1-9][0-9]*$ ]]; then
     echo "--iterations must be a positive decimal integer" >&2
     exit 2
 fi
+if [[ ! "${PERF_BARRIER_RANK_BASE}" =~ ^[0-9]+$ ]]; then
+    echo "--perf-barrier-rank-base must be a non-negative decimal integer" >&2
+    exit 2
+fi
+if [[ ! "${PERF_BARRIER_SIZE}" =~ ^[0-9]+$ ]]; then
+    echo "--perf-barrier-size must be a non-negative decimal integer" >&2
+    exit 2
+fi
+if [[ ( -z "${PERF_BARRIER_ADDR}" &&
+        ( "${PERF_BARRIER_RANK_BASE}" != "0" || "${PERF_BARRIER_SIZE}" != "0" ) ) ||
+      ( -n "${PERF_BARRIER_ADDR}" && "${PERF_BARRIER_SIZE}" == "0" ) ]]; then
+    echo "performance barrier requires --perf-barrier-addr and a positive --perf-barrier-size" >&2
+    exit 2
+fi
 if [[ ! "${TIMEOUT_SECONDS}" =~ ^[1-9][0-9]*$ ]]; then
     echo "--timeout must be a positive decimal integer" >&2
     exit 2
@@ -258,6 +290,9 @@ export TILEXR_DEMO_REGISTERED_BYTES="${REGISTERED_BYTES}"
 export TILEXR_DEMO_REREGISTER="${REREGISTER}"
 export TILEXR_DEMO_WARMUP_ITERS="${WARMUP_ITERS}"
 export TILEXR_DEMO_TIMED_ITERS="${TIMED_ITERS}"
+export TILEXR_DEMO_PERF_BARRIER_ADDR="${PERF_BARRIER_ADDR}"
+export TILEXR_DEMO_PERF_BARRIER_RANK_BASE="${PERF_BARRIER_RANK_BASE}"
+export TILEXR_DEMO_PERF_BARRIER_SIZE="${PERF_BARRIER_SIZE}"
 export TILEXR_ENABLE_IPC="${TILEXR_ENABLE_IPC:-0}"
 export TILEXR_ENABLE_SDMA="${TILEXR_ENABLE_SDMA:-0}"
 export LD_LIBRARY_PATH="${TILEXR_ROOT}/install/lib64:${TILEXR_ROOT}/install/lib:${INSTALL_DIR}/lib64:${INSTALL_DIR}/lib:${LD_LIBRARY_PATH:-}"
@@ -291,6 +326,13 @@ MPI_ARGS=(
     -genv TILEXR_ENABLE_SDMA "${TILEXR_ENABLE_SDMA}"
     -genv LD_LIBRARY_PATH "${LD_LIBRARY_PATH}"
 )
+if [[ -n "${TILEXR_DEMO_PERF_BARRIER_ADDR}" ]]; then
+    MPI_ARGS+=(
+        -genv TILEXR_DEMO_PERF_BARRIER_ADDR "${TILEXR_DEMO_PERF_BARRIER_ADDR}"
+        -genv TILEXR_DEMO_PERF_BARRIER_RANK_BASE "${TILEXR_DEMO_PERF_BARRIER_RANK_BASE}"
+        -genv TILEXR_DEMO_PERF_BARRIER_SIZE "${TILEXR_DEMO_PERF_BARRIER_SIZE}"
+    )
+fi
 RUN_COMMAND=( "${bin}" )
 if [[ "${UNSET_QP_ROUTE_SPEC}" == "0" ]]; then
     MPI_ARGS+=( -genv TILEXR_UDMA_QP_ROUTE_SPEC "${QP_ROUTE_SPEC}" )

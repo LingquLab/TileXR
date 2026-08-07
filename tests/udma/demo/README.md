@@ -54,6 +54,10 @@ Run again with `--test-type 1` to validate UDMA put-signal. Add `--require-sdma`
 
 Use `--warmup-iters <N>` to run unmeasured warmup launches and `--iterations <N>` to select the measured launch count. Their defaults are `0` and `1`, respectively, which preserves the original single-launch behavior. The same values may be supplied through `TILEXR_DEMO_WARMUP_ITERS` and `TILEXR_DEMO_TIMED_ITERS`.
 
+Performance output includes `wall_start_ns` and `wall_stop_ns` from the steady clock. When adding throughput from independently launched communicators, compare intervals from ranks on the same host and require their measured windows to overlap; adding two non-overlapping rates does not prove concurrent bandwidth.
+
+To align independent MPI jobs, give every job the same `--perf-barrier-addr` and `--perf-barrier-size`, and assign non-overlapping participant ranges with `--perf-barrier-rank-base`. The barrier is optional and only affects performance mode.
+
 For a reproducible two-card, eight-port-per-card throughput procedure and measured results, see [UDMA Dual-Card Bandwidth Validation](../../../docs/UDMA_DUAL_CARD_BANDWIDTH_VALIDATION.md).
 
 Run this demo only on A5 / Ascend950 / 950 hardware. Builds or smoke tests on other Ascend chips are not valid UDMA runtime validation.
