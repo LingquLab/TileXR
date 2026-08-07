@@ -203,9 +203,6 @@ script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
 source "${script_dir}/common_env.sh"
 
-# MoonEP stages currently use IPC; UDMA initialization interferes with the HCCL reference path.
-export TILEXR_ENABLE_UDMA=0
-
 for conda_setup in \
     /home/miniconda3/etc/profile.d/conda.sh \
     "${HOME}/miniconda3/etc/profile.d/conda.sh" \

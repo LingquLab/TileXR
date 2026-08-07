@@ -55,10 +55,8 @@ def test_script_prints_final_plog_path_before_python_launch() -> None:
     assert log_path_report < launcher_call
 
 
-def test_script_forces_ipc_only_tilexr_transport() -> None:
-    udma_disable = SCRIPT.index("export TILEXR_ENABLE_UDMA=0")
-    launcher_call = SCRIPT.index("python -m tools.moonep.launcher")
-    assert udma_disable < launcher_call
+def test_script_preserves_caller_tilexr_udma_selection() -> None:
+    assert "export TILEXR_ENABLE_UDMA=" not in SCRIPT
 
 
 def test_script_selects_manual_small_through_case_id_only() -> None:
