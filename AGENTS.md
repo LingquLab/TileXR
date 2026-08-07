@@ -41,7 +41,7 @@ Optional CMake switches are `TILEXR_BUILD_COLLECTIVES`, `TILEXR_BUILD_EP`, `TILE
 - `src/comm` builds `libtile-comm.so`, owns communicator setup, peer mappings, capability flags, and `CommArgs`, and exposes the core API through `tilexr_api.h`.
 - Device synchronization uses reusable magic-tagged flags. Use `TileXRCommNextMagic` for new rounds rather than resetting shared flag memory.
 - `src/collectives` builds `libtilexr-collectives.so` when enabled. Multi-rank AllToAll requires the supported `TOPO_910_93` topology.
-- `src/ep` builds standalone dispatch/combine host and kernel libraries. Same-node traffic uses IPC peer windows; cross-node traffic uses registered UDMA workspaces.
+- `src/ep` builds standalone dispatch/combine host and kernel libraries. The peer-memory backend supports both same-node and cross-node traffic; the UDMA backend uses registered workspaces.
 - UDMA is a registered remote-memory transport for A5 / Ascend950. SDMA is an opt-in same-device GM copy transport enabled with `TILEXR_ENABLE_SDMA=1`.
 
 ## Critical Constraints
@@ -49,6 +49,7 @@ Optional CMake switches are `TILEXR_BUILD_COLLECTIVES`, `TILEXR_BUILD_EP`, `TILE
 - Preserve C++14 and CANN 9.1 compatibility unless the task explicitly changes them.
 - Treat `reference/` as comparison-only; active targets must not include or link sources from it.
 - UDMA and SDMA are best-effort capabilities. Communicator initialization must preserve existing paths when either is unavailable.
+- Do not select memory versus UDMA from topology alone: memory supports cross-node transfers. Prefer memory for small transfers and UDMA for large transfers, subject to runtime capability and registration readiness.
 - `TileXRUDMARegister` is unsupported in `InitThread`; UDMA targets must be registered ordinary device memory, not `peerMems[]`.
 - UDMA WQEs must be assembled entirely in UB and published to the SQ through MTE3. Never construct or patch an SQ WQE with scalar or direct-GM stores.
 - Ring a UDMA doorbell only with `st_dev`, after the corresponding MTE3 WQE write has completed. Scalar stores must never be used for doorbells.

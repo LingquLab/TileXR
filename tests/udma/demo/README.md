@@ -50,7 +50,7 @@ bash demo/run_tilexr_udma_data_channel_probe_mpi.sh \
   --iterations 20
 ```
 
-Run again with `--test-type 1` to validate UDMA put-signal. Add `--require-sdma` if the test should also fail when TileXR SDMA is unavailable. This probe validates the cross-node UDMA/SDMA data-channel prerequisites; it does not mean EP dispatch itself has a cross-node backend.
+Run again with `--test-type 1` to validate UDMA put-signal. Add `--require-sdma` if the test should also fail when TileXR SDMA is unavailable. This probe validates the cross-node UDMA/SDMA data-channel prerequisites independently from the EP memory and UDMA backends.
 
 Use `--warmup-iters <N>` to run unmeasured warmup launches and `--iterations <N>` to select the measured launch count. Their defaults are `0` and `1`, respectively, which preserves the original single-launch behavior. The same values may be supplied through `TILEXR_DEMO_WARMUP_ITERS` and `TILEXR_DEMO_TIMED_ITERS`.
 

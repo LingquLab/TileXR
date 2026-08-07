@@ -1,8 +1,9 @@
 # TileXR EP Dispatch/Combine Tests
 
 This tree tests the standalone TileXR EP module under `src/ep`. It is independent from hcomm, HCCL window helpers,
-and `ops-transformer`; the same-node route uses TileXR IPC peer-memory windows, while cross-node dispatch/combine
-use TileXR-registered UDMA workspaces.
+and `ops-transformer`. The memory backend uses TileXR peer-memory windows for both same-node and cross-node
+dispatch/combine, while the UDMA backend uses TileXR-registered workspaces. Memory generally performs better for
+small transfers, while UDMA generally performs better for large transfers.
 
 ## Source-Only Tests
 

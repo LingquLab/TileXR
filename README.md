@@ -24,7 +24,7 @@ Instead of stalling every rank at coarse barriers, TileXR splits a phase into ti
 
 - **Core communication runtime**: `libtile-comm.so` initializes ranks, shared buffers, peer memory mappings, socket exchange, device `CommArgs`, and DFX state. It builds only against CANN runtime/ACL/driver APIs and TileXR-owned types; it does not include or link HCCL, shmem, or reference-only source trees.
 - **Optional TileXR collectives**: `libtilexr-collectives.so`, built only when `TILEXR_BUILD_COLLECTIVES=ON`, layers standalone `TileXRAllGather` and equal-size `TileXRAllToAll` APIs on top of `libtile-comm.so`.
-- **Standalone EP dispatch/combine MVP**: `libtilexr-ep.so`, `libtilexr_ep_dispatch_kernel.so`, and `libtilexr_ep_combine_kernel.so` provide TileXR-native MoE EP dispatch/combine routes under `src/ep`, independent from HCCL window helpers, `ops-transformer`, and shmem. Same-node paths use IPC peer-memory windows; cross-node dispatch/combine use TileXR-registered UDMA workspaces.
+- **Standalone EP dispatch/combine MVP**: `libtilexr-ep.so`, `libtilexr_ep_dispatch_kernel.so`, and `libtilexr_ep_combine_kernel.so` provide TileXR-native MoE EP dispatch/combine routes under `src/ep`, independent from HCCL window helpers, `ops-transformer`, and shmem. The peer-memory backend supports both same-node and cross-node dispatch/combine; the UDMA backend uses TileXR-registered workspaces.
 - **Tile-level synchronization**: device-side flag regions and magic values support reusable fine-grained synchronization rounds.
 - **Registered-memory UDMA path**: host code registers ordinary `aclrtMalloc` device memory with `TileXRUDMARegister`; device kernels use `tilexr_udma.h` wrappers for put/get/signal.
 - **On-card SDMA transport**: an opt-in (`TILEXR_ENABLE_SDMA=1`) local GM-to-GM copy path. Host code queries it with `TileXRSDMAAvailable` / `TileXRGetSDMAWorkspaceDev`; device kernels use `tilexr_sdma.h` (`SDMACopyNbi`, `SDMAWait`). Separate from UDMA: SDMA is local to one device, UDMA targets registered remote memory.
@@ -215,15 +215,15 @@ Initial collectives APIs:
 - `libtilexr_ep_dispatch_kernel.so` contains the Ascend C dispatch kernels.
 - `libtilexr_ep_combine_kernel.so` contains the Ascend C combine kernels, including the cross-node UDMA combine path.
 - Host code validates MoE shape, dtype, communicator state, and IPC window size before launch.
-- The same-node route uses `CommArgs::peerMems[]`, `TileXR::IPC_DATA_OFFSET`, and `SyncCollectives` for peer-memory communication. Each rank writes its own IPC window, peers read from that window after synchronization.
-- The cross-node route requires a workspace registered with `TileXRUDMARegister`; remote ranks exchange window slots and ready values through the UDMA registry.
+- The memory route uses `CommArgs::peerMems[]`, `TileXR::IPC_DATA_OFFSET`, and `SyncCollectives` for peer-memory communication across both same-node and cross-node peers. Each rank writes its own peer-memory window, and peers read from that window after synchronization.
+- The UDMA route uses a workspace registered with `TileXRUDMARegister`; remote ranks exchange window slots and ready values through the UDMA registry.
 - Shared EP window metadata is written through MTE/UB copies so peer ranks observe slot headers and assist tuples consistently.
 
 This EP path is intentionally independent from HCCL window helpers, `ops-transformer`, and shmem while reusing TileXR core IPC/UDMA runtime state.
 
 ### Transports Overview
 
-TileXR offers three data-plane transports that kernels select by data size, link state, peer readiness, and capability flags. IPC/MTE uses same-host peer-memory windows, UDMA targets registered remote memory on A5 / Ascend950, and SDMA performs a local on-card copy within a single device.
+TileXR offers three data-plane transports that kernels select by data size, link state, peer readiness, and capability flags. Memory uses peer-memory windows across same-node or cross-node peers and is generally better for small transfers. UDMA targets registered remote memory on A5 / Ascend950 and is generally better for large transfers. SDMA performs a local on-card copy within a single device.
 
 <p align="center">
   <img src="docs/diagrams/transport-paths.drawio.svg" alt="TileXR transport data paths between ranks" width="940"/>
@@ -424,7 +424,7 @@ bash scripts/driver_fix.sh
 - [reference/README.md](reference/README.md): ignored reference-only source checkouts
 - [docs/CANN_VERSION_MIGRATION.md](docs/CANN_VERSION_MIGRATION.md): CANN 9.1.0 migration notes
 - [tests/collectives/README.md](tests/collectives/README.md): optional collectives correctness and performance tools
-- [tests/ep/README.md](tests/ep/README.md): standalone EP dispatch/combine build, demo, and cross-node UDMA notes
+- [tests/ep/README.md](tests/ep/README.md): standalone EP dispatch/combine build, demo, and cross-node transport notes
 - [AGENTS.md](AGENTS.md): repository guidance for AI coding agents
 - [docs/diagrams/](docs/diagrams/): editable draw.io sources for the README architecture diagrams (SVGs embed the diagram XML, so they reopen in draw.io)
 

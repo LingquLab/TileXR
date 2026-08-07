@@ -56,7 +56,7 @@
             </Array>
           </mxGeometry>
         </mxCell>
-        <mxCell id="sel" parent="1" style="rounded=1;whiteSpace=wrap;fillColor=#f5f5f5;strokeColor=#666666;align=center;fontFamily=Comic Sans MS;" value="Kernels pick a transport by data size, link state, peer readiness, and capability flags (CommArgs::extraFlag).&#xa;IPC/MTE: same-host peer windows  •  UDMA: registered remote memory (A5 / Ascend950)  •  SDMA: local single-device copy." vertex="1">
+        <mxCell id="sel" parent="1" style="rounded=1;whiteSpace=wrap;fillColor=#f5f5f5;strokeColor=#666666;align=center;fontFamily=Comic Sans MS;" value="Kernels pick a transport by data size, link state, peer readiness, and capability flags (CommArgs::extraFlag).&#xa;Memory: same-node/cross-node peer windows, better for small transfers  •  UDMA: registered remote memory, better for large transfers  •  SDMA: local single-device copy." vertex="1">
           <mxGeometry height="70" width="1040" x="60" y="480" as="geometry" />
         </mxCell>
       </root>
