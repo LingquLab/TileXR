@@ -43,9 +43,10 @@ struct PrefetchWeightKernelArgs {
     int64_t rankSize;
     int64_t expertsPerRank;
     uint64_t qpNum;
+    uint64_t routeWeights;
 };
 
-static_assert(sizeof(PrefetchWeightKernelArgs) == 16U * sizeof(uint64_t),
+static_assert(sizeof(PrefetchWeightKernelArgs) == 17U * sizeof(uint64_t),
     "PrefetchWeight kernel argument ABI changed");
 
 int EnsureKernelRegistered()
@@ -96,7 +97,8 @@ int LaunchPrefetchWeight(const PrefetchWeightLayout &layout, GM_ADDR commArgs,
         layout.down.localBase, status, layout.gate.registryOffset,
         layout.up.registryOffset, layout.down.registryOffset,
         layout.gate.rowBytes, layout.up.rowBytes, layout.down.rowBytes,
-        layout.rank, layout.rankSize, layout.expertsPerRank, layout.qpNum
+        layout.rank, layout.rankSize, layout.expertsPerRank, layout.qpNum,
+        layout.routeWeights
     };
     rtArgsEx_t argsInfo {};
     argsInfo.args = &args;

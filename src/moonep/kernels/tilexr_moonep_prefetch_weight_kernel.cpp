@@ -15,6 +15,9 @@ constexpr uint32_t kStatusCqErrorBase = 2200;
 constexpr uint32_t kStatusSubmitErrorBase = 2300;
 constexpr uint32_t kMaxTrackedRankSize = 1024;
 constexpr uint32_t kUsedPeerWordCount = kMaxTrackedRankSize / 64;
+constexpr uint32_t kRouteWeightBits = 8;
+constexpr uint32_t kRouteWeightMask = 0xFF;
+constexpr uint32_t kSliceAlignment = 64;
 
 class PrefetchWeightKernel {
 public:
@@ -22,7 +25,8 @@ public:
         GM_ADDR gate, GM_ADDR up, GM_ADDR down, GM_ADDR status,
         uint64_t gateOffset, uint64_t upOffset, uint64_t downOffset,
         uint32_t gateRowBytes, uint32_t upRowBytes, uint32_t downRowBytes,
-        int32_t rank, int32_t rankSize, int32_t expertsPerRank, uint32_t qpNum)
+        int32_t rank, int32_t rankSize, int32_t expertsPerRank, uint32_t qpNum,
+        uint64_t routeWeights)
     {
         args_ = reinterpret_cast<__gm__ TileXR::CommArgs *>(commArgs);
         expertsToCopy_ = reinterpret_cast<__gm__ int32_t *>(expertsToCopy);
@@ -40,6 +44,7 @@ public:
         rankSize_ = rankSize;
         expertsPerRank_ = expertsPerRank;
         qpNum_ = qpNum;
+        routeWeights_ = routeWeights;
         const uint32_t subBlockCount = static_cast<uint32_t>(get_subblockdim());
         worker_ = static_cast<uint32_t>(get_block_idx()) * subBlockCount +
             static_cast<uint32_t>(get_subblockid());
@@ -92,7 +97,15 @@ private:
             return kStatusInvalidRuntime;
         }
         __gm__ TileXR::UDMAInfo *info = TileXR::GetUDMAInfo(args_);
-        return info->qpNum == qpNum_ ? 0 : kStatusInvalidRuntime;
+        if (info->qpNum != qpNum_) {
+            return kStatusInvalidRuntime;
+        }
+        for (uint32_t worker = 0; worker < workerCount_; ++worker) {
+            if (RouteWeight(worker) == 0) {
+                return kStatusInvalidRuntime;
+            }
+        }
+        return 0;
     }
 
     __aicore__ inline void MarkPeer(
@@ -109,6 +122,39 @@ private:
             (static_cast<uint64_t>(1) << (static_cast<uint32_t>(peer) & 63U))) != 0;
     }
 
+    __aicore__ inline uint32_t RouteWeight(uint32_t worker) const
+    {
+        return static_cast<uint32_t>(
+            (routeWeights_ >> (worker * kRouteWeightBits)) & kRouteWeightMask);
+    }
+
+    __aicore__ inline void BuildSlice(
+        uint32_t rowBytes, uint32_t &sliceOffset, uint32_t &sliceBytes) const
+    {
+        uint32_t totalWeight = 0;
+        uint32_t beginWeight = 0;
+        uint32_t endWeight = 0;
+        for (uint32_t worker = 0; worker < workerCount_; ++worker) {
+            const uint32_t weight = RouteWeight(worker);
+            if (worker < worker_) {
+                beginWeight += weight;
+            }
+            totalWeight += weight;
+            if (worker <= worker_) {
+                endWeight += weight;
+            }
+        }
+        const uint64_t beginNumerator = static_cast<uint64_t>(rowBytes) * beginWeight;
+        const uint64_t endNumerator = static_cast<uint64_t>(rowBytes) * endWeight;
+        const uint32_t begin = static_cast<uint32_t>(
+            (beginNumerator / totalWeight) / kSliceAlignment * kSliceAlignment);
+        const uint32_t end = worker_ + 1 == workerCount_ ? rowBytes :
+            static_cast<uint32_t>((endNumerator / totalWeight) /
+                kSliceAlignment * kSliceAlignment);
+        sliceOffset = begin;
+        sliceBytes = end - begin;
+    }
+
     __aicore__ inline void SubmitReads(
         uint64_t usedPeers[kUsedPeerWordCount], uint32_t &workerStatus)
     {
@@ -116,8 +162,7 @@ private:
         const int64_t globalExpertCount =
             static_cast<int64_t>(expertsPerRank_) * rankSize_;
         const int64_t planRow = static_cast<int64_t>(rank_) * expertsPerRank_;
-        for (int32_t slot = static_cast<int32_t>(worker_); slot < expertsPerRank_;
-             slot += static_cast<int32_t>(workerCount_)) {
+        for (int32_t slot = 0; slot < expertsPerRank_; ++slot) {
             const int32_t expert = expertsToCopy_[planRow + slot];
             if (expert < 0) {
                 continue;
@@ -136,15 +181,23 @@ private:
                 continue;
             }
             const int32_t localExpert = expert % expertsPerRank_;
-            MarkPeer(usedPeers, owner);
             for (uint32_t projection = 0; projection < 3; ++projection) {
+                uint32_t sliceOffset = 0;
+                uint32_t sliceBytes = 0;
+                BuildSlice(rowBytes_[projection], sliceOffset, sliceBytes);
+                if (sliceBytes == 0) {
+                    continue;
+                }
+                MarkPeer(usedPeers, owner);
                 const uint64_t sourceOffset = offsets_[projection] +
-                    static_cast<uint64_t>(localExpert) * rowBytes_[projection];
+                    static_cast<uint64_t>(localExpert) * rowBytes_[projection] +
+                    sliceOffset;
                 __gm__ uint8_t *destination = projections_[projection] +
-                    static_cast<uint64_t>(expertsPerRank_ + slot) * rowBytes_[projection];
+                    static_cast<uint64_t>(expertsPerRank_ + slot) * rowBytes_[projection] +
+                    sliceOffset;
                 const uint32_t submitStatus = TileXR::UDMAGetNbiOnQp<uint8_t>(
                     args_, wqeScratch, owner, worker_, destination, sourceOffset,
-                    rowBytes_[projection]);
+                    sliceBytes);
                 if (submitStatus != TileXR::TILEXR_UDMA_STATUS_SUCCESS && workerStatus == 0) {
                     workerStatus = kStatusSubmitErrorBase + (submitStatus & 0xFFU);
                 }
@@ -187,6 +240,7 @@ private:
     uint32_t qpNum_ = 0;
     uint32_t worker_ = 0;
     uint32_t workerCount_ = 0;
+    uint64_t routeWeights_ = 0;
     AscendC::TPipe pipe_;
     AscendC::TBuf<AscendC::QuePosition::VECCALC> wqeBuf_;
 };
@@ -198,13 +252,15 @@ extern "C" __global__ __aicore__ void tilexr_moonep_prefetch_weight_kernel(
     GM_ADDR commArgs, GM_ADDR expertsToCopy, GM_ADDR gate, GM_ADDR up, GM_ADDR down,
     GM_ADDR status, uint64_t gateOffset, uint64_t upOffset, uint64_t downOffset,
     uint64_t gateRowBytes, uint64_t upRowBytes, uint64_t downRowBytes,
-    int64_t rank, int64_t rankSize, int64_t expertsPerRank, uint64_t qpNum)
+    int64_t rank, int64_t rankSize, int64_t expertsPerRank, uint64_t qpNum,
+    uint64_t routeWeights)
 {
     TileXRMoonEp::Kernel::PrefetchWeightKernel op;
     op.Init(commArgs, expertsToCopy, gate, up, down, status,
         gateOffset, upOffset, downOffset, static_cast<uint32_t>(gateRowBytes),
         static_cast<uint32_t>(upRowBytes), static_cast<uint32_t>(downRowBytes),
         static_cast<int32_t>(rank), static_cast<int32_t>(rankSize),
-        static_cast<int32_t>(expertsPerRank), static_cast<uint32_t>(qpNum));
+        static_cast<int32_t>(expertsPerRank), static_cast<uint32_t>(qpNum),
+        routeWeights);
     op.Process();
 }

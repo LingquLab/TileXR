@@ -4,6 +4,7 @@
 #include <climits>
 #include <cstdlib>
 #include <limits>
+#include <string>
 
 namespace TileXRMoonEp {
 namespace {
@@ -139,9 +140,117 @@ bool RangesOverlap(uint64_t lhsBegin, uint64_t lhsEnd,
 
 } // namespace
 
+bool BuildPrefetchWeightRouteWeights(
+    uint32_t qpNum, const char *routeSpec, uint64_t &packedWeights)
+{
+    if (!SupportedWorkerCount(qpNum) || qpNum > kPrefetchWeightMaxWorkers) {
+        return false;
+    }
+    if (routeSpec == nullptr || routeSpec[0] == '\0') {
+        packedWeights = 0;
+        for (uint32_t qp = 0; qp < qpNum; ++qp) {
+            packedWeights |= static_cast<uint64_t>(1) <<
+                (qp * kPrefetchWeightRouteWeightBits);
+        }
+        return true;
+    }
+
+    const std::string spec(routeSpec);
+    uint64_t result = 0;
+    size_t begin = 0;
+    uint32_t qp = 0;
+    while (begin <= spec.size() && qp < qpNum) {
+        const size_t comma = spec.find(',', begin);
+        const size_t end = comma == std::string::npos ? spec.size() : comma;
+        const std::string rule = spec.substr(begin, end - begin);
+        uint32_t weight = 0;
+        if (rule == "topology") {
+            weight = 1;
+        } else {
+            constexpr char prefix[] = "port_count:";
+            if (rule.compare(0, sizeof(prefix) - 1, prefix) != 0) {
+                return false;
+            }
+            const std::string value = rule.substr(sizeof(prefix) - 1);
+            if (value.empty()) {
+                return false;
+            }
+            for (char ch : value) {
+                if (ch < '0' || ch > '9') {
+                    return false;
+                }
+                const uint32_t digit = static_cast<uint32_t>(ch - '0');
+                if (weight > (kPrefetchWeightMaxRouteWeight - digit) / 10U) {
+                    return false;
+                }
+                weight = weight * 10U + digit;
+            }
+            if (weight == 0) {
+                return false;
+            }
+        }
+        result |= static_cast<uint64_t>(weight) <<
+            (qp * kPrefetchWeightRouteWeightBits);
+        ++qp;
+        if (comma == std::string::npos) {
+            begin = spec.size() + 1;
+            break;
+        }
+        begin = comma + 1;
+    }
+    if (qp != qpNum || begin <= spec.size()) {
+        return false;
+    }
+    packedWeights = result;
+    return true;
+}
+
+bool BuildPrefetchWeightSlice(uint32_t rowBytes, uint32_t worker,
+    uint32_t workerCount, uint64_t packedWeights, PrefetchWeightSlice &slice)
+{
+    if (rowBytes == 0 || rowBytes % kPrefetchWeightAlignment != 0 ||
+        workerCount == 0 || workerCount > kPrefetchWeightMaxWorkers ||
+        worker >= workerCount) {
+        return false;
+    }
+    uint32_t totalWeight = 0;
+    uint32_t beginWeight = 0;
+    uint32_t endWeight = 0;
+    for (uint32_t index = 0; index < workerCount; ++index) {
+        const uint32_t weight = static_cast<uint32_t>(
+            (packedWeights >> (index * kPrefetchWeightRouteWeightBits)) &
+            kPrefetchWeightMaxRouteWeight);
+        if (weight == 0 || totalWeight > UINT32_MAX - weight) {
+            return false;
+        }
+        if (index < worker) {
+            beginWeight += weight;
+        }
+        totalWeight += weight;
+        if (index <= worker) {
+            endWeight += weight;
+        }
+    }
+    const uint64_t beginNumerator = static_cast<uint64_t>(rowBytes) * beginWeight;
+    const uint64_t endNumerator = static_cast<uint64_t>(rowBytes) * endWeight;
+    const uint32_t begin = static_cast<uint32_t>(
+        (beginNumerator / totalWeight) / kPrefetchWeightAlignment *
+        kPrefetchWeightAlignment);
+    const uint32_t end = worker + 1 == workerCount ? rowBytes :
+        static_cast<uint32_t>((endNumerator / totalWeight) /
+            kPrefetchWeightAlignment * kPrefetchWeightAlignment);
+    if (begin > end || end > rowBytes) {
+        return false;
+    }
+    slice.offset = begin;
+    slice.bytes = end - begin;
+    return true;
+}
+
 int BuildPrefetchWeightLayout(const TileXRMoonEpPrefetchWeightArgsV1 &args,
     const TileXR::CommArgs &commArgs, const TileXR::TileXRUDMARegistry &registry,
-    uint32_t qpNum, const char *blockDimOverride, PrefetchWeightLayout &layout)
+    uint32_t qpNum, const char *blockDimOverride, const char *routeSpec,
+    PrefetchWeightLayout &layout)
 {
     if (args.structSize < sizeof(TileXRMoonEpPrefetchWeightArgsV1) ||
         args.abiVersion != TILEXR_MOONEP_ABI_VERSION_V1 || args.comm == nullptr ||
@@ -167,6 +276,9 @@ int BuildPrefetchWeightLayout(const TileXRMoonEpPrefetchWeightArgsV1 &args,
     result.rankSize = commArgs.rankSize;
     result.expertsPerRank = static_cast<int32_t>(args.plan->b);
     result.qpNum = qpNum;
+    if (!BuildPrefetchWeightRouteWeights(qpNum, routeSpec, result.routeWeights)) {
+        return TILEXR_MOONEP_ERROR_INVALID_ARGUMENT;
+    }
 
     uint64_t gateEnd = 0;
     uint64_t upEnd = 0;

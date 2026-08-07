@@ -110,6 +110,7 @@ int main()
     Contains("launch", launch, "rtFunctionRegister");
     Contains("launch", launch, "rtKernelLaunchWithFlagV2");
     Contains("launch", launch, "layout.blockDim");
+    Contains("launch", launch, "layout.routeWeights");
     Excludes("launch", launch, "launch_tilexr_moonep_prefetch_weight_kernel");
     Excludes("kernel", kernel, "launch_tilexr_moonep_prefetch_weight_kernel");
     Excludes("kernel", kernel, "<<<");
@@ -118,6 +119,10 @@ int main()
     Contains("kernel", kernel, "auto wqeScratch = wqeBuf_.Get<uint8_t>()");
     Contains("kernel", kernel, "UDMAGetNbiOnQp<uint8_t>");
     Contains("kernel", kernel, "args_, wqeScratch, owner, worker_");
+    Contains("kernel", kernel, "for (int32_t slot = 0; slot < expertsPerRank_; ++slot)");
+    Contains("kernel", kernel, "BuildSlice(rowBytes_[projection]");
+    Contains("kernel", kernel, "sliceOffset");
+    Contains("kernel", kernel, "sliceBytes");
     Contains("kernel", kernel, "UDMAQuietStatusOnQp");
     Excludes("kernel", kernel, "UDMAGetNbiQp");
     Excludes("kernel", kernel, "UDMAQuietQpStatus");

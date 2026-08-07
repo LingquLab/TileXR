@@ -378,7 +378,8 @@ extern "C" int TileXRMoonEpPrefetchWeightV1(
 
     TileXRMoonEp::PrefetchWeightLayout layout {};
     const int layoutRet = TileXRMoonEp::BuildPrefetchWeightLayout(*args, *commArgs,
-        *registry, qpNum, std::getenv("TILEXR_MOONEP_PREFETCH_BLOCK_DIM"), layout);
+        *registry, qpNum, std::getenv("TILEXR_MOONEP_PREFETCH_BLOCK_DIM"),
+        std::getenv("TILEXR_UDMA_QP_ROUTE_SPEC"), layout);
     if (layoutRet != TILEXR_MOONEP_SUCCESS) {
         return layoutRet;
     }

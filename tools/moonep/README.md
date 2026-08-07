@@ -95,9 +95,11 @@ Candidates are limited to `1,2,4,8` and must not exceed `B=E/R` for any
 selected case. `prefetch_sweep_summary.json` records each cross-rank p50 and the
 recommended worker count. Cases with larger B can sweep all four candidates.
 For a single fixed configuration, `--prefetch-workers N` emits external-port
-rules in `TILEXR_UDMA_QP_ROUTE_SPEC`: one worker uses `port_count:6`, two use
-`port_count:6,port_count:2`, and four use `6,6,6,2`; eight workers repeat the
-four-worker pattern. It also sets
+  rules in `TILEXR_UDMA_QP_ROUTE_SPEC`: one worker uses `port_count:6`, two use
+  `topology,port_count:6` so every row is striped across same-server FullMesh
+  and six-port Clos routes, and four use `6,6,6,2`; eight workers repeat the
+  four-worker pattern. Route slices use the selector port counts as weights and
+  64-byte boundaries. It also sets
 `TILEXR_MOONEP_PREFETCH_BLOCK_DIM=N` before communicator initialization. The
 transport's compatibility default remains one QP until target A5/Ascend950
 measurements select a project-wide default. Rank and summary artifacts record

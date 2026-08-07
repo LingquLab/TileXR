@@ -78,7 +78,7 @@ class MoonEPSmokeTests(unittest.TestCase):
         self.assertEqual(_parse_prefetch_workers(None), [])
         self.assertEqual(_parse_prefetch_workers("1,2,8"), [1, 2, 8])
         self.assertEqual(_prefetch_route_spec(1), "port_count:6")
-        self.assertEqual(_prefetch_route_spec(2), "port_count:6,port_count:2")
+        self.assertEqual(_prefetch_route_spec(2), "topology,port_count:6")
         self.assertEqual(
             _prefetch_route_spec(4),
             "port_count:6,port_count:6,port_count:6,port_count:2",

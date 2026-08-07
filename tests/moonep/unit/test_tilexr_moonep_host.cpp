@@ -125,6 +125,7 @@ void ResetFakes()
     g_registry.regions[1].bytes = 0x4000;
     g_prefetchCall = PrefetchCall {};
     unsetenv("TILEXR_MOONEP_PREFETCH_BLOCK_DIM");
+    unsetenv("TILEXR_UDMA_QP_ROUTE_SPEC");
     g_runtimeCalls.clear();
     g_memsetCall = MemsetCall {};
     g_memcpyCall = MemcpyCall {};
@@ -564,6 +565,34 @@ TileXRMoonEpPrefetchWeightArgsV1 PrefetchArgs(TileXRMoonEpPlanV1 *plan,
     return args;
 }
 
+void TestPrefetchWeightSlices()
+{
+    uint64_t weights = 0;
+    Check(TileXRMoonEp::BuildPrefetchWeightRouteWeights(
+        2, "topology,port_count:6", weights), "special route weights must parse");
+    Check(weights == UINT64_C(0x0601), "special route weights must pack as 1:6");
+
+    TileXRMoonEp::PrefetchWeightSlice first {};
+    TileXRMoonEp::PrefetchWeightSlice second {};
+    Check(TileXRMoonEp::BuildPrefetchWeightSlice(1024, 0, 2, weights, first) &&
+        TileXRMoonEp::BuildPrefetchWeightSlice(1024, 1, 2, weights, second),
+        "1:6 slices must build");
+    Check(first.offset == 0 && first.bytes == 128 &&
+        second.offset == 128 && second.bytes == 896,
+        "1:6 slices must align and cover the row");
+
+    Check(TileXRMoonEp::BuildPrefetchWeightSlice(64, 0, 2, weights, first) &&
+        TileXRMoonEp::BuildPrefetchWeightSlice(64, 1, 2, weights, second) &&
+        first.bytes == 0 && second.offset == 0 && second.bytes == 64,
+        "small rows must allow an empty narrow-route slice");
+    Check(!TileXRMoonEp::BuildPrefetchWeightRouteWeights(
+        2, "topology", weights), "route count mismatch must fail");
+    Check(!TileXRMoonEp::BuildPrefetchWeightRouteWeights(
+        2, "topology,port_count:256", weights), "oversized route weight must fail");
+    Check(!TileXRMoonEp::BuildPrefetchWeightSlice(
+        65, 0, 2, UINT64_C(0x0601), first), "unaligned rows must fail");
+}
+
 void TestPrefetchWeight()
 {
     ResetFakes();
@@ -596,6 +625,8 @@ void TestPrefetchWeight()
         "PrefetchWeight projection layout mismatch");
     Check(g_prefetchCall.layout.blockDim == 2 && g_prefetchCall.layout.qpNum == 4,
         "PrefetchWeight must contract workers to min(B, qpNum)");
+    Check(g_prefetchCall.layout.routeWeights == UINT64_C(0x01010101),
+        "implicit PrefetchWeight routes must have unit weights");
     Check(g_runtimeCalls.empty() && g_streamSynchronizeCalls == 0,
         "PrefetchWeight must not call host memcpy or synchronize the stream");
 
@@ -629,6 +660,19 @@ void TestPrefetchWeight()
         TileXRMoonEpPrefetchWeightV1(&args, stream),
         TILEXR_MOONEP_ERROR_INVALID_ARGUMENT);
     unsetenv("TILEXR_MOONEP_PREFETCH_BLOCK_DIM");
+
+    g_qpNum = 2;
+    setenv("TILEXR_UDMA_QP_ROUTE_SPEC", "topology,port_count:6", 1);
+    CheckStatus("prefetch special route weights", TileXRMoonEpPrefetchWeightV1(&args, stream),
+        TILEXR_MOONEP_SUCCESS);
+    Check(g_prefetchCall.layout.blockDim == 2 &&
+        g_prefetchCall.layout.routeWeights == UINT64_C(0x0601),
+        "PrefetchWeight must propagate topology and Clos weights");
+    setenv("TILEXR_UDMA_QP_ROUTE_SPEC", "topology", 1);
+    CheckStatus("prefetch route count mismatch", TileXRMoonEpPrefetchWeightV1(&args, stream),
+        TILEXR_MOONEP_ERROR_INVALID_ARGUMENT);
+    unsetenv("TILEXR_UDMA_QP_ROUTE_SPEC");
+    g_qpNum = 4;
 
     gate.data = reinterpret_cast<void *>(UINTPTR_C(0x10020));
     CheckStatus("prefetch alignment", TileXRMoonEpPrefetchWeightV1(&args, stream),
@@ -755,6 +799,7 @@ int main()
     TestPlanningDelegation();
     TestStubEnqueueAndNoOp();
     TestStubValidationAndRuntimeFailures();
+    TestPrefetchWeightSlices();
     TestPrefetchWeight();
     return g_failures == 0 ? 0 : 1;
 }

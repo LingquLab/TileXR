@@ -128,7 +128,7 @@ def _prefetch_route_spec(worker_count: int) -> str:
         raise ValueError("prefetch worker count must be chosen from 1,2,4,8")
     external_routes = {
         1: ("port_count:6",),
-        2: ("port_count:6", "port_count:2"),
+        2: ("topology", "port_count:6"),
         4: ("port_count:6", "port_count:6", "port_count:6", "port_count:2"),
         8: (
             "port_count:6",
