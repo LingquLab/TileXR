@@ -12,10 +12,15 @@ from pathlib import Path
 from typing import Callable
 
 from .config import apply_overrides, build_case_parser, load_cases, select_cases
-from .planner_reference import build_reference_plan, deterministic_all_topk
+from .planner_reference import (
+    build_reference_plan,
+    deterministic_all_topk,
+    deterministic_rank_topk,
+)
 from .rendezvous import (
     completion_barrier_from_env,
     hold_for_managed_abort,
+    offset_host_port,
     signal_managed_abort,
 )
 from .report import write_json, write_jsonl
@@ -56,6 +61,12 @@ def _hold_unsafe_teardown(
         if world_size > 1:
             hold_for_managed_abort()
     raise RuntimeError(reason)
+
+
+def _case_endpoint(endpoint: str, case_index: int) -> str:
+    if case_index < 0:
+        raise ValueError("case_index must be non-negative")
+    return offset_host_port(endpoint, offset=case_index)
 
 
 class DeviceEventTimer:
@@ -196,14 +207,19 @@ def make_inputs(torch_module, case, context):
     if hasattr(torch_module.npu, "manual_seed_all"):
         torch_module.npu.manual_seed_all(case.seed + context.global_rank)
     dtype = _torch_dtype(torch_module, case.dtype)
-    route_ids = torch_module.arange(
-        case.tokens_per_rank * case.topk,
+    route_ids = torch_module.tensor(
+        deterministic_rank_topk(
+            context.planner_group_size,
+            case.tokens_per_rank,
+            case.topk,
+            case.expert_count,
+            rank=context.planner_group_rank,
+            pattern=case.route_pattern,
+            seed=case.seed,
+        ),
         dtype=torch_module.int32,
         device=device,
-    )
-    route_ids = (
-        route_ids + context.planner_group_rank * case.topk
-    ).remainder(case.expert_count).reshape(case.tokens_per_rank, case.topk)
+    ).reshape(case.tokens_per_rank, case.topk)
     tokens_per_expert = torch_module.bincount(
         route_ids.reshape(-1).to(dtype=torch_module.int64),
         minlength=case.expert_count,
@@ -217,12 +233,25 @@ def make_inputs(torch_module, case, context):
         dtype=torch_module.float32,
         device=device,
     )
-    rows = case.expert_count + context.experts_per_rank
-    projections = ProjectionBuffers(
-        gate=torch_module.full((rows, case.hidden_size), 0.5, dtype=dtype, device=device),
-        up=torch_module.full((rows, case.hidden_size), 0.25, dtype=dtype, device=device),
-        down=torch_module.full((rows, case.hidden_size), 0.75, dtype=dtype, device=device),
+    local_expert_ids = torch_module.arange(
+        context.experts_per_rank, dtype=torch_module.float32, device=device
+    ) + context.planner_group_rank * context.experts_per_rank
+
+    def local_projection(base):
+        row_shape = tuple(case.expert_shape)
+        return (local_expert_ids + base).reshape(
+            context.experts_per_rank, *(1 for _ in row_shape)
+        ).expand(context.experts_per_rank, *row_shape).to(dtype=dtype).contiguous()
+
+    projections = ProjectionBuffers.from_local_weights(
+        context,
+        local_projection(1),
+        local_projection(101),
+        local_projection(201),
+        slot_fill_value=-1.0,
+        torch_module=torch_module,
     )
+    rows = case.expert_count + context.experts_per_rank
     gradients = ProjectionBuffers(
         gate=torch_module.ones((rows, case.hidden_size), dtype=torch_module.float32, device=device),
         up=torch_module.ones((rows, case.hidden_size), dtype=torch_module.float32, device=device),
@@ -274,6 +303,13 @@ def _tensor_values(tensor) -> list[int]:
     return _flatten(tensor.cpu().tolist())
 
 
+def _expert_row_broadcast_shape(rows: int, tensor_shape) -> tuple[int, ...]:
+    shape = tuple(int(value) for value in tensor_shape)
+    if rows <= 0 or len(shape) < 2 or shape[0] != rows:
+        raise ValueError("projection tensor must have the expected expert-row dimension")
+    return (rows, *(1 for _ in shape[1:]))
+
+
 def _require_exact(name: str, actual: list[int], expected) -> None:
     expected_values = [int(value) for value in expected]
     if actual == expected_values:
@@ -296,7 +332,13 @@ def _require_exact(name: str, actual: list[int], expected) -> None:
     )
 
 
-def validate_plan(plan, context) -> dict[str, object]:
+def validate_plan(
+    plan,
+    context,
+    *,
+    route_pattern: str = "balanced",
+    seed: int = 1234,
+) -> dict[str, object]:
     status = int(plan.status.item())
     if status != 0:
         raise RuntimeError(f"Planner device status is {status}")
@@ -311,6 +353,8 @@ def validate_plan(plan, context) -> dict[str, object]:
             context.tokens_per_rank,
             context.topk,
             context.expert_count,
+            pattern=route_pattern,
+            seed=seed,
         ),
     )
     _require_exact("dst", _tensor_values(plan.dst), reference.dst)
@@ -335,6 +379,54 @@ def validate_plan(plan, context) -> dict[str, object]:
             "experts_to_copy_exact": True,
             "remote_stats_exact": True,
         },
+    }
+
+
+def validate_prefetch_weight(torch_module, plan, projections, context) -> dict[str, object]:
+    experts = _tensor_values(
+        plan.experts_to_copy[context.planner_group_rank]
+    )
+    if len(experts) != context.experts_per_rank:
+        raise RuntimeError("PrefetchWeight planner row has an invalid length")
+    checks = {}
+    active_slots = 0
+    row_bytes = {}
+    for name, base in (("gate", 1), ("up", 101), ("down", 201)):
+        tensor = getattr(projections, name)
+        row_bytes[name] = (
+            int(tensor.numel()) * int(tensor.element_size()) // int(tensor.shape[0])
+        )
+        source = tensor[: context.experts_per_rank]
+        slots = tensor[context.experts_per_rank :]
+        local_ids = torch_module.arange(
+            context.experts_per_rank,
+            dtype=torch_module.float32,
+            device=tensor.device,
+        ) + context.planner_group_rank * context.experts_per_rank + base
+        expected_source = local_ids.reshape(
+            _expert_row_broadcast_shape(context.experts_per_rank, source.shape)
+        ).expand_as(source)
+        expected_source = expected_source.to(dtype=tensor.dtype)
+        source_ok = bool(torch_module.equal(source, expected_source))
+        slot_ok = True
+        for slot, expert in enumerate(experts):
+            expected = -1.0 if expert < 0 else float(expert + base)
+            if expert >= 0:
+                active_slots += 1 if name == "gate" else 0
+            if not bool(torch_module.all(slots[slot] == expected).item()):
+                slot_ok = False
+                break
+        checks[f"{name}_source_unchanged"] = source_ok
+        checks[f"{name}_slots_exact"] = slot_ok
+    failed = [name for name, passed in checks.items() if not passed]
+    if failed:
+        raise RuntimeError(f"native PrefetchWeight mismatch: {', '.join(failed)}")
+    return {
+        "passed": True,
+        "active_slots": active_slots,
+        "row_bytes": row_bytes,
+        "transferred_bytes": active_slots * sum(row_bytes.values()),
+        "checks": checks,
     }
 
 
@@ -415,6 +507,14 @@ def topology_metadata(context) -> dict[str, object]:
             "effective TILEXR_MOONEP_PLANNER_BLOCK_DIM must satisfy "
             f"planner_group_size={context.planner_group_size} <= blockDim <= 64"
         )
+    device_ids = [
+        int(item)
+        for item in os.environ.get(
+            "TILEXR_DEVICE_IDS", ",".join(str(item) for item in range(physical))
+        ).split(",")
+        if item.strip()
+    ]
+    actual_qp_count = int(getattr(context.runtime, "udma_qp_count", 0))
     return {
         "global_rank": context.global_rank,
         "global_world_size": context.global_world_size,
@@ -427,12 +527,21 @@ def topology_metadata(context) -> dict[str, object]:
         "lane_group_rank": context.lane_group_rank,
         "lane_group_size": context.lane_group_size,
         "physical_device_count": physical,
+        "device_ids": device_ids,
         "ranks_per_device": ranks_per_device,
         "oversubscribed": os.environ.get("TILEXR_OVERSUBSCRIBED", "0") == "1",
         "planner_block_dim": planner_block_dim,
         "planner_block_dim_source": os.environ.get(
             "TILEXR_MOONEP_PLANNER_BLOCK_DIM_SOURCE",
             "default_oversubscribed" if ranks_per_device == 2 else "default_native",
+        ),
+        "udma_qp_num": actual_qp_count,
+        "udma_qp_route_spec": os.environ.get("TILEXR_UDMA_QP_ROUTE_SPEC", ""),
+        "prefetch_block_dim": int(
+            os.environ.get(
+                "TILEXR_MOONEP_PREFETCH_BLOCK_DIM",
+                str(actual_qp_count),
+            )
         ),
         "peer_memory_cross_node": context.node_count > 1,
         "cross_node_validated": os.environ.get(
@@ -495,6 +604,7 @@ def run_case(torch_module, case, args, root: Path) -> None:
         result["capabilities"] = capabilities
         result["topology"] = topology_metadata(context)
         inputs = make_inputs(torch_module, case, context)
+        buffer.register_projection_buffers(inputs["projections"])
         planning_epoch = 0
 
         def coordinated_iteration(timer=None):
@@ -508,14 +618,22 @@ def run_case(torch_module, case, args, root: Path) -> None:
         validation = {"passed": True, "mode": "disabled"}
         if case.correctness:
             first = coordinated_iteration()
-            validation = validate_plan(first[0], context)
+            validation = validate_plan(
+                first[0],
+                context,
+                route_pattern=case.route_pattern,
+                seed=case.seed,
+            )
             implementations = capabilities["implementations"]
-            stub_stages = ("dispatch", "prefetch_weight", "combine", "reduce_grad")
+            validation["prefetch_weight"] = validate_prefetch_weight(
+                torch_module, first[0], inputs["projections"], context
+            )
+            stub_stages = ("dispatch", "combine", "reduce_grad")
             if all(implementations[stage] == "stub" for stage in stub_stages):
                 validation["stub_flow_checks"] = validate_stub_flow(
                     torch_module, inputs, first[1], first[2], context
                 )
-                validation["mode"] = "planner_cpu_oracle_and_stub_flow"
+                validation["mode"] = "planner_and_native_prefetch_with_stub_flow"
             first_checksum = _checksum(first[1].hidden) + _checksum(first[2].hidden)
             second = coordinated_iteration()
             second_checksum = _checksum(second[1].hidden) + _checksum(second[2].hidden)
@@ -529,19 +647,23 @@ def run_case(torch_module, case, args, root: Path) -> None:
         for _ in range(case.warmup):
             warmup_plan = coordinated_iteration()[0]
         if warmup_plan is not None and int(warmup_plan.status.item()) != 0:
-            raise RuntimeError(
-                f"Planner device status is {int(warmup_plan.status.item())} during warmup"
-            )
+                raise RuntimeError(
+                    f"MoonEP device status is {int(warmup_plan.status.item())} during warmup"
+                )
         samples = []
+        transferred_bytes = int(
+            validation.get("prefetch_weight", {}).get("transferred_bytes", 0)
+        )
         for iteration in range(case.iterations):
             timer = DeviceEventTimer(torch_module)
             plan, forward, backward, timings = coordinated_iteration(timer)
             if int(plan.status.item()) != 0:
-                raise RuntimeError(f"Planner device status is {int(plan.status.item())}")
+                raise RuntimeError(f"MoonEP device status is {int(plan.status.item())}")
             samples.append(
                 {
                     "iteration": iteration,
                     "timings_us": timings,
+                    "prefetch_weight_transferred_bytes": transferred_bytes,
                     "checksums": {
                         "forward": _checksum(forward.hidden),
                         "backward": _checksum(backward.hidden),
@@ -644,7 +766,15 @@ def main(argv: list[str] | None = None) -> int:
                 "environment": environment_metadata(torch, root),
             },
         )
-    for case in cases:
+    comm_id = os.environ.get("TILEXR_COMM_ID")
+    barrier_addr = os.environ.get("TILEXR_MOONEP_BARRIER_ADDR")
+    for case_index, case in enumerate(cases):
+        if comm_id:
+            os.environ["TILEXR_COMM_ID"] = _case_endpoint(comm_id, case_index)
+        if barrier_addr:
+            os.environ["TILEXR_MOONEP_BARRIER_ADDR"] = _case_endpoint(
+                barrier_addr, case_index
+            )
         run_case(torch, case, args, root)
     return 0
 

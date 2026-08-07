@@ -34,6 +34,7 @@ class FakeTensor:
         *,
         contiguous=True,
         storage_offset=0,
+        base_ptr=None,
     ):
         self.shape = tuple(int(value) for value in shape)
         self.dtype = dtype
@@ -45,8 +46,12 @@ class FakeTensor:
         self._contiguous = bool(contiguous)
         self._storage_offset = int(storage_offset)
         self._item = 0
-        self._ptr = FakeTensor._next_ptr
-        FakeTensor._next_ptr += max(64, self.numel() * self.element_size())
+        if base_ptr is None:
+            FakeTensor._next_ptr = (FakeTensor._next_ptr + 63) // 64 * 64
+            self._ptr = FakeTensor._next_ptr
+            FakeTensor._next_ptr += max(64, self.numel() * self.element_size())
+        else:
+            self._ptr = int(base_ptr)
 
     def is_contiguous(self):
         return self._contiguous
@@ -73,7 +78,42 @@ class FakeTensor:
     def reshape(self, *shape):
         if len(shape) == 1 and isinstance(shape[0], tuple):
             shape = shape[0]
-        return FakeTensor(shape, self.dtype, self.device)
+        if math.prod(shape) != self.numel():
+            raise ValueError("reshape changes the number of elements")
+        return FakeTensor(
+            shape,
+            self.dtype,
+            self.device,
+            storage_offset=self._storage_offset,
+            base_ptr=self._ptr,
+        )
+
+    def narrow(self, dim, start, length):
+        dim = int(dim)
+        start = int(start)
+        length = int(length)
+        shape = list(self.shape)
+        if dim < 0 or dim >= len(shape) or start < 0 or length < 0 or start + length > shape[dim]:
+            raise ValueError("invalid narrow")
+        stride = math.prod(shape[dim + 1 :])
+        shape[dim] = length
+        offset_elements = start * stride
+        return FakeTensor(
+            tuple(shape),
+            self.dtype,
+            self.device,
+            storage_offset=self._storage_offset + offset_elements,
+            base_ptr=self._ptr + offset_elements * self.element_size(),
+        )
+
+    def copy_(self, source):
+        if self.shape != source.shape:
+            raise ValueError("copy shape mismatch")
+        return self
+
+    def fill_(self, value):
+        self._item = value
+        return self
 
     def to(self, *, dtype):
         return FakeTensor(self.shape, dtype, self.device)
@@ -133,10 +173,11 @@ class FakeRuntime:
         self.world_size = world_size
         self.calls = []
         self.closed = False
+        self.udma_qp_count = 1
         self.capabilities = NativeCapabilities(
-            abi_version=1,
-            stage_mask=1,
-            stub_mask=30,
+            abi_version=2,
+            stage_mask=5,
+            stub_mask=26,
         )
 
     def planning_workspace_size(self, context):
@@ -158,7 +199,14 @@ class FakeRuntime:
     ):
         self.calls.append(("dispatch", plan, stream))
 
-    def prefetch_weight(self, context, plan, projections, outputs, stream):
+    def udma_register(self, tensor):
+        self.calls.append(("udma_register", tensor))
+        return 0
+
+    def udma_unregister(self, handle):
+        self.calls.append(("udma_unregister", handle))
+
+    def prefetch_weight(self, context, plan, projections, stream):
         self.calls.append(("prefetch_weight", plan, stream))
 
     def combine(

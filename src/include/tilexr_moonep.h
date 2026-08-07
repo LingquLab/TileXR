@@ -93,8 +93,9 @@ typedef struct TileXRMoonEpPrefetchWeightArgsV1 {
     uint32_t abiVersion;
     TileXRCommPtr comm;
     const TileXRMoonEpPlanV1 *plan;
-    const TileXRMoonEpTensorV1 *input;
-    TileXRMoonEpTensorV1 *output;
+    const TileXRMoonEpTensorV1 *gate;
+    const TileXRMoonEpTensorV1 *up;
+    const TileXRMoonEpTensorV1 *down;
     uint64_t flags;
 } TileXRMoonEpPrefetchWeightArgsV1;
 

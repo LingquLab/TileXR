@@ -155,11 +155,13 @@ void TestUDMAReviewFeedbackGuards()
     const std::string apiPath = "src/include/tilexr_api.h";
     const auto api = ReadFile(apiPath);
     CheckContains(apiPath, api, "int TileXRUDMAGetQpCount(TileXRCommPtr comm, uint32_t *qpCount);");
+    CheckNotContains(apiPath, api, "TileXRGetUDMAQpNum");
 
     const std::string wrapPath = "src/comm/comm_wrap.cpp";
     const auto wrap = ReadFile(wrapPath);
     CheckContains(wrapPath, wrap, "int TileXRUDMAGetQpCount(TileXRCommPtr comm, uint32_t *qpCount)");
     CheckContains(wrapPath, wrap, "*qpCount = 0;");
+    CheckNotContains(wrapPath, wrap, "TileXRGetUDMAQpNum");
 }
 
 void TestUDMAMemoryCleanupIsRetryable()
@@ -311,6 +313,14 @@ void TestUDMAMultiQpHostTransportContract()
     CheckContains(transportPath, transport, "LoadUDMARootInfo(rootInfo, &error)");
     CheckContains(transportPath, transport, "ResolveUDMAPortCountEid(");
     CheckContains(transportPath, transport, "ResolveUDMATopologyEid(");
+    CheckContains(transportPath, transport,
+                  "const bool sameServer = UDMARanksShareServer(options_.rank, peer);");
+    CheckContains(transportPath, transport,
+                  "if (rule.selector == UDMAQpRouteSelector::PORT_COUNT)");
+    CheckContains(transportPath, transport, "else if (sameServer)");
+    CheckContains(transportPath, transport,
+                  "resolved = ResolveUDMAAggregateEid(rootInfo, localId, localEid);");
+    CheckNotContains(transportPath, transport, "sameNode ||");
     CheckContains(transportPath, transport,
                   "peerQpStates_[index].reset(new (std::nothrow) PerPeerQpState())");
     CheckContains(transportPath, transport,

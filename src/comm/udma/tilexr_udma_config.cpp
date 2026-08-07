@@ -154,6 +154,12 @@ uint32_t UDMAQpConfigQpCount(const UDMAQpConfig& config)
     return static_cast<uint32_t>(config.routes.size());
 }
 
+bool UDMARanksShareServer(int rank, int peer)
+{
+    return rank >= 0 && peer >= 0 &&
+        rank / TILEXR_UDMA_RANKS_PER_SERVER == peer / TILEXR_UDMA_RANKS_PER_SERVER;
+}
+
 UDMAQpConfigWireDescriptor BuildUDMAQpConfigWireDescriptor(
     const UDMAQpConfig& config, UDMAQpConfigParseStatus parseStatus)
 {

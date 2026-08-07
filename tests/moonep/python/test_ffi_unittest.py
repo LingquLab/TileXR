@@ -44,6 +44,8 @@ class FakeCDLLLoader:
     def __init__(self):
         self.loads = []
         self.destroy_calls = 0
+        self.register_calls = []
+        self.unregister_calls = []
         self.planning_records = []
         self.stage_records = []
         self.comm = self._comm_library()
@@ -64,8 +66,29 @@ class FakeCDLLLoader:
             self.destroy_calls += 1
             return 0
 
+        def register(comm, pointer, size, output):
+            self.assert_scalar(comm, 0x1234)
+            self.register_calls.append(
+                (pointer.value, size.value if hasattr(size, "value") else int(size))
+            )
+            ctypes.cast(output, ctypes.POINTER(ctypes.c_uint32)).contents.value = 0
+            return 0
+
+        def unregister(comm, handle):
+            self.assert_scalar(comm, 0x1234)
+            self.unregister_calls.append(handle.value)
+            return 0
+
+        def get_qp_count(comm, output):
+            self.assert_scalar(comm, 0x1234)
+            ctypes.cast(output, ctypes.POINTER(ctypes.c_uint32)).contents.value = 4
+            return 0
+
         library.TileXRCommInitRankLocal = FakeFunction(init_rank_local)
         library.TileXRCommDestroy = FakeFunction(destroy)
+        library.TileXRUDMARegister = FakeFunction(register)
+        library.TileXRUDMAUnregister = FakeFunction(unregister)
+        library.TileXRUDMAGetQpCount = FakeFunction(get_qp_count)
         return library
 
     @staticmethod
@@ -79,8 +102,8 @@ class FakeCDLLLoader:
         library.TileXRMoonEpGetAbiVersion = FakeFunction(lambda: 1)
 
         def capabilities(native, stub):
-            ctypes.cast(native, ctypes.POINTER(ctypes.c_uint64)).contents.value = 1
-            ctypes.cast(stub, ctypes.POINTER(ctypes.c_uint64)).contents.value = 30
+            ctypes.cast(native, ctypes.POINTER(ctypes.c_uint64)).contents.value = 5
+            ctypes.cast(stub, ctypes.POINTER(ctypes.c_uint64)).contents.value = 26
             return 0
 
         def workspace(comm, s, k, e, workspace_bytes, capacity):
@@ -105,6 +128,7 @@ class FakeCDLLLoader:
                     "workspace_bytes": args.workspaceBytes,
                     "wait_iterations": args.waitIterations,
                     "flags": args.flags,
+                    "abi_versions": (args.abiVersion, topk.abiVersion, plan.abiVersion),
                     "topk_shape": tuple(topk.shape[: topk.rank]),
                     "tpe_shape": tuple(tpe.shape[: tpe.rank]),
                     "plan": (plan.s, plan.k, plan.e, plan.b, plan.rank, plan.world,
@@ -116,9 +140,27 @@ class FakeCDLLLoader:
         library.TileXRMoonEpGetCapabilitiesV1 = FakeFunction(capabilities)
         library.TileXRMoonEpPlanningGetWorkspaceSizeV1 = FakeFunction(workspace)
         library.TileXRMoonEpPlanningV1 = FakeFunction(planning)
+
+        def prefetch(args_ptr, stream):
+            args = ctypes.cast(
+                args_ptr, ctypes.POINTER(TileXRMoonEPPrefetchWeightArgsV1)
+            ).contents
+            self.stage_records.append(
+                {
+                    "name": "prefetch_weight",
+                    "stream": stream.value,
+                    "flags": args.flags,
+                    "abi_version": args.abiVersion,
+                    "gate_shape": tuple(args.gate.contents.shape[: args.gate.contents.rank]),
+                    "up_shape": tuple(args.up.contents.shape[: args.up.contents.rank]),
+                    "down_shape": tuple(args.down.contents.shape[: args.down.contents.rank]),
+                }
+            )
+            return 0
+
+        library.TileXRMoonEpPrefetchWeightV1 = FakeFunction(prefetch)
         for name, args_type in (
             ("dispatch", TileXRMoonEPDispatchArgsV1),
-            ("prefetch_weight", TileXRMoonEPPrefetchWeightArgsV1),
             ("combine", TileXRMoonEPCombineArgsV1),
             ("reduce_grad", TileXRMoonEPReduceGradArgsV1),
         ):
@@ -126,7 +168,6 @@ class FakeCDLLLoader:
                 library,
                 {
                     "dispatch": "TileXRMoonEpDispatchV1",
-                    "prefetch_weight": "TileXRMoonEpPrefetchWeightV1",
                     "combine": "TileXRMoonEpCombineV1",
                     "reduce_grad": "TileXRMoonEpReduceGradV1",
                 }[name],
@@ -169,10 +210,12 @@ class FfiAbiTests(unittest.TestCase):
         self.assertEqual(ctypes.sizeof(TileXRMoonEPPlanV1), 104)
         self.assertEqual(ctypes.sizeof(TileXRMoonEPPlanningArgsV1), 72)
         self.assertEqual(ctypes.sizeof(TileXRMoonEPDispatchArgsV1), 48)
+        self.assertEqual(ctypes.sizeof(TileXRMoonEPPrefetchWeightArgsV1), 56)
         self.assertEqual(TileXRMoonEPTensorV1.shape.offset, 32)
         self.assertEqual(TileXRMoonEPPlanV1.dst.offset, 64)
         self.assertEqual(TileXRMoonEPPlanningArgsV1.flags.offset, 64)
         self.assertEqual(TileXRMoonEPDispatchArgsV1.flags.offset, 40)
+        self.assertEqual(TileXRMoonEPPrefetchWeightArgsV1.flags.offset, 48)
 
     def test_fake_cdll_receives_exact_v1_descriptors_and_current_stream(self):
         loader = FakeCDLLLoader()
@@ -211,11 +254,14 @@ class FfiAbiTests(unittest.TestCase):
         dispatched = buffer.dispatch(
             tensor((4, 8), torch.bfloat16), plan, tensor((4, 2), torch.float32)
         )
-        projections = ProjectionBuffers(
-            tensor((6, 8), torch.bfloat16),
-            tensor((6, 8), torch.bfloat16),
-            tensor((6, 8), torch.bfloat16),
+        projections = ProjectionBuffers.from_local_weights(
+            context,
+            tensor((2, 32), torch.bfloat16),
+            tensor((2, 32), torch.bfloat16),
+            tensor((2, 32), torch.bfloat16),
+            torch_module=torch,
         )
+        buffer.register_projection_buffers(projections)
         prefetched = buffer.prefetch_weight(plan, projections)
         buffer.combine(dispatched.hidden, plan, dispatched.route_weights)
         gradients = ProjectionBuffers(
@@ -227,16 +273,17 @@ class FfiAbiTests(unittest.TestCase):
             tensor((6, 8), torch.float32),
         )
         buffer.reduce_grad(plan, gradients)
-        self.assertEqual(tuple(prefetched.gate.shape), (6, 8))
+        self.assertEqual(tuple(prefetched.gate.shape), (4, 32))
         buffer.close()
 
         self.assertEqual(
             [Path(path).name for path, _ in loader.loads],
             ["libtile-comm.so", "libtilexr-moonep-planner.so", "libtilexr-moonep.so.1"],
         )
-        self.assertEqual(runtime.capabilities.stage_mask, 1)
-        self.assertEqual(runtime.capabilities.stub_mask, 30)
+        self.assertEqual(runtime.capabilities.stage_mask, 5)
+        self.assertEqual(runtime.capabilities.stub_mask, 26)
         self.assertFalse(runtime.capabilities.transport_performance_valid)
+        self.assertEqual(runtime.udma_qp_count, 4)
         self.assertEqual(loader.destroy_calls, 1)
         self.assertEqual(
             loader.planning_records,
@@ -245,6 +292,7 @@ class FfiAbiTests(unittest.TestCase):
                 "workspace_bytes": 256,
                 "wait_iterations": 1234,
                 "flags": 0,
+                "abi_versions": (1, 1, 1),
                 "topk_shape": (4, 2),
                 "tpe_shape": (4,),
                 "plan": (4, 2, 4, 2, 0, 2, 8),
@@ -255,8 +303,6 @@ class FfiAbiTests(unittest.TestCase):
             [
                 "dispatch",
                 "dispatch",
-                "prefetch_weight",
-                "prefetch_weight",
                 "prefetch_weight",
                 "combine",
                 "combine",
@@ -269,8 +315,12 @@ class FfiAbiTests(unittest.TestCase):
         self.assertTrue(all(record["flags"] == 0 for record in loader.stage_records))
         self.assertEqual(loader.stage_records[1]["input_shape"], (4, 2))
         self.assertEqual(loader.stage_records[1]["output_shape"], (8,))
-        self.assertEqual(loader.stage_records[6]["input_shape"], (8,))
-        self.assertEqual(loader.stage_records[6]["output_shape"], (4, 2))
+        self.assertEqual(loader.stage_records[4]["input_shape"], (8,))
+        self.assertEqual(loader.stage_records[4]["output_shape"], (4, 2))
+        self.assertEqual(loader.stage_records[2]["abi_version"], 1)
+        self.assertEqual(loader.stage_records[2]["gate_shape"], (4, 32))
+        self.assertEqual(len(loader.register_calls), 1)
+        self.assertEqual(loader.unregister_calls, [0])
 
     def test_versioned_planner_library_is_preferred(self):
         import tempfile
