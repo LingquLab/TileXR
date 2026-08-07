@@ -340,8 +340,8 @@ global payload buffers.
   `OFF`.
 - Keep the Planner independent of `src/ep` and all active targets independent
   of `reference/`.
-- Install Host and kernel libraries plus public headers through normal CMake
-  install rules.
+- Install Host libraries with embedded pure-AICore kernels plus public headers through
+  normal CMake install rules. Do not install Bisheng Host-wrapper kernel SOs.
 - Runtime RPATH is `$ORIGIN`; no toolkit `devlib` directory appears in RPATH or
   RUNPATH.
 - Planner build remains A5-only. Torch/source tests remain runnable without an

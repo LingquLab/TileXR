@@ -45,6 +45,7 @@ class FakeTensor:
         self._contiguous = bool(contiguous)
         self._storage_offset = int(storage_offset)
         self._item = 0
+        self.masked_fill_calls = []
         self._ptr = FakeTensor._next_ptr
         FakeTensor._next_ptr += max(64, self.numel() * self.element_size())
 
@@ -86,6 +87,13 @@ class FakeTensor:
 
     __rmul__ = __mul__
 
+    def __ge__(self, other):
+        return FakeTensor(self.shape, "uint8", self.device)
+
+    def masked_fill_(self, mask, value):
+        self.masked_fill_calls.append((mask, value))
+        return self
+
     def contiguous(self):
         return self
 
@@ -93,6 +101,9 @@ class FakeTensor:
 class FakeStream:
     def __init__(self, value=0xCAFE):
         self.npu_stream = int(value)
+
+    def record_event(self):
+        return ("event", self.npu_stream)
 
 
 class FakeNpu:
@@ -128,23 +139,34 @@ class FakeTorch:
 
 
 class FakeRuntime:
-    def __init__(self, rank=0, world_size=2):
+    def __init__(
+        self,
+        rank=0,
+        world_size=2,
+        *,
+        write_status_markers=False,
+        fail_dispatch_calls=0,
+    ):
         self.rank = rank
         self.world_size = world_size
+        self.write_status_markers = bool(write_status_markers)
+        self.fail_dispatch_calls = int(fail_dispatch_calls)
         self.calls = []
         self.closed = False
         self.capabilities = NativeCapabilities(
             abi_version=1,
-            stage_mask=1,
-            stub_mask=30,
+            stage_mask=31,
+            stub_mask=0,
         )
 
     def planning_workspace_size(self, context):
         self.calls.append(("planning_workspace_size", None))
         return 64
 
-    def planning(self, context, topk, tpe, plan, stream, wait_iterations):
+    def planning(self, context, topk, tpe, plan, cu_seqlens, stream, wait_iterations):
         self.calls.append(("planning", plan, stream, wait_iterations))
+        if self.write_status_markers:
+            plan.status._item = 0
 
     def dispatch(
         self,
@@ -155,11 +177,33 @@ class FakeRuntime:
         stream,
         route_weights=None,
         output_route_weights=None,
+        *,
+        build_dedup,
+        inter_rank_sync,
     ):
-        self.calls.append(("dispatch", plan, stream))
+        self.calls.append(
+            (
+                "dispatch",
+                plan,
+                hidden,
+                output,
+                route_weights,
+                output_route_weights,
+                stream,
+                build_dedup,
+                inter_rank_sync,
+            )
+        )
+        if self.fail_dispatch_calls > 0:
+            self.fail_dispatch_calls -= 1
+            raise RuntimeError("fake dispatch enqueue failed")
+        if self.write_status_markers:
+            plan.status._item = 2000
 
-    def prefetch_weight(self, context, plan, projections, outputs, stream):
-        self.calls.append(("prefetch_weight", plan, stream))
+    def prefetch_weight(self, context, plan, projections, stream):
+        self.calls.append(("prefetch_weight", plan, projections, stream))
+        if self.write_status_markers:
+            plan.status._item = 4000
 
     def combine(
         self,
@@ -170,11 +214,28 @@ class FakeRuntime:
         stream,
         route_weights=None,
         output_route_weights=None,
+        *,
+        inter_rank_sync,
     ):
-        self.calls.append(("combine", plan, stream))
+        self.calls.append(
+            (
+                "combine",
+                plan,
+                hidden,
+                output,
+                route_weights,
+                output_route_weights,
+                stream,
+                inter_rank_sync,
+            )
+        )
+        if self.write_status_markers:
+            plan.status._item = 3000
 
     def reduce_grad(self, context, plan, gradients, stream):
-        self.calls.append(("reduce_grad", plan, stream))
+        self.calls.append(("reduce_grad", plan, gradients, stream))
+        if self.write_status_markers:
+            plan.status._item = 5000
 
     def close(self):
         self.closed = True

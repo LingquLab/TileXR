@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib
 import importlib.metadata
 import json
 import math
@@ -12,6 +13,10 @@ from pathlib import Path
 from typing import Callable
 
 from .config import apply_overrides, build_case_parser, load_cases, select_cases
+from .case_factory import make_correctness_case
+from .contracts import BackendUnavailableError, MoonEPBackend, MoonEPDimensions
+from .correctness import CorrectnessRunner
+from .expert_forward import run_expert_forward
 from .planner_reference import build_reference_plan, deterministic_all_topk
 from .rendezvous import (
     completion_barrier_from_env,
@@ -19,10 +24,13 @@ from .rendezvous import (
     signal_managed_abort,
 )
 from .report import write_json, write_jsonl
+from .torch_npu_backend import TorchNpuMoonEPBackend
+
+
+DEFAULT_CORRECTNESS_BACKEND = "tools.moonep.tilexr_backend:create_backend"
 
 
 STAGE_ORDER = (
-    "planning",
     "dispatch_forward",
     "prefetch_weight",
     "expert_forward",
@@ -32,6 +40,8 @@ STAGE_ORDER = (
     "combine_backward",
     "reduce_grad",
 )
+
+REDUCE_GRAD_STATUS_SUCCESS = 5000
 
 
 def _hold_unsafe_teardown(
@@ -116,75 +126,95 @@ def _oversubscribed_planning_barrier(buffer, case_id: str, epoch: int) -> None:
         raise RuntimeError("oversubscribed Planning launch rendezvous failed")
 
 
-def execute_iteration(buffer, inputs: dict[str, object], timer: DeviceEventTimer | None = None):
+def execute_iteration(
+    buffer,
+    inputs: dict[str, object],
+    timer: DeviceEventTimer | None = None,
+    *,
+    torch_module,
+    torch_npu_module=None,
+):
     if timer is not None:
         timer.start()
-    plan = _timed_call(
-        timer,
-        "planning",
-        lambda: buffer.planning(inputs["topk_experts"], inputs["tokens_per_expert"]),
-    )
-    dispatched = _timed_call(
+    hidden_nvsh, route_weights_nvs, cu_seqlens, plan = _timed_call(
         timer,
         "dispatch_forward",
-        lambda: buffer.dispatch(inputs["hidden"], plan, inputs["route_weights"]),
+        lambda: buffer.dispatch(
+            inputs["hidden"],
+            inputs["route_weights"],
+            inputs["topk_experts"],
+            inputs["tokens_per_expert"],
+        ),
     )
-    prefetched = _timed_call(
+    _timed_call(
         timer,
         "prefetch_weight",
-        lambda: buffer.prefetch_weight(plan, inputs["projections"]),
+        lambda: buffer.prefetch_weight(
+            plan,
+            full_gate_weight=inputs["projections"].gate,
+            full_up_weight=inputs["projections"].up,
+            full_down_weight=inputs["projections"].down,
+        ),
     )
 
-    def expert_forward():
-        scale = prefetched.gate[-buffer.context.experts_per_rank :].mean()
-        output = dispatched.hidden * scale.to(dtype=dispatched.hidden.dtype)
-        if dispatched.route_weights is not None:
-            route_weights = dispatched.route_weights.to(dtype=output.dtype)
-            output = output * route_weights.reshape(buffer.context.dispatched_capacity, 1)
-        return output
-
-    expert_output = _timed_call(timer, "expert_forward", expert_forward)
-    forward = _timed_call(
+    expert_output = _timed_call(
+        timer,
+        "expert_forward",
+        lambda: run_expert_forward(
+            torch_module,
+            hidden_nvsh,
+            cu_seqlens,
+            inputs["projections"],
+            route_weights_nvs,
+            torch_npu_module=torch_npu_module,
+        ).hidden,
+    )
+    forward_hidden, forward_weights, _ = _timed_call(
         timer,
         "combine_forward",
-        lambda: buffer.combine(expert_output, plan, dispatched.route_weights),
+        lambda: buffer.combine(plan, expert_output, route_weights_nvs),
     )
-    dispatched_grad = _timed_call(
+    dispatched_grad, _, _, _ = _timed_call(
         timer,
         "dispatch_backward",
-        lambda: buffer.dispatch(inputs["grad_output"], plan),
+        lambda: buffer.dispatch(inputs["grad_output"], plan=plan),
     )
 
     def expert_backward():
-        scale = prefetched.gate[-buffer.context.experts_per_rank :].mean()
-        output = dispatched_grad.hidden * scale.to(dtype=dispatched_grad.hidden.dtype)
-        if dispatched.route_weights is not None:
-            route_weights = dispatched.route_weights.to(dtype=output.dtype)
-            output = output * route_weights.reshape(
-                buffer.context.dispatched_capacity, 1
-            )
+        scale = inputs["projections"].gate[-buffer.context.prefetch_slots :].mean()
+        output = dispatched_grad * scale.to(dtype=dispatched_grad.dtype)
+        if route_weights_nvs is not None:
+            route_weights = route_weights_nvs.to(dtype=output.dtype)
+            output = output * route_weights.reshape(buffer.context.nv_s, 1)
         return output
 
     grad_expert_hidden = _timed_call(timer, "expert_backward", expert_backward)
-    backward = _timed_call(
+    backward_hidden, _, _ = _timed_call(
         timer,
         "combine_backward",
-        lambda: buffer.combine(grad_expert_hidden, plan),
+        lambda: buffer.combine(plan, grad_expert_hidden),
     )
     _timed_call(
         timer,
         "reduce_grad",
-        lambda: buffer.reduce_grad(plan, inputs["gradients"]),
+        lambda: buffer.reduce_grad(
+            plan,
+            full_gate_grad=inputs["gradients"].gate,
+            full_up_grad=inputs["gradients"].up,
+            full_down_grad=inputs["gradients"].down,
+            gate_reduce_buffer=inputs["gradients"].gate_reduce,
+            up_reduce_buffer=inputs["gradients"].up_reduce,
+            down_reduce_buffer=inputs["gradients"].down_reduce,
+        ),
     )
     timings = None if timer is None else timer.finish()
     buffer.synchronize()
-    return plan, forward, backward, timings
+    return plan, cu_seqlens, forward_hidden, forward_weights, backward_hidden, timings
 
 
 def _torch_dtype(torch_module, name: str):
     return {
         "bfloat16": torch_module.bfloat16,
-        "float16": torch_module.float16,
     }[name]
 
 
@@ -217,30 +247,43 @@ def make_inputs(torch_module, case, context):
         dtype=torch_module.float32,
         device=device,
     )
-    rows = case.expert_count + context.experts_per_rank
+    rows = case.expert_count + context.prefetch_slots
+    intermediate_size = (
+        int(case.intermediate_size)
+        if case.intermediate_size is not None
+        else int(case.hidden_size)
+    )
+    gate_up_shape = (rows, case.hidden_size, intermediate_size)
+    down_shape = (rows, intermediate_size, case.hidden_size)
+    gate_up_reduce_shape = (
+        context.planner_group_size,
+        context.prefetch_slots,
+        case.hidden_size,
+        intermediate_size,
+    )
+    down_reduce_shape = (
+        context.planner_group_size,
+        context.prefetch_slots,
+        intermediate_size,
+        case.hidden_size,
+    )
     projections = ProjectionBuffers(
-        gate=torch_module.full((rows, case.hidden_size), 0.5, dtype=dtype, device=device),
-        up=torch_module.full((rows, case.hidden_size), 0.25, dtype=dtype, device=device),
-        down=torch_module.full((rows, case.hidden_size), 0.75, dtype=dtype, device=device),
+        gate=torch_module.full(gate_up_shape, 0.5, dtype=dtype, device=device),
+        up=torch_module.full(gate_up_shape, 0.25, dtype=dtype, device=device),
+        down=torch_module.full(down_shape, 0.75, dtype=dtype, device=device),
     )
     gradients = ProjectionBuffers(
-        gate=torch_module.ones((rows, case.hidden_size), dtype=torch_module.float32, device=device),
-        up=torch_module.ones((rows, case.hidden_size), dtype=torch_module.float32, device=device),
-        down=torch_module.ones((rows, case.hidden_size), dtype=torch_module.float32, device=device),
+        gate=torch_module.ones(gate_up_shape, dtype=torch_module.float32, device=device),
+        up=torch_module.ones(gate_up_shape, dtype=torch_module.float32, device=device),
+        down=torch_module.ones(down_shape, dtype=torch_module.float32, device=device),
         gate_reduce=torch_module.zeros(
-            (rows, case.hidden_size),
-            dtype=torch_module.float32,
-            device=device,
+            gate_up_reduce_shape, dtype=torch_module.float32, device=device
         ),
         up_reduce=torch_module.zeros(
-            (rows, case.hidden_size),
-            dtype=torch_module.float32,
-            device=device,
+            gate_up_reduce_shape, dtype=torch_module.float32, device=device
         ),
         down_reduce=torch_module.zeros(
-            (rows, case.hidden_size),
-            dtype=torch_module.float32,
-            device=device,
+            down_reduce_shape, dtype=torch_module.float32, device=device
         ),
     )
     return {
@@ -296,16 +339,22 @@ def _require_exact(name: str, actual: list[int], expected) -> None:
     )
 
 
-def validate_plan(plan, context) -> dict[str, object]:
+def validate_plan(
+    plan, context, cu_seqlens=None, *, expected_status: int = 0
+) -> dict[str, object]:
     status = int(plan.status.item())
-    if status != 0:
-        raise RuntimeError(f"Planner device status is {status}")
+    if status != int(expected_status):
+        raise RuntimeError(
+            f"MoonEP device status is {status}, expected {int(expected_status)}"
+        )
     reference = build_reference_plan(
         rank=context.planner_group_rank,
         rank_size=context.planner_group_size,
         tokens_per_rank=context.tokens_per_rank,
         topk=context.topk,
         expert_count=context.expert_count,
+        prefetch_slots=context.prefetch_slots,
+        token_padding=context.token_padding,
         all_topk=deterministic_all_topk(
             context.planner_group_size,
             context.tokens_per_rank,
@@ -314,8 +363,15 @@ def validate_plan(plan, context) -> dict[str, object]:
         ),
     )
     _require_exact("dst", _tensor_values(plan.dst), reference.dst)
+    if cu_seqlens is None:
+        cu_seqlens = getattr(plan, "cu_seqlens", None)
+    if cu_seqlens is None:
+        raise RuntimeError("Planner cu_seqlens output is required")
+    _require_exact("cu_seqlens", _tensor_values(cu_seqlens), reference.cu_seqlens)
     _require_exact(
-        "cu_seqlens", _tensor_values(plan.cu_seqlens), reference.cu_seqlens
+        "zero_fill_ranges",
+        _tensor_values(plan.zero_fill_ranges),
+        reference.zero_fill_ranges,
     )
     _require_exact(
         "experts_to_copy",
@@ -329,9 +385,10 @@ def validate_plan(plan, context) -> dict[str, object]:
         "passed": True,
         "mode": "planner_cpu_oracle",
         "checks": {
-            "status_zero": True,
+            "status_expected": True,
             "dst_exact": True,
             "cu_seqlens_exact": True,
+            "zero_fill_ranges_exact": True,
             "experts_to_copy_exact": True,
             "remote_stats_exact": True,
         },
@@ -342,12 +399,10 @@ def validate_stub_flow(torch_module, inputs, forward, backward, context) -> dict
     scale = inputs["projections"].gate[-context.experts_per_rank :].mean()
     local_weights = inputs["route_weights"].reshape(-1)[: context.tokens_per_rank]
     local_weights = local_weights.reshape(context.tokens_per_rank, 1)
-    expected_forward = inputs["hidden"] * scale.to(dtype=inputs["hidden"].dtype)
-    expected_forward = expected_forward * local_weights.to(dtype=expected_forward.dtype)
     expected_backward = inputs["grad_output"] * scale.to(dtype=inputs["grad_output"].dtype)
     expected_backward = expected_backward * local_weights.to(dtype=expected_backward.dtype)
     checks = {
-        "forward_hidden_exact": bool(torch_module.equal(forward.hidden, expected_forward)),
+        "forward_hidden_finite": bool(torch_module.isfinite(forward.hidden).all().item()),
         "forward_weights_exact": bool(
             torch_module.equal(forward.route_weights, inputs["route_weights"])
         ),
@@ -364,7 +419,7 @@ def validate_stub_flow(torch_module, inputs, forward, backward, context) -> dict
     }
     failed = [name for name, passed in checks.items() if not passed]
     if failed:
-        raise RuntimeError(f"native stub flow mismatch: {', '.join(failed)}")
+        raise RuntimeError(f"remaining stub flow mismatch: {', '.join(failed)}")
     return checks
 
 
@@ -484,6 +539,8 @@ def run_case(torch_module, case, args, root: Path) -> None:
             topk=case.topk,
             expert_count=case.expert_count,
             dtype=dtype,
+            token_padding=case.token_padding,
+            prefetch_slots=case.prefetch_slots,
             install_prefix=args.install_prefix,
             torch_module=torch_module,
         )
@@ -501,50 +558,66 @@ def run_case(torch_module, case, args, root: Path) -> None:
             nonlocal planning_epoch
             _oversubscribed_planning_barrier(buffer, case.case_id, planning_epoch)
             planning_epoch += 1
-            return execute_iteration(buffer, inputs, timer)
+            return execute_iteration(
+                buffer, inputs, timer, torch_module=torch_module
+            )
 
-        if int(inputs["tokens_per_expert"].sum().item()) != context.dispatched_capacity:
+        if int(inputs["tokens_per_expert"].sum().item()) != context.route_count:
             raise RuntimeError("tokens_per_expert does not sum to S*K")
         validation = {"passed": True, "mode": "disabled"}
         if case.correctness:
             first = coordinated_iteration()
-            validation = validate_plan(first[0], context)
+            validation = validate_plan(
+                first[0],
+                context,
+                first[1],
+                expected_status=REDUCE_GRAD_STATUS_SUCCESS,
+            )
             implementations = capabilities["implementations"]
             stub_stages = ("dispatch", "prefetch_weight", "combine", "reduce_grad")
             if all(implementations[stage] == "stub" for stage in stub_stages):
                 validation["stub_flow_checks"] = validate_stub_flow(
-                    torch_module, inputs, first[1], first[2], context
+                    torch_module, inputs, first[2], first[4], context
                 )
                 validation["mode"] = "planner_cpu_oracle_and_stub_flow"
-            first_checksum = _checksum(first[1].hidden) + _checksum(first[2].hidden)
+            elif capabilities.get("transport_correctness_valid", False):
+                validation["mode"] = "planner_cpu_oracle_and_native_status"
+            first_checksum = _checksum(first[2]) + _checksum(first[4])
             second = coordinated_iteration()
-            second_checksum = _checksum(second[1].hidden) + _checksum(second[2].hidden)
+            second_checksum = _checksum(second[2]) + _checksum(second[4])
             if first_checksum != second_checksum:
                 raise RuntimeError(
-                    f"stub flow is not deterministic: {first_checksum} != {second_checksum}"
+                    f"MoonEP flow is not deterministic: {first_checksum} != {second_checksum}"
                 )
             validation["checksum"] = first_checksum
             validation["deterministic"] = True
         warmup_plan = None
         for _ in range(case.warmup):
             warmup_plan = coordinated_iteration()[0]
-        if warmup_plan is not None and int(warmup_plan.status.item()) != 0:
+        if (
+            warmup_plan is not None
+            and int(warmup_plan.status.item()) != REDUCE_GRAD_STATUS_SUCCESS
+        ):
             raise RuntimeError(
-                f"Planner device status is {int(warmup_plan.status.item())} during warmup"
+                f"MoonEP device status is {int(warmup_plan.status.item())} during "
+                f"warmup, expected {REDUCE_GRAD_STATUS_SUCCESS}"
             )
         samples = []
         for iteration in range(case.iterations):
             timer = DeviceEventTimer(torch_module)
-            plan, forward, backward, timings = coordinated_iteration(timer)
-            if int(plan.status.item()) != 0:
-                raise RuntimeError(f"Planner device status is {int(plan.status.item())}")
+            plan, _, forward, _, backward, timings = coordinated_iteration(timer)
+            if int(plan.status.item()) != REDUCE_GRAD_STATUS_SUCCESS:
+                raise RuntimeError(
+                    f"MoonEP device status is {int(plan.status.item())}, expected "
+                    f"{REDUCE_GRAD_STATUS_SUCCESS}"
+                )
             samples.append(
                 {
                     "iteration": iteration,
                     "timings_us": timings,
                     "checksums": {
-                        "forward": _checksum(forward.hidden),
-                        "backward": _checksum(backward.hidden),
+                        "forward": _checksum(forward),
+                        "backward": _checksum(backward),
                     },
                 }
             )
@@ -610,19 +683,164 @@ def run_case(torch_module, case, args, root: Path) -> None:
         raise failure[0].with_traceback(failure[1])
 
 
+def _correctness_dimensions(case, *, rank: int, world_size: int) -> MoonEPDimensions:
+    return MoonEPDimensions(
+        rank=rank,
+        world_size=world_size,
+        tokens_per_rank=int(case.tokens_per_rank),
+        topk=int(case.topk),
+        expert_count=int(case.expert_count),
+        prefetch_slots=(
+            int(case.prefetch_slots)
+            if case.prefetch_slots is not None
+            else int(case.expert_count) // world_size
+        ),
+        token_padding=int(case.token_padding),
+        hidden_size=int(case.hidden_size),
+        intermediate_size=(
+            int(case.intermediate_size)
+            if case.intermediate_size is not None
+            else int(case.hidden_size)
+        ),
+    )
+
+
+def load_candidate_backend(spec: str, *, torch_module, dimensions, case, args):
+    module_name, separator, factory_name = spec.partition(":")
+    if not separator or not module_name or not factory_name:
+        raise ValueError("candidate backend must use MODULE:FACTORY syntax")
+    module = importlib.import_module(module_name)
+    factory = getattr(module, factory_name, None)
+    if factory is None or not callable(factory):
+        raise BackendUnavailableError(
+            f"candidate backend factory {spec!r} is not callable"
+        )
+    backend = factory(
+        torch_module=torch_module,
+        dimensions=dimensions,
+        case=case,
+        args=args,
+    )
+    if not isinstance(backend, MoonEPBackend):
+        raise BackendUnavailableError(
+            f"candidate backend factory {spec!r} did not return MoonEPBackend"
+        )
+    return backend
+
+
+def run_correctness_case(torch_module, case, args, root: Path) -> None:
+    del root
+    rank = int(os.environ.get("RANK", "0"))
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    dimensions = _correctness_dimensions(case, rank=rank, world_size=world_size)
+    device = f"npu:{int(os.environ.get('LOCAL_RANK', str(rank)))}"
+    rank_dir = Path(args.output_dir) / case.case_id / f"rank_{rank}"
+    dump_enabled = bool(getattr(args, "dump_stage_tensors", False))
+    preview_elements = int(getattr(args, "tensor_preview_elements", 8))
+    tensor_dump_dir = rank_dir / "tensor_dumps" if dump_enabled else None
+    result = {
+        "schema_version": 1,
+        "status": "failed",
+        "failure_reason": None,
+        "mode": args.mode,
+        "case": case.as_dict(),
+        "rank": rank,
+        "performance_valid": False,
+        "tensor_dump": {
+            "enabled": dump_enabled,
+            "preview_elements": preview_elements if dump_enabled else None,
+            "directory": "tensor_dumps" if dump_enabled else None,
+        },
+        "validation": None,
+    }
+    reference = None
+    candidate = None
+    failure = None
+    try:
+        canonical = make_correctness_case(
+            torch_module,
+            dimensions,
+            case_id=case.case_id,
+            routing_pattern=case.routing_pattern,
+            device=device,
+        )
+        reference = TorchNpuMoonEPBackend(torch_module, dimensions)
+        if args.mode == "correctness":
+            candidate = load_candidate_backend(
+                args.candidate_backend or DEFAULT_CORRECTNESS_BACKEND,
+                torch_module=torch_module,
+                dimensions=dimensions,
+                case=case,
+                args=args,
+            )
+        runner = CorrectnessRunner(
+            torch_module,
+            reference,
+            candidate,
+            artifact_dir=rank_dir / "stages",
+            tensor_dump_dir=tensor_dump_dir,
+            preview_elements=preview_elements,
+            preview_sink=print,
+        )
+        report = (
+            runner.run_reference(canonical)
+            if args.mode == "reference"
+            else runner.run_differential(canonical)
+        )
+        result["status"] = "passed"
+        result["validation"] = report.as_dict()
+    except Exception as exc:
+        result["failure_reason"] = f"{type(exc).__name__}: {exc}"
+        failure = (exc, exc.__traceback__)
+    finally:
+        cleanup_errors = []
+        for name, backend in (("candidate", candidate), ("reference", reference)):
+            if backend is None:
+                continue
+            try:
+                backend.close()
+            except Exception as close_exc:
+                cleanup_errors.append(
+                    f"{name}: {type(close_exc).__name__}: {close_exc}"
+                )
+                if failure is None:
+                    result["status"] = "failed"
+                    result["failure_reason"] = (
+                        f"{type(close_exc).__name__}: {close_exc}"
+                    )
+                    failure = (close_exc, close_exc.__traceback__)
+        if cleanup_errors:
+            result["cleanup_errors"] = cleanup_errors
+        write_json(rank_dir / "result.json", result)
+    if failure is not None:
+        raise failure[0].with_traceback(failure[1])
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="TileXR MoonEP complete-flow benchmark")
     build_case_parser(parser)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--install-prefix", default=None)
     parser.add_argument("--wait-iterations", type=int, default=1_000_000)
+    parser.add_argument(
+        "--mode", choices=("benchmark", "reference", "correctness"), default="benchmark"
+    )
+    parser.add_argument("--candidate-backend", default=None, metavar="MODULE:FACTORY")
+    parser.add_argument(
+        "--dump-stage-tensors",
+        action="store_true",
+        help="save complete untimed correctness-stage inputs and outputs",
+    )
+    parser.add_argument("--tensor-preview-elements", type=int, default=8)
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    if args.wait_iterations <= 0:
-        raise ValueError("wait_iterations must be positive")
+    if args.wait_iterations <= 0 or args.tensor_preview_elements <= 0:
+        raise ValueError("wait_iterations and tensor_preview_elements must be positive")
+    if args.mode == "benchmark" and args.dump_stage_tensors:
+        raise ValueError("--dump-stage-tensors is only valid in reference/correctness mode")
     if (
         int(os.environ.get("WORLD_SIZE", "1")) > 1
         and os.environ.get("TILEXR_MOONEP_MANAGED_LAUNCH") != "1"
@@ -630,8 +848,20 @@ def main(argv: list[str] | None = None) -> int:
         raise RuntimeError("multi-rank MoonEP workers require the managed launcher")
     import torch
 
+    if args.mode != "benchmark":
+        importlib.import_module("torch_npu")
+
     local_rank = int(os.environ.get("LOCAL_RANK", "0"))
     torch.npu.set_device(local_rank)
+    initialized_group = False
+    if args.mode != "benchmark" and int(os.environ.get("WORLD_SIZE", "1")) > 1:
+        if not torch.distributed.is_initialized():
+            torch.distributed.init_process_group(
+                backend="hccl",
+                rank=int(os.environ["RANK"]),
+                world_size=int(os.environ["WORLD_SIZE"]),
+            )
+            initialized_group = True
     cases = select_cases(load_cases(args.cases), args.case_ids)
     cases = [apply_overrides(case, args) for case in cases]
     root = Path(__file__).resolve().parents[2]
@@ -644,8 +874,15 @@ def main(argv: list[str] | None = None) -> int:
                 "environment": environment_metadata(torch, root),
             },
         )
-    for case in cases:
-        run_case(torch, case, args, root)
+    try:
+        for case in cases:
+            if args.mode == "benchmark":
+                run_case(torch, case, args, root)
+            else:
+                run_correctness_case(torch, case, args, root)
+    finally:
+        if initialized_group:
+            torch.distributed.destroy_process_group()
     return 0
 
 

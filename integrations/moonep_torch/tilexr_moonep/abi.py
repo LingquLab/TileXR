@@ -8,6 +8,9 @@ TILEXR_SUCCESS = 0
 TILEXR_MOONEP_ABI_VERSION = 1
 TILEXR_MOONEP_MAX_TENSOR_RANK = 4
 TILEXR_MOONEP_FLAG_NONE = 0
+TILEXR_MOONEP_FLAG_BUILD_DEDUP = 1 << 0
+TILEXR_MOONEP_FLAG_SKIP_INTER_RANK_SYNC = 1 << 1
+TILEXR_MOONEP_FLAG_ZERO_COPY = 1 << 2
 
 
 class TileXRMoonEPDType(IntEnum):
@@ -41,17 +44,19 @@ class TileXRMoonEPPlanV1(ctypes.Structure):
     _fields_ = [
         ("structSize", ctypes.c_uint32),
         ("abiVersion", ctypes.c_uint32),
-        ("s", ctypes.c_int64),
-        ("k", ctypes.c_int64),
+        ("n", ctypes.c_int64),
+        ("r", ctypes.c_int64),
         ("e", ctypes.c_int64),
         ("b", ctypes.c_int64),
-        ("rank", ctypes.c_int64),
-        ("world", ctypes.c_int64),
-        ("dispatchedCapacity", ctypes.c_int64),
+        ("nvS", ctypes.c_int64),
+        ("k", ctypes.c_int64),
         ("dst", ctypes.c_void_p),
-        ("cu", ctypes.c_void_p),
         ("expertsToCopy", ctypes.c_void_p),
+        ("zeroFillRanges", ctypes.c_void_p),
         ("remoteStats", ctypes.c_void_p),
+        ("dupGroups", ctypes.c_void_p),
+        ("dupLoffs", ctypes.c_void_p),
+        ("dupCounts", ctypes.c_void_p),
         ("status", ctypes.c_void_p),
     ]
 
@@ -65,38 +70,68 @@ class TileXRMoonEPPlanningArgsV1(ctypes.Structure):
         ("tokensPerExpert", ctypes.POINTER(TileXRMoonEPTensorV1)),
         ("workspace", ctypes.c_void_p),
         ("workspaceBytes", ctypes.c_uint64),
+        ("cuSeqlens", ctypes.POINTER(TileXRMoonEPTensorV1)),
         ("plan", ctypes.POINTER(TileXRMoonEPPlanV1)),
         ("waitIterations", ctypes.c_uint64),
         ("flags", ctypes.c_uint64),
     ]
 
 
-class _TileXRMoonEPStageArgsV1(ctypes.Structure):
+class TileXRMoonEPDispatchArgsV1(ctypes.Structure):
     _fields_ = [
         ("structSize", ctypes.c_uint32),
         ("abiVersion", ctypes.c_uint32),
         ("comm", ctypes.c_void_p),
         ("plan", ctypes.POINTER(TileXRMoonEPPlanV1)),
-        ("input", ctypes.POINTER(TileXRMoonEPTensorV1)),
-        ("output", ctypes.POINTER(TileXRMoonEPTensorV1)),
+        ("hiddenSh", ctypes.POINTER(TileXRMoonEPTensorV1)),
+        ("routeWeightsSk", ctypes.POINTER(TileXRMoonEPTensorV1)),
+        ("hiddenNvsh", ctypes.POINTER(TileXRMoonEPTensorV1)),
+        ("routeWeightsNvs", ctypes.POINTER(TileXRMoonEPTensorV1)),
         ("flags", ctypes.c_uint64),
     ]
 
 
-class TileXRMoonEPDispatchArgsV1(_TileXRMoonEPStageArgsV1):
-    pass
+class TileXRMoonEPPrefetchWeightArgsV1(ctypes.Structure):
+    _fields_ = [
+        ("structSize", ctypes.c_uint32),
+        ("abiVersion", ctypes.c_uint32),
+        ("comm", ctypes.c_void_p),
+        ("plan", ctypes.POINTER(TileXRMoonEPPlanV1)),
+        ("fullGateWeight", ctypes.POINTER(TileXRMoonEPTensorV1)),
+        ("fullUpWeight", ctypes.POINTER(TileXRMoonEPTensorV1)),
+        ("fullDownWeight", ctypes.POINTER(TileXRMoonEPTensorV1)),
+        ("flags", ctypes.c_uint64),
+    ]
 
 
-class TileXRMoonEPPrefetchWeightArgsV1(_TileXRMoonEPStageArgsV1):
-    pass
+class TileXRMoonEPCombineArgsV1(ctypes.Structure):
+    _fields_ = [
+        ("structSize", ctypes.c_uint32),
+        ("abiVersion", ctypes.c_uint32),
+        ("comm", ctypes.c_void_p),
+        ("plan", ctypes.POINTER(TileXRMoonEPPlanV1)),
+        ("hiddenNvsh", ctypes.POINTER(TileXRMoonEPTensorV1)),
+        ("routeWeightsNvs", ctypes.POINTER(TileXRMoonEPTensorV1)),
+        ("hiddenSh", ctypes.POINTER(TileXRMoonEPTensorV1)),
+        ("routeWeightsSk", ctypes.POINTER(TileXRMoonEPTensorV1)),
+        ("flags", ctypes.c_uint64),
+    ]
 
 
-class TileXRMoonEPCombineArgsV1(_TileXRMoonEPStageArgsV1):
-    pass
-
-
-class TileXRMoonEPReduceGradArgsV1(_TileXRMoonEPStageArgsV1):
-    pass
+class TileXRMoonEPReduceGradArgsV1(ctypes.Structure):
+    _fields_ = [
+        ("structSize", ctypes.c_uint32),
+        ("abiVersion", ctypes.c_uint32),
+        ("comm", ctypes.c_void_p),
+        ("plan", ctypes.POINTER(TileXRMoonEPPlanV1)),
+        ("fullGateGrad", ctypes.POINTER(TileXRMoonEPTensorV1)),
+        ("fullUpGrad", ctypes.POINTER(TileXRMoonEPTensorV1)),
+        ("fullDownGrad", ctypes.POINTER(TileXRMoonEPTensorV1)),
+        ("gateReduceBuffer", ctypes.POINTER(TileXRMoonEPTensorV1)),
+        ("upReduceBuffer", ctypes.POINTER(TileXRMoonEPTensorV1)),
+        ("downReduceBuffer", ctypes.POINTER(TileXRMoonEPTensorV1)),
+        ("flags", ctypes.c_uint64),
+    ]
 
 
 def initialize_struct(value: ctypes.Structure) -> ctypes.Structure:

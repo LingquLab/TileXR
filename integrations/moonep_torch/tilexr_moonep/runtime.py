@@ -8,6 +8,7 @@ from typing import Callable, Mapping, Sequence
 
 from .abi import (
     TILEXR_MOONEP_ABI_VERSION,
+    TILEXR_MOONEP_FLAG_BUILD_DEDUP,
     TILEXR_MOONEP_FLAG_NONE,
     TILEXR_SUCCESS,
     TileXRMoonEPCombineArgsV1,
@@ -74,11 +75,12 @@ class NativeCapabilities:
             "stage_mask": self.stage_mask,
             "stub_mask": self.stub_mask,
             "implementations": implementations,
+            "transport_correctness_valid": self.transport_correctness_valid,
             "transport_performance_valid": self.transport_performance_valid,
         }
 
     @property
-    def transport_performance_valid(self) -> bool:
+    def transport_correctness_valid(self) -> bool:
         required = int(
             TileXRMoonEPStage.PLANNING
             | TileXRMoonEPStage.DISPATCH
@@ -86,7 +88,12 @@ class NativeCapabilities:
             | TileXRMoonEPStage.COMBINE
             | TileXRMoonEPStage.REDUCE_GRAD
         )
-        return (self.stage_mask & required) == required and self.stub_mask == 0
+        return (self.stage_mask & required) == required and (self.stub_mask & required) == 0
+
+    @property
+    def transport_performance_valid(self) -> bool:
+        # Native coverage is necessary but does not replace precision and profiling gates.
+        return False
 
 
 def _resolve_install_prefix(value: str | os.PathLike[str] | None) -> Path:
@@ -194,6 +201,8 @@ class TileXRMoonEPRuntime:
             ctypes.c_int64,
             ctypes.c_int64,
             ctypes.c_int64,
+            ctypes.c_int64,
+            ctypes.c_int64,
             ctypes.POINTER(ctypes.c_uint64),
             ctypes.POINTER(ctypes.c_int64),
         ]
@@ -239,17 +248,19 @@ class TileXRMoonEPRuntime:
     @staticmethod
     def _plan_v1(context, plan) -> TileXRMoonEPPlanV1:
         value = initialize_struct(TileXRMoonEPPlanV1())
-        value.s = int(context.tokens_per_rank)
-        value.k = int(context.topk)
-        value.e = int(context.expert_count)
-        value.b = int(context.experts_per_rank)
-        value.rank = int(context.planner_group_rank)
-        value.world = int(context.planner_group_size)
-        value.dispatchedCapacity = int(context.dispatched_capacity)
+        value.n = int(plan.n)
+        value.r = int(plan.rank_size)
+        value.e = int(plan.expert_count)
+        value.b = int(plan.prefetch_slots)
+        value.nvS = int(plan.nv_s)
+        value.k = int(plan.topk)
         value.dst = tensor_ptr(plan.dst)
-        value.cu = tensor_ptr(plan.cu_seqlens)
         value.expertsToCopy = tensor_ptr(plan.experts_to_copy)
+        value.zeroFillRanges = tensor_ptr(plan.zero_fill_ranges)
         value.remoteStats = tensor_ptr(plan.remote_stats)
+        value.dupGroups = tensor_ptr(plan.dup_groups)
+        value.dupLoffs = tensor_ptr(plan.dup_loffs)
+        value.dupCounts = tensor_ptr(plan.dup_counts)
         value.status = tensor_ptr(plan.status)
         return value
 
@@ -261,15 +272,17 @@ class TileXRMoonEPRuntime:
             ctypes.c_int64(context.tokens_per_rank),
             ctypes.c_int64(context.topk),
             ctypes.c_int64(context.expert_count),
+            ctypes.c_int64(context.prefetch_slots),
+            ctypes.c_int64(context.token_padding),
             ctypes.byref(workspace_bytes),
             ctypes.byref(capacity),
         )
         self._check("TileXRMoonEpPlanningGetWorkspaceSizeV1", ret)
-        if int(capacity.value) != int(context.dispatched_capacity):
+        if int(capacity.value) != int(context.nv_s):
             raise TileXRMoonEPError(
                 "TileXRMoonEpPlanningGetWorkspaceSizeV1",
                 -1,
-                f"expected NvS={context.dispatched_capacity}, got {capacity.value}",
+                f"expected NvS={context.nv_s}, got {capacity.value}",
             )
         return int(workspace_bytes.value)
 
@@ -279,6 +292,7 @@ class TileXRMoonEPRuntime:
         topk_experts,
         tokens_per_expert,
         plan,
+        cu_seqlens,
         stream_ptr: int,
         wait_iterations: int,
     ) -> None:
@@ -291,6 +305,8 @@ class TileXRMoonEPRuntime:
         args.tokensPerExpert = ctypes.pointer(tpe)
         args.workspace = tensor_ptr(plan.workspace)
         args.workspaceBytes = tensor_nbytes(plan.workspace)
+        cu_v1 = make_tensor_v1(cu_seqlens)
+        args.cuSeqlens = ctypes.pointer(cu_v1)
         args.plan = ctypes.pointer(plan_v1)
         args.waitIterations = int(wait_iterations)
         args.flags = TILEXR_MOONEP_FLAG_NONE
@@ -298,19 +314,6 @@ class TileXRMoonEPRuntime:
             ctypes.byref(args), void_p(stream_ptr)
         )
         self._check("TileXRMoonEpPlanningV1", ret)
-
-    def _run_stage(self, symbol: str, args_type, context, plan, input_tensor, output_tensor, stream_ptr: int) -> None:
-        plan_v1 = self._plan_v1(context, plan)
-        input_v1 = make_tensor_v1(input_tensor)
-        output_v1 = make_tensor_v1(output_tensor)
-        args = initialize_struct(args_type())
-        args.comm = void_p(self.comm_ptr)
-        args.plan = ctypes.pointer(plan_v1)
-        args.input = ctypes.pointer(input_v1)
-        args.output = ctypes.pointer(output_v1)
-        args.flags = TILEXR_MOONEP_FLAG_NONE
-        ret = getattr(self._moonep_lib, symbol)(ctypes.byref(args), void_p(stream_ptr))
-        self._check(symbol, ret)
 
     def dispatch(
         self,
@@ -321,42 +324,61 @@ class TileXRMoonEPRuntime:
         stream_ptr: int,
         route_weights=None,
         output_route_weights=None,
+        *,
+        build_dedup: bool,
+        inter_rank_sync: bool,
     ) -> None:
+        if not inter_rank_sync:
+            raise NotImplementedError(
+                "TileXR MoonEP does not support inter_rank_sync=False; "
+                "peer protocol synchronization is required"
+            )
         if (route_weights is None) != (output_route_weights is None):
             raise ValueError(
                 "route_weights and output_route_weights must both be provided or both be None"
             )
-        self._run_stage(
-            "TileXRMoonEpDispatchV1",
-            TileXRMoonEPDispatchArgsV1,
-            context,
-            plan,
-            input_tensor,
-            output_tensor,
-            stream_ptr,
+        plan_v1 = self._plan_v1(context, plan)
+        hidden_sh = make_tensor_v1(input_tensor)
+        hidden_nvsh = make_tensor_v1(output_tensor)
+        weights_sk = make_tensor_v1(route_weights) if route_weights is not None else None
+        weights_nvs = (
+            make_tensor_v1(output_route_weights) if output_route_weights is not None else None
         )
-        if route_weights is not None:
-            self._run_stage(
-                "TileXRMoonEpDispatchV1",
-                TileXRMoonEPDispatchArgsV1,
-                context,
-                plan,
-                route_weights,
-                output_route_weights,
-                stream_ptr,
-            )
+        args = initialize_struct(TileXRMoonEPDispatchArgsV1())
+        args.comm = void_p(self.comm_ptr)
+        args.plan = ctypes.pointer(plan_v1)
+        args.hiddenSh = ctypes.pointer(hidden_sh)
+        args.routeWeightsSk = ctypes.pointer(weights_sk) if weights_sk is not None else None
+        args.hiddenNvsh = ctypes.pointer(hidden_nvsh)
+        args.routeWeightsNvs = (
+            ctypes.pointer(weights_nvs) if weights_nvs is not None else None
+        )
+        args.flags = (
+            TILEXR_MOONEP_FLAG_BUILD_DEDUP
+            if build_dedup
+            else TILEXR_MOONEP_FLAG_NONE
+        )
+        ret = self._moonep_lib.TileXRMoonEpDispatchV1(
+            ctypes.byref(args), void_p(stream_ptr)
+        )
+        self._check("TileXRMoonEpDispatchV1", ret)
 
-    def prefetch_weight(self, context, plan, inputs, outputs, stream_ptr: int) -> None:
-        for name in ("gate", "up", "down"):
-            self._run_stage(
-                "TileXRMoonEpPrefetchWeightV1",
-                TileXRMoonEPPrefetchWeightArgsV1,
-                context,
-                plan,
-                getattr(inputs, name),
-                getattr(outputs, name),
-                stream_ptr,
-            )
+    def prefetch_weight(self, context, plan, projections, stream_ptr: int) -> None:
+        plan_v1 = self._plan_v1(context, plan)
+        gate = make_tensor_v1(projections.gate)
+        up = make_tensor_v1(projections.up)
+        down = make_tensor_v1(projections.down)
+        args = initialize_struct(TileXRMoonEPPrefetchWeightArgsV1())
+        args.comm = void_p(self.comm_ptr)
+        args.plan = ctypes.pointer(plan_v1)
+        args.fullGateWeight = ctypes.pointer(gate)
+        args.fullUpWeight = ctypes.pointer(up)
+        args.fullDownWeight = ctypes.pointer(down)
+        args.flags = TILEXR_MOONEP_FLAG_NONE
+        ret = self._moonep_lib.TileXRMoonEpPrefetchWeightV1(
+            ctypes.byref(args), void_p(stream_ptr)
+        )
+        self._check("TileXRMoonEpPrefetchWeightV1", ret)
 
     def combine(
         self,
@@ -367,46 +389,58 @@ class TileXRMoonEPRuntime:
         stream_ptr: int,
         route_weights=None,
         output_route_weights=None,
+        *,
+        inter_rank_sync: bool,
     ) -> None:
+        if not inter_rank_sync:
+            raise NotImplementedError(
+                "TileXR MoonEP does not support inter_rank_sync=False; "
+                "peer protocol synchronization is required"
+            )
         if (route_weights is None) != (output_route_weights is None):
             raise ValueError(
                 "route_weights and output_route_weights must both be provided or both be None"
             )
-        self._run_stage(
-            "TileXRMoonEpCombineV1",
-            TileXRMoonEPCombineArgsV1,
-            context,
-            plan,
-            input_tensor,
-            output_tensor,
-            stream_ptr,
+        plan_v1 = self._plan_v1(context, plan)
+        hidden_nvsh = make_tensor_v1(input_tensor)
+        hidden_sh = make_tensor_v1(output_tensor)
+        weights_nvs = make_tensor_v1(route_weights) if route_weights is not None else None
+        weights_sk = (
+            make_tensor_v1(output_route_weights) if output_route_weights is not None else None
         )
-        if route_weights is not None:
-            self._run_stage(
-                "TileXRMoonEpCombineV1",
-                TileXRMoonEPCombineArgsV1,
-                context,
-                plan,
-                route_weights,
-                output_route_weights,
-                stream_ptr,
-            )
+        args = initialize_struct(TileXRMoonEPCombineArgsV1())
+        args.comm = void_p(self.comm_ptr)
+        args.plan = ctypes.pointer(plan_v1)
+        args.hiddenNvsh = ctypes.pointer(hidden_nvsh)
+        args.routeWeightsNvs = ctypes.pointer(weights_nvs) if weights_nvs is not None else None
+        args.hiddenSh = ctypes.pointer(hidden_sh)
+        args.routeWeightsSk = ctypes.pointer(weights_sk) if weights_sk is not None else None
+        args.flags = TILEXR_MOONEP_FLAG_NONE
+        ret = self._moonep_lib.TileXRMoonEpCombineV1(
+            ctypes.byref(args), void_p(stream_ptr)
+        )
+        self._check("TileXRMoonEpCombineV1", ret)
 
     def reduce_grad(self, context, plan, gradients, stream_ptr: int) -> None:
-        for input_name, output_name in (
-            ("gate", "gate_reduce"),
-            ("up", "up_reduce"),
-            ("down", "down_reduce"),
-        ):
-            self._run_stage(
-                "TileXRMoonEpReduceGradV1",
-                TileXRMoonEPReduceGradArgsV1,
-                context,
-                plan,
-                getattr(gradients, input_name),
-                getattr(gradients, output_name),
-                stream_ptr,
-            )
+        plan_v1 = self._plan_v1(context, plan)
+        tensors = {
+            name: make_tensor_v1(getattr(gradients, name))
+            for name in ("gate", "up", "down", "gate_reduce", "up_reduce", "down_reduce")
+        }
+        args = initialize_struct(TileXRMoonEPReduceGradArgsV1())
+        args.comm = void_p(self.comm_ptr)
+        args.plan = ctypes.pointer(plan_v1)
+        args.fullGateGrad = ctypes.pointer(tensors["gate"])
+        args.fullUpGrad = ctypes.pointer(tensors["up"])
+        args.fullDownGrad = ctypes.pointer(tensors["down"])
+        args.gateReduceBuffer = ctypes.pointer(tensors["gate_reduce"])
+        args.upReduceBuffer = ctypes.pointer(tensors["up_reduce"])
+        args.downReduceBuffer = ctypes.pointer(tensors["down_reduce"])
+        args.flags = TILEXR_MOONEP_FLAG_NONE
+        ret = self._moonep_lib.TileXRMoonEpReduceGradV1(
+            ctypes.byref(args), void_p(stream_ptr)
+        )
+        self._check("TileXRMoonEpReduceGradV1", ret)
 
     def close(self) -> None:
         if self._closed:

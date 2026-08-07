@@ -24,6 +24,17 @@ int TileXRMoonEpPlannerV2(const int32_t *topkExpertIds, const int32_t *tokensPer
     int32_t *expertsToCopy, int32_t *remoteStats, int32_t *plannerStatus,
     uint64_t waitIterations, aclrtStream stream);
 
+int TileXRMoonEpPlannerGetWorkspaceSizeV3(TileXRCommPtr comm, int64_t s, int64_t k,
+    int64_t expertCount, int64_t b, int64_t tokenPadding,
+    uint64_t *workspaceBytes, int64_t *nvS);
+
+int TileXRMoonEpPlannerV3(const int32_t *topkExpertIds, const int32_t *tokensPerExpert,
+    TileXRCommPtr comm, int64_t s, int64_t k, int64_t expertCount,
+    int64_t b, int64_t tokenPadding, void *workspace, uint64_t workspaceBytes,
+    int32_t *dst, int32_t *cuSeqlens, int32_t *expertsToCopy,
+    int32_t *zeroFillRanges, int32_t *remoteStats, int32_t *dupCounts,
+    int32_t *plannerStatus, uint64_t waitIterations, aclrtStream stream);
+
 }
 
 #endif

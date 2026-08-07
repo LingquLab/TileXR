@@ -56,6 +56,12 @@ MANIFEST.in
 .claude/scheduled_tasks.json
 .claude/settings.local.json
 
+# Agent planning scratch files
+/.planning/
+/task_plan.md
+/findings.md
+/progress.md
+
 # custom
 .worktrees/
 op-simulator/build
@@ -76,6 +82,9 @@ utils/
 sign_tmp/
 **/build_device/
 **/build/
+tests/moonep/build-mingw/
+tests/moonep_planner/build-mingw/
+tests/moonep_planner/Testing/
 tests/sdma/install/
 reference/*
 !reference/README.md
@@ -90,3 +99,5 @@ comm/Makefile
 comm/cmake_install.cmake
 install_manifest.txt
 patches/
+temp/
+Testing/

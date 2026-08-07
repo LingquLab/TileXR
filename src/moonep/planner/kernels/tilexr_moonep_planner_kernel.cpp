@@ -74,9 +74,11 @@ class PlannerKernel {
 public:
     __aicore__ inline void Init(GM_ADDR commArgs, GM_ADDR topkExpertIds,
         GM_ADDR tokensPerExpert, GM_ADDR workspace, GM_ADDR dst, GM_ADDR cuSeqlens,
-        GM_ADDR expertsToCopy, GM_ADDR remoteStats, GM_ADDR plannerStatus,
+        GM_ADDR expertsToCopy, GM_ADDR zeroFillRanges, GM_ADDR remoteStats,
+        GM_ADDR dupCounts, GM_ADDR plannerStatus,
         int64_t s, int64_t k, int64_t expertCount, int64_t expertsPerRank,
-        int64_t routeCount, int64_t dispatchedCapacity, uint64_t waitIterations,
+        int64_t b, int64_t tokenPadding, int64_t routeCount, int64_t nvS,
+        uint64_t waitIterations,
         uint64_t tpePrefixOffset, uint64_t blockHistogramOffset,
         uint64_t allocPrefixOffset, uint64_t expertOffsetsOffset, uint64_t zOffset,
         uint64_t groupTotalsOffset, int64_t magic)
@@ -88,8 +90,10 @@ public:
         k_ = k;
         expertCount_ = expertCount;
         expertsPerRank_ = expertsPerRank;
+        b_ = b;
+        tokenPadding_ = tokenPadding;
         routeCount_ = routeCount;
-        dispatchedCapacity_ = dispatchedCapacity;
+        nvS_ = nvS;
         waitIterations_ = waitIterations;
         magic_ = magic;
         const int64_t subBlockCount = static_cast<int64_t>(get_subblockdim());
@@ -101,10 +105,13 @@ public:
         localTpeGm_.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(tokensPerExpert), expertCount_);
         dstGm_.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(dst), routeCount_);
         cuSeqlensGm_.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(cuSeqlens),
-            expertCount_ + expertsPerRank_);
+            expertCount_ + b_);
         expertsToCopyGm_.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(expertsToCopy),
-            rankSize_ * expertsPerRank_);
+            rankSize_ * b_);
+        zeroFillRangesGm_.SetGlobalBuffer(
+            reinterpret_cast<__gm__ int32_t *>(zeroFillRanges), 2 * (expertCount_ + b_));
         remoteStatsGm_.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(remoteStats), 2);
+        dupCountsGm_.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(dupCounts), 2);
         plannerStatusGm_.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(plannerStatus), 1);
 
         GM_ADDR workBase = workspace;
@@ -202,6 +209,8 @@ private:
         AscendC::LocalTensor<int32_t> status = Array0();
         status.SetValue(0, kPlannerStatusSuccess);
         CopyUbToGm(plannerStatusGm_, status, 1);
+        status.SetValue(1, 0);
+        CopyUbToGm(dupCountsGm_, status, 2);
     }
 
     __aicore__ inline bool PlannerSucceeded()
@@ -512,7 +521,7 @@ private:
         constexpr int64_t kMteAlignmentInts = 32 / sizeof(int32_t);
         const int64_t ownerCopiesOffset = AlignUp(expertCount_, kMteAlignmentInts);
         const int64_t cuSeqlensOffset = AlignUp(ownerCopiesOffset + rankSize_, kMteAlignmentInts);
-        const int64_t groupCount = expertCount_ + expertsPerRank_;
+        const int64_t groupCount = expertCount_ + b_;
         const int64_t statsOffset = AlignUp(cuSeqlensOffset + groupCount, kMteAlignmentInts);
 
         CopyGmToUb(counts, allocPrefixGm_[static_cast<int64_t>(dest) * expertCount_], expertCount_);
@@ -520,7 +529,7 @@ private:
         const int64_t localExpertEnd = localExpertBegin + expertsPerRank_;
         int32_t remoteCount = 0;
         int64_t heapSize = 0;
-        for (int64_t slot = 0; slot < expertsPerRank_; ++slot) {
+        for (int64_t slot = 0; slot < b_; ++slot) {
             sortedExpertsScratch.SetValue(slot, -1);
         }
         for (int64_t expert = 0; expert < expertCount_; ++expert) {
@@ -533,7 +542,7 @@ private:
                 continue;
             }
             ++remoteCount;
-            if (heapSize < expertsPerRank_) {
+            if (heapSize < b_) {
                 int64_t index = heapSize++;
                 selectedExperts.SetValue(index, static_cast<int32_t>(expert));
                 selectedMask.SetValue(index, count);
@@ -635,7 +644,7 @@ private:
         for (int32_t owner = 0; owner < rankSize_; ++owner) {
             layout.SetValue(ownerCopiesOffset + owner, 0);
         }
-        for (int64_t slot = 0; slot < expertsPerRank_; ++slot) {
+        for (int64_t slot = 0; slot < b_; ++slot) {
             const int32_t expert = slot < selectedCount ?
                 sortedExpertsScratch.GetValue(slot) : -1;
             selectedExperts.SetValue(slot, expert);
@@ -648,6 +657,7 @@ private:
         }
 
         int32_t start = 0;
+        AscendC::LocalTensor<int32_t> zeroRange = DstTile();
         for (int64_t group = 0; group < groupCount; ++group) {
             int32_t count = 0;
             int32_t expert = -1;
@@ -665,9 +675,20 @@ private:
             if (count > 0) {
                 layout.SetValue(expert, start);
             }
-            const int32_t end = start + count;
+            const int32_t realEnd = start + count;
+            int32_t end = realEnd;
+            if (count > 0) {
+                end = static_cast<int32_t>(AlignUp(realEnd, tokenPadding_));
+            }
             if (dest == rank_) {
                 layout.SetValue(cuSeqlensOffset + group, end);
+                zeroRange.SetValue(0, 0);
+                zeroRange.SetValue(1, 0);
+                if (end > realEnd) {
+                    zeroRange.SetValue(0, realEnd);
+                    zeroRange.SetValue(1, end - realEnd);
+                }
+                CopyUbToGm(zeroFillRangesGm_[group * 2], zeroRange, 2);
             }
             start = end;
         }
@@ -677,8 +698,8 @@ private:
             layout, expertCount_);
         CopyUbToGm(zGm_[static_cast<int64_t>(dest) * rankSize_],
             layout[ownerCopiesOffset], rankSize_);
-        CopyUbToGm(expertsToCopyGm_[static_cast<int64_t>(dest) * expertsPerRank_],
-            selectedExperts, expertsPerRank_);
+        CopyUbToGm(expertsToCopyGm_[static_cast<int64_t>(dest) * b_],
+            selectedExperts, b_);
         if (dest == rank_) {
             CopyUbToGm(cuSeqlensGm_, layout[cuSeqlensOffset], groupCount);
             CopyUbToGm(remoteStatsGm_, layout[statsOffset], 1);
@@ -856,7 +877,7 @@ private:
                     const int32_t base = offsets.GetValue(
                         static_cast<int64_t>(dest) * expertCount_ + expert);
                     const int32_t raw = static_cast<int32_t>(
-                        static_cast<int64_t>(dest) * dispatchedCapacity_ + base + globalRank - previous);
+                        static_cast<int64_t>(dest) * nvS_ + base + globalRank - previous);
 
                     bool duplicate = false;
                     if (dest < 64) {
@@ -908,7 +929,7 @@ private:
                     const int32_t base = expertOffsetsGm_.GetValue(
                         static_cast<int64_t>(dest) * expertCount_ + expert);
                     const int32_t raw = static_cast<int32_t>(
-                        static_cast<int64_t>(dest) * dispatchedCapacity_ + base + globalRank - previous);
+                        static_cast<int64_t>(dest) * nvS_ + base + globalRank - previous);
 
                     bool duplicate = false;
                     if (dest < 64) {
@@ -947,8 +968,10 @@ private:
     int64_t k_ = 0;
     int64_t expertCount_ = 0;
     int64_t expertsPerRank_ = 0;
+    int64_t b_ = 0;
+    int64_t tokenPadding_ = 0;
     int64_t routeCount_ = 0;
-    int64_t dispatchedCapacity_ = 0;
+    int64_t nvS_ = 0;
     uint64_t waitIterations_ = 0;
     int64_t magic_ = 0;
     int64_t blockIdx_ = 0;
@@ -964,7 +987,9 @@ private:
     AscendC::GlobalTensor<int32_t> dstGm_;
     AscendC::GlobalTensor<int32_t> cuSeqlensGm_;
     AscendC::GlobalTensor<int32_t> expertsToCopyGm_;
+    AscendC::GlobalTensor<int32_t> zeroFillRangesGm_;
     AscendC::GlobalTensor<int32_t> remoteStatsGm_;
+    AscendC::GlobalTensor<int32_t> dupCountsGm_;
     AscendC::GlobalTensor<int32_t> plannerStatusGm_;
     AscendC::GlobalTensor<int32_t> tpePrefixGm_;
     AscendC::GlobalTensor<int32_t> blockHistogramGm_;
@@ -979,16 +1004,19 @@ private:
 
 extern "C" __global__ __aicore__ void tilexr_moonep_planner_kernel(GM_ADDR commArgs,
     GM_ADDR topkExpertIds, GM_ADDR tokensPerExpert, GM_ADDR workspace, GM_ADDR dst,
-    GM_ADDR cuSeqlens, GM_ADDR expertsToCopy, GM_ADDR remoteStats, GM_ADDR plannerStatus,
+    GM_ADDR cuSeqlens, GM_ADDR expertsToCopy, GM_ADDR zeroFillRanges,
+    GM_ADDR remoteStats, GM_ADDR dupCounts, GM_ADDR plannerStatus,
     int64_t s, int64_t k, int64_t expertCount, int64_t expertsPerRank,
-    int64_t routeCount, int64_t dispatchedCapacity, uint64_t waitIterations,
+    int64_t b, int64_t tokenPadding, int64_t routeCount, int64_t nvS,
+    uint64_t waitIterations,
     uint64_t tpePrefixOffset, uint64_t blockHistogramOffset, uint64_t allocPrefixOffset,
     uint64_t expertOffsetsOffset, uint64_t zOffset, uint64_t groupTotalsOffset, int64_t magic)
 {
     TileXRMoonEp::Kernel::PlannerKernel op;
     op.Init(commArgs, topkExpertIds, tokensPerExpert, workspace, dst, cuSeqlens,
-        expertsToCopy, remoteStats, plannerStatus, s, k, expertCount, expertsPerRank,
-        routeCount, dispatchedCapacity, waitIterations, tpePrefixOffset,
+        expertsToCopy, zeroFillRanges, remoteStats, dupCounts, plannerStatus,
+        s, k, expertCount, expertsPerRank, b, tokenPadding, routeCount, nvS,
+        waitIterations, tpePrefixOffset,
         blockHistogramOffset, allocPrefixOffset, expertOffsetsOffset, zOffset,
         groupTotalsOffset, magic);
     op.Process();

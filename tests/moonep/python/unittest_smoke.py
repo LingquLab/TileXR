@@ -36,9 +36,9 @@ def tensor(shape, dtype, **kwargs):
     return FakeTensor(shape, dtype, "npu:0", **kwargs)
 
 
-def make_buffer():
+def make_buffer(*, write_status_markers=False, runtime=None):
     torch = FakeTorch()
-    runtime = FakeRuntime()
+    runtime = runtime or FakeRuntime(write_status_markers=write_status_markers)
     context = TileXRMoonEPContext(
         runtime=runtime,
         global_rank=0,
@@ -62,6 +62,30 @@ def make_buffer():
 
 
 class MoonEPSmokeTests(unittest.TestCase):
+    def test_native_hidden_dtype_is_bfloat16_only(self):
+        torch = FakeTorch()
+        context = TileXRMoonEPContext(
+            runtime=FakeRuntime(),
+            global_rank=0,
+            global_world_size=2,
+            node_rank=0,
+            node_count=1,
+            local_rank=0,
+            local_world_size=2,
+            planner_group_rank=0,
+            planner_group_size=2,
+            lane_group_rank=0,
+            lane_group_size=1,
+            device_index=0,
+            tokens_per_rank=4,
+            hidden_size=8,
+            topk=2,
+            expert_count=4,
+            dtype=torch.float16,
+        )
+        with self.assertRaisesRegex(TypeError, "must be bfloat16"):
+            TileXRMoonEPBuffer(context, torch_module=torch)
+
     def test_oversubscribed_planning_barrier_is_outside_device_work(self):
         buffer = SimpleNamespace(synchronize_calls=0)
         buffer.synchronize = lambda: setattr(
@@ -94,9 +118,9 @@ class MoonEPSmokeTests(unittest.TestCase):
     def test_forward_backward_order_and_plan_reuse(self):
         torch, runtime, buffer = make_buffer()
         projection = ProjectionBuffers(
-            tensor((6, 8), torch.bfloat16),
-            tensor((6, 8), torch.bfloat16),
-            tensor((6, 8), torch.bfloat16),
+            tensor((6, 2, 4), torch.bfloat16),
+            tensor((6, 4, 3), torch.bfloat16),
+            tensor((6, 3, 2), torch.bfloat16),
         )
 
         def expert_forward(dispatched, plan, projections):
@@ -114,12 +138,12 @@ class MoonEPSmokeTests(unittest.TestCase):
             apply_route_weights=False,
         )
         gradients = ProjectionBuffers(
-            tensor((6, 8), torch.float32),
-            tensor((6, 8), torch.float32),
-            tensor((6, 8), torch.float32),
-            tensor((6, 8), torch.float32),
-            tensor((6, 8), torch.float32),
-            tensor((6, 8), torch.float32),
+            tensor((6, 2, 4), torch.float32),
+            tensor((6, 4, 3), torch.float32),
+            tensor((6, 3, 2), torch.float32),
+            tensor((2, 2, 2, 4), torch.float32),
+            tensor((2, 2, 4, 3), torch.float32),
+            tensor((2, 2, 3, 2), torch.float32),
         )
 
         def expert_backward(dispatched, state):
@@ -168,6 +192,143 @@ class MoonEPSmokeTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "current NPU device"):
             buffer.planning(tensor((4, 2), torch.int32), tpe)
 
+    def test_upstream_dispatch_reuse_flags_events_and_zero_copy_rejection(self):
+        torch, runtime, buffer = make_buffer()
+        hidden = tensor((4, 8), torch.bfloat16)
+        topk = tensor((4, 2), torch.int32)
+        tpe = tensor((4,), torch.int32)
+
+        with self.assertRaisesRegex(NotImplementedError, "zero_copy=True"):
+            buffer.dispatch(hidden, topk_experts_sk=topk, tokens_per_expert=tpe,
+                            zero_copy=True)
+        self.assertEqual(runtime.calls, [])
+
+        hidden_nvsh, _, cu_seqlens, plan, event = buffer.dispatch(
+            hidden,
+            topk_experts_sk=topk,
+            tokens_per_expert=tpe,
+            async_finish=True,
+        )
+        self.assertEqual(event, ("event", 0xCAFE))
+        self.assertEqual(tuple(cu_seqlens.shape), (6,))
+        self.assertEqual(tuple(hidden_nvsh.shape), (8, 8))
+        fresh_call = next(call for call in runtime.calls if call[0] == "dispatch")
+        self.assertEqual(fresh_call[-2:], (True, True))
+
+        planning_count = sum(call[0] == "planning" for call in runtime.calls)
+        native_calls = len(runtime.calls)
+        with self.assertRaisesRegex(NotImplementedError, "inter_rank_sync=False"):
+            buffer.dispatch(hidden, plan=plan, inter_rank_sync=False)
+        self.assertEqual(
+            sum(call[0] == "planning" for call in runtime.calls), planning_count
+        )
+        self.assertEqual(len(runtime.calls), native_calls)
+
+        with self.assertRaisesRegex(NotImplementedError, "inter_rank_sync=False"):
+            buffer.combine(plan, hidden_nvsh, inter_rank_sync=False)
+        self.assertEqual(len(runtime.calls), native_calls)
+
+        with self.assertRaisesRegex(NotImplementedError, "zero_copy=True"):
+            buffer.combine(plan, hidden_nvsh, zero_copy=True)
+        self.assertEqual(len(runtime.calls), native_calls)
+
+    def test_explicit_planning_dispatch_builds_dedup_once_after_synchronize(self):
+        torch, runtime, buffer = make_buffer(write_status_markers=True)
+        plan, _ = buffer.planning(
+            tensor((4, 2), torch.int32), tensor((4,), torch.int32)
+        )
+        buffer.synchronize()
+
+        hidden = tensor((4, 8), torch.bfloat16)
+        buffer.dispatch(hidden, plan=plan)
+        first = [call for call in runtime.calls if call[0] == "dispatch"][-1]
+        self.assertEqual(first[-2:], (True, True))
+        buffer.synchronize()
+
+        buffer.dispatch(hidden, plan=plan)
+        second = [call for call in runtime.calls if call[0] == "dispatch"][-1]
+        self.assertEqual(second[-2:], (False, True))
+        buffer.synchronize()
+        buffer.close()
+
+    def test_failed_explicit_dispatch_retains_fresh_dedup_state(self):
+        runtime = FakeRuntime(write_status_markers=True, fail_dispatch_calls=1)
+        torch, runtime, buffer = make_buffer(runtime=runtime)
+        plan, _ = buffer.planning(
+            tensor((4, 2), torch.int32), tensor((4,), torch.int32)
+        )
+        buffer.synchronize()
+        hidden = tensor((4, 8), torch.bfloat16)
+
+        with self.assertRaisesRegex(RuntimeError, "fake dispatch enqueue failed"):
+            buffer.dispatch(hidden, plan=plan)
+        buffer.dispatch(hidden, plan=plan)
+
+        dispatch_calls = [call for call in runtime.calls if call[0] == "dispatch"]
+        self.assertEqual([call[-2] for call in dispatch_calls], [True, True])
+        buffer.synchronize()
+        buffer.close()
+
+    def test_close_clears_fresh_dedup_registry(self):
+        torch, _, buffer = make_buffer()
+        plan, _ = buffer.planning(
+            tensor((4, 2), torch.int32), tensor((4,), torch.int32)
+        )
+        self.assertIs(buffer._plans_needing_dedup[id(plan)], plan)
+        buffer.close()
+        self.assertEqual(buffer._plans_needing_dedup, {})
+
+    def test_native_stage_success_markers_are_accepted(self):
+        torch, _, buffer = make_buffer(write_status_markers=True)
+        plan, _ = buffer.planning(
+            tensor((4, 2), torch.int32), tensor((4,), torch.int32)
+        )
+        buffer.synchronize()
+
+        hidden_nvsh, _, _, _ = buffer.dispatch(
+            tensor((4, 8), torch.bfloat16), plan=plan
+        )
+        self.assertEqual(plan.status.item(), 2000)
+        buffer.synchronize()
+
+        buffer.prefetch_weight(
+            plan,
+            full_gate_weight=tensor((6, 2, 4), torch.bfloat16),
+            full_up_weight=tensor((6, 4, 3), torch.bfloat16),
+            full_down_weight=tensor((6, 3, 2), torch.bfloat16),
+        )
+        self.assertEqual(plan.status.item(), 4000)
+        buffer.synchronize()
+
+        buffer.combine(plan, hidden_nvsh)
+        self.assertEqual(plan.status.item(), 3000)
+        buffer.synchronize()
+
+        buffer.reduce_grad(
+            plan,
+            full_gate_grad=tensor((6, 2, 4), torch.float32),
+            full_up_grad=tensor((6, 4, 3), torch.float32),
+            full_down_grad=tensor((6, 3, 2), torch.float32),
+            gate_reduce_buffer=tensor((2, 2, 2, 4), torch.float32),
+            up_reduce_buffer=tensor((2, 2, 4, 3), torch.float32),
+            down_reduce_buffer=tensor((2, 2, 3, 2), torch.float32),
+        )
+        self.assertEqual(plan.status.item(), 5000)
+        buffer.synchronize()
+        buffer.close()
+
+    def test_native_stage_mismatched_success_marker_fails(self):
+        torch, _, buffer = make_buffer(write_status_markers=True)
+        plan, _ = buffer.planning(
+            tensor((4, 2), torch.int32), tensor((4,), torch.int32)
+        )
+        buffer.synchronize()
+        buffer.dispatch(tensor((4, 8), torch.bfloat16), plan=plan)
+        plan.status._item = 3000
+        with self.assertRaisesRegex(RuntimeError, "expected 2000"):
+            buffer.synchronize()
+        buffer.close()
+
     def test_close_is_idempotent(self):
         torch, runtime, buffer = make_buffer()
         buffer.close()
@@ -181,14 +342,16 @@ class MoonEPSmokeTests(unittest.TestCase):
         buffer.planning(tensor((4, 2), torch.int32), tensor((4,), torch.int32))
         torch.npu._stream = FakeStream(0xBEEF)
         with self.assertRaisesRegex(RuntimeError, "bound to one NPU stream"):
-            buffer.dispatch(tensor((4, 8), torch.bfloat16), buffer._pending_plans[0])
+            buffer.dispatch(
+                tensor((4, 8), torch.bfloat16), plan=buffer._pending_plans[0]
+            )
         buffer.close()
         self.assertTrue(runtime.closed)
         self.assertEqual(torch.npu.synchronize_calls, [0])
 
     def test_close_reports_planner_failure_after_destroying_comm(self):
         torch, runtime, buffer = make_buffer()
-        plan = buffer.planning(
+        plan, _ = buffer.planning(
             tensor((4, 2), torch.int32), tensor((4,), torch.int32)
         )
         plan.status._item = 1001
@@ -211,25 +374,39 @@ class MoonEPSmokeTests(unittest.TestCase):
         self.assertFalse(buffer._closed)
 
     def test_active_python_has_no_distributed_or_hccl_dependency(self):
-        sources = list((ROOT / "integrations" / "moonep_torch").rglob("*.py"))
-        sources += list((ROOT / "tools" / "moonep").rglob("*.py"))
-        text = "\n".join(path.read_text(encoding="utf-8") for path in sources)
-        self.assertNotIn("torch." + "distributed", text)
-        self.assertNotIn("import " + "hccl", text.lower())
-        self.assertNotIn("from " + "hccl", text.lower())
+        integration_sources = list(
+            (ROOT / "integrations" / "moonep_torch").rglob("*.py")
+        )
+        integration_text = "\n".join(
+            path.read_text(encoding="utf-8") for path in integration_sources
+        )
+        self.assertNotIn("torch." + "distributed", integration_text)
+        self.assertNotIn("import " + "hccl", integration_text.lower())
+        self.assertNotIn("from " + "hccl", integration_text.lower())
+        benchmark_source = (ROOT / "tools" / "moonep" / "benchmark.py").read_text(
+            encoding="utf-8"
+        )
+        mode_guard = benchmark_source.index('if args.mode != "benchmark"')
+        hccl_init = benchmark_source.index("torch." + "distributed.init_process_group")
+        self.assertLess(mode_guard, hccl_init)
 
-    def test_projection_must_be_non_empty_rank_two(self):
+    def test_projection_must_be_non_empty_rank_three(self):
         torch, _, buffer = make_buffer()
-        plan = buffer.planning(
+        plan, _ = buffer.planning(
             tensor((4, 2), torch.int32), tensor((4,), torch.int32)
         )
         bad = ProjectionBuffers(
             tensor((6, 2, 4), torch.bfloat16),
             tensor((6, 8), torch.bfloat16),
-            tensor((6, 8), torch.bfloat16),
+            tensor((6, 3, 2), torch.bfloat16),
         )
-        with self.assertRaisesRegex(ValueError, "rank-2"):
-            buffer.prefetch_weight(plan, bad)
+        with self.assertRaisesRegex(ValueError, "rank-3"):
+            buffer.prefetch_weight(
+                plan,
+                full_gate_weight=bad.gate,
+                full_up_weight=bad.up,
+                full_down_weight=bad.down,
+            )
 
     def test_json_case_and_oversubscribed_topology(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -575,13 +752,38 @@ class MoonEPSmokeTests(unittest.TestCase):
             status=Values(None, 0),
             dst=Values(list(reference.dst)),
             cu_seqlens=Values(list(reference.cu_seqlens)),
+            zero_fill_ranges=Values(list(reference.zero_fill_ranges)),
             experts_to_copy=Values(list(reference.experts_to_copy)),
             remote_stats=Values(list(reference.remote_stats)),
         )
         self.assertEqual(validate_plan(plan, context)["mode"], "planner_cpu_oracle")
+        plan.status.scalar = 5000
+        self.assertEqual(
+            validate_plan(plan, context, expected_status=5000)["mode"],
+            "planner_cpu_oracle",
+        )
+        with self.assertRaisesRegex(RuntimeError, "expected 0"):
+            validate_plan(plan, context)
+        plan.status.scalar = 0
         plan.dst.values[0] += 1
         with self.assertRaisesRegex(RuntimeError, "dst mismatch"):
             validate_plan(plan, context)
+
+    def test_planner_cpu_oracle_supports_v3_padding_and_prefetch_slots(self):
+        reference = build_reference_plan(
+            rank=0,
+            rank_size=1,
+            tokens_per_rank=8,
+            topk=2,
+            expert_count=8,
+            prefetch_slots=2,
+            token_padding=4,
+            all_topk=deterministic_all_topk(1, 8, 2, 8),
+        )
+        self.assertEqual(reference.dispatched_capacity, 64)
+        self.assertEqual(reference.dst[1], -5)
+        self.assertEqual(len(reference.cu_seqlens), 10)
+        self.assertEqual(len(reference.experts_to_copy), 2)
 
     def test_cross_rank_max_report_marks_stub_scope(self):
         capabilities = {

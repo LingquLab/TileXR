@@ -1,6 +1,6 @@
 # TileXR Build Verification
 
-**Updated:** 2026-05-29
+**Updated:** 2026-08-04
 
 This checklist reflects the current TileXR codebase. The core runtime builds `libtile-comm.so` without a compile-time or link-time shmem dependency.
 
@@ -68,6 +68,112 @@ test -f install/lib/libtilexr_udma_demo_kernel.so
 
 If `bisheng` is unavailable, `build.sh` may skip only the demo target while still building host-only tests.
 
+## Build MoonEP Five-Stage Runtime
+
+MoonEP native five-stage support requires CANN 9.1 and an A5 target compiler. Building
+does not require launching an NPU kernel:
+
+```bash
+source /path/to/cann-9.1.0/set_env.sh
+cmake -S . -B build-moonep \
+  -DTILEXR_BUILD_MOONEP=ON \
+  -DTILEXR_BUILD_TESTS=ON \
+  -DCMAKE_INSTALL_PREFIX="$PWD/install"
+cmake --build build-moonep -j"$(nproc)"
+cmake --install build-moonep
+```
+
+Run the Host/source-only suite separately:
+
+```bash
+cmake -S tests/moonep -B tests/moonep/build-host
+cmake --build tests/moonep/build-host -j"$(nproc)"
+ctest --test-dir tests/moonep/build-host --output-on-failure
+python -m pytest tests/moonep/python -q
+```
+
+Inspect the installed public library:
+
+```bash
+nm -D install/lib*/libtilexr-moonep.so.1 | \
+  grep -E 'TileXRMoonEp(Planning|Dispatch|PrefetchWeight|Combine|ReduceGrad)V1'
+readelf -d install/lib*/libtilexr-moonep.so.1 | \
+  grep -E 'NEEDED|RPATH|RUNPATH'
+```
+
+Expected:
+
+- all five V1 symbols are exported;
+- planner, dispatch, prefetch-weight, combine, and reduce-grad Host libraries are NEEDED;
+- RPATH is `$ORIGIN` and contains no CANN `devlib` directory;
+- Host/source and Python fake-runtime tests pass without device execution.
+
+Do not describe these checks as NPU correctness. When runtime testing is authorized,
+run the installed demo first on one rank, then on the intended physical A5 ranks. For
+the validated four-card shape used on 2026-08-04:
+
+```bash
+ASCEND_RT_VISIBLE_DEVICES=4,5,6,7 \
+  bash install/bin/tilexr_moonep_flow_run_a5.sh 4 64 4 32 512 4
+```
+
+Require every rank to report Planning 0, Dispatch 2000, PrefetchWeight 4000, Combine
+3000, and ReduceGrad 5000, plus `native MoonEP flow smoke passed`. Then run the
+separate precision and msprof gates documented in
+`docs/moonep/DISPATCH_COMBINE.md`.
+
+### MoonEP Python Correctness Reference
+
+The CPU suite checks five-stage contracts, deterministic fixtures, the upstream
+Planning oracle, downstream reference semantics, fault localization, CLI mode routing,
+and report aggregation:
+
+```bash
+python -m pytest tests/moonep/python -q
+```
+
+This does not prove Torch-NPU or HCCL execution. On a CANN 9.1 host with four visible
+A5/Ascend950 devices, run the independent reference separately:
+
+```bash
+python tools/moonep/run_benchmark.py \
+  --mode reference \
+  --cases tools/moonep/cases/correctness.json \
+  --world-size 4 --physical-device-count 4 \
+  --output-dir temp/moonep-reference
+```
+
+Require all five stage artifacts to pass on every rank. `performance_valid` must remain
+false. Differential execution defaults to the built-in TileXR adapter. Run one rank
+first against the installed libraries:
+
+```bash
+ASCEND_RT_VISIBLE_DEVICES=4 python -m tools.moonep.launcher \
+  --mode correctness \
+  --cases tools/moonep/cases/correctness.json \
+  --case-ids planning-small \
+  --world-size 1 --physical-device-count 1 \
+  --install-prefix "$TILEXR_INSTALL_PREFIX" \
+  --output-dir temp/moonep-correctness-1r
+```
+
+Then validate the same-node four-rank path:
+
+```bash
+ASCEND_RT_VISIBLE_DEVICES=4,5,6,7 python -m tools.moonep.launcher \
+  --mode correctness \
+  --cases tools/moonep/cases/correctness.json \
+  --case-ids skewed-padding \
+  --world-size 4 --physical-device-count 4 \
+  --install-prefix "$TILEXR_INSTALL_PREFIX" \
+  --output-dir temp/moonep-correctness-4r
+```
+
+The adapter rejects missing/stub stages, mismatched dimensions or device/rank metadata,
+and cross-node topology before Planning. External adapters remain available through
+`--candidate-backend MODULE:FACTORY`. These runs are correctness-only and must retain
+`performance_valid=false`.
+
 ## Run Host Checks
 
 ```bash
@@ -83,6 +189,7 @@ RANK=0 RANK_SIZE=1 ./install/bin/test_tilexr_udma
 Expected:
 
 - `TileXR UDMA transport layout checks passed`
+- `TileXR UDMA JSON checks passed`
 - `TileXR UDMA registry checks passed`
 - `test_tilexr_udma` exits with `Failed: 0`
 

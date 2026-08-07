@@ -8,7 +8,13 @@ from pathlib import Path
 from typing import Iterable, Mapping
 
 
-_DTYPES = {"bfloat16", "float16"}
+_DTYPES = {"bfloat16"}
+_ROUTING_PATTERNS = {
+    "balanced",
+    "skewed",
+    "duplicate_destinations",
+    "imbalanced_duplicates",
+}
 _CASE_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
@@ -24,6 +30,10 @@ class BenchmarkCase:
     warmup: int = 5
     iterations: int = 20
     correctness: bool = True
+    intermediate_size: int | None = None
+    prefetch_slots: int | None = None
+    token_padding: int = 1
+    routing_pattern: str = "balanced"
 
     def __post_init__(self) -> None:
         if (
@@ -43,6 +53,16 @@ class BenchmarkCase:
             raise ValueError("warmup must be non-negative and iterations must be positive")
         if self.topk > self.expert_count:
             raise ValueError("topk cannot exceed expert_count")
+        for name in ("intermediate_size", "prefetch_slots"):
+            value = getattr(self, name)
+            if value is not None and int(value) <= 0:
+                raise ValueError(f"{name} must be positive when provided")
+        if self.token_padding <= 0:
+            raise ValueError("token_padding must be positive")
+        if self.routing_pattern not in _ROUTING_PATTERNS:
+            raise ValueError(
+                f"routing_pattern must be one of {sorted(_ROUTING_PATTERNS)}"
+            )
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, object]) -> "BenchmarkCase":
@@ -52,6 +72,10 @@ class BenchmarkCase:
             "K": "topk",
             "E": "expert_count",
             "H": "hidden_size",
+            "Hf": "intermediate_size",
+            "B": "prefetch_slots",
+            "P": "token_padding",
+            "routing": "routing_pattern",
             "iters": "iterations",
         }
         normalized = {aliases.get(key, key): value for key, value in raw.items()}
@@ -99,6 +123,10 @@ def apply_overrides(case: BenchmarkCase, args: argparse.Namespace) -> BenchmarkC
         "topk",
         "expert_count",
         "hidden_size",
+        "intermediate_size",
+        "prefetch_slots",
+        "token_padding",
+        "routing_pattern",
         "dtype",
         "seed",
         "warmup",
@@ -118,6 +146,12 @@ def build_case_parser(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--topk", type=int, default=None)
     parser.add_argument("--expert-count", type=int, default=None)
     parser.add_argument("--hidden-size", type=int, default=None)
+    parser.add_argument("--intermediate-size", type=int, default=None)
+    parser.add_argument("--prefetch-slots", type=int, default=None)
+    parser.add_argument("--token-padding", type=int, default=None)
+    parser.add_argument(
+        "--routing-pattern", choices=sorted(_ROUTING_PATTERNS), default=None
+    )
     parser.add_argument("--dtype", choices=sorted(_DTYPES), default=None)
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--warmup", type=int, default=None)

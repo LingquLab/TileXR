@@ -61,19 +61,25 @@ std::vector<int32_t> MakeRouting(const std::string &pattern, int32_t rankSize,
 }
 
 bool BuildReferencePlan(int32_t rank, int32_t rankSize, int64_t s, int64_t k,
-    int64_t expertCount, const std::vector<int32_t> &allTopk,
+    int64_t expertCount, int64_t b, int64_t tokenPadding,
+    const std::vector<int32_t> &allTopk,
     ReferencePlan *plan, std::string *error)
 {
     if (plan == nullptr || error == nullptr || rank < 0 || rank >= rankSize ||
         rankSize <= 0 || s <= 0 || k <= 0 || expertCount <= 0 ||
-        expertCount % rankSize != 0 ||
+        expertCount % rankSize != 0 || b <= 0 || b > expertCount / rankSize ||
+        tokenPadding <= 0 ||
         s > std::numeric_limits<int64_t>::max() / k) {
         return false;
     }
     error->clear();
     const int64_t n = s * k;
-    const int64_t b = expertCount / rankSize;
-    const int64_t nvs = n;
+    const int64_t epn = expertCount / rankSize;
+    if (tokenPadding - 1 > (std::numeric_limits<int64_t>::max() - n) / (2 * epn)) {
+        *error = "NvS overflow";
+        return false;
+    }
+    const int64_t nvs = n + (tokenPadding - 1) * 2 * epn;
     const uint64_t encodedCapacity =
         static_cast<uint64_t>(rankSize) * static_cast<uint64_t>(nvs);
     if (nvs > std::numeric_limits<int32_t>::max() ||
@@ -112,8 +118,8 @@ bool BuildReferencePlan(int32_t rank, int32_t rankSize, int64_t s, int64_t k,
     std::vector<int32_t> balance(static_cast<size_t>(rankSize), 0);
     for (int32_t home = 0; home < rankSize; ++home) {
         int32_t total = 0;
-        for (int64_t localExpert = 0; localExpert < b; ++localExpert) {
-            total += expertCountGlobal[static_cast<size_t>(home * b + localExpert)];
+        for (int64_t localExpert = 0; localExpert < epn; ++localExpert) {
+            total += expertCountGlobal[static_cast<size_t>(home * epn + localExpert)];
         }
         balance[static_cast<size_t>(home)] = total - static_cast<int32_t>(n);
     }
@@ -142,15 +148,15 @@ bool BuildReferencePlan(int32_t rank, int32_t rankSize, int64_t s, int64_t k,
 
     std::vector<int32_t> alloc(static_cast<size_t>(expertCount * rankSize), 0);
     for (int64_t expert = 0; expert < expertCount; ++expert) {
-        alloc[static_cast<size_t>(AllocIndex(expert, static_cast<int32_t>(expert / b), rankSize))] =
+        alloc[static_cast<size_t>(AllocIndex(expert, static_cast<int32_t>(expert / epn), rankSize))] =
             expertCountGlobal[static_cast<size_t>(expert)];
     }
     for (int32_t home = 0; home < rankSize; ++home) {
-        std::vector<int32_t> remaining(static_cast<size_t>(b));
+        std::vector<int32_t> remaining(static_cast<size_t>(epn));
         std::vector<int32_t> quotas(static_cast<size_t>(rankSize));
-        for (int64_t localExpert = 0; localExpert < b; ++localExpert) {
+        for (int64_t localExpert = 0; localExpert < epn; ++localExpert) {
             remaining[static_cast<size_t>(localExpert)] =
-                expertCountGlobal[static_cast<size_t>(home * b + localExpert)];
+                expertCountGlobal[static_cast<size_t>(home * epn + localExpert)];
         }
         for (int32_t dest = 0; dest < rankSize; ++dest) {
             quotas[static_cast<size_t>(dest)] = z[static_cast<size_t>(home * rankSize + dest)];
@@ -168,7 +174,7 @@ bool BuildReferencePlan(int32_t rank, int32_t rankSize, int64_t s, int64_t k,
             }
             const int32_t take = std::min(
                 remaining[static_cast<size_t>(localExpert)], quotas[static_cast<size_t>(dest)]);
-            const int64_t expert = home * b + localExpert;
+            const int64_t expert = home * epn + localExpert;
             alloc[static_cast<size_t>(AllocIndex(expert, dest, rankSize))] += take;
             alloc[static_cast<size_t>(AllocIndex(expert, home, rankSize))] -= take;
             remaining[static_cast<size_t>(localExpert)] -= take;
@@ -179,12 +185,14 @@ bool BuildReferencePlan(int32_t rank, int32_t rankSize, int64_t s, int64_t k,
     std::vector<int32_t> expertOffsets(static_cast<size_t>(rankSize * expertCount), 0);
     std::vector<int32_t> cuAll(static_cast<size_t>(rankSize * (expertCount + b)), 0);
     std::vector<int32_t> expertsToCopy(static_cast<size_t>(rankSize * b), -1);
+    std::vector<int32_t> zeroFillAll(
+        static_cast<size_t>(rankSize * (expertCount + b) * 2), 0);
     std::vector<int32_t> remoteStatsAll(static_cast<size_t>(rankSize * 2), 0);
 
     for (int32_t dest = 0; dest < rankSize; ++dest) {
         std::vector<int32_t> remote;
-        const int64_t localBegin = dest * b;
-        const int64_t localEnd = localBegin + b;
+        const int64_t localBegin = dest * epn;
+        const int64_t localEnd = localBegin + epn;
         for (int64_t expert = 0; expert < expertCount; ++expert) {
             if ((expert < localBegin || expert >= localEnd) &&
                 alloc[static_cast<size_t>(AllocIndex(expert, dest, rankSize))] > 0) {
@@ -202,7 +210,7 @@ bool BuildReferencePlan(int32_t rank, int32_t rankSize, int64_t s, int64_t k,
             const int32_t expert = remote[static_cast<size_t>(slot)];
             expertsToCopy[static_cast<size_t>(dest * b + slot)] = expert;
             selected[static_cast<size_t>(expert)] = 1;
-            ++remoteStatsAll[static_cast<size_t>((expert / b) * 2 + 1)];
+            ++remoteStatsAll[static_cast<size_t>((expert / epn) * 2 + 1)];
         }
 
         int32_t start = 0;
@@ -223,11 +231,26 @@ bool BuildReferencePlan(int32_t rank, int32_t rankSize, int64_t s, int64_t k,
             if (count > 0) {
                 expertOffsets[static_cast<size_t>(dest * expertCount + expert)] = start;
             }
-            start += count;
+            const int32_t realEnd = start + count;
+            int32_t paddedEnd = realEnd;
+            if (count > 0) {
+                const int64_t rounded = ((static_cast<int64_t>(realEnd) + tokenPadding - 1) /
+                    tokenPadding) * tokenPadding;
+                if (rounded > nvs || rounded > std::numeric_limits<int32_t>::max()) {
+                    *error = "padded group exceeds NvS";
+                    return false;
+                }
+                paddedEnd = static_cast<int32_t>(rounded);
+            }
+            const size_t rangeIndex = static_cast<size_t>(
+                (dest * (expertCount + b) + group) * 2);
+            zeroFillAll[rangeIndex] = realEnd;
+            zeroFillAll[rangeIndex + 1] = paddedEnd;
+            start = paddedEnd;
             cuAll[static_cast<size_t>(dest * (expertCount + b) + group)] = start;
         }
-        if (start != nvs) {
-            *error = "compact layout does not fill NvS";
+        if (start > nvs) {
+            *error = "padded layout exceeds NvS";
             return false;
         }
     }
@@ -280,11 +303,14 @@ bool BuildReferencePlan(int32_t rank, int32_t rankSize, int64_t s, int64_t k,
         }
     }
 
-    plan->dispatchedCapacity = nvs;
+    plan->nvS = nvs;
     plan->dst = std::move(dst);
     plan->expertsToCopy = std::move(expertsToCopy);
     plan->cuSeqlens.assign(
         cuAll.begin() + rank * (expertCount + b), cuAll.begin() + (rank + 1) * (expertCount + b));
+    plan->zeroFillRanges.assign(
+        zeroFillAll.begin() + rank * (expertCount + b) * 2,
+        zeroFillAll.begin() + (rank + 1) * (expertCount + b) * 2);
     plan->remoteStats.assign(
         remoteStatsAll.begin() + rank * 2, remoteStatsAll.begin() + (rank + 1) * 2);
     return true;

@@ -12,6 +12,19 @@ if(NOT TILEXR_BUILD_MOONEP)
     return()
 endif()
 
+if(NOT TARGET tilexr-moonep-dispatch)
+    add_subdirectory(dispatch)
+endif()
+if(NOT TARGET tilexr-moonep-combine)
+    add_subdirectory(combine)
+endif()
+if(NOT TARGET tilexr-moonep-prefetch-weight)
+    add_subdirectory(prefetch_weight)
+endif()
+if(NOT TARGET tilexr-moonep-reduce-grad)
+    add_subdirectory(reduce_grad)
+endif()
+
 add_library(tilexr-moonep SHARED
     host/tilexr_moonep.cpp
 )
@@ -30,6 +43,10 @@ target_link_directories(tilexr-moonep PRIVATE
 )
 target_link_libraries(tilexr-moonep PRIVATE
     tilexr-moonep-planner
+    tilexr-moonep-dispatch
+    tilexr-moonep-combine
+    tilexr-moonep-prefetch-weight
+    tilexr-moonep-reduce-grad
     tile-comm
     ascendcl
     runtime

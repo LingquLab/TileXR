@@ -1,0 +1,6 @@
+#ifndef TILEXR_MOONEP_DISPATCH_COMMON_H
+#define TILEXR_MOONEP_DISPATCH_COMMON_H
+
+#include "moonep_peer_window.h"
+
+#endif // TILEXR_MOONEP_DISPATCH_COMMON_H

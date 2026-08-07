@@ -7,6 +7,8 @@ import os
 from pathlib import Path
 from typing import Iterable, Mapping
 
+from .contracts import CORRECTNESS_STAGES
+
 
 def write_json(path: str | Path, value: object) -> None:
     target = Path(path)
@@ -132,6 +134,9 @@ def aggregate_rank_artifacts(
     }
     first = reference
     capabilities = first["capabilities"]
+    transport_correctness_valid = bool(
+        capabilities.get("transport_correctness_valid", False)
+    )
     oversubscribed = bool(first["topology"]["oversubscribed"])
     peer_memory_cross_node = bool(
         first["topology"].get("peer_memory_cross_node", False)
@@ -150,6 +155,8 @@ def aggregate_rank_artifacts(
         performance_scope = "cross_node_functional_unvalidated"
     elif transport_performance_valid:
         performance_scope = "transport"
+    elif transport_correctness_valid:
+        performance_scope = "native_correctness_only"
     else:
         performance_scope = "stub_contract_only"
     summary = {
@@ -163,6 +170,7 @@ def aggregate_rank_artifacts(
         "planner_block_dim": first["topology"].get("planner_block_dim"),
         "planner_block_dim_source": first["topology"].get("planner_block_dim_source"),
         "capabilities": capabilities,
+        "transport_correctness_valid": transport_correctness_valid,
         "transport_performance_valid": transport_performance_valid,
         "performance_scope": performance_scope,
         "validation": {
@@ -193,4 +201,86 @@ def aggregate_rank_artifacts(
         writer.writeheader()
         for name, values in metrics.items():
             writer.writerow({"metric": name, **values})
+    return summary
+
+
+def aggregate_correctness_artifacts(
+    case_dir: str | Path,
+    *,
+    world_size: int,
+) -> dict[str, object]:
+    root = Path(case_dir)
+    results = []
+    for rank in range(world_size):
+        path = root / f"rank_{rank}" / "result.json"
+        with path.open("r", encoding="utf-8") as handle:
+            result = json.load(handle)
+        if result.get("status") != "passed":
+            raise RuntimeError(
+                f"rank {rank} failed: {result.get('failure_reason', 'unknown')}"
+            )
+        if int(result.get("rank", rank)) != rank:
+            raise ValueError(f"rank_{rank} contains result metadata for another rank")
+        validation = result.get("validation")
+        if not isinstance(validation, dict) or not isinstance(
+            validation.get("stages"), list
+        ):
+            raise ValueError(f"rank {rank} has invalid correctness validation metadata")
+        stage_names = tuple(stage.get("stage") for stage in validation["stages"])
+        if stage_names != CORRECTNESS_STAGES:
+            raise ValueError(
+                f"rank {rank} must contain ordered correctness stages "
+                f"{CORRECTNESS_STAGES}, got {stage_names}"
+            )
+        case_id = result.get("case", {}).get("case_id")
+        if not isinstance(case_id, str) or not case_id:
+            raise ValueError(f"rank {rank} has invalid correctness case id")
+        for stage in validation["stages"]:
+            stage_path = (
+                root
+                / f"rank_{rank}"
+                / "stages"
+                / f"{case_id}.{stage['stage']}.json"
+            )
+            if not stage_path.is_file():
+                raise FileNotFoundError(
+                    f"rank {rank} is missing stage artifact {stage_path.name}"
+                )
+            with stage_path.open("r", encoding="utf-8") as handle:
+                artifact = json.load(handle)
+            if artifact.get("stage") != stage["stage"] or bool(
+                artifact.get("passed")
+            ) != bool(stage.get("passed")):
+                raise ValueError(
+                    f"rank {rank} stage artifact {stage_path.name} differs from result"
+                )
+        results.append(result)
+    reference = results[0]
+    for rank, result in enumerate(results[1:], start=1):
+        if result["case"] != reference["case"]:
+            raise ValueError(f"rank {rank} case metadata differs from rank 0")
+        if result["mode"] != reference["mode"]:
+            raise ValueError(f"rank {rank} mode differs from rank 0")
+    stages = [
+        {
+            "stage": stage_name,
+            "passed": all(
+                bool(result["validation"]["stages"][stage_index]["passed"])
+                for result in results
+            ),
+        }
+        for stage_index, stage_name in enumerate(CORRECTNESS_STAGES)
+    ]
+    summary = {
+        "schema_version": 1,
+        "status": "passed" if all(stage["passed"] for stage in stages) else "failed",
+        "mode": reference["mode"],
+        "case": reference["case"],
+        "logical_world_size": world_size,
+        "performance_valid": False,
+        "reference_backend": reference["validation"]["reference_backend"],
+        "candidate_backend": reference["validation"].get("candidate_backend"),
+        "stages": stages,
+    }
+    write_json(root / "summary.json", summary)
     return summary

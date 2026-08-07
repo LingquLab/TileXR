@@ -16,12 +16,16 @@ struct PlannerParams {
     int64_t s = 0;
     int64_t k = 0;
     int64_t expertCount = 0;
+    int64_t b = 0;
+    int64_t tokenPadding = 0;
     void *workspace = nullptr;
     uint64_t workspaceBytes = 0;
     int32_t *dst = nullptr;
     int32_t *cuSeqlens = nullptr;
     int32_t *expertsToCopy = nullptr;
+    int32_t *zeroFillRanges = nullptr;
     int32_t *remoteStats = nullptr;
+    int32_t *dupCounts = nullptr;
     int32_t *plannerStatus = nullptr;
     uint64_t waitIterations = 0;
     aclrtStream stream = nullptr;
@@ -34,7 +38,7 @@ struct PlannerLaunchContext {
 };
 
 int TileXRMoonEpPrepareLayout(TileXRCommPtr comm, int64_t s, int64_t k,
-    int64_t expertCount, PlannerLayout *layout);
+    int64_t expertCount, int64_t b, int64_t tokenPadding, PlannerLayout *layout);
 
 int TileXRMoonEpValidateParams(const PlannerParams &params, const TileXR::CommArgs &commArgs,
     const PlannerLayout &layout);

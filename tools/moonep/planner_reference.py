@@ -9,6 +9,7 @@ class ReferencePlan:
     dispatched_capacity: int
     dst: tuple[int, ...]
     cu_seqlens: tuple[int, ...]
+    zero_fill_ranges: tuple[int, ...]
     experts_to_copy: tuple[int, ...]
     remote_stats: tuple[int, ...]
 
@@ -40,6 +41,8 @@ def build_reference_plan(
     topk: int,
     expert_count: int,
     all_topk: Sequence[int],
+    prefetch_slots: int | None = None,
+    token_padding: int = 1,
 ) -> ReferencePlan:
     if (
         rank_size <= 0
@@ -53,9 +56,16 @@ def build_reference_plan(
         raise ValueError("invalid Planner reference dimensions")
     route_count = tokens_per_rank * topk
     experts_per_rank = expert_count // rank_size
+    slots = experts_per_rank if prefetch_slots is None else int(prefetch_slots)
+    padding = int(token_padding)
+    if slots <= 0 or slots > experts_per_rank:
+        raise ValueError("prefetch_slots must be in [1, E/R]")
+    if padding <= 0:
+        raise ValueError("token_padding must be positive")
+    dispatched_capacity = route_count + (padding - 1) * 2 * experts_per_rank
     if len(all_topk) != rank_size * route_count:
         raise ValueError("all_topk size does not match rank_size * S * K")
-    if rank_size * route_count > 2**31:
+    if rank_size * dispatched_capacity > 2**31:
         raise OverflowError("encoded destination range exceeds signed int32")
 
     tpe = [[0 for _ in range(expert_count)] for _ in range(rank_size)]
@@ -117,11 +127,15 @@ def build_reference_plan(
         [0 for _ in range(expert_count)] for _ in range(rank_size)
     ]
     all_cu = [
-        [0 for _ in range(expert_count + experts_per_rank)]
+        [0 for _ in range(expert_count + slots)]
+        for _ in range(rank_size)
+    ]
+    all_zero_fill = [
+        [[0, 0] for _ in range(expert_count + slots)]
         for _ in range(rank_size)
     ]
     experts_to_copy = [
-        [-1 for _ in range(experts_per_rank)] for _ in range(rank_size)
+        [-1 for _ in range(slots)] for _ in range(rank_size)
     ]
     all_remote_stats = [[0, 0] for _ in range(rank_size)]
     for destination in range(rank_size):
@@ -139,13 +153,13 @@ def build_reference_plan(
         )
         all_remote_stats[destination][0] = len(remote)
         selected = [False for _ in range(expert_count)]
-        for slot, expert in enumerate(remote[:experts_per_rank]):
+        for slot, expert in enumerate(remote[:slots]):
             experts_to_copy[destination][slot] = expert
             selected[expert] = True
             all_remote_stats[expert // experts_per_rank][1] += 1
 
         end = 0
-        for group in range(expert_count + experts_per_rank):
+        for group in range(expert_count + slots):
             count = 0
             expert = -1
             if group < expert_count:
@@ -158,10 +172,13 @@ def build_reference_plan(
                     count = allocation[expert][destination]
             if count > 0:
                 expert_offsets[destination][expert] = end
-            end += count
+            padded = ((count + padding - 1) // padding) * padding if count > 0 else 0
+            if padded > count:
+                all_zero_fill[destination][group] = [end + count, padded - count]
+            end += padded
             all_cu[destination][group] = end
-        if end != route_count:
-            raise RuntimeError("compact layout does not fill NvS")
+        if end > dispatched_capacity:
+            raise RuntimeError("padded layout exceeds NvS")
 
     allocation_prefix = [row[:] for row in allocation]
     for expert in range(expert_count):
@@ -195,7 +212,7 @@ def build_reference_plan(
                 else allocation_prefix[expert][destination - 1]
             )
             raw = (
-                destination * route_count
+                destination * dispatched_capacity
                 + expert_offsets[destination][expert]
                 + global_occurrence
                 - previous
@@ -205,9 +222,12 @@ def build_reference_plan(
             dst.append(-raw - 1 if duplicate else raw)
 
     return ReferencePlan(
-        dispatched_capacity=route_count,
+        dispatched_capacity=dispatched_capacity,
         dst=tuple(dst),
         cu_seqlens=tuple(all_cu[rank]),
+        zero_fill_ranges=tuple(
+            value for group in all_zero_fill[rank] for value in group
+        ),
         experts_to_copy=tuple(
             expert for row in experts_to_copy for expert in row
         ),

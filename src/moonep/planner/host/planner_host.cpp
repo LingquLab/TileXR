@@ -35,7 +35,7 @@ bool PeerWindowsReady(const TileXR::CommArgs &commArgs)
 } // namespace
 
 int TileXRMoonEpPrepareLayout(TileXRCommPtr comm, int64_t s, int64_t k,
-    int64_t expertCount, PlannerLayout *layout)
+    int64_t expertCount, int64_t b, int64_t tokenPadding, PlannerLayout *layout)
 {
     if (comm == nullptr || layout == nullptr) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
@@ -54,10 +54,14 @@ int TileXRMoonEpPrepareLayout(TileXRCommPtr comm, int64_t s, int64_t k,
     if (!LocalityValid(*commArgs)) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
+    if (commArgs->localRankSize != commArgs->rankSize) {
+        return TileXR::TILEXR_ERROR_NOT_SUPPORT;
+    }
     if (!PeerWindowsReady(*commArgs)) {
         return TileXR::TILEXR_ERROR_NOT_INITIALIZED;
     }
-    return TileXRMoonEpBuildPlannerLayout(commArgs->rankSize, s, k, expertCount, layout);
+    return TileXRMoonEpBuildPlannerLayout(
+        commArgs->rankSize, s, k, expertCount, b, tokenPadding, layout);
 }
 
 int TileXRMoonEpValidateParams(const PlannerParams &params, const TileXR::CommArgs &commArgs,
@@ -66,7 +70,8 @@ int TileXRMoonEpValidateParams(const PlannerParams &params, const TileXR::CommAr
     if (params.topkExpertIds == nullptr || params.tokensPerExpert == nullptr ||
         params.comm == nullptr || params.workspace == nullptr || params.dst == nullptr ||
         params.cuSeqlens == nullptr || params.expertsToCopy == nullptr ||
-        params.remoteStats == nullptr || params.plannerStatus == nullptr ||
+        params.zeroFillRanges == nullptr || params.remoteStats == nullptr ||
+        params.dupCounts == nullptr || params.plannerStatus == nullptr ||
         params.waitIterations == 0 || params.stream == nullptr) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
@@ -75,6 +80,9 @@ int TileXRMoonEpValidateParams(const PlannerParams &params, const TileXR::CommAr
     }
     if (!LocalityValid(commArgs)) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    if (commArgs.localRankSize != commArgs.rankSize) {
+        return TileXR::TILEXR_ERROR_NOT_SUPPORT;
     }
     if (!PeerWindowsReady(commArgs)) {
         return TileXR::TILEXR_ERROR_NOT_INITIALIZED;
@@ -103,7 +111,7 @@ int TileXRMoonEpPrepareLaunchContext(const PlannerParams &params, PlannerLaunchC
     }
 
     ret = TileXRMoonEpBuildPlannerLayout(context->hostArgs->rankSize, params.s, params.k,
-        params.expertCount, &context->layout);
+        params.expertCount, params.b, params.tokenPadding, &context->layout);
     if (ret != TileXR::TILEXR_SUCCESS) {
         *context = PlannerLaunchContext {};
         return ret;

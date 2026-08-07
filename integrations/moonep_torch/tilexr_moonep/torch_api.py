@@ -7,6 +7,12 @@ from typing import Any, Callable
 from .runtime import TileXRMoonEPRuntime
 
 
+_DISPATCH_STATUS_SUCCESS = 2000
+_COMBINE_STATUS_SUCCESS = 3000
+_PREFETCH_WEIGHT_STATUS_SUCCESS = 4000
+_REDUCE_GRAD_STATUS_SUCCESS = 5000
+
+
 def _torch():
     import torch
 
@@ -82,23 +88,29 @@ class ProjectionBuffers:
 @dataclass(frozen=True, slots=True)
 class MoonEPPlan:
     dst: Any
-    cu_seqlens: Any
     experts_to_copy: Any
+    zero_fill_ranges: Any
     remote_stats: Any
+    dup_groups: Any
+    dup_loffs: Any
+    dup_counts: Any
     status: Any
     workspace: Any
+    n: int
     tokens_per_rank: int
     topk: int
     expert_count: int
     rank_size: int
-    experts_per_rank: int
+    prefetch_slots: int
+    nv_s: int
+    token_padding: int
     epoch: int
     backend: str
     runtime: Any
 
     @property
     def dispatched_capacity(self) -> int:
-        return int(self.tokens_per_rank) * int(self.topk)
+        return int(self.nv_s)
 
 
 @dataclass
@@ -155,6 +167,8 @@ class TileXRMoonEPContext:
     topk: int
     expert_count: int
     dtype: Any
+    token_padding: int = 1
+    prefetch_slots: int | None = None
 
     def __post_init__(self) -> None:
         if self.planner_group_size <= 0 or self.planner_group_size > 128:
@@ -163,16 +177,27 @@ class TileXRMoonEPContext:
             )
         if self.planner_group_rank < 0 or self.planner_group_rank >= self.planner_group_size:
             raise ValueError("planner_group_rank is outside the planner group")
-        if self.tokens_per_rank <= 0 or self.hidden_size <= 0 or self.topk <= 0:
-            raise ValueError("tokens_per_rank, hidden_size, and topk must be positive")
+        if (self.tokens_per_rank <= 0 or self.hidden_size <= 0 or self.topk <= 0 or
+                self.topk > 32):
+            raise ValueError(
+                "tokens_per_rank and hidden_size must be positive; topk must be in [1, 32]"
+            )
         if self.expert_count <= 0 or self.expert_count % self.planner_group_size != 0:
             raise ValueError(
                 "expert_count must be positive and divisible by planner_group_size"
             )
-        if self.planner_group_size * self.dispatched_capacity > 2**31:
+        if self.token_padding <= 0:
+            raise ValueError("token_padding must be positive")
+        if self.prefetch_slots is None:
+            self.prefetch_slots = self.experts_per_rank
+        if self.prefetch_slots <= 0 or self.prefetch_slots > self.experts_per_rank:
+            raise ValueError("prefetch_slots must be in [1, experts_per_rank]")
+        if self.nv_s > 2**63 - 1:
+            raise OverflowError("NvS exceeds signed int64")
+        if self.planner_group_size * self.nv_s > 2**31:
             raise OverflowError(
                 "signed int32 dst encoding requires "
-                "planner_group_size * (tokens_per_rank * topk) <= INT32_MAX + 1"
+                "planner_group_size * NvS <= INT32_MAX + 1"
             )
         runtime_rank = getattr(self.runtime, "rank", self.planner_group_rank)
         runtime_world = getattr(self.runtime, "world_size", self.planner_group_size)
@@ -185,7 +210,15 @@ class TileXRMoonEPContext:
 
     @property
     def dispatched_capacity(self) -> int:
+        return self.nv_s
+
+    @property
+    def route_count(self) -> int:
         return self.tokens_per_rank * self.topk
+
+    @property
+    def nv_s(self) -> int:
+        return self.route_count + (self.token_padding - 1) * 2 * self.experts_per_rank
 
     @classmethod
     def from_env(
@@ -196,6 +229,8 @@ class TileXRMoonEPContext:
         topk: int,
         expert_count: int,
         dtype,
+        token_padding: int = 1,
+        prefetch_slots: int | None = None,
         runtime=None,
         install_prefix=None,
         torch_module=None,
@@ -238,6 +273,8 @@ class TileXRMoonEPContext:
             topk=int(topk),
             expert_count=int(expert_count),
             dtype=dtype,
+            token_padding=int(token_padding),
+            prefetch_slots=(None if prefetch_slots is None else int(prefetch_slots)),
         )
 
     def close(self) -> None:
@@ -265,10 +302,11 @@ class TileXRMoonEPBuffer:
         self._bound_stream_ptr: int | None = None
         self._pending_refs: list[tuple[Any, ...]] = []
         self._pending_plans: list[MoonEPPlan] = []
+        self._pending_statuses: dict[int, int] = {}
+        self._plans_needing_dedup: dict[int, MoonEPPlan] = {}
         self._quiesced = True
-        supported = (self._torch.bfloat16, self._torch.float16)
-        if context.dtype not in supported:
-            raise TypeError(f"MoonEP hidden dtype must be bfloat16 or float16, got {context.dtype}")
+        if context.dtype != self._torch.bfloat16:
+            raise TypeError(f"MoonEP hidden dtype must be bfloat16, got {context.dtype}")
 
     def _require_open(self) -> None:
         if self._closed:
@@ -291,12 +329,26 @@ class TileXRMoonEPBuffer:
         if all(existing is not plan for existing in self._pending_plans):
             self._pending_plans.append(plan)
 
+    def _expect_status(self, plan: MoonEPPlan, status: int) -> None:
+        self._pending_statuses[id(plan)] = int(status)
+
     def _empty(self, shape: tuple[int, ...], dtype):
         return self._torch.empty(
             shape,
             dtype=dtype,
             device=f"npu:{self.context.device_index}",
         )
+
+    def _record_event(self):
+        stream = self._torch.npu.current_stream()
+        if hasattr(stream, "record_event"):
+            return stream.record_event()
+        event_type = getattr(self._torch.npu, "Event", None)
+        if event_type is None:
+            raise RuntimeError("torch.npu does not expose event recording")
+        event = event_type()
+        event.record(stream)
+        return event
 
     def _validate_plan(self, plan: MoonEPPlan) -> None:
         if not isinstance(plan, MoonEPPlan):
@@ -309,22 +361,31 @@ class TileXRMoonEPBuffer:
             plan.topk,
             plan.expert_count,
             plan.rank_size,
-            plan.experts_per_rank,
+            plan.prefetch_slots,
+            plan.nv_s,
+            plan.token_padding,
         )
         expected_dims = (
             c.tokens_per_rank,
             c.topk,
             c.expert_count,
             c.planner_group_size,
-            c.experts_per_rank,
+            c.prefetch_slots,
+            c.nv_s,
+            c.token_padding,
         )
         if dims != expected_dims:
             raise ValueError("plan dimensions do not match the buffer context")
         for name, tensor, shape in (
-            ("plan.dst", plan.dst, (c.tokens_per_rank, c.topk)),
-            ("plan.cu_seqlens", plan.cu_seqlens, (c.expert_count + c.experts_per_rank,)),
-            ("plan.experts_to_copy", plan.experts_to_copy, (c.planner_group_size, c.experts_per_rank)),
+            ("plan.dst", plan.dst, (c.route_count,)),
+            ("plan.experts_to_copy", plan.experts_to_copy,
+                (c.planner_group_size, c.prefetch_slots)),
+            ("plan.zero_fill_ranges", plan.zero_fill_ranges,
+                (c.expert_count + c.prefetch_slots, 2)),
             ("plan.remote_stats", plan.remote_stats, (2,)),
+            ("plan.dup_groups", plan.dup_groups, (c.nv_s, 3)),
+            ("plan.dup_loffs", plan.dup_loffs, (c.nv_s,)),
+            ("plan.dup_counts", plan.dup_counts, (2,)),
             ("plan.status", plan.status, (1,)),
         ):
             _validate_tensor(
@@ -336,7 +397,7 @@ class TileXRMoonEPBuffer:
                 device_index=c.device_index,
             )
 
-    def planning(self, topk_experts, tokens_per_expert) -> MoonEPPlan:
+    def planning(self, topk_experts, tokens_per_expert) -> tuple[MoonEPPlan, Any]:
         self._require_open()
         c = self.context
         _validate_tensor(
@@ -359,20 +420,31 @@ class TileXRMoonEPBuffer:
         if workspace_bytes <= 0:
             raise RuntimeError(f"native planner returned invalid workspace size {workspace_bytes}")
         self._epoch += 1
+        cu_seqlens = self._empty(
+            (c.expert_count + c.prefetch_slots,), self._torch.int32
+        )
         plan = MoonEPPlan(
-            dst=self._empty((c.tokens_per_rank, c.topk), self._torch.int32),
-            cu_seqlens=self._empty((c.expert_count + c.experts_per_rank,), self._torch.int32),
+            dst=self._empty((c.route_count,), self._torch.int32),
             experts_to_copy=self._empty(
-                (c.planner_group_size, c.experts_per_rank), self._torch.int32
+                (c.planner_group_size, c.prefetch_slots), self._torch.int32
+            ),
+            zero_fill_ranges=self._empty(
+                (c.expert_count + c.prefetch_slots, 2), self._torch.int32
             ),
             remote_stats=self._empty((2,), self._torch.int32),
+            dup_groups=self._empty((c.nv_s, 3), self._torch.int32),
+            dup_loffs=self._empty((c.nv_s,), self._torch.int32),
+            dup_counts=self._empty((2,), self._torch.int32),
             status=self._empty((1,), self._torch.int32),
             workspace=self._empty((workspace_bytes,), self._torch.uint8),
+            n=c.route_count,
             tokens_per_rank=c.tokens_per_rank,
             topk=c.topk,
             expert_count=c.expert_count,
             rank_size=c.planner_group_size,
-            experts_per_rank=c.experts_per_rank,
+            prefetch_slots=c.prefetch_slots,
+            nv_s=c.nv_s,
+            token_padding=c.token_padding,
             epoch=self._epoch,
             backend="native",
             runtime=self.runtime,
@@ -382,50 +454,91 @@ class TileXRMoonEPBuffer:
             topk_experts,
             tokens_per_expert,
             plan,
+            cu_seqlens,
             self._stream_ptr(),
             self.wait_iterations,
         )
-        self._retain(plan, topk_experts, tokens_per_expert)
-        return plan
+        self._plans_needing_dedup[id(plan)] = plan
+        self._retain(plan, topk_experts, tokens_per_expert, cu_seqlens)
+        self._expect_status(plan, 0)
+        return plan, cu_seqlens
 
-    def dispatch(self, hidden, plan: MoonEPPlan, route_weights=None) -> DispatchResult:
+    def dispatch(
+        self,
+        hidden_sh,
+        route_weights_sk=None,
+        topk_experts_sk=None,
+        tokens_per_expert=None,
+        plan: MoonEPPlan | None = None,
+        async_finish: bool = False,
+        *,
+        inter_rank_sync: bool = True,
+        zero_copy: bool = False,
+    ):
         self._require_open()
-        self._validate_plan(plan)
+        if zero_copy:
+            raise NotImplementedError("TileXR MoonEP does not support zero_copy=True")
+        if not bool(inter_rank_sync):
+            raise NotImplementedError(
+                "TileXR MoonEP does not support inter_rank_sync=False; "
+                "peer protocol synchronization is required"
+            )
+        inline_plan = plan is None
+        if inline_plan:
+            if topk_experts_sk is None or tokens_per_expert is None:
+                raise ValueError(
+                    "topk_experts_sk and tokens_per_expert are required when plan is None"
+                )
+            plan, cu_seqlens = self.planning(topk_experts_sk, tokens_per_expert)
+        else:
+            self._validate_plan(plan)
+            cu_seqlens = None
+        build_dedup = self._plans_needing_dedup.get(id(plan)) is plan
         c = self.context
         _validate_tensor(
             self._torch,
-            hidden,
-            "hidden",
+            hidden_sh,
+            "hidden_sh",
             dtype=c.dtype,
             shape=(c.tokens_per_rank, c.hidden_size),
             device_index=c.device_index,
         )
-        if route_weights is not None:
+        if route_weights_sk is not None:
             _validate_tensor(
                 self._torch,
-                route_weights,
-                "route_weights",
+                route_weights_sk,
+                "route_weights_sk",
                 dtype=self._torch.float32,
                 shape=(c.tokens_per_rank, c.topk),
                 device_index=c.device_index,
             )
-        output = self._empty((c.dispatched_capacity, c.hidden_size), c.dtype)
-        output_route_weights = (
-            self._empty((c.dispatched_capacity,), self._torch.float32)
-            if route_weights is not None
+        hidden_nvsh = self._empty((c.nv_s, c.hidden_size), c.dtype)
+        route_weights_nvs = (
+            self._empty((c.nv_s,), self._torch.float32)
+            if route_weights_sk is not None
             else None
         )
-        self._retain(plan, hidden, output, route_weights, output_route_weights)
+        self._retain(
+            plan, hidden_sh, hidden_nvsh, route_weights_sk, route_weights_nvs, cu_seqlens
+        )
         self.runtime.dispatch(
             c,
             plan,
-            hidden,
-            output,
+            hidden_sh,
+            hidden_nvsh,
             self._stream_ptr(),
-            route_weights,
-            output_route_weights,
+            route_weights_sk,
+            route_weights_nvs,
+            build_dedup=build_dedup,
+            inter_rank_sync=bool(inter_rank_sync),
         )
-        return DispatchResult(output, output_route_weights, plan)
+        if build_dedup:
+            self._plans_needing_dedup.pop(id(plan), None)
+        self._expect_status(plan, _DISPATCH_STATUS_SUCCESS)
+        result = (hidden_nvsh, route_weights_nvs, cu_seqlens, plan)
+        if async_finish:
+            return (*result, self._record_event())
+        return result
 
     def _validate_projection_buffers(self, buffers: ProjectionBuffers, *, reduce: bool) -> None:
         if not isinstance(buffers, ProjectionBuffers):
@@ -442,12 +555,12 @@ class TileXRMoonEPBuffer:
                 device_index=c.device_index,
             )
             tensor_shape = _shape(tensor)
-            if len(tensor_shape) != 2 or tensor_shape[1] <= 0:
-                raise ValueError(f"projection.{name} must be a non-empty rank-2 tensor")
-            if tensor_shape[0] != c.expert_count + c.experts_per_rank:
+            if len(tensor_shape) != 3 or tensor_shape[1] <= 0 or tensor_shape[2] <= 0:
+                raise ValueError(f"projection.{name} must be a non-empty rank-3 tensor")
+            if tensor_shape[0] != c.expert_count + c.prefetch_slots:
                 raise ValueError(
                     f"projection.{name} first dimension must be E+B="
-                    f"{c.expert_count + c.experts_per_rank}"
+                    f"{c.expert_count + c.prefetch_slots}"
                 )
         if not reduce:
             return
@@ -458,7 +571,11 @@ class TileXRMoonEPBuffer:
         ):
             full = getattr(buffers, full_name)
             reduced = getattr(buffers, reduce_name)
-            expected = _shape(full)
+            expected = (
+                c.planner_group_size,
+                c.prefetch_slots,
+                *_shape(full)[1:],
+            )
             _validate_tensor(
                 self._torch,
                 reduced,
@@ -469,67 +586,111 @@ class TileXRMoonEPBuffer:
             )
 
     def prefetch_weight(
-        self, plan: MoonEPPlan, projections: ProjectionBuffers
-    ) -> ProjectionBuffers:
+        self,
+        plan: MoonEPPlan | None = None,
+        async_finish: bool = False,
+        *,
+        full_gate_weight=None,
+        full_up_weight=None,
+        full_down_weight=None,
+    ):
         self._require_open()
         self._validate_plan(plan)
+        projections = ProjectionBuffers(
+            full_gate_weight, full_up_weight, full_down_weight
+        )
         self._validate_projection_buffers(projections, reduce=False)
-        prefetched = ProjectionBuffers(
-            gate=self._empty(_shape(projections.gate), projections.gate.dtype),
-            up=self._empty(_shape(projections.up), projections.up.dtype),
-            down=self._empty(_shape(projections.down), projections.down.dtype),
-        )
-        self._retain(plan, projections, prefetched)
+        self._retain(plan, projections)
         self.runtime.prefetch_weight(
-            self.context, plan, projections, prefetched, self._stream_ptr()
+            self.context, plan, projections, self._stream_ptr()
         )
-        return prefetched
+        self._expect_status(plan, _PREFETCH_WEIGHT_STATUS_SUCCESS)
+        return self._record_event() if async_finish else None
 
-    def combine(self, hidden, plan: MoonEPPlan, route_weights=None) -> CombineResult:
+    def combine(
+        self,
+        plan: MoonEPPlan | None = None,
+        hidden_nvsh=None,
+        route_weights_nvs=None,
+        async_finish: bool = False,
+        inter_rank_sync: bool = True,
+        *,
+        zero_copy: bool = False,
+    ):
         self._require_open()
+        if zero_copy:
+            raise NotImplementedError("TileXR MoonEP does not support zero_copy=True")
+        if not bool(inter_rank_sync):
+            raise NotImplementedError(
+                "TileXR MoonEP does not support inter_rank_sync=False; "
+                "peer protocol synchronization is required"
+            )
         self._validate_plan(plan)
         c = self.context
         _validate_tensor(
             self._torch,
-            hidden,
-            "dispatched_hidden",
+            hidden_nvsh,
+            "hidden_nvsh",
             dtype=c.dtype,
-            shape=(c.dispatched_capacity, c.hidden_size),
+            shape=(c.nv_s, c.hidden_size),
             device_index=c.device_index,
         )
-        if route_weights is not None:
+        if route_weights_nvs is not None:
             _validate_tensor(
                 self._torch,
-                route_weights,
-                "dispatched_route_weights",
+                route_weights_nvs,
+                "route_weights_nvs",
                 dtype=self._torch.float32,
-                shape=(c.dispatched_capacity,),
+                shape=(c.nv_s,),
                 device_index=c.device_index,
             )
-        output = self._empty((c.tokens_per_rank, c.hidden_size), c.dtype)
-        output_route_weights = (
+        hidden_sh = self._empty((c.tokens_per_rank, c.hidden_size), c.dtype)
+        route_weights_sk = (
             self._empty((c.tokens_per_rank, c.topk), self._torch.float32)
-            if route_weights is not None
+            if route_weights_nvs is not None
             else None
         )
-        self._retain(plan, hidden, output, route_weights, output_route_weights)
+        self._retain(plan, hidden_nvsh, hidden_sh, route_weights_nvs, route_weights_sk)
         self.runtime.combine(
             c,
             plan,
-            hidden,
-            output,
+            hidden_nvsh,
+            hidden_sh,
             self._stream_ptr(),
-            route_weights,
-            output_route_weights,
+            route_weights_nvs,
+            route_weights_sk,
+            inter_rank_sync=bool(inter_rank_sync),
         )
-        return CombineResult(output, output_route_weights)
+        self._expect_status(plan, _COMBINE_STATUS_SUCCESS)
+        event = self._record_event() if async_finish else None
+        return hidden_sh, route_weights_sk, event
 
-    def reduce_grad(self, plan: MoonEPPlan, gradients: ProjectionBuffers) -> None:
+    def reduce_grad(
+        self,
+        plan: MoonEPPlan | None = None,
+        async_finish: bool = False,
+        full_gate_grad=None,
+        full_up_grad=None,
+        full_down_grad=None,
+        gate_reduce_buffer=None,
+        up_reduce_buffer=None,
+        down_reduce_buffer=None,
+    ):
         self._require_open()
         self._validate_plan(plan)
+        gradients = ProjectionBuffers(
+            full_gate_grad,
+            full_up_grad,
+            full_down_grad,
+            gate_reduce_buffer,
+            up_reduce_buffer,
+            down_reduce_buffer,
+        )
         self._validate_projection_buffers(gradients, reduce=True)
         self._retain(plan, gradients)
         self.runtime.reduce_grad(self.context, plan, gradients, self._stream_ptr())
+        self._expect_status(plan, _REDUCE_GRAD_STATUS_SUCCESS)
+        return self._record_event() if async_finish else None
 
     @staticmethod
     def _unwrap_expert_result(value) -> tuple[Any, Any]:
@@ -550,24 +711,35 @@ class TileXRMoonEPBuffer:
         expert_forward: Callable[[Any, MoonEPPlan, ProjectionBuffers], Any],
         apply_route_weights: bool = True,
     ) -> ForwardResult:
-        plan = self.planning(topk_experts, tokens_per_expert)
-        dispatched = self.dispatch(hidden, plan, route_weights)
-        prefetched = self.prefetch_weight(plan, projections)
-        expert_output, expert_cache = self._unwrap_expert_result(
-            expert_forward(dispatched.hidden, plan, prefetched)
+        hidden_nvsh, route_weights_nvs, _, plan = self.dispatch(
+            hidden,
+            route_weights,
+            topk_experts,
+            tokens_per_expert,
         )
-        if apply_route_weights and dispatched.route_weights is not None:
-            expert_output = expert_output * dispatched.route_weights.reshape(
-                self.context.dispatched_capacity, 1
+        self.prefetch_weight(
+            plan,
+            full_gate_weight=projections.gate,
+            full_up_weight=projections.up,
+            full_down_weight=projections.down,
+        )
+        expert_output, expert_cache = self._unwrap_expert_result(
+            expert_forward(hidden_nvsh, plan, projections)
+        )
+        if apply_route_weights and route_weights_nvs is not None:
+            expert_output = expert_output * route_weights_nvs.reshape(
+                self.context.nv_s, 1
             )
-        combined = self.combine(expert_output, plan, dispatched.route_weights)
+        hidden_sh, route_weights_sk, _ = self.combine(
+            plan, expert_output, route_weights_nvs
+        )
         return ForwardResult(
-            hidden=combined.hidden,
-            route_weights=combined.route_weights,
+            hidden=hidden_sh,
+            route_weights=route_weights_sk,
             state=ForwardState(
                 plan=plan,
-                projections=prefetched,
-                dispatched_route_weights=dispatched.route_weights,
+                projections=projections,
+                dispatched_route_weights=route_weights_nvs,
                 apply_route_weights=bool(apply_route_weights),
                 expert_cache=expert_cache,
             ),
@@ -582,11 +754,10 @@ class TileXRMoonEPBuffer:
         gradients: ProjectionBuffers,
     ) -> BackwardResult:
         self._validate_plan(state.plan)
-        dispatched = self.dispatch(grad_output, state.plan)
-        dispatched_grad = dispatched.hidden
+        dispatched_grad, _, _, _ = self.dispatch(grad_output, plan=state.plan)
         if state.apply_route_weights and state.dispatched_route_weights is not None:
             dispatched_grad = dispatched_grad * state.dispatched_route_weights.reshape(
-                self.context.dispatched_capacity, 1
+                self.context.nv_s, 1
             ).to(dtype=dispatched_grad.dtype)
         grad_expert_result = expert_backward(dispatched_grad, state)
         if isinstance(grad_expert_result, tuple):
@@ -595,9 +766,17 @@ class TileXRMoonEPBuffer:
             grad_expert_hidden, gradients = grad_expert_result
         else:
             grad_expert_hidden = grad_expert_result
-        combined = self.combine(grad_expert_hidden, state.plan)
-        self.reduce_grad(state.plan, gradients)
-        return BackwardResult(grad_hidden=combined.hidden, plan=state.plan)
+        grad_hidden, _, _ = self.combine(state.plan, grad_expert_hidden)
+        self.reduce_grad(
+            state.plan,
+            full_gate_grad=gradients.gate,
+            full_up_grad=gradients.up,
+            full_down_grad=gradients.down,
+            gate_reduce_buffer=gradients.gate_reduce,
+            up_reduce_buffer=gradients.up_reduce,
+            down_reduce_buffer=gradients.down_reduce,
+        )
+        return BackwardResult(grad_hidden=grad_hidden, plan=state.plan)
 
     def quiesce(self) -> None:
         """Wait until this process has no active work on the bound NPU device."""
@@ -620,13 +799,28 @@ class TileXRMoonEPBuffer:
             raise RuntimeError("check_pending_status requires a successful quiesce")
         statuses = []
         for plan in self._pending_plans:
-            statuses.append((plan.epoch, int(plan.status.item())))
+            statuses.append(
+                (
+                    plan.epoch,
+                    int(plan.status.item()),
+                    self._pending_statuses.get(id(plan), 0),
+                )
+            )
         self._pending_refs.clear()
         self._pending_plans.clear()
+        self._pending_statuses.clear()
         self._bound_stream_ptr = None
-        failed = [(epoch, status) for epoch, status in statuses if status != 0]
+        failed = [
+            (epoch, status, expected)
+            for epoch, status, expected in statuses
+            if status != expected
+        ]
         if failed:
-            raise RuntimeError(f"Planner device status failures: {failed}")
+            details = ", ".join(
+                f"epoch {epoch}: actual {status}, expected {expected}"
+                for epoch, status, expected in failed
+            )
+            raise RuntimeError(f"MoonEP device status failures: {details}")
 
     def synchronize(self) -> None:
         self.quiesce()
@@ -647,6 +841,8 @@ class TileXRMoonEPBuffer:
             self._closed = True
             self._pending_refs.clear()
             self._pending_plans.clear()
+            self._pending_statuses.clear()
+            self._plans_needing_dedup.clear()
         if sync_error is not None:
             raise sync_error
 

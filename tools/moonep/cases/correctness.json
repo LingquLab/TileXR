@@ -1,0 +1,69 @@
+[
+  {
+    "id": "manual-small",
+    "S": 2,
+    "K": 2,
+    "E": 4,
+    "H": 2,
+    "Hf": 2,
+    "B": 1,
+    "routing": "skewed",
+    "warmup": 0,
+    "iters": 1,
+    "correctness": true
+  },
+  {
+    "id": "manual-2rank-imbalanced",
+    "S": 2,
+    "K": 2,
+    "E": 4,
+    "H": 2,
+    "Hf": 2,
+    "B": 1,
+    "routing": "skewed",
+    "warmup": 0,
+    "iters": 1,
+    "correctness": true
+  },
+  {
+    "id": "manual-2rank-dedup-3",
+    "S": 2,
+    "K": 4,
+    "E": 8,
+    "H": 2,
+    "Hf": 2,
+    "B": 2,
+    "routing": "imbalanced_duplicates",
+    "warmup": 0,
+    "iters": 1,
+    "correctness": true
+  },
+  {
+    "id": "planning-small",
+    "S": 8,
+    "K": 2,
+    "E": 8,
+    "H": 8,
+    "Hf": 4,
+    "B": 2,
+    "P": 4,
+    "routing": "balanced",
+    "warmup": 0,
+    "iters": 1,
+    "correctness": true
+  },
+  {
+    "id": "skewed-padding",
+    "S": 8,
+    "K": 2,
+    "E": 8,
+    "H": 8,
+    "Hf": 4,
+    "B": 2,
+    "P": 4,
+    "routing": "skewed",
+    "warmup": 0,
+    "iters": 1,
+    "correctness": true
+  }
+]

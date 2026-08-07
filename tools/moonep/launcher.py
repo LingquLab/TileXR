@@ -11,8 +11,8 @@ from pathlib import Path
 from typing import Mapping
 
 from .config import apply_overrides, build_case_parser, load_cases, select_cases
-from .rendezvous import offset_host_port
-from .report import aggregate_rank_artifacts, write_json
+from .rendezvous import offset_host_port, parse_host_port
+from .report import aggregate_correctness_artifacts, aggregate_rank_artifacts, write_json
 
 
 PLANNER_BLOCK_DIM_ENV = "TILEXR_MOONEP_PLANNER_BLOCK_DIM"
@@ -80,6 +80,10 @@ def _append_case_overrides(command: list[str], args: argparse.Namespace) -> None
         "topk": "--topk",
         "expert_count": "--expert-count",
         "hidden_size": "--hidden-size",
+        "intermediate_size": "--intermediate-size",
+        "prefetch_slots": "--prefetch-slots",
+        "token_padding": "--token-padding",
+        "routing_pattern": "--routing-pattern",
         "dtype": "--dtype",
         "seed": "--seed",
         "warmup": "--warmup",
@@ -108,6 +112,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--python", default=sys.executable)
     parser.add_argument("--wait-iterations", type=int, default=1_000_000)
     parser.add_argument("--timeout-sec", type=float, default=1800.0)
+    parser.add_argument(
+        "--mode", choices=("benchmark", "reference", "correctness"), default="benchmark"
+    )
+    parser.add_argument("--candidate-backend", default=None, metavar="MODULE:FACTORY")
+    parser.add_argument(
+        "--dump-stage-tensors",
+        action="store_true",
+        help="save correctness-stage tensors and echo the rank-0 previews",
+    )
+    parser.add_argument("--tensor-preview-elements", type=int, default=8)
     return parser
 
 
@@ -122,19 +136,34 @@ def _process_command(args: argparse.Namespace) -> list[str]:
         str(Path(args.output_dir).resolve()),
         "--wait-iterations",
         str(args.wait_iterations),
+        "--mode",
+        args.mode,
     ]
     if args.case_ids:
         command.extend(("--case-ids", args.case_ids))
     if args.install_prefix:
         command.extend(("--install-prefix", str(Path(args.install_prefix).resolve())))
+    if args.candidate_backend:
+        command.extend(("--candidate-backend", args.candidate_backend))
+    if args.dump_stage_tensors:
+        command.append("--dump-stage-tensors")
+    command.extend(("--tensor-preview-elements", str(args.tensor_preview_elements)))
     _append_case_overrides(command, args)
     return command
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    if args.wait_iterations <= 0 or args.timeout_sec <= 0:
-        raise ValueError("wait_iterations and timeout_sec must be positive")
+    if (
+        args.wait_iterations <= 0
+        or args.timeout_sec <= 0
+        or args.tensor_preview_elements <= 0
+    ):
+        raise ValueError(
+            "wait_iterations, timeout_sec, and tensor_preview_elements must be positive"
+        )
+    if args.mode == "benchmark" and args.dump_stage_tensors:
+        raise ValueError("--dump-stage-tensors is only valid in reference/correctness mode")
     topology = resolve_topology(
         physical_device_count=args.physical_device_count,
         ranks_per_device=args.ranks_per_device,
@@ -147,6 +176,15 @@ def main(argv: list[str] | None = None) -> int:
     barrier_addr = os.environ.get("TILEXR_MOONEP_BARRIER_ADDR") or offset_host_port(
         comm_id
     )
+    hccl_id = None
+    if args.mode != "benchmark":
+        for _ in range(16):
+            candidate = _unused_local_comm_id()
+            if candidate not in (comm_id, barrier_addr):
+                hccl_id = candidate
+                break
+        if hccl_id is None:
+            raise RuntimeError("could not reserve a distinct HCCL rendezvous address")
     barrier_timeout_sec = args.timeout_sec + 60.0
     launch_id = secrets.token_hex(16)
     launch_secret = secrets.token_hex(32)
@@ -160,6 +198,8 @@ def main(argv: list[str] | None = None) -> int:
         "barrier_timeout_sec": barrier_timeout_sec,
         "launch_id": launch_id,
         "command": _process_command(args),
+        "mode": args.mode,
+        "hccl_addr": hccl_id,
     }
     write_json(output_dir / "launcher_metadata.json", metadata)
 
@@ -175,6 +215,10 @@ def main(argv: list[str] | None = None) -> int:
     base_env["NODE_RANK"] = "0"
     base_env["NODE_COUNT"] = "1"
     base_env["TILEXR_COMM_ID"] = comm_id
+    if hccl_id is not None:
+        master_addr, master_port = parse_host_port(hccl_id)
+        base_env["MASTER_ADDR"] = master_addr
+        base_env["MASTER_PORT"] = str(master_port)
     base_env["TILEXR_MOONEP_BARRIER_ADDR"] = barrier_addr
     base_env["TILEXR_MOONEP_BARRIER_TIMEOUT_SEC"] = str(barrier_timeout_sec)
     base_env["TILEXR_MOONEP_LAUNCH_ID"] = launch_id
@@ -250,7 +294,24 @@ def main(argv: list[str] | None = None) -> int:
     cases = select_cases(load_cases(args.cases), args.case_ids)
     for case in cases:
         case = apply_overrides(case, args)
-        aggregate_rank_artifacts(output_dir / case.case_id, world_size=world_size)
+        if args.mode == "benchmark":
+            aggregate_rank_artifacts(output_dir / case.case_id, world_size=world_size)
+        else:
+            aggregate_correctness_artifacts(
+                output_dir / case.case_id, world_size=world_size
+            )
+            if args.dump_stage_tensors:
+                preview_path = (
+                    output_dir
+                    / case.case_id
+                    / "rank_0"
+                    / "tensor_dumps"
+                    / "preview.log"
+                )
+                if not preview_path.is_file():
+                    raise FileNotFoundError(f"missing rank-0 tensor preview: {preview_path}")
+                print(f"\n=== {case.case_id}: rank 0 tensor previews ===")
+                print(preview_path.read_text(encoding="utf-8"), end="")
     return 0
 
 

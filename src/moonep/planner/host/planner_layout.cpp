@@ -87,12 +87,12 @@ uint64_t TileXRMoonEpAlignUp(uint64_t value, uint64_t alignment)
 }
 
 int TileXRMoonEpBuildPlannerLayout(int64_t rankSize, int64_t s, int64_t k,
-    int64_t expertCount, PlannerLayout *out)
+    int64_t expertCount, int64_t b, int64_t tokenPadding, PlannerLayout *out)
 {
     if (out == nullptr || rankSize <= 0 || rankSize > TileXR::TILEXR_MAX_RANK_SIZE ||
         !PositiveAndFitsInt32(s) || k <= 0 || k > kPlannerMaxTopK ||
         !PositiveAndFitsInt32(expertCount) || expertCount > kPlannerMaxExpertCount ||
-        expertCount % rankSize != 0) {
+        expertCount % rankSize != 0 || b <= 0 || tokenPadding <= 0) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
 
@@ -106,12 +106,21 @@ int TileXRMoonEpBuildPlannerLayout(int64_t rankSize, int64_t s, int64_t k,
     const uint64_t kU = static_cast<uint64_t>(k);
     const uint64_t expertCountU = static_cast<uint64_t>(expertCount);
     const uint64_t expertsPerRankU = expertCountU / rankSizeU;
+    if (static_cast<uint64_t>(b) > expertsPerRankU) {
+        return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
 
     uint64_t routeCount = 0;
+    uint64_t paddingExtra = 0;
+    uint64_t nvS = 0;
     uint64_t encodedCapacity = 0;
     if (!CheckedMul(sU, kU, &routeCount) || routeCount == 0 ||
-        !CheckedMul(rankSizeU, routeCount, &encodedCapacity) ||
+        !CheckedMul(static_cast<uint64_t>(tokenPadding - 1),
+            2U * expertsPerRankU, &paddingExtra) ||
+        !CheckedAdd(routeCount, paddingExtra, &nvS) ||
+        !CheckedMul(rankSizeU, nvS, &encodedCapacity) ||
         routeCount > static_cast<uint64_t>(std::numeric_limits<int32_t>::max()) ||
+        nvS > static_cast<uint64_t>(std::numeric_limits<int32_t>::max()) ||
         encodedCapacity > static_cast<uint64_t>(std::numeric_limits<int32_t>::max()) + 1U) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
@@ -132,7 +141,10 @@ int TileXRMoonEpBuildPlannerLayout(int64_t rankSize, int64_t s, int64_t k,
         !AppendRegion(rankExpertElements, sizeof(int32_t), &cursor, &next.allocPrefixOffset) ||
         !AppendRegion(rankExpertElements, sizeof(int32_t), &cursor, &next.expertOffsetsOffset) ||
         !AppendRegion(rankSquareElements, sizeof(int32_t), &cursor, &next.zOffset) ||
-        !AppendRegion(rankSizeU, sizeof(int32_t), &cursor, &next.groupTotalsOffset)) {
+        !AppendRegion(rankSizeU, sizeof(int32_t), &cursor, &next.groupTotalsOffset) ||
+        !AppendRegion(2U * (expertCountU + static_cast<uint64_t>(b)), sizeof(int32_t),
+            &cursor, &next.compatZeroFillOffset) ||
+        !AppendRegion(2U, sizeof(int32_t), &cursor, &next.compatDupCountsOffset)) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
 
@@ -149,8 +161,10 @@ int TileXRMoonEpBuildPlannerLayout(int64_t rankSize, int64_t s, int64_t k,
     next.k = k;
     next.expertCount = expertCount;
     next.expertsPerRank = static_cast<int64_t>(expertsPerRankU);
+    next.b = b;
+    next.tokenPadding = tokenPadding;
     next.routeCount = static_cast<int64_t>(routeCount);
-    next.dispatchedCapacity = static_cast<int64_t>(routeCount);
+    next.nvS = static_cast<int64_t>(nvS);
     next.blockDim = blockDim;
     next.workspaceBytes = workspaceBytes;
     next.peerPublicationBytes = peerPublicationBytes;

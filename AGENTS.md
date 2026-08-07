@@ -53,4 +53,33 @@ Optional CMake switches are `TILEXR_BUILD_COLLECTIVES`, `TILEXR_BUILD_EP`, `TILE
 - UDMA WQEs must be assembled entirely in UB and published to the SQ through MTE3. Never construct or patch an SQ WQE with scalar or direct-GM stores.
 - Ring a UDMA doorbell only with `st_dev`, after the corresponding MTE3 WQE write has completed. Scalar stores must never be used for doorbells.
 - Never put `${ASCEND_HOME_PATH}/${ARCH}-linux/devlib` in runtime RPATH/RUNPATH; runtime must resolve the real driver HAL.
+- Never use Host wrappers that launch Ascend C kernels with `kernel<<<...>>>` syntax. Build and embed pure AICore binaries, register them with `rtDevBinaryRegister` and `rtFunctionRegister`, then launch the registered signature with `rtKernelLaunchWithFlagV2`.
 - Host, simulator, and 910B fallback tests do not prove UDMA data-plane transfer. Keep validation claims scoped to the hardware actually exercised.
+
+<!-- karpathy-guidelines:start -->
+# Karpathy Guidelines
+
+## Think Before Coding
+
+- Do not assume or hide uncertainty. State assumptions and material tradeoffs.
+- Ask when ambiguity would change scope, architecture, interfaces, or behavior.
+- Prefer the simpler approach when it fully satisfies the requirement.
+
+## Simplicity First
+
+- Write the minimum code needed for the requested behavior.
+- Do not add speculative features, abstractions, or configurability.
+- Keep implementations proportional to the problem being solved.
+
+## Surgical Changes
+
+- Touch only files and lines required by the task.
+- Preserve existing style and unrelated user changes.
+- Remove only unused code introduced by the current change.
+
+## Goal-Driven Execution
+
+- Define concrete, verifiable success criteria before implementation.
+- Add focused tests for changed behavior and iterate until they pass.
+- Report validation boundaries accurately and do not overstate evidence.
+<!-- karpathy-guidelines:end -->

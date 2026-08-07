@@ -105,6 +105,101 @@ bash scripts/test_allreduce.sh
 - Launches multi-rank test via mpirun
 - Tests AllReduce operation across NPU devices
 
+### `run_moonep.sh`
+**Purpose**: Run the MoonEP benchmark, reference, or correctness flow with a requested
+logical rank count.
+
+**Usage**:
+```bash
+bash scripts/run_moonep.sh --mode correctness --rank-size 4
+```
+
+The equivalent short form is `bash scripts/run_moonep.sh -m correctness -r 4`.
+
+The MoonEP wrapper exports `TILEXR_ENABLE_UDMA=0` because these stages currently use
+the same-node IPC path. This avoids optional UDMA initialization sharing HCCP state
+with the Torch-NPU/HCCL reference flow.
+
+All modes continue to default to `skewed-padding`. Reference and correctness runs can
+opt into the hand-checkable `manual-small` case
+(`S=2,K=2,E=4,H=2,Hf=2,B=1`, default `P=1`) with
+`--case-id manual-small`.
+
+Without a device option, the script selects physical NPUs starting at 0, so a
+four-rank run uses devices `0,1,2,3`. Select a different set without configuring the
+shell environment:
+
+```bash
+bash scripts/run_moonep.sh --mode reference --rank-size 4 \
+  --case-id manual-small \
+  --visible-devices 4,5,6,7 \
+  --hccl-npu-socket-port-range 47200-47300
+```
+
+The HCCL NPU socket range defaults to `47000-47100` inside the script. The CLI values
+take precedence; existing `ASCEND_RT_VISIBLE_DEVICES` and
+`HCCL_NPU_SOCKET_PORT_RANGE` remain supported only as compatibility fallbacks.
+
+`reference` and `correctness` runs save complete inputs and outputs for every MoonEP
+stage by default and print the first eight values of each tensor. Override the preview
+length with `--tensor-preview-elements COUNT`, or disable snapshots with
+`--no-dump-stage-tensors`. `benchmark` runs never enable snapshots because device-to-CPU
+copies would invalidate performance measurements.
+
+Each binary `input.pt`/`output.pt` has a matching `input.txt`/`output.txt` that includes
+the field path, shape, dtype, original device, and every value without ellipsis. JSON
+files retain compact metadata and terminal previews.
+
+Add `--generate-flowcharts` to a `reference` or `correctness` run to generate a
+left-to-right diagram for all six stage boundaries:
+
+```bash
+bash scripts/run_moonep.sh --mode reference --rank-size 2 \
+  --case-id manual-2rank-dedup-3 \
+  --generate-flowcharts
+```
+
+The option is disabled by default and requires the default tensor snapshots. It reads
+the reference snapshots even in correctness mode, then writes numbered Mermaid, SVG,
+and 2x PNG files under `<result>/<case_id>/flowcharts/`, from `1_planning-*` through
+`6_reduce-grad-*`. Run `bash scripts/prepare.sh` first to install the PyPI Mermaid CLI
+and browser. Flowchart export is rejected in benchmark mode so rendering and snapshot
+work cannot affect performance measurements.
+
+The script supports npm Mermaid CLI with Puppeteer and the Python Mermaid CLI with
+Playwright. The selected CLI must also have a browser for the host architecture; for
+the Playwright variant, install it once with `python -m playwright install chromium`.
+The script performs a minimal render before launching NPU work and fails with this
+guidance when the browser is missing or incompatible.
+
+Use the two-rank manual case to inspect Planner load migration from owner load `[8,0]`
+to execution load `[4,4]`:
+
+```bash
+bash scripts/run_moonep.sh --mode reference --rank-size 2 \
+  --case-id manual-2rank-imbalanced
+```
+
+Both ranks start with local `tokens_per_expert=[2,2,0,0]`. Expert 0 is migrated to
+rank 1 and occupies its single prefetch slot.
+
+Use the compact mixed case to verify Planner load migration and one primary plus
+three duplicate offsets in the same run:
+
+```bash
+bash scripts/run_moonep.sh --mode reference --rank-size 2 \
+  --case-id manual-2rank-dedup-3
+```
+
+Initial expert-owner loads are `[12,4]`, and Planner moves execution to `[8,8]`.
+Rank 0's first token routes to experts `[4,5,6,7]` on rank 1, producing a dedup group
+with duplicate count 3.
+
+The script sources `common_env.sh`, uses Conda environment `ai_moe_test`, and writes
+results to a timestamped directory under `/tmp`. With eight available devices and no
+explicit device selection, a four-rank run uses physical devices 0-3.
+Running it without arguments or with `--help` prints usage.
+
 ## Utilities
 
 ### `plog_grep.sh`
@@ -163,8 +258,14 @@ bash scripts/prepare.sh
 ```
 
 **What it does**:
+- Checks that Python and pip are available before downloading dependencies
+- Installs the PyPI `mermaid-cli` package and its Playwright Chromium browser
+- Validates the installed `mmdc` interface and launches Chromium once
 - Installs repo-managed local build utilities
 - Installs MPICH for multi-rank tests
+
+The Mermaid setup requires access to the configured PyPI index and Playwright browser
+CDN. Installation failures stop the script before native dependency downloads begin.
 
 **Use case**: First-time repository setup
 

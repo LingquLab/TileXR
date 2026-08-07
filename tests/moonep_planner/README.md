@@ -57,8 +57,10 @@ Inspect the installed dynamic tags after the full build:
 
 ```bash
 readelf -d install/lib64/libtilexr-moonep-planner.so
-readelf -d install/lib64/libtilexr_moonep_planner_kernel.so
+nm -D install/lib64/libtilexr-moonep-planner.so | \
+  grep -E 'rtDevBinaryRegister|rtFunctionRegister|rtKernelLaunchWithFlagV2'
 ```
 
-The Host planner library must use only `RPATH=$ORIGIN`; neither artifact may
-contain a CANN `devlib` RPATH or RUNPATH.
+The Host planner library embeds the pure AICore ELF and must use only
+`RPATH=$ORIGIN`; it must not contain a CANN `devlib` RPATH or RUNPATH. No
+standalone Bisheng Host kernel SO is installed.
