@@ -266,6 +266,7 @@ Optional components:
 | --- | --- | --- | --- |
 | hcomm | on-demand checkout under `reference/` | Legacy HCCL resource/context comparison | Downloaded with `bash reference/download_cann_repos.sh hcomm`; not a TileXR build dependency |
 | ops-transformer | on-demand checkout under `reference/` | Upstream implementation comparison | Downloaded with `bash reference/download_cann_repos.sh ops-transformer`; not a TileXR build dependency |
+| MoonEP | on-demand checkout under `reference/` | MoonEP Planner and MoE operator behavior comparison | Downloaded with `bash reference/download_moonep.sh`; not a TileXR build dependency |
 
 ## UDMA Validation
 

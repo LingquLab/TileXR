@@ -80,6 +80,7 @@ tests/sdma/install/
 reference/*
 !reference/README.md
 !reference/download_cann_repos.sh
+!reference/download_moonep.sh
 
 CMakeCache.txt
 CMakeFiles/

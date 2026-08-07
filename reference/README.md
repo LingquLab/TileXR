@@ -68,3 +68,17 @@ documentation and examples used by the externally maintained
 | `hcomm` | Official HCCL communication helpers, host resource setup, examples, and integration code. | You need to compare current TileXR communication paths with upstream hcomm/HCCL resource and context flows. |
 | `ops-transformer` | Upstream fused communication and computation operators, host tiling code, kernels, examples, and tests. | You need historical MC2 implementation details or want to compare TileXR-owned collectives and EP code with upstream operator implementations. |
 | `shmem` | Ascend SHMEM communication library with host/device APIs, symmetric memory heap, team/sync/RMA/Signal interfaces, RDMA/SDMA/UDMA/MTE/xDMA transports, docs, examples, and tests. | You are comparing TileXR registered-memory UDMA/SDMA work with upstream SHMEM, studying RMA and signal semantics, checking AICore direct-drive communication examples, or revisiting historical TileXR UDMA experiments. |
+
+## MoonEP
+
+MoonEP is a non-CANN, reference-only source checkout. Download or update it
+separately with:
+
+```bash
+bash reference/download_moonep.sh
+```
+
+It clones `https://github.com/MoonshotAI/MoonEP.git` into `reference/MoonEP`
+on the `master` branch by default. Override the source or branch with
+`MOONEP_REPO_URL` or `MOONEP_BRANCH`. Use it when comparing the TileXR MoonEP
+Planner's routing semantics or later replacing staged native operator stubs.
