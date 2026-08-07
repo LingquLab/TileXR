@@ -61,10 +61,12 @@ def resolve_topology(
     }
 
 
-def rank_to_device(rank: int, physical_device_count: int) -> int:
-    if rank < 0 or physical_device_count <= 0:
-        raise ValueError("rank must be non-negative and physical_device_count positive")
-    return rank % physical_device_count
+def rank_to_device(rank: int, physical_device_count: int, device_offset: int = 0) -> int:
+    if rank < 0 or physical_device_count <= 0 or device_offset < 0:
+        raise ValueError(
+            "rank and device_offset must be non-negative and physical_device_count positive"
+        )
+    return device_offset + rank % physical_device_count
 
 
 def _unused_local_comm_id() -> str:
@@ -80,6 +82,7 @@ def _append_case_overrides(command: list[str], args: argparse.Namespace) -> None
         "topk": "--topk",
         "expert_count": "--expert-count",
         "hidden_size": "--hidden-size",
+        "route_pattern": "--route-pattern",
         "dtype": "--dtype",
         "seed": "--seed",
         "warmup": "--warmup",
@@ -89,6 +92,10 @@ def _append_case_overrides(command: list[str], args: argparse.Namespace) -> None
         value = getattr(args, name)
         if value is not None:
             command.extend((flag, str(value)))
+    for name in ("gate_grad_shape", "up_grad_shape", "down_grad_shape"):
+        value = getattr(args, name)
+        if value is not None:
+            command.extend((f"--{name.replace('_', '-')}", "x".join(map(str, value))))
     if args.correctness is True:
         command.append("--correctness")
     elif args.correctness is False:
@@ -101,12 +108,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--install-prefix", default=None)
     parser.add_argument("--physical-device-count", type=int, default=8)
+    parser.add_argument("--device-offset", type=int, default=0)
     parser.add_argument("--ranks-per-device", type=int, choices=(1, 2), default=1)
     parser.add_argument("--world-size", type=int, default=None)
     parser.add_argument("--planner-block-dim", type=int, default=None)
     parser.add_argument("--comm-id", default=None)
     parser.add_argument("--python", default=sys.executable)
     parser.add_argument("--wait-iterations", type=int, default=1_000_000)
+    parser.add_argument("--udma-chunk-bytes", type=int, default=0)
     parser.add_argument("--timeout-sec", type=float, default=1800.0)
     return parser
 
@@ -122,6 +131,8 @@ def _process_command(args: argparse.Namespace) -> list[str]:
         str(Path(args.output_dir).resolve()),
         "--wait-iterations",
         str(args.wait_iterations),
+        "--udma-chunk-bytes",
+        str(args.udma_chunk_bytes),
     ]
     if args.case_ids:
         command.extend(("--case-ids", args.case_ids))
@@ -133,8 +144,16 @@ def _process_command(args: argparse.Namespace) -> list[str]:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    if args.wait_iterations <= 0 or args.timeout_sec <= 0:
-        raise ValueError("wait_iterations and timeout_sec must be positive")
+    if (
+        args.wait_iterations <= 0
+        or args.timeout_sec <= 0
+        or args.udma_chunk_bytes < 0
+        or args.device_offset < 0
+    ):
+        raise ValueError(
+            "wait_iterations and timeout_sec must be positive; "
+            "udma_chunk_bytes and device_offset must be non-negative"
+        )
     topology = resolve_topology(
         physical_device_count=args.physical_device_count,
         ranks_per_device=args.ranks_per_device,
@@ -143,6 +162,11 @@ def main(argv: list[str] | None = None) -> int:
         environment=os.environ,
     )
     world_size = int(topology["logical_world_size"])
+    topology["device_offset"] = args.device_offset
+    topology["device_ids"] = [
+        rank_to_device(rank, args.physical_device_count, args.device_offset)
+        for rank in range(world_size)
+    ]
     comm_id = args.comm_id or _unused_local_comm_id()
     barrier_addr = os.environ.get("TILEXR_MOONEP_BARRIER_ADDR") or offset_host_port(
         comm_id
@@ -193,7 +217,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         for rank in range(world_size):
             env = base_env.copy()
-            device = rank_to_device(rank, args.physical_device_count)
+            device = rank_to_device(rank, args.physical_device_count, args.device_offset)
             env["RANK"] = str(rank)
             env["LOCAL_RANK"] = str(device)
             env["TILEXR_PLANNER_GROUP_RANK"] = str(rank)

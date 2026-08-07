@@ -1,22 +1,75 @@
 #include "planner_launch.h"
 
+#include <cstddef>
+#include <cstdint>
+#include <iostream>
+#include <limits>
+#include <mutex>
+
 #include "planner_common.h"
 #include "runtime/kernel.h"
 #include "tilexr_types.h"
 
-extern "C" void tilexr_moonep_planner_kernel(
-    GM_ADDR commArgs, GM_ADDR topkExpertIds, GM_ADDR tokensPerExpert, GM_ADDR workspace,
-    GM_ADDR dst, GM_ADDR cuSeqlens, GM_ADDR expertsToCopy, GM_ADDR remoteStats,
-    GM_ADDR plannerStatus, int64_t s, int64_t k, int64_t expertCount,
-    int64_t expertsPerRank, int64_t routeCount, int64_t dispatchedCapacity,
-    uint64_t waitIterations, uint64_t tpePrefixOffset, uint64_t blockHistogramOffset,
-    uint64_t allocPrefixOffset, uint64_t expertOffsetsOffset, uint64_t zOffset,
-    uint64_t groupTotalsOffset, int64_t magic);
+extern "C" {
+extern const unsigned char TileXRMoonEpPlannerKernelBinaryData[];
+extern const std::size_t TileXRMoonEpPlannerKernelBinarySize;
+}
 
 namespace TileXRMoonEp {
+namespace {
+
+const char kPlannerKernelName[] = "tilexr_moonep_planner_kernel";
+std::mutex g_plannerRegistrationMutex;
+bool g_plannerRegistered = false;
+void *g_plannerBinaryHandle = nullptr;
+
+int EnsurePlannerKernelRegistered()
+{
+    std::lock_guard<std::mutex> guard(g_plannerRegistrationMutex);
+    if (g_plannerRegistered) {
+        return TileXR::TILEXR_SUCCESS;
+    }
+    if (TileXRMoonEpPlannerKernelBinarySize == 0) {
+        return TileXR::TILEXR_ERROR_NOT_INITIALIZED;
+    }
+
+    rtDevBinary_t binary {};
+    binary.data = TileXRMoonEpPlannerKernelBinaryData;
+    binary.length = static_cast<uint64_t>(TileXRMoonEpPlannerKernelBinarySize);
+    binary.magic = RT_DEV_BINARY_MAGIC_ELF_AIVEC;
+    binary.version = 0;
+
+    void *binaryHandle = nullptr;
+    rtError_t rtRet = rtDevBinaryRegister(&binary, &binaryHandle);
+    if (rtRet != RT_ERROR_NONE) {
+        std::cerr << "MoonEP Planner rtDevBinaryRegister failed, ret=" << rtRet << std::endl;
+        return TileXR::TILEXR_ERROR_MKIRT;
+    }
+    rtRet = rtFunctionRegister(binaryHandle, kPlannerKernelName,
+        kPlannerKernelName, kPlannerKernelName, 0);
+    if (rtRet != RT_ERROR_NONE) {
+        std::cerr << "MoonEP Planner rtFunctionRegister failed, ret=" << rtRet << std::endl;
+        const rtError_t unregisterRet = rtDevBinaryUnRegister(binaryHandle);
+        if (unregisterRet != RT_ERROR_NONE) {
+            std::cerr << "MoonEP Planner rtDevBinaryUnRegister failed, ret="
+                      << unregisterRet << std::endl;
+        }
+        return TileXR::TILEXR_ERROR_MKIRT;
+    }
+    g_plannerBinaryHandle = binaryHandle;
+    g_plannerRegistered = true;
+    return TileXR::TILEXR_SUCCESS;
+}
+
+} // namespace
 
 int TileXRMoonEpLaunchKernel(const PlannerParams &params, const PlannerLaunchContext &context)
 {
+    const int registerRet = EnsurePlannerKernelRegistered();
+    if (registerRet != TileXR::TILEXR_SUCCESS) {
+        return registerRet;
+    }
+
     int64_t magic = 0;
     const int ret = TileXRCommNextMagic(params.comm, &magic);
     if (ret != TileXR::TILEXR_SUCCESS) {
@@ -48,7 +101,10 @@ int TileXRMoonEpLaunchKernel(const PlannerParams &params, const PlannerLaunchCon
         uint64_t zOffset;
         uint64_t groupTotalsOffset;
         int64_t magic;
-    } args {
+    };
+    static_assert(sizeof(PlannerKernelArgs) <= std::numeric_limits<uint32_t>::max(),
+        "Planner kernel argument block exceeds Runtime V2 argsSize");
+    PlannerKernelArgs args {
         context.devArgs,
         reinterpret_cast<GM_ADDR>(const_cast<int32_t *>(params.topkExpertIds)),
         reinterpret_cast<GM_ADDR>(const_cast<int32_t *>(params.tokensPerExpert)),
@@ -65,13 +121,10 @@ int TileXRMoonEpLaunchKernel(const PlannerParams &params, const PlannerLaunchCon
 
     rtArgsEx_t argsInfo {};
     argsInfo.args = &args;
-    argsInfo.argsSize = sizeof(args);
-
+    argsInfo.argsSize = static_cast<uint32_t>(sizeof(args));
     rtTaskCfgInfo_t cfgInfo {};
     cfgInfo.schemMode = 1;
-
-    const rtError_t launchRet = rtKernelLaunchWithFlagV2(
-        reinterpret_cast<const void *>(tilexr_moonep_planner_kernel),
+    const rtError_t launchRet = rtKernelLaunchWithFlagV2(kPlannerKernelName,
         static_cast<uint32_t>(layout.blockDim), &argsInfo, nullptr,
         static_cast<rtStream_t>(params.stream), 0, &cfgInfo);
     return launchRet == RT_ERROR_NONE ? TileXR::TILEXR_SUCCESS : TileXR::TILEXR_ERROR_MKIRT;

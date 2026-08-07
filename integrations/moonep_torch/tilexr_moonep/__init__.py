@@ -1,5 +1,6 @@
 from .runtime import (
     NativeCapabilities,
+    ReduceGradWorkspaceInfo,
     TileXRMoonEPError,
     TileXRMoonEPRuntime,
 )
@@ -24,6 +25,7 @@ __all__ = [
     "MoonEPPlan",
     "NativeCapabilities",
     "ProjectionBuffers",
+    "ReduceGradWorkspaceInfo",
     "TileXRMoonEPBuffer",
     "TileXRMoonEPContext",
     "TileXRMoonEPError",

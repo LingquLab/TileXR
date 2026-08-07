@@ -1,5 +1,4 @@
 #include "kernel_operator.h"
-
 #include <cstdint>
 
 #include "comm_args.h"
@@ -250,18 +249,18 @@ private:
 
     __aicore__ inline bool WaitReadyFlag(int32_t peer)
     {
-        AscendC::GlobalTensor<int64_t> readyGm;
-        readyGm.SetGlobalBuffer(
+        __gm__ int64_t *readyAddr =
             reinterpret_cast<__gm__ int64_t *>(shareAddrs_[peer]) +
-                static_cast<int64_t>(kPlannerReadyEventId) * FLAG_UNIT_INT_NUM,
-            FLAG_UNIT_INT_NUM);
+            static_cast<int64_t>(kPlannerReadyEventId) * FLAG_UNIT_INT_NUM;
+        AscendC::GlobalTensor<int64_t> readyGm;
+        readyGm.SetGlobalBuffer(readyAddr, FLAG_UNIT_INT_NUM);
         const int64_t expected =
             (static_cast<int64_t>(static_cast<int32_t>(magic_)) << MAGIC_OFFSET) |
             static_cast<int64_t>(kPlannerReadyStep);
         for (uint64_t iteration = 0; iteration < waitIterations_; ++iteration) {
             AscendC::DataCacheCleanAndInvalid<int64_t, AscendC::CacheLine::SINGLE_CACHE_LINE,
                 AscendC::DcciDst::CACHELINE_OUT>(readyGm);
-            const int64_t value = readyGm.GetValue(0);
+            const int64_t value = sync_.GetFlag(readyAddr);
             if ((value & MAGIC_MASK) == (expected & MAGIC_MASK) && value >= expected) {
                 return true;
             }

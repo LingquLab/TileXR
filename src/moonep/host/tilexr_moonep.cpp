@@ -17,6 +17,11 @@ const uint64_t kStubStages = static_cast<uint64_t>(TILEXR_MOONEP_STAGE_DISPATCH)
     static_cast<uint64_t>(TILEXR_MOONEP_STAGE_PREFETCH_WEIGHT) |
     static_cast<uint64_t>(TILEXR_MOONEP_STAGE_COMBINE) |
     static_cast<uint64_t>(TILEXR_MOONEP_STAGE_REDUCE_GRAD);
+const uint64_t kNativeStagesV2 = static_cast<uint64_t>(TILEXR_MOONEP_STAGE_PLANNING) |
+    static_cast<uint64_t>(TILEXR_MOONEP_STAGE_REDUCE_GRAD);
+const uint64_t kStubStagesV2 = static_cast<uint64_t>(TILEXR_MOONEP_STAGE_DISPATCH) |
+    static_cast<uint64_t>(TILEXR_MOONEP_STAGE_PREFETCH_WEIGHT) |
+    static_cast<uint64_t>(TILEXR_MOONEP_STAGE_COMBINE);
 
 bool CheckedMultiply(uint64_t lhs, uint64_t rhs, uint64_t *result)
 {
@@ -247,7 +252,7 @@ int RunLocalStub(const Args *args, aclrtStream stream, StubStage stage)
 
 extern "C" uint32_t TileXRMoonEpGetAbiVersion(void)
 {
-    return TILEXR_MOONEP_ABI_VERSION_V1;
+    return TILEXR_MOONEP_ABI_VERSION_V2;
 }
 
 extern "C" int TileXRMoonEpGetCapabilitiesV1(uint64_t *nativeStages, uint64_t *stubStages)
@@ -257,6 +262,16 @@ extern "C" int TileXRMoonEpGetCapabilitiesV1(uint64_t *nativeStages, uint64_t *s
     }
     *nativeStages = kNativeStages;
     *stubStages = kStubStages;
+    return TILEXR_MOONEP_SUCCESS;
+}
+
+extern "C" int TileXRMoonEpGetCapabilitiesV2(uint64_t *nativeStages, uint64_t *stubStages)
+{
+    if (nativeStages == nullptr || stubStages == nullptr) {
+        return TILEXR_MOONEP_ERROR_INVALID_ARGUMENT;
+    }
+    *nativeStages = kNativeStagesV2;
+    *stubStages = kStubStagesV2;
     return TILEXR_MOONEP_SUCCESS;
 }
 

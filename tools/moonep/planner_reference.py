@@ -14,11 +14,35 @@ class ReferencePlan:
 
 
 def deterministic_all_topk(
-    rank_size: int, tokens_per_rank: int, topk: int, expert_count: int
+    rank_size: int,
+    tokens_per_rank: int,
+    topk: int,
+    expert_count: int,
+    *,
+    route_pattern: str = "balanced",
 ) -> tuple[int, ...]:
+    if (
+        rank_size <= 0
+        or tokens_per_rank <= 0
+        or topk <= 0
+        or expert_count <= 0
+        or expert_count % rank_size != 0
+    ):
+        raise ValueError("invalid deterministic route dimensions")
+    if route_pattern not in ("balanced", "fan_in", "skew"):
+        raise ValueError(f"unsupported route_pattern: {route_pattern}")
     route_count = tokens_per_rank * topk
+    experts_per_rank = expert_count // rank_size
+
+    def expert_for(source: int, route: int) -> int:
+        if route_pattern == "fan_in":
+            return 0
+        if route_pattern == "skew":
+            return (route + source * topk) % experts_per_rank
+        return (route + source * topk) % expert_count
+
     return tuple(
-        (route + source * topk) % expert_count
+        expert_for(source, route)
         for source in range(rank_size)
         for route in range(route_count)
     )

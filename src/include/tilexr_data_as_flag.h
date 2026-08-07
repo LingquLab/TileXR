@@ -244,11 +244,12 @@ __aicore__ inline uint32_t DataAsFlagSend(
     return totalBlocks;
 }
 
-__aicore__ inline bool DataAsFlagCheckBatch(
+__aicore__ inline bool DataAsFlagCheckBatchValue(
     const __gm__ uint8_t* dataAsFlagGM,
     uint32_t blockOffset,
     uint32_t batchBlocks,
-    AscendC::LocalTensor<uint8_t>& recvScratch)
+    AscendC::LocalTensor<uint8_t>& recvScratch,
+    float expectedValue)
 {
     AscendC::LocalTensor<float> flagLocal;
     AscendC::LocalTensor<float> sumOut;
@@ -283,7 +284,26 @@ __aicore__ inline bool DataAsFlagCheckBatch(
     AscendC::Sum<float>(sumOut, flagLocal, sharedTmpBuffer, sumParams);
     AscendC::SetFlag<AscendC::HardEvent::V_S>(EVENT_ID0);
     AscendC::WaitFlag<AscendC::HardEvent::V_S>(EVENT_ID0);
-    return sumOut.GetValue(0) == 1.0f * batchBlocks;
+    return sumOut.GetValue(0) == expectedValue * static_cast<float>(batchBlocks);
+}
+
+__aicore__ inline bool DataAsFlagCheckBatch(
+    const __gm__ uint8_t* dataAsFlagGM,
+    uint32_t blockOffset,
+    uint32_t batchBlocks,
+    AscendC::LocalTensor<uint8_t>& recvScratch)
+{
+    return DataAsFlagCheckBatchValue(
+        dataAsFlagGM, blockOffset, batchBlocks, recvScratch, DATA_AS_FLAG_READY_VALUE);
+}
+
+__aicore__ inline bool DataAsFlagCheckBatchCleared(
+    const __gm__ uint8_t* dataAsFlagGM,
+    uint32_t blockOffset,
+    uint32_t batchBlocks,
+    AscendC::LocalTensor<uint8_t>& recvScratch)
+{
+    return DataAsFlagCheckBatchValue(dataAsFlagGM, blockOffset, batchBlocks, recvScratch, 0.0f);
 }
 
 __aicore__ inline bool DataAsFlagCheck(

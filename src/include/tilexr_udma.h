@@ -683,15 +683,15 @@ __aicore__ inline void UDMAGetRegisteredNbi(
 }
 
 template <typename T>
-__aicore__ inline void UDMAPutSignalNbi(
+__aicore__ inline uint32_t UDMAPutSignalNbiOnQp(
     const __gm__ CommArgs* args, const AscendC::LocalTensor<uint8_t>& wqeScratch,
-    int targetRank, const __gm__ T* localSrc, uint64_t byteOffset,
+    int targetRank, uint32_t qpIdx, const __gm__ T* localSrc, uint64_t byteOffset,
     uint32_t byteCount, uint64_t signalByteOffset, uint64_t signal)
 {
-    if (!UDMARegisteredOperationValid(args, targetRank, 0U, byteOffset, byteCount) ||
-        !UDMARegisteredOperationValid(args, targetRank, 0U, signalByteOffset, sizeof(uint64_t)) ||
+    if (!UDMARegisteredOperationValid(args, targetRank, qpIdx, byteOffset, byteCount) ||
+        !UDMARegisteredOperationValid(args, targetRank, qpIdx, signalByteOffset, sizeof(uint64_t)) ||
         (localSrc == nullptr && byteCount != 0U)) {
-        return;
+        return TILEXR_UDMA_STATUS_INVALID;
     }
 
     auto registry = GetUDMARegistry(args);
@@ -701,8 +701,28 @@ __aicore__ inline void UDMAPutSignalNbi(
         UDMARegisteredRemoteAddr(registry, targetRank, signalByteOffset));
     signalParams.signal = signal;
     auto remoteAddr = UDMARegisteredRemoteAddr(registry, targetRank, byteOffset);
-    (void)UDMAWriteNotify(args, wqeScratch, remoteAddr, localAddr,
-        static_cast<uint32_t>(targetRank), 0U, byteCount, &signalParams);
+    return UDMAWriteNotify(args, wqeScratch, remoteAddr, localAddr,
+        static_cast<uint32_t>(targetRank), qpIdx, byteCount, &signalParams);
+}
+
+template <typename T>
+__aicore__ inline void UDMAPutSignalNbi(
+    const __gm__ CommArgs* args, const AscendC::LocalTensor<uint8_t>& wqeScratch,
+    int targetRank, const __gm__ T* localSrc, uint64_t byteOffset,
+    uint32_t byteCount, uint64_t signalByteOffset, uint64_t signal)
+{
+    (void)UDMAPutSignalNbiOnQp<T>(args, wqeScratch, targetRank, 0U, localSrc,
+        byteOffset, byteCount, signalByteOffset, signal);
+}
+
+template <typename T>
+__aicore__ inline uint32_t UDMAPutRegisteredSignalNbiOnQp(
+    const __gm__ CommArgs* args, const AscendC::LocalTensor<uint8_t>& wqeScratch,
+    int targetRank, uint32_t qpIdx, const __gm__ T* localSrc, uint64_t byteOffset,
+    uint32_t byteCount, uint64_t signalByteOffset, uint64_t signal)
+{
+    return UDMAPutSignalNbiOnQp<T>(args, wqeScratch, targetRank, qpIdx, localSrc,
+        byteOffset, byteCount, signalByteOffset, signal);
 }
 
 template <typename T>
@@ -711,8 +731,8 @@ __aicore__ inline void UDMAPutRegisteredSignalNbi(
     int targetRank, const __gm__ T* localSrc, uint64_t byteOffset,
     uint32_t byteCount, uint64_t signalByteOffset, uint64_t signal)
 {
-    UDMAPutSignalNbi<T>(args, wqeScratch, targetRank, localSrc,
-        byteOffset, byteCount, signalByteOffset, signal);
+    (void)UDMAPutRegisteredSignalNbiOnQp<T>(args, wqeScratch, targetRank, 0U,
+        localSrc, byteOffset, byteCount, signalByteOffset, signal);
 }
 
 __aicore__ inline uint32_t UDMAFlushQpDoorbell(

@@ -130,6 +130,9 @@ int main()
     const std::string kernel = ReadFile(kernelPath);
     CheckContains(kernelPath, kernel, "UDMARegistryEnabled");
     CheckContains(kernelPath, kernel, "UDMAPutSignalNbi<int32_t>");
+    CheckNotContains(kernelPath, kernel, "UDMAPutSignalNbiOnQp<int32_t>");
+    CheckNotContains(kernelPath, kernel, "debug[14]");
+    CheckNotContains(kernelPath, kernel, "debug[15]");
     CheckContains(kernelPath, kernel, "UDMAQuiet");
     CheckContains(kernelPath, kernel, "UDMAQpCount(args)");
     CheckContains(kernelPath, kernel, "UDMAPutNbiOnQpWithFlagDeferred<int32_t>");

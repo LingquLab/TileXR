@@ -354,6 +354,72 @@ void TestGetAndLegacyQp0Wrappers()
         "legacy PUT uses named ordered-completion flag");
 }
 
+void TestRegisteredSignalIsQpAware()
+{
+    Fixture fixture;
+    constexpr uint32_t qp = 1U;
+    constexpr uint64_t dataOffset = 32U;
+    constexpr uint64_t signalOffset = 128U;
+    constexpr uint64_t signal = 0x1122334455667788ULL;
+    std::array<uint8_t, 16> local = {};
+    auto scratch = fixture.Scratch();
+
+    const uint32_t status = UDMAPutRegisteredSignalNbiOnQp<uint8_t>(
+        &fixture.args, scratch, 1, qp, local.data(), dataOffset, local.size(),
+        signalOffset, signal);
+    Check(status == TILEXR_UDMA_STATUS_SUCCESS, "QP-aware registered signal succeeds");
+    Check(fixture.sqHead[qp] == 2U && fixture.sqDoorbell[qp] == 2U,
+        "registered signal posts and rings the selected QP");
+    Check(fixture.sqHead[0] == 0U && fixture.sqDoorbell[0] == 0U,
+        "registered signal leaves QP0 unchanged");
+
+    const UDMASqeCtx* sqe = fixture.Sqe(qp, 0U);
+    Check(sqe->opcode == static_cast<uint32_t>(UDMAOpcode::WRITE_WITH_NOTIFY),
+        "registered signal emits WRITE_WITH_NOTIFY");
+    const uint64_t remoteAddr = static_cast<uint64_t>(sqe->rmtAddrLOrTokenId) |
+        (static_cast<uint64_t>(sqe->rmtAddrHOrTokenValue) << 32U);
+    Check(remoteAddr == AddressOf(fixture.remoteRegion.data() + dataOffset),
+        "registered signal uses the registered data offset");
+    Check(sqe->tpId == fixture.mem[Fixture::kQpNum + qp].tpn,
+        "registered signal uses selected-QP remote metadata");
+    Check(sqe->rmtJettyOrSegId == fixture.mem[Fixture::kQpNum + qp].tid,
+        "registered signal uses selected-QP remote object ID");
+
+    const UDMANotifyCtx* notify = reinterpret_cast<const UDMANotifyCtx*>(
+        fixture.sqBuffers[qp].data() + sizeof(UDMASqeCtx));
+    const uint64_t notifyAddr = static_cast<uint64_t>(notify->notifyAddrL) |
+        (static_cast<uint64_t>(notify->notifyAddrH) << 32U);
+    const uint64_t notifyData = static_cast<uint64_t>(notify->notifyDataL) |
+        (static_cast<uint64_t>(notify->notifyDataH) << 32U);
+    Check(notifyAddr == AddressOf(fixture.remoteRegion.data() + signalOffset),
+        "registered signal uses the registered signal offset");
+    Check(notifyData == signal, "registered signal preserves the signal value");
+    Check(notify->notifyTokenId ==
+        (fixture.mem[Fixture::kQpNum + qp].tid & 0xFFFFFU),
+        "registered signal uses the remote object ID for notify");
+
+    Check(UDMAPutSignalNbiOnQp<uint8_t>(&fixture.args, scratch, 1, Fixture::kQpNum,
+        local.data(), dataOffset, local.size(), signalOffset, signal) ==
+        TILEXR_UDMA_STATUS_INVALID, "registered signal rejects an invalid QP");
+    Check(UDMAPutSignalNbiOnQp<uint8_t>(&fixture.args, scratch, 1, qp,
+        local.data(), fixture.remoteRegion.size() - 8U, local.size(), signalOffset, signal) ==
+        TILEXR_UDMA_STATUS_INVALID, "registered signal rejects an invalid data range");
+    Check(UDMAPutSignalNbiOnQp<uint8_t>(&fixture.args, scratch, 1, qp,
+        local.data(), dataOffset, local.size(), fixture.remoteRegion.size() - 4U, signal) ==
+        TILEXR_UDMA_STATUS_INVALID, "registered signal rejects an invalid signal range");
+    Check(fixture.sqHead[qp] == 2U && fixture.sqDoorbell[qp] == 2U,
+        "invalid registered signals do not mutate the selected QP");
+
+    UDMAPutSignalNbi<uint8_t>(&fixture.args, scratch, 1, local.data(),
+        dataOffset, local.size(), signalOffset, signal);
+    Check(fixture.sqHead[0] == 2U && fixture.sqDoorbell[0] == 2U,
+        "legacy signal wrapper selects QP0");
+    UDMAPutRegisteredSignalNbi<uint8_t>(&fixture.args, scratch, 1, local.data(),
+        dataOffset, local.size(), signalOffset, signal);
+    Check(fixture.sqHead[0] == 4U && fixture.sqDoorbell[0] == 4U,
+        "legacy registered signal wrapper selects QP0");
+}
+
 void TestWriteNotifyWrapsWithinSqRing()
 {
     Fixture fixture;
@@ -515,6 +581,7 @@ int main()
     TestDeferredPutAndFlushAreQpSpecific();
     TestImmediatePutReclaimsCompletedFullSq();
     TestGetAndLegacyQp0Wrappers();
+    TestRegisteredSignalIsQpAware();
     TestWriteNotifyWrapsWithinSqRing();
     TestWriteNotifyCompletionUsesFinalBbIndex();
     TestLegacyQuietWithoutRegistry();

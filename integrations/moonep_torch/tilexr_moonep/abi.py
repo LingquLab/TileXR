@@ -5,9 +5,12 @@ from enum import IntEnum, IntFlag
 
 
 TILEXR_SUCCESS = 0
-TILEXR_MOONEP_ABI_VERSION = 1
+TILEXR_MOONEP_ABI_VERSION_V1 = 1
+TILEXR_MOONEP_ABI_VERSION_V2 = 2
+TILEXR_MOONEP_ABI_VERSION = TILEXR_MOONEP_ABI_VERSION_V2
 TILEXR_MOONEP_MAX_TENSOR_RANK = 4
 TILEXR_MOONEP_FLAG_NONE = 0
+TILEXR_MOONEP_REDUCE_GRAD_UDMA_THRESHOLD_BYTES = 1 << 20
 
 
 class TileXRMoonEPDType(IntEnum):
@@ -23,6 +26,12 @@ class TileXRMoonEPStage(IntFlag):
     PREFETCH_WEIGHT = 1 << 2
     COMBINE = 1 << 3
     REDUCE_GRAD = 1 << 4
+
+
+class TileXRMoonEPReduceGradTransport(IntEnum):
+    NONE = 0
+    PEER = 1
+    UDMA = 2
 
 
 class TileXRMoonEPTensorV1(ctypes.Structure):
@@ -99,9 +108,65 @@ class TileXRMoonEPReduceGradArgsV1(_TileXRMoonEPStageArgsV1):
     pass
 
 
-def initialize_struct(value: ctypes.Structure) -> ctypes.Structure:
+class TileXRMoonEPReduceGradWorkspaceQueryV2(ctypes.Structure):
+    _fields_ = [
+        ("structSize", ctypes.c_uint32),
+        ("abiVersion", ctypes.c_uint32),
+        ("comm", ctypes.c_void_p),
+        ("plan", ctypes.POINTER(TileXRMoonEPPlanV1)),
+        ("gate", ctypes.POINTER(TileXRMoonEPTensorV1)),
+        ("up", ctypes.POINTER(TileXRMoonEPTensorV1)),
+        ("down", ctypes.POINTER(TileXRMoonEPTensorV1)),
+        ("requestedUdmaChunkBytes", ctypes.c_uint64),
+        ("flags", ctypes.c_uint64),
+    ]
+
+
+class TileXRMoonEPReduceGradWorkspaceInfoV2(ctypes.Structure):
+    _fields_ = [
+        ("structSize", ctypes.c_uint32),
+        ("abiVersion", ctypes.c_uint32),
+        ("workspaceBytes", ctypes.c_uint64),
+        ("workspaceAlignment", ctypes.c_uint64),
+        ("udmaChunkBytes", ctypes.c_uint64),
+        ("peerWindowBytes", ctypes.c_uint64),
+        ("peerHalfBytes", ctypes.c_uint64),
+        ("peerSlotStrideBytes", ctypes.c_uint64),
+        ("rowBytes", ctypes.c_uint64 * 3),
+        ("transports", ctypes.c_uint32 * 3),
+        ("blockDim", ctypes.c_uint32),
+    ]
+
+
+class TileXRMoonEPReduceGradArgsV2(ctypes.Structure):
+    _fields_ = [
+        ("structSize", ctypes.c_uint32),
+        ("abiVersion", ctypes.c_uint32),
+        ("comm", ctypes.c_void_p),
+        ("plan", ctypes.POINTER(TileXRMoonEPPlanV1)),
+        ("gate", ctypes.POINTER(TileXRMoonEPTensorV1)),
+        ("up", ctypes.POINTER(TileXRMoonEPTensorV1)),
+        ("down", ctypes.POINTER(TileXRMoonEPTensorV1)),
+        ("workspace", ctypes.c_void_p),
+        ("workspaceBytes", ctypes.c_uint64),
+        ("status", ctypes.POINTER(TileXRMoonEPTensorV1)),
+        ("waitIterations", ctypes.c_uint64),
+        ("requestedUdmaChunkBytes", ctypes.c_uint64),
+        ("flags", ctypes.c_uint64),
+    ]
+
+
+def initialize_struct(
+    value: ctypes.Structure, *, abi_version: int | None = None
+) -> ctypes.Structure:
     value.structSize = ctypes.sizeof(type(value))
-    value.abiVersion = TILEXR_MOONEP_ABI_VERSION
+    if abi_version is None:
+        abi_version = (
+            TILEXR_MOONEP_ABI_VERSION_V2
+            if type(value).__name__.endswith("V2")
+            else TILEXR_MOONEP_ABI_VERSION_V1
+        )
+    value.abiVersion = int(abi_version)
     return value
 
 

@@ -317,6 +317,8 @@ void TestUDMAMultiQpHostTransportContract()
                   "registration.remoteMemHandles.count(importKey) == 0");
     CheckContains(transportPath, transport,
                   "BuildUDMAInfoImage(reinterpret_cast<uintptr_t>(registration.infoDev), qpCount_");
+    CheckContains(transportPath, transport,
+                  "memInfo.tid = registration.tokenId >> 8;");
     CheckContains(transportPath, transport, "return IsAvailable() ? qpCount_ : 0U;");
     CheckContains(transportPath, transport, "ret = AgreeInitStatus(localStatus);");
     CheckContains(transportPath, transport, "int TileXRUDMATransport::AgreeEidCount() const");
@@ -339,6 +341,7 @@ void TestUDMAMultiQpHostTransportContract()
                   "__attribute__((always_inline)) inline __aicore__ void UDMAFillSqeCtx");
     CheckContains(devicePath, device,
                   "__attribute__((always_inline)) inline __aicore__ uint32_t UDMAPostSend");
+    CheckContains(devicePath, device, "UDMAPutRegisteredSignalNbiOnQp");
 }
 
 void TestUDMADevicePostingContract()
