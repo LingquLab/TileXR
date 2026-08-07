@@ -243,6 +243,7 @@ class TileXRCorrectnessAdapterTests(unittest.TestCase):
         _, _, _, backend = make_backend()
         self.assertIsInstance(backend, MoonEPBackend)
         self.assertEqual(backend.name, "tilexr_native")
+        self.assertFalse(backend.supports_duplicate_destinations)
         backend.close()
 
 

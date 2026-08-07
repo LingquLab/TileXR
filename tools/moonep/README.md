@@ -98,21 +98,21 @@ status failures:
 ASCEND_RT_VISIBLE_DEVICES=4 python -m tools.moonep.launcher \
   --mode correctness \
   --cases tools/moonep/cases/correctness.json \
-  --case-ids planning-small \
+  --case-ids planning-no-dedup \
   --world-size 1 --physical-device-count 1 \
   --install-prefix "$TILEXR_INSTALL_PREFIX" \
   --output-dir output/moonep-correctness-1r
 ```
 
-Then run the four-rank padded/skewed differential case on four physical devices:
+Then run the same padded single-route differential case on four physical devices:
 
 ```bash
 bash scripts/run_moonep.sh --mode correctness --rank-size 4
 ```
 
 For `reference` and `correctness`, this script enables stage tensor snapshots by
-default and reports the directory and `.pt/.json/.txt` file counts. It continues to
-run `skewed-padding`; use `--case-id manual-small` for hand verification. Use
+default and reports the directory and `.pt/.json/.txt` file counts. It runs
+`planning-no-dedup`; use `--case-id manual-small` for reference-only hand verification. Use
 `--tensor-preview-elements COUNT` to control terminal preview length or
 `--no-dump-stage-tensors` for summary-only runs.
 
@@ -134,7 +134,9 @@ Planner redistributes execution to `[4,4]` with one remote expert prefetch on ra
 `--case-id manual-2rank-dedup-3 --rank-size 2` combines Planner load migration with
 duplicate Dispatch routes. Initial expert-owner loads are `[12,4]`; Planner balances
 execution to `[8,8]`. Rank 0's first token routes to experts `[4,5,6,7]` on rank 1,
-where Dispatch emits one primary plus three duplicates in one dedup group.
+where the reference emits one primary plus three duplicates in one dedup group. The
+current registered-workspace URMA candidate rejects this case before Dispatch because
+that path does not build dedup metadata.
 
 The script selects devices starting at 0 by default and owns the HCCL NPU socket
 range, so the normal command requires no environment exports. Use

@@ -151,7 +151,7 @@ first against the installed libraries:
 ASCEND_RT_VISIBLE_DEVICES=4 python -m tools.moonep.launcher \
   --mode correctness \
   --cases tools/moonep/cases/correctness.json \
-  --case-ids planning-small \
+  --case-ids planning-no-dedup \
   --world-size 1 --physical-device-count 1 \
   --install-prefix "$TILEXR_INSTALL_PREFIX" \
   --output-dir temp/moonep-correctness-1r
@@ -163,14 +163,15 @@ Then validate the same-node four-rank path:
 ASCEND_RT_VISIBLE_DEVICES=4,5,6,7 python -m tools.moonep.launcher \
   --mode correctness \
   --cases tools/moonep/cases/correctness.json \
-  --case-ids skewed-padding \
+  --case-ids planning-no-dedup \
   --world-size 4 --physical-device-count 4 \
   --install-prefix "$TILEXR_INSTALL_PREFIX" \
   --output-dir temp/moonep-correctness-4r
 ```
 
 The adapter rejects missing/stub stages, mismatched dimensions or device/rank metadata,
-and cross-node topology before Planning. External adapters remain available through
+cross-node topology before Planning, and repeated destination ranks before the current
+URMA Dispatch. External adapters remain available through
 `--candidate-backend MODULE:FACTORY`. These runs are correctness-only and must retain
 `performance_valid=false`.
 

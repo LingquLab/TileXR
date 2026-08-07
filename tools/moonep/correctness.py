@@ -229,6 +229,17 @@ def _dedup_semantics(plan: MoonEPPlan) -> set[tuple[int, tuple[int, ...]]]:
     return result
 
 
+def _has_duplicate_destinations(torch_module, plan: MoonEPPlan) -> bool:
+    d = plan.dimensions
+    if d.topk < 2:
+        return False
+    encoded = plan.dst.reshape(d.tokens_per_rank, d.topk)
+    raw = torch_module.where(encoded < 0, -encoded - 1, encoded)
+    destinations = torch_module.div(raw, d.nvsh, rounding_mode="floor")
+    ordered = torch_module.sort(destinations, dim=1).values
+    return bool((ordered[:, 1:] == ordered[:, :-1]).any().item())
+
+
 def _assert_unchanged(torch_module, stage: str, name: str, value, snapshot) -> None:
     require_tensor_equal(torch_module, stage, f"input.{name}", value, snapshot)
 
@@ -379,6 +390,15 @@ class CorrectnessRunner:
     def _dispatch(self, case, backends, states):
         torch = self.torch
         d = case.dimensions
+        if len(backends) > 1 and not getattr(
+            backends[1], "supports_duplicate_destinations", True
+        ):
+            reference_plan = states[id(backends[0])]["plan"]
+            if _has_duplicate_destinations(torch, reference_plan):
+                raise BackendUnavailableError(
+                    f"{backends[1].name} current URMA Dispatch does not support "
+                    "duplicate destination ranks for one token"
+                )
         for backend in backends:
             plan = states[id(backend)]["plan"]
             core_before = [(name, tensor.clone()) for name, tensor in _plan_core_tensors(plan)]

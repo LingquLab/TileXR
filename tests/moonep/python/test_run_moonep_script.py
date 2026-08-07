@@ -69,7 +69,7 @@ fi'''
 def test_script_selects_manual_small_through_case_id_only() -> None:
     assert "-c|--case-id" in SCRIPT
     assert 'case_id="$2"' in SCRIPT
-    assert 'case_id="skewed-padding"' in SCRIPT
+    assert 'case_id="planning-no-dedup"' in SCRIPT
     assert "--manual-small" not in SCRIPT
     assert '--case-ids "${case_id}"' in SCRIPT
     assert 'summary_file="${output_dir}/${case_id}/summary.json"' in SCRIPT

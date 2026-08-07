@@ -123,6 +123,36 @@ def test_reference_and_identical_candidate_pass_all_stage_gates(tmp_path) -> Non
     assert len(list(tmp_path.glob("*.json"))) == len(STAGES)
 
 
+def test_candidate_without_dedup_support_rejects_duplicate_destinations_before_dispatch() -> None:
+    case = make_correctness_case(torch, dimensions())
+    reference = TorchNpuMoonEPBackend(torch, dimensions())
+    candidate = FaultBackend(TorchNpuMoonEPBackend(torch, dimensions()), "none")
+    candidate.supports_duplicate_destinations = False
+
+    with pytest.raises(CorrectnessError) as captured:
+        CorrectnessRunner(
+            torch, reference, candidate, expert_ops=CpuTorchNpu()
+        ).run_differential(case)
+
+    assert captured.value.artifact["stage"] == "dispatch"
+    assert "does not support duplicate destination ranks" in str(captured.value)
+    assert candidate.calls == ["planning"]
+
+
+def test_candidate_without_dedup_support_accepts_single_route_case() -> None:
+    single_route = MoonEPDimensions(0, 1, 4, 1, 4, 4, 4, 4, 3)
+    case = make_correctness_case(torch, single_route)
+    reference = TorchNpuMoonEPBackend(torch, single_route)
+    candidate = FaultBackend(TorchNpuMoonEPBackend(torch, single_route), "none")
+    candidate.supports_duplicate_destinations = False
+
+    report = CorrectnessRunner(
+        torch, reference, candidate, expert_ops=CpuTorchNpu()
+    ).run_differential(case)
+
+    assert report.passed
+
+
 def test_manual_small_reference_passes_and_writes_complete_readable_boundaries(
     tmp_path,
 ) -> None:

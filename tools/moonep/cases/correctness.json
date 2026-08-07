@@ -53,6 +53,20 @@
     "correctness": true
   },
   {
+    "id": "planning-no-dedup",
+    "S": 8,
+    "K": 1,
+    "E": 8,
+    "H": 8,
+    "Hf": 4,
+    "B": 8,
+    "P": 4,
+    "routing": "balanced",
+    "warmup": 0,
+    "iters": 1,
+    "correctness": true
+  },
+  {
     "id": "skewed-padding",
     "S": 8,
     "K": 2,

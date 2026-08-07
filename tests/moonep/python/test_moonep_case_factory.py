@@ -103,6 +103,20 @@ def test_manual_small_case_keeps_all_stage_tensors_human_auditable() -> None:
     assert dimensions.nvsh == 4
 
 
+def test_default_no_dedup_case_uses_one_route_per_token() -> None:
+    root = Path(__file__).resolve().parents[3]
+    cases = load_cases(root / "tools" / "moonep" / "cases" / "correctness.json")
+    case = next(item for item in cases if item.case_id == "planning-no-dedup")
+
+    assert (
+        case.tokens_per_rank,
+        case.topk,
+        case.expert_count,
+        case.token_padding,
+        case.routing_pattern,
+    ) == (8, 1, 8, 4, "balanced")
+
+
 def test_manual_two_rank_case_starts_with_all_routes_on_rank_zero_experts() -> None:
     root = Path(__file__).resolve().parents[3]
     cases = load_cases(root / "tools" / "moonep" / "cases" / "correctness.json")

@@ -12,7 +12,7 @@ Run a TileXR MoonEP case with the requested mode and logical rank count.
 Options:
   -m, --mode MODE       benchmark, reference, or correctness
   -r, --rank-size SIZE  Logical rank count; at most two ranks per physical NPU
-  -c, --case-id ID      Case to run (default: skewed-padding)
+  -c, --case-id ID      Case to run (default: planning-no-dedup)
   -v, --visible-devices LIST
                         Comma-separated physical NPU IDs (default: start at 0)
   -d, --dump-stage-tensors
@@ -32,7 +32,8 @@ Available case IDs:
   manual-2rank-imbalanced   2-rank Planner load migration from [8,0] to [4,4]
   manual-2rank-dedup-3      2-rank [12,4] to [8,8] migration plus a 3-duplicate group
   planning-small            Balanced Planner case with padded layout (P=4)
-  skewed-padding            Default skewed-routing case with padded layout (P=4)
+  planning-no-dedup         Padded single-route case supported by current URMA Dispatch
+  skewed-padding            Skewed-routing reference case with padded layout (P=4)
 
 Environment:
   ASCEND_RT_VISIBLE_DEVICES    Legacy fallback when --visible-devices is omitted
@@ -53,7 +54,7 @@ fi
 
 mode=""
 rank_size=""
-case_id="skewed-padding"
+case_id="planning-no-dedup"
 dump_stage_tensors=""
 generate_flowcharts="false"
 tensor_preview_elements="${TILEXR_MOONEP_TENSOR_PREVIEW_ELEMENTS:-8}"

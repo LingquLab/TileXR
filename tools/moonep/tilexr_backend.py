@@ -48,6 +48,7 @@ class TileXRMoonEPBackend:
     """Normalized correctness backend backed by the native TileXR Torch facade."""
 
     name = "tilexr_native"
+    supports_duplicate_destinations = False
 
     def __init__(
         self,

@@ -121,8 +121,8 @@ TileXR does not initialize UDMA for a single-rank communicator. Multi-rank runs
 preserve the caller's selection; when the variable is unset, TileXR uses its
 default UDMA-enabled behavior.
 
-All modes continue to default to `skewed-padding`. Reference and correctness runs can
-opt into the hand-checkable `manual-small` case
+All modes default to the padded single-route `planning-no-dedup` case supported by
+the current URMA Dispatch. Reference runs can opt into the hand-checkable `manual-small` case
 (`S=2,K=2,E=4,H=2,Hf=2,B=1`, default `P=1`) with
 `--case-id manual-small`.
 
