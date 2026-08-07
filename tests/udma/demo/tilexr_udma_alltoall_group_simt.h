@@ -17,7 +17,9 @@ namespace Demo {
 
 constexpr uint32_t kAllToAllGroupSimtThreads = 32U;
 constexpr uint32_t kAllToAllGroupSimtMaxTasks = 32U;
-constexpr uint32_t kAllToAllGroupSimtMaxQueues = 32U;
+constexpr uint32_t kAllToAllGroupSimtPendingMaxTasks = 64U;
+constexpr uint32_t kAllToAllGroupSimtMaxQueues =
+    kAllToAllGroupSimtPendingMaxTasks;
 constexpr uint32_t kAllToAllGroupSimtWqesPerTask = 2U;
 constexpr uint32_t kAllToAllGroupSimtPostCombined = 0U;
 constexpr uint32_t kAllToAllGroupSimtPostPayload = 1U;
@@ -26,25 +28,25 @@ constexpr uint32_t kAllToAllGroupSimtCreditScratchBytes = 512U;
 
 struct AllToAllGroupSimtBatch {
     uint32_t sendCoreCount;
-    uint32_t active[kAllToAllGroupSimtMaxTasks];
-    uint32_t configStatus[kAllToAllGroupSimtMaxTasks];
-    uint64_t configOffset[kAllToAllGroupSimtMaxTasks];
-    uint64_t configRegionBytes[kAllToAllGroupSimtMaxTasks];
-    uint64_t localAddr[kAllToAllGroupSimtMaxTasks];
-    uint64_t remoteAddr[kAllToAllGroupSimtMaxTasks];
-    uint64_t signalLocalAddr[kAllToAllGroupSimtMaxTasks];
-    uint64_t signalAddr[kAllToAllGroupSimtMaxTasks];
-    uint64_t signal[kAllToAllGroupSimtMaxTasks];
-    uint32_t byteCount[kAllToAllGroupSimtMaxTasks];
-    uint32_t peer[kAllToAllGroupSimtMaxTasks];
-    uint32_t qpIdx[kAllToAllGroupSimtMaxTasks];
-    uint32_t payloadRegionIndex[kAllToAllGroupSimtMaxTasks];
-    uint32_t signalRegionIndex[kAllToAllGroupSimtMaxTasks];
-    uint32_t worker[kAllToAllGroupSimtMaxTasks];
-    uint32_t group[kAllToAllGroupSimtMaxTasks];
-    uint32_t pass[kAllToAllGroupSimtMaxTasks];
-    uint64_t postBegin[kAllToAllGroupSimtMaxTasks];
-    uint32_t reservedHead[kAllToAllGroupSimtMaxTasks];
+    uint32_t active[kAllToAllGroupSimtPendingMaxTasks];
+    uint32_t configStatus[kAllToAllGroupSimtPendingMaxTasks];
+    uint64_t configOffset[kAllToAllGroupSimtPendingMaxTasks];
+    uint64_t configRegionBytes[kAllToAllGroupSimtPendingMaxTasks];
+    uint64_t localAddr[kAllToAllGroupSimtPendingMaxTasks];
+    uint64_t remoteAddr[kAllToAllGroupSimtPendingMaxTasks];
+    uint64_t signalLocalAddr[kAllToAllGroupSimtPendingMaxTasks];
+    uint64_t signalAddr[kAllToAllGroupSimtPendingMaxTasks];
+    uint64_t signal[kAllToAllGroupSimtPendingMaxTasks];
+    uint32_t byteCount[kAllToAllGroupSimtPendingMaxTasks];
+    uint32_t peer[kAllToAllGroupSimtPendingMaxTasks];
+    uint32_t qpIdx[kAllToAllGroupSimtPendingMaxTasks];
+    uint32_t payloadRegionIndex[kAllToAllGroupSimtPendingMaxTasks];
+    uint32_t signalRegionIndex[kAllToAllGroupSimtPendingMaxTasks];
+    uint32_t worker[kAllToAllGroupSimtPendingMaxTasks];
+    uint32_t group[kAllToAllGroupSimtPendingMaxTasks];
+    uint32_t pass[kAllToAllGroupSimtPendingMaxTasks];
+    uint64_t postBegin[kAllToAllGroupSimtPendingMaxTasks];
+    uint32_t reservedHead[kAllToAllGroupSimtPendingMaxTasks];
     uint32_t queuePeer[kAllToAllGroupSimtMaxQueues];
     uint32_t queueQpIdx[kAllToAllGroupSimtMaxQueues];
     uint32_t queueTaskBegin[kAllToAllGroupSimtMaxQueues];

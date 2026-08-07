@@ -1033,7 +1033,8 @@ __aicore__ inline void AllToAllGroupPostSimtRange(
     TileXR::UDMACleanCacheLines(
         reinterpret_cast<__gm__ uint8_t*>(debug) +
             TILEXR_ALLTOALL_GROUP_ERROR_BYTES,
-        static_cast<uint64_t>(TileXR::Demo::kAllToAllGroupSimtMaxTasks) *
+        static_cast<uint64_t>(
+            TileXR::Demo::kAllToAllGroupSimtPendingMaxTasks) *
             sizeof(uint64_t));
     if (payloadOnly) {
         TileXR::Demo::AllToAllGroupSimtPostPayload(
@@ -1462,7 +1463,7 @@ __aicore__ inline bool AllToAllGroupRunSimtReadyPost(
             const uint32_t requiredTasks = readyLaneCount * 2U;
             if (taskCount != 0U &&
                 taskCount + requiredTasks >
-                    TileXR::Demo::kAllToAllGroupSimtMaxTasks) {
+                    TileXR::Demo::kAllToAllGroupSimtPendingMaxTasks) {
                 if (!AllToAllGroupFlushSimt(
                         args, batch, taskCount, queueCount, debug, blockIdx,
                         queueDiag, invocationId, trace, traceIteration,

@@ -822,7 +822,7 @@ void TestKernelStructure()
         "const uint32_t requiredTasks = readyLaneCount * 2U;");
     CHECK_CONTAINS(readyPost,
         "taskCount + requiredTasks >\n"
-        "                    TileXR::Demo::kAllToAllGroupSimtMaxTasks");
+        "                    TileXR::Demo::kAllToAllGroupSimtPendingMaxTasks");
     CHECK_CONTAINS(readyPost,
         "return taskCount == 0U || AllToAllGroupFlushSimt(");
     CHECK_CONTAINS(readyPost, "groupCount, 1U, false");
@@ -943,6 +943,10 @@ void TestHostStructure()
     CHECK_CONTAINS(simt, "AllToAllGroupSimtBuildPrepared");
     CHECK_CONTAINS(simt, "uint32_t taskBase");
     CHECK_CONTAINS(simt, "uint32_t queueBegin");
+    CHECK_CONTAINS(simt,
+        "constexpr uint32_t kAllToAllGroupSimtPendingMaxTasks = 64U;");
+    CHECK_CONTAINS(simt,
+        "active[kAllToAllGroupSimtPendingMaxTasks]");
     CHECK_CONTAINS(simt, "kAllToAllGroupSimtCreditScratchBytes");
     CHECK_CONTAINS(simt,
         "tokenBase + static_cast<uint64_t>(slot) * sizeof(uint64_t)");
