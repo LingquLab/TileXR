@@ -809,15 +809,26 @@ void TestKernelStructure()
         std::string() : kernel.substr(readyPostBegin,
             readyPostEnd == std::string::npos ? std::string::npos :
                 readyPostEnd - readyPostBegin);
+    CHECK_CONTAINS(readyPost,
+        "nextGroup[TILEXR_ALLTOALL_GROUP_DEFAULT_WIDTH]");
+    CHECK_CONTAINS(readyPost,
+        "while (completedLaneCount < ownedLaneCount)");
+    CHECK_CONTAINS(readyPost, "nextGroup[lane] != group");
     CHECK_CONTAINS(readyPost, "const uint32_t rangeBegin = taskCount;");
     CHECK_CONTAINS(readyPost, "AllToAllGroupSimtBuildPrepared(");
     CHECK_CONTAINS(readyPost, "AllToAllGroupPostSimtRange(");
     CHECK_CONTAINS(readyPost, "queueCount, rangeCount, false");
-    CHECK_CONTAINS(readyPost, "taskCount != 0U && !AllToAllGroupFlushSimt(");
+    CHECK_CONTAINS(readyPost,
+        "const uint32_t requiredTasks = readyLaneCount * 2U;");
+    CHECK_CONTAINS(readyPost,
+        "taskCount + requiredTasks >\n"
+        "                    TileXR::Demo::kAllToAllGroupSimtMaxTasks");
+    CHECK_CONTAINS(readyPost,
+        "return taskCount == 0U || AllToAllGroupFlushSimt(");
     CHECK_CONTAINS(readyPost, "groupCount, 1U, false");
     CHECK_NOT_CONTAINS(readyPost, "AllToAllGroupFlushPreparedSimtSend(");
     CHECK_EQ(CountOccurrences(readyPost, "AllToAllGroupPostSimtRange("), 1U);
-    CHECK_EQ(CountOccurrences(readyPost, "AllToAllGroupFlushSimt("), 1U);
+    CHECK_EQ(CountOccurrences(readyPost, "AllToAllGroupFlushSimt("), 2U);
     CHECK_CONTAINS(kernel, "kAllToAllGroupSimtBatchStorageBytes");
     CHECK_NOT_CONTAINS(simtSend, "AllToAllGroupWaitCreditMte(");
     CHECK_CONTAINS(kernel, "AllToAllGroupSimtBuildPrepared");
@@ -934,6 +945,8 @@ void TestHostStructure()
     CHECK_CONTAINS(simt, "uint32_t queueBegin");
     CHECK_CONTAINS(simt, "kAllToAllGroupSimtCreditScratchBytes");
     CHECK_CONTAINS(simt,
+        "tokenBase + static_cast<uint64_t>(slot) * sizeof(uint64_t)");
+    CHECK_NOT_CONTAINS(simt,
         "tokenBase + static_cast<uint64_t>(worker) * sizeof(uint64_t)");
     CHECK_CONTAINS(simt, "AllToAllGroupSimtCoResidentPeer");
     CHECK_CONTAINS(simt, "AllToAllGroupSimtPostPayloadVf");

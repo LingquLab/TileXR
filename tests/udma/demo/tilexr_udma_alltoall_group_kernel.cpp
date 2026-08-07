@@ -1393,42 +1393,49 @@ __aicore__ inline bool AllToAllGroupRunSimtReadyPost(
 {
     const uint32_t slot = invocationId & 1U;
     const int32_t currentElements = elementsPerPeer;
+    uint32_t nextGroup[TILEXR_ALLTOALL_GROUP_DEFAULT_WIDTH];
+    uint64_t creditWaitBegin[TILEXR_ALLTOALL_GROUP_MAX_GROUP_COUNT];
+    uint32_t ownedLaneCount = 0U;
+    uint32_t completedLaneCount = 0U;
+    for (uint32_t lane = 0U; lane < groupWidth; ++lane) {
+        const bool owned = lane % sendCores == sendCore;
+        nextGroup[lane] = owned ? 0U : groupCount;
+        ownedLaneCount += owned ? 1U : 0U;
+    }
     for (uint32_t group = 0U; group < groupCount; ++group) {
-        uint32_t postedMask = 0U;
-        uint32_t ownedLaneCount = 0U;
-        uint32_t postedLaneCount = 0U;
-        uint32_t taskCount = 0U;
-        uint32_t queueCount = 0U;
-        uint64_t creditWaitBegin = 0ULL;
+        creditWaitBegin[group] = 0ULL;
+    }
+
+    uint32_t taskCount = 0U;
+    uint32_t queueCount = 0U;
+    uint64_t noProgressBegin =
+        static_cast<uint64_t>(AscendC::GetSystemCycle());
+    while (completedLaneCount < ownedLaneCount) {
+        bool madeProgress = false;
         int32_t lastPendingPeer = -1;
+        uint32_t lastPendingGroup = 0U;
         uint64_t lastExpectedCredit = 0ULL;
         uint64_t lastObservedCredit = 0ULL;
-        for (uint32_t lane = 0U; lane < groupWidth; ++lane) {
-            if (lane % sendCores != sendCore) {
-                continue;
-            }
-            ++ownedLaneCount;
-            if (AllToAllGroupDevicePeer(
-                    args->rank, args->rankSize, group, lane, groupWidth) < 0) {
-                postedMask |= 1U << lane;
-                ++postedLaneCount;
-            }
-        }
-        uint64_t noProgressBegin =
-            static_cast<uint64_t>(AscendC::GetSystemCycle());
-        while (postedLaneCount < ownedLaneCount) {
+        for (uint32_t group = 0U; group < groupCount; ++group) {
             uint32_t readyLanes[TILEXR_ALLTOALL_GROUP_DEFAULT_WIDTH];
             uint32_t readyLaneCount = 0U;
             for (uint32_t lane = 0U; lane < groupWidth; ++lane) {
-                if (lane % sendCores != sendCore ||
-                    (postedMask & (1U << lane)) != 0U) {
+                if (lane % sendCores != sendCore || nextGroup[lane] != group) {
                     continue;
                 }
                 const int32_t peer = AllToAllGroupDevicePeer(
                     args->rank, args->rankSize, group, lane, groupWidth);
+                if (peer < 0) {
+                    ++nextGroup[lane];
+                    if (nextGroup[lane] == groupCount) {
+                        ++completedLaneCount;
+                    }
+                    madeProgress = true;
+                    continue;
+                }
                 if (group != 0U) {
-                    if (creditWaitBegin == 0ULL) {
-                        creditWaitBegin = AllToAllGroupTraceCycle(trace);
+                    if (creditWaitBegin[group] == 0ULL) {
+                        creditWaitBegin[group] = AllToAllGroupTraceCycle(trace);
                     }
                     const uint64_t expectedCredit =
                         AllToAllGroupDeviceToken(invocationId, group, 0U);
@@ -1440,6 +1447,7 @@ __aicore__ inline bool AllToAllGroupRunSimtReadyPost(
                         AllToAllGroupLoadCreditMte(credit, relayLocal);
                     if (observedCredit < expectedCredit) {
                         lastPendingPeer = peer;
+                        lastPendingGroup = group;
                         lastExpectedCredit = expectedCredit;
                         lastObservedCredit = observedCredit;
                         continue;
@@ -1448,16 +1456,19 @@ __aicore__ inline bool AllToAllGroupRunSimtReadyPost(
                 readyLanes[readyLaneCount++] = lane;
             }
             if (readyLaneCount == 0U) {
-                if (static_cast<uint64_t>(AscendC::GetSystemCycle()) -
-                        noProgressBegin >=
-                    TILEXR_ALLTOALL_GROUP_WAIT_TIMEOUT_CYCLES) {
-                    AllToAllGroupRecordError(
-                        debug, blockIdx, TILEXR_ALLTOALL_GROUP_STAGE_CREDIT_WAIT,
-                        group, 0U, lastPendingPeer, 0U, 0U,
-                        lastExpectedCredit, lastObservedCredit);
+                continue;
+            }
+
+            const uint32_t requiredTasks = readyLaneCount * 2U;
+            if (taskCount != 0U &&
+                taskCount + requiredTasks >
+                    TileXR::Demo::kAllToAllGroupSimtMaxTasks) {
+                if (!AllToAllGroupFlushSimt(
+                        args, batch, taskCount, queueCount, debug, blockIdx,
+                        queueDiag, invocationId, trace, traceIteration,
+                        groupCount, 1U, false)) {
                     return false;
                 }
-                continue;
             }
 
             for (uint32_t ready = 0U; ready < readyLaneCount; ++ready) {
@@ -1523,28 +1534,47 @@ __aicore__ inline bool AllToAllGroupRunSimtReadyPost(
                 debug, trace, traceIteration, groupCount, 1U);
             queueCount += rangeCount;
             for (uint32_t ready = 0U; ready < readyLaneCount; ++ready) {
-                postedMask |= 1U << readyLanes[ready];
-                ++postedLaneCount;
+                const uint32_t lane = readyLanes[ready];
+                ++nextGroup[lane];
+                if (nextGroup[lane] == groupCount) {
+                    ++completedLaneCount;
+                }
             }
-            noProgressBegin = static_cast<uint64_t>(AscendC::GetSystemCycle());
+            madeProgress = true;
+            if (group != 0U) {
+                bool groupPending = false;
+                for (uint32_t lane = 0U; lane < groupWidth; ++lane) {
+                    groupPending = groupPending ||
+                        (lane % sendCores == sendCore &&
+                            nextGroup[lane] == group);
+                }
+                if (!groupPending) {
+                    AllToAllGroupTraceRecordTask(
+                        trace, traceIteration, blockIdx, group, 0U,
+                        TileXR::Demo::kAllToAllGroupTraceCreditWait,
+                        groupCount, 1U, -1,
+                        TileXR::Demo::kAllToAllGroupTraceNoQp,
+                        creditWaitBegin[group], AllToAllGroupTraceCycle(trace));
+                }
+            }
         }
-
-        if (taskCount != 0U && !AllToAllGroupFlushSimt(
-                args, batch, taskCount, queueCount, debug, blockIdx,
-                queueDiag, invocationId, trace, traceIteration,
-                groupCount, 1U, false)) {
+        if (madeProgress) {
+            noProgressBegin = static_cast<uint64_t>(AscendC::GetSystemCycle());
+            continue;
+        }
+        if (static_cast<uint64_t>(AscendC::GetSystemCycle()) - noProgressBegin >=
+            TILEXR_ALLTOALL_GROUP_WAIT_TIMEOUT_CYCLES) {
+            AllToAllGroupRecordError(
+                debug, blockIdx, TILEXR_ALLTOALL_GROUP_STAGE_CREDIT_WAIT,
+                lastPendingGroup, 0U, lastPendingPeer, 0U, 0U,
+                lastExpectedCredit, lastObservedCredit);
             return false;
         }
-        if (group != 0U) {
-            AllToAllGroupTraceRecordTask(
-                trace, traceIteration, blockIdx, group, 0U,
-                TileXR::Demo::kAllToAllGroupTraceCreditWait,
-                groupCount, 1U, -1,
-                TileXR::Demo::kAllToAllGroupTraceNoQp,
-                creditWaitBegin, AllToAllGroupTraceCycle(trace));
-        }
     }
-    return true;
+    return taskCount == 0U || AllToAllGroupFlushSimt(
+        args, batch, taskCount, queueCount, debug, blockIdx,
+        queueDiag, invocationId, trace, traceIteration,
+        groupCount, 1U, false);
 }
 
 template <bool IngressCredit>

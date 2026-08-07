@@ -284,7 +284,7 @@ inline void AllToAllGroupSimtBuildVf(
                         static_cast<uint64_t>(group) << 16U |
                         (static_cast<uint64_t>(pass) + 1ULL);
                     auto signalLocal = reinterpret_cast<__gm__ uint64_t*>(
-                        tokenBase + static_cast<uint64_t>(worker) * sizeof(uint64_t));
+                        tokenBase + static_cast<uint64_t>(slot) * sizeof(uint64_t));
                     *signalLocal = signal;
                     batch->localAddr[slot] = reinterpret_cast<uint64_t>(input +
                         static_cast<uint64_t>(peer) * elementsPerPeer + segmentBegin);
