@@ -145,6 +145,30 @@ def test_case_aliases_add_reference_dimensions_without_changing_old_defaults() -
     assert case.routing_pattern == "skewed"
 
 
+@pytest.mark.parametrize(("world_size", "expected_slots"), [(1, 8), (4, 2)])
+def test_correctness_dimensions_derive_required_prefetch_slots(
+    world_size: int, expected_slots: int
+) -> None:
+    case = BenchmarkCase.from_mapping(
+        {
+            "id": "planning-small",
+            "S": 8,
+            "K": 2,
+            "E": 8,
+            "H": 8,
+            "Hf": 4,
+            "B": 2,
+            "P": 4,
+            "routing": "balanced",
+        }
+    )
+
+    resolved = benchmark._correctness_dimensions(case, rank=0, world_size=world_size)
+
+    assert resolved.prefetch_slots == expected_slots
+    assert resolved.prefetch_slots == resolved.experts_per_rank
+
+
 def test_launcher_forwards_mode_candidate_and_reference_overrides(tmp_path) -> None:
     args = build_launcher_parser().parse_args(
         [

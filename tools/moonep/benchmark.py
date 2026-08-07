@@ -739,11 +739,7 @@ def _correctness_dimensions(case, *, rank: int, world_size: int) -> MoonEPDimens
         tokens_per_rank=int(case.tokens_per_rank),
         topk=int(case.topk),
         expert_count=int(case.expert_count),
-        prefetch_slots=(
-            int(case.prefetch_slots)
-            if case.prefetch_slots is not None
-            else int(case.expert_count) // world_size
-        ),
+        prefetch_slots=int(case.expert_count) // world_size,
         token_padding=int(case.token_padding),
         hidden_size=int(case.hidden_size),
         intermediate_size=(
