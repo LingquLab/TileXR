@@ -12,7 +12,8 @@ constexpr uint32_t TILEXR_UDMA_DEMO_QP_COUNT_WORD = 5U;
 constexpr uint32_t TILEXR_UDMA_DEMO_QP_STATUS_BASE_WORD = 6U;
 
 __aicore__ inline bool TileXRUDMAMultiQpAllGather(
-    const __gm__ TileXR::CommArgs* args, __gm__ int32_t* data, __gm__ int32_t* debug,
+    const __gm__ TileXR::CommArgs* args, const AscendC::LocalTensor<uint8_t>& wqeScratch,
+    __gm__ int32_t* data, __gm__ int32_t* debug,
     int32_t elementsPerRank)
 {
     const int32_t rank = args->rank;
@@ -47,7 +48,8 @@ __aicore__ inline bool TileXRUDMAMultiQpAllGather(
             const uint64_t elementOffset =
                 qpIdx * elementsPerQp + static_cast<uint64_t>(rank) * elementsPerRank;
             qpStatus[qpIdx] = TileXR::UDMAPutNbiOnQpWithFlagDeferred<int32_t>(
-                args, peer, qpIdx, data + elementOffset, elementOffset * sizeof(int32_t), segmentBytes,
+                args, wqeScratch, peer, qpIdx, data + elementOffset,
+                elementOffset * sizeof(int32_t), segmentBytes,
                 TileXR::TILEXR_UDMA_SQE_FLAG_ORDERED_COMPLETION);
         }
         for (uint32_t qpIdx = 0U; qpIdx < qpCount; ++qpIdx) {
@@ -78,8 +80,11 @@ extern "C" __global__ __aicore__ void tilexr_udma_all_gather_kernel(
     auto args = reinterpret_cast<__gm__ TileXR::CommArgs*>(commArgsGM);
     auto data = reinterpret_cast<__gm__ int32_t*>(dataGM);
     auto debug = reinterpret_cast<__gm__ int32_t*>(debugGM);
+    AscendC::TPipe pipe;
+    AscendC::TBuf<AscendC::QuePosition::VECCALC> wqeBuf;
+    pipe.InitBuffer(wqeBuf, TileXR::TILEXR_UDMA_WQE_SCRATCH_BYTES);
 
-    (void)TileXRUDMAMultiQpAllGather(args, data, debug, elementsPerRank);
+    (void)TileXRUDMAMultiQpAllGather(args, wqeBuf.Get<uint8_t>(), data, debug, elementsPerRank);
 }
 
 extern "C" __global__ __aicore__ void tilexr_udma_put_signal_kernel(
@@ -90,10 +95,14 @@ extern "C" __global__ __aicore__ void tilexr_udma_put_signal_kernel(
     auto data = reinterpret_cast<__gm__ int32_t*>(dataGM);
     auto debug = reinterpret_cast<__gm__ int32_t*>(debugGM);
     (void)signalGM;
+    AscendC::TPipe pipe;
+    AscendC::TBuf<AscendC::QuePosition::VECCALC> wqeBuf;
+    pipe.InitBuffer(wqeBuf, TileXR::TILEXR_UDMA_WQE_SCRATCH_BYTES);
+    auto wqeScratch = wqeBuf.Get<uint8_t>();
 
     int32_t rank = args->rank;
     int32_t rankSize = args->rankSize;
-    if (!TileXRUDMAMultiQpAllGather(args, data, debug, elementsPerRank)) {
+    if (!TileXRUDMAMultiQpAllGather(args, wqeScratch, data, debug, elementsPerRank)) {
         return;
     }
 
@@ -102,7 +111,7 @@ extern "C" __global__ __aicore__ void tilexr_udma_put_signal_kernel(
         if (peer == rank) {
             continue;
         }
-        TileXR::UDMAPutSignalNbi<int32_t>(args, peer, localSrc,
+        TileXR::UDMAPutSignalNbi<int32_t>(args, wqeScratch, peer, localSrc,
             rank * static_cast<uint64_t>(elementsPerRank) * sizeof(int32_t),
             static_cast<uint32_t>(elementsPerRank * sizeof(int32_t)),
             signalByteOffset + static_cast<uint64_t>(rank) * sizeof(uint64_t), signal);
@@ -122,6 +131,10 @@ extern "C" __global__ __aicore__ void tilexr_udma_slot_signal_get_probe_kernel(
     auto data = reinterpret_cast<__gm__ int32_t*>(dataGM);
     auto signals = reinterpret_cast<__gm__ uint64_t*>(signalGM);
     auto debug = reinterpret_cast<__gm__ int32_t*>(debugGM);
+    AscendC::TPipe pipe;
+    AscendC::TBuf<AscendC::QuePosition::VECCALC> wqeBuf;
+    pipe.InitBuffer(wqeBuf, TileXR::TILEXR_UDMA_WQE_SCRATCH_BYTES);
+    auto wqeScratch = wqeBuf.Get<uint8_t>();
 
     int32_t rank = args->rank;
     int32_t rankSize = args->rankSize;
@@ -144,7 +157,8 @@ extern "C" __global__ __aicore__ void tilexr_udma_slot_signal_get_probe_kernel(
         if (peer == rank) {
             continue;
         }
-        TileXR::UDMAPutSignalNbi<int32_t>(args, peer, data + rank * elementsPerRank,
+        TileXR::UDMAPutSignalNbi<int32_t>(args, wqeScratch, peer,
+            data + rank * elementsPerRank,
             rank * static_cast<uint64_t>(elementsPerRank) * sizeof(int32_t), sizeof(int32_t),
             signalBaseOffset + static_cast<uint64_t>(rank) * sizeof(uint64_t), signal);
         TileXR::UDMAQuiet(args, peer);
@@ -156,7 +170,7 @@ extern "C" __global__ __aicore__ void tilexr_udma_slot_signal_get_probe_kernel(
         }
         while (signals[peer] != signal) {
         }
-        TileXR::UDMAGetNbi<int32_t>(args, peer, data + peer * elementsPerRank,
+        TileXR::UDMAGetNbi<int32_t>(args, wqeScratch, peer, data + peer * elementsPerRank,
             peer * static_cast<uint64_t>(elementsPerRank) * sizeof(int32_t),
             static_cast<uint32_t>(elementsPerRank * sizeof(int32_t)));
         TileXR::UDMAQuiet(args, peer);
@@ -169,6 +183,10 @@ extern "C" __global__ __aicore__ void tilexr_udma_registered_smoke_kernel(
     auto args = reinterpret_cast<__gm__ TileXR::CommArgs*>(commArgsGM);
     auto local = reinterpret_cast<__gm__ uint8_t*>(localGM);
     auto debug = reinterpret_cast<__gm__ int32_t*>(debugGM);
+    AscendC::TPipe pipe;
+    AscendC::TBuf<AscendC::QuePosition::VECCALC> wqeBuf;
+    pipe.InitBuffer(wqeBuf, TileXR::TILEXR_UDMA_WQE_SCRATCH_BYTES);
+    auto wqeScratch = wqeBuf.Get<uint8_t>();
 
     bool enabled = TileXR::UDMARegistryEnabled(args);
     if (debug != nullptr) {
@@ -186,9 +204,10 @@ extern "C" __global__ __aicore__ void tilexr_udma_registered_smoke_kernel(
         if (peer == rank) {
             continue;
         }
-        TileXR::UDMAPutRegisteredNbi<uint8_t>(args, peer, local, 0, bytes);
-        TileXR::UDMAGetRegisteredNbi<uint8_t>(args, peer, local, 0, bytes);
-        TileXR::UDMAPutRegisteredSignalNbi<uint8_t>(args, peer, local, 0, bytes, 0, signal);
+        TileXR::UDMAPutRegisteredNbi<uint8_t>(args, wqeScratch, peer, local, 0, bytes);
+        TileXR::UDMAGetRegisteredNbi<uint8_t>(args, wqeScratch, peer, local, 0, bytes);
+        TileXR::UDMAPutRegisteredSignalNbi<uint8_t>(
+            args, wqeScratch, peer, local, 0, bytes, 0, signal);
         TileXR::UDMAQuiet(args, peer);
     }
 }

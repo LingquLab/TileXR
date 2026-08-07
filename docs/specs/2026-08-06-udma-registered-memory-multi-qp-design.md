@@ -4,8 +4,8 @@
 
 Stabilize TileXR registered-memory UDMA on Ascend950 and extend the transport
 from its legacy single-QP layout to an operator-neutral, configurable number of
-QP/CQ pairs per peer. The design must support current UDMA callers unchanged,
-provide generic Host and device discovery and submission APIs, and give later
+QP/CQ pairs per peer. The design provides generic Host and device discovery and
+submission APIs, migrates in-tree callers to explicit UB WQE scratch, and gives later
 operators a reusable multi-QP transport without embedding operator names or
 policies in `src/comm`, public UDMA headers, or UDMA tests.
 
@@ -173,10 +173,10 @@ __aicore__ inline bool UDMAQpValid(
 Add generic helpers equivalent to the existing QP0 operations:
 
 ```cpp
-UDMAPutNbiOnQp(...)
-UDMAPutNbiOnQpWithFlag(...)
-UDMAPutNbiOnQpWithFlagDeferred(...)
-UDMAGetNbiOnQp(...)
+UDMAPutNbiOnQp(args, wqeScratch, ...)
+UDMAPutNbiOnQpWithFlag(args, wqeScratch, ...)
+UDMAPutNbiOnQpWithFlagDeferred(args, wqeScratch, ...)
+UDMAGetNbiOnQp(args, wqeScratch, ...)
 UDMAFlushQpDoorbell(...)
 UDMAQuietStatusOnQp(...)
 ```
@@ -187,14 +187,42 @@ continue to select QP0.
 
 The SQE flag literal is replaced with named completion and strong-order bits.
 New per-QP enqueue helpers report invalid UDMA state, invalid QP, invalid
-registered range, and insufficient SQ capacity instead of silently writing an
-invalid entry. Existing void wrappers may preserve their behavior by discarding
-the new internal status for QP0.
+remote registered range, and insufficient SQ capacity instead of silently
+writing an invalid entry. Existing void wrappers may preserve their behavior by
+discarding the new internal status for QP0.
+
+Every enqueue helper requires a caller-owned `LocalTensor<uint8_t>` scratch of
+at least 128 bytes with 32-byte alignment. The helper clears and assembles the
+complete WQE in that UB scratch. It publishes a one-BB WQE as 64 bytes and a
+two-BB `WRITE_WITH_NOTIFY` WQE as the complete 128 bytes through MTE3. A notify
+at the physical SQ ring end is split into 64-byte tail and head transfers. No
+SQ WQE field may be constructed or patched through scalar or direct-GM stores.
+On device, `LocalTensor::GetPhyAddr()` is a local-buffer offset and zero is a
+valid address for the first allocated UB buffer; scratch validation therefore
+checks size and alignment without treating zero as a null pointer.
+
+The generic `WithFlag` enqueue helpers require `COMPLETION`; completion-only is
+accepted, while a flag without completion is rejected before the SQ is mutated.
+`UDMAPollCQ` can reclaim a contiguous SQ prefix because both legacy and
+configured QP creation set `jfsFlag.value = 2`, which leaves the HCCP
+`outorderComp` bit clear. The SQE `STRONG_ORDER` bit (`0x02`) controls placement
+ordering and is not the completion-order bit (`0x04`), so requiring `0x02` would
+not establish the CQ property used here. Enabling out-of-order completion in a
+future QP configuration requires either the documented completion-order bit or
+explicit tracking of completed entries before contiguous reclamation.
+
+This critical correction does not add device-side local-range validation. For
+PUT, GET, and signal PUT, the caller must pass a non-empty local data range that
+lies wholly inside `registry->regions[args->rank]`; using an unrelated device
+allocation with the registered region's token can fail memory protection in the
+UDMA data plane. Remote byte offsets remain validated against the selected peer
+region. A future defensive change may add subtraction-based local bounds checks
+without changing the valid registered-memory path.
 
 ### Deferred Submission Contract
 
-A deferred PUT writes and cache-cleans the SQ entry and advances the software
-head and submitted-WQE count, but does not ring the doorbell. Before writing, it
+A deferred PUT publishes the UB-built SQ entry through MTE3 and advances the
+software head and submitted-WQE count, but does not ring the doorbell. Before writing, it
 checks that the required SQ basic blocks do not collide with the reclaimed tail.
 If there is insufficient capacity, it returns without modifying queue state.
 
@@ -208,8 +236,23 @@ enqueue one or more bounded deferred PUTs
 
 `UDMAFlushQpDoorbell` rings the selected queue at its current software head.
 `UDMAQuietStatusOnQp` polls through the selected QP's submitted-WQE count and
-returns the completion status. Deferred submission never permits unconsumed SQ
-entries to be overwritten.
+returns the completion status. With the QP configured for in-order completion,
+each CQE describes the next WQE at the current SQ reclaim tail, and its `entryIdx` identifies that
+WQE's final basic block. The poller validates the reported final block against
+the WQE's one- or two-block size before advancing the SQ tail. Deferred
+submission never permits unconsumed SQ entries to be overwritten.
+
+Scalar-to-MTE3 and MTE3-to-scalar events bracket every WQE publish. Head and
+submitted-WQE count updates occur only after the MTE3-to-scalar event confirms
+the SQ write completed. Immediate submission then rings the SQ doorbell last,
+and both immediate and deferred doorbells use `st_dev` exclusively.
+
+### Device Queue Ownership
+
+Each `(peer, qpIdx)` SQ has one device-side producer. Enqueue, flush, and quiet
+operations for the same queue must not execute concurrently from multiple
+AICores or control paths; callers must serialize them or assign distinct QPs.
+Different `(peer, qpIdx)` queues are independent and may progress concurrently.
 
 ## Host Transport Design
 
@@ -387,6 +430,26 @@ In `CleanupPending`:
 
 Shutdown remains best effort but logs residual cleanup failures before queue and
 context destruction.
+
+### Cleanup Coordination Contract
+
+The application must stop issuing operations to a registered region on every
+rank and complete or quiet every affected QP before any rank unregisters that
+region. After the device registry is hidden, `TileXRUDMAUnregister` and cleanup
+retry are local and non-collective. TileXR removes the remote imports owned by
+the current rank before attempting its local MR unregister, retains failed
+handles in `CleanupPending`, and does not add a socket collective to the retry
+path.
+
+This contract relies on the target HCCP implementation allowing local MR
+unregister after this rank has released its own remote imports; TileXR does not
+establish cross-rank ordering between peer unimport and local unregister.
+Platforms that require every peer import to be destroyed first need an external
+rank-wide teardown protocol and are not covered by the current local retry
+path. Adding an internal rank-wide phase boundary would make unregister
+collective and can block or hang applications that currently call it locally,
+so that API-semantic change is documented rather than included in the critical
+data-plane correction.
 
 ## RootInfo Parsing
 

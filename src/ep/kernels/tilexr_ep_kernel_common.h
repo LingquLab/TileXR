@@ -388,8 +388,10 @@ __aicore__ inline void TileXREpWaitRelayReadyValue(GM_ADDR relayBase, int64_t to
 }
 
 __aicore__ inline void TileXREpNotifyRemoteUdmaReadySeparate(
-    const __gm__ TileXR::CommArgs *args, GM_ADDR localWindow, int32_t rank, int32_t rankSize, int32_t localRankSize,
-    int64_t totalBytes, int64_t magic, int64_t slotBytes, int32_t step, int64_t remoteRecvWindowOffset)
+    const __gm__ TileXR::CommArgs *args, const AscendC::LocalTensor<uint8_t> &wqeScratch,
+    GM_ADDR localWindow, int32_t rank, int32_t rankSize, int32_t localRankSize,
+    int64_t totalBytes, int64_t magic, int64_t slotBytes, int32_t step,
+    int64_t remoteRecvWindowOffset)
 {
     const uint64_t ready = TileXREpReadyValue(magic, step);
     const int64_t remoteWindowBaseOffset = remoteRecvWindowOffset - UDMARecvWindowOffset(totalBytes);
@@ -400,13 +402,14 @@ __aicore__ inline void TileXREpNotifyRemoteUdmaReadySeparate(
         if (peer == rank || TileXREpSameNode(peer, rank, localRankSize)) {
             continue;
         }
-        TileXR::UDMAPutNbi<uint8_t>(args, peer,
+        TileXR::UDMAPutNbi<uint8_t>(args, wqeScratch, peer,
             reinterpret_cast<__gm__ uint8_t *>(localWindow + SlotOffset(peer, slotBytes)),
             static_cast<uint64_t>(remoteRecvWindowOffset + SlotOffset(rank, slotBytes)),
             static_cast<uint32_t>(slotBytes));
         TileXR::UDMAQuiet(args, peer);
-        TileXR::UDMAPutNbi<uint8_t>(args, peer, reinterpret_cast<__gm__ uint8_t *>(localWindow + localReadyOffset),
-            remoteReadyOffset, static_cast<uint32_t>(sizeof(uint64_t)));
+        TileXR::UDMAPutNbi<uint8_t>(args, wqeScratch, peer,
+            reinterpret_cast<__gm__ uint8_t *>(localWindow + localReadyOffset), remoteReadyOffset,
+            static_cast<uint32_t>(sizeof(uint64_t)));
         TileXR::UDMAQuiet(args, peer);
     }
 }

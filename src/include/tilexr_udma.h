@@ -17,6 +17,9 @@ constexpr uint32_t TILEXR_UDMA_SQE_FLAG_COMPLETION = 0x20U;
 constexpr uint32_t TILEXR_UDMA_SQE_FLAG_STRONG_ORDER = 0x02U;
 constexpr uint32_t TILEXR_UDMA_SQE_FLAG_ORDERED_COMPLETION =
     TILEXR_UDMA_SQE_FLAG_COMPLETION | TILEXR_UDMA_SQE_FLAG_STRONG_ORDER;
+constexpr uint32_t TILEXR_UDMA_WQE_BB_BYTES = 64U;
+constexpr uint32_t TILEXR_UDMA_WQE_SCRATCH_BYTES = 2U * TILEXR_UDMA_WQE_BB_BYTES;
+constexpr uint32_t TILEXR_UDMA_WQE_SCRATCH_ALIGNMENT = 32U;
 
 constexpr uint32_t TILEXR_UDMA_STATUS_SUCCESS = 0U;
 constexpr uint32_t TILEXR_UDMA_STATUS_CQ_TIMEOUT = 0xFFU;
@@ -45,6 +48,12 @@ struct UDMASignalParams {
     __gm__ uint64_t* sigAddr;
     uint64_t signal;
 };
+
+static_assert(sizeof(UDMASqeCtx) + sizeof(UDMASgeCtx) == TILEXR_UDMA_WQE_BB_BYTES,
+    "UDMA WRITE/READ WQE must occupy one basic block");
+static_assert(sizeof(UDMASqeCtx) + sizeof(UDMANotifyCtx) + sizeof(UDMASgeCtx) <=
+        TILEXR_UDMA_WQE_SCRATCH_BYTES,
+    "UDMA WRITE_WITH_NOTIFY WQE must fit in two basic blocks");
 
 __aicore__ inline bool UDMAEnabled(const __gm__ CommArgs* args)
 {
@@ -235,104 +244,76 @@ __aicore__ inline uint32_t UDMAPollCQ(__gm__ UDMAInfo* udmaInfo, uint32_t pe, ui
 
         const uint32_t sqHead = ld_dev(reinterpret_cast<__gm__ uint32_t*>(wqCtxEntry->headAddr), 0);
         const uint32_t sqOutstanding = sqHead - sqTail;
-        if (sqOutstanding > wqCtxEntry->depth || cqeAddr->entryIdx >= wqCtxEntry->depth) {
+        if (sqOutstanding == 0U || sqOutstanding > wqCtxEntry->depth ||
+            cqeAddr->entryIdx >= wqCtxEntry->depth) {
             return TILEXR_UDMA_STATUS_INVALID;
         }
-        const uint32_t sqTailIdx = sqTail % wqCtxEntry->depth;
-        const uint32_t entryDistance =
-            (static_cast<uint32_t>(cqeAddr->entryIdx) + wqCtxEntry->depth - sqTailIdx) % wqCtxEntry->depth;
-        if (entryDistance >= sqOutstanding) {
-            return TILEXR_UDMA_STATUS_INVALID;
-        }
-        const uint32_t absoluteEntry = sqTail + entryDistance;
         __gm__ UDMASqeCtx* completedSqe = reinterpret_cast<__gm__ UDMASqeCtx*>(
             wqCtxEntry->bufAddr +
-            (1U << wqCtxEntry->baseBkShift) * (absoluteEntry % wqCtxEntry->depth));
+            (1U << wqCtxEntry->baseBkShift) * (sqTail % wqCtxEntry->depth));
         const UDMAOpcode opcode = static_cast<UDMAOpcode>(completedSqe->opcode);
         if (opcode != UDMAOpcode::WRITE && opcode != UDMAOpcode::READ &&
             opcode != UDMAOpcode::WRITE_WITH_NOTIFY) {
             return TILEXR_UDMA_STATUS_INVALID;
         }
-        const uint32_t reclaimedBb = entryDistance + UDMAWqeBBCnt(opcode);
-        if (reclaimedBb > sqOutstanding) {
+        const uint32_t completedBb = UDMAWqeBBCnt(opcode);
+        const uint32_t expectedEntryIdx =
+            (sqTail + completedBb - 1U) % wqCtxEntry->depth;
+        if (completedBb > sqOutstanding || cqeAddr->entryIdx != expectedEntryIdx) {
             return TILEXR_UDMA_STATUS_INVALID;
         }
-        sqTail += reclaimedBb;
+        sqTail += completedBb;
         ++cqTail;
         UDMAPollCQUpdateInfo(cqTail, sqTail, cqCtxEntry, wqCtxEntry);
     }
     return TILEXR_UDMA_STATUS_SUCCESS;
 }
 
-__aicore__ inline __gm__ uint8_t* UDMAGetSgeCtxAddr(__gm__ uint8_t* wqeAddr, UDMAOpcode opcode)
+__attribute__((always_inline)) inline __aicore__ bool UDMAWqeScratchValid(
+    const AscendC::LocalTensor<uint8_t>& wqeScratch)
 {
-    if (opcode == UDMAOpcode::WRITE_WITH_NOTIFY) {
-        return wqeAddr + sizeof(UDMASqeCtx) + sizeof(UDMANotifyCtx);
-    }
-    return wqeAddr + sizeof(UDMASqeCtx);
+    const uint64_t scratchAddr = wqeScratch.GetPhyAddr();
+    return (scratchAddr % TILEXR_UDMA_WQE_SCRATCH_ALIGNMENT) == 0U &&
+        wqeScratch.GetSize() >= TILEXR_UDMA_WQE_SCRATCH_BYTES;
 }
 
-__aicore__ inline void UDMAFillNotifyData(
-    __gm__ UDMASqeCtx* sqeCtx, uint32_t tid, uint32_t tokenValue, const UDMASignalParams* params)
+template <AscendC::HardEvent event>
+__attribute__((always_inline)) inline __aicore__ void UDMASyncEvent()
 {
-    if (params == nullptr) {
-        return;
-    }
-    __gm__ UDMANotifyCtx* notifyCtx =
-        reinterpret_cast<__gm__ UDMANotifyCtx*>(reinterpret_cast<__gm__ uint8_t*>(sqeCtx) + sizeof(UDMASqeCtx));
-    notifyCtx->notifyTokenId = tid & 0xFFFFF;
-    notifyCtx->rsv = 0;
-    notifyCtx->notifyTokenValue = tokenValue;
-    notifyCtx->notifyAddrL = reinterpret_cast<uint64_t>(params->sigAddr) & 0xFFFFFFFF;
-    notifyCtx->notifyAddrH = (reinterpret_cast<uint64_t>(params->sigAddr) >> 32) & 0xFFFFFFFF;
-    notifyCtx->notifyDataL = params->signal & 0xFFFFFFFF;
-    notifyCtx->notifyDataH = (params->signal >> 32) & 0xFFFFFFFF;
-    notifyCtx->rsv2[0] = 0;
-    notifyCtx->rsv2[1] = 0;
+    const auto eventId = GetTPipePtr()->FetchEventID(event);
+    AscendC::SetFlag<event>(eventId);
+    AscendC::WaitFlag<event>(eventId);
 }
 
-__aicore__ inline __gm__ uint8_t* UDMAGetSqLogicalAddr(
-    __gm__ UDMAWQCtx* qpCtxEntry, uint32_t curHead, uint32_t logicalByteOffset)
+__attribute__((always_inline)) inline __aicore__ void UDMAClearWqeScratch(
+    __ubuf__ uint8_t* wqeBytes, uint32_t byteCount)
 {
-    const uint64_t wqeSize = 1ULL << qpCtxEntry->baseBkShift;
-    const uint64_t ringBytes = wqeSize * qpCtxEntry->depth;
-    const uint64_t start = wqeSize * (curHead % qpCtxEntry->depth);
-    return reinterpret_cast<__gm__ uint8_t*>(
-        qpCtxEntry->bufAddr + (start + logicalByteOffset) % ringBytes);
+    __ubuf__ uint32_t* words = reinterpret_cast<__ubuf__ uint32_t*>(wqeBytes);
+    for (uint32_t word = 0U; word < byteCount / sizeof(uint32_t); ++word) {
+        words[word] = 0U;
+    }
 }
 
-__aicore__ inline void UDMAFillWrappedNotifyData(
-    __gm__ UDMAWQCtx* qpCtxEntry, uint32_t curHead, uint32_t tid,
-    uint32_t tokenValue, const UDMASignalParams* params)
+__attribute__((always_inline)) inline __aicore__ void UDMAFillNotifyData(
+    __ubuf__ uint8_t* wqeBytes, uint32_t tid, uint32_t tokenValue,
+    const UDMASignalParams* params)
 {
-    if (params == nullptr) {
-        return;
-    }
-    const uint32_t baseOffset = sizeof(UDMASqeCtx);
+    __ubuf__ UDMANotifyCtx* notifyCtx = reinterpret_cast<__ubuf__ UDMANotifyCtx*>(
+        wqeBytes + sizeof(UDMASqeCtx));
     const uint64_t signalAddr = reinterpret_cast<uint64_t>(params->sigAddr);
-    st_dev(tid & 0xFFFFFU, reinterpret_cast<__gm__ uint32_t*>(
-        UDMAGetSqLogicalAddr(qpCtxEntry, curHead, baseOffset)), 0);
-    st_dev(tokenValue, reinterpret_cast<__gm__ uint32_t*>(
-        UDMAGetSqLogicalAddr(qpCtxEntry, curHead, baseOffset + 4U)), 0);
-    st_dev(static_cast<uint32_t>(signalAddr), reinterpret_cast<__gm__ uint32_t*>(
-        UDMAGetSqLogicalAddr(qpCtxEntry, curHead, baseOffset + 8U)), 0);
-    st_dev(static_cast<uint32_t>(signalAddr >> 32U), reinterpret_cast<__gm__ uint32_t*>(
-        UDMAGetSqLogicalAddr(qpCtxEntry, curHead, baseOffset + 12U)), 0);
-    st_dev(static_cast<uint32_t>(params->signal), reinterpret_cast<__gm__ uint32_t*>(
-        UDMAGetSqLogicalAddr(qpCtxEntry, curHead, baseOffset + 16U)), 0);
-    st_dev(static_cast<uint32_t>(params->signal >> 32U), reinterpret_cast<__gm__ uint32_t*>(
-        UDMAGetSqLogicalAddr(qpCtxEntry, curHead, baseOffset + 20U)), 0);
-    st_dev(0U, reinterpret_cast<__gm__ uint32_t*>(
-        UDMAGetSqLogicalAddr(qpCtxEntry, curHead, baseOffset + 24U)), 0);
-    st_dev(0U, reinterpret_cast<__gm__ uint32_t*>(
-        UDMAGetSqLogicalAddr(qpCtxEntry, curHead, baseOffset + 28U)), 0);
+    notifyCtx->notifyTokenId = tid & 0xFFFFFU;
+    notifyCtx->notifyTokenValue = tokenValue;
+    notifyCtx->notifyAddrL = static_cast<uint32_t>(signalAddr);
+    notifyCtx->notifyAddrH = static_cast<uint32_t>(signalAddr >> 32U);
+    notifyCtx->notifyDataL = static_cast<uint32_t>(params->signal);
+    notifyCtx->notifyDataH = static_cast<uint32_t>(params->signal >> 32U);
 }
 
 // BiSheng must not outline the posting chain: late device-call arguments can be corrupted.
 template <UDMAOpcode opcode>
 __attribute__((always_inline)) inline __aicore__ void UDMAFillSqeCtx(
-    __gm__ UDMASqeCtx* sqeCtx, __gm__ uint8_t* remoteAddr, __gm__ UDMAMemInfo* remoteMemInfo,
-    uint32_t curHead, uint32_t sqeFlag)
+    __ubuf__ UDMASqeCtx* sqeCtx, __gm__ uint8_t* remoteAddr,
+    __gm__ UDMAMemInfo* remoteMemInfo, uint32_t curHead, uint32_t sqeFlag)
 {
     sqeCtx->sqeBbIdx = curHead % TILEXR_UDMA_SQ_BB_COUNT;
     sqeCtx->opcode = static_cast<uint32_t>(opcode);
@@ -362,8 +343,8 @@ __attribute__((always_inline)) inline __aicore__ void UDMAFillSqeCtx(
     sqeCtx->rmtEidH = rmtEid[1];
 }
 
-__aicore__ inline void UDMAFillSgeCtx(
-    __gm__ UDMASgeCtx* sgeCtx, uint64_t messageLen, __gm__ uint8_t* localAddr,
+__attribute__((always_inline)) inline __aicore__ void UDMAFillSgeCtx(
+    __ubuf__ UDMASgeCtx* sgeCtx, uint64_t messageLen, __gm__ uint8_t* localAddr,
     uint32_t localTokenId)
 {
     sgeCtx->len = messageLen;
@@ -376,19 +357,36 @@ __aicore__ inline void UDMARingDoorbell(uint32_t curHead, __gm__ UDMAWQCtx* qpCt
     st_dev(curHead, reinterpret_cast<__gm__ uint32_t*>(qpCtxEntry->dbAddr), 0);
 }
 
-__aicore__ inline void UDMACleanWrappedWqe(
-    __gm__ UDMAWQCtx* qpCtxEntry, uint32_t curHead, uint32_t wqeBbCnt)
+__attribute__((always_inline)) inline __aicore__ void UDMAMte3CopyToSq(
+    const AscendC::LocalTensor<uint8_t>& wqeScratch, uint32_t scratchOffset,
+    __gm__ uint8_t* sqDst, uint32_t byteCount)
+{
+    AscendC::GlobalTensor<uint8_t> sqGlobal;
+    sqGlobal.SetGlobalBuffer(sqDst, byteCount);
+    const AscendC::DataCopyExtParams copyParams {1U, byteCount, 0U, 0U, 0U};
+    AscendC::DataCopyPad(sqGlobal, wqeScratch[scratchOffset], copyParams);
+}
+
+__attribute__((always_inline)) inline __aicore__ void UDMAPublishWqe(
+    const AscendC::LocalTensor<uint8_t>& wqeScratch, __gm__ UDMAWQCtx* qpCtxEntry,
+    uint32_t curHead, uint32_t wqeBbCnt)
 {
     const uint32_t headIndex = curHead % qpCtxEntry->depth;
-    const uint32_t firstBb = wqeBbCnt < qpCtxEntry->depth - headIndex
-        ? wqeBbCnt : qpCtxEntry->depth - headIndex;
-    const uint64_t wqeSize = 1ULL << qpCtxEntry->baseBkShift;
-    UDMACleanCacheLines(reinterpret_cast<__gm__ uint8_t*>(
-        qpCtxEntry->bufAddr + wqeSize * headIndex), wqeSize * firstBb);
+    const uint32_t firstBb = wqeBbCnt < qpCtxEntry->depth - headIndex ?
+        wqeBbCnt : qpCtxEntry->depth - headIndex;
+    const uint32_t firstBytes = firstBb * TILEXR_UDMA_WQE_BB_BYTES;
+    __gm__ uint8_t* firstDst = reinterpret_cast<__gm__ uint8_t*>(
+        qpCtxEntry->bufAddr + static_cast<uint64_t>(headIndex) * TILEXR_UDMA_WQE_BB_BYTES);
+
+    UDMASyncEvent<AscendC::HardEvent::S_MTE3>();
+    UDMAMte3CopyToSq(wqeScratch, 0U, firstDst, firstBytes);
     if (firstBb != wqeBbCnt) {
-        UDMACleanCacheLines(reinterpret_cast<__gm__ uint8_t*>(qpCtxEntry->bufAddr),
-            wqeSize * (wqeBbCnt - firstBb));
+        const uint32_t wrappedBytes =
+            (wqeBbCnt - firstBb) * TILEXR_UDMA_WQE_BB_BYTES;
+        UDMAMte3CopyToSq(wqeScratch, firstBytes,
+            reinterpret_cast<__gm__ uint8_t*>(qpCtxEntry->bufAddr), wrappedBytes);
     }
+    UDMASyncEvent<AscendC::HardEvent::MTE3_S>();
 }
 
 template <UDMAOpcode opcode>
@@ -429,7 +427,7 @@ __attribute__((always_inline)) inline __aicore__ uint32_t UDMAValidatePostSend(
     const uint32_t requiredBb = UDMAWqeBBCnt(opcode);
     const uint32_t requiredBytes = sizeof(UDMASqeCtx) + sizeof(UDMASgeCtx) +
         (opcode == UDMAOpcode::WRITE_WITH_NOTIFY ? sizeof(UDMANotifyCtx) : 0U);
-    if (wqeSize < sizeof(UDMASqeCtx) + sizeof(UDMASgeCtx) ||
+    if (wqeSize != TILEXR_UDMA_WQE_BB_BYTES ||
         requiredBb > qpCtxEntry->depth ||
         static_cast<uint64_t>(wqeSize) * requiredBb < requiredBytes) {
         return TILEXR_UDMA_STATUS_INVALID;
@@ -449,13 +447,14 @@ __attribute__((always_inline)) inline __aicore__ uint32_t UDMAValidatePostSend(
 
 template <UDMAOpcode opcode, bool ringDoorbell>
 __attribute__((always_inline)) inline __aicore__ uint32_t UDMAPostSend(
-    __gm__ UDMAInfo* udmaInfo, __gm__ uint8_t* remoteAddr,
+    __gm__ UDMAInfo* udmaInfo, const AscendC::LocalTensor<uint8_t>& wqeScratch,
+    __gm__ uint8_t* remoteAddr,
     __gm__ uint8_t* localAddr, uint32_t pe, uint32_t qpIdx, uint64_t messageLen,
     const UDMASignalParams* signalParams, uint32_t sqeFlag)
 {
     if (udmaInfo == nullptr || udmaInfo->qpNum == 0U ||
         udmaInfo->qpNum > TILEXR_UDMA_DEVICE_MAX_QP_COUNT || qpIdx >= udmaInfo->qpNum ||
-        udmaInfo->sqPtr == 0U) {
+        udmaInfo->sqPtr == 0U || !UDMAWqeScratchValid(wqeScratch)) {
         return TILEXR_UDMA_STATUS_INVALID;
     }
     if (opcode == UDMAOpcode::WRITE_WITH_NOTIFY &&
@@ -486,26 +485,25 @@ __attribute__((always_inline)) inline __aicore__ uint32_t UDMAPostSend(
     if (remoteMemInfo->eidAddr == 0U) {
         return TILEXR_UDMA_STATUS_INVALID;
     }
-    const uint32_t wqeSize = 1U << qpCtxEntry->baseBkShift;
     uint32_t curHead = ld_dev(reinterpret_cast<__gm__ uint32_t*>(qpCtxEntry->headAddr), 0);
     uint32_t wqeCnt = ld_dev(reinterpret_cast<__gm__ uint32_t*>(qpCtxEntry->wqeCntAddr), 0);
-    __gm__ uint8_t* wqeAddr =
-        reinterpret_cast<__gm__ uint8_t*>(qpCtxEntry->bufAddr + wqeSize * (curHead % TILEXR_UDMA_SQ_BB_COUNT));
-    __gm__ UDMASqeCtx* sqeCtx = reinterpret_cast<__gm__ UDMASqeCtx*>(wqeAddr);
+    __ubuf__ uint8_t* wqeBytes = reinterpret_cast<__ubuf__ uint8_t*>(wqeScratch.GetPhyAddr());
+    const uint32_t wqeBbCnt = UDMAWqeBBCnt(opcode);
+    UDMAClearWqeScratch(wqeBytes, wqeBbCnt * TILEXR_UDMA_WQE_BB_BYTES);
+    __ubuf__ UDMASqeCtx* sqeCtx = reinterpret_cast<__ubuf__ UDMASqeCtx*>(wqeBytes);
     UDMAFillSqeCtx<opcode>(sqeCtx, remoteAddr, remoteMemInfo, curHead, sqeFlag);
 
     if (opcode == UDMAOpcode::WRITE_WITH_NOTIFY) {
-        UDMAFillWrappedNotifyData(qpCtxEntry, curHead, remoteMemInfo->tid,
+        UDMAFillNotifyData(wqeBytes, remoteMemInfo->tid,
             remoteMemInfo->rmtTokenValue, signalParams);
     }
 
     const uint32_t sgeOffset = sizeof(UDMASqeCtx) +
         (opcode == UDMAOpcode::WRITE_WITH_NOTIFY ? sizeof(UDMANotifyCtx) : 0U);
-    __gm__ UDMASgeCtx* sgeCtx = reinterpret_cast<__gm__ UDMASgeCtx*>(
-        UDMAGetSqLogicalAddr(qpCtxEntry, curHead, sgeOffset));
+    __ubuf__ UDMASgeCtx* sgeCtx = reinterpret_cast<__ubuf__ UDMASgeCtx*>(
+        wqeBytes + sgeOffset);
     UDMAFillSgeCtx(sgeCtx, messageLen, localAddr, qpCtxEntry->localTokenId);
-    const uint32_t wqeBbCnt = UDMAWqeBBCnt(opcode);
-    UDMACleanWrappedWqe(qpCtxEntry, curHead, wqeBbCnt);
+    UDMAPublishWqe(wqeScratch, qpCtxEntry, curHead, wqeBbCnt);
     curHead += wqeBbCnt;
     ++wqeCnt;
     st_dev(curHead, reinterpret_cast<__gm__ uint32_t*>(qpCtxEntry->headAddr), 0);
@@ -517,7 +515,8 @@ __attribute__((always_inline)) inline __aicore__ uint32_t UDMAPostSend(
 }
 
 __attribute__((always_inline)) inline __aicore__ uint32_t UDMAWrite(
-    const __gm__ CommArgs* args, __gm__ uint8_t* remoteAddr, __gm__ uint8_t* localAddr,
+    const __gm__ CommArgs* args, const AscendC::LocalTensor<uint8_t>& wqeScratch,
+    __gm__ uint8_t* remoteAddr, __gm__ uint8_t* localAddr,
     uint32_t pe, uint32_t qpIdx, uint64_t messageLen,
     uint32_t sqeFlag = TILEXR_UDMA_SQE_FLAG_ORDERED_COMPLETION, bool ringDoorbell = true)
 {
@@ -528,20 +527,21 @@ __attribute__((always_inline)) inline __aicore__ uint32_t UDMAWrite(
         return TILEXR_UDMA_STATUS_INVALID;
     }
     if (ringDoorbell) {
-        return UDMAPostSend<UDMAOpcode::WRITE, true>(GetUDMAInfo(args), remoteAddr,
+        return UDMAPostSend<UDMAOpcode::WRITE, true>(GetUDMAInfo(args), wqeScratch, remoteAddr,
             localAddr, pe, qpIdx, messageLen, nullptr, sqeFlag);
     }
-    return UDMAPostSend<UDMAOpcode::WRITE, false>(GetUDMAInfo(args), remoteAddr,
+    return UDMAPostSend<UDMAOpcode::WRITE, false>(GetUDMAInfo(args), wqeScratch, remoteAddr,
         localAddr, pe, qpIdx, messageLen, nullptr, sqeFlag);
 }
 
 __aicore__ inline uint32_t UDMARead(
-    const __gm__ CommArgs* args, __gm__ uint8_t* localAddr, __gm__ uint8_t* remoteAddr,
+    const __gm__ CommArgs* args, const AscendC::LocalTensor<uint8_t>& wqeScratch,
+    __gm__ uint8_t* localAddr, __gm__ uint8_t* remoteAddr,
     uint32_t pe, uint32_t qpIdx, uint64_t messageLen)
 {
     if (TILEXR_UDMA_ARCH_SUPPORTED && UDMAQueueOperationValid(
             args, static_cast<int>(pe), qpIdx)) {
-        return UDMAPostSend<UDMAOpcode::READ, true>(GetUDMAInfo(args), remoteAddr,
+        return UDMAPostSend<UDMAOpcode::READ, true>(GetUDMAInfo(args), wqeScratch, remoteAddr,
             localAddr, pe, qpIdx, messageLen, nullptr,
             TILEXR_UDMA_SQE_FLAG_ORDERED_COMPLETION);
     }
@@ -549,7 +549,8 @@ __aicore__ inline uint32_t UDMARead(
 }
 
 __aicore__ inline uint32_t UDMAWriteNotify(
-    const __gm__ CommArgs* args, __gm__ uint8_t* remoteAddr, __gm__ uint8_t* localAddr,
+    const __gm__ CommArgs* args, const AscendC::LocalTensor<uint8_t>& wqeScratch,
+    __gm__ uint8_t* remoteAddr, __gm__ uint8_t* localAddr,
     uint32_t pe, uint32_t qpIdx, uint64_t messageLen, const UDMASignalParams* signalParams)
 {
     if (TILEXR_UDMA_ARCH_SUPPORTED && UDMAQueueOperationValid(
@@ -558,7 +559,7 @@ __aicore__ inline uint32_t UDMAWriteNotify(
             return TILEXR_UDMA_STATUS_INVALID;
         }
         return UDMAPostSend<UDMAOpcode::WRITE_WITH_NOTIFY, true>(GetUDMAInfo(args),
-            remoteAddr, localAddr, pe, qpIdx, messageLen, signalParams,
+            wqeScratch, remoteAddr, localAddr, pe, qpIdx, messageLen, signalParams,
             TILEXR_UDMA_SQE_FLAG_ORDERED_COMPLETION);
     }
     return TILEXR_UDMA_STATUS_INVALID;
@@ -585,67 +586,71 @@ __attribute__((always_inline)) inline __aicore__ bool UDMARegisteredOperationVal
 
 template <typename T>
 __attribute__((always_inline)) inline __aicore__ uint32_t UDMAPutNbiOnQpWithFlagDeferred(
-    const __gm__ CommArgs* args, int targetRank, uint32_t qpIdx,
+    const __gm__ CommArgs* args, const AscendC::LocalTensor<uint8_t>& wqeScratch,
+    int targetRank, uint32_t qpIdx,
     const __gm__ T* localSrc, uint64_t byteOffset, uint32_t byteCount, uint32_t sqeFlag)
 {
     if (!UDMARegisteredOperationValid(args, targetRank, qpIdx, byteOffset, byteCount) ||
-        (localSrc == nullptr && byteCount != 0U) ||
         (sqeFlag & TILEXR_UDMA_SQE_FLAG_COMPLETION) == 0U) {
         return TILEXR_UDMA_STATUS_INVALID;
     }
 
     auto registry = GetUDMARegistry(args);
+    auto localAddr = reinterpret_cast<__gm__ uint8_t*>(const_cast<__gm__ T*>(localSrc));
     auto remoteAddr = UDMARegisteredRemoteAddr(registry, targetRank, byteOffset);
-    return UDMAWrite(args, remoteAddr,
-        reinterpret_cast<__gm__ uint8_t*>(const_cast<__gm__ T*>(localSrc)),
+    return UDMAWrite(args, wqeScratch, remoteAddr, localAddr,
         static_cast<uint32_t>(targetRank), qpIdx, byteCount, sqeFlag, false);
 }
 
 template <typename T>
 __attribute__((always_inline)) inline __aicore__ uint32_t UDMAPutNbiOnQpWithFlag(
-    const __gm__ CommArgs* args, int targetRank, uint32_t qpIdx,
+    const __gm__ CommArgs* args, const AscendC::LocalTensor<uint8_t>& wqeScratch,
+    int targetRank, uint32_t qpIdx,
     const __gm__ T* localSrc, uint64_t byteOffset, uint32_t byteCount, uint32_t sqeFlag)
 {
     if (!UDMARegisteredOperationValid(args, targetRank, qpIdx, byteOffset, byteCount) ||
-        (localSrc == nullptr && byteCount != 0U) ||
         (sqeFlag & TILEXR_UDMA_SQE_FLAG_COMPLETION) == 0U) {
         return TILEXR_UDMA_STATUS_INVALID;
     }
 
     auto registry = GetUDMARegistry(args);
+    auto localAddr = reinterpret_cast<__gm__ uint8_t*>(const_cast<__gm__ T*>(localSrc));
     auto remoteAddr = UDMARegisteredRemoteAddr(registry, targetRank, byteOffset);
-    return UDMAWrite(args, remoteAddr,
-        reinterpret_cast<__gm__ uint8_t*>(const_cast<__gm__ T*>(localSrc)),
+    return UDMAWrite(args, wqeScratch, remoteAddr, localAddr,
         static_cast<uint32_t>(targetRank), qpIdx, byteCount, sqeFlag, true);
 }
 
 template <typename T>
 __aicore__ inline uint32_t UDMAPutNbiOnQp(
-    const __gm__ CommArgs* args, int targetRank, uint32_t qpIdx,
+    const __gm__ CommArgs* args, const AscendC::LocalTensor<uint8_t>& wqeScratch,
+    int targetRank, uint32_t qpIdx,
     const __gm__ T* localSrc, uint64_t byteOffset, uint32_t byteCount)
 {
-    return UDMAPutNbiOnQpWithFlag<T>(args, targetRank, qpIdx, localSrc,
+    return UDMAPutNbiOnQpWithFlag<T>(args, wqeScratch, targetRank, qpIdx, localSrc,
         byteOffset, byteCount, TILEXR_UDMA_SQE_FLAG_ORDERED_COMPLETION);
 }
 
 template <typename T>
 __aicore__ inline void UDMAPutNbi(
-    const __gm__ CommArgs* args, int targetRank, const __gm__ T* localSrc,
+    const __gm__ CommArgs* args, const AscendC::LocalTensor<uint8_t>& wqeScratch,
+    int targetRank, const __gm__ T* localSrc,
     uint64_t byteOffset, uint32_t byteCount)
 {
-    (void)UDMAPutNbiOnQp<T>(args, targetRank, 0U, localSrc, byteOffset, byteCount);
+    (void)UDMAPutNbiOnQp<T>(args, wqeScratch, targetRank, 0U, localSrc, byteOffset, byteCount);
 }
 
 template <typename T>
 __aicore__ inline void UDMAPutRegisteredNbi(
-    const __gm__ CommArgs* args, int targetRank, const __gm__ T* localSrc, uint64_t byteOffset, uint32_t byteCount)
+    const __gm__ CommArgs* args, const AscendC::LocalTensor<uint8_t>& wqeScratch,
+    int targetRank, const __gm__ T* localSrc, uint64_t byteOffset, uint32_t byteCount)
 {
-    UDMAPutNbi<T>(args, targetRank, localSrc, byteOffset, byteCount);
+    UDMAPutNbi<T>(args, wqeScratch, targetRank, localSrc, byteOffset, byteCount);
 }
 
 template <typename T>
 __aicore__ inline uint32_t UDMAGetNbiOnQp(
-    const __gm__ CommArgs* args, int sourceRank, uint32_t qpIdx,
+    const __gm__ CommArgs* args, const AscendC::LocalTensor<uint8_t>& wqeScratch,
+    int sourceRank, uint32_t qpIdx,
     __gm__ T* localDst, uint64_t byteOffset, uint32_t byteCount)
 {
     if (!UDMARegisteredOperationValid(args, sourceRank, qpIdx, byteOffset, byteCount) ||
@@ -654,29 +659,33 @@ __aicore__ inline uint32_t UDMAGetNbiOnQp(
     }
 
     auto registry = GetUDMARegistry(args);
+    auto localAddr = reinterpret_cast<__gm__ uint8_t*>(localDst);
     auto remoteAddr = UDMARegisteredRemoteAddr(registry, sourceRank, byteOffset);
-    return UDMARead(args, reinterpret_cast<__gm__ uint8_t*>(localDst), remoteAddr,
+    return UDMARead(args, wqeScratch, localAddr, remoteAddr,
         static_cast<uint32_t>(sourceRank), qpIdx, byteCount);
 }
 
 template <typename T>
 __aicore__ inline void UDMAGetNbi(
-    const __gm__ CommArgs* args, int sourceRank, __gm__ T* localDst,
+    const __gm__ CommArgs* args, const AscendC::LocalTensor<uint8_t>& wqeScratch,
+    int sourceRank, __gm__ T* localDst,
     uint64_t byteOffset, uint32_t byteCount)
 {
-    (void)UDMAGetNbiOnQp<T>(args, sourceRank, 0U, localDst, byteOffset, byteCount);
+    (void)UDMAGetNbiOnQp<T>(args, wqeScratch, sourceRank, 0U, localDst, byteOffset, byteCount);
 }
 
 template <typename T>
 __aicore__ inline void UDMAGetRegisteredNbi(
-    const __gm__ CommArgs* args, int sourceRank, __gm__ T* localDst, uint64_t byteOffset, uint32_t byteCount)
+    const __gm__ CommArgs* args, const AscendC::LocalTensor<uint8_t>& wqeScratch,
+    int sourceRank, __gm__ T* localDst, uint64_t byteOffset, uint32_t byteCount)
 {
-    UDMAGetNbi<T>(args, sourceRank, localDst, byteOffset, byteCount);
+    UDMAGetNbi<T>(args, wqeScratch, sourceRank, localDst, byteOffset, byteCount);
 }
 
 template <typename T>
 __aicore__ inline void UDMAPutSignalNbi(
-    const __gm__ CommArgs* args, int targetRank, const __gm__ T* localSrc, uint64_t byteOffset,
+    const __gm__ CommArgs* args, const AscendC::LocalTensor<uint8_t>& wqeScratch,
+    int targetRank, const __gm__ T* localSrc, uint64_t byteOffset,
     uint32_t byteCount, uint64_t signalByteOffset, uint64_t signal)
 {
     if (!UDMARegisteredOperationValid(args, targetRank, 0U, byteOffset, byteCount) ||
@@ -686,22 +695,24 @@ __aicore__ inline void UDMAPutSignalNbi(
     }
 
     auto registry = GetUDMARegistry(args);
+    auto localAddr = reinterpret_cast<__gm__ uint8_t*>(const_cast<__gm__ T*>(localSrc));
     UDMASignalParams signalParams = {};
     signalParams.sigAddr = reinterpret_cast<__gm__ uint64_t*>(
         UDMARegisteredRemoteAddr(registry, targetRank, signalByteOffset));
     signalParams.signal = signal;
     auto remoteAddr = UDMARegisteredRemoteAddr(registry, targetRank, byteOffset);
-    (void)UDMAWriteNotify(args, remoteAddr,
-        reinterpret_cast<__gm__ uint8_t*>(const_cast<__gm__ T*>(localSrc)),
+    (void)UDMAWriteNotify(args, wqeScratch, remoteAddr, localAddr,
         static_cast<uint32_t>(targetRank), 0U, byteCount, &signalParams);
 }
 
 template <typename T>
 __aicore__ inline void UDMAPutRegisteredSignalNbi(
-    const __gm__ CommArgs* args, int targetRank, const __gm__ T* localSrc, uint64_t byteOffset,
+    const __gm__ CommArgs* args, const AscendC::LocalTensor<uint8_t>& wqeScratch,
+    int targetRank, const __gm__ T* localSrc, uint64_t byteOffset,
     uint32_t byteCount, uint64_t signalByteOffset, uint64_t signal)
 {
-    UDMAPutSignalNbi<T>(args, targetRank, localSrc, byteOffset, byteCount, signalByteOffset, signal);
+    UDMAPutSignalNbi<T>(args, wqeScratch, targetRank, localSrc,
+        byteOffset, byteCount, signalByteOffset, signal);
 }
 
 __aicore__ inline uint32_t UDMAFlushQpDoorbell(

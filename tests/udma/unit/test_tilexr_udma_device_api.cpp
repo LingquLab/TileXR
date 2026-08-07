@@ -61,6 +61,9 @@ struct Fixture {
     std::array<uint32_t, kQpNum> sqDoorbell = {};
     std::array<uint32_t, kQpNum> cqTail = {};
     std::array<uint32_t, kQpNum> cqDoorbell = {};
+    alignas(TILEXR_UDMA_WQE_SCRATCH_ALIGNMENT)
+        std::array<uint8_t, TILEXR_UDMA_WQE_SCRATCH_BYTES> wqeScratch = {};
+    std::array<uint8_t, 256> localRegion = {};
     std::array<uint8_t, 256> remoteRegion = {};
 
     Fixture()
@@ -78,6 +81,8 @@ struct Fixture {
 
         registry.rankSize = kRankSize;
         registry.regionCount = 1U;
+        registry.regions[0].base = localRegion.data();
+        registry.regions[0].bytes = localRegion.size();
         registry.regions[1].base = remoteRegion.data();
         registry.regions[1].bytes = remoteRegion.size();
 
@@ -121,6 +126,11 @@ struct Fixture {
     {
         return reinterpret_cast<UDMACqeCtx*>(
             cqBuffers[qp].data() + static_cast<size_t>(cqeIdx) * kCqeBytes);
+    }
+
+    AscendC::LocalTensor<uint8_t> Scratch()
+    {
+        return AscendC::LocalTensor<uint8_t>(wqeScratch.data(), wqeScratch.size());
     }
 
     bool SqGuardIntact(uint32_t qp) const
@@ -167,32 +177,36 @@ void TestQpDiscoveryAndRemoteMemLayout()
 void TestValidationFailures()
 {
     Fixture fixture;
-    std::array<uint8_t, 16> local = {};
+    auto* local = fixture.localRegion.data();
+    auto scratch = fixture.Scratch();
 
     fixture.args.extraFlag = 0U;
-    Check(UDMAPutNbiOnQp<uint8_t>(&fixture.args, 1, 0U, local.data(), 0U, 8U) ==
+    Check(UDMAPutNbiOnQp<uint8_t>(&fixture.args, scratch, 1, 0U, local, 0U, 8U) ==
         TILEXR_UDMA_STATUS_INVALID, "disabled UDMA rejected");
     fixture.args.extraFlag = ExtraFlag::UDMA;
 
     GM_ADDR registry = fixture.args.udmaRegistryPtr;
     fixture.args.udmaRegistryPtr = nullptr;
-    Check(UDMAPutNbiOnQp<uint8_t>(&fixture.args, 1, 0U, local.data(), 0U, 8U) ==
+    Check(UDMAPutNbiOnQp<uint8_t>(&fixture.args, scratch, 1, 0U, local, 0U, 8U) ==
         TILEXR_UDMA_STATUS_INVALID, "missing registry rejected");
     fixture.args.udmaRegistryPtr = registry;
 
-    Check(UDMAPutNbiOnQp<uint8_t>(&fixture.args, -1, 0U, local.data(), 0U, 8U) ==
+    Check(UDMAPutNbiOnQp<uint8_t>(&fixture.args, scratch, -1, 0U, local, 0U, 8U) ==
         TILEXR_UDMA_STATUS_INVALID, "negative rank rejected");
-    Check(UDMAPutNbiOnQp<uint8_t>(&fixture.args, 0, 0U, local.data(), 0U, 8U) ==
+    Check(UDMAPutNbiOnQp<uint8_t>(&fixture.args, scratch, 0, 0U, local, 0U, 8U) ==
         TILEXR_UDMA_STATUS_INVALID, "self rank rejected");
-    Check(UDMAPutNbiOnQp<uint8_t>(&fixture.args, 2, 0U, local.data(), 0U, 8U) ==
+    Check(UDMAPutNbiOnQp<uint8_t>(&fixture.args, scratch, 2, 0U, local, 0U, 8U) ==
         TILEXR_UDMA_STATUS_INVALID, "out-of-range rank rejected");
-    Check(UDMAPutNbiOnQp<uint8_t>(&fixture.args, 1, 2U, local.data(), 0U, 8U) ==
+    Check(UDMAPutNbiOnQp<uint8_t>(&fixture.args, scratch, 1, 2U, local, 0U, 8U) ==
         TILEXR_UDMA_STATUS_INVALID, "out-of-range QP rejected");
-    Check(UDMAPutNbiOnQp<uint8_t>(&fixture.args, 1, 0U, local.data(), 252U, 8U) ==
+    Check(UDMAPutNbiOnQp<uint8_t>(&fixture.args, scratch, 1, 0U, local, 252U, 8U) ==
         TILEXR_UDMA_STATUS_INVALID, "out-of-range registered memory rejected");
-    Check(UDMAPutNbiOnQpWithFlag<uint8_t>(&fixture.args, 1, 0U, local.data(), 0U, 8U,
+    Check(UDMAPutNbiOnQpWithFlag<uint8_t>(&fixture.args, scratch, 1, 0U, local, 0U, 8U,
         TILEXR_UDMA_SQE_FLAG_STRONG_ORDER) == TILEXR_UDMA_STATUS_INVALID,
         "flag without completion semantics rejected");
+    Check(UDMAPutNbiOnQpWithFlag<uint8_t>(&fixture.args, scratch, 1, 0U, local, 0U, 8U,
+        TILEXR_UDMA_SQE_FLAG_COMPLETION) == TILEXR_UDMA_STATUS_SUCCESS,
+        "completion-only request is accepted for an in-order-completion QP");
     Check(UDMAFlushQpDoorbell(&fixture.args, 0, 0U) == TILEXR_UDMA_STATUS_INVALID,
         "doorbell flush rejects self rank");
     Check(UDMAQuietStatusOnQp(&fixture.args, 1, 2U) == TILEXR_UDMA_STATUS_INVALID,
@@ -200,14 +214,38 @@ void TestValidationFailures()
 
     fixture.sqHead[0] = TILEXR_UDMA_SQ_BB_COUNT + 1U;
     fixture.sqTail[0] = 0U;
-    Check(UDMAPutNbiOnQp<uint8_t>(&fixture.args, 1, 0U, local.data(), 0U, 8U) ==
+    Check(UDMAPutNbiOnQp<uint8_t>(&fixture.args, scratch, 1, 0U, local, 0U, 8U) ==
         TILEXR_UDMA_STATUS_INVALID, "invalid SQ outstanding state rejected");
+}
+
+void TestInvalidScratchHasNoMutation()
+{
+    Fixture fixture;
+    auto* local = fixture.localRegion.data();
+    alignas(TILEXR_UDMA_WQE_SCRATCH_ALIGNMENT)
+        std::array<uint8_t, TILEXR_UDMA_WQE_SCRATCH_BYTES + 1U> storage = {};
+    const uint32_t headBefore = fixture.sqHead[0];
+
+    AscendC::LocalTensor<uint8_t> empty;
+    Check(UDMAPutNbiOnQp<uint8_t>(&fixture.args, empty, 1, 0U, local, 0U, 8U) ==
+        TILEXR_UDMA_STATUS_INVALID, "null scratch is rejected");
+    AscendC::LocalTensor<uint8_t> shortScratch(
+        storage.data(), TILEXR_UDMA_WQE_SCRATCH_BYTES - 1U);
+    Check(UDMAPutNbiOnQp<uint8_t>(&fixture.args, shortScratch, 1, 0U, local, 0U, 8U) ==
+        TILEXR_UDMA_STATUS_INVALID, "short scratch is rejected");
+    AscendC::LocalTensor<uint8_t> misalignedScratch(
+        storage.data() + 1U, TILEXR_UDMA_WQE_SCRATCH_BYTES);
+    Check(UDMAPutNbiOnQp<uint8_t>(&fixture.args, misalignedScratch, 1, 0U, local, 0U, 8U) ==
+        TILEXR_UDMA_STATUS_INVALID, "misaligned scratch is rejected");
+    Check(fixture.sqHead[0] == headBefore && fixture.wqeCount[0] == 0U &&
+        fixture.sqDoorbell[0] == 0U, "invalid scratch does not mutate queue state");
 }
 
 void TestSqFullHasNoMutation()
 {
     Fixture fixture;
-    std::array<uint8_t, 16> local = {};
+    auto* local = fixture.localRegion.data();
+    auto scratch = fixture.Scratch();
     fixture.sqHead[1] = TILEXR_UDMA_SQ_BB_COUNT;
     fixture.sqTail[1] = 0U;
     fixture.wqeCount[1] = 9U;
@@ -217,7 +255,8 @@ void TestSqFullHasNoMutation()
     std::memcpy(before.data(), fixture.sqBuffers[1].data(), before.size());
 
     const uint32_t status = UDMAPutNbiOnQpWithFlagDeferred<uint8_t>(
-        &fixture.args, 1, 1U, local.data(), 0U, 8U, TILEXR_UDMA_SQE_FLAG_COMPLETION);
+        &fixture.args, scratch, 1, 1U, local, 0U, 8U,
+        TILEXR_UDMA_SQE_FLAG_ORDERED_COMPLETION);
     Check(status == TILEXR_UDMA_STATUS_SQ_FULL, "full SQ reports capacity failure");
     Check(fixture.sqHead[1] == TILEXR_UDMA_SQ_BB_COUNT, "full SQ preserves head");
     Check(fixture.sqTail[1] == 0U, "full SQ preserves tail");
@@ -230,11 +269,13 @@ void TestSqFullHasNoMutation()
 void TestDeferredPutAndFlushAreQpSpecific()
 {
     Fixture fixture;
-    std::array<uint8_t, 16> local = {};
+    auto* local = fixture.localRegion.data();
+    auto scratch = fixture.Scratch();
     fixture.sqDoorbell[1] = 55U;
 
     const uint32_t status = UDMAPutNbiOnQpWithFlagDeferred<uint8_t>(
-        &fixture.args, 1, 1U, local.data(), 8U, 8U, TILEXR_UDMA_SQE_FLAG_COMPLETION);
+        &fixture.args, scratch, 1, 1U, local, 8U, 8U,
+        TILEXR_UDMA_SQE_FLAG_ORDERED_COMPLETION);
     Check(status == TILEXR_UDMA_STATUS_SUCCESS, "deferred PUT succeeds");
     Check(fixture.sqHead[1] == 1U, "deferred PUT advances selected QP head");
     Check(fixture.wqeCount[1] == 1U, "deferred PUT advances selected QP completion count");
@@ -244,7 +285,8 @@ void TestDeferredPutAndFlushAreQpSpecific()
 
     const UDMASqeCtx* sqe = fixture.Sqe(1U, 0U);
     Check(sqe->sqeBbIdx == 0U, "SQE records ring basic-block index");
-    Check(sqe->flag == TILEXR_UDMA_SQE_FLAG_COMPLETION, "SQE uses requested named flag");
+    Check(sqe->flag == TILEXR_UDMA_SQE_FLAG_ORDERED_COMPLETION,
+        "SQE uses requested ordered-completion flag");
     Check(sqe->opcode == static_cast<uint32_t>(UDMAOpcode::WRITE), "deferred PUT emits WRITE");
     Check(sqe->tpId == fixture.mem[3].tpn, "deferred PUT uses QP-specific remote metadata");
     const UDMASgeCtx* sge = reinterpret_cast<const UDMASgeCtx*>(
@@ -266,7 +308,8 @@ void TestDeferredPutAndFlushAreQpSpecific()
 void TestImmediatePutReclaimsCompletedFullSq()
 {
     Fixture fixture;
-    std::array<uint8_t, 16> local = {};
+    auto* local = fixture.localRegion.data();
+    auto scratch = fixture.Scratch();
     fixture.sqHead[0] = TILEXR_UDMA_SQ_BB_COUNT;
     fixture.sqTail[0] = 0U;
     fixture.wqeCount[0] = TILEXR_UDMA_SQ_BB_COUNT;
@@ -276,7 +319,7 @@ void TestImmediatePutReclaimsCompletedFullSq()
         fixture.Cqe(0U, index)->entryIdx = index;
     }
 
-    UDMAPutNbi<uint8_t>(&fixture.args, 1, local.data(), 0U, 8U);
+    UDMAPutNbi<uint8_t>(&fixture.args, scratch, 1, local, 0U, 8U);
 
     Check(fixture.sqTail[0] == TILEXR_UDMA_SQ_BB_COUNT,
         "legacy immediate PUT reclaims completed SQ entries when full");
@@ -294,16 +337,17 @@ void TestImmediatePutReclaimsCompletedFullSq()
 void TestGetAndLegacyQp0Wrappers()
 {
     Fixture fixture;
-    std::array<uint8_t, 16> local = {};
+    auto* local = fixture.localRegion.data();
+    auto scratch = fixture.Scratch();
 
-    Check(UDMAGetNbiOnQp<uint8_t>(&fixture.args, 1, 1U, local.data(), 0U, 8U) ==
+    Check(UDMAGetNbiOnQp<uint8_t>(&fixture.args, scratch, 1, 1U, local, 0U, 8U) ==
         TILEXR_UDMA_STATUS_SUCCESS, "QP-aware GET succeeds");
     Check(fixture.Sqe(1U, 0U)->opcode == static_cast<uint32_t>(UDMAOpcode::READ),
         "QP-aware GET emits READ on selected QP");
     Check(fixture.Sqe(1U, 0U)->flag == TILEXR_UDMA_SQE_FLAG_ORDERED_COMPLETION,
         "GET uses ordered completion flag");
 
-    UDMAPutNbi<uint8_t>(&fixture.args, 1, local.data(), 0U, 8U);
+    UDMAPutNbi<uint8_t>(&fixture.args, scratch, 1, local, 0U, 8U);
     Check(fixture.sqHead[0] == 1U && fixture.sqDoorbell[0] == 1U,
         "legacy PUT selects QP0 and rings its doorbell");
     Check(fixture.Sqe(0U, 0U)->flag == TILEXR_UDMA_SQE_FLAG_ORDERED_COMPLETION,
@@ -314,15 +358,16 @@ void TestWriteNotifyWrapsWithinSqRing()
 {
     Fixture fixture;
     constexpr uint32_t qp = 1U;
-    std::array<uint8_t, 16> local = {};
+    auto* local = fixture.localRegion.data();
+    auto scratch = fixture.Scratch();
     fixture.sqHead[qp] = TILEXR_UDMA_SQ_BB_COUNT - 1U;
     fixture.sqTail[qp] = TILEXR_UDMA_SQ_BB_COUNT - 1U;
 
     UDMASignalParams signal = {};
     signal.sigAddr = reinterpret_cast<uint64_t*>(fixture.remoteRegion.data() + 128U);
     signal.signal = 0x1122334455667788ULL;
-    const uint32_t status = UDMAWriteNotify(&fixture.args,
-        fixture.remoteRegion.data(), local.data(), 1U, qp, local.size(), &signal);
+    const uint32_t status = UDMAWriteNotify(&fixture.args, scratch,
+        fixture.remoteRegion.data(), local, 1U, qp, 16U, &signal);
 
     Check(status == TILEXR_UDMA_STATUS_SUCCESS, "wrapped WRITE_WITH_NOTIFY succeeds");
     Check(fixture.sqHead[qp] == TILEXR_UDMA_SQ_BB_COUNT + 1U,
@@ -335,18 +380,59 @@ void TestWriteNotifyWrapsWithinSqRing()
         "wrapped notify payload continues at ring head");
     const UDMASgeCtx* wrappedSge = reinterpret_cast<const UDMASgeCtx*>(
         fixture.sqBuffers[qp].data() + 16U);
-    Check(wrappedSge->len == local.size() && wrappedSge->va == AddressOf(local.data()),
+    Check(wrappedSge->len == 16U && wrappedSge->va == AddressOf(local),
         "wrapped SGE follows notify data at ring head");
     Check(wrappedSge->tokenId == fixture.wq[Fixture::kQpNum + qp].localTokenId,
         "wrapped SGE uses the selected QP local MR token");
     Check(fixture.SqGuardIntact(qp), "wrapped WRITE_WITH_NOTIFY stays inside SQ allocation");
 
     fixture.Cqe(qp, 0U)->owner = 1U;
-    fixture.Cqe(qp, 0U)->entryIdx = TILEXR_UDMA_SQ_BB_COUNT - 1U;
+    fixture.Cqe(qp, 0U)->entryIdx = 0U;
     Check(UDMAQuietStatusOnQp(&fixture.args, 1, qp) == TILEXR_UDMA_STATUS_SUCCESS,
         "wrapped WRITE_WITH_NOTIFY completion succeeds");
     Check(fixture.sqTail[qp] == TILEXR_UDMA_SQ_BB_COUNT + 1U,
         "wrapped WRITE_WITH_NOTIFY completion reclaims both BBs");
+}
+
+void TestWriteNotifyCompletionUsesFinalBbIndex()
+{
+    Fixture fixture;
+    constexpr uint32_t qp = 0U;
+    auto scratch = fixture.Scratch();
+    UDMASignalParams signal = {};
+    signal.sigAddr = reinterpret_cast<uint64_t*>(fixture.remoteRegion.data() + 128U);
+    signal.signal = 7U;
+
+    Check(UDMAWriteNotify(&fixture.args, scratch, fixture.remoteRegion.data(),
+        fixture.localRegion.data(), 1U, qp, 8U, &signal) == TILEXR_UDMA_STATUS_SUCCESS,
+        "WRITE_WITH_NOTIFY posts a two-BB WQE");
+    const UDMANotifyCtx* notify = reinterpret_cast<const UDMANotifyCtx*>(
+        fixture.sqBuffers[qp].data() + sizeof(UDMASqeCtx));
+    const uint64_t notifyAddr = static_cast<uint64_t>(notify->notifyAddrL) |
+        (static_cast<uint64_t>(notify->notifyAddrH) << 32U);
+    const uint64_t notifyData = static_cast<uint64_t>(notify->notifyDataL) |
+        (static_cast<uint64_t>(notify->notifyDataH) << 32U);
+    Check(notify->notifyTokenId == (fixture.mem[2].tid & 0xFFFFFU),
+        "WRITE_WITH_NOTIFY encodes the remote notify token ID");
+    Check(notify->notifyTokenValue == fixture.mem[2].rmtTokenValue,
+        "WRITE_WITH_NOTIFY encodes the remote notify token value");
+    Check(notifyAddr == AddressOf(signal.sigAddr),
+        "WRITE_WITH_NOTIFY encodes the remote signal address");
+    Check(notifyData == signal.signal,
+        "WRITE_WITH_NOTIFY encodes the signal payload");
+    bool paddingIsZero = true;
+    for (size_t byte = sizeof(UDMASqeCtx) + sizeof(UDMANotifyCtx) + sizeof(UDMASgeCtx);
+         byte < TILEXR_UDMA_WQE_SCRATCH_BYTES; ++byte) {
+        paddingIsZero = paddingIsZero && fixture.sqBuffers[qp][byte] == 0U;
+    }
+    Check(paddingIsZero, "WRITE_WITH_NOTIFY clears the published padding bytes");
+    fixture.Cqe(qp, 0U)->owner = 1U;
+    fixture.Cqe(qp, 0U)->entryIdx = 1U;
+
+    Check(UDMAQuietStatusOnQp(&fixture.args, 1, qp) == TILEXR_UDMA_STATUS_SUCCESS,
+        "WRITE_WITH_NOTIFY completion accepts its final BB index");
+    Check(fixture.sqTail[qp] == 2U,
+        "WRITE_WITH_NOTIFY completion reclaims both basic blocks");
 }
 
 void TestLegacyQuietWithoutRegistry()
@@ -387,7 +473,7 @@ void TestCqReclaimAcrossSqAndCqWrap()
     first->entryIdx = TILEXR_UDMA_SQ_BB_COUNT - 1U;
     UDMACqeCtx* second = fixture.Cqe(qp, 0U);
     second->owner = 0U;
-    second->entryIdx = 0U;
+    second->entryIdx = 1U;
 
     Check(UDMAQuietStatusOnQp(&fixture.args, 1, qp) == TILEXR_UDMA_STATUS_SUCCESS,
         "quiet reclaims valid wrapped CQEs");
@@ -424,11 +510,13 @@ int main()
 {
     TestQpDiscoveryAndRemoteMemLayout();
     TestValidationFailures();
+    TestInvalidScratchHasNoMutation();
     TestSqFullHasNoMutation();
     TestDeferredPutAndFlushAreQpSpecific();
     TestImmediatePutReclaimsCompletedFullSq();
     TestGetAndLegacyQp0Wrappers();
     TestWriteNotifyWrapsWithinSqRing();
+    TestWriteNotifyCompletionUsesFinalBbIndex();
     TestLegacyQuietWithoutRegistry();
     TestCqReclaimAcrossSqAndCqWrap();
     TestInvalidCqeDoesNotReclaim();

@@ -56,6 +56,17 @@ void CheckNoNeedles(const std::string& path, const std::vector<std::string>& nee
     }
 }
 
+size_t CountOccurrences(const std::string& text, const std::string& needle)
+{
+    size_t count = 0;
+    size_t position = 0;
+    while ((position = text.find(needle, position)) != std::string::npos) {
+        ++count;
+        position += needle.size();
+    }
+    return count;
+}
+
 void TestTileXRCommUsesUDMAContextBoundary()
 {
     const std::string headerPath = "src/comm/tilexr_comm.h";
@@ -330,6 +341,63 @@ void TestUDMAMultiQpHostTransportContract()
                   "__attribute__((always_inline)) inline __aicore__ uint32_t UDMAPostSend");
 }
 
+void TestUDMADevicePostingContract()
+{
+    const std::string devicePath = "src/include/tilexr_udma.h";
+    const auto device = ReadFile(devicePath);
+    CheckContains(devicePath, device, "__ubuf__ UDMASqeCtx* sqeCtx");
+    CheckContains(devicePath, device, "__ubuf__ UDMANotifyCtx* notifyCtx");
+    CheckContains(devicePath, device, "__ubuf__ UDMASgeCtx* sgeCtx");
+    CheckContains(devicePath, device,
+                  "AscendC::DataCopyPad(sqGlobal, wqeScratch[scratchOffset], copyParams);");
+    CheckContains(devicePath, device, "UDMASyncEvent<AscendC::HardEvent::S_MTE3>();");
+    CheckContains(devicePath, device, "UDMASyncEvent<AscendC::HardEvent::MTE3_S>();");
+    CheckNotContains(devicePath, device, "scratchAddr != 0U");
+    CheckNotContains(devicePath, device, "UDMAFillWrappedNotifyData");
+    CheckNotContains(devicePath, device, "UDMAGetSqLogicalAddr");
+    CheckNotContains(devicePath, device, "UDMACleanWrappedWqe");
+
+    const auto postPos = device.find("inline __aicore__ uint32_t UDMAPostSend(");
+    const auto writePos = device.find("inline __aicore__ uint32_t UDMAWrite(", postPos);
+    if (postPos == std::string::npos || writePos == std::string::npos) {
+        std::cerr << "failed to locate UDMA post-send body" << std::endl;
+        ++g_failures;
+    } else {
+        const auto body = device.substr(postPos, writePos - postPos);
+        const auto publishPos = body.find("UDMAPublishWqe(");
+        const auto headPos = body.find("qpCtxEntry->headAddr", publishPos);
+        const auto countPos = body.find("qpCtxEntry->wqeCntAddr", headPos);
+        const auto doorbellPos = body.find("UDMARingDoorbell(curHead, qpCtxEntry)", countPos);
+        if (publishPos == std::string::npos || headPos == std::string::npos ||
+            countPos == std::string::npos || doorbellPos == std::string::npos ||
+            !(publishPos < headPos && headPos < countPos && countPos < doorbellPos)) {
+            std::cerr << "UDMA post order must be MTE3 publish, head, count, then doorbell"
+                      << std::endl;
+            ++g_failures;
+        }
+    }
+
+    const auto doorbellFunction = device.find("inline void UDMARingDoorbell(");
+    const auto nextFunction = device.find("inline __aicore__ void UDMAMte3CopyToSq(", doorbellFunction);
+    if (doorbellFunction == std::string::npos || nextFunction == std::string::npos) {
+        std::cerr << "failed to locate UDMA doorbell body" << std::endl;
+        ++g_failures;
+    } else {
+        const auto body = device.substr(doorbellFunction, nextFunction - doorbellFunction);
+        CheckContains(devicePath, body,
+                      "st_dev(curHead, reinterpret_cast<__gm__ uint32_t*>(qpCtxEntry->dbAddr), 0);");
+    }
+
+    const std::string transportPath = "src/comm/udma/tilexr_udma_transport.cpp";
+    const auto transport = ReadFile(transportPath);
+    const std::string inOrderQp = "qpAttr.ub.jfsFlag.value = 2;";
+    if (CountOccurrences(transport, inOrderQp) != 2U) {
+        std::cerr << "both UDMA QP creation paths must disable out-of-order completion"
+                  << std::endl;
+        ++g_failures;
+    }
+}
+
 void TestPublicHeadersDoNotExposeUDMAContext()
 {
     const std::vector<std::string> publicHeaders = {
@@ -436,6 +504,7 @@ int main()
     TestUDMAUnregisterIsLocalAfterPublication();
     TestUDMAFailedDeviceFreeRetainsPointer();
     TestUDMAMultiQpHostTransportContract();
+    TestUDMADevicePostingContract();
     if (g_failures != 0) {
         std::cerr << g_failures << " UDMA source guard checks failed" << std::endl;
         return 1;

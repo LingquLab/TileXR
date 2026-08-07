@@ -203,7 +203,9 @@ extern "C" __global__ __aicore__ void tilexr_ep_combine_cross_node_kernel(GM_ADD
 
         AscendC::TPipe pipe;
         AscendC::TBuf<AscendC::QuePosition::VECCALC> tBuf;
+        AscendC::TBuf<AscendC::QuePosition::VECCALC> udmaWqeBuf;
         pipe.InitBuffer(tBuf, kEpUbBytes);
+        pipe.InitBuffer(udmaWqeBuf, TileXR::TILEXR_UDMA_WQE_SCRATCH_BYTES);
         SyncCollectives sync;
         sync.Init(rank, rankSize, shareAddrs, tBuf);
 
@@ -241,8 +243,9 @@ extern "C" __global__ __aicore__ void tilexr_ep_combine_cross_node_kernel(GM_ADD
             sync.WaitRankInnerFlag(static_cast<int32_t>(magic), TileXREp::kEpStepCombineReady, peer);
         }
 
-        TileXREpNotifyRemoteUdmaReadySeparate(args, sendWindow, rank, rankSize, localRankSize, totalBytes, magic,
-            slotBytes, TileXREp::kEpStepCombineReady, combineWindowOffset + UDMARecvWindowOffset(totalBytes));
+        TileXREpNotifyRemoteUdmaReadySeparate(args, udmaWqeBuf.Get<uint8_t>(), sendWindow,
+            rank, rankSize, localRankSize, totalBytes, magic, slotBytes,
+            TileXREp::kEpStepCombineReady, combineWindowOffset + UDMARecvWindowOffset(totalBytes));
         sync.SetInnerFlag(static_cast<int32_t>(magic), TileXREp::kEpStepCombineGatewayReady);
         for (int32_t peer = localNodeStart; peer < localNodeEnd; ++peer) {
             sync.WaitRankInnerFlag(static_cast<int32_t>(magic), TileXREp::kEpStepCombineGatewayReady, peer);
