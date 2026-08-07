@@ -178,7 +178,7 @@ void TestCapabilities()
 {
     uint64_t nativeStages = 0;
     uint64_t stubStages = 0;
-    Check(TileXRMoonEpGetAbiVersion() == TILEXR_MOONEP_ABI_VERSION_V1,
+    Check(TileXRMoonEpGetAbiVersion() == TILEXR_MOONEP_ABI_VERSION_V2,
         "ABI version query mismatch");
     CheckStatus("capability query", TileXRMoonEpGetCapabilitiesV1(&nativeStages, &stubStages),
         TILEXR_MOONEP_SUCCESS);
@@ -192,6 +192,14 @@ void TestCapabilities()
         TILEXR_MOONEP_ERROR_INVALID_ARGUMENT);
     CheckStatus("null stub mask", TileXRMoonEpGetCapabilitiesV1(&nativeStages, nullptr),
         TILEXR_MOONEP_ERROR_INVALID_ARGUMENT);
+
+    CheckStatus("V2 capability query", TileXRMoonEpGetCapabilitiesV2(&nativeStages, &stubStages),
+        TILEXR_MOONEP_SUCCESS);
+    Check(nativeStages == (TILEXR_MOONEP_STAGE_PLANNING | TILEXR_MOONEP_STAGE_REDUCE_GRAD),
+        "V2 native capability mask mismatch");
+    Check(stubStages == (TILEXR_MOONEP_STAGE_DISPATCH |
+        TILEXR_MOONEP_STAGE_PREFETCH_WEIGHT | TILEXR_MOONEP_STAGE_COMBINE),
+        "V2 stub capability mask mismatch");
 }
 
 void TestWorkspaceQuery()

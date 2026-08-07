@@ -8,19 +8,23 @@ Planning -> Dispatch -> PrefetchWeight -> expert forward -> Combine
          -> ReduceGrad
 ```
 
-Planning is the native A5 Planner. Dispatch, PrefetchWeight, Combine, and
-ReduceGrad are native ABI stubs in this phase. Reports therefore set
-`transport_performance_valid=false`. Normal runs use
+Planning and ReduceGrad are native A5 kernels. Dispatch, PrefetchWeight, and
+Combine remain native ABI stubs in this phase. Reports therefore set the
+end-to-end `transport_performance_valid=false`, while a correctness-checked,
+non-oversubscribed ReduceGrad run can set
+`reduce_grad_performance_valid=true`. Normal runs use
 `performance_scope=stub_contract_only`; 16-rank/8-device runs use
 `performance_scope=oversubscribed_functional_only`.
 
 Optional route weights use the same replaceable ABI as hidden data:
 Dispatch maps `[S,K]` weights to `[NvS]`, forward and backward both consume the
-dispatched weights, and Combine maps them back to `[S,K]`. The current stubs
+dispatched weights, and Combine maps them back to `[S,K]`. The remaining stubs
 exercise these shapes with bounded local copies; real transport results remain
 invalid until the four stub capability bits are cleared.
 Their timings validate invocation, stream ordering, shapes, and lifecycle only;
-they are not TileXR transport-performance results.
+they are not TileXR transport-performance results. ReduceGrad reports its own
+effective bandwidth and selects the peer window for rows up to 1 MiB, or the
+registered UDMA workspace for larger rows.
 
 ## Environment
 
@@ -50,14 +54,18 @@ keeps its communicator open for launcher-coordinated termination.
 
 ```bash
 python tools/moonep/run_benchmark.py \
-  --cases tools/moonep/cases/smoke.json \
+  --cases tools/moonep/cases/reduce_grad.json \
   --output-dir output/moonep-8p \
   --physical-device-count 8 \
   --ranks-per-device 1 \
+  --udma-chunk-bytes 4194304 \
   --comm-id 127.0.0.1:10087
 ```
 
 One rank per device defaults `TILEXR_MOONEP_PLANNER_BLOCK_DIM=64`.
+Use `--udma-chunk-bytes 0` for the native 4 MiB default; explicit values let
+the benchmark tune the registered two-stage UDMA pipeline without moving
+registration into the measured loop.
 
 ## 16 Logical Ranks on 8 NPUs
 

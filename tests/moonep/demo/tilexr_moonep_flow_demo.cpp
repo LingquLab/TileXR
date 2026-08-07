@@ -696,15 +696,17 @@ bool RunFlow(const Options &options, RuntimeResources *resources,
 
     uint64_t nativeStages = 0;
     uint64_t stubStages = 0;
+    const uint64_t expectedNative =
+        static_cast<uint64_t>(TILEXR_MOONEP_STAGE_PLANNING) |
+        static_cast<uint64_t>(TILEXR_MOONEP_STAGE_REDUCE_GRAD);
     const uint64_t expectedStubs =
         static_cast<uint64_t>(TILEXR_MOONEP_STAGE_DISPATCH) |
         static_cast<uint64_t>(TILEXR_MOONEP_STAGE_PREFETCH_WEIGHT) |
-        static_cast<uint64_t>(TILEXR_MOONEP_STAGE_COMBINE) |
-        static_cast<uint64_t>(TILEXR_MOONEP_STAGE_REDUCE_GRAD);
-    if (TileXRMoonEpGetAbiVersion() != TILEXR_MOONEP_ABI_VERSION_V1 ||
-        !CheckTileXR(rank, "TileXRMoonEpGetCapabilitiesV1",
-            TileXRMoonEpGetCapabilitiesV1(&nativeStages, &stubStages)) ||
-        nativeStages != TILEXR_MOONEP_STAGE_PLANNING || stubStages != expectedStubs) {
+        static_cast<uint64_t>(TILEXR_MOONEP_STAGE_COMBINE);
+    if (TileXRMoonEpGetAbiVersion() != TILEXR_MOONEP_ABI_VERSION_V2 ||
+        !CheckTileXR(rank, "TileXRMoonEpGetCapabilitiesV2",
+            TileXRMoonEpGetCapabilitiesV2(&nativeStages, &stubStages)) ||
+        nativeStages != expectedNative || stubStages != expectedStubs) {
         std::cerr << "[rank " << rank << "] unexpected native/stub capabilities"
                   << " native=" << nativeStages << " stub=" << stubStages << std::endl;
         return false;
@@ -963,9 +965,9 @@ bool RunFlow(const Options &options, RuntimeResources *resources,
                   << " NvS=" << dispatchedCapacity
                   << " planner_status=" << statusHost[0]
                   << " cu_last=" << cuHost.back()
-                  << " planning=native"
-                  << " dispatch=stub prefetch_weight=stub"
-                  << " combine=stub reduce_grad=stub"
+                   << " planning=native"
+                   << " dispatch=stub prefetch_weight=stub"
+                   << " combine=stub reduce_grad=native"
                   << " torch_validated=false"
                   << " transport_performance_valid=false"
                   << std::endl;

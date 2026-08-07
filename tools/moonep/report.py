@@ -98,6 +98,8 @@ def aggregate_rank_artifacts(
             raise ValueError(f"rank {rank} case metadata differs from rank 0")
         if result["capabilities"] != reference["capabilities"]:
             raise ValueError(f"rank {rank} capability metadata differs from rank 0")
+        if result.get("reduce_grad") != reference.get("reduce_grad"):
+            raise ValueError(f"rank {rank} ReduceGrad metadata differs from rank 0")
         topology = {key: result["topology"].get(key) for key in topology_keys}
         if topology != reference_topology:
             raise ValueError(f"rank {rank} topology metadata differs from rank 0")
@@ -139,10 +141,73 @@ def aggregate_rank_artifacts(
     cross_node_validated = bool(
         first["topology"].get("cross_node_validated", False)
     )
+    reduce_grad_checks = [
+        result.get("validation", {}).get("reduce_grad_checks", {})
+        for result in rank_results
+    ]
+    reduce_grad_correctness_proven = bool(
+        reduce_grad_checks
+        and all(checks and all(bool(value) for value in checks.values())
+                for checks in reduce_grad_checks)
+    )
+    selected_transports = set(
+        str(value)
+        for value in (first.get("reduce_grad") or {}).get("transports", {}).values()
+        if str(value) in ("peer", "udma")
+    )
+    reduce_grad_traffic_proven = bool(selected_transports)
+    for iteration in range(iteration_count):
+        transferred = sum(
+            int(rank_samples[rank][iteration].get("reduce_grad", {})
+                .get("transferred_bytes", 0))
+            for rank in range(world_size)
+        )
+        if transferred <= 0:
+            reduce_grad_traffic_proven = False
+            break
+        for transport in selected_transports:
+            transport_transferred = sum(
+                int(rank_samples[rank][iteration].get("reduce_grad", {})
+                    .get("transport_transferred_bytes", {}).get(transport, 0))
+                for rank in range(world_size)
+            )
+            if transport_transferred <= 0:
+                reduce_grad_traffic_proven = False
+                break
+        if not reduce_grad_traffic_proven:
+            break
+    cross_node_transport_traffic_proven = bool(selected_transports)
+    if peer_memory_cross_node and cross_node_transport_traffic_proven:
+        for iteration in range(iteration_count):
+            for transport in selected_transports:
+                transferred = sum(
+                    int(rank_samples[rank][iteration].get("reduce_grad", {})
+                        .get("cross_node_transferred_bytes", {}).get(transport, 0))
+                    for rank in range(world_size)
+                )
+                if transferred <= 0:
+                    cross_node_transport_traffic_proven = False
+                    break
+            if not cross_node_transport_traffic_proven:
+                break
+    reduce_grad_cross_node_validated = bool(
+        not peer_memory_cross_node or
+        (reduce_grad_correctness_proven and cross_node_transport_traffic_proven)
+    )
     transport_performance_valid = bool(
         capabilities["transport_performance_valid"]
         and not oversubscribed
         and (not peer_memory_cross_node or cross_node_validated)
+    )
+    reduce_grad_native = (
+        capabilities.get("implementations", {}).get("reduce_grad") == "native"
+    )
+    reduce_grad_performance_valid = bool(
+        reduce_grad_native
+        and reduce_grad_correctness_proven
+        and reduce_grad_traffic_proven
+        and not oversubscribed
+        and reduce_grad_cross_node_validated
     )
     if oversubscribed:
         performance_scope = "oversubscribed_functional_only"
@@ -164,6 +229,10 @@ def aggregate_rank_artifacts(
         "planner_block_dim_source": first["topology"].get("planner_block_dim_source"),
         "capabilities": capabilities,
         "transport_performance_valid": transport_performance_valid,
+        "reduce_grad_performance_valid": reduce_grad_performance_valid,
+        "reduce_grad_traffic_proven": reduce_grad_traffic_proven,
+        "reduce_grad_cross_node_validated": reduce_grad_cross_node_validated,
+        "reduce_grad": first.get("reduce_grad"),
         "performance_scope": performance_scope,
         "validation": {
             "passed": all(bool(item["validation"]["passed"]) for item in rank_results),
@@ -184,6 +253,20 @@ def aggregate_rank_artifacts(
             else 0.0
         )
     summary["tokens_per_second"] = _metric_summary(throughput)
+    if "reduce_grad" in metric_names:
+        reduce_grad_bandwidth = []
+        for iteration, sample in enumerate(maxima):
+            duration = float(sample["timings_us"]["reduce_grad"])
+            transferred = sum(
+                int(rank_samples[rank][iteration].get("reduce_grad", {}).get("transferred_bytes", 0))
+                for rank in range(world_size)
+            )
+            reduce_grad_bandwidth.append(
+                transferred * 8.0 / duration / 1000.0 if duration > 0.0 else 0.0
+            )
+        summary["reduce_grad_effective_bandwidth_gbps"] = _metric_summary(
+            reduce_grad_bandwidth
+        )
     write_json(root / "summary.json", summary)
     with (root / "summary.csv").open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(
