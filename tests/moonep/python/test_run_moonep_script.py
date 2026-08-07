@@ -55,8 +55,15 @@ def test_script_prints_final_plog_path_before_python_launch() -> None:
     assert log_path_report < launcher_call
 
 
-def test_script_preserves_caller_tilexr_udma_selection() -> None:
-    assert "export TILEXR_ENABLE_UDMA=" not in SCRIPT
+def test_script_disables_tilexr_udma_only_for_single_rank() -> None:
+    single_rank_override = '''if [[ "${rank_size}" == "1" ]]; then
+    export TILEXR_ENABLE_UDMA=0
+fi'''
+    assert single_rank_override in SCRIPT
+    assert SCRIPT.count("export TILEXR_ENABLE_UDMA=") == 1
+    assert SCRIPT.index(single_rank_override) < SCRIPT.index(
+        "python -m tools.moonep.launcher"
+    )
 
 
 def test_script_selects_manual_small_through_case_id_only() -> None:

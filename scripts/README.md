@@ -116,9 +116,10 @@ bash scripts/run_moonep.sh --mode correctness --rank-size 4
 
 The equivalent short form is `bash scripts/run_moonep.sh -m correctness -r 4`.
 
-The MoonEP wrapper preserves the caller's `TILEXR_ENABLE_UDMA` selection. When the
-variable is unset, TileXR uses its default UDMA-enabled behavior. Set it to `0` on
-every rank only when an explicit UDMA opt-out is required.
+For a single-rank run, the MoonEP wrapper forces `TILEXR_ENABLE_UDMA=0` because
+TileXR does not initialize UDMA for a single-rank communicator. Multi-rank runs
+preserve the caller's selection; when the variable is unset, TileXR uses its
+default UDMA-enabled behavior.
 
 All modes continue to default to `skewed-padding`. Reference and correctness runs can
 opt into the hand-checkable `manual-small` case
