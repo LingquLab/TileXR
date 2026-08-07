@@ -20,12 +20,12 @@ file(WRITE "${TILEXR_MOONEP_PLANNER_FAKE_INCLUDE_DIR}/acl/acl_base.h"
 
 add_executable(test_tilexr_moonep_planner_layout
     unit/test_planner_layout.cpp
-    ${TILEXR_ROOT}/src/moonep/planner/host/planner_layout.cpp
+    ${TILEXR_ROOT}/src/moonep/planner_v2/host/planner_layout.cpp
 )
 target_include_directories(test_tilexr_moonep_planner_layout PRIVATE
     ${TILEXR_ROOT}/src/include
-    ${TILEXR_ROOT}/src/moonep/planner/common
-    ${TILEXR_ROOT}/src/moonep/planner/host
+    ${TILEXR_ROOT}/src/moonep/planner_v2/common
+    ${TILEXR_ROOT}/src/moonep/planner_v2/host
 )
 
 add_executable(test_tilexr_moonep_planner_reference
@@ -36,14 +36,14 @@ target_include_directories(test_tilexr_moonep_planner_reference PRIVATE referenc
 
 add_executable(test_tilexr_moonep_planner_host
     unit/test_planner_host.cpp
-    ${TILEXR_ROOT}/src/moonep/planner/host/planner_host.cpp
-    ${TILEXR_ROOT}/src/moonep/planner/host/planner_layout.cpp
+    ${TILEXR_ROOT}/src/moonep/planner_v2/host/planner_host.cpp
+    ${TILEXR_ROOT}/src/moonep/planner_v2/host/planner_layout.cpp
 )
 target_include_directories(test_tilexr_moonep_planner_host PRIVATE
     ${TILEXR_MOONEP_PLANNER_FAKE_INCLUDE_DIR}
     ${TILEXR_ROOT}/src/include
-    ${TILEXR_ROOT}/src/moonep/planner/common
-    ${TILEXR_ROOT}/src/moonep/planner/host
+    ${TILEXR_ROOT}/src/moonep/planner_v2/common
+    ${TILEXR_ROOT}/src/moonep/planner_v2/host
 )
 
 add_executable(test_tilexr_moonep_planner_source_guard unit/test_planner_source_guard.cpp)

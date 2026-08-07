@@ -5,7 +5,7 @@ if(NOT TILEXR_BUILD_MOONEP AND NOT TILEXR_BUILD_MOONEP_PLANNER)
 endif()
 
 if(NOT TARGET tilexr-moonep-planner)
-    add_subdirectory(planner)
+    add_subdirectory(planner_v2)
 endif()
 
 if(NOT TILEXR_BUILD_MOONEP)
