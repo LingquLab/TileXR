@@ -80,8 +80,10 @@ void TestHeaderUsesExpectedAscendCApis()
     CheckContains(path, text, "DATA_AS_FLAG_SUM_RESULT_BYTES");
     CheckContains(path, text, "DataAsFlagMaxRecvBlocks");
     CheckContains(path, text, "while (!DataAsFlagCheckBatch");
+    CheckContains(path, text, "expectedValue * batchBlocks");
     CheckDoesNotContain(path, text, "GlobalTensor::GetValue");
     CheckDoesNotContain(path, text, "GlobalTensor::SetValue");
+    CheckDoesNotContain(path, text, "static_cast<float>(batchBlocks)");
     CheckDoesNotContain(path, text, "checkScratchBlockCapacity");
 }
 

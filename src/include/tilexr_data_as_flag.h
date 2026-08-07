@@ -284,7 +284,7 @@ __aicore__ inline bool DataAsFlagCheckBatchValue(
     AscendC::Sum<float>(sumOut, flagLocal, sharedTmpBuffer, sumParams);
     AscendC::SetFlag<AscendC::HardEvent::V_S>(EVENT_ID0);
     AscendC::WaitFlag<AscendC::HardEvent::V_S>(EVENT_ID0);
-    return sumOut.GetValue(0) == expectedValue * static_cast<float>(batchBlocks);
+    return sumOut.GetValue(0) == expectedValue * batchBlocks;
 }
 
 __aicore__ inline bool DataAsFlagCheckBatch(
