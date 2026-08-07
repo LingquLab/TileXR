@@ -1,5 +1,9 @@
 include(GNUInstallDirs)
 
+if(NOT TARGET tilexr-moonep-planner)
+    message(FATAL_ERROR "Planner V3 requires the PR96 Planner V2 shared-library target")
+endif()
+
 find_program(BISHENG_EXECUTABLE bisheng)
 if(NOT BISHENG_EXECUTABLE)
     message(FATAL_ERROR "bisheng not found; source the CANN environment before configuring the MoonEP planner")
@@ -64,41 +68,26 @@ tilexr_add_moonep_kernel(tilexr_moonep_planner_kernel
         "${CMAKE_SOURCE_DIR}/src/include/tilexr_sync.h"
 )
 
-add_library(tilexr-moonep-planner SHARED
-    ${CMAKE_SOURCE_DIR}/src/moonep/common/moonep_kernel_registration.cpp
+add_library(tilexr-moonep-planner-v3-objects OBJECT
     host/planner_layout.cpp
     host/planner_host.cpp
     host/planner_launch.cpp
     host/tilexr_moonep_planner.cpp
     ${TILEXR_MOONEP_PLANNER_KERNEL_EMBED_CPP}
 )
-add_dependencies(tilexr-moonep-planner tilexr_moonep_planner_kernel)
+add_dependencies(tilexr-moonep-planner-v3-objects tilexr_moonep_planner_kernel)
+target_compile_features(tilexr-moonep-planner-v3-objects PRIVATE cxx_std_14)
+set_target_properties(tilexr-moonep-planner-v3-objects PROPERTIES
+    POSITION_INDEPENDENT_CODE ON)
 
-target_include_directories(tilexr-moonep-planner
-    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/../../include
+target_include_directories(tilexr-moonep-planner-v3-objects
     PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/../../include
         ${CMAKE_CURRENT_SOURCE_DIR}/common
         ${CMAKE_CURRENT_SOURCE_DIR}/host
         ${CMAKE_SOURCE_DIR}/src/moonep/common
         ${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc
         ${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc/runtime
 )
-target_link_directories(tilexr-moonep-planner PRIVATE
-    ${ASCEND_DRIVER_PATH}/lib64/driver
-    ${ASCEND_HOME_PATH}/${ARCH}-linux/lib64
-    ${ASCEND_HOME_PATH}/${ARCH}-linux/devlib
-)
-target_link_libraries(tilexr-moonep-planner PRIVATE
-    tile-comm
-    ascendcl
-    runtime
-)
-set_target_properties(tilexr-moonep-planner PROPERTIES
-    INSTALL_RPATH "$ORIGIN"
-    VERSION 2.0.0
-    SOVERSION 2
-)
-
-install(TARGETS tilexr-moonep-planner LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR})
-install(FILES ${CMAKE_SOURCE_DIR}/src/include/tilexr_moonep_planner.h
-    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+target_sources(tilexr-moonep-planner PRIVATE
+    $<TARGET_OBJECTS:tilexr-moonep-planner-v3-objects>)

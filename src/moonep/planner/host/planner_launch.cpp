@@ -13,19 +13,19 @@ extern const unsigned char TileXRMoonEpPlannerKernelBinaryData[];
 extern const std::size_t TileXRMoonEpPlannerKernelBinarySize;
 }
 
-namespace TileXRMoonEp {
+namespace TileXRMoonEpV3 {
 namespace {
 
 constexpr const char *kPlannerKernelName = "tilexr_moonep_planner_kernel";
-KernelRegistrationState g_plannerRegistration;
+TileXRMoonEp::KernelRegistrationState g_plannerRegistration;
 
 } // namespace
 
 int TileXRMoonEpLaunchKernel(const PlannerParams &params, const PlannerLaunchContext &context)
 {
-    const int registerRet = EnsureMoonEpKernelRegistered(g_plannerRegistration,
+    const int registerRet = TileXRMoonEp::EnsureMoonEpKernelRegistered(g_plannerRegistration,
         TileXRMoonEpPlannerKernelBinaryData, TileXRMoonEpPlannerKernelBinarySize,
-        KernelSignature(kPlannerKernelSignature), kPlannerKernelName);
+        TileXRMoonEp::KernelSignature(TileXRMoonEp::kPlannerKernelSignature), kPlannerKernelName);
     if (registerRet != TileXR::TILEXR_SUCCESS) {
         return registerRet;
     }
@@ -89,7 +89,8 @@ int TileXRMoonEpLaunchKernel(const PlannerParams &params, const PlannerLaunchCon
     cfgInfo.schemMode = 1;
 
     const rtError_t launchRet = rtKernelLaunchWithFlagV2(
-        KernelSignature(kPlannerKernelSignature), static_cast<uint32_t>(layout.blockDim),
+        TileXRMoonEp::KernelSignature(TileXRMoonEp::kPlannerKernelSignature),
+        static_cast<uint32_t>(layout.blockDim),
         &argsInfo, nullptr, static_cast<rtStream_t>(params.stream), 0, &cfgInfo);
     if (launchRet != RT_ERROR_NONE) {
         std::cerr << "TileXR MoonEP planner rtKernelLaunchWithFlagV2 failed, ret="
@@ -99,4 +100,4 @@ int TileXRMoonEpLaunchKernel(const PlannerParams &params, const PlannerLaunchCon
     return TileXR::TILEXR_SUCCESS;
 }
 
-} // namespace TileXRMoonEp
+} // namespace TileXRMoonEpV3

@@ -9,8 +9,6 @@ int main()
     const int64_t s = 17;
     const int64_t k = 4;
     const int64_t experts = 32;
-    const int64_t b = 4;
-    const int64_t tokenPadding = 4;
     bool sawEmptyGroup = false;
     for (const std::string pattern : {"balanced", "biased", "all_local", "all_remote", "duplicate"}) {
         const std::vector<int32_t> routing =
@@ -19,27 +17,24 @@ int main()
             TileXRMoonEpTest::ReferencePlan plan;
             std::string error;
             if (!TileXRMoonEpTest::BuildReferencePlan(
-                    rank, rankSize, s, k, experts, b, tokenPadding,
-                    routing, &plan, &error)) {
+                    rank, rankSize, s, k, experts, routing, &plan, &error)) {
                 std::cerr << pattern << " rank=" << rank << " failed: " << error << std::endl;
                 return 1;
             }
             if (plan.dst.size() != static_cast<size_t>(s * k) ||
-                plan.cuSeqlens.size() != static_cast<size_t>(experts + b) ||
-                plan.expertsToCopy.size() != static_cast<size_t>(rankSize * b) ||
-                plan.zeroFillRanges.size() != static_cast<size_t>((experts + b) * 2) ||
+                plan.cuSeqlens.size() != static_cast<size_t>(experts + experts / rankSize) ||
+                plan.expertsToCopy.size() != static_cast<size_t>(experts) ||
                 plan.remoteStats.size() != 2) {
                 std::cerr << pattern << " output size mismatch" << std::endl;
                 return 1;
             }
-            const int64_t expectedNvS = s * k + (tokenPadding - 1) * 2 * (experts / rankSize);
-            if (plan.nvS != expectedNvS || plan.cuSeqlens.back() > expectedNvS) {
-                std::cerr << pattern << " rank=" << rank << " padded capacity mismatch" << std::endl;
+            if (plan.dispatchedCapacity != s * k || plan.cuSeqlens.back() != s * k) {
+                std::cerr << pattern << " rank=" << rank << " compact capacity mismatch" << std::endl;
                 return 1;
             }
             int32_t previousEnd = 0;
             for (int32_t end : plan.cuSeqlens) {
-                if (end < previousEnd || end > plan.nvS) {
+                if (end < previousEnd || end > s * k) {
                     std::cerr << pattern << " rank=" << rank
                               << " invalid cu_seqlens" << std::endl;
                     return 1;
@@ -49,23 +44,13 @@ int main()
             }
             for (int32_t encoded : plan.dst) {
                 const int64_t raw = encoded < 0 ? -static_cast<int64_t>(encoded) - 1 : encoded;
-                if (raw < 0 || raw >= rankSize * plan.nvS) {
+                if (raw < 0 || raw >= rankSize * s * k) {
                     std::cerr << pattern << " rank=" << rank
                               << " dst encoding out of range" << std::endl;
                     return 1;
                 }
             }
         }
-    }
-    const std::vector<int32_t> routing =
-        TileXRMoonEpTest::MakeRouting("balanced", rankSize, s, k, experts, 77);
-    TileXRMoonEpTest::ReferencePlan smallB;
-    std::string error;
-    if (!TileXRMoonEpTest::BuildReferencePlan(
-            0, rankSize, s, k, experts, 2, 1, routing, &smallB, &error) ||
-        smallB.expertsToCopy.size() != static_cast<size_t>(rankSize * 2)) {
-        std::cerr << "small-B inference plan failed: " << error << std::endl;
-        return 1;
     }
     if (!sawEmptyGroup) {
         std::cerr << "empty-group repeated-end case was not exercised" << std::endl;

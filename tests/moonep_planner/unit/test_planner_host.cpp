@@ -45,16 +45,12 @@ TileXRMoonEp::PlannerParams MakeParams(TileXRCommPtr comm, uint64_t workspaceByt
     params.s = 64;
     params.k = 4;
     params.expertCount = 64;
-    params.b = 8;
-    params.tokenPadding = 4;
     params.workspace = reinterpret_cast<void *>(0x3000);
     params.workspaceBytes = workspaceBytes;
     params.dst = reinterpret_cast<int32_t *>(0x4000);
     params.cuSeqlens = reinterpret_cast<int32_t *>(0x5000);
     params.expertsToCopy = reinterpret_cast<int32_t *>(0x6000);
-    params.zeroFillRanges = reinterpret_cast<int32_t *>(0x6800);
     params.remoteStats = reinterpret_cast<int32_t *>(0x7000);
-    params.dupCounts = reinterpret_cast<int32_t *>(0x7800);
     params.plannerStatus = reinterpret_cast<int32_t *>(0x8000);
     params.waitIterations = 1000;
     params.stream = reinterpret_cast<aclrtStream>(0x9000);
@@ -68,28 +64,28 @@ void TestSameAndCrossNodeValidation()
 
     TileXR::CommArgs sameNode = MakeCommArgs(8, 3, 8, 3);
     gHostArgs = &sameNode;
-    Check(TileXRMoonEp::TileXRMoonEpPrepareLayout(comm, 64, 4, 64, 8, 4, &layout) ==
+    Check(TileXRMoonEp::TileXRMoonEpPrepareLayout(comm, 64, 4, 64, &layout) ==
         TileXR::TILEXR_SUCCESS, "same-node Planner layout rejected");
 
     TileXR::CommArgs crossNode = MakeCommArgs(16, 9, 8, 1);
     gHostArgs = &crossNode;
-    Check(TileXRMoonEp::TileXRMoonEpPrepareLayout(comm, 64, 4, 64, 4, 4, &layout) ==
+    Check(TileXRMoonEp::TileXRMoonEpPrepareLayout(comm, 64, 4, 64, &layout) ==
         TileXR::TILEXR_SUCCESS, "cross-node peer-window Planner layout rejected");
     Check(layout.blockDim == 64, "cross-node default blockDim mismatch");
 
     crossNode.peerMems[12] = nullptr;
-    Check(TileXRMoonEp::TileXRMoonEpPrepareLayout(comm, 64, 4, 64, 4, 4, &layout) ==
+    Check(TileXRMoonEp::TileXRMoonEpPrepareLayout(comm, 64, 4, 64, &layout) ==
         TileXR::TILEXR_ERROR_NOT_INITIALIZED, "missing remote peer window accepted");
 
     crossNode = MakeCommArgs(16, 9, 8, 8);
     gHostArgs = &crossNode;
-    Check(TileXRMoonEp::TileXRMoonEpPrepareLayout(comm, 64, 4, 64, 4, 4, &layout) ==
+    Check(TileXRMoonEp::TileXRMoonEpPrepareLayout(comm, 64, 4, 64, &layout) ==
         TileXR::TILEXR_ERROR_PARA_CHECK_FAIL, "invalid locality accepted");
 
     crossNode = MakeCommArgs(16, 9, 8, 1);
     crossNode.extraFlag = 0;
     gHostArgs = &crossNode;
-    Check(TileXRMoonEp::TileXRMoonEpPrepareLayout(comm, 64, 4, 64, 4, 4, &layout) ==
+    Check(TileXRMoonEp::TileXRMoonEpPrepareLayout(comm, 64, 4, 64, &layout) ==
         TileXR::TILEXR_ERROR_NOT_SUPPORT, "non-A5 communicator accepted");
 }
 
@@ -98,7 +94,7 @@ void TestLaunchParameterValidation()
     const TileXRCommPtr comm = reinterpret_cast<TileXRCommPtr>(0x1);
     TileXR::CommArgs args = MakeCommArgs(8, 0, 8, 0);
     TileXRMoonEp::PlannerLayout layout {};
-    Check(TileXRMoonEp::TileXRMoonEpBuildPlannerLayout(8, 64, 4, 64, 8, 4, &layout) ==
+    Check(TileXRMoonEp::TileXRMoonEpBuildPlannerLayout(8, 64, 4, 64, &layout) ==
         TileXR::TILEXR_SUCCESS, "validation layout setup failed");
 
     TileXRMoonEp::PlannerParams params = MakeParams(comm, layout.workspaceBytes);
@@ -114,11 +110,6 @@ void TestLaunchParameterValidation()
     Check(TileXRMoonEp::TileXRMoonEpValidateParams(params, args, layout) ==
         TileXR::TILEXR_ERROR_PARA_CHECK_FAIL, "null status accepted");
     params.plannerStatus = reinterpret_cast<int32_t *>(0x8000);
-
-    params.zeroFillRanges = nullptr;
-    Check(TileXRMoonEp::TileXRMoonEpValidateParams(params, args, layout) ==
-        TileXR::TILEXR_ERROR_PARA_CHECK_FAIL, "null zero-fill ranges accepted");
-    params.zeroFillRanges = reinterpret_cast<int32_t *>(0x6800);
 
     params.workspaceBytes = layout.workspaceBytes - 1;
     Check(TileXRMoonEp::TileXRMoonEpValidateParams(params, args, layout) ==
@@ -140,10 +131,9 @@ void TestPrepareLaunchContext()
     const TileXRCommPtr comm = reinterpret_cast<TileXRCommPtr>(0x1);
     TileXR::CommArgs args = MakeCommArgs(16, 9, 8, 1);
     TileXRMoonEp::PlannerLayout layout {};
-    Check(TileXRMoonEp::TileXRMoonEpBuildPlannerLayout(16, 64, 4, 64, 4, 4, &layout) ==
+    Check(TileXRMoonEp::TileXRMoonEpBuildPlannerLayout(16, 64, 4, 64, &layout) ==
         TileXR::TILEXR_SUCCESS, "context layout setup failed");
     TileXRMoonEp::PlannerParams params = MakeParams(comm, layout.workspaceBytes);
-    params.b = 4;
 
     gHostArgs = &args;
     gDeviceArgs = reinterpret_cast<GM_ADDR>(0xa000);

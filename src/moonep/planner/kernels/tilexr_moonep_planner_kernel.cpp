@@ -6,7 +6,7 @@
 #include "planner_common.h"
 #include "tilexr_sync.h"
 
-namespace TileXRMoonEp {
+namespace TileXRMoonEpV3 {
 namespace Kernel {
 
 constexpr int64_t kArrayCapacity = kPlannerMaxExpertCount;
@@ -979,7 +979,7 @@ private:
 };
 
 } // namespace Kernel
-} // namespace TileXRMoonEp
+} // namespace TileXRMoonEpV3
 
 extern "C" __global__ __aicore__ void tilexr_moonep_planner_kernel(GM_ADDR commArgs,
     GM_ADDR topkExpertIds, GM_ADDR tokensPerExpert, GM_ADDR workspace, GM_ADDR dst,
@@ -991,7 +991,7 @@ extern "C" __global__ __aicore__ void tilexr_moonep_planner_kernel(GM_ADDR commA
     uint64_t tpePrefixOffset, uint64_t blockHistogramOffset, uint64_t allocPrefixOffset,
     uint64_t expertOffsetsOffset, uint64_t zOffset, uint64_t groupTotalsOffset, int64_t magic)
 {
-    TileXRMoonEp::Kernel::PlannerKernel op;
+    TileXRMoonEpV3::Kernel::PlannerKernel op;
     op.Init(commArgs, topkExpertIds, tokensPerExpert, workspace, dst, cuSeqlens,
         expertsToCopy, zeroFillRanges, remoteStats, dupCounts, plannerStatus,
         s, k, expertCount, expertsPerRank, b, tokenPadding, routeCount, nvS,

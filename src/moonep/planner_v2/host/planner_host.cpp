@@ -4,7 +4,7 @@
 #include "planner_common.h"
 #include "tilexr_types.h"
 
-namespace TileXRMoonEpV3 {
+namespace TileXRMoonEp {
 namespace {
 
 bool IsA5(const TileXR::CommArgs &commArgs)
@@ -35,7 +35,7 @@ bool PeerWindowsReady(const TileXR::CommArgs &commArgs)
 } // namespace
 
 int TileXRMoonEpPrepareLayout(TileXRCommPtr comm, int64_t s, int64_t k,
-    int64_t expertCount, int64_t b, int64_t tokenPadding, PlannerLayout *layout)
+    int64_t expertCount, PlannerLayout *layout)
 {
     if (comm == nullptr || layout == nullptr) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
@@ -57,8 +57,7 @@ int TileXRMoonEpPrepareLayout(TileXRCommPtr comm, int64_t s, int64_t k,
     if (!PeerWindowsReady(*commArgs)) {
         return TileXR::TILEXR_ERROR_NOT_INITIALIZED;
     }
-    return TileXRMoonEpBuildPlannerLayout(
-        commArgs->rankSize, s, k, expertCount, b, tokenPadding, layout);
+    return TileXRMoonEpBuildPlannerLayout(commArgs->rankSize, s, k, expertCount, layout);
 }
 
 int TileXRMoonEpValidateParams(const PlannerParams &params, const TileXR::CommArgs &commArgs,
@@ -67,8 +66,7 @@ int TileXRMoonEpValidateParams(const PlannerParams &params, const TileXR::CommAr
     if (params.topkExpertIds == nullptr || params.tokensPerExpert == nullptr ||
         params.comm == nullptr || params.workspace == nullptr || params.dst == nullptr ||
         params.cuSeqlens == nullptr || params.expertsToCopy == nullptr ||
-        params.zeroFillRanges == nullptr || params.remoteStats == nullptr ||
-        params.dupCounts == nullptr || params.plannerStatus == nullptr ||
+        params.remoteStats == nullptr || params.plannerStatus == nullptr ||
         params.waitIterations == 0 || params.stream == nullptr) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
@@ -105,7 +103,7 @@ int TileXRMoonEpPrepareLaunchContext(const PlannerParams &params, PlannerLaunchC
     }
 
     ret = TileXRMoonEpBuildPlannerLayout(context->hostArgs->rankSize, params.s, params.k,
-        params.expertCount, params.b, params.tokenPadding, &context->layout);
+        params.expertCount, &context->layout);
     if (ret != TileXR::TILEXR_SUCCESS) {
         *context = PlannerLaunchContext {};
         return ret;
@@ -124,4 +122,4 @@ int TileXRMoonEpPrepareLaunchContext(const PlannerParams &params, PlannerLaunchC
     return TileXR::TILEXR_SUCCESS;
 }
 
-} // namespace TileXRMoonEpV3
+} // namespace TileXRMoonEp

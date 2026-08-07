@@ -3,11 +3,10 @@
 
 #include "planner_host.h"
 
-namespace TileXRMoonEp {
+namespace TileXRMoonEpV3 {
 
 int TileXRMoonEpLaunchKernel(const PlannerParams &params, const PlannerLaunchContext &context);
 
-} // namespace TileXRMoonEp
+} // namespace TileXRMoonEpV3
 
 #endif // TILEXR_MOONEP_PLANNER_LAUNCH_H
-

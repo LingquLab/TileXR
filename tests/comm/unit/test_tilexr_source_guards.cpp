@@ -204,6 +204,17 @@ void TestCommBuildIncludesProfilingHeaders()
     CheckContains(commPath, commText, "${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc/profiling/");
 }
 
+void TestCommInitHonorsUDMAOptOut()
+{
+    const std::string path = "src/comm/tilexr_comm.cpp";
+    const auto text = ReadFile(path);
+
+    CheckContains(path, text, "IsEnvEnabled(\"TILEXR_ENABLE_UDMA\", true)");
+    CheckContains(path, text, "allUdmaEnabled");
+    CheckContains(path, text, "TILEXR_ENABLE_UDMA must match on every rank");
+    CheckContains(path, text, "TileXR UDMA disabled by TILEXR_ENABLE_UDMA");
+}
+
 void TestChipMapCoversObservedAscend950Variants()
 {
     const std::string path = "src/comm/tilexr_internal.cpp";
@@ -244,6 +255,7 @@ int main()
     TestRuntimeEnvDoesNotPrependCannDevlib();
     TestRootCMakeRespectsAscendDriverOverride();
     TestCommBuildIncludesProfilingHeaders();
+    TestCommInitHonorsUDMAOptOut();
     TestChipMapCoversObservedAscend950Variants();
 
     if (g_failures != 0) {

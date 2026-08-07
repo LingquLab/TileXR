@@ -556,10 +556,25 @@ int TileXRComm::Init()
         TILEXR_LOG(INFO) << "Dedicated credit IPC memory initialized";
     }
 
-    // 新增：初始化 UDMA
-    ret = InitUDMA();
+    const int32_t localUdmaEnabled = IsEnvEnabled("TILEXR_ENABLE_UDMA", true) ? 1 : 0;
+    std::vector<int32_t> allUdmaEnabled(rankSize_, -1);
+    ret = socketExchange_->AllGather(&localUdmaEnabled, 1, allUdmaEnabled.data());
     if (ret != TILEXR_SUCCESS) {
+        TILEXR_LOG(ERROR) << "Failed to agree TILEXR_ENABLE_UDMA across ranks: " << ret;
         return ret;
+    }
+    if (std::any_of(allUdmaEnabled.begin(), allUdmaEnabled.end(),
+            [localUdmaEnabled](int32_t enabled) { return enabled != localUdmaEnabled; })) {
+        TILEXR_LOG(ERROR) << "TILEXR_ENABLE_UDMA must match on every rank";
+        return TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    if (localUdmaEnabled != 0) {
+        ret = InitUDMA();
+        if (ret != TILEXR_SUCCESS) {
+            return ret;
+        }
+    } else {
+        TILEXR_LOG(INFO) << "TileXR UDMA disabled by TILEXR_ENABLE_UDMA";
     }
     ret = InitSDMA();
     if (ret != TILEXR_SUCCESS) {

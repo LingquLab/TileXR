@@ -8,6 +8,7 @@
 namespace TileXRMoonEp {
 
 constexpr uintptr_t kPlannerKernelSignature = UINT64_C(0x4D4F4F001000);
+constexpr uintptr_t kPlannerV2KernelSignature = UINT64_C(0x4D4F4F006000);
 constexpr uintptr_t kDispatchKernelSignature = UINT64_C(0x4D4F4F002000);
 constexpr uintptr_t kCombineKernelSignature = UINT64_C(0x4D4F4F003000);
 constexpr uintptr_t kPrefetchWeightKernelSignature = UINT64_C(0x4D4F4F004000);

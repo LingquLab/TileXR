@@ -12,6 +12,7 @@ include(GNUInstallDirs)
 enable_testing()
 
 option(BUILD_TILEXR_EP_DEMO "Build TileXR EP dispatch hardware demo" OFF)
+option(BUILD_TILEXR_EP_PLAN_MULTIRANK_TEST "Build the MoonEP Plan multi-rank peer-memory hardware test" OFF)
 
 set(TILEXR_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../..")
 set(TILEXR_INSTALL_PREFIX "${TILEXR_ROOT}/install" CACHE PATH "TileXR install prefix")
@@ -50,6 +51,9 @@ set(TILEXR_EP_TEST_INCLUDE_DIRS
     ${TILEXR_ROOT}/src/include
     ${TILEXR_ROOT}/src/ep/common
     ${TILEXR_ROOT}/src/ep/host
+    ${TILEXR_ROOT}/src/moonep/common
+    ${TILEXR_ROOT}/src/moonep/planner_v2/common
+    ${TILEXR_ROOT}/src/moonep/planner_v2/host
 )
 foreach(dir
     "${ASCEND_DRIVER_PATH}/kernel/inc"
@@ -69,8 +73,58 @@ find_path(TILEXR_EP_ACL_BASE_INCLUDE_DIR acl/acl_base.h
 if(NOT TILEXR_EP_ACL_BASE_INCLUDE_DIR)
     set(TILEXR_EP_ACL_STUB_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated_acl_stub")
     file(MAKE_DIRECTORY "${TILEXR_EP_ACL_STUB_DIR}/acl")
-    file(WRITE "${TILEXR_EP_ACL_STUB_DIR}/acl/acl_base.h"
-"#ifndef TILEXR_EP_TEST_ACL_BASE_H\n#define TILEXR_EP_TEST_ACL_BASE_H\ntypedef void *aclrtStream;\n#endif\n")
+    file(MAKE_DIRECTORY "${TILEXR_EP_ACL_STUB_DIR}/runtime")
+    file(WRITE "${TILEXR_EP_ACL_STUB_DIR}/acl/acl_base.h" [=[
+#ifndef TILEXR_EP_TEST_ACL_BASE_H
+#define TILEXR_EP_TEST_ACL_BASE_H
+typedef int aclError;
+typedef void *aclrtStream;
+typedef void *aclrtEvent;
+#endif
+]=])
+    file(WRITE "${TILEXR_EP_ACL_STUB_DIR}/acl/acl_rt.h" [=[
+#ifndef TILEXR_EP_TEST_ACL_RT_H
+#define TILEXR_EP_TEST_ACL_RT_H
+#include <stddef.h>
+#include "acl_base.h"
+#ifdef __cplusplus
+extern "C" {
+#endif
+typedef enum aclrtMemcpyKind {
+    ACL_MEMCPY_HOST_TO_DEVICE = 1,
+    ACL_MEMCPY_DEVICE_TO_DEVICE = 3
+} aclrtMemcpyKind;
+aclError aclrtStreamWaitEvent(aclrtStream stream, aclrtEvent event);
+aclError aclrtMemcpy(void *dst, size_t destMax, const void *src,
+    size_t count, aclrtMemcpyKind kind);
+aclError aclrtMemcpyAsync(void *dst, size_t destMax, const void *src,
+    size_t count, aclrtMemcpyKind kind, aclrtStream stream);
+#ifdef __cplusplus
+}
+#endif
+#endif
+]=])
+    file(WRITE "${TILEXR_EP_ACL_STUB_DIR}/runtime/kernel.h" [=[
+#ifndef TILEXR_EP_TEST_RUNTIME_KERNEL_H
+#define TILEXR_EP_TEST_RUNTIME_KERNEL_H
+#include <stddef.h>
+#include <stdint.h>
+typedef int rtError_t;
+typedef void *rtStream_t;
+typedef struct rtArgsEx {
+    void *args;
+    size_t argsSize;
+} rtArgsEx_t;
+typedef struct rtTaskCfgInfo {
+    int32_t schemMode;
+} rtTaskCfgInfo_t;
+typedef struct rtSmDesc rtSmDesc_t;
+#define RT_ERROR_NONE 0
+rtError_t rtKernelLaunchWithFlagV2(const void *func, uint32_t blockDim,
+    rtArgsEx_t *argsInfo, rtSmDesc_t *smDesc, rtStream_t stream, uint32_t flags,
+    const rtTaskCfgInfo_t *cfgInfo);
+#endif
+]=])
     list(APPEND TILEXR_EP_TEST_INCLUDE_DIRS "${TILEXR_EP_ACL_STUB_DIR}")
 endif()
 
@@ -85,6 +139,43 @@ add_executable(test_tilexr_ep_api_sources
 )
 
 add_executable(test_tilexr_ep_kernel_sources unit/test_tilexr_ep_kernel_sources.cpp)
+
+add_executable(test_tilexr_ep_plan_sources unit/test_tilexr_ep_plan_sources.cpp)
+add_executable(test_tilexr_moonep_planner_public_abi unit/test_tilexr_moonep_planner_public_abi.cpp)
+
+add_executable(test_tilexr_ep_plan_layout
+    unit/test_tilexr_ep_plan_layout.cpp
+    ${TILEXR_ROOT}/src/moonep/planner_v2/common/ep_plan_layout.cpp
+)
+
+add_executable(test_tilexr_ep_plan_reference
+    unit/test_tilexr_ep_plan_reference.cpp
+    ${TILEXR_ROOT}/src/moonep/planner_v2/reference/ep_plan_reference.cpp
+)
+add_executable(test_tilexr_ep_plan_algorithm
+    unit/test_tilexr_ep_plan_algorithm.cpp
+    ${TILEXR_ROOT}/src/moonep/planner_v2/common/ep_plan_algorithm.cpp
+    ${TILEXR_ROOT}/src/moonep/planner_v2/reference/ep_plan_reference.cpp
+)
+add_executable(test_tilexr_ep_plan_downstream
+    unit/test_tilexr_ep_plan_downstream.cpp
+    ${TILEXR_ROOT}/src/moonep/planner_v2/common/ep_plan_downstream.cpp
+    ${TILEXR_ROOT}/src/moonep/planner_v2/reference/ep_plan_reference.cpp
+)
+
+add_executable(test_tilexr_moonep_planner_compat
+    unit/test_tilexr_moonep_planner_compat.cpp
+    ${TILEXR_ROOT}/src/moonep/planner_v2/common/ep_plan_layout.cpp
+    ${TILEXR_ROOT}/src/moonep/planner_v2/host/tilexr_moonep_planner.cpp
+)
+
+add_executable(test_tilexr_ep_plan_host
+    unit/test_tilexr_ep_plan_host.cpp
+    ${TILEXR_ROOT}/src/moonep/planner_v2/common/ep_plan_layout.cpp
+    ${TILEXR_ROOT}/src/moonep/planner_v2/host/ep_plan_host.cpp
+    ${TILEXR_ROOT}/src/moonep/planner_v2/host/planner_launch.cpp
+    ${TILEXR_ROOT}/src/moonep/planner_v2/host/tilexr_moonep_planner.cpp
+)
 
 add_executable(test_tilexr_ep_host_validation
     unit/test_tilexr_ep_host_validation.cpp
@@ -104,19 +195,59 @@ target_include_directories(test_tilexr_ep_host_validation PRIVATE
     ${TILEXR_EP_TEST_INCLUDE_DIRS}
 )
 
+target_include_directories(test_tilexr_ep_plan_layout PRIVATE
+    ${TILEXR_EP_TEST_INCLUDE_DIRS}
+)
+
+target_include_directories(test_tilexr_ep_plan_reference PRIVATE
+    ${TILEXR_EP_TEST_INCLUDE_DIRS}
+    ${TILEXR_ROOT}/src/moonep/planner_v2/reference
+)
+target_include_directories(test_tilexr_ep_plan_algorithm PRIVATE
+    ${TILEXR_EP_TEST_INCLUDE_DIRS}
+    ${TILEXR_ROOT}/src/moonep/planner_v2/reference
+)
+target_include_directories(test_tilexr_ep_plan_downstream PRIVATE
+    ${TILEXR_EP_TEST_INCLUDE_DIRS}
+    ${TILEXR_ROOT}/src/moonep/planner_v2/reference
+)
+target_include_directories(test_tilexr_moonep_planner_public_abi PRIVATE ${TILEXR_EP_TEST_INCLUDE_DIRS})
+
+target_include_directories(test_tilexr_moonep_planner_compat PRIVATE
+    ${TILEXR_EP_TEST_INCLUDE_DIRS}
+    ${TILEXR_ROOT}/src/moonep/planner_v2/host
+)
+
+target_include_directories(test_tilexr_ep_plan_host PRIVATE
+    ${TILEXR_EP_TEST_INCLUDE_DIRS}
+    ${TILEXR_ROOT}/src/moonep/planner_v2/host
+)
+
 target_compile_definitions(test_tilexr_ep_api_sources PRIVATE TILEXR_SOURCE_ROOT="${TILEXR_ROOT}")
 target_compile_definitions(test_tilexr_ep_kernel_sources PRIVATE TILEXR_SOURCE_ROOT="${TILEXR_ROOT}")
+target_compile_definitions(test_tilexr_ep_plan_sources PRIVATE TILEXR_SOURCE_ROOT="${TILEXR_ROOT}")
 
 add_test(NAME test_tilexr_ep_layout COMMAND test_tilexr_ep_layout)
 add_test(NAME test_tilexr_ep_api_sources COMMAND test_tilexr_ep_api_sources)
 add_test(NAME test_tilexr_ep_kernel_sources COMMAND test_tilexr_ep_kernel_sources)
 add_test(NAME test_tilexr_ep_host_validation COMMAND test_tilexr_ep_host_validation)
+add_test(NAME test_tilexr_ep_plan_sources COMMAND test_tilexr_ep_plan_sources)
+add_test(NAME test_tilexr_moonep_planner_public_abi COMMAND test_tilexr_moonep_planner_public_abi)
+add_test(NAME test_tilexr_ep_plan_layout COMMAND test_tilexr_ep_plan_layout)
+add_test(NAME test_tilexr_ep_plan_reference COMMAND test_tilexr_ep_plan_reference)
+add_test(NAME test_tilexr_ep_plan_algorithm COMMAND test_tilexr_ep_plan_algorithm)
+add_test(NAME test_tilexr_ep_plan_downstream COMMAND test_tilexr_ep_plan_downstream)
+add_test(NAME test_tilexr_ep_plan_host COMMAND test_tilexr_ep_plan_host)
+add_test(NAME test_tilexr_moonep_planner_compat COMMAND test_tilexr_moonep_planner_compat)
 
 install(TARGETS
     test_tilexr_ep_layout
     test_tilexr_ep_api_sources
     test_tilexr_ep_kernel_sources
     test_tilexr_ep_host_validation
+    test_tilexr_ep_plan_sources
+    test_tilexr_ep_plan_layout
+    test_tilexr_ep_plan_reference
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
 
@@ -160,4 +291,84 @@ if(BUILD_TILEXR_EP_DEMO)
     )
 
     install(TARGETS tilexr_ep_dispatch_demo RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+endif()
+
+if(BUILD_TILEXR_EP_PLAN_MULTIRANK_TEST)
+    if(IS_ABSOLUTE "${TILEXR_INSTALL_LIBDIR}")
+        set(TILEXR_PLAN_MULTIRANK_LIB_SEARCH_DIR "${TILEXR_INSTALL_LIBDIR}")
+    else()
+        set(TILEXR_PLAN_MULTIRANK_LIB_SEARCH_DIR "${TILEXR_INSTALL_PREFIX}/${TILEXR_INSTALL_LIBDIR}")
+    endif()
+    if(IS_ABSOLUTE "${TILEXR_INSTALL_INCLUDEDIR}")
+        set(TILEXR_PLAN_MULTIRANK_INCLUDE_SEARCH_DIR "${TILEXR_INSTALL_INCLUDEDIR}")
+    else()
+        set(TILEXR_PLAN_MULTIRANK_INCLUDE_SEARCH_DIR "${TILEXR_INSTALL_PREFIX}/${TILEXR_INSTALL_INCLUDEDIR}")
+    endif()
+
+    find_library(TILEXR_PLAN_MULTIRANK_PLANNER_LIB tilexr-moonep-planner
+        HINTS "${TILEXR_PLAN_MULTIRANK_LIB_SEARCH_DIR}" REQUIRED)
+    find_library(TILEXR_PLAN_MULTIRANK_COMM_LIB tile-comm
+        HINTS "${TILEXR_PLAN_MULTIRANK_LIB_SEARCH_DIR}" REQUIRED)
+
+    # This consumer intentionally compiles no Planner implementation source. It verifies
+    # that the installed public header and production shared library export the four
+    # downstream route helpers required by Dispatch and Combine.
+    add_executable(test_tilexr_ep_plan_public_helper_consumer
+        integration/test_tilexr_ep_plan_public_helper_consumer.cpp
+    )
+    target_include_directories(test_tilexr_ep_plan_public_helper_consumer PRIVATE
+        "${TILEXR_PLAN_MULTIRANK_INCLUDE_SEARCH_DIR}"
+        "${ASCEND_HOME_PATH}/${ARCH}-linux/include"
+        "${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc"
+        "${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc/runtime"
+    )
+    target_link_directories(test_tilexr_ep_plan_public_helper_consumer PRIVATE
+        "${TILEXR_PLAN_MULTIRANK_LIB_SEARCH_DIR}"
+        "${ASCEND_HOME_PATH}/${ARCH}-linux/lib64"
+        "${ASCEND_DRIVER_PATH}/lib64/driver"
+    )
+    target_link_libraries(test_tilexr_ep_plan_public_helper_consumer PRIVATE
+        ${TILEXR_PLAN_MULTIRANK_PLANNER_LIB}
+    )
+    set_target_properties(test_tilexr_ep_plan_public_helper_consumer PROPERTIES
+        BUILD_RPATH "${TILEXR_PLAN_MULTIRANK_LIB_SEARCH_DIR};${ASCEND_HOME_PATH}/${ARCH}-linux/lib64;${ASCEND_DRIVER_PATH}/lib64/driver"
+        INSTALL_RPATH "${TILEXR_PLAN_MULTIRANK_LIB_SEARCH_DIR};${ASCEND_HOME_PATH}/${ARCH}-linux/lib64;${ASCEND_DRIVER_PATH}/lib64/driver"
+    )
+    add_test(NAME test_tilexr_ep_plan_public_helper_consumer
+        COMMAND test_tilexr_ep_plan_public_helper_consumer)
+
+    add_executable(test_tilexr_ep_plan_multirank
+        integration/test_tilexr_ep_plan_multirank.cpp
+        ${TILEXR_ROOT}/src/moonep/planner_v2/common/ep_plan_layout.cpp
+        ${TILEXR_ROOT}/src/moonep/planner_v2/common/ep_plan_downstream.cpp
+        ${TILEXR_ROOT}/src/moonep/planner_v2/reference/ep_plan_reference.cpp
+    )
+    target_include_directories(test_tilexr_ep_plan_multirank PRIVATE
+        ${TILEXR_EP_TEST_INCLUDE_DIRS}
+        ${TILEXR_ROOT}/src/moonep/planner_v2/reference
+        "${TILEXR_PLAN_MULTIRANK_INCLUDE_SEARCH_DIR}"
+        "${ASCEND_HOME_PATH}/${ARCH}-linux/include"
+        "${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc"
+        "${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc/runtime"
+    )
+    target_link_directories(test_tilexr_ep_plan_multirank PRIVATE
+        "${TILEXR_PLAN_MULTIRANK_LIB_SEARCH_DIR}"
+        "${ASCEND_HOME_PATH}/${ARCH}-linux/lib64"
+        "${ASCEND_DRIVER_PATH}/lib64/driver"
+    )
+    target_link_libraries(test_tilexr_ep_plan_multirank PRIVATE
+        ${TILEXR_PLAN_MULTIRANK_PLANNER_LIB}
+        ${TILEXR_PLAN_MULTIRANK_COMM_LIB}
+        ascendcl
+        runtime
+        ascend_hal
+    )
+    set_target_properties(test_tilexr_ep_plan_multirank PROPERTIES
+        BUILD_RPATH "${TILEXR_PLAN_MULTIRANK_LIB_SEARCH_DIR};${ASCEND_HOME_PATH}/${ARCH}-linux/lib64;${ASCEND_DRIVER_PATH}/lib64/driver"
+        INSTALL_RPATH "${TILEXR_PLAN_MULTIRANK_LIB_SEARCH_DIR};${ASCEND_HOME_PATH}/${ARCH}-linux/lib64;${ASCEND_DRIVER_PATH}/lib64/driver"
+    )
+    install(TARGETS
+        test_tilexr_ep_plan_public_helper_consumer
+        test_tilexr_ep_plan_multirank
+        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 endif()

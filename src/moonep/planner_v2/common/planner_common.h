@@ -3,7 +3,7 @@
 
 #include <cstdint>
 
-namespace TileXRMoonEpV3 {
+namespace TileXRMoonEp {
 
 constexpr int64_t kPlannerAivBlockCount = 64;
 constexpr uint64_t kPlannerWorkspaceAlignment = 32;
@@ -17,6 +17,6 @@ constexpr uint32_t kPlannerSyncUbBytes = 4 * 1024;
 constexpr uint32_t kPlannerWorkUbBytes = 192 * 1024;
 constexpr int64_t kPlannerRouteTileInts = 16 * 1024;
 
-} // namespace TileXRMoonEpV3
+} // namespace TileXRMoonEp
 
 #endif // TILEXR_MOONEP_PLANNER_COMMON_H
