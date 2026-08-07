@@ -408,9 +408,14 @@ int TileXRUDMATransport::BuildExplicitRoutes(const std::vector<DevEidInfo>& devE
     int localStatus = LoadUDMARootInfo(rootInfo, &error) &&
         ResolveUDMALocalId(rootInfo, static_cast<uint32_t>(options_.devId), localId)
         ? TILEXR_SUCCESS : TILEXR_ERROR_NOT_FOUND;
-    bool needsTopology = options_.localRankSize > 1;
-    for (const auto& rule : options_.qpConfig.routes) {
-        needsTopology = needsTopology || rule.selector == UDMAQpRouteSelector::TOPOLOGY;
+    bool needsTopology = false;
+    for (int peer = 0; peer < options_.rankSize && !needsTopology; ++peer) {
+        if (peer == options_.rank || !UDMARanksShareServer(options_.rank, peer)) {
+            continue;
+        }
+        for (const auto& rule : options_.qpConfig.routes) {
+            needsTopology = needsTopology || rule.selector == UDMAQpRouteSelector::TOPOLOGY;
+        }
     }
     if (localStatus == TILEXR_SUCCESS && needsTopology &&
         !LoadUDMATopologyFromPath(rootInfo.topoPath, topoEdges, &error)) {
@@ -439,21 +444,22 @@ int TileXRUDMATransport::BuildExplicitRoutes(const std::vector<DevEidInfo>& devE
     localRouteByPeerQp_.assign(entryCount, UINT32_MAX);
     remoteRouteByPeerQp_.assign(entryCount, UINT32_MAX);
     localStatus = TILEXR_SUCCESS;
-    const int localNode = options_.rank / options_.localRankSize;
     for (int peer = 0; peer < options_.rankSize && localStatus == TILEXR_SUCCESS; ++peer) {
         if (peer == options_.rank) {
             continue;
         }
-        const bool sameNode = peer / options_.localRankSize == localNode;
+        const bool sameServer = UDMARanksShareServer(options_.rank, peer);
         for (uint32_t qpIdx = 0; qpIdx < qpCount_; ++qpIdx) {
             const auto& rule = options_.qpConfig.routes[qpIdx];
             uint32_t localEid = UINT32_MAX;
             bool resolved = false;
-            if (sameNode || rule.selector == UDMAQpRouteSelector::TOPOLOGY) {
+            if (rule.selector == UDMAQpRouteSelector::PORT_COUNT) {
+                resolved = ResolveUDMAPortCountEid(rootInfo, localId, rule.value, localEid);
+            } else if (sameServer) {
                 resolved = ResolveUDMATopologyEid(
                     rootInfo, topoEdges, localId, allLocalIds[peer], localEid);
             } else {
-                resolved = ResolveUDMAPortCountEid(rootInfo, localId, rule.value, localEid);
+                resolved = ResolveUDMAAggregateEid(rootInfo, localId, localEid);
             }
             if (!resolved || localEidByEid_.count(localEid) == 0 || localEid >= eidCount_) {
                 TILEXR_LOG(ERROR) << "TileXR explicit UDMA route unavailable for peer " << peer

@@ -215,7 +215,7 @@ void TestCapabilities()
 {
     uint64_t nativeStages = 0;
     uint64_t stubStages = 0;
-    Check(TileXRMoonEpGetAbiVersion() == TILEXR_MOONEP_ABI_VERSION_V2,
+    Check(TileXRMoonEpGetAbiVersion() == TILEXR_MOONEP_ABI_VERSION_V1,
         "ABI version query mismatch");
     CheckStatus("capability query", TileXRMoonEpGetCapabilitiesV1(&nativeStages, &stubStages),
         TILEXR_MOONEP_SUCCESS);
@@ -549,13 +549,13 @@ void TestStubValidationAndRuntimeFailures()
         TILEXR_MOONEP_ERROR_INVALID_ARGUMENT);
 }
 
-TileXRMoonEpPrefetchWeightArgsV2 PrefetchArgs(TileXRMoonEpPlanV1 *plan,
+TileXRMoonEpPrefetchWeightArgsV1 PrefetchArgs(TileXRMoonEpPlanV1 *plan,
     TileXRMoonEpTensorV1 *gate, TileXRMoonEpTensorV1 *up,
     TileXRMoonEpTensorV1 *down)
 {
-    TileXRMoonEpPrefetchWeightArgsV2 args {};
+    TileXRMoonEpPrefetchWeightArgsV1 args {};
     args.structSize = sizeof(args);
-    args.abiVersion = TILEXR_MOONEP_ABI_VERSION_V2;
+    args.abiVersion = TILEXR_MOONEP_ABI_VERSION_V1;
     args.comm = reinterpret_cast<TileXRCommPtr>(UINTPTR_C(0x1000));
     args.plan = plan;
     args.gate = gate;
@@ -577,10 +577,10 @@ void TestPrefetchWeight()
     TileXRMoonEpTensorV1 down = Tensor(
         reinterpret_cast<void *>(UINTPTR_C(0x10300)), 256,
         TILEXR_MOONEP_DTYPE_BFLOAT16, 4, 64);
-    TileXRMoonEpPrefetchWeightArgsV2 args = PrefetchArgs(&plan, &gate, &up, &down);
+    TileXRMoonEpPrefetchWeightArgsV1 args = PrefetchArgs(&plan, &gate, &up, &down);
     const aclrtStream stream = reinterpret_cast<aclrtStream>(UINTPTR_C(0x9000));
 
-    CheckStatus("prefetch V2", TileXRMoonEpPrefetchWeightV2(&args, stream),
+    CheckStatus("prefetch V1", TileXRMoonEpPrefetchWeightV1(&args, stream),
         TILEXR_MOONEP_SUCCESS);
     Check(g_prefetchLaunchCalls == 1, "PrefetchWeight must issue one fused launch");
     Check(g_prefetchCall.commArgs == g_commDev &&
@@ -601,61 +601,61 @@ void TestPrefetchWeight()
 
     const int launchesAfterSuccess = g_prefetchLaunchCalls;
     args.structSize -= 1;
-    CheckStatus("prefetch V2 struct size", TileXRMoonEpPrefetchWeightV2(&args, stream),
+    CheckStatus("prefetch V1 struct size", TileXRMoonEpPrefetchWeightV1(&args, stream),
         TILEXR_MOONEP_ERROR_INVALID_ARGUMENT);
     Check(g_prefetchLaunchCalls == launchesAfterSuccess,
         "invalid PrefetchWeight args must not reach launch");
     args.structSize = sizeof(args);
-    args.abiVersion = TILEXR_MOONEP_ABI_VERSION_V1;
-    CheckStatus("prefetch V2 ABI", TileXRMoonEpPrefetchWeightV2(&args, stream),
+    args.abiVersion = 2;
+    CheckStatus("prefetch V1 ABI", TileXRMoonEpPrefetchWeightV1(&args, stream),
         TILEXR_MOONEP_ERROR_INVALID_ARGUMENT);
-    args.abiVersion = TILEXR_MOONEP_ABI_VERSION_V2;
+    args.abiVersion = TILEXR_MOONEP_ABI_VERSION_V1;
 
     gate.dtype = TILEXR_MOONEP_DTYPE_FLOAT16;
     up.dtype = TILEXR_MOONEP_DTYPE_FLOAT16;
     down.dtype = TILEXR_MOONEP_DTYPE_FLOAT16;
-    CheckStatus("prefetch FP16", TileXRMoonEpPrefetchWeightV2(&args, stream),
+    CheckStatus("prefetch FP16", TileXRMoonEpPrefetchWeightV1(&args, stream),
         TILEXR_MOONEP_SUCCESS);
     gate.dtype = TILEXR_MOONEP_DTYPE_BFLOAT16;
     up.dtype = TILEXR_MOONEP_DTYPE_BFLOAT16;
     down.dtype = TILEXR_MOONEP_DTYPE_BFLOAT16;
 
     setenv("TILEXR_MOONEP_PREFETCH_BLOCK_DIM", "1", 1);
-    CheckStatus("prefetch worker override", TileXRMoonEpPrefetchWeightV2(&args, stream),
+    CheckStatus("prefetch worker override", TileXRMoonEpPrefetchWeightV1(&args, stream),
         TILEXR_MOONEP_SUCCESS);
     Check(g_prefetchCall.layout.blockDim == 1, "worker override was not applied");
     setenv("TILEXR_MOONEP_PREFETCH_BLOCK_DIM", "4", 1);
     CheckStatus("prefetch oversized worker override",
-        TileXRMoonEpPrefetchWeightV2(&args, stream),
+        TileXRMoonEpPrefetchWeightV1(&args, stream),
         TILEXR_MOONEP_ERROR_INVALID_ARGUMENT);
     unsetenv("TILEXR_MOONEP_PREFETCH_BLOCK_DIM");
 
     gate.data = reinterpret_cast<void *>(UINTPTR_C(0x10020));
-    CheckStatus("prefetch alignment", TileXRMoonEpPrefetchWeightV2(&args, stream),
+    CheckStatus("prefetch alignment", TileXRMoonEpPrefetchWeightV1(&args, stream),
         TILEXR_MOONEP_ERROR_INVALID_ARGUMENT);
     gate.data = reinterpret_cast<void *>(UINTPTR_C(0x10000));
     down.data = up.data;
-    CheckStatus("prefetch overlap", TileXRMoonEpPrefetchWeightV2(&args, stream),
+    CheckStatus("prefetch overlap", TileXRMoonEpPrefetchWeightV1(&args, stream),
         TILEXR_MOONEP_ERROR_INVALID_ARGUMENT);
     down.data = reinterpret_cast<void *>(UINTPTR_C(0x10300));
     g_registry.regions[1].bytes = 0x120;
     CheckStatus("prefetch remote registry bounds",
-        TileXRMoonEpPrefetchWeightV2(&args, stream),
+        TileXRMoonEpPrefetchWeightV1(&args, stream),
         TILEXR_MOONEP_ERROR_INVALID_ARGUMENT);
     g_registry.regions[1].bytes = 0x4000;
 
     g_qpNum = 3;
     CheckStatus("prefetch unsupported QP count",
-        TileXRMoonEpPrefetchWeightV2(&args, stream),
+        TileXRMoonEpPrefetchWeightV1(&args, stream),
         TILEXR_MOONEP_ERROR_INVALID_ARGUMENT);
     g_qpNum = 4;
 
     g_qpReturn = -1;
-    CheckStatus("prefetch unavailable UDMA", TileXRMoonEpPrefetchWeightV2(&args, stream),
+    CheckStatus("prefetch unavailable UDMA", TileXRMoonEpPrefetchWeightV1(&args, stream),
         TILEXR_MOONEP_ERROR_NOT_SUPPORTED);
     g_qpReturn = TILEXR_MOONEP_SUCCESS;
     g_prefetchLaunchReturn = -55;
-    CheckStatus("prefetch launch failure", TileXRMoonEpPrefetchWeightV2(&args, stream), -55);
+    CheckStatus("prefetch launch failure", TileXRMoonEpPrefetchWeightV1(&args, stream), -55);
 }
 
 } // namespace

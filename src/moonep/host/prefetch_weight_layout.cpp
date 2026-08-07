@@ -139,12 +139,12 @@ bool RangesOverlap(uint64_t lhsBegin, uint64_t lhsEnd,
 
 } // namespace
 
-int BuildPrefetchWeightLayout(const TileXRMoonEpPrefetchWeightArgsV2 &args,
+int BuildPrefetchWeightLayout(const TileXRMoonEpPrefetchWeightArgsV1 &args,
     const TileXR::CommArgs &commArgs, const TileXR::TileXRUDMARegistry &registry,
     uint32_t qpNum, const char *blockDimOverride, PrefetchWeightLayout &layout)
 {
-    if (args.structSize < sizeof(TileXRMoonEpPrefetchWeightArgsV2) ||
-        args.abiVersion != TILEXR_MOONEP_ABI_VERSION_V2 || args.comm == nullptr ||
+    if (args.structSize < sizeof(TileXRMoonEpPrefetchWeightArgsV1) ||
+        args.abiVersion != TILEXR_MOONEP_ABI_VERSION_V1 || args.comm == nullptr ||
         args.plan == nullptr || args.gate == nullptr || args.up == nullptr ||
         args.down == nullptr || args.flags != TILEXR_MOONEP_FLAG_NONE ||
         args.plan->b <= 0 || args.plan->b > INT32_MAX ||

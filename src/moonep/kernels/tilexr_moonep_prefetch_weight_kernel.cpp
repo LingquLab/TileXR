@@ -13,6 +13,8 @@ constexpr uint32_t kStatusInvalidExpert = 2102;
 constexpr uint32_t kStatusLocalExpert = 2103;
 constexpr uint32_t kStatusCqErrorBase = 2200;
 constexpr uint32_t kStatusSubmitErrorBase = 2300;
+constexpr uint32_t kMaxTrackedRankSize = 1024;
+constexpr uint32_t kUsedPeerWordCount = kMaxTrackedRankSize / 64;
 
 class PrefetchWeightKernel {
 public:
@@ -50,7 +52,7 @@ public:
         InitializeStatus();
         AscendC::SyncAll<true>();
 
-        uint64_t usedPeers[2] = {0, 0};
+        uint64_t usedPeers[kUsedPeerWordCount] = {};
         uint32_t workerStatus = ValidateRuntime();
         if (workerStatus == 0) {
             SubmitReads(usedPeers, workerStatus);
@@ -82,7 +84,8 @@ private:
             projections_[0] == nullptr || projections_[1] == nullptr ||
             projections_[2] == nullptr || rowBytes_[0] == 0 || rowBytes_[1] == 0 ||
             rowBytes_[2] == 0 ||
-            rank_ < 0 || rank_ >= rankSize_ || expertsPerRank_ <= 0 ||
+            rank_ < 0 || rank_ >= rankSize_ || rankSize_ > kMaxTrackedRankSize ||
+            expertsPerRank_ <= 0 ||
             workerCount_ == 0 || worker_ >= workerCount_ || worker_ >= qpNum_ ||
             !TileXR::UDMARegistryEnabled(args_) ||
             args_->rank != rank_ || args_->rankSize != rankSize_) {
@@ -92,19 +95,22 @@ private:
         return info->qpNum == qpNum_ ? 0 : kStatusInvalidRuntime;
     }
 
-    __aicore__ inline void MarkPeer(uint64_t usedPeers[2], int32_t peer) const
+    __aicore__ inline void MarkPeer(
+        uint64_t usedPeers[kUsedPeerWordCount], int32_t peer) const
     {
         usedPeers[static_cast<uint32_t>(peer) >> 6] |=
             static_cast<uint64_t>(1) << (static_cast<uint32_t>(peer) & 63U);
     }
 
-    __aicore__ inline bool PeerUsed(const uint64_t usedPeers[2], int32_t peer) const
+    __aicore__ inline bool PeerUsed(
+        const uint64_t usedPeers[kUsedPeerWordCount], int32_t peer) const
     {
         return (usedPeers[static_cast<uint32_t>(peer) >> 6] &
             (static_cast<uint64_t>(1) << (static_cast<uint32_t>(peer) & 63U))) != 0;
     }
 
-    __aicore__ inline void SubmitReads(uint64_t usedPeers[2], uint32_t &workerStatus)
+    __aicore__ inline void SubmitReads(
+        uint64_t usedPeers[kUsedPeerWordCount], uint32_t &workerStatus)
     {
         auto wqeScratch = wqeBuf_.Get<uint8_t>();
         const int64_t globalExpertCount =
@@ -146,8 +152,8 @@ private:
         }
     }
 
-    __aicore__ inline void CompleteReads(const uint64_t usedPeers[2],
-        uint32_t &workerStatus)
+    __aicore__ inline void CompleteReads(
+        const uint64_t usedPeers[kUsedPeerWordCount], uint32_t &workerStatus)
     {
         bool completedAny = false;
         for (int32_t peer = 0; peer < rankSize_; ++peer) {
@@ -191,25 +197,14 @@ private:
 extern "C" __global__ __aicore__ void tilexr_moonep_prefetch_weight_kernel(
     GM_ADDR commArgs, GM_ADDR expertsToCopy, GM_ADDR gate, GM_ADDR up, GM_ADDR down,
     GM_ADDR status, uint64_t gateOffset, uint64_t upOffset, uint64_t downOffset,
-    uint32_t gateRowBytes, uint32_t upRowBytes, uint32_t downRowBytes,
-    int32_t rank, int32_t rankSize, int32_t expertsPerRank, uint32_t qpNum)
+    uint64_t gateRowBytes, uint64_t upRowBytes, uint64_t downRowBytes,
+    int64_t rank, int64_t rankSize, int64_t expertsPerRank, uint64_t qpNum)
 {
     TileXRMoonEp::Kernel::PrefetchWeightKernel op;
     op.Init(commArgs, expertsToCopy, gate, up, down, status,
-        gateOffset, upOffset, downOffset, gateRowBytes, upRowBytes, downRowBytes,
-        rank, rankSize, expertsPerRank, qpNum);
+        gateOffset, upOffset, downOffset, static_cast<uint32_t>(gateRowBytes),
+        static_cast<uint32_t>(upRowBytes), static_cast<uint32_t>(downRowBytes),
+        static_cast<int32_t>(rank), static_cast<int32_t>(rankSize),
+        static_cast<int32_t>(expertsPerRank), static_cast<uint32_t>(qpNum));
     op.Process();
-}
-
-extern "C" void launch_tilexr_moonep_prefetch_weight_kernel(uint32_t blockDim,
-    void *stream, GM_ADDR commArgs, GM_ADDR expertsToCopy, GM_ADDR gate, GM_ADDR up,
-    GM_ADDR down, GM_ADDR status, uint64_t gateOffset, uint64_t upOffset,
-    uint64_t downOffset, uint32_t gateRowBytes, uint32_t upRowBytes,
-    uint32_t downRowBytes, int32_t rank, int32_t rankSize, int32_t expertsPerRank,
-    uint32_t qpNum)
-{
-    tilexr_moonep_prefetch_weight_kernel<<<blockDim, nullptr, stream>>>(
-        commArgs, expertsToCopy, gate, up, down, status, gateOffset, upOffset,
-        downOffset, gateRowBytes, upRowBytes, downRowBytes, rank, rankSize,
-        expertsPerRank, qpNum);
 }

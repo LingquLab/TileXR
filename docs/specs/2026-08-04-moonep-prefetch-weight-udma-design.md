@@ -2,8 +2,9 @@
 
 ## Goal
 
-Replace the MoonEP PrefetchWeight stub with one native direct-launch operator
-that fetches the three expert projections through TileXR registered-memory UDMA.
+Replace the MoonEP PrefetchWeight stub with one native operator whose embedded
+AIV binary is registered and launched through the runtime API and fetches the
+three expert projections through TileXR registered-memory UDMA.
 The operator must use one Host call, one kernel launch, one Plan scan, and one
 completion phase for gate, up, and down weights. Integrate the native path into
 the Torch facade and `tools/moonep` benchmark so its correctness and performance
@@ -14,7 +15,7 @@ are reported as real PrefetchWeight evidence.
 - Add one fused native PrefetchWeight Host/Kernel path under `src/moonep`.
 - Extend the TileXR UDMA queue image so one fused kernel may use multiple
   independently owned QP/SQ/CQ workers without queue-state races.
-- Replace, rather than retain, the old `TileXRMoonEpPrefetchWeightV1` stub.
+- Replace the old `TileXRMoonEpPrefetchWeightV1` stub implementation in place.
 - Add the packed registered-weight lifecycle to the MoonEP Torch facade.
 - Exercise and time the fused operator in the existing MoonEP benchmark.
 - Preserve C++14, CANN 9.1.0, and the A5 / Ascend950 UDMA boundary.
@@ -44,12 +45,12 @@ before target-hardware measurement.
 
 ## Public ABI
 
-Delete `TileXRMoonEpPrefetchWeightArgsV1` and
-`TileXRMoonEpPrefetchWeightV1`. Add a fused V2 entry point whose fixed inputs
-are gate, up, and down tensors:
+Keep `TileXRMoonEpPrefetchWeightArgsV1` and
+`TileXRMoonEpPrefetchWeightV1` while the project remains under development.
+The V1 entry point is replaced in place with fixed gate, up, and down inputs:
 
 ```text
-TileXRMoonEpPrefetchWeightV2(args, stream)
+TileXRMoonEpPrefetchWeightV1(args, stream)
   args.comm
   args.plan
   args.gate
@@ -63,12 +64,13 @@ slots live in the same tensor; no separate output tensor is accepted. The
 three descriptors may have different expert shapes but must use the same
 supported dtype and registered arena.
 
-Removing a published symbol is an ABI break. The MoonEP ABI version and shared
-library SOVERSION advance to 2. Existing V1 Planning, Dispatch, Combine, and
-ReduceGrad entry points remain available and retain their V1 struct contracts.
-Capability reporting marks Planning and PrefetchWeight native, and leaves only
-Dispatch, Combine, and ReduceGrad in the stub mask. The Torch loader requires
-`libtilexr-moonep.so.2` and calls only the fused PrefetchWeight V2 symbol.
+No release ABI has been published, so this development change does not advance
+the MoonEP ABI version or shared-library SOVERSION. Planning, Dispatch,
+PrefetchWeight, Combine, and ReduceGrad retain their V1 symbols and struct
+contracts. Capability reporting marks Planning and PrefetchWeight native, and
+leaves only Dispatch, Combine, and ReduceGrad in the stub mask. The Torch loader
+continues to load `libtilexr-moonep.so.1` and calls the fused PrefetchWeight V1
+symbol.
 
 ## Registered Weight Layout
 
@@ -125,6 +127,10 @@ worker count but may never exceed the independently provisioned QPs. The Host
 does not synchronize or copy `expertsToCopy` merely to count active slots;
 sparse workers exit in the Kernel.
 
+The Host embeds the linked AIV binary, registers it once with
+`rtDevBinaryRegister` and `rtFunctionRegister`, and launches it with
+`rtKernelLaunchWithFlagV2`. No generated `<<< >>>` Host wrapper is linked.
+
 Validation or launch errors are returned synchronously. UDMA completion errors
 are written to the Plan status tensor and are surfaced by the existing
 event/stream synchronization boundary. PrefetchWeight never synchronizes the
@@ -150,7 +156,7 @@ measured PrefetchWeight interval.
 
 ## Kernel Data Flow
 
-The fused direct-launch kernel runs on one or more AIV blocks:
+The fused runtime-registered kernel runs on one or more AIV blocks:
 
 1. Initialize PrefetchWeight status to success.
 2. Each block reads its strided subset of the local
@@ -223,8 +229,8 @@ are reported independently rather than being hidden by that aggregate flag.
 
 1. Host-only ABI, layout, overflow, registry-bound, sparse-slot, duplicate-slot,
    capability, and lifecycle tests.
-2. Python fake-runtime tests proving one V2 call, one registration lifecycle,
-   in-place results, Plan lifetime, and removal of the V1 stub symbol.
+2. Python fake-runtime tests proving one V1 call, one registration lifecycle,
+   in-place results, Plan lifetime, and removal of the old stub behavior.
 3. CANN 9.1 target compilation of Host and A5 kernel artifacts, plus symbol,
    SONAME, dependency, and RPATH inspection.
 4. Bounded A5 / Ascend950 correctness on representative full, sparse, unused,

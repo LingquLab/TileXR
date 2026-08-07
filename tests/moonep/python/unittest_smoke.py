@@ -77,9 +77,16 @@ class MoonEPSmokeTests(unittest.TestCase):
     def test_prefetch_worker_candidates_are_explicit_and_bounded(self):
         self.assertEqual(_parse_prefetch_workers(None), [])
         self.assertEqual(_parse_prefetch_workers("1,2,8"), [1, 2, 8])
-        self.assertEqual(_prefetch_route_spec(1), "topology")
+        self.assertEqual(_prefetch_route_spec(1), "port_count:6")
+        self.assertEqual(_prefetch_route_spec(2), "port_count:6,port_count:2")
         self.assertEqual(
-            _prefetch_route_spec(4), "topology,topology,topology,topology"
+            _prefetch_route_spec(4),
+            "port_count:6,port_count:6,port_count:6,port_count:2",
+        )
+        self.assertEqual(
+            _prefetch_route_spec(8),
+            "port_count:6,port_count:6,port_count:6,port_count:2,"
+            "port_count:6,port_count:6,port_count:6,port_count:2",
         )
         with self.assertRaisesRegex(ValueError, "chosen from"):
             _parse_prefetch_workers("1,3")

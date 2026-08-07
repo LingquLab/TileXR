@@ -17,6 +17,7 @@ namespace TileXR {
 constexpr char TILEXR_UDMA_QP_ROUTE_SPEC_ENV[] = "TILEXR_UDMA_QP_ROUTE_SPEC";
 constexpr uint32_t TILEXR_UDMA_QP_CONFIG_WIRE_VERSION = 1;
 constexpr uint32_t TILEXR_UDMA_MAX_QP_COUNT = 8;
+constexpr int TILEXR_UDMA_RANKS_PER_SERVER = 8;
 
 enum class UDMAQpRouteSelector : uint32_t {
     TOPOLOGY = 1,
@@ -63,6 +64,8 @@ UDMAQpConfigParseStatus LoadUDMAQpConfigFromEnv(
     UDMAQpConfig& config, std::string* error = nullptr);
 
 uint32_t UDMAQpConfigQpCount(const UDMAQpConfig& config);
+
+bool UDMARanksShareServer(int rank, int peer);
 
 UDMAQpConfigWireDescriptor BuildUDMAQpConfigWireDescriptor(
     const UDMAQpConfig& config, UDMAQpConfigParseStatus parseStatus);

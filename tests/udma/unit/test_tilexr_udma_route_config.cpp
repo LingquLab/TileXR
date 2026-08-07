@@ -166,6 +166,16 @@ void TestEnvironmentConfig()
     CHECK_EQ(unsetenv(TileXR::TILEXR_UDMA_QP_ROUTE_SPEC_ENV), 0);
 }
 
+void TestServerRankGrouping()
+{
+    CHECK_TRUE(TileXR::UDMARanksShareServer(0, 7));
+    CHECK_TRUE(TileXR::UDMARanksShareServer(8, 15));
+    CHECK_TRUE(TileXR::UDMARanksShareServer(1023, 1016));
+    CHECK_TRUE(!TileXR::UDMARanksShareServer(0, 8));
+    CHECK_TRUE(!TileXR::UDMARanksShareServer(7, 15));
+    CHECK_TRUE(!TileXR::UDMARanksShareServer(-1, 0));
+}
+
 } // namespace
 
 int main()
@@ -175,6 +185,7 @@ int main()
     TestInvalidRules();
     TestWireDescriptor();
     TestEnvironmentConfig();
+    TestServerRankGrouping();
     if (g_failures != 0) {
         std::cerr << g_failures << " UDMA route configuration checks failed" << std::endl;
         return 1;

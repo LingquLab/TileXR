@@ -3,9 +3,9 @@
 ## Goal
 
 Implement the approved fused MoonEP PrefetchWeight operator over direct TileXR
-UDMA, remove the V1 PrefetchWeight stub, integrate a packed registered-weight
-lifecycle into the Torch facade, and measure the native stage through the
-existing MoonEP benchmark.
+UDMA, replace the development PrefetchWeight stub in place, integrate a packed
+registered-weight lifecycle into the Torch facade, and measure the native stage
+through the existing MoonEP benchmark.
 
 The authoritative architecture and acceptance boundary are in
 `docs/specs/2026-08-04-moonep-prefetch-weight-udma-design.md`.
@@ -58,8 +58,9 @@ queue/memory helpers, and a transport-selected worker count consumed by Task 2.
 
 ## Task 2: Implement The Fused Native PrefetchWeight Operator
 
-**Objective and role:** Replace the V1 local-copy stub with one V2 Host call and
-one direct-launch Kernel that moves gate, up, and down slot rows in place.
+**Objective and role:** Replace the V1 local-copy stub with one native V1 Host
+call and one runtime-registered Kernel that moves gate, up, and down slot rows
+in place.
 
 **Background and prerequisites:** Requires Task 1's exclusive qpIdx worker
 contract and the existing Planner's `expertsToCopy[rank, B]` output.
@@ -74,8 +75,9 @@ contract and the existing Planner's `expertsToCopy[rank, B]` output.
 
 **Constraints and non-goals:**
 
-- Delete `TileXRMoonEpPrefetchWeightArgsV1` and its function.
-- Add a fixed three-projection V2 in-place ABI and advance MoonEP SOVERSION.
+- Keep `TileXRMoonEpPrefetchWeightArgsV1`, its function, and MoonEP SOVERSION 1
+  while the project is still under development.
+- Replace the V1 implementation in place with the fixed three-projection ABI.
 - Accept compact `[2 * B, ...]` BF16/FP16 projections in one registered arena.
 - Validate checked byte arithmetic, 64-byte alignment, per-peer registry bounds,
   and one-WQE `uint32_t` row length.
@@ -88,9 +90,10 @@ contract and the existing Planner's `expertsToCopy[rank, B]` output.
 - ABI, capability, invalid-input, overflow, registry-bound, and launch tests.
 - Kernel/source tests cover one fused launch and absence of old stub behavior.
 - Target CANN compilation reaches every supported dtype and worker path.
-- Installed symbol and SONAME inspection confirms V2 and no V1 Prefetch symbol.
+- Installed symbol and SONAME inspection confirms PrefetchWeight V1 and
+  `libtilexr-moonep.so.1`.
 
-**Artifacts and interfaces:** `TileXRMoonEpPrefetchWeightV2`, the fused Kernel
+**Artifacts and interfaces:** `TileXRMoonEpPrefetchWeightV1`, the fused Kernel
 artifact, and capability metadata used by Task 3.
 
 ## Task 3: Integrate Packed Weights Into Torch And MoonEP Benchmark
@@ -99,7 +102,7 @@ artifact, and capability metadata used by Task 3.
 registration or packing and produce honest stage-specific correctness and
 performance evidence.
 
-**Background and prerequisites:** Requires Task 2's exact V2 tensor contract,
+**Background and prerequisites:** Requires Task 2's exact V1 tensor contract,
 library name, capabilities, and asynchronous status behavior.
 
 **Modification scope:**
@@ -114,7 +117,7 @@ library name, capabilities, and asynchronous status behavior.
 - Own one flat aligned backing allocation and three `[2 * B, ...]` views.
 - Register once after deterministic/model weight initialization and unregister
   only after quiescence.
-- Launch exactly one V2 Prefetch call and mutate slots in place.
+- Launch exactly one V1 Prefetch call and mutate slots in place.
 - Keep packed allocation, views, Plan, and UDMA handle alive asynchronously.
 - Benchmark registration and initialization outside the measured interval.
 - Report PrefetchWeight correctness/performance independently while aggregate
@@ -164,7 +167,7 @@ record the exact remaining build/run command and do not claim UDMA performance.
 - Run all focused UDMA, MoonEP, Torch facade, and benchmark tests from the final
   source state.
 - Run `git diff --check` and inspect the final scoped diff.
-- Search active code for the removed PrefetchWeight V1 symbol and forbidden
+- Search active code for the removed PrefetchWeight stub behavior and forbidden
   fallback transports.
 - Report host, target compile, target runtime, cross-node, and performance
   evidence separately.

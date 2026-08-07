@@ -6,8 +6,7 @@ from enum import IntEnum, IntFlag
 
 TILEXR_SUCCESS = 0
 TILEXR_MOONEP_ABI_VERSION_V1 = 1
-TILEXR_MOONEP_ABI_VERSION_V2 = 2
-TILEXR_MOONEP_ABI_VERSION = TILEXR_MOONEP_ABI_VERSION_V2
+TILEXR_MOONEP_ABI_VERSION = TILEXR_MOONEP_ABI_VERSION_V1
 TILEXR_MOONEP_MAX_TENSOR_RANK = 4
 TILEXR_MOONEP_FLAG_NONE = 0
 
@@ -89,7 +88,7 @@ class TileXRMoonEPDispatchArgsV1(_TileXRMoonEPStageArgsV1):
     pass
 
 
-class TileXRMoonEPPrefetchWeightArgsV2(ctypes.Structure):
+class TileXRMoonEPPrefetchWeightArgsV1(ctypes.Structure):
     _fields_ = [
         ("structSize", ctypes.c_uint32),
         ("abiVersion", ctypes.c_uint32),
@@ -110,11 +109,9 @@ class TileXRMoonEPReduceGradArgsV1(_TileXRMoonEPStageArgsV1):
     pass
 
 
-def initialize_struct(
-    value: ctypes.Structure, abi_version: int = TILEXR_MOONEP_ABI_VERSION_V1
-) -> ctypes.Structure:
+def initialize_struct(value: ctypes.Structure) -> ctypes.Structure:
     value.structSize = ctypes.sizeof(type(value))
-    value.abiVersion = int(abi_version)
+    value.abiVersion = TILEXR_MOONEP_ABI_VERSION
     return value
 
 

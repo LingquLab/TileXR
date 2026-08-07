@@ -40,19 +40,18 @@ int main()
         "Unexpected PlanningArgsV1 size");
     static_assert(sizeof(TileXRMoonEpDispatchArgsV1) == 48,
         "Unexpected DispatchArgsV1 size");
-    static_assert(sizeof(TileXRMoonEpPrefetchWeightArgsV2) == 56,
-        "Unexpected PrefetchWeightArgsV2 size");
-    static_assert(offsetof(TileXRMoonEpPrefetchWeightArgsV2, gate) == 24,
-        "Unexpected PrefetchWeightArgsV2 gate offset");
-    static_assert(offsetof(TileXRMoonEpPrefetchWeightArgsV2, flags) == 48,
-        "Unexpected PrefetchWeightArgsV2 flags offset");
+    static_assert(sizeof(TileXRMoonEpPrefetchWeightArgsV1) == 56,
+        "Unexpected PrefetchWeightArgsV1 size");
+    static_assert(offsetof(TileXRMoonEpPrefetchWeightArgsV1, gate) == 24,
+        "Unexpected PrefetchWeightArgsV1 gate offset");
+    static_assert(offsetof(TileXRMoonEpPrefetchWeightArgsV1, flags) == 48,
+        "Unexpected PrefetchWeightArgsV1 flags offset");
     static_assert(sizeof(TileXRMoonEpDispatchArgsV1) == sizeof(TileXRMoonEpCombineArgsV1),
         "Stub argument layouts must match");
     static_assert(sizeof(TileXRMoonEpDispatchArgsV1) == sizeof(TileXRMoonEpReduceGradArgsV1),
         "Stub argument layouts must match");
 
     Check(TILEXR_MOONEP_ABI_VERSION_V1 == 1, "ABI version must be 1");
-    Check(TILEXR_MOONEP_ABI_VERSION_V2 == 2, "ABI version must advance to 2");
     Check((TILEXR_MOONEP_STAGE_PLANNING & TILEXR_MOONEP_STAGE_DISPATCH) == 0,
         "Stage capability bits must not overlap");
     Check(TILEXR_MOONEP_MAX_TENSOR_RANK == 4, "Tensor rank must remain fixed at four");

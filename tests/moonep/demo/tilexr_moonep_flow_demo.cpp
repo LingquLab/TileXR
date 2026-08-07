@@ -719,7 +719,7 @@ bool RunFlow(const Options &options, RuntimeResources *resources,
     const uint64_t expectedNative =
         static_cast<uint64_t>(TILEXR_MOONEP_STAGE_PLANNING) |
         static_cast<uint64_t>(TILEXR_MOONEP_STAGE_PREFETCH_WEIGHT);
-    if (TileXRMoonEpGetAbiVersion() != TILEXR_MOONEP_ABI_VERSION_V2 ||
+    if (TileXRMoonEpGetAbiVersion() != TILEXR_MOONEP_ABI_VERSION_V1 ||
         !CheckTileXR(rank, "TileXRMoonEpGetCapabilitiesV1",
             TileXRMoonEpGetCapabilitiesV1(&nativeStages, &stubStages)) ||
         nativeStages != expectedNative || stubStages != expectedStubs) {
@@ -885,9 +885,9 @@ bool RunFlow(const Options &options, RuntimeResources *resources,
         prefetchBase + projectionBytes, projectionElements, 2 * b, options.hidden);
     TileXRMoonEpTensorV1 down = ProjectionTensor(
         prefetchBase + 2 * projectionBytes, projectionElements, 2 * b, options.hidden);
-    TileXRMoonEpPrefetchWeightArgsV2 prefetch {};
+    TileXRMoonEpPrefetchWeightArgsV1 prefetch {};
     prefetch.structSize = sizeof(prefetch);
-    prefetch.abiVersion = TILEXR_MOONEP_ABI_VERSION_V2;
+    prefetch.abiVersion = TILEXR_MOONEP_ABI_VERSION_V1;
     prefetch.comm = resources->comm;
     prefetch.plan = &plan;
     prefetch.gate = &gate;
@@ -929,7 +929,7 @@ bool RunFlow(const Options &options, RuntimeResources *resources,
         !CheckTileXR(rank, "Dispatch forward",
             TileXRMoonEpDispatchV1(&forwardDispatch, resources->stream)) ||
         !CheckTileXR(rank, "PrefetchWeight",
-            TileXRMoonEpPrefetchWeightV2(&prefetch, resources->stream)) ||
+            TileXRMoonEpPrefetchWeightV1(&prefetch, resources->stream)) ||
         !CheckTileXR(rank, "Combine forward",
             TileXRMoonEpCombineV1(&forwardCombine, resources->stream)) ||
         !CheckTileXR(rank, "Dispatch backward",

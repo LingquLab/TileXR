@@ -314,6 +314,14 @@ void TestUDMAMultiQpHostTransportContract()
     CheckContains(transportPath, transport, "ResolveUDMAPortCountEid(");
     CheckContains(transportPath, transport, "ResolveUDMATopologyEid(");
     CheckContains(transportPath, transport,
+                  "const bool sameServer = UDMARanksShareServer(options_.rank, peer);");
+    CheckContains(transportPath, transport,
+                  "if (rule.selector == UDMAQpRouteSelector::PORT_COUNT)");
+    CheckContains(transportPath, transport, "else if (sameServer)");
+    CheckContains(transportPath, transport,
+                  "resolved = ResolveUDMAAggregateEid(rootInfo, localId, localEid);");
+    CheckNotContains(transportPath, transport, "sameNode ||");
+    CheckContains(transportPath, transport,
                   "peerQpStates_[index].reset(new (std::nothrow) PerPeerQpState())");
     CheckContains(transportPath, transport,
                   "registration.remoteMemHandles.count(importKey) == 0");

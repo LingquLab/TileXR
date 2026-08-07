@@ -13,7 +13,6 @@ extern "C" {
 typedef void *TileXRCommPtr;
 
 #define TILEXR_MOONEP_ABI_VERSION_V1 UINT32_C(1)
-#define TILEXR_MOONEP_ABI_VERSION_V2 UINT32_C(2)
 #define TILEXR_MOONEP_MAX_TENSOR_RANK UINT32_C(4)
 #define TILEXR_MOONEP_FLAG_NONE UINT64_C(0)
 
@@ -89,7 +88,7 @@ typedef struct TileXRMoonEpDispatchArgsV1 {
     uint64_t flags;
 } TileXRMoonEpDispatchArgsV1;
 
-typedef struct TileXRMoonEpPrefetchWeightArgsV2 {
+typedef struct TileXRMoonEpPrefetchWeightArgsV1 {
     uint32_t structSize;
     uint32_t abiVersion;
     TileXRCommPtr comm;
@@ -98,7 +97,7 @@ typedef struct TileXRMoonEpPrefetchWeightArgsV2 {
     const TileXRMoonEpTensorV1 *up;
     const TileXRMoonEpTensorV1 *down;
     uint64_t flags;
-} TileXRMoonEpPrefetchWeightArgsV2;
+} TileXRMoonEpPrefetchWeightArgsV1;
 
 typedef struct TileXRMoonEpCombineArgsV1 {
     uint32_t structSize;
@@ -131,7 +130,7 @@ int TileXRMoonEpPlanningV1(const TileXRMoonEpPlanningArgsV1 *args, aclrtStream s
 
 int TileXRMoonEpDispatchV1(const TileXRMoonEpDispatchArgsV1 *args, aclrtStream stream);
 
-int TileXRMoonEpPrefetchWeightV2(const TileXRMoonEpPrefetchWeightArgsV2 *args,
+int TileXRMoonEpPrefetchWeightV1(const TileXRMoonEpPrefetchWeightArgsV1 *args,
     aclrtStream stream);
 
 int TileXRMoonEpCombineV1(const TileXRMoonEpCombineArgsV1 *args, aclrtStream stream);

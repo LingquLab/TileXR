@@ -29,7 +29,7 @@ struct PrefetchWeightLayout {
     uint32_t blockDim = 0;
 };
 
-int BuildPrefetchWeightLayout(const TileXRMoonEpPrefetchWeightArgsV2 &args,
+int BuildPrefetchWeightLayout(const TileXRMoonEpPrefetchWeightArgsV1 &args,
     const TileXR::CommArgs &commArgs, const TileXR::TileXRUDMARegistry &registry,
     uint32_t qpNum, const char *blockDimOverride, PrefetchWeightLayout &layout);
 

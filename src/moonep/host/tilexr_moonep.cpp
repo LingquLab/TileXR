@@ -248,7 +248,7 @@ int RunLocalStub(const Args *args, aclrtStream stream, StubStage stage)
 
 extern "C" uint32_t TileXRMoonEpGetAbiVersion(void)
 {
-    return TILEXR_MOONEP_ABI_VERSION_V2;
+    return TILEXR_MOONEP_ABI_VERSION_V1;
 }
 
 extern "C" int TileXRMoonEpGetCapabilitiesV1(uint64_t *nativeStages, uint64_t *stubStages)
@@ -349,11 +349,11 @@ extern "C" int TileXRMoonEpDispatchV1(const TileXRMoonEpDispatchArgsV1 *args,
     return RunLocalStub(args, stream, StubStage::Dispatch);
 }
 
-extern "C" int TileXRMoonEpPrefetchWeightV2(
-    const TileXRMoonEpPrefetchWeightArgsV2 *args, aclrtStream stream)
+extern "C" int TileXRMoonEpPrefetchWeightV1(
+    const TileXRMoonEpPrefetchWeightArgsV1 *args, aclrtStream stream)
 {
-    if (args == nullptr || args->structSize < sizeof(TileXRMoonEpPrefetchWeightArgsV2) ||
-        args->abiVersion != TILEXR_MOONEP_ABI_VERSION_V2 || args->comm == nullptr ||
+    if (args == nullptr || args->structSize < sizeof(TileXRMoonEpPrefetchWeightArgsV1) ||
+        args->abiVersion != TILEXR_MOONEP_ABI_VERSION_V1 || args->comm == nullptr ||
         args->plan == nullptr || args->gate == nullptr || args->up == nullptr ||
         args->down == nullptr || args->flags != TILEXR_MOONEP_FLAG_NONE ||
         stream == nullptr) {

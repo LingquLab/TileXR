@@ -126,7 +126,22 @@ def _append_case_overrides(command: list[str], args: argparse.Namespace) -> None
 def _prefetch_route_spec(worker_count: int) -> str:
     if worker_count not in (1, 2, 4, 8):
         raise ValueError("prefetch worker count must be chosen from 1,2,4,8")
-    return ",".join("topology" for _ in range(worker_count))
+    external_routes = {
+        1: ("port_count:6",),
+        2: ("port_count:6", "port_count:2"),
+        4: ("port_count:6", "port_count:6", "port_count:6", "port_count:2"),
+        8: (
+            "port_count:6",
+            "port_count:6",
+            "port_count:6",
+            "port_count:2",
+            "port_count:6",
+            "port_count:6",
+            "port_count:6",
+            "port_count:2",
+        ),
+    }
+    return ",".join(external_routes[worker_count])
 
 
 def build_parser() -> argparse.ArgumentParser:

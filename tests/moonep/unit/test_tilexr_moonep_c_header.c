@@ -7,7 +7,7 @@ int main(void)
     TileXRMoonEpTensorV1 tensor = {0};
     TileXRMoonEpPlanV1 plan = {0};
     TileXRMoonEpDispatchArgsV1 dispatch = {0};
-    TileXRMoonEpPrefetchWeightArgsV2 prefetch = {0};
+    TileXRMoonEpPrefetchWeightArgsV1 prefetch = {0};
 
     tensor.structSize = (uint32_t)sizeof(tensor);
     tensor.abiVersion = TILEXR_MOONEP_ABI_VERSION_V1;
@@ -18,7 +18,7 @@ int main(void)
     dispatch.structSize = (uint32_t)sizeof(dispatch);
     dispatch.abiVersion = TILEXR_MOONEP_ABI_VERSION_V1;
     prefetch.structSize = (uint32_t)sizeof(prefetch);
-    prefetch.abiVersion = TILEXR_MOONEP_ABI_VERSION_V2;
+    prefetch.abiVersion = TILEXR_MOONEP_ABI_VERSION_V1;
     prefetch.gate = &tensor;
 
     return tensor.dtype == TILEXR_MOONEP_DTYPE_FLOAT16 &&

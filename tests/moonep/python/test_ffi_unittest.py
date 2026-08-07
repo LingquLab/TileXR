@@ -19,7 +19,7 @@ from tilexr_moonep.abi import (
     TileXRMoonEPDispatchArgsV1,
     TileXRMoonEPPlanV1,
     TileXRMoonEPPlanningArgsV1,
-    TileXRMoonEPPrefetchWeightArgsV2,
+    TileXRMoonEPPrefetchWeightArgsV1,
     TileXRMoonEPReduceGradArgsV1,
     TileXRMoonEPTensorV1,
 )
@@ -99,7 +99,7 @@ class FakeCDLLLoader:
 
     def _moonep_library(self):
         library = FakeLibrary()
-        library.TileXRMoonEpGetAbiVersion = FakeFunction(lambda: 2)
+        library.TileXRMoonEpGetAbiVersion = FakeFunction(lambda: 1)
 
         def capabilities(native, stub):
             ctypes.cast(native, ctypes.POINTER(ctypes.c_uint64)).contents.value = 5
@@ -143,7 +143,7 @@ class FakeCDLLLoader:
 
         def prefetch(args_ptr, stream):
             args = ctypes.cast(
-                args_ptr, ctypes.POINTER(TileXRMoonEPPrefetchWeightArgsV2)
+                args_ptr, ctypes.POINTER(TileXRMoonEPPrefetchWeightArgsV1)
             ).contents
             self.stage_records.append(
                 {
@@ -158,7 +158,7 @@ class FakeCDLLLoader:
             )
             return 0
 
-        library.TileXRMoonEpPrefetchWeightV2 = FakeFunction(prefetch)
+        library.TileXRMoonEpPrefetchWeightV1 = FakeFunction(prefetch)
         for name, args_type in (
             ("dispatch", TileXRMoonEPDispatchArgsV1),
             ("combine", TileXRMoonEPCombineArgsV1),
@@ -210,12 +210,12 @@ class FfiAbiTests(unittest.TestCase):
         self.assertEqual(ctypes.sizeof(TileXRMoonEPPlanV1), 104)
         self.assertEqual(ctypes.sizeof(TileXRMoonEPPlanningArgsV1), 72)
         self.assertEqual(ctypes.sizeof(TileXRMoonEPDispatchArgsV1), 48)
-        self.assertEqual(ctypes.sizeof(TileXRMoonEPPrefetchWeightArgsV2), 56)
+        self.assertEqual(ctypes.sizeof(TileXRMoonEPPrefetchWeightArgsV1), 56)
         self.assertEqual(TileXRMoonEPTensorV1.shape.offset, 32)
         self.assertEqual(TileXRMoonEPPlanV1.dst.offset, 64)
         self.assertEqual(TileXRMoonEPPlanningArgsV1.flags.offset, 64)
         self.assertEqual(TileXRMoonEPDispatchArgsV1.flags.offset, 40)
-        self.assertEqual(TileXRMoonEPPrefetchWeightArgsV2.flags.offset, 48)
+        self.assertEqual(TileXRMoonEPPrefetchWeightArgsV1.flags.offset, 48)
 
     def test_fake_cdll_receives_exact_v1_descriptors_and_current_stream(self):
         loader = FakeCDLLLoader()
@@ -225,7 +225,7 @@ class FfiAbiTests(unittest.TestCase):
             library_paths={
                 "comm": "libtile-comm.so",
                 "planner": "libtilexr-moonep-planner.so",
-                "moonep": "libtilexr-moonep.so.2",
+                "moonep": "libtilexr-moonep.so.1",
             },
             cdll_loader=loader,
         )
@@ -278,7 +278,7 @@ class FfiAbiTests(unittest.TestCase):
 
         self.assertEqual(
             [Path(path).name for path, _ in loader.loads],
-            ["libtile-comm.so", "libtilexr-moonep-planner.so", "libtilexr-moonep.so.2"],
+            ["libtile-comm.so", "libtilexr-moonep-planner.so", "libtilexr-moonep.so.1"],
         )
         self.assertEqual(runtime.capabilities.stage_mask, 5)
         self.assertEqual(runtime.capabilities.stub_mask, 26)
@@ -317,7 +317,7 @@ class FfiAbiTests(unittest.TestCase):
         self.assertEqual(loader.stage_records[1]["output_shape"], (8,))
         self.assertEqual(loader.stage_records[4]["input_shape"], (8,))
         self.assertEqual(loader.stage_records[4]["output_shape"], (4, 2))
-        self.assertEqual(loader.stage_records[2]["abi_version"], 2)
+        self.assertEqual(loader.stage_records[2]["abi_version"], 1)
         self.assertEqual(loader.stage_records[2]["gate_shape"], (4, 32))
         self.assertEqual(len(loader.register_calls), 1)
         self.assertEqual(loader.unregister_calls, [0])
