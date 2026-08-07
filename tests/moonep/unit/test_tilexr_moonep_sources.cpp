@@ -79,6 +79,8 @@ int main()
     const std::string dispatchCmake = ReadFile("src/moonep/dispatch/CMakeLists.txt");
     const std::string dispatchUrmaHost =
         ReadFile("src/moonep/dispatch/urma/host/dispatch_host.cpp");
+    const std::string dispatchUrmaLaunch =
+        ReadFile("src/moonep/dispatch/urma/host/dispatch_launch.cpp");
     const std::string dispatchUrmaKernel =
         ReadFile("src/moonep/dispatch/urma/kernels/tilexr_moonep_dispatch_kernel.cpp");
     const std::string combineCmake = ReadFile("src/moonep/combine/CMakeLists.txt");
@@ -155,9 +157,17 @@ int main()
     Contains("URMA dispatch Host", dispatchUrmaHost,
         "TileXRMoonEpBuildDispatchUrmaLayout");
     Contains("URMA dispatch Host", dispatchUrmaHost, "registeredWorkspaceBytes");
+    Contains("URMA dispatch Host", dispatchUrmaHost,
+        "params.zeroFillRanges = static_cast<const int32_t *>(args->plan->zeroFillRanges)");
+    Contains("URMA dispatch Host", dispatchUrmaHost,
+        "zeroFillRangeCount > UINT32_MAX");
+    Contains("URMA dispatch launch", dispatchUrmaLaunch, "params.zeroFillRanges");
+    Contains("URMA dispatch launch", dispatchUrmaLaunch, "zeroFillRangeCount");
     Contains("URMA dispatch kernel", dispatchUrmaKernel,
         "tilexr_moonep_dispatch_urma_kernel");
     Contains("URMA dispatch kernel", dispatchUrmaKernel, "destinationCapacityArg");
+    Contains("URMA dispatch kernel", dispatchUrmaKernel,
+        "ClearDispatchZeroFillRanges");
     Contains("URMA dispatch kernel", dispatchUrmaKernel, "udmaIssueQp0Buf");
     Contains("URMA dispatch kernel", dispatchUrmaKernel, "udmaIssueQp1Buf");
     Excludes("URMA dispatch kernel", dispatchUrmaKernel, "<<<");

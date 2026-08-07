@@ -43,6 +43,7 @@ struct DispatchKernelArgs {
     GM_ADDR commArgs;
     GM_ADDR input;
     GM_ADDR dst;
+    GM_ADDR zeroFillRanges;
     GM_ADDR workspace;
     GM_ADDR output;
     GM_ADDR planStatus;
@@ -57,6 +58,7 @@ struct DispatchKernelArgs {
     int64_t h;
     int64_t routeCount;
     int64_t destinationCapacity;
+    int64_t zeroFillRangeCount;
     uint64_t rowBytes;
     uint64_t payloadMode;
     int64_t magic;
@@ -65,7 +67,7 @@ struct DispatchKernelArgs {
     uint64_t groupWidth;
 };
 
-static_assert(sizeof(DispatchKernelArgs) == 23U * sizeof(uint64_t),
+static_assert(sizeof(DispatchKernelArgs) == 25U * sizeof(uint64_t),
     "MoonEP Dispatch Host/Kernel ABI changed");
 
 int EnsureDispatchKernelRegistered()
@@ -187,6 +189,7 @@ int TileXRMoonEpLaunchDispatchUrmaKernel(const DispatchUrmaLaunchParams &params)
         params.commArgs,
         reinterpret_cast<GM_ADDR>(const_cast<void *>(params.input)),
         reinterpret_cast<GM_ADDR>(const_cast<int32_t *>(params.dst)),
+        reinterpret_cast<GM_ADDR>(const_cast<int32_t *>(params.zeroFillRanges)),
         static_cast<GM_ADDR>(params.workspace),
         static_cast<GM_ADDR>(params.output),
         reinterpret_cast<GM_ADDR>(params.planStatus),
@@ -201,6 +204,7 @@ int TileXRMoonEpLaunchDispatchUrmaKernel(const DispatchUrmaLaunchParams &params)
         hidden ? params.layout.h : 1,
         params.layout.routeCount,
         params.layout.destinationCapacity,
+        params.zeroFillRangeCount,
         active->rowBytes,
         static_cast<uint64_t>(params.mode),
         magic,

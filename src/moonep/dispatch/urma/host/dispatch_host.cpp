@@ -135,6 +135,7 @@ bool PlanValid(const TileXRMoonEpPlanV1 *plan)
         plan->r > 0 && plan->e > 0 && plan->b > 0 && plan->nvS >= plan->n &&
         plan->k > 0 && plan->k <= 32 && plan->n % plan->k == 0 &&
         plan->e % plan->r == 0 && plan->b <= plan->e / plan->r &&
+        plan->e <= std::numeric_limits<int64_t>::max() - plan->b &&
         plan->dst != nullptr && plan->expertsToCopy != nullptr &&
         plan->zeroFillRanges != nullptr && plan->remoteStats != nullptr &&
         plan->dupGroups != nullptr && plan->dupLoffs != nullptr &&
@@ -396,12 +397,24 @@ int TileXRMoonEpRunDispatchUrmaV1(const TileXRMoonEpDispatchArgsV1 *args,
         ranges[rangeCount++] = BufferRange {tensors[index]->data, bytes};
     }
     uint64_t dstBytes = 0;
-    if (!CheckedMul(static_cast<uint64_t>(layout.routeCount),
+    const uint64_t zeroFillRangeCount = static_cast<uint64_t>(
+        args->plan->e + args->plan->b);
+    uint64_t zeroFillBytes = 0;
+    if (zeroFillRangeCount > UINT32_MAX ||
+        !CheckedMul(static_cast<uint64_t>(layout.routeCount),
             sizeof(int32_t), &dstBytes) ||
+        !CheckedMul(zeroFillRangeCount, 2U * sizeof(int32_t),
+            &zeroFillBytes) ||
         RangesOverlap(args->plan->dst, dstBytes, args->registeredWorkspace,
             args->registeredWorkspaceBytes) ||
+        RangesOverlap(args->plan->zeroFillRanges, zeroFillBytes,
+            args->registeredWorkspace, args->registeredWorkspaceBytes) ||
+        RangesOverlap(args->plan->dst, dstBytes,
+            args->plan->zeroFillRanges, zeroFillBytes) ||
         RangesOverlap(args->plan->status, sizeof(int32_t),
-            args->registeredWorkspace, args->registeredWorkspaceBytes)) {
+            args->registeredWorkspace, args->registeredWorkspaceBytes) ||
+        RangesOverlap(args->plan->status, sizeof(int32_t),
+            args->plan->zeroFillRanges, zeroFillBytes)) {
         return TILEXR_MOONEP_ERROR_INVALID_ARGUMENT;
     }
     for (uint32_t lhs = 0; lhs < rangeCount; ++lhs) {
@@ -409,6 +422,8 @@ int TileXRMoonEpRunDispatchUrmaV1(const TileXRMoonEpDispatchArgsV1 *args,
                 args->registeredWorkspace, args->registeredWorkspaceBytes) ||
             RangesOverlap(ranges[lhs].data, ranges[lhs].bytes,
                 args->plan->dst, dstBytes) ||
+            RangesOverlap(ranges[lhs].data, ranges[lhs].bytes,
+                args->plan->zeroFillRanges, zeroFillBytes) ||
             RangesOverlap(ranges[lhs].data, ranges[lhs].bytes,
                 args->plan->status, sizeof(int32_t))) {
             return TILEXR_MOONEP_ERROR_INVALID_ARGUMENT;
@@ -424,12 +439,14 @@ int TileXRMoonEpRunDispatchUrmaV1(const TileXRMoonEpDispatchArgsV1 *args,
     DispatchUrmaLaunchParams params {};
     params.commArgs = devArgs;
     params.dst = static_cast<const int32_t *>(args->plan->dst);
+    params.zeroFillRanges = static_cast<const int32_t *>(args->plan->zeroFillRanges);
     params.workspace = args->registeredWorkspace;
     params.planStatus = static_cast<int32_t *>(args->plan->status);
     params.comm = args->comm;
     params.stream = stream;
     params.peerMode = peerConfig.mode;
     params.groupWidth = peerConfig.groupWidth;
+    params.zeroFillRangeCount = args->plan->e + args->plan->b;
     params.layout = layout;
 
     params.input = args->hiddenSh->data;

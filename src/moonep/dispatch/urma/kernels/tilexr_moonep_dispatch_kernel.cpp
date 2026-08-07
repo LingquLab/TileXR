@@ -1348,15 +1348,65 @@ __aicore__ inline void DispatchPublishFirstStatus(
         static_cast<uint32_t>(status));
 }
 
+__aicore__ inline void ClearDispatchBytes(__gm__ uint8_t *dst,
+    uint64_t bytes, AscendC::LocalTensor<uint8_t> relayLocal)
+{
+    AscendC::LocalTensor<uint16_t> zeros = relayLocal.ReinterpretCast<uint16_t>();
+    AscendC::Duplicate(zeros, static_cast<uint16_t>(0),
+        static_cast<int32_t>(kRelayUbBytes / sizeof(uint16_t)));
+    SyncFunc<AscendC::HardEvent::V_MTE3>();
+
+    AscendC::GlobalTensor<uint8_t> dstGlobal;
+    dstGlobal.SetGlobalBuffer(dst, bytes);
+    for (uint64_t offset = 0U; offset < bytes; offset += kRelayUbBytes) {
+        const uint64_t remaining = bytes - offset;
+        const uint32_t tileBytes = static_cast<uint32_t>(
+            remaining < kRelayUbBytes ? remaining : kRelayUbBytes);
+        const AscendC::DataCopyExtParams copyOut {
+            1U, tileBytes, 0U, 0U, 0U};
+        AscendC::DataCopyPad(dstGlobal[offset], relayLocal, copyOut);
+    }
+    SyncFunc<AscendC::HardEvent::MTE3_V>();
+}
+
+__aicore__ inline bool ClearDispatchZeroFillRanges(
+    __gm__ uint8_t *scratch, const __gm__ int32_t *zeroFillRanges,
+    uint64_t zeroFillRangeCount, uint64_t destinationCapacity,
+    uint64_t rowBytes, uint64_t blockIdx, uint64_t blockNum,
+    AscendC::LocalTensor<uint8_t> relayLocal)
+{
+    for (uint64_t range = blockIdx; range < zeroFillRangeCount;
+         range += blockNum) {
+        const int32_t startValue = zeroFillRanges[range * 2U];
+        const int32_t countValue = zeroFillRanges[range * 2U + 1U];
+        if (startValue < 0 || countValue < 0) {
+            return false;
+        }
+        const uint64_t start = static_cast<uint64_t>(startValue);
+        const uint64_t count = static_cast<uint64_t>(countValue);
+        if (start > destinationCapacity ||
+            count > destinationCapacity - start) {
+            return false;
+        }
+        if (count != 0U) {
+            ClearDispatchBytes(scratch + start * rowBytes,
+                count * rowBytes, relayLocal);
+        }
+    }
+    return true;
+}
+
 } // namespace
 
 extern "C" __global__ __aicore__ void tilexr_moonep_dispatch_urma_kernel(
-    GM_ADDR commArgsGM, GM_ADDR inputGM, GM_ADDR dstGM, GM_ADDR workspaceGM,
-    GM_ADDR outputGM, GM_ADDR planStatusGM, uint64_t profileOffset,
+    GM_ADDR commArgsGM, GM_ADDR inputGM, GM_ADDR dstGM,
+    GM_ADDR zeroFillRangesGM, GM_ADDR workspaceGM, GM_ADDR outputGM,
+    GM_ADDR planStatusGM, uint64_t profileOffset,
     uint64_t scratchOffset, uint64_t completionFlagsOffset,
     uint64_t signalOffset, uint64_t dfxOffset, uint64_t kernelStatusOffset,
     int64_t s, int64_t k, int64_t h, int64_t routeCountArg,
-    int64_t destinationCapacityArg, uint64_t rowBytes,
+    int64_t destinationCapacityArg, int64_t zeroFillRangeCountArg,
+    uint64_t rowBytes,
     uint64_t payloadMode, int64_t magic,
     uint64_t completionTimeoutTicks, uint64_t peerMode,
     uint64_t groupWidthArg)
@@ -1365,12 +1415,15 @@ extern "C" __global__ __aicore__ void tilexr_moonep_dispatch_urma_kernel(
         auto args = reinterpret_cast<__gm__ TileXR::CommArgs *>(commArgsGM);
         auto input = reinterpret_cast<__gm__ uint8_t *>(inputGM);
         auto dst = reinterpret_cast<__gm__ int32_t *>(dstGM);
+        auto zeroFillRanges = reinterpret_cast<__gm__ int32_t *>(zeroFillRangesGM);
         auto workspace = reinterpret_cast<__gm__ uint8_t *>(workspaceGM);
         auto output = reinterpret_cast<__gm__ uint8_t *>(outputGM);
         auto planStatus = reinterpret_cast<__gm__ int32_t *>(planStatusGM);
-        if (args == nullptr || input == nullptr || dst == nullptr || workspace == nullptr ||
-            output == nullptr || planStatus == nullptr || s <= 0 || k <= 0 || h <= 0 ||
+        if (args == nullptr || input == nullptr || dst == nullptr ||
+            zeroFillRanges == nullptr || workspace == nullptr || output == nullptr ||
+            planStatus == nullptr || s <= 0 || k <= 0 || h <= 0 ||
             routeCountArg <= 0 || destinationCapacityArg < routeCountArg ||
+            zeroFillRangeCountArg <= 0 || zeroFillRangeCountArg > UINT32_MAX ||
             rowBytes == 0U || rowBytes > UINT32_MAX || magic <= 0 ||
             completionTimeoutTicks == 0U ||
             peerMode > UINT32_MAX || groupWidthArg > UINT32_MAX ||
@@ -1402,6 +1455,8 @@ extern "C" __global__ __aicore__ void tilexr_moonep_dispatch_urma_kernel(
         const uint64_t routeCount = static_cast<uint64_t>(routeCountArg);
         const uint64_t destinationCapacity = static_cast<uint64_t>(
             destinationCapacityArg);
+        const uint64_t zeroFillRangeCount = static_cast<uint64_t>(
+            zeroFillRangeCountArg);
         if (blockNum == 0U || blockNum > TileXRMoonEp::kDispatchAivCoreCount ||
             routeCount > UINT32_MAX || destinationCapacity > UINT32_MAX ||
             routeCount / static_cast<uint64_t>(k) != static_cast<uint64_t>(s) ||
@@ -2196,6 +2251,12 @@ extern "C" __global__ __aicore__ void tilexr_moonep_dispatch_urma_kernel(
 #endif
         if (selectedRouteCount != processedRouteCount) {
             dfxFlags |= TileXRMoonEp::kDispatchDfxRouteCountMismatch;
+        }
+        if (upstreamStatus == TileXRMoonEp::kDispatchStatusSuccess &&
+            !ClearDispatchZeroFillRanges(currentScratch, zeroFillRanges,
+                zeroFillRangeCount, destinationCapacity, rowBytes,
+                blockIdx, blockNum, relayLocal)) {
+            dfxFlags |= TileXRMoonEp::kDispatchDfxInvalidConfig;
         }
         const int32_t localExecutionStatus = StatusFromDfxFlags(dfxFlags);
         DispatchPublishFirstStatus(planStatus, localExecutionStatus);

@@ -12,6 +12,7 @@ struct DispatchUrmaLaunchParams {
     GM_ADDR commArgs = nullptr;
     const void *input = nullptr;
     const int32_t *dst = nullptr;
+    const int32_t *zeroFillRanges = nullptr;
     void *workspace = nullptr;
     void *output = nullptr;
     int32_t *planStatus = nullptr;
@@ -20,6 +21,7 @@ struct DispatchUrmaLaunchParams {
     DispatchPayloadMode mode = DispatchPayloadMode::Hidden;
     DispatchPeerMode peerMode = DispatchPeerMode::Legacy;
     uint32_t groupWidth = kDispatchDefaultGroupWidth;
+    int64_t zeroFillRangeCount = 0;
     MoonEpDispatchUrmaLayout layout {};
 };
 
