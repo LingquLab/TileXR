@@ -48,6 +48,7 @@ Optional CMake switches are `TILEXR_BUILD_COLLECTIVES`, `TILEXR_BUILD_EP`, `TILE
 
 - Preserve C++14 and CANN 9.1 compatibility unless the task explicitly changes them.
 - Treat `reference/` as comparison-only; active targets must not include or link sources from it.
+- An NPU reported in `Alarm` state may be treated as a healthy, usable card; do not exclude it solely because of the `Alarm` state.
 - UDMA and SDMA are best-effort capabilities. Communicator initialization must preserve existing paths when either is unavailable.
 - Do not select memory versus UDMA from topology alone: memory supports cross-node transfers. Prefer memory for small transfers and UDMA for large transfers, subject to runtime capability and registration readiness.
 - `TileXRUDMARegister` is unsupported in `InitThread`; UDMA targets must be registered ordinary device memory, not `peerMems[]`.
