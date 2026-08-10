@@ -161,6 +161,7 @@ int TileXRComm::InitUDMA()
     options.rankSize = rankSize_;
     options.localRankSize = static_cast<int>(localRankSize_);
     options.devId = devId_;
+    options.sharedQpDomain = sharedQpDomain_;
     options.nonPinRegistration =
         physicalInfo_.chipName == ChipName::CHIP_950 ||
         physicalInfo_.chipName == ChipName::CHIP_950PR;
@@ -184,10 +185,15 @@ int TileXRComm::ApplyUDMACommArgsState(const TileXRUDMACommArgsState &state)
 
     if (state.available && state.infoDev != nullptr) {
         commArgs_.extraFlag |= ExtraFlag::UDMA;
+        if (state.sharedQp) {
+            commArgs_.extraFlag |= ExtraFlag::UDMA_SHARED_QP;
+        } else {
+            commArgs_.extraFlag &= ~ExtraFlag::UDMA_SHARED_QP;
+        }
         commArgs_.udmaInfoPtr = state.infoDev;
         commArgs_.udmaRegistryPtr = state.registryDev;
     } else {
-        commArgs_.extraFlag &= ~ExtraFlag::UDMA;
+        commArgs_.extraFlag &= ~(ExtraFlag::UDMA | ExtraFlag::UDMA_SHARED_QP);
         commArgs_.udmaInfoPtr = nullptr;
         commArgs_.udmaRegistryPtr = nullptr;
     }
@@ -1106,8 +1112,10 @@ TileXRComm::TileXRComm(int rank, int rankSize) : rank_(rank), rankSize_(rankSize
 {
 }
 
-TileXRComm::TileXRComm(int rank, int rankSize, int commDomain, int bufferSize)
-    : rank_(rank), rankSize_(rankSize), commDomain_(commDomain), bufferSize_(bufferSize)
+TileXRComm::TileXRComm(int rank, int rankSize, int commDomain, int bufferSize,
+    bool sharedQpDomain)
+    : rank_(rank), rankSize_(rankSize), commDomain_(commDomain),
+      bufferSize_(bufferSize), sharedQpDomain_(sharedQpDomain)
 {
 }
 

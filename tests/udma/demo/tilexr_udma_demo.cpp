@@ -33,18 +33,16 @@ extern void launch_tilexr_udma_put_signal(
 namespace {
 constexpr int32_t kDefaultElementsPerRank = 16;
 constexpr uint64_t kSignalValue = 1000;
-constexpr size_t kDebugWords = 16;
 constexpr int32_t kDemoMagic = 0x5444554d;
 constexpr size_t kDebugQpCountWord = 5;
 constexpr size_t kDebugQpStatusBaseWord = 6;
 constexpr int kDefaultCommPort = 10067;
 constexpr int kDemoBarrierPortOffset = 97;
 constexpr size_t kDefaultRegisteredBytes = 2097152;
-constexpr uint32_t kMaxExpectedQpCount = 8;
+constexpr uint32_t kMaxExpectedQpCount = 32;
+constexpr size_t kDebugWords = kDebugQpStatusBaseWord + kMaxExpectedQpCount;
 constexpr int kConnectRetryCount = 500;
 constexpr int kConnectRetrySleepMs = 10;
-static_assert(kDebugQpStatusBaseWord + kMaxExpectedQpCount <= kDebugWords,
-    "UDMA demo debug buffer must hold every per-QP status");
 
 struct BarrierEndpoint {
     std::string host;
@@ -575,6 +573,7 @@ int main(int argc, char** argv)
     uint64_t timedItersValue = 0;
     uint64_t perfBarrierRankBaseValue = 0;
     uint64_t perfBarrierSizeValue = 0;
+    uint64_t sharedQpDomainValue = 0;
     if (!ParseUnsignedEnv("TILEXR_DEMO_EXPECT_UDMA", 1, 1, expectUdmaValue) ||
         !ParseUnsignedEnv("TILEXR_DEMO_EXPECT_QP_COUNT", expectUdmaValue == 0 ? 0 : 1,
             kMaxExpectedQpCount, expectedQpCountValue) ||
@@ -588,7 +587,9 @@ int main(int argc, char** argv)
         !ParseUnsignedEnv("TILEXR_DEMO_PERF_BARRIER_RANK_BASE", 0,
             static_cast<uint64_t>(std::numeric_limits<int>::max()), perfBarrierRankBaseValue) ||
         !ParseUnsignedEnv("TILEXR_DEMO_PERF_BARRIER_SIZE", 0,
-            static_cast<uint64_t>(std::numeric_limits<int>::max()), perfBarrierSizeValue)) {
+            static_cast<uint64_t>(std::numeric_limits<int>::max()), perfBarrierSizeValue) ||
+        !ParseUnsignedEnv("TILEXR_DEMO_SHARED_QP_DOMAIN", 0,
+            static_cast<uint64_t>(std::numeric_limits<int>::max()), sharedQpDomainValue)) {
         return 2;
     }
     const bool expectUdma = expectUdmaValue != 0;
@@ -599,6 +600,7 @@ int main(int argc, char** argv)
     const uint32_t timedIters = static_cast<uint32_t>(timedItersValue);
     const int perfBarrierRankBase = static_cast<int>(perfBarrierRankBaseValue);
     const int perfBarrierSize = static_cast<int>(perfBarrierSizeValue);
+    const int sharedQpDomain = static_cast<int>(sharedQpDomainValue);
     if (timedIters == 0U) {
         std::cerr << "ERROR: TILEXR_DEMO_TIMED_ITERS must be positive" << std::endl;
         return 2;
@@ -647,7 +649,7 @@ int main(int argc, char** argv)
               << " npuCount=" << npuCount << " firstNpu=" << firstNpu << std::endl;
     std::cout << "[rank " << rank << "] validation: expectUDMA=" << expectUdma
               << " expectedQpCount=" << expectedQpCount << " registeredBytes=" << registeredBytes
-              << " reregister=" << reregister << std::endl;
+              << " reregister=" << reregister << " sharedQpDomain=" << sharedQpDomain << std::endl;
     std::cout << "[rank " << rank << "] perf: enabled=" << perfEnabled
               << " warmupIters=" << warmupIters << " timedIters=" << timedIters
               << " barrierEnabled=" << perfBarrierEnabled;
@@ -681,7 +683,11 @@ int main(int argc, char** argv)
         return 1;
     }
 
-    if (!CheckTileXR(rank, "TileXRCommInitRankLocal", TileXRCommInitRankLocal(rankSize, rank, &comm))) {
+    const int commInitRet = sharedQpDomain == 0 ?
+        TileXRCommInitRankLocal(rankSize, rank, &comm) :
+        TileXRCommInitRankWithSharedQpDomain(sharedQpDomain, rankSize, rank, &comm);
+    if (!CheckTileXR(rank, sharedQpDomain == 0 ? "TileXRCommInitRankLocal" :
+            "TileXRCommInitRankWithSharedQpDomain", commInitRet)) {
         Cleanup(comm, stream, registeredMemory, debug, rank, deviceId);
         return 1;
     }
@@ -700,9 +706,12 @@ int main(int argc, char** argv)
     uint32_t actualQpCount = std::numeric_limits<uint32_t>::max();
     int qpCountRet = TileXRUDMAGetQpCount(comm, &actualQpCount);
     const bool udmaFlagPublished = (commArgsHost->extraFlag & TileXR::ExtraFlag::UDMA) != 0;
+    const bool sharedQpFlagPublished =
+        (commArgsHost->extraFlag & TileXR::ExtraFlag::UDMA_SHARED_QP) != 0;
     const bool udmaInfoPublished = commArgsHost->udmaInfoPtr != nullptr;
     std::cout << "[rank " << rank << "] TileXRUDMAGetQpCount ret=" << qpCountRet
               << " qpCount=" << actualQpCount << " flagPublished=" << udmaFlagPublished
+              << " sharedQpFlagPublished=" << sharedQpFlagPublished
               << " infoPublished=" << udmaInfoPublished << std::endl;
 
     if (!expectUdma) {
@@ -723,6 +732,12 @@ int main(int argc, char** argv)
     if (!udmaFlagPublished || !udmaInfoPublished) {
         std::cerr << "[rank " << rank << "] ERROR: TileXR UDMA is not enabled. "
                   << "Check A5/Ascend950 hardware support, CANN/driver setup, and LD_LIBRARY_PATH." << std::endl;
+        Cleanup(comm, stream, registeredMemory, debug, rank, deviceId);
+        return 1;
+    }
+    if ((sharedQpDomain != 0) != sharedQpFlagPublished) {
+        std::cerr << "[rank " << rank << "] ERROR: shared-QP capability mismatch, requested="
+                  << (sharedQpDomain != 0) << " published=" << sharedQpFlagPublished << std::endl;
         Cleanup(comm, stream, registeredMemory, debug, rank, deviceId);
         return 1;
     }

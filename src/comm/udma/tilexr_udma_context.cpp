@@ -133,6 +133,7 @@ TileXRUDMACommArgsState TileXRUDMAContext::GetCommArgsState() const
 {
     TileXRUDMACommArgsState state {};
     state.available = IsAvailable();
+    state.sharedQp = state.available && transport_->UsesSharedQps();
     state.infoDev = state.available ? udmaInfoDev_ : nullptr;
     state.registryDev = state.available && lifecycle_ == Lifecycle::MemoryReady ? udmaRegistryDev_ : nullptr;
     return state;
@@ -243,6 +244,7 @@ int TileXRUDMAContext::RegisterMemory(GM_ADDR localPtr, size_t bytes, TileXRUDMA
 
     TileXRUDMACommArgsState nextState {};
     nextState.available = true;
+    nextState.sharedQp = transport_->UsesSharedQps();
     nextState.infoDev = transport_->GetPreparedUDMAInfoDev();
     nextState.registryDev = nextRegistryDev;
     const int localPublishStatus = nextState.infoDev == nullptr
@@ -319,6 +321,7 @@ int TileXRUDMAContext::UnregisterMemory(TileXRUDMAMemHandle handle)
 
     TileXRUDMACommArgsState hiddenState {};
     hiddenState.available = true;
+    hiddenState.sharedQp = transport_->UsesSharedQps();
     hiddenState.infoDev = transport_->GetBaseUDMAInfoDev();
     hiddenState.registryDev = nullptr;
     int ret = hiddenState.infoDev == nullptr
@@ -382,7 +385,12 @@ int TileXRUDMAContext::LoadAndAgreeQpConfig(UDMAQpConfig& config) const
     }
 
     std::string parseError;
-    const UDMAQpConfigParseStatus parseStatus = LoadUDMAQpConfigFromEnv(config, &parseError);
+    UDMAQpConfigParseStatus parseStatus = UDMAQpConfigParseStatus::SUCCESS;
+    if (options_.sharedQpDomain) {
+        config = BuildUDMASharedQpConfig();
+    } else {
+        parseStatus = LoadUDMAQpConfigFromEnv(config, &parseError);
+    }
     if (parseStatus != UDMAQpConfigParseStatus::SUCCESS) {
         TILEXR_LOG(ERROR) << "TileXR UDMA QP route specification is invalid: " << parseError;
     }
@@ -507,6 +515,8 @@ void TileXRUDMAContext::EnterCleanupPending(const char* reason)
     TILEXR_LOG(ERROR) << "TileXR UDMA entered cleanup-pending state: " << reason;
     TileXRUDMACommArgsState hiddenState {};
     hiddenState.available = IsAvailable();
+    hiddenState.sharedQp = hiddenState.available && transport_ != nullptr &&
+        transport_->UsesSharedQps();
     hiddenState.infoDev = hiddenState.available ? udmaInfoDev_ : nullptr;
     hiddenState.registryDev = nullptr;
     const int ret = ApplyCommArgsState(hiddenState);

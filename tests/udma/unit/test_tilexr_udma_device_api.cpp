@@ -163,7 +163,13 @@ void TestQpDiscoveryAndRemoteMemLayout()
     Check(!UDMAQpValid(&fixture.args, 0U), "disabled UDMA has no valid QP");
 
     fixture.args.extraFlag = ExtraFlag::UDMA;
-    for (uint32_t invalidQpNum : {0U, 9U, UINT32_MAX}) {
+    fixture.info.qpNum = TILEXR_UDMA_DEVICE_MAX_QP_COUNT;
+    Check(UDMAQpCount(&fixture.args) == TILEXR_UDMA_DEVICE_MAX_QP_COUNT,
+        "maximum device QP count is accepted");
+    Check(UDMAQpValid(&fixture.args, TILEXR_UDMA_DEVICE_MAX_QP_COUNT - 1U),
+        "last QP at the device limit is valid");
+
+    for (uint32_t invalidQpNum : {0U, TILEXR_UDMA_DEVICE_MAX_QP_COUNT + 1U, UINT32_MAX}) {
         fixture.info.qpNum = invalidQpNum;
         Check(UDMAQpCount(&fixture.args) == 0U, "invalid device QP count is rejected");
         Check(!UDMAQpValid(&fixture.args, 0U), "invalid device QP count has no valid QP");

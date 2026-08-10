@@ -215,6 +215,29 @@ void TestCommInitHonorsUDMAOptOut()
     CheckContains(path, text, "TileXR UDMA disabled by TILEXR_ENABLE_UDMA");
 }
 
+void TestSharedQpDomainIsExplicit()
+{
+    const std::string apiPath = "src/include/tilexr_api.h";
+    const std::string wrapperPath = "src/comm/comm_wrap.cpp";
+    const std::string commPath = "src/comm/tilexr_comm.cpp";
+    const std::string contextPath = "src/comm/udma/tilexr_udma_context.cpp";
+    const auto apiText = ReadFile(apiPath);
+    const auto wrapperText = ReadFile(wrapperPath);
+    const auto commText = ReadFile(commPath);
+    const auto contextText = ReadFile(contextPath);
+
+    CheckContains(apiPath, apiText, "TileXRCommInitRankWithSharedQpDomain");
+    CheckContains(wrapperPath, wrapperText,
+        "commDomain, minBufferSize, rankSize, rank, true, comm");
+    CheckContains(wrapperPath, wrapperText,
+        "commDomain, bufferSize, rankSize, rank, false, comm");
+    CheckContains(commPath, commText,
+        "options.sharedQpDomain = sharedQpDomain_");
+    CheckContains(contextPath, contextText,
+        "if (options_.sharedQpDomain)");
+    CheckNotContains(apiPath, apiText, "TILEXR_UDMA_SHARED_QP");
+}
+
 void TestChipMapCoversObservedAscend950Variants()
 {
     const std::string path = "src/comm/tilexr_internal.cpp";
@@ -256,6 +279,7 @@ int main()
     TestRootCMakeRespectsAscendDriverOverride();
     TestCommBuildIncludesProfilingHeaders();
     TestCommInitHonorsUDMAOptOut();
+    TestSharedQpDomainIsExplicit();
     TestChipMapCoversObservedAscend950Variants();
 
     if (g_failures != 0) {

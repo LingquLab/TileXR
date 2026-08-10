@@ -13,6 +13,7 @@ constexpr uintptr_t kDispatchKernelSignature = UINT64_C(0x4D4F4F002000);
 constexpr uintptr_t kCombineKernelSignature = UINT64_C(0x4D4F4F003000);
 constexpr uintptr_t kPrefetchWeightKernelSignature = UINT64_C(0x4D4F4F004000);
 constexpr uintptr_t kReduceGradKernelSignature = UINT64_C(0x4D4F4F005000);
+constexpr uintptr_t kCombineV2KernelSignature = UINT64_C(0x4D4F4F007000);
 
 struct KernelRegistrationState {
     std::mutex mutex;

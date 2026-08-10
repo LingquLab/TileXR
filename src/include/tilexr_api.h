@@ -33,6 +33,9 @@ int TileXRCommInitRankWithCustDomainSize(int commDomain, int bufferSize, int ran
 
 int TileXRCommInitRankWithDomain(int commDomain, int rankSize, int rank, TileXRCommPtr *comm);
 
+// Use a commDomain distinct from every concurrently active non-shared communicator.
+int TileXRCommInitRankWithSharedQpDomain(int commDomain, int rankSize, int rank, TileXRCommPtr *comm);
+
 int TileXRGetCommArgsDev(TileXRCommPtr comm, GM_ADDR &commArgsPtr);
 
 int TileXRGetCommArgsHost(TileXRCommPtr comm, TileXR::CommArgs *&commArgsPtr);

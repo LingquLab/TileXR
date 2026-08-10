@@ -60,10 +60,12 @@ public:
     size_t GetRegisteredMemoryBytes() const;
     bool HasMemoryCleanupPending() const;
     uint32_t GetQpCount() const;
+    bool UsesSharedQps() const;
 
 private:
     struct PerEidState;
     struct PerPeerQpState;
+    struct SharedQpState;
     struct RegistrationState;
 
     int AgreeInitStatus(int localStatus) const;
@@ -76,9 +78,11 @@ private:
     int CreateQueues();
     int CreateLegacyQueues();
     int CreateExplicitQueues();
+    int CreateSharedQueues();
     int ImportQueues();
     int ImportLegacyQueues();
     int ImportExplicitQueues();
+    int ImportSharedQueues();
     int RefreshUDMAInfo();
     int BuildQueueImages(std::vector<UDMAWQCtx>& sq, std::vector<UDMAWQCtx>& rq,
         std::vector<UDMACQCtx>& scq, std::vector<UDMACQCtx>& rcq,
@@ -100,6 +104,8 @@ private:
     const PerPeerQpState* GetPeerQpState(int peer, uint32_t qpIdx) const;
     PerPeerQpState* GetPeerQpState(int peer, uint32_t qpIdx);
     const PerPeerQpState* GetFallbackQpState(uint32_t qpIdx) const;
+    const SharedQpState* GetSharedQpState(uint32_t qpIdx) const;
+    SharedQpState* GetSharedQpState(uint32_t qpIdx);
     size_t RouteIndex(int peer, uint32_t qpIdx) const;
 
     TileXRHccpLoader loader_;
@@ -117,6 +123,7 @@ private:
     std::map<int, uint32_t> peerRemoteEid_;
     std::map<uint32_t, PerEidState> states_;
     std::vector<std::unique_ptr<PerPeerQpState>> peerQpStates_;
+    std::vector<std::unique_ptr<SharedQpState>> sharedQpStates_;
     std::vector<uint32_t> localRouteByPeerQp_;
     std::vector<uint32_t> remoteRouteByPeerQp_;
     std::map<uint32_t, HccpEid> localEidByEid_;
@@ -129,6 +136,7 @@ private:
     uint32_t udmaInfoSize_ = 0;
     uint32_t qpCount_ = 1;
     bool explicitConfig_ = false;
+    bool sharedQp_ = false;
 };
 
 } // namespace TileXR

@@ -97,6 +97,7 @@ struct ExtraFlag {
     static constexpr uint32_t TOPO_PCIE = 1 << 9;
     static constexpr uint32_t UDMA = 1 << 10;
     static constexpr uint32_t SDMA = 1 << 11;
+    static constexpr uint32_t UDMA_SHARED_QP = 1 << 12;
     static constexpr uint32_t ATOMIC_ENABLE = 1 << 15;  // 表示在910A5算子中启用atomic实现
     static constexpr uint32_t IS_GREATER_THAN_40_AIV = 1 << 16;
     static constexpr uint32_t PERF_CYCLE_A5 = 1 << 17;

@@ -40,6 +40,18 @@ bool ParseOk(const char* text, TileXR::UDMAQpConfig& config)
     return true;
 }
 
+std::string RepeatedRouteSpec(uint32_t count)
+{
+    std::string result;
+    for (uint32_t i = 0; i < count; ++i) {
+        if (!result.empty()) {
+            result += ',';
+        }
+        result += i < 16U ? "port_count:6" : "port_count:2";
+    }
+    return result;
+}
+
 void ExpectInvalid(const char* text)
 {
     TileXR::UDMAQpConfig config;
@@ -89,10 +101,11 @@ void TestNormalizedRules()
     CHECK_EQ(config.routes.size(), static_cast<size_t>(3));
     CHECK_EQ(config.routes[0].value, config.routes[1].value);
 
-    CHECK_TRUE(ParseOk(
-        "topology,port_count:1,port_count:2,port_count:3,"
-        "port_count:4,port_count:5,port_count:6,port_count:7", config));
-    CHECK_EQ(TileXR::UDMAQpConfigQpCount(config), 8U);
+    const std::string routes32 = RepeatedRouteSpec(32U);
+    CHECK_TRUE(ParseOk(routes32.c_str(), config));
+    CHECK_EQ(TileXR::UDMAQpConfigQpCount(config), 32U);
+    CHECK_EQ(config.routes[15].value, 6U);
+    CHECK_EQ(config.routes[16].value, 2U);
 }
 
 void TestInvalidRules()
@@ -110,8 +123,8 @@ void TestInvalidRules()
     ExpectInvalid("port_count: 2");
     ExpectInvalid("port_count:2x");
     ExpectInvalid("port_count:4294967296");
-    ExpectInvalid(
-        "topology,topology,topology,topology,topology,topology,topology,topology,topology");
+    const std::string routes33 = RepeatedRouteSpec(33U);
+    ExpectInvalid(routes33.c_str());
 }
 
 void TestWireDescriptor()
@@ -139,7 +152,7 @@ void TestWireDescriptor()
     CHECK_TRUE(TileXR::UDMAQpConfigWireDescriptorsEqual(wire, wire));
 
     auto invalid = wire;
-    invalid.qpCount = 9;
+    invalid.qpCount = 33;
     CHECK_TRUE(!TileXR::ValidateUDMAQpConfigWireDescriptor(invalid));
     invalid = wire;
     invalid.routeRules[7].selectorKind = 99;
@@ -160,10 +173,55 @@ void TestEnvironmentConfig()
     CHECK_EQ(TileXR::LoadUDMAQpConfigFromEnv(config, &error),
              TileXR::UDMAQpConfigParseStatus::SUCCESS);
     CHECK_TRUE(config.explicitConfig);
+    CHECK_TRUE(!config.sharedQp);
     CHECK_EQ(config.routes.size(), static_cast<size_t>(2));
     CHECK_EQ(config.routes[0].value, 6U);
     CHECK_EQ(config.routes[1].selector, TileXR::UDMAQpRouteSelector::TOPOLOGY);
+
     CHECK_EQ(unsetenv(TileXR::TILEXR_UDMA_QP_ROUTE_SPEC_ENV), 0);
+}
+
+void TestSharedQpDomainConfig()
+{
+    TileXR::UDMAQpConfig config = TileXR::BuildUDMASharedQpConfig();
+    CHECK_TRUE(config.explicitConfig);
+    CHECK_TRUE(config.sharedQp);
+    CHECK_TRUE(TileXR::ValidateUDMASharedQpConfig(config));
+    CHECK_EQ(config.routes.size(),
+             static_cast<size_t>(TileXR::TILEXR_UDMA_MAX_QP_COUNT));
+    for (uint32_t qp = 0; qp < TileXR::TILEXR_UDMA_MAX_QP_COUNT; ++qp) {
+        CHECK_EQ(config.routes[qp].selector,
+                 TileXR::UDMAQpRouteSelector::PORT_COUNT);
+        CHECK_EQ(config.routes[qp].value,
+                 qp < TileXR::TILEXR_UDMA_SHARED_QP_SIX_PORT_COUNT ?
+                     TileXR::TILEXR_UDMA_SHARED_QP_SIX_PORT_VALUE :
+                     TileXR::TILEXR_UDMA_SHARED_QP_TWO_PORT_VALUE);
+    }
+
+    const auto wire = TileXR::BuildUDMAQpConfigWireDescriptor(
+        config, TileXR::UDMAQpConfigParseStatus::SUCCESS);
+    CHECK_EQ(wire.qpCount, TileXR::TILEXR_UDMA_MAX_QP_COUNT);
+    CHECK_EQ(wire.sharedQp, 1U);
+    CHECK_TRUE(TileXR::ValidateUDMAQpConfigWireDescriptor(wire));
+    TileXR::UDMAQpConfig roundTrip;
+    CHECK_TRUE(TileXR::UDMAQpConfigFromWireDescriptor(wire, roundTrip));
+    CHECK_TRUE(roundTrip.sharedQp);
+    CHECK_EQ(roundTrip.routes.size(), config.routes.size());
+
+    auto invalidConfig = config;
+    invalidConfig.routes.pop_back();
+    CHECK_TRUE(!TileXR::ValidateUDMASharedQpConfig(invalidConfig));
+    invalidConfig = config;
+    invalidConfig.routes[0].selector = TileXR::UDMAQpRouteSelector::TOPOLOGY;
+    CHECK_TRUE(!TileXR::ValidateUDMASharedQpConfig(invalidConfig));
+
+    auto invalidWire = wire;
+    invalidWire.qpCount = TileXR::TILEXR_UDMA_MAX_QP_COUNT - 1U;
+    CHECK_TRUE(!TileXR::ValidateUDMAQpConfigWireDescriptor(invalidWire));
+    invalidWire = wire;
+    invalidWire.routeRules[16].selectorValue =
+        TileXR::TILEXR_UDMA_SHARED_QP_SIX_PORT_VALUE;
+    CHECK_TRUE(!TileXR::ValidateUDMAQpConfigWireDescriptor(invalidWire));
 }
 
 } // namespace
@@ -175,6 +233,7 @@ int main()
     TestInvalidRules();
     TestWireDescriptor();
     TestEnvironmentConfig();
+    TestSharedQpDomainConfig();
     if (g_failures != 0) {
         std::cerr << g_failures << " UDMA route configuration checks failed" << std::endl;
         return 1;

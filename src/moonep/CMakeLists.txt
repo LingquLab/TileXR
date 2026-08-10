@@ -21,6 +21,9 @@ endif()
 if(NOT TARGET tilexr-moonep-combine)
     add_subdirectory(combine)
 endif()
+if(NOT TARGET tilexr-moonep-combine-v2)
+    add_subdirectory(combine_v2)
+endif()
 if(NOT TARGET tilexr-moonep-prefetch-weight)
     add_subdirectory(prefetch_weight)
 endif()
@@ -48,6 +51,7 @@ target_link_libraries(tilexr-moonep PRIVATE
     tilexr-moonep-planner
     tilexr-moonep-dispatch
     tilexr-moonep-combine
+    tilexr-moonep-combine-v2
     tilexr-moonep-prefetch-weight
     tilexr-moonep-reduce-grad
     tile-comm

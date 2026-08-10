@@ -23,6 +23,7 @@ class TileXRUDMATransport;
 
 struct TileXRUDMACommArgsState {
     bool available = false;
+    bool sharedQp = false;
     GM_ADDR infoDev = nullptr;
     GM_ADDR registryDev = nullptr;
 };
@@ -34,6 +35,7 @@ struct TileXRUDMAContextOptions {
     int rankSize = 0;
     int localRankSize = 0;
     int devId = 0;
+    bool sharedQpDomain = false;
     bool threadMode = false;
     bool nonPinRegistration = false;
     TileXRSockExchange* exchange = nullptr;

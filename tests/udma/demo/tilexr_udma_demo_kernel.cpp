@@ -7,7 +7,7 @@
 #include "tilexr_udma.h"
 
 constexpr int32_t TILEXR_UDMA_DEMO_MAGIC = 0x5444554d; // "TDUM"
-constexpr uint32_t TILEXR_UDMA_DEMO_MAX_QPS = 8U;
+constexpr uint32_t TILEXR_UDMA_DEMO_MAX_QPS = TileXR::TILEXR_UDMA_DEVICE_MAX_QP_COUNT;
 constexpr uint32_t TILEXR_UDMA_DEMO_QP_COUNT_WORD = 5U;
 constexpr uint32_t TILEXR_UDMA_DEMO_QP_STATUS_BASE_WORD = 6U;
 

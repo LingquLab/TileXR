@@ -95,6 +95,9 @@ int main()
     CheckContains(demoPath, demo, "wall_stop_ns=");
     CheckContains(demoPath, demo, "wall_tx_GBps=");
     CheckContains(demoPath, demo, "TILEXR_DEMO_PERF_BARRIER_ADDR");
+    CheckContains(demoPath, demo, "TILEXR_DEMO_SHARED_QP_DOMAIN");
+    CheckContains(demoPath, demo, "TileXRCommInitRankWithSharedQpDomain");
+    CheckContains(demoPath, demo, "ExtraFlag::UDMA_SHARED_QP");
     CheckContains(demoPath, demo, "all communicators ready for timed perf");
     CheckContains(demoPath, demo, "TILEXR_UDMA_PERF");
     CheckContains(demoPath, demo, "kDefaultRegisteredBytes = 2097152");

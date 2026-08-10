@@ -21,6 +21,45 @@
 using namespace std;
 using namespace TileXR;
 
+namespace {
+
+int CommInitRankWithDomainConfig(int commDomain, int bufferSize,
+    int rankSize, int rank, bool sharedQpDomain, TileXRCommPtr *comm)
+{
+    TILEXR_LOG(INFO) << "using tilexr c++ api! rank" << rank
+                     << ", shared QP domain: " << sharedQpDomain;
+    if (comm == nullptr) {
+        TILEXR_LOG(ERROR) << "tilexr comm ptr is nullptr!";
+        return TILEXR_ERROR_INTERNAL;
+    }
+    *comm = nullptr;
+
+    constexpr int minBufferSize = TILEXR_COMM_BUFFER_SIZE;
+    if (bufferSize < minBufferSize) {
+        TILEXR_LOG(ERROR) << "tilexr comm buffer size " << bufferSize
+                          << " MBytes should not be less than "
+                          << minBufferSize << " MBytes!";
+        return TILEXR_ERROR_INTERNAL;
+    }
+
+    unique_ptr<TileXRComm> c(new (std::nothrow) TileXRComm(
+        rank, rankSize, commDomain, bufferSize, sharedQpDomain));
+    if (c == nullptr) {
+        TILEXR_LOG(ERROR) << "TileXRComm create failed. rank : " << rank
+                          << ", rankSize : " << rankSize;
+        return TILEXR_ERROR_INTERNAL;
+    }
+    const int ret = c->Init();
+    if (ret != TILEXR_SUCCESS) {
+        TILEXR_LOG(ERROR) << "tilexr init failed! ret: " << ret;
+        return ret;
+    }
+    *comm = c.release();
+    return TILEXR_SUCCESS;
+}
+
+} // namespace
+
 int TileXRCommInitRankLocal(int rankSize, int rank, TileXRCommPtr *comm)
 {
     TILEXR_LOG(INFO) << "using tilexr c++ api! rank" << rank;
@@ -81,38 +120,22 @@ int TileXRCommInitRank(TileXRUniqueId commId, int rankSize, int rank, TileXRComm
 
 int TileXRCommInitRankWithCustDomainSize(int commDomain, int bufferSize, int rankSize, int rank, TileXRCommPtr *comm)
 {
-    TILEXR_LOG(INFO) << "using tilexr c++ api! rank" << rank;
-    if (comm == nullptr) {
-        TILEXR_LOG(ERROR) << "tilexr comm ptr is nullptr!";
-        return TILEXR_ERROR_INTERNAL;
-    }
-    *comm = nullptr;
-
-    constexpr int minBufferSize = TILEXR_COMM_BUFFER_SIZE;
-    if (bufferSize < minBufferSize) {
-        TILEXR_LOG(ERROR) << "tilexr comm buffer size " << bufferSize << " MBytes should not be less than " <<
-            minBufferSize << " MBytes!";
-        return TILEXR_ERROR_INTERNAL;
-    }
-
-    unique_ptr<TileXRComm> c(new (std::nothrow) TileXRComm(rank, rankSize, commDomain, bufferSize));
-    if (c == nullptr) {
-        TILEXR_LOG(ERROR) << "TileXRComm create failed. rank : " << rank << ", rankSize : " << rankSize;
-        return TILEXR_ERROR_INTERNAL;
-    }
-    int ret = c->Init();
-    if (ret != TILEXR_SUCCESS) {
-        TILEXR_LOG(ERROR) << "tilexr init failed! ret: " << ret;
-        return ret;
-    }
-    *comm = c.release();
-    return TILEXR_SUCCESS;
+    return CommInitRankWithDomainConfig(
+        commDomain, bufferSize, rankSize, rank, false, comm);
 }
 
 int TileXRCommInitRankWithDomain(int commDomain, int rankSize, int rank, TileXRCommPtr *comm)
 {
     constexpr int minBufferSize = TILEXR_COMM_BUFFER_SIZE;
     return TileXRCommInitRankWithCustDomainSize(commDomain, minBufferSize, rankSize, rank, comm);
+}
+
+int TileXRCommInitRankWithSharedQpDomain(
+    int commDomain, int rankSize, int rank, TileXRCommPtr *comm)
+{
+    constexpr int minBufferSize = TILEXR_COMM_BUFFER_SIZE;
+    return CommInitRankWithDomainConfig(
+        commDomain, minBufferSize, rankSize, rank, true, comm);
 }
 
 int TileXRGetCommArgsDev(TileXRCommPtr comm, GM_ADDR &commArgsPtr)

@@ -285,11 +285,17 @@ void TestUDMAMultiQpHostTransportContract()
     const std::string contextPath = "src/comm/udma/tilexr_udma_context.cpp";
     const auto context = ReadFile(contextPath);
     CheckContains(contextPath, context, "LoadUDMAQpConfigFromEnv(config, &parseError)");
+    CheckContains(contextPath, context, "if (options_.sharedQpDomain)");
+    CheckContains(contextPath, context, "config = BuildUDMASharedQpConfig();");
     CheckContains(contextPath, context,
                   "BuildUDMAQpConfigWireDescriptor(config, parseStatus)");
     CheckContains(contextPath, context,
                   "options_.exchange->AllGather(&localDescriptor, 1, allDescriptors.data())");
     CheckContains(contextPath, context, "UDMAQpConfigWireDescriptorsEqual(");
+    CheckContains(contextPath, context,
+                  "nextState.sharedQp = transport_->UsesSharedQps();");
+    CheckContains(contextPath, context,
+                  "hiddenState.sharedQp = transport_->UsesSharedQps();");
     CheckContains(contextPath, context, "const int transportAllocationStatus = AgreeStatus(");
     CheckContains(contextPath, context,
                   "TileXRUDMATransport allocation failed on at least one rank");
@@ -300,7 +306,9 @@ void TestUDMAMultiQpHostTransportContract()
     const std::string headerPath = "src/comm/udma/tilexr_udma_transport.h";
     const auto header = ReadFile(headerPath);
     CheckContains(headerPath, header, "struct PerPeerQpState;");
+    CheckContains(headerPath, header, "struct SharedQpState;");
     CheckContains(headerPath, header, "std::vector<std::unique_ptr<PerPeerQpState>> peerQpStates_");
+    CheckContains(headerPath, header, "std::vector<std::unique_ptr<SharedQpState>> sharedQpStates_");
     CheckContains(headerPath, header, "std::vector<uint32_t> localRouteByPeerQp_");
     CheckContains(headerPath, header, "std::vector<uint32_t> remoteRouteByPeerQp_");
 
@@ -314,6 +322,19 @@ void TestUDMAMultiQpHostTransportContract()
     CheckContains(transportPath, transport,
                   "peerQpStates_[index].reset(new (std::nothrow) PerPeerQpState())");
     CheckContains(transportPath, transport,
+                  "sharedQpStates_[qpIdx].reset(new (std::nothrow) SharedQpState())");
+    CheckContains(transportPath, transport, "int TileXRUDMATransport::ImportSharedQueues()");
+    CheckContains(transportPath, transport,
+                  "state.remoteQpHandles.assign(options_.rankSize, nullptr)");
+    CheckContains(transportPath, transport,
+                  "if ((!sharedQp_ && sameNode) ||");
+    CheckContains(transportPath, transport,
+                  "ValidateUDMASharedQpConfig(");
+    CheckContains(transportPath, transport,
+                  "if (remoteClean && state.qpHandle != nullptr)");
+    CheckContains(transportPath, transport,
+                  "const bool hardwareClean = remoteClean && state.qpHandle == nullptr");
+    CheckContains(transportPath, transport,
                   "registration.remoteMemHandles.count(importKey) == 0");
     CheckContains(transportPath, transport,
                   "BuildUDMAInfoImage(reinterpret_cast<uintptr_t>(registration.infoDev), qpCount_");
@@ -326,6 +347,16 @@ void TestUDMAMultiQpHostTransportContract()
                   "options_.exchange->AllGather(&eidCount_, 1, allEidCounts.data())");
     CheckNotContains(transportPath, transport, "MoonEP");
     CheckNotContains(transportPath, transport, "moonep");
+
+    const std::string configPath = "src/comm/udma/tilexr_udma_config.h";
+    const auto config = ReadFile(configPath);
+    CheckContains(configPath, config, "TILEXR_UDMA_MAX_QP_COUNT = 32");
+    CheckContains(configPath, config, "BuildUDMASharedQpConfig");
+    CheckNotContains(configPath, config, "TILEXR_UDMA_SHARED_QP_ENV");
+
+    const std::string commArgsPath = "src/include/comm_args.h";
+    const auto commArgs = ReadFile(commArgsPath);
+    CheckContains(commArgsPath, commArgs, "UDMA_SHARED_QP");
 
     const std::string typesPath = "src/include/tilexr_udma_types.h";
     const auto types = ReadFile(typesPath);
@@ -391,8 +422,8 @@ void TestUDMADevicePostingContract()
     const std::string transportPath = "src/comm/udma/tilexr_udma_transport.cpp";
     const auto transport = ReadFile(transportPath);
     const std::string inOrderQp = "qpAttr.ub.jfsFlag.value = 2;";
-    if (CountOccurrences(transport, inOrderQp) != 2U) {
-        std::cerr << "both UDMA QP creation paths must disable out-of-order completion"
+    if (CountOccurrences(transport, inOrderQp) != 3U) {
+        std::cerr << "all UDMA QP creation paths must disable out-of-order completion"
                   << std::endl;
         ++g_failures;
     }
