@@ -88,10 +88,28 @@ def dimensions() -> MoonEPDimensions:
     return MoonEPDimensions(0, 2, 2, 1, 4, 2, 1, 4, 2)
 
 
-def test_reference_collective_backend_uses_gloo_only_when_oversubscribed() -> None:
-    assert _reference_process_group_backend({"TILEXR_OVERSUBSCRIBED": "0"}) == "hccl"
-    assert _reference_process_group_backend({"TILEXR_OVERSUBSCRIBED": "1"}) == "gloo"
-    assert _reference_process_group_backend({}) == "hccl"
+def test_reference_collective_backend_keeps_hccl_for_native_reference() -> None:
+    assert (
+        _reference_process_group_backend(
+            {"TILEXR_OVERSUBSCRIBED": "0"}, mode="reference"
+        )
+        == "hccl"
+    )
+    assert (
+        _reference_process_group_backend(
+            {"TILEXR_OVERSUBSCRIBED": "1"}, mode="reference"
+        )
+        == "gloo"
+    )
+
+
+def test_reference_collective_backend_uses_gloo_for_correctness() -> None:
+    assert (
+        _reference_process_group_backend(
+            {"TILEXR_OVERSUBSCRIBED": "0"}, mode="correctness"
+        )
+        == "gloo"
+    )
 
 
 def test_gloo_collective_stages_npu_tensors_through_cpu() -> None:

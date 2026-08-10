@@ -181,11 +181,14 @@ class TileXRMoonEPBackend:
                 ).copy_(source)
         packed = self.buffer.prefetch_weight(entry.native, self._registered_projections)
         for name in ("gate", "up", "down"):
-            getattr(projections, name).narrow(
-                0, d.expert_count, d.experts_per_rank
-            ).copy_(getattr(packed, name).narrow(
-                0, d.experts_per_rank, d.experts_per_rank
-            ))
+            destination = getattr(projections, name)
+            source = getattr(packed, name)
+            for slot in range(d.prefetch_slots):
+                if int(plan.experts_to_copy[d.rank][slot].item()) < 0:
+                    continue
+                destination.narrow(0, d.expert_count + slot, 1).copy_(
+                    source.narrow(0, d.experts_per_rank + slot, 1)
+                )
         return PrefetchResult(projections)
 
     def combine(
@@ -230,6 +233,19 @@ class TileXRMoonEPBackend:
             dtype=self.torch.float32,
             reduce_buffers=True,
         )
+        d = self.dimensions
+        full_tail = {
+            name: tensor.narrow(0, d.expert_count, d.prefetch_slots).clone()
+            for name, tensor in full_grads.items()
+        }
+        unused_reduce = {
+            name: {
+                slot: tensor[d.rank][slot].clone()
+                for slot in range(d.prefetch_slots)
+                if int(plan.experts_to_copy[d.rank][slot].item()) < 0
+            }
+            for name, tensor in reduce_buffers.items()
+        }
         self.buffer.reduce_grad(
             entry.native,
             full_gate_grad=full_grads.gate,
@@ -239,6 +255,13 @@ class TileXRMoonEPBackend:
             up_reduce_buffer=reduce_buffers.up,
             down_reduce_buffer=reduce_buffers.down,
         )
+        # These restores follow the native launch on the same current stream.
+        for name, tensor in full_grads.items():
+            tensor.narrow(0, d.expert_count, d.prefetch_slots).copy_(full_tail[name])
+        for name, slots in unused_reduce.items():
+            tensor = getattr(reduce_buffers, name)
+            for slot, snapshot in slots.items():
+                tensor[d.rank][slot].copy_(snapshot)
         return ReduceGradResult(full_grads, reduce_buffers)
 
     def synchronize(self) -> None:

@@ -38,7 +38,7 @@ public:
     __aicore__ inline void Init(GM_ADDR commArgs, GM_ADDR expertsToCopy,
         GM_ADDR gate, GM_ADDR up, GM_ADDR down, GM_ADDR workspace, GM_ADDR status,
         int64_t rank, int64_t rankSize, int64_t expertCount,
-        int64_t expertsPerRank, int64_t controlBlockCount,
+        int64_t expertsPerRank, int64_t prefetchSlots, int64_t controlBlockCount,
         uint64_t gateRowElements, uint64_t upRowElements,
         uint64_t downRowElements, uint64_t gateRowBytes, uint64_t upRowBytes,
         uint64_t downRowBytes, uint32_t gateTransport, uint32_t upTransport,
@@ -60,6 +60,7 @@ public:
         rankSize_ = rankSize;
         expertCount_ = expertCount;
         expertsPerRank_ = expertsPerRank;
+        prefetchSlots_ = prefetchSlots;
         controlBlockCount_ = controlBlockCount;
         rowElements_[kReduceGradGate] = gateRowElements;
         rowElements_[kReduceGradUp] = upRowElements;
@@ -100,7 +101,8 @@ public:
     {
         if (args_ == nullptr || expertsToCopy_ == nullptr || status_ == nullptr ||
             rank_ < 0 || rank_ >= rankSize_ || rankSize_ <= 0 || expertCount_ <= 0 ||
-            expertsPerRank_ <= 0 || controlBlockCount_ < 0 ||
+            expertsPerRank_ <= 0 || prefetchSlots_ <= 0 ||
+            prefetchSlots_ > expertsPerRank_ || controlBlockCount_ < 0 ||
             (rankSize_ > 1 && controlBlockCount_ == 0) || receiverCount_ <= 0 ||
             magic_ <= 0 ||
             (UsesUdma() && (udmaQpCount_ == 0 ||
@@ -124,7 +126,7 @@ private:
 
     __aicore__ inline int32_t ExpertForSlot(int64_t sourceRank, int64_t slot) const
     {
-        return expertsToCopy_[sourceRank * expertsPerRank_ + slot];
+        return expertsToCopy_[sourceRank * prefetchSlots_ + slot];
     }
 
     __aicore__ inline int64_t OwnerForExpert(int32_t expert) const
@@ -149,7 +151,7 @@ private:
         uint64_t ordinal = 1;
         for (uint32_t q = 0; q < projection; ++q) {
             if (transports_[q] == kReduceGradTransportUdma) {
-                ordinal += static_cast<uint64_t>(expertsPerRank_) * ChunkCount(q);
+                ordinal += static_cast<uint64_t>(prefetchSlots_) * ChunkCount(q);
             }
         }
         ordinal += static_cast<uint64_t>(slot) * ChunkCount(projection) + chunk;
@@ -183,7 +185,7 @@ private:
         int64_t slot, uint64_t chunk) const
     {
         const uint64_t stage = chunk & 1U;
-        const uint64_t slotIndex = static_cast<uint64_t>(source * expertsPerRank_ + slot);
+        const uint64_t slotIndex = static_cast<uint64_t>(source * prefetchSlots_ + slot);
         return args_->peerMems[owner] + TileXR::IPC_DATA_OFFSET +
             peerRecordBaseOffset_ + stage * peerHalfBytes_ +
             slotIndex * peerSlotStrideBytes_;
@@ -511,7 +513,7 @@ private:
                 SetStatus(kReduceGradDeviceInvalidState);
                 return false;
             }
-            for (int64_t slot = 0; slot < expertsPerRank_; ++slot) {
+            for (int64_t slot = 0; slot < prefetchSlots_; ++slot) {
                 const int32_t expert = ExpertForSlot(rank_, slot);
                 if (expert < 0) {
                     continue;
@@ -577,7 +579,7 @@ private:
             const uint64_t chunkBytes = ChunkBytes(projection);
             const uint64_t chunks = ChunkCount(projection);
             for (int64_t source = 0; source < rankSize_; ++source) {
-                for (int64_t slot = 0; slot < expertsPerRank_; ++slot) {
+                for (int64_t slot = 0; slot < prefetchSlots_; ++slot) {
                     const int32_t expert = ExpertForSlot(source, slot);
                     if (expert < 0) {
                         continue;
@@ -643,6 +645,7 @@ private:
     int64_t rankSize_{0};
     int64_t expertCount_{0};
     int64_t expertsPerRank_{0};
+    int64_t prefetchSlots_{0};
     int64_t controlBlockCount_{0};
     int64_t blockIdx_{0};
     int64_t blockCount_{0};
@@ -676,7 +679,8 @@ private:
 extern "C" __global__ __aicore__ void tilexr_moonep_reduce_grad_kernel(
     GM_ADDR commArgs, GM_ADDR expertsToCopy, GM_ADDR gate, GM_ADDR up, GM_ADDR down,
     GM_ADDR workspace, GM_ADDR status, int64_t rank, int64_t rankSize,
-    int64_t expertCount, int64_t expertsPerRank, int64_t controlBlockCount,
+    int64_t expertCount, int64_t expertsPerRank, int64_t prefetchSlots,
+    int64_t controlBlockCount,
     uint64_t gateRowElements, uint64_t upRowElements, uint64_t downRowElements,
     uint64_t gateRowBytes, uint64_t upRowBytes, uint64_t downRowBytes,
     uint32_t gateTransport, uint32_t upTransport, uint32_t downTransport,
@@ -689,7 +693,7 @@ extern "C" __global__ __aicore__ void tilexr_moonep_reduce_grad_kernel(
     if constexpr (g_coreType == AscendC::AIV) {
         TileXRMoonEp::Kernel::ReduceGradKernel op;
         op.Init(commArgs, expertsToCopy, gate, up, down, workspace, status, rank,
-            rankSize, expertCount, expertsPerRank, controlBlockCount,
+            rankSize, expertCount, expertsPerRank, prefetchSlots, controlBlockCount,
             gateRowElements, upRowElements, downRowElements, gateRowBytes,
             upRowBytes, downRowBytes, gateTransport, upTransport, downTransport,
             udmaQpCount,

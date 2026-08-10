@@ -216,6 +216,9 @@ int main()
         "extern \"C\" __global__ __aicore__ void tilexr_moonep_prefetch_weight_kernel");
     Contains("prefetch kernel", prefetchKernel, "expertsToCopy");
     Contains("prefetch kernel", prefetchKernel, "expertsPerRank_ + slot");
+    Contains("prefetch kernel", prefetchKernel,
+        "rank_) * prefetchSlots_");
+    Contains("prefetch kernel", prefetchKernel, "slot < prefetchSlots_");
     Contains("prefetch kernel", prefetchKernel, "localExpert");
     Excludes("prefetch kernel", prefetchKernel, "e_ + slot");
     Contains("prefetch kernel", prefetchKernel, "UDMAGetNbiOnQp");
@@ -238,6 +241,11 @@ int main()
     Contains("reduce kernel", reduceKernel,
         "controlIndex += controlBlockCount_");
     Contains("reduce kernel", reduceKernel, "RunReceiver");
+    Contains("reduce kernel", reduceKernel,
+        "sourceRank * prefetchSlots_ + slot");
+    Contains("reduce kernel", reduceKernel,
+        "source * prefetchSlots_ + slot");
+    Contains("reduce kernel", reduceKernel, "slot < prefetchSlots_");
     Excludes("reduce kernel", reduceKernel, "reduceBuffers_");
     Contains("reduce kernel", reduceKernel, "DataAsFlagSend");
     Contains("reduce kernel", reduceKernel, "DataAsFlagCheckBatchCleared");

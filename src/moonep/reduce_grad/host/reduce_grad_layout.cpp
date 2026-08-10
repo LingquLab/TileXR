@@ -99,13 +99,15 @@ uint64_t TileXRMoonEpReduceGradPeerWindowBytes()
 }
 
 int TileXRMoonEpBuildReduceGradLayout(int64_t rank, int64_t rankSize,
-    int64_t expertCount, const uint64_t rowElements[kReduceGradProjectionCount],
+    int64_t expertCount, int64_t prefetchSlots,
+    const uint64_t rowElements[kReduceGradProjectionCount],
     uint64_t peerWindowBytes, uint64_t requestedUdmaChunkBytes,
     ReduceGradLayout *out)
 {
     if (out == nullptr || rowElements == nullptr || rankSize <= 0 ||
         rankSize > TileXR::TILEXR_MAX_RANK_SIZE || rank < 0 || rank >= rankSize ||
-        expertCount <= 0 || expertCount % rankSize != 0) {
+        expertCount <= 0 || expertCount % rankSize != 0 || prefetchSlots <= 0 ||
+        prefetchSlots > expertCount / rankSize) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
 
@@ -114,6 +116,7 @@ int TileXRMoonEpBuildReduceGradLayout(int64_t rank, int64_t rankSize,
     next.rankSize = rankSize;
     next.expertCount = expertCount;
     next.expertsPerRank = expertCount / rankSize;
+    next.prefetchSlots = prefetchSlots;
     next.peerWindowBytes = peerWindowBytes;
 
     bool usesPeer = false;
@@ -150,7 +153,11 @@ int TileXRMoonEpBuildReduceGradLayout(int64_t rank, int64_t rankSize,
         next.peerHalfBytes = AlignDown(
             (peerWindowBytes - kReduceGradStateWindowBytes) / 2,
             kReduceGradDataAsFlagRecordBytes);
-        const uint64_t incomingSlots = static_cast<uint64_t>(expertCount);
+        uint64_t incomingSlots = 0;
+        if (!CheckedMul(static_cast<uint64_t>(rankSize),
+                static_cast<uint64_t>(prefetchSlots), &incomingSlots)) {
+            return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
+        }
         next.peerSlotStrideBytes = AlignDown(next.peerHalfBytes / incomingSlots,
             kReduceGradDataAsFlagRecordBytes);
         if (next.peerSlotStrideBytes < kReduceGradDataAsFlagRecordBytes ||
@@ -214,7 +221,7 @@ int TileXRMoonEpBuildReduceGradLayout(int64_t rank, int64_t rankSize,
         uint64_t sequenceCount = 0;
         for (uint32_t q = 0; q < kReduceGradProjectionCount; ++q) {
             uint64_t projectionSequences = 0;
-            if (!CheckedMul(static_cast<uint64_t>(next.expertsPerRank),
+            if (!CheckedMul(static_cast<uint64_t>(next.prefetchSlots),
                     next.udmaChunkCounts[q], &projectionSequences) ||
                 !CheckedAdd(sequenceCount, projectionSequences, &sequenceCount)) {
                 return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
@@ -227,6 +234,18 @@ int TileXRMoonEpBuildReduceGradLayout(int64_t rank, int64_t rankSize,
 
     *out = next;
     return TileXR::TILEXR_SUCCESS;
+}
+
+int TileXRMoonEpBuildReduceGradLayout(int64_t rank, int64_t rankSize,
+    int64_t expertCount, const uint64_t rowElements[kReduceGradProjectionCount],
+    uint64_t peerWindowBytes, uint64_t requestedUdmaChunkBytes,
+    ReduceGradLayout *out)
+{
+    const int64_t prefetchSlots = rankSize > 0 && expertCount > 0 ?
+        expertCount / rankSize : 0;
+    return TileXRMoonEpBuildReduceGradLayout(rank, rankSize, expertCount,
+        prefetchSlots, rowElements, peerWindowBytes,
+        requestedUdmaChunkBytes, out);
 }
 
 } // namespace TileXRMoonEp

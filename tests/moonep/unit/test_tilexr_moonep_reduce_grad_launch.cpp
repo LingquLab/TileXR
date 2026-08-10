@@ -92,6 +92,7 @@ void TestLaunch()
     layout.rankSize = 4;
     layout.expertCount = 8;
     layout.expertsPerRank = 2;
+    layout.prefetchSlots = 1;
     layout.controlBlockCount = 3;
     layout.blockDim = 64;
     layout.rowElements[0] = 10;
@@ -164,7 +165,8 @@ void TestLaunch()
         g_args.workspace == params.workspace && g_args.status == status.data,
         "ReduceGrad pointer args ABI mismatch");
     Check(g_args.rank == 1 && g_args.rankSize == 4 && g_args.expertCount == 8 &&
-        g_args.expertsPerRank == 2 && g_args.controlBlockCount == 3,
+        g_args.expertsPerRank == 2 && g_args.prefetchSlots == 1 &&
+        g_args.controlBlockCount == 3,
         "ReduceGrad rank args ABI mismatch");
     Check(g_args.gateRowElements == 10 && g_args.upRowElements == 20 &&
         g_args.downRowElements == 30 && g_args.gateRowBytes == 40 &&

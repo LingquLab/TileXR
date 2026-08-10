@@ -24,7 +24,8 @@ correctness modes:
   local device IDs.
 - `--mode correctness` runs the reference and the built-in TileXR candidate backend after
   independently cloning every stage input, then compares every defined output and
-  required/forbidden mutation before proceeding.
+  required/forbidden mutation before proceeding. It uses Gloo with CPU staging so the
+  reference collective can coexist with TileXR registered UDMA.
 
 The default candidate is `tools.moonep.tilexr_backend:create_backend`. It requires an
 installed five-stage native TileXR library, `transport_correctness_valid=true`, exact
@@ -72,6 +73,31 @@ Run the CPU/fake-backend suite without NPU hardware:
 ```bash
 python -m pytest tests/moonep/python -q
 ```
+
+## Public API NPU E2E Tool
+
+`test_npu_e2e.py` is a standalone base test tool for the upstream-compatible
+`Buffer` API. Run it directly from the repository root; it launches eight local
+distributed workers with the current Python interpreter:
+
+```bash
+python tools/moonep/test_npu_e2e.py
+```
+
+Use `--nproc-per-node`, `--master-addr`, and `--master-port` to override the
+single-node launcher defaults. The same file can run as a worker script under an
+existing launcher:
+
+```bash
+torchrun --nproc-per-node=8 tools/moonep/test_npu_e2e.py
+```
+
+The tool requires `torch`, `torch_npu`, the `tilexr_moonep` integration package,
+an installed TileXR runtime, and at least five ranks for its duplicate-free remote
+PrefetchWeight route. It exercises Planning, Dispatch, PrefetchWeight, ExpertForward,
+Combine, and ReduceGrad through the public API. Combine intentionally remains on
+`TileXRMoonEpCombineV1`; the standalone Combine V2 implementation is not selected by
+this E2E tool yet.
 
 Run the Torch-NPU/HCCL reference on four devices:
 

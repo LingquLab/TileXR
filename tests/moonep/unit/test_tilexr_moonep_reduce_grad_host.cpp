@@ -183,6 +183,36 @@ void TestPeerOnly()
         "peer-only query and launch must not query UDMA QPs");
 }
 
+void TestCompactPrefetchSlots()
+{
+    Reset();
+    TileXRMoonEpPlanV1 plan = Plan();
+    plan.b = 1;
+    TileXRMoonEpTensorV1 gate = Gradient(
+        reinterpret_cast<void *>(UINTPTR_C(0x400000)), 64);
+    TileXRMoonEpTensorV1 up = Gradient(
+        reinterpret_cast<void *>(UINTPTR_C(0x500000)), 128);
+    TileXRMoonEpTensorV1 down = Gradient(
+        reinterpret_cast<void *>(UINTPTR_C(0x600000)), 256);
+    TileXRMoonEpTensorV1 *gradients[] = {&gate, &up, &down};
+    for (TileXRMoonEpTensorV1 *tensor : gradients) {
+        tensor->shape[0] = plan.e + plan.b;
+        tensor->elementCount = static_cast<uint64_t>(tensor->shape[0]) *
+            static_cast<uint64_t>(tensor->shape[1]);
+    }
+    TileXRMoonEpTensorV1 status = Status();
+    const auto info = Query(&plan, &gate, &up, &down, TileXR::TILEXR_SUCCESS);
+    Check(info.workspaceBytes == 0,
+        "compact-B peer query must not request UDMA workspace");
+
+    auto args = Args(&plan, &gate, &up, &down, &status);
+    aclrtStream stream = reinterpret_cast<aclrtStream>(UINTPTR_C(0x700000));
+    CheckStatus("compact-B peer launch", TileXRMoonEpReduceGradV2(&args, stream),
+        TileXR::TILEXR_SUCCESS);
+    Check(g_launchCalls == 1,
+        "compact-B ReduceGrad must launch exactly once");
+}
+
 void TestMixedUdma()
 {
     Reset();
@@ -455,6 +485,7 @@ int TileXRMoonEpLaunchReduceGradKernel(const ReduceGradParams &,
 int main()
 {
     TestPeerOnly();
+    TestCompactPrefetchSlots();
     TestMixedUdma();
     TestSingleRankLargeRowsDoNotRequireUdma();
     TestLargeRankWorkspaceQuery();

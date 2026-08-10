@@ -261,6 +261,10 @@ void TestPaddingAndDuplicatePlan()
     CHECK_TRUE(ranges[1][0] == 0 && ranges[1][1] == 0);
     CHECK_TRUE(ranges[2][0] == 9 && ranges[2][1] == 3);
     CHECK_TRUE(ranges[3][0] == 13 && ranges[3][1] == 3);
+    CheckStatus("padded layout physical tail", TileXRMoonEp::Reference::BuildPaddedLayout(
+        {3, 0, 5, 1}, 4, 20, &cu, &ranges), 0);
+    CHECK_TRUE(cu == std::vector<int32_t>({4, 4, 12, 16}));
+    CHECK_TRUE(ranges[3][0] == 13 && ranges[3][1] == 7);
     CHECK_TRUE(TileXRMoonEp::Reference::BuildPaddedLayout(
         {3, 5}, 4, 8, &cu, &ranges) != 0);
 

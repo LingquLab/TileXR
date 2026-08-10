@@ -729,9 +729,10 @@ private:
                 layout.SetValue(cuSeqlensOffset + group, end);
                 zeroRange.SetValue(0, 0);
                 zeroRange.SetValue(1, 0);
-                if (end > realEnd) {
+                const int64_t zeroEnd = group + 1 == groupCount ? nvS_ : end;
+                if (zeroEnd > realEnd) {
                     zeroRange.SetValue(0, realEnd);
-                    zeroRange.SetValue(1, end - realEnd);
+                    zeroRange.SetValue(1, zeroEnd - realEnd);
                 }
                 CopyUbToGm(zeroFillRangesGm_[group * 2], zeroRange, 2);
             }

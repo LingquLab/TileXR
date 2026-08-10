@@ -36,6 +36,7 @@ int TileXRMoonEpLaunchPrefetchWeightKernel(
         int64_t rank;
         int64_t rankSize;
         int64_t expertsPerRank;
+        int64_t prefetchSlots;
         uint64_t qpNum;
     } args {
         context.devArgs,
@@ -48,10 +49,11 @@ int TileXRMoonEpLaunchPrefetchWeightKernel(
         context.layout.gate.rowBytes, context.layout.up.rowBytes,
         context.layout.down.rowBytes, context.layout.rank,
         context.layout.rankSize, context.layout.expertsPerRank,
+        context.layout.prefetchSlots,
         context.layout.qpNum
     };
 
-    static_assert(sizeof(PrefetchWeightKernelArgs) == 16U * sizeof(uint64_t),
+    static_assert(sizeof(PrefetchWeightKernelArgs) == 17U * sizeof(uint64_t),
         "PrefetchWeight kernel argument ABI changed");
 
     return LaunchRegisteredMoonEpKernel(g_prefetchWeightRegistration,

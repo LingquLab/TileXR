@@ -448,7 +448,7 @@ if (( node_count > 1 )); then
 fi
 echo "Devices: ${ASCEND_RT_VISIBLE_DEVICES}"
 if [[ "${mode}" != "benchmark" ]]; then
-    if (( ranks_per_device == 2 )); then
+    if [[ "${mode}" == "correctness" ]] || (( ranks_per_device == 2 )); then
         echo "Reference collective: Gloo (CPU staging)"
     else
         echo "Reference collective: HCCL"

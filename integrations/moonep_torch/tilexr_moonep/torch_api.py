@@ -287,8 +287,8 @@ class TileXRMoonEPContext:
             raise ValueError("token_padding must be positive")
         if self.prefetch_slots is None:
             self.prefetch_slots = self.experts_per_rank
-        if self.prefetch_slots != self.experts_per_rank:
-            raise ValueError("PR93 PrefetchWeight requires prefetch_slots == experts_per_rank")
+        if self.prefetch_slots <= 0 or self.prefetch_slots > self.experts_per_rank:
+            raise ValueError("prefetch_slots must be in [1, E/R]")
         if self.nv_s > 2**63 - 1:
             raise OverflowError("NvS exceeds signed int64")
         if self.planner_group_size * self.nv_s > 2**31:
@@ -755,7 +755,7 @@ class TileXRMoonEPBuffer:
             )
         hidden_nvsh = self._empty((c.nv_s, c.hidden_size), c.dtype)
         route_weights_nvs = (
-            self._empty((c.nv_s,), self._torch.float32)
+            self._zeros((c.nv_s,), self._torch.float32)
             if route_weights_sk is not None
             else None
         )

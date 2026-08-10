@@ -39,7 +39,7 @@ bool ValidatePlan(const TileXRMoonEpPlanV1 *plan, const TileXR::CommArgs &commAr
         plan->k <= 0 || plan->n % plan->k != 0 || plan->e <= 0 || plan->b <= 0 ||
         plan->r <= 0 || plan->r > TileXR::TILEXR_MAX_RANK_SIZE ||
         plan->r != commArgs.rankSize || plan->e % plan->r != 0 ||
-        plan->b != plan->e / plan->r || plan->expertsToCopy == nullptr) {
+        plan->b > plan->e / plan->r || plan->expertsToCopy == nullptr) {
         return false;
     }
     uint64_t capacity = 0;
@@ -218,8 +218,8 @@ int TileXRMoonEpPrepareReduceGradLayout(TileXRCommPtr comm,
             return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
         }
     }
-    ret = TileXRMoonEpBuildReduceGradLayout(commArgs->rank, commArgs->rankSize, plan->e,
-        rowElements, TileXRMoonEpReduceGradPeerWindowBytes(),
+    ret = TileXRMoonEpBuildReduceGradLayout(commArgs->rank, commArgs->rankSize,
+        plan->e, plan->b, rowElements, TileXRMoonEpReduceGradPeerWindowBytes(),
         requestedUdmaChunkBytes, layout);
     if (ret != TileXR::TILEXR_SUCCESS ||
         !UsesTransport(*layout, TILEXR_MOONEP_REDUCE_GRAD_TRANSPORT_UDMA)) {

@@ -49,6 +49,7 @@ struct ReduceGradLayout {
     int64_t rankSize = 0;
     int64_t expertCount = 0;
     int64_t expertsPerRank = 0;
+    int64_t prefetchSlots = 0;
     int64_t blockDim = 0;
     int64_t controlBlockCount = 0;
 
@@ -84,6 +85,7 @@ struct ReduceGradKernelArgs {
     int64_t rankSize;
     int64_t expertCount;
     int64_t expertsPerRank;
+    int64_t prefetchSlots;
     int64_t controlBlockCount;
     uint64_t gateRowElements;
     uint64_t upRowElements;

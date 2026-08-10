@@ -132,6 +132,14 @@ class FakeTensor:
     def to(self, *, dtype):
         return FakeTensor(self.shape, dtype, self.device)
 
+    def clamp_min(self, value):
+        return FakeTensor(self.shape, self.dtype, self.device)
+
+    def index_select(self, dim, index):
+        if int(dim) != 0:
+            raise ValueError("FakeTensor.index_select supports only dim 0")
+        return FakeTensor((index.shape[0], *self.shape[1:]), self.dtype, self.device)
+
     def item(self):
         return self._item
 
@@ -169,12 +177,27 @@ class FakeTensor:
         return self
 
 
+class FakeEvent:
+    def __init__(self, stream):
+        self.stream = int(stream)
+        self.wait_calls = []
+
+    def wait(self, stream):
+        self.wait_calls.append(stream)
+
+    def synchronize(self):
+        self.wait_calls.append("synchronize")
+
+    def __eq__(self, other):
+        return other == ("event", self.stream)
+
+
 class FakeStream:
     def __init__(self, value=0xCAFE):
         self.npu_stream = int(value)
 
     def record_event(self):
-        return ("event", self.npu_stream)
+        return FakeEvent(self.npu_stream)
 
 
 class FakeNpu:
@@ -213,6 +236,12 @@ class FakeTorch:
         value = FakeTensor(shape, dtype, device)
         value._item = 0
         return value
+
+    @staticmethod
+    def where(condition, input, other):
+        if input.shape != other.shape:
+            raise ValueError("FakeTorch.where input shapes must match")
+        return FakeTensor(input.shape, input.dtype, input.device)
 
 
 class FakeRuntime:

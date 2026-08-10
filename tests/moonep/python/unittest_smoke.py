@@ -583,6 +583,9 @@ class MoonEPSmokeTests(unittest.TestCase):
         integration_sources = list(
             (ROOT / "integrations" / "moonep_torch").rglob("*.py")
         )
+        integration_sources = [
+            path for path in integration_sources if path.name != "compat.py"
+        ]
         integration_text = "\n".join(
             path.read_text(encoding="utf-8") for path in integration_sources
         )

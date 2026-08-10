@@ -235,9 +235,10 @@ class TorchNpuMoonEPBackend:
                 all_cu[destination, group] = padded_end
                 if count > 0:
                     expert_offsets[destination, expert] = start
-                    if padded > count:
-                        zero_fill[destination, group, 0] = end
-                        zero_fill[destination, group, 1] = padded - count
+                zero_end = d.nvsh if group + 1 == E + B else padded_end
+                if zero_end > end:
+                    zero_fill[destination, group, 0] = end
+                    zero_fill[destination, group, 1] = zero_end - end
                 start = padded_end
             if start > d.nvsh:
                 raise RuntimeError("Planning padded layout exceeds NvS")

@@ -48,7 +48,7 @@ def test_script_owns_and_validates_hccl_npu_port_range() -> None:
 
 
 def test_script_reports_oversubscribed_reference_collective() -> None:
-    assert 'if (( ranks_per_device == 2 )); then' in SCRIPT
+    assert 'if [[ "${mode}" == "correctness" ]] || (( ranks_per_device == 2 )); then' in SCRIPT
     assert 'echo "Reference collective: Gloo (CPU staging)"' in SCRIPT
     assert 'echo "Reference collective: HCCL"' in SCRIPT
 

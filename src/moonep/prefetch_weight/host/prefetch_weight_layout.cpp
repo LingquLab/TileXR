@@ -115,7 +115,7 @@ int TileXRMoonEpBuildPrefetchWeightLayout(
     if (args.flags != TILEXR_MOONEP_FLAG_NONE ||
         !Layout::PlanValid(commArgs.rank, commArgs.rankSize, args.plan, &s) ||
         args.plan->e > INT32_MAX || args.plan->b > INT32_MAX ||
-        args.plan->b != args.plan->e / args.plan->r ||
+        args.plan->b > args.plan->e / args.plan->r ||
         (commArgs.extraFlag & TileXR::ExtraFlag::UDMA) == 0 ||
         commArgs.udmaInfoPtr == nullptr || commArgs.udmaRegistryPtr == nullptr ||
         !TileXR::UDMARegistryValid(&registry, commArgs.rankSize) ||
@@ -125,16 +125,17 @@ int TileXRMoonEpBuildPrefetchWeightLayout(
     }
 
     PrefetchWeightLayout next {};
+    const int64_t expertsPerRank = args.plan->e / args.plan->r;
     uint64_t gateEnd = 0;
     uint64_t upEnd = 0;
     uint64_t downEnd = 0;
     if (args.gate == nullptr || args.up == nullptr || args.down == nullptr ||
         args.gate->dtype != args.up->dtype || args.gate->dtype != args.down->dtype ||
-        !BuildProjection(args.gate, args.plan->b, commArgs.rank,
+        !BuildProjection(args.gate, expertsPerRank, commArgs.rank,
             registry, &next.gate, &gateEnd) ||
-        !BuildProjection(args.up, args.plan->b, commArgs.rank,
+        !BuildProjection(args.up, expertsPerRank, commArgs.rank,
             registry, &next.up, &upEnd) ||
-        !BuildProjection(args.down, args.plan->b, commArgs.rank,
+        !BuildProjection(args.down, expertsPerRank, commArgs.rank,
             registry, &next.down, &downEnd) ||
         RangesOverlap(next.gate.registryOffset, gateEnd,
             next.up.registryOffset, upEnd) ||
@@ -154,7 +155,8 @@ int TileXRMoonEpBuildPrefetchWeightLayout(
     while (workers > static_cast<uint32_t>(args.plan->b)) {
         workers >>= 1;
     }
-    next.expertsPerRank = args.plan->b;
+    next.expertsPerRank = expertsPerRank;
+    next.prefetchSlots = args.plan->b;
     next.rank = commArgs.rank;
     next.rankSize = commArgs.rankSize;
     next.qpNum = qpNum;

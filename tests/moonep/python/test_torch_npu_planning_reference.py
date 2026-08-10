@@ -83,6 +83,33 @@ def test_planning_rejects_inconsistent_tokens_per_expert() -> None:
         backend.planning(case.topk_experts, bad)
 
 
+def test_planning_zero_fill_covers_e2e_physical_tail() -> None:
+    R, S, K, E = 8, 256, 4, 32
+    experts_per_rank = E // R
+    all_topk = tuple(
+        ((rank + token + route) % R) * experts_per_rank
+        + (token * K + route) % experts_per_rank
+        for rank in range(R)
+        for token in range(S)
+        for route in range(K)
+    )
+
+    plan = build_reference_plan(
+        rank=0,
+        rank_size=R,
+        tokens_per_rank=S,
+        topk=K,
+        expert_count=E,
+        prefetch_slots=2,
+        token_padding=128,
+        all_topk=all_topk,
+    )
+
+    assert plan.dispatched_capacity == 2040
+    assert plan.cu_seqlens[-1] == 1024
+    assert plan.zero_fill_ranges[-2:] == (1024, 1016)
+
+
 def test_two_rank_skewed_case_rebalances_owner_load_and_prefetches_remote_expert() -> None:
     small = [
         MoonEPDimensions(rank, 2, 2, 2, 4, 2, 1, 2, 2)

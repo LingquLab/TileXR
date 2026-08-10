@@ -18,7 +18,8 @@ public:
         GM_ADDR gate, GM_ADDR up, GM_ADDR down, GM_ADDR status,
         uint64_t gateOffset, uint64_t upOffset, uint64_t downOffset,
         uint32_t gateRowBytes, uint32_t upRowBytes, uint32_t downRowBytes,
-        int32_t rank, int32_t rankSize, int64_t expertsPerRank, uint32_t qpNum)
+        int32_t rank, int32_t rankSize, int64_t expertsPerRank,
+        int64_t prefetchSlots, uint32_t qpNum)
     {
         args_ = reinterpret_cast<__gm__ TileXR::CommArgs *>(commArgs);
         expertsToCopy_ = reinterpret_cast<__gm__ int32_t *>(expertsToCopy);
@@ -33,6 +34,7 @@ public:
         rowBytes_[2] = downRowBytes;
         status_ = reinterpret_cast<__gm__ uint32_t *>(status);
         expertsPerRank_ = expertsPerRank;
+        prefetchSlots_ = prefetchSlots;
         rank_ = rank;
         rankSize_ = rankSize;
         qpNum_ = qpNum;
@@ -88,7 +90,8 @@ private:
         if (args_ == nullptr || status_ == nullptr || expertsToCopy_ == nullptr ||
             projections_[0] == nullptr || projections_[1] == nullptr ||
             projections_[2] == nullptr || rowBytes_[0] == 0 || rowBytes_[1] == 0 ||
-            rowBytes_[2] == 0 || expertsPerRank_ <= 0 ||
+            rowBytes_[2] == 0 || expertsPerRank_ <= 0 || prefetchSlots_ <= 0 ||
+            prefetchSlots_ > expertsPerRank_ ||
             rank_ < 0 || rank_ >= rankSize_ ||
             rankSize_ > static_cast<int32_t>(kMaxTrackedRankSize) ||
             workerCount_ == 0 || worker_ >= workerCount_ || worker_ >= qpNum_ ||
@@ -119,8 +122,8 @@ private:
     {
         auto wqeScratch = wqeBuf_.Get<uint8_t>();
         const int64_t globalExpertCount = expertsPerRank_ * rankSize_;
-        const int64_t planRow = static_cast<int64_t>(rank_) * expertsPerRank_;
-        for (int64_t slot = static_cast<int64_t>(worker_); slot < expertsPerRank_;
+        const int64_t planRow = static_cast<int64_t>(rank_) * prefetchSlots_;
+        for (int64_t slot = static_cast<int64_t>(worker_); slot < prefetchSlots_;
              slot += static_cast<int64_t>(workerCount_)) {
             const int32_t expert = expertsToCopy_[planRow + slot];
             if (expert < 0) {
@@ -190,6 +193,7 @@ private:
     uint64_t offsets_[3] = {0, 0, 0};
     uint32_t rowBytes_[3] = {0, 0, 0};
     int64_t expertsPerRank_ = 0;
+    int64_t prefetchSlots_ = 0;
     int32_t rank_ = 0;
     int32_t rankSize_ = 0;
     uint32_t qpNum_ = 0;
@@ -206,13 +210,14 @@ extern "C" __global__ __aicore__ void tilexr_moonep_prefetch_weight_kernel(
     GM_ADDR commArgs, GM_ADDR expertsToCopy, GM_ADDR gate, GM_ADDR up, GM_ADDR down,
     GM_ADDR status, uint64_t gateOffset, uint64_t upOffset, uint64_t downOffset,
     uint64_t gateRowBytes, uint64_t upRowBytes, uint64_t downRowBytes,
-    int64_t rank, int64_t rankSize, int64_t expertsPerRank, uint64_t qpNum)
+    int64_t rank, int64_t rankSize, int64_t expertsPerRank,
+    int64_t prefetchSlots, uint64_t qpNum)
 {
     TileXRMoonEp::Kernel::PrefetchWeightKernel op;
     op.Init(commArgs, expertsToCopy, gate, up, down, status,
         gateOffset, upOffset, downOffset, static_cast<uint32_t>(gateRowBytes),
         static_cast<uint32_t>(upRowBytes), static_cast<uint32_t>(downRowBytes),
         static_cast<int32_t>(rank), static_cast<int32_t>(rankSize),
-        expertsPerRank, static_cast<uint32_t>(qpNum));
+        expertsPerRank, prefetchSlots, static_cast<uint32_t>(qpNum));
     op.Process();
 }

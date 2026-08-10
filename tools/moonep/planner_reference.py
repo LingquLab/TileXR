@@ -241,10 +241,20 @@ def build_reference_plan(
             if count > 0:
                 expert_offsets[destination][expert] = end
             padded = ((count + padding - 1) // padding) * padding if count > 0 else 0
-            if padded > count:
-                all_zero_fill[destination][group] = [end + count, padded - count]
-            end += padded
-            all_cu[destination][group] = end
+            real_end = end + count
+            padded_end = end + padded
+            zero_end = (
+                dispatched_capacity
+                if group + 1 == expert_count + slots
+                else padded_end
+            )
+            if zero_end > real_end:
+                all_zero_fill[destination][group] = [
+                    real_end,
+                    zero_end - real_end,
+                ]
+            end = padded_end
+            all_cu[destination][group] = padded_end
         if end > dispatched_capacity:
             raise RuntimeError("padded layout exceeds NvS")
 

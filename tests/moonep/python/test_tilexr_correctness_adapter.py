@@ -187,7 +187,7 @@ class TileXRCorrectnessAdapterTests(unittest.TestCase):
         self.assertIs(native_reduce.gate_reduce, reduce_buffers.gate)
         self.assertIs(native_reduce.down_reduce, reduce_buffers.down)
         for _, full_tensor in full_grads.items():
-            self.assertEqual(len(full_tensor.copy_calls), 1)
+            self.assertEqual(len(full_tensor.copy_calls), 2)
         for _, reduce_tensor in reduce_buffers.items():
             self.assertEqual(reduce_tensor.masked_fill_calls, [])
             self.assertEqual(len(reduce_tensor.zero_calls), 1)
@@ -197,6 +197,43 @@ class TileXRCorrectnessAdapterTests(unittest.TestCase):
         backend.close()
         lifecycle = [call[0] for call in runtime.calls]
         self.assertLess(lifecycle.index("udma_unregister"), lifecycle.index("close"))
+
+    def test_prefetch_preserves_unused_projection_slots(self):
+        torch, _, _, backend = make_backend()
+        plan = self._planned(backend, torch)
+        backend.synchronize()
+        projections = projection_tensors(torch)
+
+        with patch.object(FakeTensor, "item", return_value=-1):
+            backend.prefetch_weight(plan, projections)
+
+        for _, projection in projections.items():
+            self.assertEqual(projection.copy_calls, [])
+        backend.close()
+
+    def test_reduce_grad_restores_legacy_tail_and_unused_slots(self):
+        torch, _, _, backend = make_backend()
+        plan = self._planned(backend, torch)
+        backend.synchronize()
+        backend.dispatch(plan, tensor((4, 4), torch.bfloat16))
+        backend.synchronize()
+        full_grads = ProjectionTensors(
+            tensor((6, 4, 8), torch.float32),
+            tensor((6, 4, 8), torch.float32),
+            tensor((6, 8, 4), torch.float32),
+        )
+        reduce_buffers = projection_tensors(torch, reduce=True)
+
+        with patch.object(FakeTensor, "item", return_value=-1):
+            backend.reduce_grad(plan, full_grads, reduce_buffers)
+        backend.synchronize()
+
+        for _, full_tensor in full_grads.items():
+            self.assertEqual(len(full_tensor.copy_calls), 2)
+        for _, reduce_tensor in reduce_buffers.items():
+            self.assertEqual(len(reduce_tensor.copy_calls), dimensions().prefetch_slots)
+            self.assertEqual(len(reduce_tensor.zero_calls), 1)
+        backend.close()
 
     def test_unknown_or_cloned_plan_is_rejected(self):
         torch, runtime, _, backend = make_backend()

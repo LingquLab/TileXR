@@ -119,9 +119,12 @@ void TestLaunch()
     plan = Plan(); plan.b = 2; gate = Weight(0x100000, 4, 8);
     up = Weight(0x101000, 4, 16); down = Weight(0x102000, 8, 8);
     args = Args(&plan, &gate, &up, &down);
-    Status("prefetch compact B mismatch",
+    Status("prefetch compact B",
         TileXRMoonEp::TileXRMoonEpRunPrefetchWeightV1(&args, stream),
-        TILEXR_MOONEP_ERROR_INVALID_ARGUMENT);
+        TILEXR_MOONEP_SUCCESS);
+    Check(launchCalls == 1 && seenContext.layout.expertsPerRank == 4 &&
+        seenContext.layout.prefetchSlots == 2,
+        "prefetch compact B must preserve the owner expert stride");
     Reset(); plan = Plan(); gate = Weight(0x100000, 4, 8);
     up = Weight(0x101000, 4, 16); down = Weight(0x102000, 8, 8);
     args = Args(&plan, &gate, &up, &down); registryRet = -1;

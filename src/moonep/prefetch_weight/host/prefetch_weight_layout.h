@@ -22,6 +22,7 @@ struct PrefetchWeightLayout {
     PrefetchWeightProjectionLayout up {};
     PrefetchWeightProjectionLayout down {};
     int64_t expertsPerRank = 0;
+    int64_t prefetchSlots = 0;
     int32_t rank = 0;
     int32_t rankSize = 0;
     uint32_t qpNum = 0;

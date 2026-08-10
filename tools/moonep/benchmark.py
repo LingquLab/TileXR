@@ -35,7 +35,13 @@ from .torch_npu_backend import TorchNpuMoonEPBackend
 DEFAULT_CORRECTNESS_BACKEND = "tools.moonep.tilexr_backend:create_backend"
 
 
-def _reference_process_group_backend(environment: Mapping[str, str]) -> str:
+def _reference_process_group_backend(
+    environment: Mapping[str, str], *, mode: str
+) -> str:
+    if mode == "correctness":
+        return "gloo"
+    if mode != "reference":
+        raise ValueError(f"reference process group is invalid for mode {mode!r}")
     return "gloo" if environment.get("TILEXR_OVERSUBSCRIBED") == "1" else "hccl"
 
 
@@ -1084,7 +1090,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.mode != "benchmark" and int(os.environ.get("WORLD_SIZE", "1")) > 1:
         if not torch.distributed.is_initialized():
             torch.distributed.init_process_group(
-                backend=_reference_process_group_backend(os.environ),
+                backend=_reference_process_group_backend(os.environ, mode=args.mode),
                 rank=int(os.environ["RANK"]),
                 world_size=int(os.environ["WORLD_SIZE"]),
             )

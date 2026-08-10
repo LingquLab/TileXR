@@ -116,7 +116,8 @@ int BuildPaddedLayout(const std::vector<int32_t> &counts, int64_t tokenPadding,
     nextCu.reserve(counts.size());
     nextRanges.reserve(counts.size());
     uint64_t cursor = 0;
-    for (int32_t count : counts) {
+    for (size_t group = 0; group < counts.size(); ++group) {
+        const int32_t count = counts[group];
         if (count < 0) {
             return kInvalid;
         }
@@ -137,9 +138,11 @@ int BuildPaddedLayout(const std::vector<int32_t> &counts, int64_t tokenPadding,
             return kInvalid;
         }
         nextCu.push_back(static_cast<int32_t>(paddedEnd));
-        if (paddedEnd > realEnd) {
+        const uint64_t zeroEnd = group + 1 == counts.size() ?
+            static_cast<uint64_t>(nvS) : paddedEnd;
+        if (zeroEnd > realEnd) {
             nextRanges.push_back({{static_cast<int32_t>(realEnd),
-                static_cast<int32_t>(paddedEnd - realEnd)}});
+                static_cast<int32_t>(zeroEnd - realEnd)}});
         } else {
             nextRanges.push_back({{0, 0}});
         }
