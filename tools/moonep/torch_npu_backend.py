@@ -21,7 +21,7 @@ from .contracts import (
 
 
 class TorchDistributedCollective:
-    """Small HCCL adapter used only by the correctness reference backend."""
+    """Torch distributed adapter used only by the correctness reference backend."""
 
     def __init__(self, torch_module, dimensions: MoonEPDimensions, group=None):
         self.torch = torch_module
@@ -32,35 +32,50 @@ class TorchDistributedCollective:
         d = self.dimensions
         if d.world_size == 1:
             return tensor.unsqueeze(0)
-        dist = self.torch.distributed
-        if not dist.is_available() or not dist.is_initialized():
-            raise BackendUnavailableError(
-                "multi-rank Torch MoonEP reference requires an initialized HCCL process group"
-            )
-        if dist.get_world_size(self.group) != d.world_size:
-            raise ContractError("HCCL world size does not match MoonEP dimensions")
-        if dist.get_rank(self.group) != d.rank:
-            raise ContractError("HCCL rank does not match MoonEP dimensions")
-        backend = str(dist.get_backend(self.group)).lower()
-        if tensor.device.type == "npu" and backend != "hccl":
-            raise BackendUnavailableError(
-                f"NPU MoonEP reference requires HCCL, got process-group backend {backend}"
-            )
-        gathered = [self.torch.empty_like(tensor) for _ in range(d.world_size)]
-        dist.all_gather(gathered, tensor, group=self.group)
-        return self.torch.stack(gathered, dim=0)
+        dist, backend = self._process_group()
+        collective_tensor = tensor.cpu() if backend == "gloo" else tensor
+        gathered = [
+            self.torch.empty_like(collective_tensor) for _ in range(d.world_size)
+        ]
+        dist.all_gather(gathered, collective_tensor, group=self.group)
+        result = self.torch.stack(gathered, dim=0)
+        if backend == "gloo" and tensor.device.type != "cpu":
+            result = result.to(device=tensor.device)
+        return result
 
     def all_agree(self, passed: bool, *, device) -> bool:
         d = self.dimensions
         if d.world_size == 1:
             return bool(passed)
-        value = self.torch.tensor([int(passed)], dtype=self.torch.int32, device=device)
-        self.torch.distributed.all_reduce(
+        dist, backend = self._process_group()
+        collective_device = "cpu" if backend == "gloo" else device
+        value = self.torch.tensor(
+            [int(passed)], dtype=self.torch.int32, device=collective_device
+        )
+        dist.all_reduce(
             value,
-            op=self.torch.distributed.ReduceOp.MIN,
+            op=dist.ReduceOp.MIN,
             group=self.group,
         )
         return bool(int(value.item()))
+
+    def _process_group(self):
+        d = self.dimensions
+        dist = self.torch.distributed
+        if not dist.is_available() or not dist.is_initialized():
+            raise BackendUnavailableError(
+                "multi-rank Torch MoonEP reference requires an initialized process group"
+            )
+        if dist.get_world_size(self.group) != d.world_size:
+            raise ContractError("process-group world size does not match MoonEP dimensions")
+        if dist.get_rank(self.group) != d.rank:
+            raise ContractError("process-group rank does not match MoonEP dimensions")
+        backend = str(dist.get_backend(self.group)).lower()
+        if backend not in ("gloo", "hccl"):
+            raise BackendUnavailableError(
+                f"Torch MoonEP reference requires HCCL or Gloo, got {backend}"
+            )
+        return dist, backend
 
 
 class TorchNpuMoonEPBackend:

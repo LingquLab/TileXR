@@ -13,6 +13,7 @@ _DTYPES = {"bfloat16", "float16"}
 _ROUTING_PATTERNS = {
     "balanced",
     "skewed",
+    "unique_destinations",
     "duplicate_destinations",
     "imbalanced_duplicates",
 }
@@ -116,6 +117,17 @@ def select_cases(cases: Iterable[BenchmarkCase], case_ids: str | None) -> list[B
     if not case_ids:
         return values
     requested = [item.strip() for item in case_ids.split(",") if item.strip()]
+    resolved = []
+    for item in requested:
+        if re.fullmatch(r"[0-9]+", item):
+            number = int(item)
+            if number < 1 or number > len(values):
+                raise ValueError(
+                    f"case number must be in [1, {len(values)}]: {item}"
+                )
+            item = values[number - 1].case_id
+        resolved.append(item)
+    requested = resolved
     by_id = {item.case_id: item for item in values}
     missing = [item for item in requested if item not in by_id]
     if missing:

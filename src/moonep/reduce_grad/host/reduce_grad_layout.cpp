@@ -77,9 +77,12 @@ bool ResolveBlockDim(int64_t rankSize, bool, int64_t *blockDim,
 
     int64_t controls = 0;
     if (rankSize > 1) {
-        controls = rankSize - 1;
-        if (selected <= controls) {
+        if (selected < 2) {
             return false;
+        }
+        controls = rankSize - 1;
+        if (controls >= selected) {
+            controls = selected - 1;
         }
     }
     *blockDim = selected;

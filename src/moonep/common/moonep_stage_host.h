@@ -44,8 +44,7 @@ int PrepareStageHost(TileXRCommPtr comm, LaunchContext *context)
         *context = LaunchContext {};
         return TILEXR_MOONEP_ERROR_INVALID_ARGUMENT;
     }
-    if ((context->hostArgs->extraFlag & TileXR::ExtraFlag::TOPO_910A5) == 0 ||
-        context->hostArgs->localRankSize != context->hostArgs->rankSize) {
+    if ((context->hostArgs->extraFlag & TileXR::ExtraFlag::TOPO_910A5) == 0) {
         *context = LaunchContext {};
         return TILEXR_MOONEP_ERROR_NOT_SUPPORTED;
     }

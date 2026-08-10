@@ -233,6 +233,9 @@ class FakeRuntime:
         self.calls = []
         self.closed = False
         self.udma_handles = []
+        self._projection_handles = {}
+        self._active_udma_owner = None
+        self._active_projection = None
         self.capabilities = NativeCapabilities(
             abi_version=2,
             stage_mask=31,
@@ -282,9 +285,14 @@ class FakeRuntime:
         return 2 * 1024 * 1024, 2 * 1024 * 1024
 
     def register_dispatch_workspace(self, pointer, size):
+        self._active_udma_owner = "dispatch"
+        self._active_projection = None
         return 7 if self.world_size > 1 else None
 
     def unregister_dispatch_workspace(self, handle):
+        if handle is not None and self._active_udma_owner == "dispatch":
+            self.calls.append(("udma_unregister", int(handle)))
+            self._active_udma_owner = None
         return None
 
     def planning(self, context, topk, tpe, plan, cu_seqlens, stream, wait_iterations):
@@ -332,14 +340,24 @@ class FakeRuntime:
             plan.status._item = 4000
 
     def udma_register(self, tensor):
+        key = id(tensor)
+        if self._active_udma_owner == "projection" and self._active_projection == key:
+            return self._projection_handles[key]
         self.calls.append(("udma_register", tensor))
-        handle = len(self.udma_handles) + 1
-        self.udma_handles.append(handle)
+        handle = self._projection_handles.get(key)
+        if handle is None:
+            handle = len(self._projection_handles) + 1
+            self._projection_handles[key] = handle
+            self.udma_handles.append(handle)
+        self._active_udma_owner = "projection"
+        self._active_projection = key
         return handle
 
     def udma_unregister(self, handle):
-        self.calls.append(("udma_unregister", int(handle)))
-        self.udma_handles.remove(int(handle))
+        if self._active_udma_owner == "projection":
+            self.calls.append(("udma_unregister", int(handle)))
+            self._active_udma_owner = None
+            self._active_projection = None
 
     def combine(
         self,
@@ -352,6 +370,7 @@ class FakeRuntime:
         output_route_weights=None,
         *,
         inter_rank_sync,
+        flags=0,
     ):
         self.calls.append(
             (
@@ -363,6 +382,7 @@ class FakeRuntime:
                 output_route_weights,
                 stream,
                 inter_rank_sync,
+                flags,
             )
         )
         if self.write_status_markers:
@@ -399,7 +419,14 @@ class FakeRuntime:
             self._require_reduce_grad_workspace_owner(
                 owner_token, "register_reduce_grad_workspace"
             )
+            if (
+                self._active_udma_owner == "reduce_grad"
+                and self.registered_workspace is workspace
+            ):
+                return
             self.registered_workspace = workspace
+            self._active_udma_owner = "reduce_grad"
+            self._active_projection = None
             self.calls.append(("register_reduce_grad_workspace", required_bytes))
 
     def unregister_reduce_grad_workspace(self, *, owner_token=None):
@@ -407,8 +434,12 @@ class FakeRuntime:
             self._require_reduce_grad_workspace_owner(
                 owner_token, "unregister_reduce_grad_workspace"
             )
-            if self.registered_workspace is not None:
+            if (
+                self.registered_workspace is not None
+                and self._active_udma_owner == "reduce_grad"
+            ):
                 self.calls.append(("unregister_reduce_grad_workspace", None))
+                self._active_udma_owner = None
             self.registered_workspace = None
 
     def reduce_grad(

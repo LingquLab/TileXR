@@ -47,6 +47,31 @@ def test_script_owns_and_validates_hccl_npu_port_range() -> None:
     assert 'echo "HCCL NPU socket ports: ${HCCL_NPU_SOCKET_PORT_RANGE}"' in SCRIPT
 
 
+def test_script_reports_oversubscribed_reference_collective() -> None:
+    assert 'if (( ranks_per_device == 2 )); then' in SCRIPT
+    assert 'echo "Reference collective: Gloo (CPU staging)"' in SCRIPT
+    assert 'echo "Reference collective: HCCL"' in SCRIPT
+
+
+def test_script_discovers_the_shared_anaconda_installation() -> None:
+    system_miniconda = "/home/miniconda3/etc/profile.d/conda.sh"
+    system_anaconda = "/home/anaconda3/etc/profile.d/conda.sh"
+    home_miniconda = '"${HOME}/miniconda3/etc/profile.d/conda.sh"'
+
+    assert system_anaconda in SCRIPT
+    assert SCRIPT.index(system_miniconda) < SCRIPT.index(system_anaconda)
+    assert SCRIPT.index(system_anaconda) < SCRIPT.index(home_miniconda)
+
+
+def test_default_output_directory_is_under_project_run_moonep() -> None:
+    assert (
+        'output_dir="${TILEXR_MOONEP_OUTPUT_DIR:-${TILEXR_HOME}/run/moonep/'
+        'tilexr-moonep-${mode}-${rank_size}r-$(date +%Y%m%d-%H%M%S)-$$}"'
+        in SCRIPT
+    )
+    assert "/tmp/tilexr-moonep-${mode}" not in SCRIPT
+
+
 def test_script_prints_final_plog_path_before_python_launch() -> None:
     log_path_report = SCRIPT.index(
         'echo "ASCEND_PROCESS_LOG_PATH: ${ASCEND_PROCESS_LOG_PATH}"'
@@ -84,8 +109,92 @@ def test_usage_lists_every_available_case_id_with_a_description() -> None:
     usage_cases = SCRIPT.split("Available case IDs:", 1)[1].split(
         "\n\nEnvironment:", 1
     )[0]
-    for case_id in case_ids:
-        assert re.search(rf"^  {re.escape(case_id)}\s+\S.+$", usage_cases, re.MULTILINE)
+    for number, case_id in enumerate(case_ids, start=1):
+        assert re.search(
+            rf"^  {number}\s+{re.escape(case_id)}\s+\S.+$",
+            usage_cases,
+            re.MULTILINE,
+        )
+
+
+def test_usage_describes_only_fixed_padding_non_duplicate_cases() -> None:
+    usage_cases = SCRIPT.split("Available case IDs:", 1)[1].split(
+        "\n\nEnvironment:", 1
+    )[0]
+    descriptions = [line for line in usage_cases.splitlines() if line.strip()]
+    assert descriptions
+    assert all("P=1" in line for line in descriptions)
+    assert "dedup-3" not in usage_cases
+    assert "duplicate group" not in usage_cases
+    assert "P=4" not in usage_cases
+
+
+def test_usage_describes_rank_size_and_rank_per_device_for_every_case() -> None:
+    usage_cases = SCRIPT.split("Available case IDs:", 1)[1].split(
+        "\n\nEnvironment:", 1
+    )[0]
+    descriptions = [line for line in usage_cases.splitlines() if line.strip()]
+    assert len(descriptions) == 14
+    assert all("rank_size=" in line for line in descriptions)
+    assert all("rank_per_dev=" in line for line in descriptions)
+
+
+def test_usage_describes_eight_and_sixteen_rank_cases() -> None:
+    assert re.search(
+        r"^  8\s+planning-8rank-topk-8\s+8-rank .+P=1\)$",
+        SCRIPT,
+        re.MULTILINE,
+    )
+    assert re.search(
+        r"^  9\s+planning-16rank-topk-16\s+16-rank, 8 NPUs x 2 ranks .+P=1\)$",
+        SCRIPT,
+        re.MULTILINE,
+    )
+    assert re.search(
+        r"^  10\s+planning-8rank-single-route\s+8-rank single route .+P=1\)$",
+        SCRIPT,
+        re.MULTILINE,
+    )
+    assert re.search(
+        r"^  11\s+planning-16rank-single-route\s+16-rank, 8 NPUs x 2 ranks single route .+P=1\)$",
+        SCRIPT,
+        re.MULTILINE,
+    )
+    assert re.search(
+        r"^  12\s+planning-64rank-single-route\s+64-rank, 8 nodes x 8 NPUs single route .+P=1\)$",
+        SCRIPT,
+        re.MULTILINE,
+    )
+    assert re.search(
+        r"^  13\s+planning-128rank-single-route\s+128-rank, 16 nodes x 8 NPUs single route .+P=1\)$",
+        SCRIPT,
+        re.MULTILINE,
+    )
+    assert re.search(
+        r"^  14\s+planning-16rank-16card-single-route\s+16-rank, 2 nodes x 8 NPUs single route .+rank_size=16, rank_per_dev=1.+P=1\)$",
+        SCRIPT,
+        re.MULTILINE,
+    )
+
+
+def test_script_exposes_managed_multinode_three_mode_launch() -> None:
+    for option in ("--node-count", "--node-rank", "--master-addr", "--master-port"):
+        assert option in SCRIPT
+    assert 'if (( node_count > 1 )); then' in SCRIPT
+    assert 'python -m tools.moonep.distributed_node' in SCRIPT
+    assert 'distributed_args+=("--dump-stage-tensors")' in SCRIPT
+    assert '--mode "${mode}"' in SCRIPT
+    assert '--benchmark-kind flow' in SCRIPT
+    assert "multi-node runs require --mode reference" not in SCRIPT
+    assert "multi-node runs require exactly one rank per visible NPU" in SCRIPT
+
+
+def test_script_resolves_numeric_case_before_constructing_artifact_paths() -> None:
+    numeric_check = SCRIPT.index('if [[ "${case_id}" =~ ^[0-9]+$ ]]')
+    resolver = SCRIPT.index("select_cases(load_cases(sys.argv[1]), sys.argv[2])")
+    canonical_assignment = SCRIPT.index('case_id="${resolved_case_id}"')
+    summary_path = SCRIPT.index('summary_file="${output_dir}/${case_id}/summary.json"')
+    assert numeric_check < resolver < canonical_assignment < summary_path
 
 
 def test_script_exposes_opt_in_flowchart_export() -> None:

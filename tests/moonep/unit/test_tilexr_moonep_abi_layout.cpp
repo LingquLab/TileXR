@@ -100,5 +100,16 @@ int main()
         "Dispatch flags must not overlap");
     Check((TILEXR_MOONEP_FLAG_ZERO_COPY & TILEXR_MOONEP_FLAG_BUILD_DEDUP) == 0,
         "Zero-copy and dedup flags must not overlap");
+    Check((TILEXR_MOONEP_FLAG_COMBINE_PUBLISH_ONLY &
+        TILEXR_MOONEP_FLAG_COMBINE_CONSUME_ONLY) == 0,
+        "Combine split-phase flags must not overlap");
+    Check((TILEXR_MOONEP_FLAG_COMBINE_PUBLISH_ONLY &
+        (TILEXR_MOONEP_FLAG_BUILD_DEDUP | TILEXR_MOONEP_FLAG_SKIP_INTER_RANK_SYNC |
+            TILEXR_MOONEP_FLAG_ZERO_COPY)) == 0,
+        "Combine publish-only flag must not overlap existing flags");
+    Check((TILEXR_MOONEP_FLAG_COMBINE_CONSUME_ONLY &
+        (TILEXR_MOONEP_FLAG_BUILD_DEDUP | TILEXR_MOONEP_FLAG_SKIP_INTER_RANK_SYNC |
+            TILEXR_MOONEP_FLAG_ZERO_COPY)) == 0,
+        "Combine consume-only flag must not overlap existing flags");
     return g_failures == 0 ? 0 : 1;
 }

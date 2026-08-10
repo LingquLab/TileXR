@@ -37,7 +37,7 @@ bool ValidatePlan(const TileXRMoonEpPlanV1 *plan, const TileXR::CommArgs &commAr
     if (plan == nullptr || plan->structSize < sizeof(*plan) ||
         plan->abiVersion != TILEXR_MOONEP_ABI_VERSION_V1 || plan->n <= 0 ||
         plan->k <= 0 || plan->n % plan->k != 0 || plan->e <= 0 || plan->b <= 0 ||
-        plan->r <= 0 || plan->r > kReduceGradMaxAivBlockCount ||
+        plan->r <= 0 || plan->r > TileXR::TILEXR_MAX_RANK_SIZE ||
         plan->r != commArgs.rankSize || plan->e % plan->r != 0 ||
         plan->b != plan->e / plan->r || plan->expertsToCopy == nullptr) {
         return false;
@@ -93,7 +93,7 @@ bool IsA5(const TileXR::CommArgs &commArgs)
 
 bool LocalityValid(const TileXR::CommArgs &commArgs)
 {
-    return commArgs.rankSize > 0 && commArgs.rankSize <= kReduceGradMaxAivBlockCount &&
+    return commArgs.rankSize > 0 && commArgs.rankSize <= TileXR::TILEXR_MAX_RANK_SIZE &&
         commArgs.rank >= 0 && commArgs.rank < commArgs.rankSize &&
         commArgs.localRankSize > 0 && commArgs.localRankSize <= commArgs.rankSize &&
         commArgs.rankSize % commArgs.localRankSize == 0 &&

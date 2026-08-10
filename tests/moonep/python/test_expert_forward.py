@@ -128,7 +128,7 @@ def test_expert_forward_uses_only_torch_npu_grouped_pipeline() -> None:
         first["group_list"], normalized_plan.cu_seqlens.to(dtype=torch.int64)
     )
     assert first["split_item"] == 3
-    assert first["group_list_type"] == 1
+    assert first["group_list_type"] == 0
     assert first["group_type"] == 0
     assert first["output_dtype"] == torch.bfloat16
     assert second["weight"][0].data_ptr() != weights.down.data_ptr()
@@ -142,7 +142,7 @@ def test_expert_forward_uses_only_torch_npu_grouped_pipeline() -> None:
         x=[unweighted],
         weight=[weights.down],
         split_item=3,
-        group_list_type=1,
+        group_list_type=0,
         group_type=0,
         group_list=normalized_plan.cu_seqlens.to(dtype=torch.int64),
         output_dtype=torch.bfloat16,
@@ -184,6 +184,34 @@ def test_expert_forward_does_not_mutate_inputs() -> None:
         normalized_plan.cu_seqlens,
     )
     assert all(torch.equal(value, before) for value, before in zip(actual, snapshots))
+
+
+def test_expert_forward_accepts_projection_views_into_shared_backing() -> None:
+    d = dimensions()
+    original = projections()
+
+    def offset_view(value):
+        backing = torch.empty(value.numel() + 1, dtype=value.dtype)
+        view = backing[1:].view_as(value)
+        view.copy_(value)
+        assert view.storage_offset() == 1
+        return view
+
+    weights = ProjectionTensors(
+        gate=offset_view(original.gate),
+        up=offset_view(original.up),
+        down=offset_view(original.down),
+    )
+    result = run_expert_forward(
+        torch,
+        torch.ones((d.nvsh, d.hidden_size), dtype=torch.bfloat16),
+        plan().cu_seqlens,
+        weights,
+        torch.ones((d.nvsh,), dtype=torch.float32),
+        torch_npu_module=RecordingTorchNpu(),
+    )
+
+    assert result.hidden.shape == (d.nvsh, d.hidden_size)
 
 
 def test_expert_forward_requires_torch_npu_without_fallback(monkeypatch) -> None:

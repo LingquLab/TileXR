@@ -22,6 +22,16 @@ add_executable(test_tilexr_moonep_planner_layout
     unit/test_planner_layout.cpp
     ${TILEXR_ROOT}/src/moonep/planner_v2/host/planner_layout.cpp
 )
+
+add_executable(test_tilexr_moonep_planner_v3_layout
+    unit/test_planner_v3_layout.cpp
+    ${TILEXR_ROOT}/src/moonep/planner/host/planner_layout.cpp
+)
+target_include_directories(test_tilexr_moonep_planner_v3_layout PRIVATE
+    ${TILEXR_ROOT}/src/include
+    ${TILEXR_ROOT}/src/moonep/planner/common
+    ${TILEXR_ROOT}/src/moonep/planner/host
+)
 target_include_directories(test_tilexr_moonep_planner_layout PRIVATE
     ${TILEXR_ROOT}/src/include
     ${TILEXR_ROOT}/src/moonep/planner_v2/common
@@ -57,6 +67,7 @@ target_include_directories(test_tilexr_moonep_planner_public_abi PRIVATE
 )
 
 add_test(NAME test_tilexr_moonep_planner_layout COMMAND test_tilexr_moonep_planner_layout)
+add_test(NAME test_tilexr_moonep_planner_v3_layout COMMAND test_tilexr_moonep_planner_v3_layout)
 add_test(NAME test_tilexr_moonep_planner_reference COMMAND test_tilexr_moonep_planner_reference)
 add_test(NAME test_tilexr_moonep_planner_host COMMAND test_tilexr_moonep_planner_host)
 add_test(NAME test_tilexr_moonep_planner_public_abi COMMAND test_tilexr_moonep_planner_public_abi)
@@ -64,6 +75,7 @@ add_test(NAME test_tilexr_moonep_planner_source_guard COMMAND test_tilexr_moonep
 
 install(TARGETS
     test_tilexr_moonep_planner_layout
+    test_tilexr_moonep_planner_v3_layout
     test_tilexr_moonep_planner_reference
     test_tilexr_moonep_planner_host
     test_tilexr_moonep_planner_public_abi

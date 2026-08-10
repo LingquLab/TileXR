@@ -220,7 +220,7 @@ void TestTopologyAndFailurePropagation()
 
     commArgs.localRankSize = 1;
     CheckStatus("cross-node", TileXRMoonEp::TileXRMoonEpRunDispatchV1(&args, stream),
-        TILEXR_MOONEP_ERROR_NOT_SUPPORTED);
+        TILEXR_MOONEP_SUCCESS);
     Reset();
     commArgs.extraFlag = 0;
     CheckStatus("non-A5", TileXRMoonEp::TileXRMoonEpRunDispatchV1(&args, stream),

@@ -243,6 +243,7 @@ def validate_tensor(
     shape: tuple[int, ...],
     dtype,
     device_type: str | None = None,
+    allow_storage_offset: bool = False,
 ) -> None:
     if tensor is None:
         raise ContractError(f"{name} is required")
@@ -253,7 +254,7 @@ def validate_tensor(
         raise ContractError(f"{name} must have dtype {dtype}, got {tensor.dtype}")
     if not tensor.is_contiguous():
         raise ContractError(f"{name} must be contiguous")
-    if int(tensor.storage_offset()) != 0:
+    if not allow_storage_offset and int(tensor.storage_offset()) != 0:
         raise ContractError(f"{name} must have storage_offset 0")
     if device_type is not None and tensor.device.type != device_type:
         raise ContractError(

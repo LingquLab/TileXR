@@ -121,10 +121,13 @@ TileXR does not initialize UDMA for a single-rank communicator. Multi-rank runs
 preserve the caller's selection; when the variable is unset, TileXR uses its
 default UDMA-enabled behavior.
 
-All modes default to the padded single-route `planning-no-dedup` case supported by
-the current URMA Dispatch. Reference runs can opt into the hand-checkable `manual-small` case
-(`S=2,K=2,E=4,H=2,Hf=2,B=1`, default `P=1`) with
-`--case-id manual-small`.
+All modes default to the fixed-padding single-route `planning-no-dedup` case supported
+by the current URMA Dispatch. Reference runs can opt into the hand-checkable
+`manual-small` case (`S=2,K=1,E=2,H=8,Hf=4,B=2,P=1`) with
+`--case-id 1` or `--case-id manual-small`. Case numbers are one-based positions in
+`tools/moonep/cases/correctness.json`; results always use the canonical string ID.
+The usage table lists the intended `rank_size` and `rank_per_dev` topology together
+with `S`, `K`, `E`, `H`, `Hf`, `B`, and fixed `P=1` for every case.
 
 Without a device option, the script selects physical NPUs starting at 0, so a
 four-rank run uses devices `0,1,2,3`. Select a different set without configuring the
@@ -132,7 +135,7 @@ shell environment:
 
 ```bash
 bash scripts/run_moonep.sh --mode reference --rank-size 4 \
-  --case-id manual-small \
+  --case-id planning-4rank-topk-4 \
   --visible-devices 4,5,6,7 \
   --hccl-npu-socket-port-range 47200-47300
 ```
@@ -156,7 +159,7 @@ left-to-right diagram for all six stage boundaries:
 
 ```bash
 bash scripts/run_moonep.sh --mode reference --rank-size 2 \
-  --case-id manual-2rank-dedup-3 \
+  --case-id manual-2rank-topk-2 \
   --generate-flowcharts
 ```
 
@@ -173,32 +176,101 @@ the Playwright variant, install it once with `python -m playwright install chrom
 The script performs a minimal render before launching NPU work and fails with this
 guidance when the browser is missing or incompatible.
 
-Use the two-rank manual case to inspect Planner load migration from owner load `[8,0]`
-to execution load `[4,4]`:
+Use the two-rank manual case to inspect uneven Planner input load without duplicate
+token destinations:
 
 ```bash
 bash scripts/run_moonep.sh --mode reference --rank-size 2 \
   --case-id manual-2rank-imbalanced
 ```
 
-Both ranks start with local `tokens_per_expert=[2,2,0,0]`. Expert 0 is migrated to
-rank 1 and occupies its single prefetch slot.
+The global expert counts are `[2,2,1,1]`, so the initial owner loads are `[4,2]`.
+Planner can exercise remote expert placement while each token has only one route.
 
-Use the compact mixed case to verify Planner load migration and one primary plus
-three duplicate offsets in the same run:
+Use the compact multi-route case to retain `K > 1` coverage without repeated token
+destinations:
 
 ```bash
 bash scripts/run_moonep.sh --mode reference --rank-size 2 \
-  --case-id manual-2rank-dedup-3
+  --case-id manual-2rank-topk-2
 ```
 
-Initial expert-owner loads are `[12,4]`, and Planner moves execution to `[8,8]`.
-Rank 0's first token routes to experts `[4,5,6,7]` on rank 1, producing a dedup group
-with duplicate count 3.
+Its `unique_destinations` routing sends each token's two TopK routes to different owner
+ranks. `planning-4rank-topk-4`, `planning-8rank-topk-8`, and
+`planning-16rank-topk-16` extend the same invariant to `K=4`, `K=8`, and `K=16`.
+The paired `planning-8rank-single-route` and `planning-16rank-single-route` cases share
+`S=8,K=1,E=16,H=8,Hf=4,P=1`, isolating rank/collective scaling from TopK scaling.
+Their required capacities are `B=2` and `B=1` respectively because `B=E/R`.
+Every runner case uses `P=1`, and no runner case selects a duplicate-destination
+routing pattern.
 
-The script sources `common_env.sh`, uses Conda environment `ai_moe_test`, and writes
-results to a timestamped directory under `/tmp`. With eight available devices and no
-explicit device selection, a four-rank run uses physical devices 0-3.
+Run the full-device cases on eight visible NPUs:
+
+```bash
+bash scripts/run_moonep.sh --mode reference --rank-size 8 \
+  --case-id 8 --visible-devices 0,1,2,3,4,5,6,7
+
+bash scripts/run_moonep.sh --mode reference --rank-size 16 \
+  --case-id 9 --visible-devices 0,1,2,3,4,5,6,7
+
+bash scripts/run_moonep.sh --mode reference --rank-size 8 \
+  --case-id 10 --visible-devices 0,1,2,3,4,5,6,7
+
+bash scripts/run_moonep.sh --mode reference --rank-size 16 \
+  --case-id 11 --visible-devices 0,1,2,3,4,5,6,7
+```
+
+The 16-rank launch uses `ranks_per_device=2`; modulo assignment binds logical ranks
+`d` and `d+8` to physical device `d`. Oversubscribed runs are functional validation,
+not valid performance measurements. Reference/correctness mode uses Gloo with CPU
+staging for this layout because HCCL requires unique local device IDs; one-rank-per-NPU
+runs continue to use HCCL. Canonical IDs `planning-8rank-topk-8`,
+`planning-16rank-topk-16`, `planning-8rank-single-route`, and
+`planning-16rank-single-route` remain accepted.
+
+IDs `12` and `13` extend the single-route matrix to 64 and 128 ranks. They
+use eight ranks per server with one rank bound to each NPU, so ID 12 requires eight
+servers and ID 13 requires sixteen. Set the same launch ID, output path, master address,
+and master port on every participating node, then set the zero-based node rank locally:
+
+```bash
+export TILEXR_MOONEP_LAUNCH_ID=moonep-64r-example
+export TILEXR_MOONEP_OUTPUT_DIR="$PWD/run/moonep/moonep-64r-example"
+
+bash scripts/run_moonep.sh --mode reference --rank-size 64 --case-id 12 \
+  --node-count 8 --node-rank "$NODE_RANK" \
+  --master-addr "$MASTER_ADDR" --master-port 29600 \
+  --visible-devices 0,1,2,3,4,5,6,7 --no-dump-stage-tensors
+```
+
+Each node writes its own global-rank directories. Merge those node-local result trees
+before running aggregation.
+
+ID `14` / `planning-16rank-16card-single-route` is the compact two-node topology:
+`rank_size=16`, `rank_per_dev=1`, two servers, and eight NPUs per server. Multi-node
+`benchmark` uses the TileXR communicator and authenticated Host barrier environment;
+`reference` uses `MASTER_ADDR`/`MASTER_PORT`; `correctness` requires both sets and runs
+the full flow for both backends. For example, launch the following concurrently with
+`NODE_RANK=0` and `1` on the two servers:
+
+```bash
+export TILEXR_MOONEP_LAUNCH_ID=moonep-16r-16card-example
+export TILEXR_MOONEP_LAUNCH_SECRET=<64-hex-shared-secret>
+export TILEXR_COMM_ID="$MASTER_ADDR:12001"
+export TILEXR_MOONEP_BARRIER_ADDR="$MASTER_ADDR:12114"
+export TILEXR_MOONEP_OUTPUT_DIR="$PWD/run/moonep/moonep-16r-16card-example"
+
+bash scripts/run_moonep.sh --mode correctness --rank-size 16 --case-id 14 \
+  --node-count 2 --node-rank "$NODE_RANK" \
+  --master-addr "$MASTER_ADDR" --master-port 29600 \
+  --visible-devices 0,1,2,3,4,5,6,7 --no-dump-stage-tensors
+```
+
+The script sources `common_env.sh`, uses Conda environment `ai_moe_test` by default, and writes
+results to a timestamped directory under `${TILEXR_HOME}/run/moonep`. Set
+`TILEXR_MOONEP_OUTPUT_DIR` to override that location. Exclude the generated `run`
+directory from Mutagen synchronization. With eight available devices and no explicit
+device selection, a four-rank run uses physical devices 0-3.
 Running it without arguments or with `--help` prints usage.
 
 ## Utilities

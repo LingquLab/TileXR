@@ -69,7 +69,7 @@ bool ResolveBlockDim(int64_t rankSize, int64_t *blockDim)
         }
         selected = static_cast<int64_t>(parsed);
     }
-    if (selected <= 0 || selected > kPlannerAivBlockCount || selected < rankSize) {
+    if (selected <= 0 || selected > kPlannerAivBlockCount) {
         return false;
     }
     *blockDim = selected;

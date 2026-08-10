@@ -100,7 +100,9 @@ public:
     {
         if (args_ == nullptr || expertsToCopy_ == nullptr || status_ == nullptr ||
             rank_ < 0 || rank_ >= rankSize_ || rankSize_ <= 0 || expertCount_ <= 0 ||
-            expertsPerRank_ <= 0 || receiverCount_ <= 0 || magic_ <= 0 ||
+            expertsPerRank_ <= 0 || controlBlockCount_ < 0 ||
+            (rankSize_ > 1 && controlBlockCount_ == 0) || receiverCount_ <= 0 ||
+            magic_ <= 0 ||
             (UsesUdma() && (udmaQpCount_ == 0 ||
                 udmaQpCount_ > kReduceGradMaxUdmaQpCount ||
                 TileXR::UDMAQpCount(args_) != udmaQpCount_))) {
@@ -172,9 +174,9 @@ private:
         return (ordinal - 1U) % udmaQpCount_;
     }
 
-    __aicore__ inline int64_t ControlPeer() const
+    __aicore__ inline int64_t ControlPeer(int64_t controlIndex) const
     {
-        return blockIdx_ >= rank_ ? blockIdx_ + 1 : blockIdx_;
+        return controlIndex >= rank_ ? controlIndex + 1 : controlIndex;
     }
 
     __aicore__ inline GM_ADDR PeerRecord(int64_t owner, int64_t source,
@@ -496,19 +498,18 @@ private:
         return true;
     }
 
-    __aicore__ inline void RunSender()
+    __aicore__ inline bool RunSenderTo(int64_t target)
     {
-        const int64_t target = ControlPeer();
         if (target < 0 || target >= rankSize_) {
             SetStatus(kReduceGradDeviceInvalidState);
-            return;
+            return false;
         }
         for (uint32_t projection = 0; projection < kReduceGradProjectionCount; ++projection) {
             const uint64_t chunkBytes = ChunkBytes(projection);
             const uint64_t chunks = ChunkCount(projection);
             if (chunkBytes == 0 || chunks == 0) {
                 SetStatus(kReduceGradDeviceInvalidState);
-                return;
+                return false;
             }
             for (int64_t slot = 0; slot < expertsPerRank_; ++slot) {
                 const int32_t expert = ExpertForSlot(rank_, slot);
@@ -517,7 +518,7 @@ private:
                 }
                 if (expert >= expertCount_) {
                     SetStatus(kReduceGradDeviceInvalidState);
-                    return;
+                    return false;
                 }
                 if (OwnerForExpert(expert) != target) {
                     continue;
@@ -532,7 +533,7 @@ private:
                             rowBytes_[projection] - completedOffset, chunkBytes);
                         if (!CompleteChunk(target, slot, projection, completedChunk,
                                 sourceRow + completedOffset, completedBytes)) {
-                            return;
+                            return false;
                         }
                     }
                     const uint64_t offset = chunk * chunkBytes;
@@ -542,7 +543,7 @@ private:
                         SendPeerChunk(target, slot, projection, chunk, sourceRow + offset, bytes) :
                         PostUdmaChunk(target, slot, projection, chunk, sourceRow + offset, bytes);
                     if (!ok) {
-                        return;
+                        return false;
                     }
                 }
                 const uint64_t drainBegin = chunks > 2 ? chunks - 2 : 0;
@@ -551,9 +552,20 @@ private:
                     const uint64_t bytes = MinU64(rowBytes_[projection] - offset, chunkBytes);
                     if (!CompleteChunk(target, slot, projection, chunk,
                             sourceRow + offset, bytes)) {
-                        return;
+                        return false;
                     }
                 }
+            }
+        }
+        return true;
+    }
+
+    __aicore__ inline void RunSender()
+    {
+        for (int64_t controlIndex = blockIdx_; controlIndex < rankSize_ - 1;
+             controlIndex += controlBlockCount_) {
+            if (!RunSenderTo(ControlPeer(controlIndex))) {
+                return;
             }
         }
     }

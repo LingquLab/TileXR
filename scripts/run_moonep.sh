@@ -12,9 +12,13 @@ Run a TileXR MoonEP case with the requested mode and logical rank count.
 Options:
   -m, --mode MODE       benchmark, reference, or correctness
   -r, --rank-size SIZE  Logical rank count; at most two ranks per physical NPU
-  -c, --case-id ID      Case to run (default: planning-no-dedup)
+  -c, --case-id ID      Case number or canonical ID (default: 5 / planning-no-dedup)
   -v, --visible-devices LIST
-                        Comma-separated physical NPU IDs (default: start at 0)
+                         Comma-separated physical NPU IDs (default: start at 0)
+      --node-count COUNT Number of servers participating in a multi-node launch (default: 1)
+      --node-rank RANK   Zero-based server rank (default: 0)
+      --master-addr HOST Torch distributed rendezvous host for multi-node reference/correctness
+      --master-port PORT Torch distributed rendezvous port for multi-node reference/correctness
   -d, --dump-stage-tensors
                         Save complete stage inputs/outputs (default for reference/correctness)
       --no-dump-stage-tensors
@@ -28,20 +32,29 @@ Options:
   -h, --help            Show this usage
 
 Available case IDs:
-  manual-small              Small tensors for manual inspection (S=2, K=2, E=4, P=1)
-  manual-2rank-imbalanced   2-rank Planner load migration from [8,0] to [4,4]
-  manual-2rank-dedup-3      2-rank [12,4] to [8,8] migration plus a 3-duplicate group
-  planning-small            Balanced Planner case with padded layout (P=4)
-  planning-no-dedup         Padded single-route case supported by current URMA Dispatch
-  skewed-padding            Skewed-routing reference case with padded layout (P=4)
+  1  manual-small              1-rank manual tensors (rank_size=1, rank_per_dev=1, S=2, K=1, E=2, H=8, Hf=4, B=2, P=1)
+  2  manual-2rank-imbalanced   2-rank uneven load (rank_size=2, rank_per_dev=1, S=3, K=1, E=4, H=8, Hf=4, B=2, P=1)
+  3  manual-2rank-topk-2       2-rank unique owners (rank_size=2, rank_per_dev=1, S=3, K=2, E=4, H=8, Hf=4, B=2, P=1)
+  4  planning-small            2-rank unique owners (rank_size=2, rank_per_dev=1, S=8, K=2, E=8, H=8, Hf=4, B=4, P=1)
+  5  planning-no-dedup         4-rank single route (rank_size=4, rank_per_dev=1, S=8, K=1, E=8, H=8, Hf=4, B=2, P=1)
+  6  planning-4rank-topk-4     4-rank unique owners (rank_size=4, rank_per_dev=1, S=4, K=4, E=16, H=8, Hf=4, B=4, P=1)
+  7  skewed-no-dup             4-rank hot expert (rank_size=4, rank_per_dev=1, S=7, K=1, E=16, H=8, Hf=4, B=4, P=1)
+  8  planning-8rank-topk-8     8-rank unique owners (rank_size=8, rank_per_dev=1, S=4, K=8, E=32, H=8, Hf=4, B=4, P=1)
+  9  planning-16rank-topk-16   16-rank, 8 NPUs x 2 ranks unique owners (rank_size=16, rank_per_dev=2, S=2, K=16, E=32, H=8, Hf=4, B=2, P=1)
+  10 planning-8rank-single-route 8-rank single route (rank_size=8, rank_per_dev=1, S=8, K=1, E=16, H=8, Hf=4, B=2, P=1)
+  11 planning-16rank-single-route 16-rank, 8 NPUs x 2 ranks single route (rank_size=16, rank_per_dev=2, S=8, K=1, E=16, H=8, Hf=4, B=1, P=1)
+  12 planning-64rank-single-route 64-rank, 8 nodes x 8 NPUs single route (rank_size=64, rank_per_dev=1, S=8, K=1, E=64, H=8, Hf=4, B=1, P=1)
+  13 planning-128rank-single-route 128-rank, 16 nodes x 8 NPUs single route (rank_size=128, rank_per_dev=1, S=8, K=1, E=128, H=8, Hf=4, B=1, P=1)
+  14 planning-16rank-16card-single-route 16-rank, 2 nodes x 8 NPUs single route (rank_size=16, rank_per_dev=1, S=8, K=1, E=16, H=8, Hf=4, B=1, P=1)
 
 Environment:
   ASCEND_RT_VISIBLE_DEVICES    Legacy fallback when --visible-devices is omitted
   HCCL_NPU_SOCKET_PORT_RANGE   Legacy fallback when the port option is omitted
   TILEXR_INSTALL_PREFIX        TileXR installation prefix
   TILEXR_MOONEP_CONDA_ENV      Conda environment (default: ai_moe_test)
-  TILEXR_MOONEP_OUTPUT_DIR     Result directory (default: timestamped /tmp directory)
+  TILEXR_MOONEP_OUTPUT_DIR     Result directory (default: timestamped run/moonep directory)
   TILEXR_MOONEP_TIMEOUT_SEC    Launcher timeout in seconds (default: 600)
+  TILEXR_MOONEP_LAUNCH_ID      Shared non-secret launch ID (required for multi-node)
   TILEXR_MOONEP_TENSOR_PREVIEW_ELEMENTS
                                Default number of values printed per tensor
 EOF
@@ -59,6 +72,10 @@ dump_stage_tensors=""
 generate_flowcharts="false"
 tensor_preview_elements="${TILEXR_MOONEP_TENSOR_PREVIEW_ELEMENTS:-8}"
 visible_device_spec=""
+node_count=1
+node_rank=0
+master_addr=""
+master_port=""
 hccl_npu_socket_port_range="47000-47100"
 if [[ -n "${HCCL_NPU_SOCKET_PORT_RANGE:-}" ]]; then
     hccl_npu_socket_port_range="${HCCL_NPU_SOCKET_PORT_RANGE}"
@@ -99,6 +116,38 @@ while [[ $# -gt 0 ]]; do
                 exit 2
             fi
             visible_device_spec="$2"
+            shift 2
+            ;;
+        --node-count)
+            if [[ $# -lt 2 ]]; then
+                echo "Missing value for --node-count" >&2
+                exit 2
+            fi
+            node_count="$2"
+            shift 2
+            ;;
+        --node-rank)
+            if [[ $# -lt 2 ]]; then
+                echo "Missing value for --node-rank" >&2
+                exit 2
+            fi
+            node_rank="$2"
+            shift 2
+            ;;
+        --master-addr)
+            if [[ $# -lt 2 ]]; then
+                echo "Missing value for --master-addr" >&2
+                exit 2
+            fi
+            master_addr="$2"
+            shift 2
+            ;;
+        --master-port)
+            if [[ $# -lt 2 ]]; then
+                echo "Missing value for --master-port" >&2
+                exit 2
+            fi
+            master_port="$2"
             shift 2
             ;;
         -d|--dump-stage-tensors)
@@ -185,6 +234,39 @@ if [[ ! "${rank_size}" =~ ^[1-9][0-9]*$ ]]; then
     usage >&2
     exit 2
 fi
+if [[ ! "${node_count}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "--node-count must be a positive integer: ${node_count}" >&2
+    exit 2
+fi
+if [[ ! "${node_rank}" =~ ^[0-9]+$ ]] || (( node_rank >= node_count )); then
+    echo "--node-rank must be in [0, node-count): ${node_rank}" >&2
+    exit 2
+fi
+local_rank_size="${rank_size}"
+if (( node_count > 1 )); then
+    if (( rank_size % node_count != 0 )); then
+        echo "--rank-size must be divisible by --node-count" >&2
+        exit 2
+    fi
+    local_rank_size=$((rank_size / node_count))
+    if [[ "${mode}" != "benchmark" ]] &&
+       { [[ -z "${master_addr}" || ! "${master_port}" =~ ^[1-9][0-9]*$ ]] || (( master_port > 65535 )); }; then
+        echo "multi-node runs require --master-addr and a valid --master-port" >&2
+        exit 2
+    fi
+    if [[ -z "${TILEXR_MOONEP_LAUNCH_ID:-}" ]]; then
+        echo "multi-node runs require TILEXR_MOONEP_LAUNCH_ID" >&2
+        exit 2
+    fi
+    if [[ -z "${TILEXR_MOONEP_OUTPUT_DIR:-}" ]]; then
+        echo "multi-node runs require TILEXR_MOONEP_OUTPUT_DIR" >&2
+        exit 2
+    fi
+    if [[ "${generate_flowcharts}" == "true" ]]; then
+        echo "multi-node runs do not generate flowcharts on node-local artifacts" >&2
+        exit 2
+    fi
+fi
 if [[ ! "${tensor_preview_elements}" =~ ^[1-9][0-9]*$ ]]; then
     echo "--tensor-preview-elements must be a positive integer: ${tensor_preview_elements}" >&2
     exit 2
@@ -210,6 +292,7 @@ fi
 
 for conda_setup in \
     /home/miniconda3/etc/profile.d/conda.sh \
+    /home/anaconda3/etc/profile.d/conda.sh \
     "${HOME}/miniconda3/etc/profile.d/conda.sh" \
     "${HOME}/anaconda3/etc/profile.d/conda.sh"; do
     if [[ -f "${conda_setup}" ]]; then
@@ -281,7 +364,7 @@ else
         echo "No Ascend devices were detected by common_env.sh" >&2
         exit 1
     fi
-    physical_device_count="${rank_size}"
+    physical_device_count="${local_rank_size}"
     if (( physical_device_count > TILEXR_ASCEND_DEV_NUM )); then
         physical_device_count="${TILEXR_ASCEND_DEV_NUM}"
     fi
@@ -293,7 +376,13 @@ else
 fi
 
 physical_device_count="${#visible_devices[@]}"
-if (( rank_size <= physical_device_count )); then
+if (( node_count > 1 )); then
+    if (( local_rank_size != physical_device_count )); then
+        echo "multi-node runs require exactly one rank per visible NPU" >&2
+        exit 2
+    fi
+    ranks_per_device=1
+elif (( rank_size <= physical_device_count )); then
     physical_device_count="${rank_size}"
     ranks_per_device=1
 elif (( rank_size <= physical_device_count * 2 )); then
@@ -305,9 +394,8 @@ fi
 
 install_prefix="${TILEXR_INSTALL_PREFIX:-${TILEXR_HOME}/install-moonep-b131-20260805}"
 timeout_sec="${TILEXR_MOONEP_TIMEOUT_SEC:-600}"
-output_dir="${TILEXR_MOONEP_OUTPUT_DIR:-/tmp/tilexr-moonep-${mode}-${rank_size}r-$(date +%Y%m%d-%H%M%S)-$$}"
+output_dir="${TILEXR_MOONEP_OUTPUT_DIR:-${TILEXR_HOME}/run/moonep/tilexr-moonep-${mode}-${rank_size}r-$(date +%Y%m%d-%H%M%S)-$$}"
 case_file="${TILEXR_HOME}/tools/moonep/cases/correctness.json"
-summary_file="${output_dir}/${case_id}/summary.json"
 
 if [[ ! "${timeout_sec}" =~ ^[1-9][0-9]*$ ]]; then
     echo "TILEXR_MOONEP_TIMEOUT_SEC must be a positive integer: ${timeout_sec}" >&2
@@ -324,6 +412,28 @@ if [[ ! -d "${install_prefix}" ]]; then
     exit 1
 fi
 
+if [[ "${case_id}" =~ ^[0-9]+$ ]]; then
+    if ! resolved_case_id="$(
+        PYTHONPATH="${TILEXR_HOME}${PYTHONPATH:+:${PYTHONPATH}}" \
+            python - "${case_file}" "${case_id}" <<'PY'
+import sys
+
+from tools.moonep.config import load_cases, select_cases
+
+try:
+    selected = select_cases(load_cases(sys.argv[1]), sys.argv[2])
+except ValueError as error:
+    print(error, file=sys.stderr)
+    raise SystemExit(2)
+print(selected[0].case_id)
+PY
+    )"; then
+        exit 2
+    fi
+    case_id="${resolved_case_id}"
+fi
+summary_file="${output_dir}/${case_id}/summary.json"
+
 export TILEXR_INSTALL_PREFIX="${install_prefix}"
 export LD_LIBRARY_PATH="${install_prefix}/lib64:${install_prefix}/lib:${LD_LIBRARY_PATH:-}"
 if [[ "${mode}" != "benchmark" ]]; then
@@ -333,9 +443,17 @@ fi
 echo "MoonEP mode: ${mode}"
 echo "Case: ${case_id}"
 echo "Ranks: ${rank_size} logical, ${physical_device_count} physical"
+if (( node_count > 1 )); then
+    echo "Nodes: ${node_count}, node rank: ${node_rank}, local ranks: ${local_rank_size}"
+fi
 echo "Devices: ${ASCEND_RT_VISIBLE_DEVICES}"
 if [[ "${mode}" != "benchmark" ]]; then
-    echo "HCCL NPU socket ports: ${HCCL_NPU_SOCKET_PORT_RANGE}"
+    if (( ranks_per_device == 2 )); then
+        echo "Reference collective: Gloo (CPU staging)"
+    else
+        echo "Reference collective: HCCL"
+        echo "HCCL NPU socket ports: ${HCCL_NPU_SOCKET_PORT_RANGE}"
+    fi
 fi
 echo "Results: ${output_dir}"
 echo "Tensor snapshots: ${dump_stage_tensors}"
@@ -345,6 +463,32 @@ fi
 echo "Flowcharts: ${generate_flowcharts}"
 
 cd "${TILEXR_HOME}"
+if (( node_count > 1 )); then
+    if [[ "${mode}" != "benchmark" ]]; then
+        export MASTER_ADDR="${master_addr}"
+        export MASTER_PORT="${master_port}"
+    fi
+    distributed_args=(
+        --mode "${mode}"
+        --benchmark-kind flow
+        --cases "${case_file}"
+        --case-ids "${case_id}"
+        --node-count "${node_count}"
+        --node-rank "${node_rank}"
+        --local-world-size "${local_rank_size}"
+        --physical-device-count "${physical_device_count}"
+        --install-prefix "${install_prefix}"
+        --output-dir "${output_dir}"
+        --timeout-sec "${timeout_sec}"
+    )
+    if [[ "${dump_stage_tensors}" == "true" ]]; then
+        distributed_args+=("--dump-stage-tensors")
+        distributed_args+=("--tensor-preview-elements" "${tensor_preview_elements}")
+    fi
+    python -m tools.moonep.distributed_node "${distributed_args[@]}"
+    echo "Node ${node_rank} result: ${output_dir}/node_${node_rank}_complete.json"
+    exit 0
+fi
 launcher_args=(
     --mode "${mode}"
     --cases "${case_file}"

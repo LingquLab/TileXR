@@ -5,6 +5,7 @@
 #include "comm_args.h"
 #include "combine_common.h"
 #include "tilexr_sync.h"
+#include "tilexr_udma.h"
 
 namespace TileXRMoonEp {
 namespace Kernel {
@@ -99,7 +100,21 @@ public:
         if (!Valid() || AscendC::GetBlockIdx() != 0) {
             return;
         }
-        localWindow_ = shareAddrs_[rank_] + TileXR::IPC_DATA_OFFSET;
+        if (IsPublishOnly() || IsConsumeOnly()) {
+            if (!InitRegisteredWindow()) {
+                return;
+            }
+        } else {
+            localWindow_ = shareAddrs_[rank_] + TileXR::IPC_DATA_OFFSET;
+        }
+        if (IsPublishOnly()) {
+            RunPublishOnly();
+            return;
+        }
+        if (IsConsumeOnly()) {
+            RunConsumeOnly();
+            return;
+        }
         for (int64_t chunk = 0; chunk < chunkCount_; ++chunk) {
             const int64_t chunkOffset = chunk * hiddenChunkBytes_;
             const int64_t bytesThisChunk = MinInt64(
@@ -128,9 +143,117 @@ public:
     }
 
 private:
+    __aicore__ inline bool IsPublishOnly() const
+    {
+        return (flags_ & kMoonEpFlagCombinePublishOnly) != 0;
+    }
+
+    __aicore__ inline bool IsConsumeOnly() const
+    {
+        return (flags_ & kMoonEpFlagCombineConsumeOnly) != 0;
+    }
+
+    __aicore__ inline bool InitRegisteredWindow()
+    {
+        if (!TileXR::UDMARegistryEnabled(args_)) {
+            Fail(kMoonEpCombineStatusUdmaInvalid);
+            return false;
+        }
+        const uint64_t weightsEnd = routeWeightsOffset_ + routeWeightsBytes_;
+        const uint64_t payloadEnd = hiddenPayloadBytes_ > weightsEnd ?
+            hiddenPayloadBytes_ : weightsEnd;
+        if (payloadEnd > UINT64_MAX - (kMoonEpStageAlignment - 1U)) {
+            Fail(kMoonEpCombineStatusUdmaInvalid);
+            return false;
+        }
+        const uint64_t scratchOffset =
+            ((payloadEnd + kMoonEpStageAlignment - 1U) / kMoonEpStageAlignment) *
+            kMoonEpStageAlignment;
+        const uint64_t scratchBytes = hiddenChunkBytes_ > static_cast<int64_t>(sizeof(float)) ?
+            static_cast<uint64_t>(hiddenChunkBytes_) : sizeof(float);
+        if (scratchOffset > UINT64_MAX - scratchBytes) {
+            Fail(kMoonEpCombineStatusUdmaInvalid);
+            return false;
+        }
+        const uint64_t requiredBytes = scratchOffset + scratchBytes;
+        __gm__ TileXR::TileXRUDMARegistry *registry = TileXR::GetUDMARegistry(args_);
+        if (!TileXR::UDMARegisteredRangeValid(registry, rank_, 0, requiredBytes)) {
+            Fail(kMoonEpCombineStatusUdmaInvalid);
+            return false;
+        }
+        localWindow_ = TileXR::UDMARegisteredRemoteAddr(registry, rank_, 0);
+        registeredScratch_ = localWindow_ + scratchOffset;
+        return true;
+    }
+
+    __aicore__ inline bool FetchRegisteredPayload(
+        int64_t peer, uint64_t byteOffset, uint32_t byteCount, GM_ADDR &source)
+    {
+        if (peer == rank_) {
+            source = localWindow_ + static_cast<int64_t>(byteOffset);
+            return true;
+        }
+        __gm__ TileXR::TileXRUDMARegistry *registry = TileXR::GetUDMARegistry(args_);
+        if (registeredScratch_ == nullptr ||
+            !TileXR::UDMARegisteredRangeValid(registry, static_cast<int>(peer),
+                byteOffset, byteCount)) {
+            Fail(kMoonEpCombineStatusUdmaInvalid);
+            return false;
+        }
+        AscendC::LocalTensor<uint8_t> wqeScratch = syncBuf_.Get<uint8_t>();
+        const uint32_t qpCount = TileXR::UDMAQpCount(args_);
+        if (qpCount == 0U) {
+            Fail(kMoonEpCombineStatusUdmaInvalid);
+            return false;
+        }
+        const uint32_t qpIdx = qpCount > 1U ? 1U : 0U;
+        const uint32_t submitStatus = TileXR::UDMAGetNbiOnQp<uint8_t>(
+            args_, wqeScratch, static_cast<int>(peer), qpIdx,
+            reinterpret_cast<__gm__ uint8_t *>(registeredScratch_), byteOffset,
+            byteCount);
+        if (submitStatus != TileXR::TILEXR_UDMA_STATUS_SUCCESS) {
+            Fail(kMoonEpCombineStatusUdmaSubmitBase + static_cast<int32_t>(peer));
+            return false;
+        }
+        const uint32_t completionStatus = TileXR::UDMAQuietStatusOnQp(
+            args_, static_cast<int>(peer), qpIdx);
+        if (completionStatus != TileXR::TILEXR_UDMA_STATUS_SUCCESS) {
+            Fail(kMoonEpCombineStatusUdmaCompletionBase + static_cast<int32_t>(peer));
+            return false;
+        }
+        AscendC::GlobalTensor<uint64_t> cache;
+        cache.SetGlobalBuffer(reinterpret_cast<__gm__ uint64_t *>(0), 1);
+        AscendC::DataCacheCleanAndInvalid<uint64_t,
+            AscendC::CacheLine::ENTIRE_DATA_CACHE,
+            AscendC::DcciDst::CACHELINE_OUT>(cache);
+        source = registeredScratch_;
+        return true;
+    }
+
+    __aicore__ inline void RunPublishOnly()
+    {
+        PublishLocalInput(0, hiddenChunkBytes_, true);
+        if (PreReduceDuplicates(hiddenChunkBytes_)) {
+            StoreStatus(kMoonEpCombineStatusSuccess);
+        }
+    }
+
+    __aicore__ inline void RunConsumeOnly()
+    {
+        if (!ReduceHiddenChunk(0, hiddenChunkBytes_)) {
+            return;
+        }
+        if (routeWeightsBytes_ > 0 && !GatherWeights()) {
+            return;
+        }
+        StoreStatus(kMoonEpCombineStatusSuccess);
+    }
+
     __aicore__ inline bool Valid() const
     {
-        const uint64_t allowedFlags = kMoonEpFlagSkipInterRankSync;
+        const uint64_t splitFlags = kMoonEpFlagCombinePublishOnly |
+            kMoonEpFlagCombineConsumeOnly;
+        const uint64_t allowedFlags = kMoonEpFlagSkipInterRankSync | splitFlags;
         uint64_t windowBytes = hiddenPayloadBytes_;
         const uint64_t weightsEnd = routeWeightsOffset_ + routeWeightsBytes_;
         windowBytes = weightsEnd > windowBytes ? weightsEnd : windowBytes;
@@ -146,6 +269,8 @@ private:
                 static_cast<uint64_t>(nvS_) * static_cast<uint64_t>(hiddenChunkStride_) &&
             windowBytes <= static_cast<uint64_t>(TileXR::IPC_BUFF_MAX_SIZE) &&
             waitIterations_ > 0 && magic_ > 0 && (flags_ & ~allowedFlags) == 0 &&
+            (flags_ & splitFlags) != splitFlags &&
+            ((flags_ & splitFlags) == 0 || chunkCount_ == 1) &&
             ((routeWeightsBytes_ == 0 && routeWeightsNvsAddr_ == nullptr &&
                 routeWeightsSkAddr_ == nullptr) ||
                 (routeWeightsBytes_ == static_cast<uint64_t>(nvS_) * sizeof(float) &&
@@ -327,10 +452,24 @@ private:
                     if (!DecodeRoute(encoded, peer, offset)) {
                         return false;
                     }
+                    const uint64_t remoteByteOffset =
+                        static_cast<uint64_t>(offset) * hiddenChunkStride_ +
+                        static_cast<uint64_t>(tileOffset) * sizeof(bfloat16_t);
+                    GM_ADDR source = nullptr;
+                    if (IsConsumeOnly() && !FetchRegisteredPayload(
+                            peer, remoteByteOffset,
+                            static_cast<uint32_t>(tileElements * sizeof(bfloat16_t)),
+                            source)) {
+                        return false;
+                    }
+                    if (!IsConsumeOnly()) {
+                        source = shareAddrs_[peer] + TileXR::IPC_DATA_OFFSET +
+                            offset * hiddenChunkStride_ +
+                            tileOffset * static_cast<int64_t>(sizeof(bfloat16_t));
+                    }
                     AscendC::GlobalTensor<bfloat16_t> remote;
                     remote.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(
-                        shareAddrs_[peer] + TileXR::IPC_DATA_OFFSET +
-                        offset * hiddenChunkStride_) + tileOffset, tileElements);
+                        source), tileElements);
                     AscendC::DataCopyExtParams params {
                         1, static_cast<uint32_t>(tileElements * sizeof(bfloat16_t)), 0, 0, 0
                     };
@@ -375,9 +514,17 @@ private:
             if (!DecodeRoute(encoded, peer, offset)) {
                 return false;
             }
-            CopyBytesGmToGm(routeWeightsSkAddr_ + route * sizeof(float),
-                shareAddrs_[peer] + TileXR::IPC_DATA_OFFSET +
-                    static_cast<int64_t>(routeWeightsOffset_) + offset * sizeof(float),
+            GM_ADDR source = nullptr;
+            if (IsConsumeOnly() && !FetchRegisteredPayload(peer,
+                    routeWeightsOffset_ + static_cast<uint64_t>(offset) * sizeof(float),
+                    sizeof(float), source)) {
+                return false;
+            }
+            if (!IsConsumeOnly()) {
+                source = shareAddrs_[peer] + TileXR::IPC_DATA_OFFSET +
+                    static_cast<int64_t>(routeWeightsOffset_) + offset * sizeof(float);
+            }
+            CopyBytesGmToGm(routeWeightsSkAddr_ + route * sizeof(float), source,
                 routeBuf_, sizeof(float));
         }
         return true;
@@ -440,7 +587,9 @@ private:
     __aicore__ inline void Fail(int32_t status)
     {
         StoreStatus(status);
-        PublishStep(kMoonEpCombineFailedStep);
+        if (!IsPublishOnly() && !IsConsumeOnly()) {
+            PublishStep(kMoonEpCombineFailedStep);
+        }
     }
 
     __gm__ TileXR::CommArgs *args_ = nullptr;
@@ -471,6 +620,7 @@ private:
     GM_ADDR routeWeightsSkAddr_ = nullptr;
     GM_ADDR statusAddr_ = nullptr;
     GM_ADDR localWindow_ = nullptr;
+    GM_ADDR registeredScratch_ = nullptr;
     GM_ADDR shareAddrs_[TileXR::TILEXR_MAX_RANK_SIZE] = {};
     AscendC::TPipe pipe_;
     AscendC::TBuf<AscendC::QuePosition::VECCALC> syncBuf_;

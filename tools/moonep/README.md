@@ -18,8 +18,10 @@ correctness modes:
 
 - `--mode reference` runs all five native stages through the independent baseline V1
   Torch reference (`torch_npu_reference_v1`) on NPU tensors, executes the shared
-  Torch-NPU Expert Forward between PrefetchWeight and Combine, and uses an HCCL
-  process group for cross-rank data.
+  Torch-NPU Expert Forward between PrefetchWeight and Combine, and uses Torch
+  distributed for cross-rank data. One-rank-per-NPU launches use HCCL; oversubscribed
+  two-ranks-per-NPU launches use Gloo with CPU staging because HCCL rejects repeated
+  local device IDs.
 - `--mode correctness` runs the reference and the built-in TileXR candidate backend after
   independently cloning every stage input, then compares every defined output and
   required/forbidden mutation before proceeding.
@@ -104,7 +106,7 @@ ASCEND_RT_VISIBLE_DEVICES=4 python -m tools.moonep.launcher \
   --output-dir output/moonep-correctness-1r
 ```
 
-Then run the same padded single-route differential case on four physical devices:
+Then run the same fixed-padding single-route differential case on four physical devices:
 
 ```bash
 bash scripts/run_moonep.sh --mode correctness --rank-size 4
@@ -128,25 +130,58 @@ PyPI CLI and Playwright browser are installed and validated by
 `python -m playwright install chromium`.
 
 `--case-id manual-2rank-imbalanced --rank-size 2` provides a compact load-balancing
-case: global Expert 0/1 counts are `[4,4]`, initial owner loads are `[8,0]`, and
-Planner redistributes execution to `[4,4]` with one remote expert prefetch on rank 1.
+case with one route per token and no duplicate destination. Initial owner loads are
+`[4,2]`, so Planner can exercise remote expert placement without repeated token routes.
 
-`--case-id manual-2rank-dedup-3 --rank-size 2` combines Planner load migration with
-duplicate Dispatch routes. Initial expert-owner loads are `[12,4]`; Planner balances
-execution to `[8,8]`. Rank 0's first token routes to experts `[4,5,6,7]` on rank 1,
-where the reference emits one primary plus three duplicates in one dedup group. The
-current registered-workspace URMA candidate rejects this case before Dispatch because
-that path does not build dedup metadata.
+`--case-id manual-2rank-topk-2 --rank-size 2` and
+`--case-id planning-4rank-topk-4 --rank-size 4` retain compact multi-route coverage.
+`planning-8rank-topk-8` and `planning-16rank-topk-16` extend the same coverage to all
+eight physical NPUs. Their `unique_destinations` routing assigns every TopK slot of a
+token to a different logical owner rank, so `K > 1` does not create duplicate token
+traffic. `skewed-no-dup` keeps a single-route hot-expert case for four-rank
+load-placement coverage.
+
+`planning-8rank-single-route` and `planning-16rank-single-route` share
+`S=8,K=1,E=16,H=8,Hf=4,P=1`, with the required `B=2` and `B=1` capacities. These
+cases isolate rank and collective scaling from the `K=8` and `K=16` Planning paths.
+
+For the 16-rank case, pass all eight physical NPUs and `--rank-size 16`. The launcher
+sets `ranks_per_device=2` and binds ranks `d` and `d+8` to device `d`; this
+oversubscribed mode is functional-only and must not be used for performance claims.
+The runner assigns one-based numbers in JSON order: `--case-id 8` and `9` select the
+large-rank TopK cases, while `--case-id 10` and `11` select their single-route pairs.
+Canonical string IDs remain accepted and are always used for artifact directory names.
+
+`planning-64rank-single-route` and `planning-128rank-single-route` are append-only IDs
+12 and 13. They use `S=8,K=1,H=8,Hf=4,B=1,P=1` with `E=64/128`, respectively,
+and run as eight ranks per node with one rank per NPU. The 64-rank case uses eight nodes;
+the 128-rank case uses sixteen. `run_moonep.sh` requires the same master endpoint,
+launch ID, and output path on every node and records node-local global-rank artifacts.
+Merge those artifacts before aggregation.
+
+Append-only ID 14, `planning-16rank-16card-single-route`, reuses
+`S=8,K=1,E=16,H=8,Hf=4,B=1,P=1` for two nodes with eight physical NPUs each. Its
+runner topology is `rank_size=16`, `rank_per_dev=1`, unlike IDs 9 and 11, which place
+two logical ranks on each of eight devices. The script usage reports these two topology
+values alongside every case's MoonEP parameters. Distributed `benchmark` requires the
+TileXR communicator and authenticated barrier environment, `reference` requires the
+Torch distributed master endpoint, and `correctness` requires both; all three use the
+full six-stage flow when launched through `run_moonep.sh`.
+
+All cases exposed by `run_moonep.sh` set token padding to 1. Duplicate-destination
+routing patterns remain available to focused reference tests but are intentionally
+excluded from this runner matrix.
 
 The script selects devices starting at 0 by default and owns the HCCL NPU socket
 range, so the normal command requires no environment exports. Use
 `--visible-devices 4,5,6,7` or
 `--hccl-npu-socket-port-range 47200-47300` when a shared host needs explicit
-isolation.
+isolation for a one-rank-per-NPU HCCL run.
 
-Reference and correctness modes initialize HCCL on a launcher-reserved rendezvous port
-separate from TileXR bootstrap and teardown rendezvous. Their summaries always record
-`performance_valid=false`; reference/HCCL work is never included in native timing.
+Reference and correctness modes initialize HCCL or Gloo on a launcher-reserved
+rendezvous port separate from TileXR bootstrap and teardown rendezvous. Their summaries
+always record `performance_valid=false`; reference collective work is never included in
+native timing.
 
 Planning, Dispatch, PrefetchWeight, Combine, and ReduceGrad are native A5 stages.
 ExpertForward is not a TileXR native stage or ABI: it is the Torch-NPU compute step

@@ -68,18 +68,21 @@ def run_expert_forward(
         "expert_forward.gate",
         shape=(group_count, hidden_size, intermediate_size),
         dtype=torch_module.bfloat16,
+        allow_storage_offset=True,
     )
     validate_tensor(
         projections.up,
         "expert_forward.up",
         shape=(group_count, hidden_size, intermediate_size),
         dtype=torch_module.bfloat16,
+        allow_storage_offset=True,
     )
     validate_tensor(
         projections.down,
         "expert_forward.down",
         shape=(group_count, intermediate_size, hidden_size),
         dtype=torch_module.bfloat16,
+        allow_storage_offset=True,
     )
     validate_tensor(
         route_weights_nvs,
@@ -109,7 +112,7 @@ def run_expert_forward(
     gmm_group_list = group_list.to(dtype=torch_module.int64).contiguous()
     grouped_args = {
         "split_item": 3,
-        "group_list_type": 1,
+        "group_list_type": 0,
         "group_type": 0,
         "group_list": gmm_group_list,
         "output_dtype": torch_module.bfloat16,

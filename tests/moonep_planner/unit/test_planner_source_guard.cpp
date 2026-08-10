@@ -60,6 +60,10 @@ int main()
     const std::string planHeader = Read(root + "/src/include/tilexr_ep_plan.h");
     const std::string v3Entry = Read(
         root + "/src/moonep/planner/host/tilexr_moonep_planner.cpp");
+    const std::string v3Layout = Read(
+        root + "/src/moonep/planner/host/planner_layout.cpp");
+    const std::string v3Kernel = Read(
+        root + "/src/moonep/planner/kernels/tilexr_moonep_planner_kernel.cpp");
     const std::string moonEpHost = Read(root + "/src/moonep/host/tilexr_moonep.cpp");
 
     bool ok = true;
@@ -122,6 +126,26 @@ int main()
     ok &= Require(publicHeader, "TileXRMoonEpPlannerV3", "Planner V3 ABI missing");
     ok &= Require(v3Entry, "TileXRMoonEpV3::PlannerLayout",
         "Planner V3 internals are not isolated from PR96 V2");
+    ok &= Reject(v3Layout, "selected < rankSize",
+        "Planner V3 still requires one AIV block per rank");
+    ok &= Require(v3Kernel, "sourceRankValue += blockCount_",
+        "Planner V3 gather does not stride over ranks");
+    ok &= Require(v3Kernel, "ownerValue += blockCount_",
+        "Planner V3 allocation does not stride over ranks");
+    ok &= Require(v3Kernel, "destValue += blockCount_",
+        "Planner V3 expert layout does not stride over ranks");
+    ok &= Require(v3Kernel,
+        "PublishCrossRankReady();\n        AscendC::SyncAll<true>();\n\n        CrossRankReady();",
+        "Planner V3 does not publish readiness before its local waiters start");
+    ok &= Require(v3Kernel, "peerOffset = blockIdx_; peerOffset < rankSize_",
+        "Planner V3 readiness wait is not partitioned across AIV blocks");
+    ok &= Require(v3Kernel, "peerOffset += blockCount_",
+        "Planner V3 readiness wait does not stride over peers");
+    ok &= Require(v3Kernel,
+        "CrossRankReady();\n        AscendC::SyncAll<true>();\n        FinalizeCrossRankReady();",
+        "Planner V3 does not reduce per-block readiness results");
+    ok &= Require(v3Kernel, "groupTotalsGm_[blockIdx_]",
+        "Planner V3 readiness waiters do not report through block-local slots");
     ok &= Require(moonEpHost, "TileXRMoonEpPlannerV3",
         "MoonEP V1 no longer routes planning through the V3 compatibility backend");
 

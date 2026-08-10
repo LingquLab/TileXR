@@ -3,11 +3,40 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 import torch
 
 from tools.moonep.case_factory import make_correctness_case
-from tools.moonep.config import load_cases
+from tools.moonep.config import load_cases, select_cases
 from tools.moonep.contracts import MoonEPDimensions, validate_projections
+from tools.moonep.correctness import _has_duplicate_destinations
+from tools.moonep.torch_npu_backend import TorchNpuMoonEPBackend
+
+
+RUNNER_WORLD_SIZES = {
+    "manual-small": 1,
+    "manual-2rank-imbalanced": 2,
+    "manual-2rank-topk-2": 2,
+    "planning-small": 2,
+    "planning-no-dedup": 4,
+    "planning-4rank-topk-4": 4,
+    "skewed-no-dup": 4,
+    "planning-8rank-topk-8": 8,
+    "planning-16rank-topk-16": 16,
+    "planning-8rank-single-route": 8,
+    "planning-16rank-single-route": 16,
+    "planning-16rank-16card-single-route": 16,
+    "planning-64rank-single-route": 64,
+    "planning-128rank-single-route": 128,
+}
+
+
+class StaticCollective:
+    def __init__(self, gathered):
+        self.gathered = gathered
+
+    def all_gather(self, tensor):
+        return self.gathered.to(device=tensor.device)
 
 
 def dimensions(rank: int = 0) -> MoonEPDimensions:
@@ -63,6 +92,25 @@ def test_duplicate_destination_pattern_stays_inside_one_owner_group() -> None:
     assert torch.all(owners == owners[:, :1])
 
 
+def test_unique_destination_pattern_rejects_more_routes_than_ranks() -> None:
+    with pytest.raises(ValueError, match="topk.*world_size"):
+        make_correctness_case(
+            torch,
+            MoonEPDimensions(
+                rank=0,
+                world_size=2,
+                tokens_per_rank=2,
+                topk=3,
+                expert_count=6,
+                prefetch_slots=3,
+                token_padding=1,
+                hidden_size=2,
+                intermediate_size=2,
+            ),
+            routing_pattern="unique_destinations",
+        )
+
+
 def test_case_clone_does_not_alias_inputs() -> None:
     case = make_correctness_case(torch, dimensions())
     cloned = case.clone()
@@ -81,105 +129,210 @@ def test_expert_weights_are_rank_distinguishable() -> None:
     )
 
 
-def test_manual_small_case_keeps_all_stage_tensors_human_auditable() -> None:
+def test_runner_case_matrix_uses_fixed_padding_and_unique_token_destinations() -> None:
     root = Path(__file__).resolve().parents[3]
     case_path = root / "tools" / "moonep" / "cases" / "correctness.json"
     raw_cases = json.loads(case_path.read_text(encoding="utf-8"))
-    raw_manual = next(case for case in raw_cases if case["id"] == "manual-small")
-    assert "P" not in raw_manual
-    assert "token_padding" not in raw_manual
+    assert all(case.get("P") == 1 for case in raw_cases)
+    assert all(
+        case["routing"] not in {"duplicate_destinations", "imbalanced_duplicates"}
+        for case in raw_cases
+    )
+
     cases = load_cases(case_path)
-    manual = next(case for case in cases if case.case_id == "manual-small")
-    assert (
-        manual.tokens_per_rank,
-        manual.topk,
-        manual.expert_count,
-        manual.hidden_size,
-        manual.intermediate_size,
-        manual.prefetch_slots,
-        manual.token_padding,
-    ) == (2, 2, 4, 2, 2, 1, 1)
-    dimensions = MoonEPDimensions(0, 4, 2, 2, 4, 1, 1, 2, 2)
-    assert dimensions.nvsh == 4
+    assert all(case.route_distribution == "rank_shifted_uniform" for case in cases)
+    assert {case.case_id for case in cases} == set(RUNNER_WORLD_SIZES)
+
+    for case in cases:
+        world_size = RUNNER_WORLD_SIZES[case.case_id]
+        assert case.token_padding == 1
+        assert case.prefetch_slots == case.expert_count // world_size
+        assert (case.hidden_size, case.intermediate_size) == (8, 4)
+        assert case.hidden_size * case.intermediate_size * 2 % 64 == 0
+        for rank in range(world_size):
+            dimensions = MoonEPDimensions(
+                rank,
+                world_size,
+                case.tokens_per_rank,
+                case.topk,
+                case.expert_count,
+                case.prefetch_slots,
+                case.token_padding,
+                case.hidden_size,
+                case.intermediate_size,
+            )
+            generated = make_correctness_case(
+                torch, dimensions, routing_pattern=case.routing_pattern
+            )
+            owners = torch.div(
+                generated.topk_experts,
+                dimensions.experts_per_rank,
+                rounding_mode="floor",
+            )
+            for token_owners in owners.tolist():
+                assert len(set(token_owners)) == case.topk
 
 
-def test_default_no_dedup_case_uses_one_route_per_token() -> None:
+def test_runner_plans_do_not_assign_one_token_to_the_same_rank_twice() -> None:
     root = Path(__file__).resolve().parents[3]
     cases = load_cases(root / "tools" / "moonep" / "cases" / "correctness.json")
-    case = next(item for item in cases if item.case_id == "planning-no-dedup")
 
-    assert (
-        case.tokens_per_rank,
-        case.topk,
-        case.expert_count,
-        case.token_padding,
-        case.routing_pattern,
-    ) == (8, 1, 8, 4, "balanced")
-
-
-def test_manual_two_rank_case_starts_with_all_routes_on_rank_zero_experts() -> None:
-    root = Path(__file__).resolve().parents[3]
-    cases = load_cases(root / "tools" / "moonep" / "cases" / "correctness.json")
-    case = next(item for item in cases if item.case_id == "manual-2rank-imbalanced")
-    assert (
-        case.tokens_per_rank,
-        case.topk,
-        case.expert_count,
-        case.hidden_size,
-        case.intermediate_size,
-        case.prefetch_slots,
-        case.token_padding,
-        case.routing_pattern,
-    ) == (2, 2, 4, 2, 2, 2, 1, "skewed")
-    dimensions = MoonEPDimensions(0, 2, 2, 2, 4, 2, 1, 2, 2)
-    generated = make_correctness_case(
-        torch, dimensions, routing_pattern=case.routing_pattern
-    )
-    assert torch.equal(
-        generated.tokens_per_expert,
-        torch.tensor([2, 2, 0, 0], dtype=torch.int32),
-    )
-
-
-def test_manual_two_rank_case_combines_imbalance_and_three_duplicates() -> None:
-    root = Path(__file__).resolve().parents[3]
-    cases = load_cases(root / "tools" / "moonep" / "cases" / "correctness.json")
-    case = next(item for item in cases if item.case_id == "manual-2rank-dedup-3")
-    assert (
-        case.tokens_per_rank,
-        case.topk,
-        case.expert_count,
-        case.hidden_size,
-        case.intermediate_size,
-        case.prefetch_slots,
-        case.token_padding,
-        case.routing_pattern,
-    ) == (2, 4, 8, 2, 2, 4, 1, "imbalanced_duplicates")
-
-    expected = (
-        torch.tensor([[4, 5, 6, 7], [0, 1, 2, 3]], dtype=torch.int32),
-        torch.tensor([[0, 1, 2, 3], [0, 1, 2, 3]], dtype=torch.int32),
-    )
-    for rank in range(2):
-        dimensions = MoonEPDimensions(rank, 2, 2, 4, 8, 4, 1, 2, 2)
-        generated = make_correctness_case(
-            torch, dimensions, routing_pattern=case.routing_pattern
-        )
-        assert torch.equal(generated.topk_experts, expected[rank])
-
-    all_tpe = torch.stack(
-        [
-            make_correctness_case(
-                torch,
-                MoonEPDimensions(rank, 2, 2, 4, 8, 4, 1, 2, 2),
-                routing_pattern=case.routing_pattern,
-            ).tokens_per_expert
-            for rank in range(2)
+    for case in cases:
+        world_size = RUNNER_WORLD_SIZES[case.case_id]
+        dimensions_by_rank = [
+            MoonEPDimensions(
+                rank,
+                world_size,
+                case.tokens_per_rank,
+                case.topk,
+                case.expert_count,
+                case.prefetch_slots,
+                case.token_padding,
+                case.hidden_size,
+                case.intermediate_size,
+            )
+            for rank in range(world_size)
         ]
+        generated = [
+            make_correctness_case(
+                torch, dimensions, routing_pattern=case.routing_pattern
+            )
+            for dimensions in dimensions_by_rank
+        ]
+        all_tpe = torch.stack([item.tokens_per_expert for item in generated])
+        for dimensions, item in zip(dimensions_by_rank, generated):
+            plan = TorchNpuMoonEPBackend(
+                torch, dimensions, collective=StaticCollective(all_tpe)
+            ).planning(item.topk_experts, item.tokens_per_expert).plan
+            assert not _has_duplicate_destinations(torch, plan), case.case_id
+
+
+def test_runner_case_matrix_varies_core_dimensions_and_retains_topk_above_one() -> None:
+    root = Path(__file__).resolve().parents[3]
+    cases = load_cases(root / "tools" / "moonep" / "cases" / "correctness.json")
+
+    for name in (
+        "tokens_per_rank",
+        "topk",
+        "expert_count",
+        "prefetch_slots",
+    ):
+        assert len({getattr(case, name) for case in cases}) >= 2
+    assert {case.topk for case in cases} >= {1, 2, 4, 8, 16}
+
+
+@pytest.mark.parametrize(
+    ("case_id", "expected"),
+    [
+        ("planning-8rank-topk-8", (4, 8, 32, 4, 1)),
+        ("planning-16rank-topk-16", (2, 16, 32, 2, 1)),
+    ],
+)
+def test_large_rank_cases_keep_bounded_routes_and_required_capacity(
+    case_id: str, expected: tuple[int, ...]
+) -> None:
+    root = Path(__file__).resolve().parents[3]
+    cases = load_cases(root / "tools" / "moonep" / "cases" / "correctness.json")
+    case = next(item for item in cases if item.case_id == case_id)
+
+    assert (
+        case.tokens_per_rank,
+        case.topk,
+        case.expert_count,
+        case.prefetch_slots,
+        case.token_padding,
+    ) == expected
+    assert case.tokens_per_rank * case.topk == 32
+    assert case.routing_pattern == "unique_destinations"
+
+
+@pytest.mark.parametrize(
+    ("case_id", "expected"),
+    [
+        ("planning-8rank-single-route", (8, 1, 16, 2, 1)),
+        ("planning-16rank-single-route", (8, 1, 16, 1, 1)),
+        ("planning-16rank-16card-single-route", (8, 1, 16, 1, 1)),
+        ("planning-64rank-single-route", (8, 1, 64, 1, 1)),
+        ("planning-128rank-single-route", (8, 1, 128, 1, 1)),
+    ],
+)
+def test_large_rank_single_route_cases_isolate_topk_from_rank_scaling(
+    case_id: str, expected: tuple[int, ...]
+) -> None:
+    root = Path(__file__).resolve().parents[3]
+    cases = load_cases(root / "tools" / "moonep" / "cases" / "correctness.json")
+    case = next(item for item in cases if item.case_id == case_id)
+
+    assert (
+        case.tokens_per_rank,
+        case.topk,
+        case.expert_count,
+        case.prefetch_slots,
+        case.token_padding,
+    ) == expected
+    assert case.routing_pattern == "balanced"
+
+
+def test_large_rank_single_route_cases_share_core_dimensions() -> None:
+    root = Path(__file__).resolve().parents[3]
+    cases = load_cases(root / "tools" / "moonep" / "cases" / "correctness.json")
+    selected = {
+        case.case_id: case
+        for case in cases
+        if case.case_id
+        in {"planning-8rank-single-route", "planning-16rank-single-route"}
+    }
+    eight = selected["planning-8rank-single-route"]
+    sixteen = selected["planning-16rank-single-route"]
+
+    assert (
+        eight.tokens_per_rank,
+        eight.topk,
+        eight.expert_count,
+        eight.hidden_size,
+        eight.intermediate_size,
+        eight.token_padding,
+        eight.routing_pattern,
+    ) == (
+        sixteen.tokens_per_rank,
+        sixteen.topk,
+        sixteen.expert_count,
+        sixteen.hidden_size,
+        sixteen.intermediate_size,
+        sixteen.token_padding,
+        sixteen.routing_pattern,
     )
-    global_tpe = all_tpe.sum(dim=0)
-    assert torch.equal(global_tpe, torch.tensor([3, 3, 3, 3, 1, 1, 1, 1]))
-    assert torch.equal(
-        global_tpe.reshape(2, 4).sum(dim=1),
-        torch.tensor([12, 4]),
-    )
+    assert eight.prefetch_slots == eight.expert_count // 8
+    assert sixteen.prefetch_slots == sixteen.expert_count // 16
+
+
+def test_runner_cases_support_one_based_numeric_selection() -> None:
+    root = Path(__file__).resolve().parents[3]
+    cases = load_cases(root / "tools" / "moonep" / "cases" / "correctness.json")
+
+    for number, case in enumerate(cases, start=1):
+        assert select_cases(cases, str(number)) == [case]
+    assert select_cases(cases, "1,14") == [cases[0], cases[13]]
+    for invalid in ("0", "15"):
+        with pytest.raises(ValueError, match=r"case number must be in \[1, 14\]"):
+            select_cases(cases, invalid)
+
+
+def test_case_14_is_the_two_node_one_rank_per_device_case() -> None:
+    root = Path(__file__).resolve().parents[3]
+    cases = load_cases(root / "tools" / "moonep" / "cases" / "correctness.json")
+
+    assert len(cases) == 14
+    case = cases[13]
+    assert case.case_id == "planning-16rank-16card-single-route"
+    assert (
+        case.tokens_per_rank,
+        case.topk,
+        case.expert_count,
+        case.hidden_size,
+        case.intermediate_size,
+        case.prefetch_slots,
+        case.token_padding,
+        case.routing_pattern,
+        case.route_distribution,
+    ) == (8, 1, 16, 8, 4, 1, 1, "balanced", "rank_shifted_uniform")

@@ -111,7 +111,7 @@ int main()
     Contains("planner kernel", plannerKernel, "TileXR::IPC_DATA_OFFSET");
     Excludes("planner kernel", Lower(plannerKernel), "udma");
     Contains("dispatch common", dispatchCommon, "moonep_peer_window.h");
-    Contains("common stage Host", stageHost,
+    Excludes("common stage Host", stageHost,
         "context->hostArgs->localRankSize != context->hostArgs->rankSize");
     Contains("registration implementation", registrationImpl, "rtDevBinaryRegister");
     Contains("registration implementation", registrationImpl, "rtFunctionRegister");
@@ -187,6 +187,19 @@ int main()
     Contains("combine kernel", combineKernel, "AscendC::Add");
     Contains("combine kernel", combineKernel, "AscendC::RoundMode::CAST_RINT");
     Contains("combine kernel", combineKernel, "GatherWeights");
+    Contains("combine kernel", combineKernel, "IsPublishOnly");
+    Contains("combine kernel", combineKernel, "IsConsumeOnly");
+    Contains("combine kernel", combineKernel, "RunPublishOnly");
+    Contains("combine kernel", combineKernel, "RunConsumeOnly");
+    Contains("combine kernel", combineKernel, "#include \"tilexr_udma.h\"");
+    Contains("combine kernel", combineKernel, "UDMAGetNbiOnQp");
+    Contains("combine kernel", combineKernel, "UDMAQuietStatusOnQp");
+    Contains("combine kernel", combineKernel, "UDMARegisteredRangeValid");
+    Contains("combine kernel", combineKernel,
+        "const uint32_t qpCount = TileXR::UDMAQpCount(args_)");
+    Contains("combine kernel", combineKernel,
+        "const uint32_t qpIdx = qpCount > 1U ? 1U : 0U");
+    Excludes("combine kernel", combineKernel, "const uint32_t qpIdx = 0U");
     Contains("combine kernel", combineKernel, "kMoonEpCombineDataReadyStep");
     Contains("combine kernel", combineKernel, "kMoonEpCombineWindowDrainedStep");
     Contains("combine kernel", combineKernel, "kMoonEpCombineFailedStep");
@@ -195,7 +208,6 @@ int main()
     Contains("combine kernel", combineKernel, "AscendC::PipeBarrier<PIPE_ALL>()");
     Excludes("combine kernel", combineKernel, "WaitRankInnerFlag");
     Excludes("combine kernel", combineKernel, "aclrtSynchronizeStream");
-    Excludes("combine kernel", Lower(combineKernel), "udma");
     Contains("prefetch launch", prefetchLaunch, "#include \"moonep_kernel_launch.h\"");
     Contains("prefetch launch", prefetchLaunch, "LaunchRegisteredMoonEpKernel(");
     Excludes("prefetch launch", prefetchLaunch, "rtKernelLaunchWithFlagV2");
@@ -222,6 +234,9 @@ int main()
     Contains("reduce kernel", reduceKernel,
         "extern \"C\" __global__ __aicore__ void tilexr_moonep_reduce_grad_kernel");
     Contains("reduce kernel", reduceKernel, "RunSender");
+    Contains("reduce kernel", reduceKernel, "RunSenderTo");
+    Contains("reduce kernel", reduceKernel,
+        "controlIndex += controlBlockCount_");
     Contains("reduce kernel", reduceKernel, "RunReceiver");
     Excludes("reduce kernel", reduceKernel, "reduceBuffers_");
     Contains("reduce kernel", reduceKernel, "DataAsFlagSend");
@@ -233,6 +248,10 @@ int main()
         "tilexr_moonep_reduce_grad_status_kernel");
     Excludes("reduce kernel", reduceKernel, "kReduceGradDeviceStatusSuccess");
     Contains("reduce Host", reduceHost, "TileXRMoonEpReduceGradV2");
+    Excludes("reduce Host", reduceHost,
+        "plan->r > kReduceGradMaxAivBlockCount");
+    Excludes("reduce Host", reduceHost,
+        "commArgs.rankSize <= kReduceGradMaxAivBlockCount");
     Contains("DataAsFlag helper", dataAsFlag, "DataAsFlagCheckBatchCleared");
     Contains("UDMA helper", udma, "UDMAPutRegisteredSignalNbiOnQp");
     Contains("UDMA helper", udma, "UDMAWriteNotify");

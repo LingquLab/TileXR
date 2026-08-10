@@ -208,6 +208,7 @@ int main()
 
     Contains("common stage Host", stageHost, "PrepareStageHost");
     Contains("common stage Host", stageHost, "PrepareStageDevice");
+    Excludes("common stage Host", stageHost, "localRankSize !=");
     for (std::vector<std::string>::const_iterator it = nativeStageHosts.begin();
          it != nativeStageHosts.end(); ++it) {
         Contains("native stage Host", *it, "#include \"moonep_stage_host.h\"");

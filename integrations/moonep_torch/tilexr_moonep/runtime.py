@@ -10,6 +10,8 @@ from typing import Callable, Mapping, Sequence
 from .abi import (
     TILEXR_MOONEP_ABI_VERSION,
     TILEXR_MOONEP_FLAG_BUILD_DEDUP,
+    TILEXR_MOONEP_FLAG_COMBINE_CONSUME_ONLY,
+    TILEXR_MOONEP_FLAG_COMBINE_PUBLISH_ONLY,
     TILEXR_MOONEP_FLAG_NONE,
     TILEXR_SUCCESS,
     TileXRMoonEPCombineArgsV1,
@@ -196,6 +198,10 @@ class TileXRMoonEPRuntime:
         self._udma_workspace = None
         self._udma_workspace_ptr = 0
         self._udma_workspace_bytes = 0
+        self._active_udma_owner: str | None = None
+        self._active_udma_pointer = 0
+        self._active_udma_bytes = 0
+        self._active_udma_handle: int | None = None
         self._reduce_grad_lock = threading.RLock()
         self._reduce_grad_owner_token = None
         paths = dict(library_paths or {})
@@ -441,23 +447,52 @@ class TileXRMoonEPRuntime:
         return int(workspace_bytes.value), int(workspace_alignment.value)
 
     def register_dispatch_workspace(self, pointer: int, size: int) -> int | None:
+        return self._activate_udma_region(
+            pointer, size, "dispatch", f"workspace_bytes={int(size)}"
+        )
+
+    def _activate_udma_region(
+        self, pointer: int, size: int, owner: str, detail: str
+    ) -> int | None:
+        pointer = int(pointer)
+        size = int(size)
         if self.world_size == 1:
             return None
+        if pointer <= 0 or size <= 0:
+            raise ValueError("UDMA registration requires a valid pointer and positive size")
+        if self._active_udma_pointer == pointer and self._active_udma_bytes == size:
+            self._active_udma_owner = owner
+            return self._active_udma_handle
         handle = ctypes.c_uint32()
         ret = self._comm_lib.TileXRUDMARegister(
             void_p(self.comm_ptr), void_p(pointer), ctypes.c_size_t(size),
             ctypes.byref(handle)
         )
-        self._check("TileXRUDMARegister", ret)
-        return int(handle.value)
+        self._check("TileXRUDMARegister", ret, detail)
+        self._active_udma_owner = owner
+        self._active_udma_pointer = pointer
+        self._active_udma_bytes = size
+        self._active_udma_handle = int(handle.value)
+        return self._active_udma_handle
+
+    def _deactivate_udma_region(self, owner: str | None = None) -> None:
+        if self._active_udma_handle is None:
+            return
+        if owner is not None and self._active_udma_owner != owner:
+            return
+        ret = self._comm_lib.TileXRUDMAUnregister(
+            void_p(self.comm_ptr), ctypes.c_uint32(self._active_udma_handle)
+        )
+        self._check("TileXRUDMAUnregister", ret)
+        self._active_udma_owner = None
+        self._active_udma_pointer = 0
+        self._active_udma_bytes = 0
+        self._active_udma_handle = None
 
     def unregister_dispatch_workspace(self, handle: int | None) -> None:
         if handle is None:
             return
-        ret = self._comm_lib.TileXRUDMAUnregister(
-            void_p(self.comm_ptr), ctypes.c_uint32(handle)
-        )
-        self._check("TileXRUDMAUnregister", ret)
+        self._deactivate_udma_region("dispatch")
 
     def planning(
         self,
@@ -562,19 +597,14 @@ class TileXRMoonEPRuntime:
         self._check("TileXRMoonEpPrefetchWeightV1", ret)
 
     def udma_register(self, tensor) -> int:
-        handle = ctypes.c_uint32()
-        ret = self._comm_lib.TileXRUDMARegister(
-            void_p(self.comm_ptr), tensor_ptr(tensor), tensor_nbytes(tensor),
-            ctypes.byref(handle)
+        size = tensor_nbytes(tensor)
+        handle = self._activate_udma_region(
+            int(tensor.data_ptr()), size, "projection", f"bytes={size}"
         )
-        self._check("TileXRUDMARegister", ret, f"bytes={tensor_nbytes(tensor)}")
-        return int(handle.value)
+        return 0 if handle is None else int(handle)
 
     def udma_unregister(self, handle: int) -> None:
-        ret = self._comm_lib.TileXRUDMAUnregister(
-            void_p(self.comm_ptr), ctypes.c_uint32(int(handle))
-        )
-        self._check("TileXRUDMAUnregister", ret, f"handle={int(handle)}")
+        self._deactivate_udma_region("projection")
 
     def combine(
         self,
@@ -587,6 +617,7 @@ class TileXRMoonEPRuntime:
         output_route_weights=None,
         *,
         inter_rank_sync: bool,
+        flags: int = TILEXR_MOONEP_FLAG_NONE,
     ) -> None:
         if not inter_rank_sync:
             raise NotImplementedError(
@@ -611,7 +642,13 @@ class TileXRMoonEPRuntime:
         args.routeWeightsNvs = ctypes.pointer(weights_nvs) if weights_nvs is not None else None
         args.hiddenSh = ctypes.pointer(hidden_sh)
         args.routeWeightsSk = ctypes.pointer(weights_sk) if weights_sk is not None else None
-        args.flags = TILEXR_MOONEP_FLAG_NONE
+        allowed_flags = (
+            TILEXR_MOONEP_FLAG_COMBINE_PUBLISH_ONLY |
+            TILEXR_MOONEP_FLAG_COMBINE_CONSUME_ONLY
+        )
+        if int(flags) & ~allowed_flags:
+            raise ValueError(f"unsupported TileXR MoonEP Combine flags: {int(flags)}")
+        args.flags = int(flags)
         ret = self._moonep_lib.TileXRMoonEpCombineV1(
             ctypes.byref(args), void_p(stream_ptr)
         )
@@ -679,17 +716,15 @@ class TileXRMoonEPRuntime:
                 raise ValueError(
                     f"ReduceGrad workspace has {available} bytes, requires {required_bytes}"
                 )
-            if self._udma_handle is not None:
-                if pointer == self._udma_workspace_ptr and available == self._udma_workspace_bytes:
-                    return
+            if self._udma_handle is not None and (
+                pointer != self._udma_workspace_ptr or
+                available != self._udma_workspace_bytes
+            ):
                 raise RuntimeError("a different TileXR UDMA workspace is already registered")
-            handle = ctypes.c_uint32()
-            ret = self._comm_lib.TileXRUDMARegister(
-                void_p(self.comm_ptr), void_p(pointer), ctypes.c_size_t(available),
-                ctypes.byref(handle),
+            handle = self._activate_udma_region(
+                pointer, available, "reduce_grad", f"workspace_bytes={available}"
             )
-            self._check("TileXRUDMARegister", ret, f"workspace_bytes={available}")
-            self._udma_handle = handle
+            self._udma_handle = None if handle is None else ctypes.c_uint32(handle)
             self._udma_workspace = workspace
             self._udma_workspace_ptr = pointer
             self._udma_workspace_bytes = available
@@ -703,10 +738,7 @@ class TileXRMoonEPRuntime:
             )
             if self._udma_handle is None:
                 return
-            ret = self._comm_lib.TileXRUDMAUnregister(
-                void_p(self.comm_ptr), ctypes.c_uint32(self._udma_handle.value)
-            )
-            self._check("TileXRUDMAUnregister", ret)
+            self._deactivate_udma_region("reduce_grad")
             self._udma_handle = None
             self._udma_workspace = None
             self._udma_workspace_ptr = 0
@@ -756,6 +788,7 @@ class TileXRMoonEPRuntime:
                 return
             if self._comm.value:
                 self.unregister_reduce_grad_workspace()
+                self._deactivate_udma_region()
                 ret = self._comm_lib.TileXRCommDestroy(self._comm)
                 self._check("TileXRCommDestroy", ret, f"rank={self.rank}")
                 self._comm = ctypes.c_void_p()

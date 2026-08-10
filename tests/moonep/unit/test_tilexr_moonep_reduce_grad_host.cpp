@@ -299,6 +299,40 @@ void TestSingleRankLargeRowsDoNotRequireUdma()
         "single-rank large-row launch must not consult an unavailable UDMA registry");
 }
 
+void TestLargeRankWorkspaceQuery()
+{
+    Reset();
+    g_commArgs.rankSize = TileXR::TILEXR_MAX_RANK_SIZE;
+    g_commArgs.localRankSize = 8;
+    for (int rank = 0; rank < g_commArgs.rankSize; ++rank) {
+        g_commArgs.peerMems[rank] = reinterpret_cast<GM_ADDR>(
+            UINTPTR_C(0x200000) + static_cast<uintptr_t>(rank) * UINTPTR_C(0x100000));
+    }
+
+    TileXRMoonEpPlanV1 plan = Plan();
+    plan.n = TileXR::TILEXR_MAX_RANK_SIZE;
+    plan.k = 1;
+    plan.e = TileXR::TILEXR_MAX_RANK_SIZE;
+    plan.b = 1;
+    plan.r = TileXR::TILEXR_MAX_RANK_SIZE;
+    TileXRMoonEpTensorV1 gate = Gradient(
+        reinterpret_cast<void *>(UINTPTR_C(0x400000)), 64);
+    TileXRMoonEpTensorV1 up = Gradient(
+        reinterpret_cast<void *>(UINTPTR_C(0x500000)), 128);
+    TileXRMoonEpTensorV1 down = Gradient(
+        reinterpret_cast<void *>(UINTPTR_C(0x600000)), 256);
+    TileXRMoonEpTensorV1 *gradients[] = {&gate, &up, &down};
+    for (TileXRMoonEpTensorV1 *tensor : gradients) {
+        tensor->shape[0] = plan.e + plan.b;
+        tensor->elementCount = static_cast<uint64_t>(tensor->shape[0]) *
+            static_cast<uint64_t>(tensor->shape[1]);
+    }
+
+    const auto info = Query(&plan, &gate, &up, &down, TileXR::TILEXR_SUCCESS);
+    Check(info.blockDim == TileXRMoonEp::kReduceGradMaxAivBlockCount,
+        "128-rank workspace query must retain the 64-AIV launch limit");
+}
+
 void TestLaunchFailureDrainsEnqueuedStatusReset()
 {
     Reset();
@@ -423,6 +457,7 @@ int main()
     TestPeerOnly();
     TestMixedUdma();
     TestSingleRankLargeRowsDoNotRequireUdma();
+    TestLargeRankWorkspaceQuery();
     TestLaunchFailureDrainsEnqueuedStatusReset();
     TestValidation();
     return g_failures == 0 ? 0 : 1;

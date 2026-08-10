@@ -71,8 +71,11 @@ class IterationBuffer:
     def prefetch_weight(*_args, **_kwargs):
         return None
 
-    def combine(self, _plan, hidden, route_weights=None):
+    def combine(self, _plan, hidden, route_weights=None, *, phase_barrier=None):
         self.combine_inputs.append(hidden.clone())
+        if phase_barrier is not None:
+            phase_barrier("published")
+            phase_barrier("consumed")
         return hidden, route_weights, None
 
     @staticmethod
@@ -109,15 +112,32 @@ def test_timed_iteration_executes_torch_npu_expert_forward() -> None:
     }
     buffer = IterationBuffer()
     ops = IterationTorchNpu()
+    events = []
+    original_combine = buffer.combine
+
+    def combine(*args, **kwargs):
+        events.append("combine")
+        return original_combine(*args, **kwargs)
+
+    buffer.combine = combine
 
     benchmark.execute_iteration(
         buffer,
         inputs,
         torch_module=torch,
         torch_npu_module=ops,
+        stage_barrier=lambda stage: events.append(stage),
     )
 
     assert ops.gmm_calls == 2
+    assert events[:2] == ["expert_forward", "combine"]
+    assert events.count("expert_forward") == 1
+    assert events.count("combine_forward_published") == 1
+    assert events.count("combine_forward_consumed") == 1
+    assert events.count("combine_backward_published") == 1
+    assert events.count("combine_backward_consumed") == 1
+    assert events.count("reduce_grad") == 1
+    assert events[-1] == "reduce_grad"
     assert torch.count_nonzero(buffer.combine_inputs[0][2:]).item() == 0
 
 

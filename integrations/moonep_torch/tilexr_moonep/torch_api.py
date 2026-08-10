@@ -4,11 +4,16 @@ import os
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from .abi import (
+    TILEXR_MOONEP_FLAG_COMBINE_CONSUME_ONLY,
+    TILEXR_MOONEP_FLAG_COMBINE_PUBLISH_ONLY,
+)
 from .runtime import TileXRMoonEPRuntime
 
 
 _COMBINE_STATUS_SUCCESS = 3000
 _PREFETCH_WEIGHT_STATUS_SUCCESS = 4000
+_UDMA_REGISTRATION_ALIGNMENT = 2 * 1024 * 1024
 
 
 def _torch():
@@ -130,12 +135,27 @@ class ProjectionBuffers:
         if any(source.dtype != gate.dtype or int(source.element_size()) != element_bytes
                for source in sources):
             raise TypeError("gate, up, and down local weights must use the same dtype")
-        total_elements = (cursor_bytes + element_bytes - 1) // element_bytes
-        backing = torch_module.empty(
-            (total_elements,), dtype=gate.dtype, device=f"npu:{context.device_index}"
+        registered_bytes = (
+            (cursor_bytes + _UDMA_REGISTRATION_ALIGNMENT - 1) //
+            _UDMA_REGISTRATION_ALIGNMENT * _UDMA_REGISTRATION_ALIGNMENT
         )
-        if int(backing.data_ptr()) % alignment:
-            raise RuntimeError("projection backing allocation is not 64-byte aligned")
+        allocation_elements = (
+            registered_bytes + _UDMA_REGISTRATION_ALIGNMENT - 1 + element_bytes - 1
+        ) // element_bytes
+        allocation = torch_module.empty(
+            (allocation_elements,), dtype=gate.dtype,
+            device=f"npu:{context.device_index}"
+        )
+        allocation_ptr = int(allocation.data_ptr())
+        offset_bytes = (-allocation_ptr) % _UDMA_REGISTRATION_ALIGNMENT
+        if offset_bytes % element_bytes:
+            raise RuntimeError("projection registration offset is not element-aligned")
+        backing = allocation.narrow(
+            0, offset_bytes // element_bytes, registered_bytes // element_bytes
+        )
+        if (int(backing.data_ptr()) % _UDMA_REGISTRATION_ALIGNMENT or
+                int(backing.numel()) * element_bytes != registered_bytes):
+            raise RuntimeError("projection backing is not 2-MiB registration-aligned")
 
         views = []
         for source, offset_bytes in zip(sources, offsets):
@@ -424,6 +444,13 @@ class TileXRMoonEPContext:
         self._dispatch_workspace_alignment = alignment
         self._dispatch_workspace_handle = handle
 
+    def activate_dispatch_workspace(self) -> None:
+        if self._dispatch_workspace_owner is None:
+            raise RuntimeError("Dispatch workspace is not initialized")
+        self._dispatch_workspace_handle = self.runtime.register_dispatch_workspace(
+            self._dispatch_workspace_ptr, self._dispatch_workspace_bytes
+        )
+
     @property
     def dispatch_workspace(self) -> tuple[int, int]:
         if self._dispatch_workspace_owner is None:
@@ -500,6 +527,19 @@ class TileXRMoonEPBuffer:
             )
         self.context.bind_stream(self, stream_ptr)
         return stream_ptr
+
+    def _synchronize_device(self) -> None:
+        try:
+            self._torch.npu.synchronize(self.context.device_index)
+        except TypeError:
+            self._torch.npu.synchronize()
+
+    def _trace_stage(self, stage: str) -> None:
+        if os.environ.get("TILEXR_MOONEP_TRACE_STAGES", "0") == "1":
+            print(
+                f"[TileXR MoonEP rank {self.context.global_rank}] {stage}",
+                flush=True,
+            )
 
     def _retain(self, plan: MoonEPPlan, *values: Any) -> None:
         self._quiesced = False
@@ -612,7 +652,9 @@ class TileXRMoonEPBuffer:
             shape=(c.expert_count,),
             device_index=c.device_index,
         )
+        self._trace_stage("planning_workspace_begin")
         workspace_bytes = int(self.runtime.planning_workspace_size(c))
+        self._trace_stage("planning_workspace_end")
         if workspace_bytes <= 0:
             raise RuntimeError(f"native planner returned invalid workspace size {workspace_bytes}")
         self._epoch += 1
@@ -646,6 +688,7 @@ class TileXRMoonEPBuffer:
             backend="native",
             runtime=self.runtime,
         )
+        self._trace_stage("planning_kernel_launch_begin")
         self.runtime.planning(
             c,
             topk_experts,
@@ -655,6 +698,7 @@ class TileXRMoonEPBuffer:
             self._stream_ptr(),
             self.wait_iterations,
         )
+        self._trace_stage("planning_kernel_launch_end")
         self._plans_needing_dedup[id(plan)] = plan
         self._retain(plan, topk_experts, tokens_per_expert, cu_seqlens)
         self._expect_status(plan, 0)
@@ -715,15 +759,29 @@ class TileXRMoonEPBuffer:
             if route_weights_sk is not None
             else None
         )
+        stream_ptr = self._stream_ptr()
+        self._trace_stage("planning_sync_begin")
+        self._synchronize_device()
+        self._trace_stage("planning_sync_end")
+        if build_dedup:
+            planner_status = int(plan.status.item())
+            self._trace_stage(f"planning_status={planner_status}")
+            if os.environ.get("TILEXR_MOONEP_TRACE_STAGES", "0") == "1":
+                copy_count = int((plan.experts_to_copy >= 0).sum().item())
+                self._trace_stage(f"planning_experts_to_copy_nonnegative={copy_count}")
+            if planner_status != 0:
+                raise RuntimeError(f"MoonEP Planner device status is {planner_status}")
+        self.context.activate_dispatch_workspace()
         self._retain(
             plan, hidden_sh, hidden_nvsh, route_weights_sk, route_weights_nvs, cu_seqlens
         )
+        self._trace_stage("dispatch_kernel_launch_begin")
         self.runtime.dispatch(
             c,
             plan,
             hidden_sh,
             hidden_nvsh,
-            self._stream_ptr(),
+            stream_ptr,
             route_weights_sk,
             route_weights_nvs,
             build_dedup=False,
@@ -731,6 +789,7 @@ class TileXRMoonEPBuffer:
             registered_workspace=self.context.dispatch_workspace[0],
             registered_workspace_bytes=self.context.dispatch_workspace[1],
         )
+        self._trace_stage("dispatch_kernel_launch_end")
         if build_dedup:
             self._plans_needing_dedup.pop(id(plan), None)
         self._expect_status(plan, 0)
@@ -811,10 +870,7 @@ class TileXRMoonEPBuffer:
             return
         if self._registered_projections is not None:
             raise RuntimeError("only one projection allocation can be registered per buffer")
-        try:
-            self._torch.npu.synchronize(self.context.device_index)
-        except TypeError:
-            self._torch.npu.synchronize()
+        self._synchronize_device()
         projections.udma_handle = self.runtime.udma_register(projections.backing)
         self._registered_projections = projections
 
@@ -829,6 +885,8 @@ class TileXRMoonEPBuffer:
         self._validate_projection_buffers(projections, reduce=False)
         if self._registered_projections is not projections or projections.udma_handle is None:
             raise RuntimeError("projection buffers must be registered before PrefetchWeight")
+        self._synchronize_device()
+        projections.udma_handle = self.runtime.udma_register(projections.backing)
         self._retain(plan, projections)
         self.runtime.prefetch_weight(
             self.context, plan, projections, self._stream_ptr()
@@ -845,6 +903,7 @@ class TileXRMoonEPBuffer:
         inter_rank_sync: bool = True,
         *,
         zero_copy: bool = False,
+        phase_barrier: Callable[[str], None] | None = None,
     ):
         self._require_open()
         if zero_copy:
@@ -873,24 +932,56 @@ class TileXRMoonEPBuffer:
                 shape=(c.nv_s,),
                 device_index=c.device_index,
             )
+        split_combine = int(c.node_count) > 1
+        if split_combine and phase_barrier is None:
+            raise RuntimeError("cross-node Combine requires a Host phase barrier")
+        if split_combine:
+            self._trace_stage("combine_workspace_activation_begin")
+            self._synchronize_device()
+            self.context.activate_dispatch_workspace()
+            self._trace_stage("combine_workspace_activation_end")
         hidden_sh = self._empty((c.tokens_per_rank, c.hidden_size), c.dtype)
         route_weights_sk = (
             self._empty((c.tokens_per_rank, c.topk), self._torch.float32)
             if route_weights_nvs is not None
             else None
         )
-        self._retain(plan, hidden_nvsh, hidden_sh, route_weights_nvs, route_weights_sk)
-        self.runtime.combine(
-            c,
-            plan,
-            hidden_nvsh,
-            hidden_sh,
-            self._stream_ptr(),
-            route_weights_nvs,
-            route_weights_sk,
-            inter_rank_sync=bool(inter_rank_sync),
-        )
-        self._expect_status(plan, _COMBINE_STATUS_SUCCESS)
+        def launch(flags: int) -> None:
+            self._retain(plan, hidden_nvsh, hidden_sh, route_weights_nvs, route_weights_sk)
+            self.runtime.combine(
+                c,
+                plan,
+                hidden_nvsh,
+                hidden_sh,
+                self._stream_ptr(),
+                route_weights_nvs,
+                route_weights_sk,
+                inter_rank_sync=bool(inter_rank_sync),
+                flags=flags,
+            )
+            self._expect_status(plan, _COMBINE_STATUS_SUCCESS)
+
+        if split_combine:
+            self._trace_stage("combine_publish_launch_begin")
+            launch(TILEXR_MOONEP_FLAG_COMBINE_PUBLISH_ONLY)
+            self._trace_stage("combine_publish_launch_end")
+            self._trace_stage("combine_publish_sync_begin")
+            self.synchronize()
+            self._trace_stage("combine_publish_sync_end")
+            self._trace_stage("combine_publish_barrier_begin")
+            phase_barrier("published")
+            self._trace_stage("combine_publish_barrier_end")
+            self._trace_stage("combine_consume_launch_begin")
+            launch(TILEXR_MOONEP_FLAG_COMBINE_CONSUME_ONLY)
+            self._trace_stage("combine_consume_launch_end")
+            self._trace_stage("combine_consume_sync_begin")
+            self.synchronize()
+            self._trace_stage("combine_consume_sync_end")
+            self._trace_stage("combine_consume_barrier_begin")
+            phase_barrier("consumed")
+            self._trace_stage("combine_consume_barrier_end")
+        else:
+            launch(0)
         event = self._record_event() if async_finish else None
         return hidden_sh, route_weights_sk, event
 
@@ -988,6 +1079,13 @@ class TileXRMoonEPBuffer:
             self.prepare_reduce_grad(
                 plan, gradients, _owner_token=self._reduce_grad_owner_token
             )
+            if self._reduce_grad_info is not None and self._reduce_grad_info.uses_udma:
+                self._synchronize_device()
+                self.runtime.register_reduce_grad_workspace(
+                    self._reduce_grad_workspace,
+                    self._reduce_grad_info.workspace_bytes,
+                    owner_token=self._reduce_grad_owner_token,
+                )
             self._retain(plan, gradients, self._reduce_grad_workspace)
             retained = True
             if all(existing is not plan for existing in self._pending_reduce_plans):

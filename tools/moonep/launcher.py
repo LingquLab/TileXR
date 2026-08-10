@@ -145,7 +145,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _process_command(args: argparse.Namespace) -> list[str]:
-    dispatch_hot_loop = getattr(args, "benchmark_kind", None) == "dispatch_hot_loop"
+    dispatch_hot_loop = (
+        getattr(args, "mode", "benchmark") == "benchmark"
+        and getattr(args, "benchmark_kind", None) == "dispatch_hot_loop"
+    )
     command = [
         args.python,
         "-m",

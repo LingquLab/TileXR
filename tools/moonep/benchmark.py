@@ -10,7 +10,7 @@ import platform
 import subprocess
 import time
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Mapping
 
 from .config import apply_overrides, build_case_parser, load_cases, select_cases
 from .case_factory import make_correctness_case
@@ -21,6 +21,7 @@ from .planner_reference import (
     DEFAULT_ROUTE_DISTRIBUTION,
     build_reference_plan,
     deterministic_all_topk,
+    deterministic_rank_topk,
 )
 from .rendezvous import (
     completion_barrier_from_env,
@@ -32,6 +33,10 @@ from .torch_npu_backend import TorchNpuMoonEPBackend
 
 
 DEFAULT_CORRECTNESS_BACKEND = "tools.moonep.tilexr_backend:create_backend"
+
+
+def _reference_process_group_backend(environment: Mapping[str, str]) -> str:
+    return "gloo" if environment.get("TILEXR_OVERSUBSCRIBED") == "1" else "hccl"
 
 
 STAGE_ORDER = (
@@ -109,7 +114,23 @@ class DeviceEventTimer:
 
 
 def _timed_call(timer: DeviceEventTimer | None, name: str, callback):
-    return callback() if timer is None else timer.call(name, callback)
+    trace = os.environ.get("TILEXR_MOONEP_TRACE_STAGES", "0") == "1"
+    rank = os.environ.get("RANK", "0")
+    if trace:
+        print(f"[TileXR MoonEP rank {rank}] {name}_begin", flush=True)
+    value = callback() if timer is None else timer.call(name, callback)
+    if trace:
+        print(f"[TileXR MoonEP rank {rank}] {name}_end", flush=True)
+    return value
+
+
+def _trace_stage_sync(buffer, stage: str) -> None:
+    if os.environ.get("TILEXR_MOONEP_TRACE_SYNC_EACH_STAGE", "0") != "1":
+        return
+    rank = os.environ.get("RANK", "0")
+    print(f"[TileXR MoonEP rank {rank}] {stage}_sync_begin", flush=True)
+    buffer.synchronize()
+    print(f"[TileXR MoonEP rank {rank}] {stage}_sync_end", flush=True)
 
 
 def _oversubscribed_planning_barrier(buffer, case_id: str, epoch: int) -> None:
@@ -131,6 +152,45 @@ def _oversubscribed_planning_barrier(buffer, case_id: str, epoch: int) -> None:
         raise RuntimeError("oversubscribed Planning launch rendezvous failed")
 
 
+def _multi_node_stage_barrier(
+    buffer, case_id: str, epoch: int, stage: str, *, quiesced: bool = False
+) -> None:
+    if int(os.environ.get("NODE_COUNT", "1")) <= 1:
+        return
+    rank = int(os.environ.get("RANK", "0"))
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    if world_size <= 1:
+        return
+    trace = os.environ.get("TILEXR_MOONEP_TRACE_STAGES", "0") == "1"
+    if trace:
+        print(
+            f"[TileXR MoonEP rank {rank}] stage_barrier_{stage}_enter "
+            f"quiesced={int(quiesced)}",
+            flush=True,
+        )
+    if not quiesced:
+        buffer.synchronize()
+    if trace:
+        print(
+            f"[TileXR MoonEP rank {rank}] stage_barrier_{stage}_rendezvous_begin",
+            flush=True,
+        )
+    decision = completion_barrier_from_env(
+        rank,
+        world_size,
+        case_id=f"{case_id}.{stage}.{epoch}",
+        quiesced=True,
+        passed=True,
+    )
+    if trace:
+        print(
+            f"[TileXR MoonEP rank {rank}] stage_barrier_{stage}_rendezvous_end",
+            flush=True,
+        )
+    if not decision.release or decision.abort:
+        raise RuntimeError(f"multi-node {stage} rendezvous failed")
+
+
 def execute_iteration(
     buffer,
     inputs: dict[str, object],
@@ -138,7 +198,17 @@ def execute_iteration(
     *,
     torch_module,
     torch_npu_module=None,
+    stage_barrier: Callable[[str], None] | None = None,
 ):
+    trace_checksums = os.environ.get("TILEXR_MOONEP_TRACE_CHECKSUMS", "0") == "1"
+    rank = os.environ.get("RANK", "0")
+    if trace_checksums:
+        print(
+            f"[TileXR MoonEP rank {rank}] stage_checksum "
+            f"input_hidden={_checksum(inputs['hidden'])} "
+            f"input_hidden_weighted={_weighted_checksum(torch_module, inputs['hidden'])}",
+            flush=True,
+        )
     if timer is not None:
         timer.start()
     hidden_nvsh, route_weights_nvs, cu_seqlens, plan = _timed_call(
@@ -151,11 +221,19 @@ def execute_iteration(
             inputs["tokens_per_expert"],
         ),
     )
+    if trace_checksums:
+        print(
+            f"[TileXR MoonEP rank {rank}] stage_checksum "
+            f"dispatch_forward={_checksum(hidden_nvsh)} "
+            f"dispatch_forward_weighted={_weighted_checksum(torch_module, hidden_nvsh)}",
+            flush=True,
+        )
     _timed_call(
         timer,
         "prefetch_weight",
         lambda: buffer.prefetch_weight(plan, inputs["projections"]),
     )
+    _trace_stage_sync(buffer, "prefetch_weight")
 
     zero = torch_module.zeros_like(cu_seqlens[:1])
     counts = torch_module.cat((zero, cu_seqlens))
@@ -168,6 +246,12 @@ def execute_iteration(
             buffer.context.experts_per_rank])
     )
     compact_cu_seqlens = compact_counts.cumsum(dim=0, dtype=cu_seqlens.dtype)
+    if trace_checksums:
+        print(
+            f"[TileXR MoonEP rank {rank}] stage_checksum "
+            f"compact_cu_seqlens={compact_cu_seqlens.cpu().tolist()}",
+            flush=True,
+        )
 
     expert_output = _timed_call(
         timer,
@@ -181,11 +265,38 @@ def execute_iteration(
             torch_npu_module=torch_npu_module,
         ).hidden,
     )
+    _trace_stage_sync(buffer, "expert_forward")
+    if trace_checksums:
+        print(
+            f"[TileXR MoonEP rank {rank}] stage_checksum "
+            f"projection_gate={_weighted_checksum(torch_module, inputs['projections'].gate)} "
+            f"projection_up={_weighted_checksum(torch_module, inputs['projections'].up)} "
+            f"projection_down={_weighted_checksum(torch_module, inputs['projections'].down)} "
+            f"expert_forward={_checksum(expert_output)} "
+            f"expert_forward_weighted={_weighted_checksum(torch_module, expert_output)}",
+            flush=True,
+        )
+    if stage_barrier is not None:
+        stage_barrier("expert_forward")
     forward_hidden, forward_weights, _ = _timed_call(
         timer,
         "combine_forward",
-        lambda: buffer.combine(plan, expert_output, route_weights_nvs),
+        lambda: buffer.combine(
+            plan,
+            expert_output,
+            route_weights_nvs,
+            phase_barrier=(
+                None if stage_barrier is None else
+                lambda phase: stage_barrier(f"combine_forward_{phase}")
+            ),
+        ),
     )
+    if trace_checksums:
+        print(
+            f"[TileXR MoonEP rank {rank}] stage_checksum "
+            f"combine_forward={_checksum(forward_hidden)}",
+            flush=True,
+        )
     dispatched_grad, _, _, _ = _timed_call(
         timer,
         "dispatch_backward",
@@ -204,7 +315,14 @@ def execute_iteration(
     backward_hidden, _, _ = _timed_call(
         timer,
         "combine_backward",
-        lambda: buffer.combine(plan, grad_expert_hidden),
+        lambda: buffer.combine(
+            plan,
+            grad_expert_hidden,
+            phase_barrier=(
+                None if stage_barrier is None else
+                lambda phase: stage_barrier(f"combine_backward_{phase}")
+            ),
+        ),
     )
     _timed_call(
         timer,
@@ -219,6 +337,8 @@ def execute_iteration(
             down_reduce_buffer=inputs["gradients"].down_reduce,
         ),
     )
+    if stage_barrier is not None:
+        stage_barrier("reduce_grad")
     timings = None if timer is None else timer.finish()
     buffer.synchronize()
     return plan, cu_seqlens, forward_hidden, forward_weights, backward_hidden, timings
@@ -238,14 +358,18 @@ def make_inputs(torch_module, case, context):
     if hasattr(torch_module.npu, "manual_seed_all"):
         torch_module.npu.manual_seed_all(case.seed + context.global_rank)
     dtype = _torch_dtype(torch_module, case.dtype)
-    route_ids = torch_module.arange(
-        case.tokens_per_rank * case.topk,
+    route_ids = torch_module.tensor(
+        deterministic_rank_topk(
+            context.planner_group_rank,
+            context.planner_group_size,
+            case.tokens_per_rank,
+            case.topk,
+            case.expert_count,
+            case.route_distribution,
+        ),
         dtype=torch_module.int32,
         device=device,
-    )
-    route_ids = (
-        route_ids + context.planner_group_rank * case.topk
-    ).remainder(case.expert_count).reshape(case.tokens_per_rank, case.topk)
+    ).reshape(case.tokens_per_rank, case.topk)
     tokens_per_expert = torch_module.bincount(
         route_ids.reshape(-1).to(dtype=torch_module.int64),
         minlength=case.expert_count,
@@ -322,6 +446,16 @@ def _checksum(tensor) -> float:
     if not math.isfinite(value):
         raise RuntimeError("non-finite deterministic checksum")
     return value
+
+
+def _weighted_checksum(torch_module, tensor) -> float:
+    flat = tensor.float().reshape(-1)
+    weights = torch_module.arange(
+        1, int(flat.numel()) + 1,
+        dtype=torch_module.float32,
+        device=flat.device,
+    )
+    return _checksum(flat * weights)
 
 
 def _flatten(values) -> list[int]:
@@ -487,10 +621,10 @@ def topology_metadata(context) -> dict[str, object]:
     planner_block_dim = int(
         os.environ.get("TILEXR_MOONEP_PLANNER_BLOCK_DIM", str(default_block_dim))
     )
-    if planner_block_dim < context.planner_group_size or planner_block_dim > 64:
+    if planner_block_dim < 1 or planner_block_dim > 64:
         raise ValueError(
             "effective TILEXR_MOONEP_PLANNER_BLOCK_DIM must satisfy "
-            f"planner_group_size={context.planner_group_size} <= blockDim <= 64"
+            "1 <= blockDim <= 64"
         )
     dispatch_aiv_core_count = int(os.environ.get(
         "TILEXR_MOONEP_DISPATCH_AIV_CORE_COUNT", "64"))
@@ -584,16 +718,50 @@ def run_case(torch_module, case, args, root: Path) -> None:
         result["rank"] = context.global_rank
         result["capabilities"] = capabilities
         result["topology"] = topology_metadata(context)
+        if os.environ.get("TILEXR_MOONEP_TRACE_STAGES", "0") == "1":
+            print(
+                f"[TileXR MoonEP rank {context.global_rank}] make_inputs_begin",
+                flush=True,
+            )
         inputs = make_inputs(torch_module, case, context)
+        if os.environ.get("TILEXR_MOONEP_TRACE_STAGES", "0") == "1":
+            print(
+                f"[TileXR MoonEP rank {context.global_rank}] make_inputs_end",
+                flush=True,
+            )
         buffer.register_projection_buffers(inputs["projections"])
+        if os.environ.get("TILEXR_MOONEP_TRACE_STAGES", "0") == "1":
+            print(
+                f"[TileXR MoonEP rank {context.global_rank}] projections_registered",
+                flush=True,
+            )
         planning_epoch = 0
 
         def coordinated_iteration(timer=None):
             nonlocal planning_epoch
-            _oversubscribed_planning_barrier(buffer, case.case_id, planning_epoch)
+            epoch = planning_epoch
+            _oversubscribed_planning_barrier(buffer, case.case_id, epoch)
             planning_epoch += 1
             return execute_iteration(
-                buffer, inputs, timer, torch_module=torch_module
+                buffer,
+                inputs,
+                timer,
+                torch_module=torch_module,
+                stage_barrier=lambda stage: _multi_node_stage_barrier(
+                    buffer,
+                    case.case_id,
+                    epoch,
+                    stage,
+                    quiesced=(
+                        stage.startswith("combine_") or
+                        (
+                            stage == "expert_forward" and
+                            os.environ.get(
+                                "TILEXR_MOONEP_TRACE_SYNC_EACH_STAGE", "0"
+                            ) == "1"
+                        )
+                    ),
+                ),
             )
 
         if int(inputs["tokens_per_expert"].sum().item()) != context.route_count:
@@ -606,6 +774,7 @@ def run_case(torch_module, case, args, root: Path) -> None:
                 context,
                 first[1],
                 expected_status=FINAL_SHARED_STATUS_SUCCESS,
+                route_distribution=case.route_distribution,
             )
             implementations = capabilities["implementations"]
             stub_stages = ("dispatch", "prefetch_weight", "combine", "reduce_grad")
@@ -616,9 +785,22 @@ def run_case(torch_module, case, args, root: Path) -> None:
                 validation["mode"] = "planner_cpu_oracle_and_stub_flow"
             elif capabilities.get("transport_correctness_valid", False):
                 validation["mode"] = "planner_cpu_oracle_and_native_status"
-            first_checksum = _checksum(first[2]) + _checksum(first[4])
+            first_forward_checksum = _checksum(first[2])
+            first_backward_checksum = _checksum(first[4])
+            first_checksum = first_forward_checksum + first_backward_checksum
             second = coordinated_iteration()
-            second_checksum = _checksum(second[2]) + _checksum(second[4])
+            second_forward_checksum = _checksum(second[2])
+            second_backward_checksum = _checksum(second[4])
+            second_checksum = second_forward_checksum + second_backward_checksum
+            if os.environ.get("TILEXR_MOONEP_TRACE_CHECKSUMS", "0") == "1":
+                print(
+                    f"[TileXR MoonEP rank {context.global_rank}] "
+                    f"checksums first_forward={first_forward_checksum} "
+                    f"first_backward={first_backward_checksum} "
+                    f"second_forward={second_forward_checksum} "
+                    f"second_backward={second_backward_checksum}",
+                    flush=True,
+                )
             if first_checksum != second_checksum:
                 raise RuntimeError(
                     f"MoonEP flow is not deterministic: {first_checksum} != {second_checksum}"
@@ -902,7 +1084,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.mode != "benchmark" and int(os.environ.get("WORLD_SIZE", "1")) > 1:
         if not torch.distributed.is_initialized():
             torch.distributed.init_process_group(
-                backend="hccl",
+                backend=_reference_process_group_backend(os.environ),
                 rank=int(os.environ["RANK"]),
                 world_size=int(os.environ["WORLD_SIZE"]),
             )

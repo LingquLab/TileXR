@@ -133,6 +133,10 @@ void TestChunkingAndPlanAgreement()
         TILEXR_MOONEP_SUCCESS);
     CHECK_TRUE(combine.chunkCount == 2 &&
         combine.hiddenPayloadBytes <= static_cast<uint64_t>(TileXR::IPC_BUFF_MAX_SIZE));
+    CheckStatus("chunked split combine", TileXRMoonEp::TileXRMoonEpBuildCombineLayout(
+        0, 2, &plan, &output, nullptr, &input, nullptr,
+        TILEXR_MOONEP_FLAG_COMBINE_PUBLISH_ONLY, &combine),
+        TILEXR_MOONEP_ERROR_NOT_SUPPORTED);
 
     plan.r = 4;
     CheckStatus("world mismatch", TileXRMoonEp::TileXRMoonEpBuildCombineLayout(
@@ -167,6 +171,18 @@ void TestCombinePairedLayout()
     CHECK_TRUE(layout.hiddenRowBytes == 32 && layout.hiddenChunkStride == 32);
     CHECK_TRUE(layout.hiddenPayloadBytes == 384 && layout.routeWeightsOffset == 384);
     CHECK_TRUE(layout.routeWeightsBytes == 48 && layout.windowBytes == 432);
+
+    CheckStatus("publish-only combine", TileXRMoonEp::TileXRMoonEpBuildCombineLayout(
+        0, 2, &plan, &hiddenNvsh, &weightsNvs, &hiddenSh, &weightsSk,
+        TILEXR_MOONEP_FLAG_COMBINE_PUBLISH_ONLY, &layout), TILEXR_MOONEP_SUCCESS);
+    CheckStatus("consume-only combine", TileXRMoonEp::TileXRMoonEpBuildCombineLayout(
+        0, 2, &plan, &hiddenNvsh, &weightsNvs, &hiddenSh, &weightsSk,
+        TILEXR_MOONEP_FLAG_COMBINE_CONSUME_ONLY, &layout), TILEXR_MOONEP_SUCCESS);
+    CheckStatus("ambiguous split combine", TileXRMoonEp::TileXRMoonEpBuildCombineLayout(
+        0, 2, &plan, &hiddenNvsh, &weightsNvs, &hiddenSh, &weightsSk,
+        TILEXR_MOONEP_FLAG_COMBINE_PUBLISH_ONLY |
+            TILEXR_MOONEP_FLAG_COMBINE_CONSUME_ONLY,
+        &layout), TILEXR_MOONEP_ERROR_INVALID_ARGUMENT);
 
     weightsSk.shape[1] = 3;
     CheckStatus("weight shape mismatch", TileXRMoonEp::TileXRMoonEpBuildCombineLayout(

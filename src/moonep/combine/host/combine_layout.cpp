@@ -42,8 +42,13 @@ int TileXRMoonEpBuildCombineLayout(int64_t commRank, int64_t commWorld,
         return TILEXR_MOONEP_ERROR_INVALID_ARGUMENT;
     }
     *layout = CombineLayout {};
-    const uint64_t allowedFlags = TILEXR_MOONEP_FLAG_SKIP_INTER_RANK_SYNC;
+    const uint64_t splitFlags = TILEXR_MOONEP_FLAG_COMBINE_PUBLISH_ONLY |
+        TILEXR_MOONEP_FLAG_COMBINE_CONSUME_ONLY;
+    const uint64_t allowedFlags = TILEXR_MOONEP_FLAG_SKIP_INTER_RANK_SYNC | splitFlags;
     if ((flags & ~allowedFlags) != 0) {
+        return TILEXR_MOONEP_ERROR_INVALID_ARGUMENT;
+    }
+    if ((flags & splitFlags) == splitFlags) {
         return TILEXR_MOONEP_ERROR_INVALID_ARGUMENT;
     }
     int64_t s = 0;
@@ -85,6 +90,9 @@ int TileXRMoonEpBuildCombineLayout(int64_t commRank, int64_t commWorld,
         return TILEXR_MOONEP_ERROR_INVALID_ARGUMENT;
     }
     const uint64_t chunkCount = (hiddenRowBytes - 1) / hiddenChunkBytes + 1;
+    if ((flags & splitFlags) != 0 && chunkCount != 1) {
+        return TILEXR_MOONEP_ERROR_NOT_SUPPORTED;
+    }
     if (chunkCount > static_cast<uint64_t>(std::numeric_limits<int32_t>::max() -
             kMoonEpCombineWindowDrainedStep) / 4U) {
         return TILEXR_MOONEP_ERROR_INVALID_ARGUMENT;

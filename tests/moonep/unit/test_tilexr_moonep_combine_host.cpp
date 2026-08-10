@@ -203,7 +203,7 @@ void TestValidationAndFailures()
     Reset();
     commArgs.localRankSize = 1;
     CheckStatus("cross-node", TileXRMoonEp::TileXRMoonEpRunCombineV1(&args, stream),
-        TILEXR_MOONEP_ERROR_NOT_SUPPORTED);
+        TILEXR_MOONEP_SUCCESS);
     Reset();
     commArgs.extraFlag = 0;
     CheckStatus("non-A5", TileXRMoonEp::TileXRMoonEpRunCombineV1(&args, stream),
@@ -232,6 +232,32 @@ void TestValidationAndFailures()
     Reset();
     launchReturn = -54;
     CheckStatus("launch error", TileXRMoonEp::TileXRMoonEpRunCombineV1(&args, stream), -54);
+}
+
+void TestSplitPhaseLaunch()
+{
+    Reset();
+    TileXRMoonEpPlanV1 plan = ValidPlan();
+    TileXRMoonEpTensorV1 hiddenNvsh = Tensor(reinterpret_cast<void *>(uintptr_t {0x4000}),
+        TILEXR_MOONEP_DTYPE_BFLOAT16, 2, 8, 16, 128);
+    TileXRMoonEpTensorV1 hiddenSh = Tensor(reinterpret_cast<void *>(uintptr_t {0x5000}),
+        TILEXR_MOONEP_DTYPE_BFLOAT16, 2, 2, 16, 32);
+    TileXRMoonEpCombineArgsV1 args = Args(&plan, &hiddenNvsh, nullptr, &hiddenSh, nullptr,
+        TILEXR_MOONEP_FLAG_COMBINE_PUBLISH_ONLY);
+    aclrtStream stream = reinterpret_cast<aclrtStream>(uintptr_t {0x8000});
+
+    CheckStatus("publish-only launch", TileXRMoonEp::TileXRMoonEpRunCombineV1(
+        &args, stream), TILEXR_MOONEP_SUCCESS);
+    Check(launchCalls == 1 && launchedParams.flags ==
+        TILEXR_MOONEP_FLAG_COMBINE_PUBLISH_ONLY,
+        "publish-only flags were not forwarded");
+
+    args.flags = TILEXR_MOONEP_FLAG_COMBINE_CONSUME_ONLY;
+    CheckStatus("consume-only launch", TileXRMoonEp::TileXRMoonEpRunCombineV1(
+        &args, stream), TILEXR_MOONEP_SUCCESS);
+    Check(launchCalls == 2 && launchedParams.flags ==
+        TILEXR_MOONEP_FLAG_COMBINE_CONSUME_ONLY,
+        "consume-only flags were not forwarded");
 }
 
 } // namespace
@@ -274,5 +300,6 @@ int main()
 {
     TestPairedLaunch();
     TestValidationAndFailures();
+    TestSplitPhaseLaunch();
     return failures == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
 }

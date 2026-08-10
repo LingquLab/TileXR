@@ -133,6 +133,18 @@ void TestSingleRankLargeRowsStayLocal()
         "single-rank layout must reserve all blocks for local reduction");
 }
 
+void TestLargeRankScheduling()
+{
+    const uint64_t rows[TileXRMoonEp::kReduceGradProjectionCount] = {64, 128, 256};
+    TileXRMoonEp::ReduceGradLayout layout {};
+    CheckStatus("128-rank layout", TileXRMoonEp::TileXRMoonEpBuildReduceGradLayout(
+        0, 128, 128, rows, UINT64_C(512) << 20, 0, &layout), TileXR::TILEXR_SUCCESS);
+    Check(layout.blockDim == TileXRMoonEp::kReduceGradMaxAivBlockCount,
+        "128-rank layout must use all available AIV blocks");
+    Check(layout.controlBlockCount == TileXRMoonEp::kReduceGradMaxAivBlockCount - 1,
+        "128-rank layout must reserve one AIV block for receiving");
+}
+
 void TestInvalidInputs()
 {
     const uint64_t rows[TileXRMoonEp::kReduceGradProjectionCount] = {1, 1, 1};
@@ -171,6 +183,7 @@ int main()
     TestCapacityInjection();
     TestPureTransportLayouts();
     TestSingleRankLargeRowsStayLocal();
+    TestLargeRankScheduling();
     TestInvalidInputs();
     return g_failures == 0 ? 0 : 1;
 }

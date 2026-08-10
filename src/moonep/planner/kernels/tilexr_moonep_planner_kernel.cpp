@@ -144,7 +144,12 @@ public:
         BuildLocalHistogram();
         AscendC::SyncAll<true>();
 
+        PublishCrossRankReady();
+        AscendC::SyncAll<true>();
+
         CrossRankReady();
+        AscendC::SyncAll<true>();
+        FinalizeCrossRankReady();
         AscendC::SyncAll<true>();
         if (!PlannerSucceeded()) {
             return;
@@ -281,18 +286,47 @@ private:
         return false;
     }
 
-    __aicore__ inline void CrossRankReady()
+    __aicore__ inline void PublishCrossRankReady()
     {
         if (blockIdx_ != 0) {
             return;
         }
         sync_.SetSyncFlag(static_cast<int32_t>(magic_), kPlannerReadyStep, kPlannerReadyEventId);
-        for (int32_t peerOffset = 0; peerOffset < rankSize_; ++peerOffset) {
-            const int32_t peer = (rank_ + peerOffset) % rankSize_;
+    }
+
+    __aicore__ inline void CrossRankReady()
+    {
+        if (blockIdx_ >= rankSize_) {
+            return;
+        }
+        int32_t readyStatus = kPlannerStatusSuccess;
+        for (int64_t peerOffset = blockIdx_; peerOffset < rankSize_;
+             peerOffset += blockCount_) {
+            const int32_t peer = static_cast<int32_t>(
+                (static_cast<int64_t>(rank_) + peerOffset) % rankSize_);
             if (!WaitReadyFlag(peer)) {
-                AscendC::LocalTensor<int32_t> status = Array0();
-                status.SetValue(0, kPlannerStatusTimeoutBase + peer);
-                CopyUbToGm(plannerStatusGm_, status, 1);
+                readyStatus = kPlannerStatusTimeoutBase + peer;
+                break;
+            }
+        }
+        AscendC::LocalTensor<int32_t> status = Array0();
+        status.SetValue(0, readyStatus);
+        CopyUbToGm(groupTotalsGm_[blockIdx_], status, 1);
+    }
+
+    __aicore__ inline void FinalizeCrossRankReady()
+    {
+        if (blockIdx_ != 0) {
+            return;
+        }
+        const int64_t activeBlockCount = MinInt64(blockCount_, rankSize_);
+        AscendC::LocalTensor<int32_t> statuses = Array0();
+        CopyGmToUb(statuses, groupTotalsGm_, activeBlockCount);
+        for (int64_t block = 0; block < activeBlockCount; ++block) {
+            const int32_t status = statuses.GetValue(block);
+            if (status != kPlannerStatusSuccess) {
+                statuses.SetValue(0, status);
+                CopyUbToGm(plannerStatusGm_, statuses, 1);
                 return;
             }
         }
@@ -300,16 +334,16 @@ private:
 
     __aicore__ inline void GatherTpe()
     {
-        if (blockIdx_ >= rankSize_) {
-            return;
+        for (int64_t sourceRankValue = blockIdx_; sourceRankValue < rankSize_;
+             sourceRankValue += blockCount_) {
+            const int32_t sourceRank = static_cast<int32_t>(sourceRankValue);
+            AscendC::GlobalTensor<int32_t> peerTpe;
+            peerTpe.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(
+                shareAddrs_[sourceRank] + TileXR::IPC_DATA_OFFSET), expertCount_);
+            AscendC::LocalTensor<int32_t> local = Array0();
+            CopyGmToUb(local, peerTpe, expertCount_);
+            CopyUbToGm(tpePrefixGm_[sourceRankValue * expertCount_], local, expertCount_);
         }
-        const int32_t sourceRank = static_cast<int32_t>(blockIdx_);
-        AscendC::GlobalTensor<int32_t> peerTpe;
-        peerTpe.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(
-            shareAddrs_[sourceRank] + TileXR::IPC_DATA_OFFSET), expertCount_);
-        AscendC::LocalTensor<int32_t> local = Array0();
-        CopyGmToUb(local, peerTpe, expertCount_);
-        CopyUbToGm(tpePrefixGm_[sourceRank * expertCount_], local, expertCount_);
     }
 
     __aicore__ inline void PrefixTpe()
@@ -382,10 +416,14 @@ private:
 
     __aicore__ inline void BuildAllocation()
     {
-        if (blockIdx_ >= rankSize_) {
-            return;
+        for (int64_t ownerValue = blockIdx_; ownerValue < rankSize_;
+             ownerValue += blockCount_) {
+            BuildOwnerAllocation(static_cast<int32_t>(ownerValue));
         }
-        const int32_t owner = static_cast<int32_t>(blockIdx_);
+    }
+
+    __aicore__ inline void BuildOwnerAllocation(int32_t owner)
+    {
         const int64_t expertBegin = static_cast<int64_t>(owner) * expertsPerRank_;
         AscendC::LocalTensor<int32_t> remaining = Array0();
         AscendC::LocalTensor<int32_t> quotas = Array1();
@@ -512,10 +550,14 @@ private:
 
     __aicore__ inline void BuildExpertLayout()
     {
-        if (blockIdx_ >= rankSize_) {
-            return;
+        for (int64_t destValue = blockIdx_; destValue < rankSize_;
+             destValue += blockCount_) {
+            BuildDestinationExpertLayout(static_cast<int32_t>(destValue));
         }
-        const int32_t dest = static_cast<int32_t>(blockIdx_);
+    }
+
+    __aicore__ inline void BuildDestinationExpertLayout(int32_t dest)
+    {
         AscendC::LocalTensor<int32_t> counts = Array0();
         AscendC::LocalTensor<int32_t> selectedMask = Array1();
         AscendC::LocalTensor<int32_t> selectedExperts = Array2();

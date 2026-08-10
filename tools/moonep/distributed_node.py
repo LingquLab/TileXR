@@ -19,16 +19,19 @@ from .report import write_json
 
 def resolve_node_topology(*, node_count: int, node_rank: int,
     local_world_size: int, physical_device_count: int,
-    planner_block_dim: int, dispatch_aiv_core_count: int = 64) -> dict[str, int]:
+    planner_block_dim: int, dispatch_aiv_core_count: int = 64,
+    mode: str = "benchmark") -> dict[str, int]:
+    if mode not in ("benchmark", "reference", "correctness"):
+        raise ValueError("mode must be benchmark, reference, or correctness")
     if node_count <= 0 or node_rank < 0 or node_rank >= node_count:
         raise ValueError("node_rank must be in [0, node_count)")
     if local_world_size <= 0 or physical_device_count <= 0:
         raise ValueError("local_world_size and physical_device_count must be positive")
     if local_world_size > physical_device_count:
-        raise ValueError("distributed performance runs require at most one rank per device")
+        raise ValueError("distributed runs require at most one rank per device")
     world_size = node_count * local_world_size
-    if planner_block_dim < world_size or planner_block_dim > 64:
-        raise ValueError("planner_block_dim must satisfy world_size <= blockDim <= 64")
+    if planner_block_dim < 1 or planner_block_dim > 64:
+        raise ValueError("planner_block_dim must satisfy 1 <= blockDim <= 64")
     if dispatch_aiv_core_count < 1 or dispatch_aiv_core_count > 64:
         raise ValueError("dispatch_aiv_core_count must satisfy 1 <= coreCount <= 64")
     return {
@@ -57,6 +60,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--python", default=sys.executable)
     parser.add_argument("--wait-iterations", type=int, default=1_000_000)
     parser.add_argument("--timeout-sec", type=float, default=1800.0)
+    parser.add_argument(
+        "--mode", choices=("benchmark", "reference", "correctness"),
+        default="benchmark")
+    parser.add_argument("--candidate-backend", default=None, metavar="MODULE:FACTORY")
+    parser.add_argument("--dump-stage-tensors", action="store_true")
+    parser.add_argument("--tensor-preview-elements", type=int, default=8)
     parser.add_argument("--benchmark-kind", choices=("flow", "dispatch_hot_loop"),
         default="dispatch_hot_loop")
     parser.add_argument("--dispatch-modes", nargs="+",
@@ -64,13 +73,25 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _require_shared_environment(environment: dict[str, str]) -> None:
-    required = (
+def _require_shared_environment(
+    environment: dict[str, str], *, mode: str = "benchmark"
+) -> None:
+    native_required = (
         "TILEXR_COMM_ID",
         "TILEXR_MOONEP_BARRIER_ADDR",
         "TILEXR_MOONEP_LAUNCH_ID",
         "TILEXR_MOONEP_LAUNCH_SECRET",
     )
+    reference_required = (
+        "MASTER_ADDR", "MASTER_PORT", "TILEXR_MOONEP_LAUNCH_ID")
+    if mode == "benchmark":
+        required = native_required
+    elif mode == "reference":
+        required = reference_required
+    elif mode == "correctness":
+        required = native_required + reference_required
+    else:
+        raise ValueError("mode must be benchmark, reference, or correctness")
     missing = [name for name in required if not environment.get(name)]
     if missing:
         raise ValueError("missing shared multi-node environment: " + ", ".join(missing))
@@ -80,6 +101,10 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.wait_iterations <= 0 or args.timeout_sec <= 0:
         raise ValueError("wait_iterations and timeout_sec must be positive")
+    if args.tensor_preview_elements <= 0:
+        raise ValueError("tensor_preview_elements must be positive")
+    if args.mode in ("reference", "correctness"):
+        args.benchmark_kind = "flow"
     topology = resolve_node_topology(
         node_count=args.node_count,
         node_rank=args.node_rank,
@@ -87,6 +112,7 @@ def main(argv: list[str] | None = None) -> int:
         physical_device_count=args.physical_device_count,
         planner_block_dim=args.planner_block_dim,
         dispatch_aiv_core_count=args.dispatch_aiv_core_count,
+        mode=args.mode,
     )
     world_size = topology["world_size"]
     output_dir = Path(args.output_dir).resolve()
@@ -95,7 +121,7 @@ def main(argv: list[str] | None = None) -> int:
     root = Path(__file__).resolve().parents[2]
     integration = root / "integrations" / "moonep_torch"
     base_env = os.environ.copy()
-    _require_shared_environment(base_env)
+    _require_shared_environment(base_env, mode=args.mode)
     pythonpath = [str(root), str(integration)]
     if base_env.get("PYTHONPATH"):
         pythonpath.append(base_env["PYTHONPATH"])
@@ -106,7 +132,6 @@ def main(argv: list[str] | None = None) -> int:
         "NODE_RANK": str(topology["node_rank"]),
         "NODE_COUNT": str(topology["node_count"]),
         "TILEXR_MOONEP_MANAGED_LAUNCH": "1",
-        "TILEXR_UDMA_QP_ROUTE_SPEC": "port_count:6,port_count:2",
         "TILEXR_PHYSICAL_DEVICE_COUNT": str(topology["physical_device_count"]),
         "TILEXR_RANKS_PER_DEVICE": "1",
         "TILEXR_OVERSUBSCRIBED": "0",
@@ -115,12 +140,19 @@ def main(argv: list[str] | None = None) -> int:
         "TILEXR_MOONEP_DISPATCH_AIV_CORE_COUNT_SOURCE": "distributed_cli",
         DISPATCH_AIV_CORE_COUNT_ENV: str(topology["dispatch_aiv_core_count"]),
     })
+    if args.mode in ("benchmark", "correctness"):
+        base_env.setdefault(
+            "TILEXR_UDMA_QP_ROUTE_SPEC", "port_count:6,port_count:2"
+        )
     command = _process_command(args)
     write_json(output_dir / f"node_{args.node_rank}_metadata.json", {
         "schema_version": 1,
         "topology": topology,
-        "comm_id": base_env["TILEXR_COMM_ID"],
-        "barrier_addr": base_env["TILEXR_MOONEP_BARRIER_ADDR"],
+        "mode": args.mode,
+        "comm_id": base_env.get("TILEXR_COMM_ID"),
+        "barrier_addr": base_env.get("TILEXR_MOONEP_BARRIER_ADDR"),
+        "master_addr": base_env.get("MASTER_ADDR"),
+        "master_port": base_env.get("MASTER_PORT"),
         "launch_id": base_env["TILEXR_MOONEP_LAUNCH_ID"],
         "command": command,
     })

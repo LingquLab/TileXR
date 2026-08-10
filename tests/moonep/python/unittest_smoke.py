@@ -22,6 +22,7 @@ from fakes import FakeRuntime, FakeStream, FakeTensor, FakeTorch
 from tilexr_moonep import ProjectionBuffers, TileXRMoonEPBuffer, TileXRMoonEPContext
 from tools.moonep.config import BenchmarkCase, load_cases
 from tools.moonep.benchmark import (
+    _multi_node_stage_barrier,
     _oversubscribed_planning_barrier,
     topology_metadata,
     validate_plan,
@@ -36,7 +37,7 @@ def tensor(shape, dtype, **kwargs):
     return FakeTensor(shape, dtype, "npu:0", **kwargs)
 
 
-def make_buffer(*, write_status_markers=False, runtime=None):
+def make_buffer(*, write_status_markers=False, runtime=None, node_count=1):
     torch = FakeTorch()
     runtime = runtime or FakeRuntime(write_status_markers=write_status_markers)
     context = TileXRMoonEPContext(
@@ -44,7 +45,7 @@ def make_buffer(*, write_status_markers=False, runtime=None):
         global_rank=0,
         global_world_size=2,
         node_rank=0,
-        node_count=1,
+        node_count=node_count,
         local_rank=0,
         local_world_size=2,
         planner_group_rank=0,
@@ -115,6 +116,31 @@ class MoonEPSmokeTests(unittest.TestCase):
             _oversubscribed_planning_barrier(buffer, "smoke", 4)
         self.assertEqual(buffer.synchronize_calls, 1)
 
+    def test_multi_node_stage_barrier_aligns_ranks_after_device_sync(self):
+        buffer = SimpleNamespace(synchronize_calls=0)
+        buffer.synchronize = lambda: setattr(
+            buffer, "synchronize_calls", buffer.synchronize_calls + 1
+        )
+        decision = SimpleNamespace(release=True, abort=False)
+        environment = {"NODE_COUNT": "8", "RANK": "44", "WORLD_SIZE": "64"}
+        with patch.dict(os.environ, environment, clear=False), patch(
+            "tools.moonep.benchmark.completion_barrier_from_env",
+            return_value=decision,
+        ) as barrier:
+            _multi_node_stage_barrier(buffer, "case-12", 2, "expert_forward")
+        self.assertEqual(buffer.synchronize_calls, 1)
+        barrier.assert_called_once_with(
+            44,
+            64,
+            case_id="case-12.expert_forward.2",
+            quiesced=True,
+            passed=True,
+        )
+
+        with patch.dict(os.environ, {"NODE_COUNT": "1"}, clear=False):
+            _multi_node_stage_barrier(buffer, "case-12", 3, "expert_forward")
+        self.assertEqual(buffer.synchronize_calls, 1)
+
     def test_forward_backward_order_and_plan_reuse(self):
         torch, runtime, buffer = make_buffer(write_status_markers=True)
         projection = ProjectionBuffers.from_local_weights(
@@ -168,6 +194,7 @@ class MoonEPSmokeTests(unittest.TestCase):
                 "udma_register",
                 "planning",
                 "dispatch",
+                "udma_register",
                 "prefetch_weight",
                 "expert_forward",
                 "combine",
@@ -363,6 +390,27 @@ class MoonEPSmokeTests(unittest.TestCase):
         buffer.synchronize()
         buffer.close()
 
+    def test_inline_dispatch_rejects_failed_planner_before_consuming_outputs(self):
+        torch, runtime, buffer = make_buffer()
+        original_planning = runtime.planning
+
+        def failed_planning(*args, **kwargs):
+            original_planning(*args, **kwargs)
+            args[3].status._item = 1007
+
+        runtime.planning = failed_planning
+        with self.assertRaisesRegex(RuntimeError, "Planner device status is 1007"):
+            buffer.dispatch(
+                tensor((4, 8), torch.bfloat16),
+                topk_experts_sk=tensor((4, 2), torch.int32),
+                tokens_per_expert=tensor((4,), torch.int32),
+            )
+        self.assertFalse(any(call[0] == "dispatch" for call in runtime.calls))
+        self.assertEqual(torch.npu.synchronize_calls, [0])
+
+        buffer._pending_plans[0].status._item = 0
+        buffer.close()
+
     def test_failed_explicit_dispatch_retains_fresh_dedup_state(self):
         runtime = FakeRuntime(write_status_markers=True, fail_dispatch_calls=1)
         torch, runtime, buffer = make_buffer(runtime=runtime)
@@ -431,6 +479,48 @@ class MoonEPSmokeTests(unittest.TestCase):
         self.assertEqual(plan.status.item(), 3000)
         self.assertEqual(plan.reduce_grad_status.item(), 0)
         buffer.synchronize()
+        buffer.close()
+
+    def test_cross_node_combine_uses_host_coordinated_split_phases(self):
+        torch, runtime, buffer = make_buffer(
+            write_status_markers=True, node_count=2
+        )
+        plan, _ = buffer.planning(
+            tensor((4, 2), torch.int32), tensor((4,), torch.int32)
+        )
+        buffer.synchronize()
+        runtime._active_udma_owner = "projection"
+        phases = []
+
+        hidden, weights, event = buffer.combine(
+            plan,
+            tensor((8, 8), torch.bfloat16),
+            phase_barrier=lambda phase: phases.append(phase),
+        )
+
+        combine_calls = [call for call in runtime.calls if call[0] == "combine"]
+        self.assertEqual(phases, ["published", "consumed"])
+        self.assertEqual([call[-1] for call in combine_calls], [1 << 3, 1 << 4])
+        self.assertEqual(runtime._active_udma_owner, "dispatch")
+        self.assertIs(combine_calls[0][3], combine_calls[1][3])
+        self.assertEqual(tuple(hidden.shape), (4, 8))
+        self.assertIsNone(weights)
+        self.assertIsNone(event)
+        self.assertTrue(buffer._quiesced)
+        buffer.close()
+
+    def test_cross_node_combine_requires_phase_barrier(self):
+        torch, runtime, buffer = make_buffer(
+            write_status_markers=True, node_count=2
+        )
+        plan, _ = buffer.planning(
+            tensor((4, 2), torch.int32), tensor((4,), torch.int32)
+        )
+        buffer.synchronize()
+
+        with self.assertRaisesRegex(RuntimeError, "phase barrier"):
+            buffer.combine(plan, tensor((8, 8), torch.bfloat16))
+        self.assertFalse(any(call[0] == "combine" for call in runtime.calls))
         buffer.close()
 
     def test_native_stage_mismatched_success_marker_fails(self):
@@ -557,7 +647,10 @@ class MoonEPSmokeTests(unittest.TestCase):
         self.assertEqual(topology["planner_block_dim"], 32)
         self.assertEqual(topology["dispatch_aiv_core_count"], 64)
         self.assertEqual(topology["dispatch_aiv_core_count_source"], "default")
-        self.assertEqual([rank_to_device(rank, 8) for rank in range(16)], list(range(8)) * 2)
+        device_map = [rank_to_device(rank, 8) for rank in range(16)]
+        self.assertEqual(device_map, list(range(8)) * 2)
+        self.assertEqual({device: device_map.count(device) for device in range(8)},
+                         {device: 2 for device in range(8)})
         native = resolve_topology(
             physical_device_count=8,
             ranks_per_device=1,

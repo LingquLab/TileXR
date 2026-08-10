@@ -78,7 +78,7 @@ class FakeCDLLLoader:
             if not address.value:
                 raise AssertionError("invalid UDMA registration")
             size = int(byte_count.value if hasattr(byte_count, "value") else byte_count)
-            if size not in (768, 2 * 1024 * 1024):
+            if size != 2 * 1024 * 1024:
                 raise AssertionError(f"unexpected UDMA registration size {size}")
             handle = self.next_udma_handle
             self.next_udma_handle += 1
@@ -337,7 +337,13 @@ class FfiAbiTests(unittest.TestCase):
             tensor((2, 8, 4), torch.bfloat16),
             torch_module=torch,
         )
+        self.assertEqual(projections.backing.data_ptr() % (2 * 1024 * 1024), 0)
+        self.assertEqual(
+            projections.backing.numel() * projections.backing.element_size(),
+            2 * 1024 * 1024,
+        )
         buffer.register_projection_buffers(projections)
+        buffer.dispatch(tensor((4, 8), torch.bfloat16), plan=plan)
         buffer.prefetch_weight(plan, projections)
         buffer.combine(plan, hidden_nvsh, route_weights_nvs)
         gradients = ProjectionBuffers(
@@ -369,9 +375,10 @@ class FfiAbiTests(unittest.TestCase):
             loader.lifecycle_calls,
             [
                 ("register", 2 * 1024 * 1024, 7),
-                ("register", 768, 8),
-                ("unregister", 8),
-                ("unregister", 7),
+                ("register", 2 * 1024 * 1024, 8),
+                ("register", 2 * 1024 * 1024, 9),
+                ("register", 2 * 1024 * 1024, 10),
+                ("unregister", 10),
                 "destroy",
             ],
         )
@@ -390,15 +397,15 @@ class FfiAbiTests(unittest.TestCase):
         )
         self.assertEqual(
             [record["name"] for record in loader.stage_records],
-            ["dispatch", "prefetch_weight", "combine"],
+            ["dispatch", "dispatch", "prefetch_weight", "combine"],
         )
         self.assertTrue(all(record["stream"] == 0xCAFE for record in loader.stage_records))
         self.assertEqual(loader.stage_records[0]["flags"], 0)
         self.assertTrue(all(record["flags"] == 0 for record in loader.stage_records[1:]))
         self.assertEqual(loader.stage_records[0]["shapes"]["hiddenNvsh"], (12, 8))
         self.assertEqual(loader.stage_records[0]["shapes"]["routeWeightsNvs"], (12,))
-        self.assertEqual(loader.stage_records[1]["shapes"]["up"], (4, 4, 8))
-        self.assertEqual(loader.stage_records[2]["shapes"]["routeWeightsSk"], (4, 2))
+        self.assertEqual(loader.stage_records[2]["shapes"]["up"], (4, 4, 8))
+        self.assertEqual(loader.stage_records[3]["shapes"]["routeWeightsSk"], (4, 2))
         self.assertEqual(loader.reduce_grad_records, [{
             "stream": 0xCAFE,
             "flags": 0,
@@ -409,9 +416,11 @@ class FfiAbiTests(unittest.TestCase):
         }])
         self.assertEqual(
             [byte_count for _, byte_count in loader.register_calls],
-            [2 * 1024 * 1024, 768],
+            [2 * 1024 * 1024] * 4,
         )
-        self.assertEqual(loader.unregister_calls, [8, 7])
+        self.assertEqual(loader.register_calls[0], loader.register_calls[2])
+        self.assertEqual(loader.register_calls[1], loader.register_calls[3])
+        self.assertEqual(loader.unregister_calls, [10])
 
     def test_versioned_planner_library_is_preferred(self):
         import tempfile

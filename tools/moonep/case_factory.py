@@ -10,6 +10,16 @@ def build_topk_experts(torch_module, dimensions: MoonEPDimensions, pattern: str)
         values = (route + d.rank * d.route_count).remainder(d.expert_count)
     elif pattern == "skewed":
         values = (route.remainder(max(1, d.topk))).remainder(d.expert_count)
+    elif pattern == "unique_destinations":
+        if d.topk > d.world_size:
+            raise ValueError(
+                "unique_destinations requires topk to be no greater than world_size"
+            )
+        token = torch_module.div(route, d.topk, rounding_mode="floor")
+        slot = route.remainder(d.topk)
+        owner = (d.rank + token + slot).remainder(d.world_size)
+        local_expert = (d.rank + token).remainder(d.experts_per_rank)
+        values = owner * d.experts_per_rank + local_expert
     elif pattern == "duplicate_destinations":
         owner = (d.rank + 1) % d.world_size
         values = owner * d.experts_per_rank + route.remainder(d.experts_per_rank)
