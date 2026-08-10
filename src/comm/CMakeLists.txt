@@ -183,6 +183,7 @@ install(FILES
         ${CMAKE_CURRENT_SOURCE_DIR}/../include/tilexr_sdma_types.h
         ${CMAKE_CURRENT_SOURCE_DIR}/../include/tilexr_sdma.h
         ${CMAKE_CURRENT_SOURCE_DIR}/../include/tilexr_sdma_compat.h
+        ${CMAKE_CURRENT_SOURCE_DIR}/../include/tilexr_cmo.h
         DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 install(CODE "string(CONCAT _tilexr_collective_header \"tilexr_\" \"collectives.h\")
 string(CONCAT _tilexr_collective_perf_header \"tilexr_\" \"collectives\" \"_perf.h\")

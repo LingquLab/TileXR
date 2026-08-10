@@ -804,7 +804,6 @@ def render_perfetto_trace(index):
             })
 
     return {
-        "displayTimeUnit": "us",
         "traceEvents": events,
     }
 

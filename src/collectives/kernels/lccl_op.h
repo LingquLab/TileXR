@@ -70,7 +70,6 @@ struct TileXRCoarsePerfToken {
     TileXR::TileXRPerfStageEnd( \
         perfTrace, tokenName.perfRank, tokenName.perfCore, TileXR::PerfStageId::KERNEL_TOTAL, \
         tokenName.kernelTotal, TileXR::PerfBarrierPolicy::NO_BARRIER)
-
 #define CLASS_OP_QUANT_LAUNCH(name, outputType, inputType) \
 do { \
 name<outputType, inputType> opKernel(localRank, localRankSize, extraFlag); \
@@ -160,10 +159,16 @@ extern "C" __global__ __aicore__ void TileXRAllReduce_##type##suffix(KERNELS_ARG
     __gm__ type * shareAddrs[TILEXR_MAX_RANK_SIZE]; \
     GET_IPC_MEM_ARGS(type); \
     if ((extraFlag & ExtraFlag::TOPO_PCIE) != 0) { \
-        if (len * sizeof(type) < SIZE_OF_8M) { \
-            TileXRAllReduce2npuWrite<type>(ALLREDUCE_ARGS_CALL_16P(type)); \
+        if (rankSize == quickOneshotRankSize) { \
+            if (len * sizeof(type) < SIZE_OF_8M) { \
+                TileXRAllReduce2npuWrite<type>(ALLREDUCE_ARGS_CALL_16P(type)); \
+            } else { \
+                TileXRAllReduce2npuBigDataWrite<type>(ALLREDUCE_ARGS_CALL_16P(type)); \
+            } \
+        } else if (len * sizeof(type) < cceSmallDataSize || lcalBlockNum == rankSize) { \
+            TileXRAllReduceTwoShot<type>(ALLREDUCE_ARGS_CALL_16P(type)); \
         } else { \
-            TileXRAllReduce2npuBigDataWrite<type>(ALLREDUCE_ARGS_CALL_16P(type)); \
+            TileXRAllReduceBigData<type>(ALLREDUCE_ARGS_CALL_16P_CMO(type)); \
         } \
     } else if ((extraFlag & ExtraFlag::QUANT_FP16) != 0 && std::is_same_v<type, int8_t>) { \
         if (len * sizeof(type) <= oneshotDataSize) { \
@@ -218,7 +223,7 @@ extern "C" __global__ __aicore__ void TileXRAllReduce_##type##suffix(KERNELS_ARG
                 TileXRAllReduceTwoShot<type>(ALLREDUCE_ARGS_CALL_16P(type)); \
             } \
         } else { \
-            TileXRAllReduceBigData<type>(ALLREDUCE_ARGS_CALL_16P(type)); \
+            TileXRAllReduceBigData<type>(ALLREDUCE_ARGS_CALL_16P_CMO(type)); \
         } \
     } \
     TILEXR_COARSE_PERF_END(coarsePerf); \

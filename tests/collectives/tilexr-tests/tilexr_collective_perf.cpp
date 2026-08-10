@@ -50,6 +50,11 @@ enum class CommMode {
     SOCKET,
 };
 
+enum class CmoTargetMode {
+    SEND,
+    SCRATCH,
+};
+
 struct DataTypeInfo {
     TileXR::TileXRDataType type = TileXR::TILEXR_DATA_TYPE_INT32;
     std::string name = "int32";
@@ -77,6 +82,12 @@ struct Options {
     std::string profileDir;
     bool profileAiPrompt = false;
     int profileSampleEvery = 1;
+    bool cmo = false;
+    uint32_t cmoOpType = TILEXR_CMO_PREFETCH;
+    int64_t cmoBytes = 0;
+    int64_t cmoMinBytes = 8 * 1024 * 1024;
+    uint32_t cmoChunkBytes = 0;
+    CmoTargetMode cmoTargetMode = CmoTargetMode::SEND;
 };
 
 struct Measurement {
@@ -202,7 +213,10 @@ void PrintUsage(const char *program)
         << "  --check 0|1 [--csv path]\n"
         << "  [--min-algbw GB/s] [--max-latency-us us]\n"
         << "  [--profile 0|1] [--profile-dir path]\n"
-        << "  [--profile-ai-prompt 0|1] [--profile-sample-every N]\n";
+        << "  [--profile-ai-prompt 0|1] [--profile-sample-every N]\n"
+        << "  [--cmo 0|1] [--cmo-op prefetch|flush|invalidate|N]\n"
+        << "  [--cmo-bytes N] [--cmo-min-bytes N] [--cmo-chunk-bytes N]\n"
+        << "  [--cmo-target send|scratch]\n";
 }
 
 bool ParseBool(const std::string &value, bool &out)
@@ -274,6 +288,42 @@ bool ParseInt(const std::string &text, int &out)
     }
     out = static_cast<int>(value);
     return true;
+}
+
+bool ParseCmoOpType(const std::string &value, uint32_t &opType)
+{
+    if (value == "prefetch") {
+        opType = TILEXR_CMO_PREFETCH;
+        return true;
+    }
+    if (value == "flush") {
+        opType = TILEXR_CMO_FLUSH;
+        return true;
+    }
+    if (value == "invalidate") {
+        opType = TILEXR_CMO_INVALIDATE;
+        return true;
+    }
+    int64_t numeric = 0;
+    if (!ParseInt64(value, numeric) || numeric < TILEXR_CMO_PREFETCH || numeric > TILEXR_CMO_INVALIDATE) {
+        return false;
+    }
+    opType = static_cast<uint32_t>(numeric);
+    return true;
+}
+
+
+bool ParseCmoTargetMode(const std::string &value, CmoTargetMode &mode)
+{
+    if (value == "send") {
+        mode = CmoTargetMode::SEND;
+        return true;
+    }
+    if (value == "scratch") {
+        mode = CmoTargetMode::SCRATCH;
+        return true;
+    }
+    return false;
 }
 
 bool ParseDouble(const std::string &text, double &out)
@@ -605,6 +655,44 @@ bool ParseOptions(int argc, char **argv, Options &options)
                 std::cerr << "ERROR: invalid --profile-sample-every" << std::endl;
                 return false;
             }
+        } else if (arg == "--cmo") {
+            const char *value = requireValue(arg);
+            if (value == nullptr || !ParseBool(value, options.cmo)) {
+                std::cerr << "ERROR: --cmo must be 0 or 1" << std::endl;
+                return false;
+            }
+        } else if (arg == "--cmo-op") {
+            const char *value = requireValue(arg);
+            if (value == nullptr || !ParseCmoOpType(value, options.cmoOpType)) {
+                std::cerr << "ERROR: --cmo-op must be prefetch, flush, invalidate, or 0..2" << std::endl;
+                return false;
+            }
+        } else if (arg == "--cmo-bytes") {
+            const char *value = requireValue(arg);
+            if (value == nullptr || !ParseInt64(value, options.cmoBytes)) {
+                std::cerr << "ERROR: invalid --cmo-bytes" << std::endl;
+                return false;
+            }
+        } else if (arg == "--cmo-min-bytes") {
+            const char *value = requireValue(arg);
+            if (value == nullptr || !ParseInt64(value, options.cmoMinBytes)) {
+                std::cerr << "ERROR: invalid --cmo-min-bytes" << std::endl;
+                return false;
+            }
+        } else if (arg == "--cmo-chunk-bytes") {
+            const char *value = requireValue(arg);
+            int parsed = 0;
+            if (value == nullptr || !ParseInt(value, parsed) || parsed < 0) {
+                std::cerr << "ERROR: invalid --cmo-chunk-bytes" << std::endl;
+                return false;
+            }
+            options.cmoChunkBytes = static_cast<uint32_t>(parsed);
+        } else if (arg == "--cmo-target") {
+            const char *value = requireValue(arg);
+            if (value == nullptr || !ParseCmoTargetMode(value, options.cmoTargetMode)) {
+                std::cerr << "ERROR: --cmo-target must be send or scratch" << std::endl;
+                return false;
+            }
         } else if (arg == "--help" || arg == "-h") {
             PrintUsage(argv[0]);
             std::exit(0);
@@ -623,6 +711,14 @@ bool ParseOptions(int argc, char **argv, Options &options)
     }
     if (options.profileSampleEvery <= 0) {
         std::cerr << "ERROR: --profile-sample-every must be positive" << std::endl;
+        return false;
+    }
+    if (options.cmoBytes < 0) {
+        std::cerr << "ERROR: --cmo-bytes must be non-negative" << std::endl;
+        return false;
+    }
+    if (options.cmoMinBytes < 0) {
+        std::cerr << "ERROR: --cmo-min-bytes must be non-negative" << std::endl;
         return false;
     }
     if (options.check && options.dtype.name != "int32" && IsReductionOp(options.op)) {
@@ -653,9 +749,69 @@ bool CheckTileXR(int rank, const std::string &step, int ret)
     return false;
 }
 
-bool CallCollective(const Options &options, void *sendBuf, void *recvBuf, int64_t count, TileXRCommPtr comm,
-                    aclrtStream stream)
+bool EnvBoolTrue(const char *name)
 {
+    const char *value = std::getenv(name);
+    if (value == nullptr) {
+        return false;
+    }
+    const std::string text(value);
+    return text == "1" || text == "true" || text == "yes";
+}
+
+bool AllowCmoOnCurrentEnv()
+{
+    if (EnvBoolTrue("TILEXR_CMO_ALLOW_PCIE_FALLBACK")) {
+        return true;
+    }
+    const char *soc = std::getenv("TILEXR_SOC_NAME");
+    if (soc == nullptr) {
+        return true;
+    }
+    const std::string socName(soc);
+    return socName.find("910b") == std::string::npos && socName.find("910B") == std::string::npos;
+}
+
+bool ShouldSubmitCmoForMessage(const Options &options, int64_t messageBytes)
+{
+    if (!options.cmo || options.op != CollectiveOp::ALLREDUCE || !AllowCmoOnCurrentEnv()) {
+        return false;
+    }
+    return messageBytes >= options.cmoMinBytes;
+}
+
+uint64_t ResolveCmoBytesForMessage(const Options &options, int64_t messageBytes)
+{
+    if (!ShouldSubmitCmoForMessage(options, messageBytes)) {
+        return 0;
+    }
+    uint64_t bytes = static_cast<uint64_t>(options.cmoBytes > 0 ? options.cmoBytes : messageBytes);
+    if (options.cmoTargetMode == CmoTargetMode::SEND && bytes > static_cast<uint64_t>(messageBytes)) {
+        bytes = static_cast<uint64_t>(messageBytes);
+    }
+    return bytes;
+}
+
+bool SubmitCmoTaskIfEnabled(const Options &options, TileXRCommPtr comm, void *cmoTarget, uint64_t cmoBytes)
+{
+    if (!options.cmo || cmoBytes == 0) {
+        return true;
+    }
+    if (cmoTarget == nullptr) {
+        std::cerr << "[rank " << options.rank << "] ERROR: CMO is enabled but target is empty" << std::endl;
+        return false;
+    }
+    return CheckTileXR(options.rank, "TileXRSubmitCmoTask",
+        TileXRSubmitCmoTask(comm, static_cast<GM_ADDR>(cmoTarget), cmoBytes, options.cmoOpType, 0,
+                            options.cmoChunkBytes, 0));
+}
+
+bool CallCollective(const Options &options, void *sendBuf, void *recvBuf, int64_t count, TileXRCommPtr comm,
+                    aclrtStream stream, void *cmoTarget = nullptr, uint64_t cmoBytes = 0)
+{
+    if (!SubmitCmoTaskIfEnabled(options, comm, cmoTarget, cmoBytes)) {
+        return false;
+    }
     switch (options.op) {
         case CollectiveOp::ALLGATHER:
             return CheckTileXR(options.rank, "TileXRAllGather",
@@ -962,7 +1118,8 @@ double ComputeBusBandwidthGbps(CollectiveOp op, int rankSize, double algBwGbps)
 }
 
 bool MeasureOnce(const Options &options, void *devSend, void *devRecv, int64_t count, TileXRCommPtr comm,
-                 aclrtStream stream, uint64_t profileLaunchIndex, int &totalErrors, double &us)
+                 aclrtStream stream, uint64_t profileLaunchIndex, int &totalErrors, double &us,
+                 void *cmoTarget, uint64_t cmoBytes)
 {
     aclrtEvent start = nullptr;
     aclrtEvent stop = nullptr;
@@ -985,7 +1142,7 @@ bool MeasureOnce(const Options &options, void *devSend, void *devRecv, int64_t c
         return false;
     }
     std::string incompleteReason;
-    if (!CallCollective(options, devSend, devRecv, count, comm, stream)) {
+    if (!CallCollective(options, devSend, devRecv, count, comm, stream, cmoTarget, cmoBytes)) {
         incompleteReason = "CallCollective failed before measured launch completed";
     } else if (!CheckAcl(options.rank, "aclrtRecordEvent stop", aclrtRecordEvent(stop, stream))) {
         incompleteReason = "aclrtRecordEvent stop failed";
@@ -1013,10 +1170,11 @@ bool MeasureOnce(const Options &options, void *devSend, void *devRecv, int64_t c
 }
 
 bool Measure(const Options &options, void *devSend, void *devRecv, int64_t count, TileXRCommPtr comm,
-             aclrtStream stream, uint64_t &profileLaunchIndex, int &totalErrors, Measurement &measurement)
+             aclrtStream stream, uint64_t &profileLaunchIndex, int &totalErrors, Measurement &measurement,
+             void *cmoTarget, uint64_t cmoBytes)
 {
     for (int i = 0; i < options.warmupIters; ++i) {
-        if (!CallCollective(options, devSend, devRecv, count, comm, stream)) {
+        if (!CallCollective(options, devSend, devRecv, count, comm, stream, cmoTarget, cmoBytes)) {
             return false;
         }
     }
@@ -1030,7 +1188,7 @@ bool Measure(const Options &options, void *devSend, void *devRecv, int64_t count
         double us = 0.0;
         const uint64_t currentProfileLaunchIndex = profileLaunchIndex++;
         if (!MeasureOnce(options, devSend, devRecv, count, comm, stream,
-                currentProfileLaunchIndex, totalErrors, us)) {
+                currentProfileLaunchIndex, totalErrors, us, cmoTarget, cmoBytes)) {
             return false;
         }
         samples.push_back(us);
@@ -1401,6 +1559,9 @@ int main(int argc, char **argv)
 
         void *devSend = nullptr;
         void *devRecv = nullptr;
+        void *devCmo = nullptr;
+        void *activeCmoTarget = nullptr;
+        uint64_t activeCmoBytes = 0;
         bool ok = CheckAcl(options.rank, "aclrtMalloc send",
             aclrtMalloc(&devSend, static_cast<size_t>(sendBytes), ACL_MEM_MALLOC_HUGE_FIRST)) &&
             CheckAcl(options.rank, "aclrtMemcpy H2D send",
@@ -1418,10 +1579,27 @@ int main(int argc, char **argv)
             }
         }
 
+        if (ok && ShouldSubmitCmoForMessage(options, actualSendBytesPerRank)) {
+            activeCmoBytes = ResolveCmoBytesForMessage(options, actualSendBytesPerRank);
+            if (activeCmoBytes == 0 || activeCmoBytes > static_cast<uint64_t>(kMaxHostBufferBytes)) {
+                std::cerr << "ERROR: invalid active CMO bytes " << activeCmoBytes << std::endl;
+                ok = false;
+            } else if (options.cmoTargetMode == CmoTargetMode::SCRATCH) {
+                ok = CheckAcl(options.rank, "aclrtMalloc cmo",
+                        aclrtMalloc(&devCmo, static_cast<size_t>(activeCmoBytes), ACL_MEM_MALLOC_HUGE_FIRST)) &&
+                    CheckAcl(options.rank, "aclrtMemset cmo",
+                        aclrtMemset(devCmo, static_cast<size_t>(activeCmoBytes), 0,
+                            static_cast<size_t>(activeCmoBytes)));
+                activeCmoTarget = devCmo;
+            } else {
+                activeCmoTarget = devSend;
+            }
+        }
+
         Measurement measurement;
         if (ok) {
             ok = Measure(options, devSend, devRecv, count, comm, stream,
-                profileLaunchIndex, totalErrors, measurement);
+                profileLaunchIndex, totalErrors, measurement, activeCmoTarget, activeCmoBytes);
         }
 
         int errors = 0;
@@ -1437,7 +1615,7 @@ int main(int argc, char **argv)
                         static_cast<size_t>(sendBytes), ACL_MEMCPY_HOST_TO_DEVICE));
             }
             ok = ok &&
-                CallCollective(options, devSend, devRecv, count, comm, stream) &&
+                CallCollective(options, devSend, devRecv, count, comm, stream, activeCmoTarget, activeCmoBytes) &&
                 CheckAcl(options.rank, "aclrtSynchronizeStream check", aclrtSynchronizeStream(stream)) &&
                 CheckAcl(options.rank, "aclrtMemcpy D2H recv",
                     aclrtMemcpy(hostRecv.data(), static_cast<size_t>(recvBytes), devRecv,
@@ -1450,6 +1628,10 @@ int main(int argc, char **argv)
             }
         }
 
+
+        if (devCmo != nullptr) {
+            aclrtFree(devCmo);
+        }
         if (devSend != nullptr) {
             aclrtFree(devSend);
         }

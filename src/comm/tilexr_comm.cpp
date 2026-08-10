@@ -54,6 +54,7 @@ static std::mutex g_mtx;
 static std::mutex g_sdmaMtx;
 static bool g_sdmaUnavailable = false;
 
+<<<<<<< HEAD
 namespace {
 
 bool IsEnvEnabled(const char* name, bool defaultValue)
@@ -75,6 +76,18 @@ bool IsEnvEnabled(const char* name, bool defaultValue)
 
 } // namespace
 
+=======
+static bool EnvBoolTrue(const char *name)
+{
+    const char *value = std::getenv(name);
+    if (value == nullptr) {
+        return false;
+    }
+    const string text(value);
+    return text == "1" || text == "true" || text == "TRUE" || text == "yes" || text == "YES";
+}
+
+>>>>>>> c13c44a (add cmo code)
 
 // 如果是互联的链路，返回false； 对910B2C那些不互联的链路，返回true
 bool SkipUnusedChannel910B2C(int curRank, int peerRank, ChipName chipName)
@@ -348,6 +361,101 @@ int TileXRComm::UpdateCommArgsDev()
         TILEXR_LOG(ERROR) << "aclrtMemcpy update comm args err " << ret;
         return TILEXR_ERROR_INTERNAL;
     }
+    return TILEXR_SUCCESS;
+}
+
+int TileXRComm::SubmitCmoTask(GM_ADDR targetAddr, uint64_t totalBytes, uint32_t opType, uint32_t priority,
+                              uint32_t chunkBytes, uint64_t expireSeq)
+{
+    if (!inited_) {
+        TILEXR_LOG(ERROR) << "TileXRSubmitCmoTask requires initialized communicator";
+        return TILEXR_ERROR_NOT_INITIALIZED;
+    }
+    if (targetAddr == nullptr || totalBytes == 0 || !TileXRCmoOpTypeValid(opType)) {
+        TILEXR_LOG(ERROR) << "TileXRSubmitCmoTask invalid args, target " << static_cast<void *>(targetAddr)
+                          << ", bytes " << totalBytes << ", op " << opType;
+        return TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    if ((commArgs_.extraFlag & ExtraFlag::TOPO_PCIE) != 0 &&
+        !EnvBoolTrue("TILEXR_CMO_ALLOW_PCIE_FALLBACK")) {
+        TILEXR_LOG(WARN) << "TileXRSubmitCmoTask skipped on PCIe fallback without TILEXR_CMO_ALLOW_PCIE_FALLBACK=1";
+        return TILEXR_ERROR_NOT_SUPPORT;
+    }
+
+    bool allocated = false;
+    if (cmoTaskDev_ == nullptr) {
+        int ret = aclrtMalloc(reinterpret_cast<void **>(&cmoTaskDev_), sizeof(TileXRCmoTaskDesc),
+            ACL_MEM_MALLOC_HUGE_FIRST);
+        if (ret != ACL_SUCCESS) {
+            TILEXR_LOG(ERROR) << "aclrtMalloc cmo task err " << ret;
+            cmoTaskDev_ = nullptr;
+            return TILEXR_ERROR_INTERNAL;
+        }
+        allocated = true;
+    }
+
+    TileXRCmoTaskDesc task {};
+    task.targetAddr = targetAddr;
+    task.totalBytes = totalBytes;
+    task.offset = 0;
+    task.opType = static_cast<CmoOpType>(opType);
+    task.priority = priority;
+    task.chunkBytes = chunkBytes;
+    task.state = CmoTaskState::PENDING;
+    task.expireSeq = expireSeq;
+    task.executedBytes = 0;
+
+    int ret = aclrtMemcpy(cmoTaskDev_, sizeof(task), &task, sizeof(task), ACL_MEMCPY_HOST_TO_DEVICE);
+    if (ret != ACL_SUCCESS) {
+        TILEXR_LOG(ERROR) << "aclrtMemcpy cmo task err " << ret;
+        if (allocated) {
+            FreePeerMem(cmoTaskDev_);
+        }
+        return TILEXR_ERROR_INTERNAL;
+    }
+
+    const uint32_t oldExtraFlag = commArgs_.extraFlag;
+    const GM_ADDR oldCmoTaskPtr = commArgs_.cmoTaskPtr;
+    const TileXRCmoTaskDesc oldTask = cmoTaskHost_;
+
+    cmoTaskHost_ = task;
+    commArgs_.cmoTaskPtr = cmoTaskDev_;
+    commArgs_.extraFlag |= ExtraFlag::CMO;
+
+    ret = UpdateCommArgsDev();
+    if (ret != TILEXR_SUCCESS) {
+        commArgs_.extraFlag = oldExtraFlag;
+        commArgs_.cmoTaskPtr = oldCmoTaskPtr;
+        cmoTaskHost_ = oldTask;
+        if (allocated) {
+            FreePeerMem(cmoTaskDev_);
+        }
+        return ret;
+    }
+    return TILEXR_SUCCESS;
+}
+
+int TileXRComm::ClearCmoTask()
+{
+    if (!inited_) {
+        TILEXR_LOG(ERROR) << "TileXRClearCmoTask requires initialized communicator";
+        return TILEXR_ERROR_NOT_INITIALIZED;
+    }
+
+    const uint32_t oldExtraFlag = commArgs_.extraFlag;
+    const GM_ADDR oldCmoTaskPtr = commArgs_.cmoTaskPtr;
+
+    commArgs_.extraFlag &= ~ExtraFlag::CMO;
+    commArgs_.cmoTaskPtr = nullptr;
+    int ret = UpdateCommArgsDev();
+    if (ret != TILEXR_SUCCESS) {
+        commArgs_.extraFlag = oldExtraFlag;
+        commArgs_.cmoTaskPtr = oldCmoTaskPtr;
+        return ret;
+    }
+
+    FreePeerMem(cmoTaskDev_);
+    cmoTaskHost_ = {};
     return TILEXR_SUCCESS;
 }
 
@@ -1097,7 +1205,11 @@ TileXRComm::~TileXRComm()
     }
     FreePeerMem(commArgs_.dumpAddr);
     FreePeerMem(peerMem_[rank_]);
+<<<<<<< HEAD
     FreePeerMem(creditIpcMem_[rank_]);
+=======
+    FreePeerMem(cmoTaskDev_);
+>>>>>>> c13c44a (add cmo code)
     FreePeerMem(commArgsPtr_);
     ResetSDMAState();
 }

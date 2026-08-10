@@ -225,6 +225,29 @@ int TileXRGetSDMAWorkspaceDev(TileXRCommPtr comm, GM_ADDR *workspace)
     return TILEXR_SUCCESS;
 }
 
+
+int TileXRSubmitCmoTask(TileXRCommPtr comm, GM_ADDR targetAddr, uint64_t totalBytes,
+                        uint32_t opType, uint32_t priority, uint32_t chunkBytes,
+                        uint64_t expireSeq)
+{
+    if (comm == nullptr) {
+        TILEXR_LOG(ERROR) << "TileXRSubmitCmoTask invalid comm";
+        return TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    auto* c = static_cast<TileXRComm *>(comm);
+    return c->SubmitCmoTask(targetAddr, totalBytes, opType, priority, chunkBytes, expireSeq);
+}
+
+int TileXRClearCmoTask(TileXRCommPtr comm)
+{
+    if (comm == nullptr) {
+        TILEXR_LOG(ERROR) << "TileXRClearCmoTask invalid comm";
+        return TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    auto* c = static_cast<TileXRComm *>(comm);
+    return c->ClearCmoTask();
+}
+
 void TileXRPrintDFX2Log(TileXRCommPtr comm)
 {
     if (comm == nullptr) {
