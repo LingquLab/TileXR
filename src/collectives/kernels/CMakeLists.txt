@@ -53,6 +53,8 @@ include_directories(
         ${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc/runtime/
         ${ASCEND_HOME_PATH}/${ARCH}-linux/include/
         ${ASCEND_HOME_PATH}/${ARCH}-linux/include/ascendc
+        ${ASCEND_HOME_PATH}/${ARCH}-linux/asc/include
+        ${ASCEND_HOME_PATH}/${ARCH}-linux/asc/impl
         ${ASCEND_HOME_PATH}/${ARCH}-linux/ascendc/include
         ${ASCEND_HOME_PATH}/${ARCH}-linux/tikcpp/tikcfw/
         ${ASCEND_HOME_PATH}/${ARCH}-linux/tikcpp/tikcfw/interface/
@@ -82,6 +84,7 @@ add_custom_command(
                 --static -o "${TILEXR_COLLECTIVES_OP}" --allow-multiple-definition
         COMMAND truncate -c -s ${TILEXR_COLLECTIVES_1OP_BIN_SIZE} "${TILEXR_COLLECTIVES_OP}"
         DEPENDS tilexr_collectives_op_tmp
+                "${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/tilexr_collectives_op_tmp.dir/tilexr_lccl_op.cpp.o"
         VERBATIM
 )
 

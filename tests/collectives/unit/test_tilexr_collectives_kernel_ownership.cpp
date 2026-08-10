@@ -152,6 +152,7 @@ void TestCollectivesOwnsCceBuild()
     CheckContains(kernelsCmakePath, kernelsCmake, "CONFIGURE_DEPENDS");
     CheckContains(kernelsCmakePath, kernelsCmake, "OBJECT_DEPENDS");
     CheckContains(kernelsCmakePath, kernelsCmake, "tilexr_collectives_op.o");
+    CheckContains(kernelsCmakePath, kernelsCmake, "tilexr_lccl_op.cpp.o");
     CheckContains(kernelsCmakePath, kernelsCmake, "tilexr_collectives_op");
     CheckContains(kernelsCmakePath, kernelsCmake, "TILEXR_COLLECTIVES_ENABLE_PROFILING");
     CheckContains(kernelsCmakePath, kernelsCmake, "TILEXR_COLLECTIVES_1OP_BIN_SIZE 10485760");
@@ -182,6 +183,8 @@ void TestCollectivesKernelSourcesAreScoped()
     CheckContains(perfTraceKernelPath, perfTraceKernel, "TILEXR_PERF_TRACE_STATS_OFFSET");
     CheckContains(perfTraceKernelPath, perfTraceKernel, "CpGM2UB");
     CheckContains(perfTraceKernelPath, perfTraceKernel, "CpUB2GM");
+    CheckContains(perfTraceKernelPath, perfTraceKernel, "TILEXR_PERF_TRACE_STATS_OFFSET");
+    CheckContains(perfTraceKernelPath, perfTraceKernel, "TILEXR_PERF_STAGE_COUNT");
     CheckContains(perfTraceKernelPath, perfTraceKernel, "GetBlockNum()");
     CheckDoesNotContain(perfTraceKernelPath, perfTraceKernel, "header->statsOffset");
     CheckDoesNotContain(perfTraceKernelPath, perfTraceKernel, "header->maxCoreCount");

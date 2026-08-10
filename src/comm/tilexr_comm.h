@@ -19,6 +19,7 @@
 #include "../include/tilexr_types.h"
 #include "../include/tilexr_api.h"
 #include "../include/comm_args.h"
+#include "../include/tilexr_cmo.h"
 
 namespace TileXR {
 constexpr int IPC_NAME_SIZE = 65;
@@ -51,6 +52,9 @@ public:
     const TileXRUDMARegistry* GetUDMARegistryHost() const;
     bool IsSDMAAvailable() const;
     GM_ADDR GetSDMAWorkspacePtr() const;
+    int SubmitCmoTask(GM_ADDR targetAddr, uint64_t totalBytes, uint32_t opType, uint32_t priority,
+                      uint32_t chunkBytes, uint64_t expireSeq);
+    int ClearCmoTask();
     SDMAInitStatus GetSDMAInitStatus() const;
     std::string PrintDFX();
     friend class Lccl;
@@ -112,6 +116,8 @@ private:
     bool isEnableMsprofOp_ = false;
     std::unique_ptr<TileXRUDMAContext> udmaContext_;
     GM_ADDR sdmaWorkspaceDev_ = nullptr;
+    GM_ADDR cmoTaskDev_ = nullptr;
+    TileXRCmoTaskDesc cmoTaskHost_ = {};
     SDMAInitStatus sdmaInitStatus_ = SDMAInitStatus::DISABLED_BY_ENV;
     std::unique_ptr<TileXRSDMATransport> sdmaTransport_;
 };

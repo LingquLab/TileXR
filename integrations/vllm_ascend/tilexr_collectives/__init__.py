@@ -7,11 +7,23 @@ from .runtime import (
     TILEXR_DATA_TYPE_INT64,
     TILEXR_DATA_TYPE_UINT8,
     TILEXR_REDUCE_SUM,
+    TILEXR_CMO_FLUSH,
+    TILEXR_CMO_INVALIDATE,
+    TILEXR_CMO_PREFETCH,
     TILEXR_SUCCESS,
     TileXRCollectivesError,
     TileXRCollectivesRuntime,
 )
-from .torch_collectives import all_gather, all_reduce, all_to_all, broadcast, reduce_scatter
+from .torch_collectives import (
+    TileXRCmoMeta,
+    all_gather,
+    all_reduce,
+    all_to_all,
+    broadcast,
+    clear_cmo_meta,
+    mark_cmo,
+    reduce_scatter,
+)
 from .vllm_adapter import TileXRVllmCollectivesAdapter
 from .vllm_adapter import enabled as tilexr_vllm_collectives_enabled
 from .vllm_patch import patch_npu_communicator
@@ -25,14 +37,20 @@ __all__ = [
     "TILEXR_DATA_TYPE_INT64",
     "TILEXR_DATA_TYPE_UINT8",
     "TILEXR_REDUCE_SUM",
+    "TILEXR_CMO_FLUSH",
+    "TILEXR_CMO_INVALIDATE",
+    "TILEXR_CMO_PREFETCH",
     "TILEXR_SUCCESS",
     "TileXRCollectivesError",
     "TileXRCollectivesRuntime",
+    "TileXRCmoMeta",
     "TileXRVllmCollectivesAdapter",
     "all_gather",
     "all_reduce",
     "all_to_all",
     "broadcast",
+    "clear_cmo_meta",
+    "mark_cmo",
     "patch_npu_communicator",
     "reduce_scatter",
     "tilexr_vllm_collectives_enabled",

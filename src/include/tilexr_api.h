@@ -20,6 +20,13 @@ extern "C" {
 
 typedef void *TileXRCommPtr;
 typedef uint32_t TileXRUDMAMemHandle;
+
+typedef enum {
+    TILEXR_CMO_PREFETCH = 0,
+    TILEXR_CMO_FLUSH = 1,
+    TILEXR_CMO_INVALIDATE = 2,
+} TileXRCmoOpType;
+
 #define TILEXRUNIQUE_ID_BYTES 128
 typedef struct { char internal[TILEXRUNIQUE_ID_BYTES]; } TileXRUniqueId;
 
@@ -52,6 +59,12 @@ int TileXRGetUDMARegistryHost(TileXRCommPtr comm, const TileXR::TileXRUDMARegist
 int TileXRSDMAAvailable(TileXRCommPtr comm, bool *available);
 
 int TileXRGetSDMAWorkspaceDev(TileXRCommPtr comm, GM_ADDR *workspace);
+
+int TileXRSubmitCmoTask(TileXRCommPtr comm, GM_ADDR targetAddr, uint64_t totalBytes,
+                        uint32_t opType, uint32_t priority, uint32_t chunkBytes,
+                        uint64_t expireSeq);
+
+int TileXRClearCmoTask(TileXRCommPtr comm);
 
 void TileXRPrintDFX2Log(TileXRCommPtr comm);
 

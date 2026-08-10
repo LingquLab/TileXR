@@ -191,9 +191,11 @@ class CollectiveProfileReportTest(unittest.TestCase):
 
             trace_json = json.loads((root / "trace.json").read_text(encoding="utf-8"))
             self.assertIn("traceEvents", trace_json)
+            self.assertNotIn("displayTimeUnit", trace_json)
 
             perfetto = json.loads((root / "perfetto_trace.json").read_text(encoding="utf-8"))
             self.assertIn("traceEvents", perfetto)
+            self.assertNotIn("displayTimeUnit", perfetto)
             self.assertIn({"name": "process_name", "ph": "M", "pid": 0, "args": {"name": "rank0"}}, perfetto["traceEvents"])
             self.assertIn({"name": "thread_name", "ph": "M", "pid": 0, "tid": 0, "args": {"name": "rank0/core0"}}, perfetto["traceEvents"])
 

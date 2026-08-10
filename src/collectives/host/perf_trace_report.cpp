@@ -158,12 +158,23 @@ std::string EscapeHtml(const std::string &value)
     return out.str();
 }
 
-std::vector<TileXR::TileXRPerfCoreStageStats> NonEmptyStats(
+bool IsValidPerfStat(const TileXR::TileXRPerfTraceHeader &header,
+                     const TileXR::TileXRPerfCoreStageStats &stat)
+{
+    return stat.count != 0 &&
+        stat.rank < header.rankSize &&
+        stat.core < header.maxCoreCount &&
+        stat.stageId < header.stageCount &&
+        stat.stageId < TileXR::TILEXR_PERF_STAGE_COUNT;
+}
+
+std::vector<TileXR::TileXRPerfCoreStageStats> ValidStats(
+    const TileXR::TileXRPerfTraceHeader &header,
     const std::vector<TileXR::TileXRPerfCoreStageStats> &stats)
 {
     std::vector<TileXR::TileXRPerfCoreStageStats> result;
     for (const auto &stat : stats) {
-        if (stat.count != 0) {
+        if (IsValidPerfStat(header, stat)) {
             result.push_back(stat);
         }
     }
@@ -188,7 +199,7 @@ std::string BuildTraceJson(const TileXR::TileXRPerfTraceHeader &header,
                            const std::vector<TileXR::TileXRPerfCoreStageStats> &stats,
                            const PerfReportOptions &options)
 {
-    const auto nonEmptyStats = NonEmptyStats(stats);
+    const auto nonEmptyStats = ValidStats(header, stats);
     std::ostringstream out;
     out << "{\n";
     out << "  \"schema\": \"tilexr_perf_trace_report.v1\",\n";
@@ -291,7 +302,7 @@ std::string BuildHtmlReport(const TileXR::TileXRPerfTraceHeader &header,
                             const std::vector<TileXR::TileXRPerfCoreStageStats> &stats,
                             const PerfReportOptions &options)
 {
-    const auto nonEmptyStats = NonEmptyStats(stats);
+    const auto nonEmptyStats = ValidStats(header, stats);
     std::ostringstream out;
     out << "<!doctype html>\n<html><head><meta charset=\"utf-8\">";
     out << "<title>TileXR Collective Perf Report</title>";
@@ -414,7 +425,7 @@ std::vector<PerfStageSummary> SummarizePerfTrace(
     }
 
     for (const auto &stat : stats) {
-        if (stat.count == 0 || stat.stageId >= stageCount) {
+        if (!IsValidPerfStat(header, stat) || stat.stageId >= stageCount) {
             continue;
         }
 

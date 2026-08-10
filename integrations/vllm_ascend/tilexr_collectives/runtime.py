@@ -14,6 +14,9 @@ TILEXR_DATA_TYPE_INT64 = 5
 TILEXR_DATA_TYPE_UINT8 = 7
 TILEXR_DATA_TYPE_BFP16 = 11
 TILEXR_REDUCE_SUM = 0
+TILEXR_CMO_PREFETCH = 0
+TILEXR_CMO_FLUSH = 1
+TILEXR_CMO_INVALIDATE = 2
 
 
 class TileXRCollectivesError(RuntimeError):
@@ -103,6 +106,18 @@ class TileXRCollectivesRuntime:
         self._comm_lib.TileXRCommInitRankLocal.restype = ctypes.c_int
         self._comm_lib.TileXRCommDestroy.argtypes = [ctypes.c_void_p]
         self._comm_lib.TileXRCommDestroy.restype = ctypes.c_int
+        self._comm_lib.TileXRSubmitCmoTask.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_uint64,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_uint64,
+        ]
+        self._comm_lib.TileXRSubmitCmoTask.restype = ctypes.c_int
+        self._comm_lib.TileXRClearCmoTask.argtypes = [ctypes.c_void_p]
+        self._comm_lib.TileXRClearCmoTask.restype = ctypes.c_int
 
         self._collectives_lib.TileXRAllGather.argtypes = [
             ctypes.c_void_p,
@@ -257,6 +272,30 @@ class TileXRCollectivesRuntime:
             _void_p(stream_ptr),
         )
         self._check("TileXRBroadcast", ret, f"rank={self.rank} count={count} dtype={tilexr_dtype} root={root}")
+
+    def submit_cmo_task(
+        self,
+        target_ptr: int,
+        total_bytes: int,
+        op_type: int = TILEXR_CMO_PREFETCH,
+        priority: int = 0,
+        chunk_bytes: int = 0,
+        expire_seq: int = 0,
+    ) -> None:
+        ret = self._comm_lib.TileXRSubmitCmoTask(
+            self._comm,
+            _void_p(target_ptr),
+            ctypes.c_uint64(int(total_bytes)),
+            ctypes.c_uint32(int(op_type)),
+            ctypes.c_uint32(int(priority)),
+            ctypes.c_uint32(int(chunk_bytes)),
+            ctypes.c_uint64(int(expire_seq)),
+        )
+        self._check("TileXRSubmitCmoTask", ret, f"rank={self.rank} bytes={total_bytes} op={op_type}")
+
+    def clear_cmo_task(self) -> None:
+        ret = self._comm_lib.TileXRClearCmoTask(self._comm)
+        self._check("TileXRClearCmoTask", ret, f"rank={self.rank}")
 
     def close(self) -> None:
         if self._closed:

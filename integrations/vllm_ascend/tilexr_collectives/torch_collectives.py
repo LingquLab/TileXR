@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from functools import lru_cache
 
 from .runtime import (
@@ -9,8 +10,86 @@ from .runtime import (
     TILEXR_DATA_TYPE_INT8,
     TILEXR_DATA_TYPE_INT32,
     TILEXR_DATA_TYPE_INT64,
+    TILEXR_CMO_PREFETCH,
     TileXRCollectivesRuntime,
 )
+
+
+_CMO_META_ATTR = "_tilexr_cmo_meta"
+_CMO_META_BY_ID: dict[int, "TileXRCmoMeta"] = {}
+
+
+@dataclass(frozen=True)
+class TileXRCmoMeta:
+    target_ptr: int
+    total_bytes: int
+    op_type: int = TILEXR_CMO_PREFETCH
+    priority: int = 0
+    chunk_bytes: int = 0
+    expire_seq: int = 0
+
+
+def mark_cmo(
+    tensor,
+    *,
+    target_tensor=None,
+    target_ptr: int | None = None,
+    total_bytes: int | None = None,
+    op_type: int = TILEXR_CMO_PREFETCH,
+    priority: int = 0,
+    chunk_bytes: int = 0,
+    expire_seq: int = 0,
+):
+    if target_tensor is not None and target_ptr is not None:
+        raise ValueError("target_tensor and target_ptr cannot both be set")
+    if target_tensor is None and target_ptr is None:
+        target_tensor = tensor
+    if target_tensor is not None:
+        _validate_npu_contiguous(target_tensor, "target_tensor")
+        target_ptr = int(target_tensor.data_ptr())
+        if total_bytes is None:
+            total_bytes = int(target_tensor.numel() * target_tensor.element_size())
+    if target_ptr is None or total_bytes is None or int(total_bytes) <= 0:
+        raise ValueError("CMO target_ptr and positive total_bytes are required")
+    meta = TileXRCmoMeta(
+        target_ptr=int(target_ptr),
+        total_bytes=int(total_bytes),
+        op_type=int(op_type),
+        priority=int(priority),
+        chunk_bytes=int(chunk_bytes),
+        expire_seq=int(expire_seq),
+    )
+    try:
+        setattr(tensor, _CMO_META_ATTR, meta)
+    except (AttributeError, TypeError):
+        _CMO_META_BY_ID[id(tensor)] = meta
+    return tensor
+
+
+def clear_cmo_meta(tensor):
+    if hasattr(tensor, _CMO_META_ATTR):
+        delattr(tensor, _CMO_META_ATTR)
+    _CMO_META_BY_ID.pop(id(tensor), None)
+    return tensor
+
+
+def _get_cmo_meta(tensor) -> TileXRCmoMeta | None:
+    return getattr(tensor, _CMO_META_ATTR, None) or _CMO_META_BY_ID.get(id(tensor))
+
+
+def _sync_cmo_task(runtime: TileXRCollectivesRuntime, tensor) -> None:
+    meta = _get_cmo_meta(tensor)
+    if meta is None:
+        runtime.clear_cmo_task()
+        return
+    runtime.submit_cmo_task(
+        target_ptr=meta.target_ptr,
+        total_bytes=meta.total_bytes,
+        op_type=meta.op_type,
+        priority=meta.priority,
+        chunk_bytes=meta.chunk_bytes,
+        expire_seq=meta.expire_seq,
+    )
 
 
 def _torch():
@@ -139,6 +218,7 @@ def all_reduce(tensor, rank: int, world_size: int, install_prefix: str, runtime=
     device_index = _npu_device_index(tensor)
     _bind_npu_device(device_index)
     rt = _select_runtime(runtime, rank, world_size, install_prefix, device_index)
+    _sync_cmo_task(rt, tensor)
     output = torch.empty_like(tensor)
     rt.all_reduce(
         send_ptr=tensor.data_ptr(),
