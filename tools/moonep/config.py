@@ -52,8 +52,10 @@ class BenchmarkCase:
                 raise ValueError(f"{name} must be positive")
         if self.dtype not in _DTYPES:
             raise ValueError(f"dtype must be one of {sorted(_DTYPES)}, got {self.dtype}")
-        if self.warmup < 0 or self.iterations <= 0:
-            raise ValueError("warmup must be non-negative and iterations must be positive")
+        if self.warmup < 0 or self.iterations < 0:
+            raise ValueError("warmup and iterations must be non-negative")
+        if self.warmup + self.iterations < 1:
+            raise ValueError("warmup + iterations must be at least 1")
         if self.topk > self.expert_count:
             raise ValueError("topk cannot exceed expert_count")
         for name in ("intermediate_size", "prefetch_slots"):
@@ -157,6 +159,16 @@ def apply_overrides(case: BenchmarkCase, args: argparse.Namespace) -> BenchmarkC
         if value is not None:
             updates[name] = value
     return replace(case, **updates)
+
+
+def validate_iteration_overrides(
+    warmup: int | None, iterations: int | None
+) -> None:
+    for name, value in (("warmup", warmup), ("iterations", iterations)):
+        if value is not None and value < 0:
+            raise ValueError(f"{name} must be non-negative")
+    if warmup == 0 and iterations == 0:
+        raise ValueError("warmup + iterations must be at least 1")
 
 
 def build_case_parser(parser: argparse.ArgumentParser) -> None:

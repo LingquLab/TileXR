@@ -60,12 +60,21 @@ class IterationBuffer:
         self.plan = object()
         self.combine_inputs = []
         self.dispatch_calls = 0
+        self.planning_calls = 0
+        self.dispatch_plans = []
+
+    def planning(self, topk_experts, tokens_per_expert):
+        self.planning_calls += 1
+        assert topk_experts is not None
+        assert tokens_per_expert is not None
+        return self.plan, self.group_list
 
     def dispatch(self, *_args, **_kwargs):
         self.dispatch_calls += 1
+        self.dispatch_plans.append(_kwargs.get("plan"))
         if self.dispatch_calls == 1:
-            return self.hidden, self.route_weights, self.group_list, self.plan
-        return torch.ones_like(self.hidden), None, self.group_list, self.plan
+            return self.hidden, self.route_weights, None, self.plan
+        return torch.ones_like(self.hidden), None, None, self.plan
 
     @staticmethod
     def prefetch_weight(*_args, **_kwargs):
@@ -113,7 +122,22 @@ def test_timed_iteration_executes_torch_npu_expert_forward() -> None:
     buffer = IterationBuffer()
     ops = IterationTorchNpu()
     events = []
+    timed_stages = []
     original_combine = buffer.combine
+
+    class RecordingTimer:
+        @staticmethod
+        def start():
+            return None
+
+        @staticmethod
+        def finish():
+            return {"end_to_end": 1.0}
+
+        @staticmethod
+        def call(name, callback):
+            timed_stages.append(name)
+            return callback()
 
     def combine(*args, **kwargs):
         events.append("combine")
@@ -124,11 +148,15 @@ def test_timed_iteration_executes_torch_npu_expert_forward() -> None:
     benchmark.execute_iteration(
         buffer,
         inputs,
+        RecordingTimer(),
         torch_module=torch,
         torch_npu_module=ops,
         stage_barrier=lambda stage: events.append(stage),
     )
 
+    assert timed_stages[:2] == ["planning", "dispatch_forward"]
+    assert buffer.planning_calls == 1
+    assert buffer.dispatch_plans == [buffer.plan, buffer.plan]
     assert ops.gmm_calls == 2
     assert events[:2] == ["expert_forward", "combine"]
     assert events.count("expert_forward") == 1
@@ -163,6 +191,160 @@ def test_case_aliases_add_reference_dimensions_without_changing_old_defaults() -
     assert case.prefetch_slots == 2
     assert case.token_padding == 4
     assert case.routing_pattern == "skewed"
+
+
+@pytest.mark.parametrize(
+    ("mode", "warmup", "iterations", "expected"),
+    [
+        ("benchmark", 0, 1, (5, 20)),
+        ("benchmark", 8, 9, (5, 20)),
+        ("reference", 0, 1, (0, 1)),
+        ("correctness", 3, 4, (3, 4)),
+    ],
+)
+def test_mode_defaults_replace_case_performance_values_for_benchmark(
+    mode: str, warmup: int, iterations: int, expected: tuple[int, int]
+) -> None:
+    case = BenchmarkCase(
+        "case", 4, 2, 4, 8, warmup=warmup, iterations=iterations
+    )
+
+    resolved = benchmark.apply_mode_defaults(case, mode=mode)
+
+    assert (resolved.warmup, resolved.iterations) == expected
+
+
+@pytest.mark.parametrize(
+    ("warmup", "iterations"),
+    [(0, 7), (3, 0)],
+)
+def test_explicit_iteration_overrides_follow_benchmark_defaults(
+    warmup: int, iterations: int
+) -> None:
+    case = BenchmarkCase("case", 4, 2, 4, 8, warmup=0, iterations=1)
+
+    resolved = benchmark.apply_overrides(
+        benchmark.apply_mode_defaults(case, mode="benchmark"),
+        SimpleNamespace(warmup=warmup, iterations=iterations),
+    )
+
+    assert (resolved.warmup, resolved.iterations) == (warmup, iterations)
+
+
+def test_iteration_counts_are_non_negative_and_not_both_zero() -> None:
+    assert BenchmarkCase("warmup", 4, 2, 4, 8, warmup=1, iterations=0)
+    assert BenchmarkCase("measured", 4, 2, 4, 8, warmup=0, iterations=1)
+    with pytest.raises(ValueError, match=r"warmup \+ iterations must be at least 1"):
+        BenchmarkCase("empty", 4, 2, 4, 8, warmup=0, iterations=0)
+    with pytest.raises(ValueError, match="must be non-negative"):
+        BenchmarkCase("negative", 4, 2, 4, 8, warmup=-1, iterations=1)
+
+
+@pytest.mark.parametrize(("warmup", "iterations"), [(5, 2), (1, 0)])
+def test_benchmark_warmup_is_untimed_and_excluded_from_samples(
+    monkeypatch, tmp_path, warmup: int, iterations: int
+) -> None:
+    plan = SimpleNamespace(
+        status=torch.tensor(benchmark.FINAL_SHARED_STATUS_SUCCESS),
+        reduce_grad_status=torch.tensor(benchmark.REDUCE_GRAD_STATUS_SUCCESS),
+    )
+    context = SimpleNamespace(
+        global_rank=0,
+        route_count=1,
+        runtime=SimpleNamespace(capabilities=SimpleNamespace(as_dict=lambda: {})),
+        close=lambda: None,
+    )
+
+    class FakeContext:
+        @classmethod
+        def from_env(cls, **_kwargs):
+            return context
+
+    class FakeBuffer:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def register_projection_buffers(self, _projections):
+            pass
+
+        def quiesce(self):
+            pass
+
+        def check_pending_status(self):
+            pass
+
+        def close(self):
+            pass
+
+    tilexr_moonep = ModuleType("tilexr_moonep")
+    tilexr_moonep.TileXRMoonEPContext = FakeContext
+    tilexr_moonep.TileXRMoonEPBuffer = FakeBuffer
+    monkeypatch.setitem(sys.modules, "tilexr_moonep", tilexr_moonep)
+    monkeypatch.setattr(benchmark, "_torch_dtype", lambda *_args: object())
+    monkeypatch.setattr(
+        benchmark, "environment_metadata", lambda *_args: {"torch_npu": "test"}
+    )
+    monkeypatch.setattr(benchmark, "stage_execution_metadata", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(benchmark, "topology_metadata", lambda *_args: {})
+    monkeypatch.setattr(
+        benchmark,
+        "make_inputs",
+        lambda *_args: {
+            "tokens_per_expert": torch.tensor([1]),
+            "projections": object(),
+        },
+    )
+    monkeypatch.setattr(benchmark, "algorithm_bytes", lambda *_args: {})
+    monkeypatch.setattr(benchmark, "_checksum", lambda *_args: 0.0)
+    monkeypatch.setattr(benchmark, "_oversubscribed_planning_barrier", lambda *_args: None)
+    monkeypatch.setattr(
+        benchmark,
+        "completion_barrier_from_env",
+        lambda *_args, **_kwargs: SimpleNamespace(release=True, abort=False),
+    )
+    timers = []
+
+    def make_timer(_torch_module):
+        timer = object()
+        timers.append(timer)
+        return timer
+
+    calls = []
+
+    def execute_iteration(*_args, **kwargs):
+        calls.append(kwargs.get("timer", _args[2] if len(_args) > 2 else None))
+        return plan, None, object(), None, object(), {"planning": 1.0}
+
+    monkeypatch.setattr(benchmark, "DeviceEventTimer", make_timer)
+    monkeypatch.setattr(benchmark, "execute_iteration", execute_iteration)
+    case = BenchmarkCase(
+        "case",
+        4,
+        2,
+        4,
+        8,
+        warmup=warmup,
+        iterations=iterations,
+        correctness=False,
+    )
+    args = SimpleNamespace(
+        output_dir=str(tmp_path),
+        mode="benchmark",
+        install_prefix=None,
+        wait_iterations=1234,
+    )
+
+    benchmark.run_case(torch, case, args, tmp_path)
+
+    samples = [
+        json.loads(line)
+        for line in (tmp_path / "case" / "rank_0" / "samples.jsonl")
+        .read_text()
+        .splitlines()
+    ]
+    assert calls[:warmup] == [None] * warmup
+    assert calls[warmup:] == timers
+    assert [sample["iteration"] for sample in samples] == list(range(iterations))
 
 
 @pytest.mark.parametrize(("world_size", "expected_slots"), [(1, 8), (4, 2)])

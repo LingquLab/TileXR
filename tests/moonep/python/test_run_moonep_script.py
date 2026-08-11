@@ -7,6 +7,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
 SCRIPT = (ROOT / "scripts" / "run_moonep.sh").read_text(encoding="utf-8")
+LAUNCHER = (ROOT / "tools" / "moonep" / "launcher.py").read_text(encoding="utf-8")
 
 
 def test_script_exposes_tensor_dump_controls() -> None:
@@ -28,6 +29,20 @@ def test_script_forwards_dump_arguments_and_reports_artifacts() -> None:
     assert 'launcher_args+=("--tensor-preview-elements" "${tensor_preview_elements}")' in SCRIPT
     assert 'echo "Tensor snapshots: ${tensor_dump_root}"' in SCRIPT
     assert 'echo "Snapshot files: ${snapshot_count} .pt, ${manifest_count} .json"' in SCRIPT
+
+
+def test_script_exposes_validates_and_forwards_iteration_controls() -> None:
+    assert "--warmup COUNT" in SCRIPT
+    assert "--iterations COUNT" in SCRIPT
+    assert 'warmup=""' in SCRIPT
+    assert 'iterations=""' in SCRIPT
+    assert 'effective_warmup="${warmup:-5}"' in SCRIPT
+    assert 'effective_iterations="${iterations:-20}"' in SCRIPT
+    assert "warmup + iterations must be at least 1" in SCRIPT
+    assert 'distributed_args+=("--warmup" "${warmup}")' in SCRIPT
+    assert 'distributed_args+=("--iterations" "${iterations}")' in SCRIPT
+    assert 'launcher_args+=("--warmup" "${warmup}")' in SCRIPT
+    assert 'launcher_args+=("--iterations" "${iterations}")' in SCRIPT
 
 
 def test_script_accepts_visible_devices_and_defaults_from_device_zero() -> None:
@@ -187,6 +202,26 @@ def test_script_exposes_managed_multinode_three_mode_launch() -> None:
     assert '--benchmark-kind flow' in SCRIPT
     assert "multi-node runs require --mode reference" not in SCRIPT
     assert "multi-node runs require exactly one rank per visible NPU" in SCRIPT
+
+
+def test_single_node_native_launcher_defaults_to_two_udma_qps() -> None:
+    assert 'if args.mode in ("benchmark", "correctness"):' in LAUNCHER
+    assert '"TILEXR_UDMA_QP_ROUTE_SPEC", "port_count:6,port_count:2"' in LAUNCHER
+    assert "base_env.setdefault(" in LAUNCHER
+
+
+def test_script_exposes_merged_multinode_global_aggregation() -> None:
+    assert "--aggregate-only" in SCRIPT
+    assert "python -m tools.moonep.report" in SCRIPT
+    assert '--node-count "${node_count}"' in SCRIPT
+    assert '--world-size "${rank_size}"' in SCRIPT
+
+
+def test_six_stage_performance_table_is_the_final_terminal_section() -> None:
+    table_call = 'python -m tools.moonep.report --summary "${summary_file}"'
+    assert table_call in SCRIPT
+    assert "python -m json.tool" not in SCRIPT
+    assert SCRIPT.rindex(table_call) > SCRIPT.index('echo "Rank 0 preview: ${preview_file}"')
 
 
 def test_script_resolves_numeric_case_before_constructing_artifact_paths() -> None:

@@ -9,10 +9,17 @@ import os
 import platform
 import subprocess
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import Callable, Mapping
 
-from .config import apply_overrides, build_case_parser, load_cases, select_cases
+from .config import (
+    BenchmarkCase,
+    apply_overrides,
+    build_case_parser,
+    load_cases,
+    select_cases,
+)
 from .case_factory import make_correctness_case
 from .contracts import BackendUnavailableError, MoonEPBackend, MoonEPDimensions
 from .correctness import CorrectnessRunner
@@ -33,6 +40,18 @@ from .torch_npu_backend import TorchNpuMoonEPBackend
 
 
 DEFAULT_CORRECTNESS_BACKEND = "tools.moonep.tilexr_backend:create_backend"
+DEFAULT_BENCHMARK_WARMUP = 5
+DEFAULT_BENCHMARK_ITERATIONS = 20
+
+
+def apply_mode_defaults(case: BenchmarkCase, *, mode: str) -> BenchmarkCase:
+    if mode != "benchmark":
+        return case
+    return replace(
+        case,
+        warmup=DEFAULT_BENCHMARK_WARMUP,
+        iterations=DEFAULT_BENCHMARK_ITERATIONS,
+    )
 
 
 def _reference_process_group_backend(
@@ -46,6 +65,7 @@ def _reference_process_group_backend(
 
 
 STAGE_ORDER = (
+    "planning",
     "dispatch_forward",
     "prefetch_weight",
     "expert_forward",
@@ -56,8 +76,41 @@ STAGE_ORDER = (
     "reduce_grad",
 )
 
+_NATIVE_STAGE_KERNEL_VERSIONS = {
+    "planning": "tilexr_ep_plan_kernel (PlannerV3)",
+    "dispatch": "tilexr_moonep_dispatch_urma_kernel (DispatchV1)",
+    "prefetch_weight": "tilexr_moonep_prefetch_weight_kernel (V1)",
+    "combine": "tilexr_moonep_combine_kernel (V1)",
+    "reduce_grad": "tilexr_moonep_reduce_grad_kernel (V2)",
+}
+
 FINAL_SHARED_STATUS_SUCCESS = 3000
 REDUCE_GRAD_STATUS_SUCCESS = 0
+
+
+def stage_execution_metadata(
+    capabilities: Mapping[str, object], *, torch_npu_version: str
+) -> dict[str, dict[str, object]]:
+    implementations = capabilities.get("implementations")
+    if not isinstance(implementations, Mapping):
+        raise ValueError("MoonEP capabilities do not contain stage implementations")
+    result = {}
+    for stage, kernel_version in _NATIVE_STAGE_KERNEL_VERSIONS.items():
+        implementation = str(implementations.get(stage, "unavailable"))
+        native = implementation == "native"
+        result[stage] = {
+            "native": native,
+            "implementation": implementation,
+            "kernel_version": (
+                kernel_version if native else f"N/A ({implementation})"
+            ),
+        }
+    result["expert"] = {
+        "native": False,
+        "implementation": "torch_npu",
+        "kernel_version": f"torch_npu {torch_npu_version} (GMM+SwiGLU)",
+    }
+    return result
 
 
 def _hold_unsafe_teardown(
@@ -217,14 +270,21 @@ def execute_iteration(
         )
     if timer is not None:
         timer.start()
-    hidden_nvsh, route_weights_nvs, cu_seqlens, plan = _timed_call(
+    plan, cu_seqlens = _timed_call(
+        timer,
+        "planning",
+        lambda: buffer.planning(
+            inputs["topk_experts"],
+            inputs["tokens_per_expert"],
+        ),
+    )
+    hidden_nvsh, route_weights_nvs, _, _ = _timed_call(
         timer,
         "dispatch_forward",
         lambda: buffer.dispatch(
             inputs["hidden"],
             inputs["route_weights"],
-            inputs["topk_experts"],
-            inputs["tokens_per_expert"],
+            plan=plan,
         ),
     )
     if trace_checksums:
@@ -348,6 +408,48 @@ def execute_iteration(
     timings = None if timer is None else timer.finish()
     buffer.synchronize()
     return plan, cu_seqlens, forward_hidden, forward_weights, backward_hidden, timings
+
+
+def _tensor_row_bytes(tensor) -> int:
+    shape = tuple(int(value) for value in tensor.shape)
+    if not shape or shape[0] <= 0:
+        raise ValueError("performance tensors must have a positive row dimension")
+    total_bytes = int(tensor.numel()) * int(tensor.element_size())
+    if total_bytes % shape[0] != 0:
+        raise ValueError("performance tensor bytes are not divisible by rows")
+    return total_bytes // shape[0]
+
+
+def algorithm_bytes(plan, inputs: Mapping[str, object], context) -> dict[str, int]:
+    remote_routes = 0
+    for encoded in _tensor_values(plan.dst):
+        raw = -int(encoded) - 1 if int(encoded) < 0 else int(encoded)
+        destination = raw // int(context.nv_s)
+        if destination < 0 or destination >= int(context.planner_group_size):
+            raise RuntimeError(f"plan destination rank is out of range: {destination}")
+        if destination != int(context.planner_group_rank):
+            remote_routes += 1
+
+    remote_stats = _tensor_values(plan.remote_stats)
+    if len(remote_stats) != 2 or any(int(value) < 0 for value in remote_stats):
+        raise RuntimeError(f"invalid plan remote_stats: {remote_stats}")
+    hidden_row_bytes = _tensor_row_bytes(inputs["hidden"])
+    route_weight_bytes = int(inputs["route_weights"].element_size())
+    projection_row_bytes = sum(
+        _tensor_row_bytes(getattr(inputs["projections"], name))
+        for name in ("gate", "up", "down")
+    )
+    gradient_row_bytes = sum(
+        _tensor_row_bytes(getattr(inputs["gradients"], name))
+        for name in ("gate", "up", "down")
+    )
+    route_bytes = remote_routes * (2 * hidden_row_bytes + route_weight_bytes)
+    return {
+        "dispatch": route_bytes,
+        "prefetch_weight": int(remote_stats[0]) * projection_row_bytes,
+        "combine": route_bytes,
+        "reduce_grad": int(remote_stats[1]) * gradient_row_bytes,
+    }
 
 
 def _torch_dtype(torch_module, name: str):
@@ -601,6 +703,19 @@ def _git_sha(root: Path) -> str:
         return "unknown"
 
 
+def _git_dirty(root: Path) -> bool | str:
+    try:
+        status = subprocess.check_output(
+            ["git", "status", "--porcelain", "--untracked-files=no"],
+            cwd=root,
+            text=True,
+            stderr=subprocess.DEVNULL,
+        )
+        return bool(status.strip())
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
+
+
 def environment_metadata(torch_module, root: Path) -> dict[str, object]:
     try:
         soc = str(torch_module.npu.get_device_name())
@@ -608,6 +723,7 @@ def environment_metadata(torch_module, root: Path) -> dict[str, object]:
         soc = "unknown"
     return {
         "git_sha": _git_sha(root),
+        "git_dirty": _git_dirty(root),
         "python": platform.python_version(),
         "torch": getattr(torch_module, "__version__", "unknown"),
         "torch_npu": _version_or_unknown("torch-npu"),
@@ -644,6 +760,7 @@ def topology_metadata(context) -> dict[str, object]:
         "global_world_size": context.global_world_size,
         "node_rank": context.node_rank,
         "node_count": context.node_count,
+        "visible_devices": os.environ.get("ASCEND_RT_VISIBLE_DEVICES", "unknown"),
         "local_rank": context.local_rank,
         "local_world_size": context.local_world_size,
         "planner_group_rank": context.planner_group_rank,
@@ -662,6 +779,9 @@ def topology_metadata(context) -> dict[str, object]:
         "dispatch_aiv_core_count_source": os.environ.get(
             "TILEXR_MOONEP_DISPATCH_AIV_CORE_COUNT_SOURCE", "default"
         ),
+        "udma_qp_route_spec": os.environ.get(
+            "TILEXR_UDMA_QP_ROUTE_SPEC", "unknown"
+        ),
         "peer_memory_cross_node": context.node_count > 1,
         "cross_node_validated": os.environ.get(
             "TILEXR_MOONEP_CROSS_NODE_VALIDATED", "0"
@@ -678,15 +798,20 @@ def run_case(torch_module, case, args, root: Path) -> None:
     rank_dir = (output_root / case.case_id / f"rank_{global_rank}").resolve()
     if output_root not in rank_dir.parents:
         raise ValueError(f"case artifact path escapes output root: {rank_dir}")
+    environment = environment_metadata(torch_module, root)
     result = {
         "schema_version": 1,
         "status": "failed",
         "failure_reason": None,
+        "mode": args.mode,
+        "launch_id": os.environ.get("TILEXR_MOONEP_LAUNCH_ID", ""),
         "case": case.as_dict(),
         "rank": global_rank,
         "topology": None,
         "capabilities": None,
-        "environment": environment_metadata(torch_module, root),
+        "environment": environment,
+        "benchmark_config": {"wait_iterations": int(args.wait_iterations)},
+        "stage_execution": None,
         "validation": {"passed": False, "mode": "not_run"},
         "stage_order": list(STAGE_ORDER),
     }
@@ -723,6 +848,10 @@ def run_case(torch_module, case, args, root: Path) -> None:
         capabilities = context.runtime.capabilities.as_dict()
         result["rank"] = context.global_rank
         result["capabilities"] = capabilities
+        result["stage_execution"] = stage_execution_metadata(
+            capabilities,
+            torch_npu_version=str(environment["torch_npu"]),
+        )
         result["topology"] = topology_metadata(context)
         if os.environ.get("TILEXR_MOONEP_TRACE_STAGES", "0") == "1":
             print(
@@ -852,6 +981,7 @@ def run_case(torch_module, case, args, root: Path) -> None:
                 {
                     "iteration": iteration,
                     "timings_us": timings,
+                    "algorithm_bytes": algorithm_bytes(plan, inputs, context),
                     "checksums": {
                         "forward": _checksum(forward),
                         "backward": _checksum(backward),
@@ -976,6 +1106,7 @@ def run_correctness_case(torch_module, case, args, root: Path) -> None:
         "status": "failed",
         "failure_reason": None,
         "mode": args.mode,
+        "launch_id": os.environ.get("TILEXR_MOONEP_LAUNCH_ID", ""),
         "case": case.as_dict(),
         "rank": rank,
         "performance_valid": False,
@@ -1096,6 +1227,7 @@ def main(argv: list[str] | None = None) -> int:
             )
             initialized_group = True
     cases = select_cases(load_cases(args.cases), args.case_ids)
+    cases = [apply_mode_defaults(case, mode=args.mode) for case in cases]
     cases = [apply_overrides(case, args) for case in cases]
     root = Path(__file__).resolve().parents[2]
     if int(os.environ.get("RANK", "0")) == 0:

@@ -10,7 +10,13 @@ import time
 from pathlib import Path
 from typing import Mapping
 
-from .config import apply_overrides, build_case_parser, load_cases, select_cases
+from .config import (
+    apply_overrides,
+    build_case_parser,
+    load_cases,
+    select_cases,
+    validate_iteration_overrides,
+)
 from .rendezvous import offset_host_port, parse_host_port
 from .report import aggregate_correctness_artifacts, aggregate_rank_artifacts, write_json
 
@@ -181,6 +187,7 @@ def _process_command(args: argparse.Namespace) -> list[str]:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    validate_iteration_overrides(args.warmup, args.iterations)
     if (
         args.wait_iterations <= 0
         or args.timeout_sec <= 0
@@ -265,6 +272,10 @@ def main(argv: list[str] | None = None) -> int:
     base_env["TILEXR_MOONEP_DISPATCH_AIV_CORE_COUNT_SOURCE"] = str(
         topology["dispatch_aiv_core_count_source"]
     )
+    if args.mode in ("benchmark", "correctness"):
+        base_env.setdefault(
+            "TILEXR_UDMA_QP_ROUTE_SPEC", "port_count:6,port_count:2"
+        )
 
     command = _process_command(args)
     processes: list[tuple[int, subprocess.Popen, object]] = []

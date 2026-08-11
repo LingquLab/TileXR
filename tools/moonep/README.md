@@ -297,10 +297,25 @@ On Ascend950, same-node IPC whitelist selection defaults to PID-only.
 ## Artifacts
 
 Each case contains `rank_<rank>/samples.jsonl`, `rank_<rank>/result.json`,
-`summary.json`, and `summary.csv`. `summary.json` uses the maximum rank latency
-for each measured iteration before computing p50/p90/p99 and global tokens/s.
-Aggregation fails when rank case, capability, topology, sample count, or timing
-metric metadata differs.
+`summary.json`, `summary.csv`, and `stage_summary.csv`. The original raw event metrics
+remain in `summary.json` and `summary.csv`. Benchmark mode defaults to five untimed
+warmup iterations and 20 measured iterations. `--warmup` and `--iterations` accept
+non-negative values, but their sum must be at least one. Warmup iterations are not
+written to `samples.jsonl` and do not contribute to performance statistics. For each
+measured iteration, the six-stage report first combines forward/backward calls inside
+each rank, then selects the slowest rank for that logical stage. Mean values are the
+arithmetic mean of those per-iteration critical-rank samples. Communication bytes and
+algorithm bandwidth use that same critical rank. Planning and Expert report bandwidth
+as `N/A`. When `iterations=0`, the run is warmup-only and every performance field is
+`N/A`. Aggregation fails when
+rank case, capability, stage execution, topology, sample count, timing metric metadata,
+or communication byte metadata differs. After normal benchmark aggregation, the script
+automatically prints the complete case and runtime inputs above one horizontal table as
+the final terminal block. Its left columns identify whether
+each logical stage is a TileXR native stage and the concrete Kernel/API version; timing,
+algorithm bytes, and algorithm bandwidth remain joined on the right. The same native
+and version fields are present in `stage_summary.csv`. The build line reports both the
+source Git SHA and whether tracked source files differ from that revision.
 
 Reference/correctness cases instead contain `rank_<rank>/stages/<case>.<stage>.json`,
 optional `rank_<rank>/tensor_dumps/`, `rank_<rank>/result.json`, and `summary.json`.

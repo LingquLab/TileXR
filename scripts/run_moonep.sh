@@ -15,8 +15,11 @@ Options:
   -c, --case-id ID      Case number or canonical ID (default: 5 / planning-no-dedup)
   -v, --visible-devices LIST
                          Comma-separated physical NPU IDs (default: start at 0)
+      --warmup COUNT     Untimed warmup iterations (default for benchmark: 5)
+      --iterations COUNT Measured iterations (default for benchmark: 20)
       --node-count COUNT Number of servers participating in a multi-node launch (default: 1)
       --node-rank RANK   Zero-based server rank (default: 0)
+      --aggregate-only   Aggregate already merged multi-node rank artifacts; do not launch workers
       --master-addr HOST Torch distributed rendezvous host for multi-node reference/correctness
       --master-port PORT Torch distributed rendezvous port for multi-node reference/correctness
   -d, --dump-stage-tensors
@@ -72,8 +75,11 @@ dump_stage_tensors=""
 generate_flowcharts="false"
 tensor_preview_elements="${TILEXR_MOONEP_TENSOR_PREVIEW_ELEMENTS:-8}"
 visible_device_spec=""
+warmup=""
+iterations=""
 node_count=1
 node_rank=0
+aggregate_only="false"
 master_addr=""
 master_port=""
 hccl_npu_socket_port_range="47000-47100"
@@ -118,6 +124,24 @@ while [[ $# -gt 0 ]]; do
             visible_device_spec="$2"
             shift 2
             ;;
+        --warmup)
+            if [[ $# -lt 2 ]]; then
+                echo "Missing value for --warmup" >&2
+                usage >&2
+                exit 2
+            fi
+            warmup="$2"
+            shift 2
+            ;;
+        --iterations)
+            if [[ $# -lt 2 ]]; then
+                echo "Missing value for --iterations" >&2
+                usage >&2
+                exit 2
+            fi
+            iterations="$2"
+            shift 2
+            ;;
         --node-count)
             if [[ $# -lt 2 ]]; then
                 echo "Missing value for --node-count" >&2
@@ -133,6 +157,10 @@ while [[ $# -gt 0 ]]; do
             fi
             node_rank="$2"
             shift 2
+            ;;
+        --aggregate-only)
+            aggregate_only="true"
+            shift
             ;;
         --master-addr)
             if [[ $# -lt 2 ]]; then
@@ -249,12 +277,12 @@ if (( node_count > 1 )); then
         exit 2
     fi
     local_rank_size=$((rank_size / node_count))
-    if [[ "${mode}" != "benchmark" ]] &&
+    if [[ "${aggregate_only}" != "true" && "${mode}" != "benchmark" ]] &&
        { [[ -z "${master_addr}" || ! "${master_port}" =~ ^[1-9][0-9]*$ ]] || (( master_port > 65535 )); }; then
         echo "multi-node runs require --master-addr and a valid --master-port" >&2
         exit 2
     fi
-    if [[ -z "${TILEXR_MOONEP_LAUNCH_ID:-}" ]]; then
+    if [[ "${aggregate_only}" != "true" && -z "${TILEXR_MOONEP_LAUNCH_ID:-}" ]]; then
         echo "multi-node runs require TILEXR_MOONEP_LAUNCH_ID" >&2
         exit 2
     fi
@@ -267,8 +295,32 @@ if (( node_count > 1 )); then
         exit 2
     fi
 fi
+if [[ "${aggregate_only}" == "true" ]]; then
+    if (( node_count <= 1 )); then
+        echo "--aggregate-only requires --node-count greater than one" >&2
+        exit 2
+    fi
+    if [[ "${mode}" != "benchmark" ]]; then
+        echo "--aggregate-only currently reports benchmark performance only" >&2
+        exit 2
+    fi
+fi
 if [[ ! "${tensor_preview_elements}" =~ ^[1-9][0-9]*$ ]]; then
     echo "--tensor-preview-elements must be a positive integer: ${tensor_preview_elements}" >&2
+    exit 2
+fi
+if [[ -n "${warmup}" && ! "${warmup}" =~ ^[0-9]+$ ]]; then
+    echo "--warmup must be a non-negative integer: ${warmup}" >&2
+    exit 2
+fi
+if [[ -n "${iterations}" && ! "${iterations}" =~ ^[0-9]+$ ]]; then
+    echo "--iterations must be a non-negative integer: ${iterations}" >&2
+    exit 2
+fi
+effective_warmup="${warmup:-5}"
+effective_iterations="${iterations:-20}"
+if (( 10#${effective_warmup} + 10#${effective_iterations} < 1 )); then
+    echo "warmup + iterations must be at least 1" >&2
     exit 2
 fi
 if [[ ! "${hccl_npu_socket_port_range}" =~ ^([0-9]+)-([0-9]+)$ ]]; then
@@ -307,6 +359,51 @@ if ! command -v conda >/dev/null 2>&1; then
 fi
 conda activate "${TILEXR_MOONEP_CONDA_ENV:-ai_moe_test}"
 set -u
+
+output_dir="${TILEXR_MOONEP_OUTPUT_DIR:-${TILEXR_HOME}/run/moonep/tilexr-moonep-${mode}-${rank_size}r-$(date +%Y%m%d-%H%M%S)-$$}"
+case_file="${TILEXR_HOME}/tools/moonep/cases/correctness.json"
+if [[ ! -f "${case_file}" ]]; then
+    echo "Required file not found: ${case_file}" >&2
+    exit 1
+fi
+if [[ "${case_id}" =~ ^[0-9]+$ ]]; then
+    if ! resolved_case_id="$(
+        PYTHONPATH="${TILEXR_HOME}${PYTHONPATH:+:${PYTHONPATH}}" \
+            python - "${case_file}" "${case_id}" <<'PY'
+import sys
+
+from tools.moonep.config import load_cases, select_cases
+
+try:
+    selected = select_cases(load_cases(sys.argv[1]), sys.argv[2])
+except ValueError as error:
+    print(error, file=sys.stderr)
+    raise SystemExit(2)
+print(selected[0].case_id)
+PY
+    )"; then
+        exit 2
+    fi
+    case_id="${resolved_case_id}"
+fi
+summary_file="${output_dir}/${case_id}/summary.json"
+
+if [[ "${aggregate_only}" == "true" ]]; then
+    cd "${TILEXR_HOME}"
+    python -m tools.moonep.report \
+        --aggregate-output-dir "${output_dir}" \
+        --case-id "${case_id}" \
+        --node-count "${node_count}" \
+        --world-size "${rank_size}" \
+        --mode "${mode}"
+    if [[ ! -f "${summary_file}" ]]; then
+        echo "Summary file not found: ${summary_file}" >&2
+        exit 1
+    fi
+    echo "MoonEP multi-node global aggregation passed. Summary: ${summary_file}"
+    python -m tools.moonep.report --summary "${summary_file}"
+    exit 0
+fi
 
 if [[ "${generate_flowcharts}" == "true" ]]; then
     if ! command -v mmdc >/dev/null 2>&1; then
@@ -394,45 +491,15 @@ fi
 
 install_prefix="${TILEXR_INSTALL_PREFIX:-${TILEXR_HOME}/install-moonep-b131-20260805}"
 timeout_sec="${TILEXR_MOONEP_TIMEOUT_SEC:-600}"
-output_dir="${TILEXR_MOONEP_OUTPUT_DIR:-${TILEXR_HOME}/run/moonep/tilexr-moonep-${mode}-${rank_size}r-$(date +%Y%m%d-%H%M%S)-$$}"
-case_file="${TILEXR_HOME}/tools/moonep/cases/correctness.json"
 
 if [[ ! "${timeout_sec}" =~ ^[1-9][0-9]*$ ]]; then
     echo "TILEXR_MOONEP_TIMEOUT_SEC must be a positive integer: ${timeout_sec}" >&2
     exit 2
 fi
-for required_file in "${case_file}"; do
-    if [[ ! -f "${required_file}" ]]; then
-        echo "Required file not found: ${required_file}" >&2
-        exit 1
-    fi
-done
 if [[ ! -d "${install_prefix}" ]]; then
     echo "TileXR installation prefix not found: ${install_prefix}" >&2
     exit 1
 fi
-
-if [[ "${case_id}" =~ ^[0-9]+$ ]]; then
-    if ! resolved_case_id="$(
-        PYTHONPATH="${TILEXR_HOME}${PYTHONPATH:+:${PYTHONPATH}}" \
-            python - "${case_file}" "${case_id}" <<'PY'
-import sys
-
-from tools.moonep.config import load_cases, select_cases
-
-try:
-    selected = select_cases(load_cases(sys.argv[1]), sys.argv[2])
-except ValueError as error:
-    print(error, file=sys.stderr)
-    raise SystemExit(2)
-print(selected[0].case_id)
-PY
-    )"; then
-        exit 2
-    fi
-    case_id="${resolved_case_id}"
-fi
-summary_file="${output_dir}/${case_id}/summary.json"
 
 export TILEXR_INSTALL_PREFIX="${install_prefix}"
 export LD_LIBRARY_PATH="${install_prefix}/lib64:${install_prefix}/lib:${LD_LIBRARY_PATH:-}"
@@ -485,6 +552,12 @@ if (( node_count > 1 )); then
         distributed_args+=("--dump-stage-tensors")
         distributed_args+=("--tensor-preview-elements" "${tensor_preview_elements}")
     fi
+    if [[ -n "${warmup}" ]]; then
+        distributed_args+=("--warmup" "${warmup}")
+    fi
+    if [[ -n "${iterations}" ]]; then
+        distributed_args+=("--iterations" "${iterations}")
+    fi
     python -m tools.moonep.distributed_node "${distributed_args[@]}"
     echo "Node ${node_rank} result: ${output_dir}/node_${node_rank}_complete.json"
     exit 0
@@ -503,6 +576,12 @@ launcher_args=(
 if [[ "${dump_stage_tensors}" == "true" ]]; then
     launcher_args+=("--dump-stage-tensors")
     launcher_args+=("--tensor-preview-elements" "${tensor_preview_elements}")
+fi
+if [[ -n "${warmup}" ]]; then
+    launcher_args+=("--warmup" "${warmup}")
+fi
+if [[ -n "${iterations}" ]]; then
+    launcher_args+=("--iterations" "${iterations}")
 fi
 echo "ASCEND_PROCESS_LOG_PATH: ${ASCEND_PROCESS_LOG_PATH}"
 python -m tools.moonep.launcher "${launcher_args[@]}"
@@ -575,7 +654,6 @@ PY
 fi
 
 echo "MoonEP ${mode} passed. Summary: ${summary_file}"
-python -m json.tool "${summary_file}"
 
 if [[ "${dump_stage_tensors}" == "true" ]]; then
     tensor_dump_root="${output_dir}/${case_id}"
@@ -591,4 +669,8 @@ if [[ "${dump_stage_tensors}" == "true" ]]; then
     echo "Snapshot files: ${snapshot_count} .pt, ${manifest_count} .json"
     echo "Readable files: ${readable_count} .txt"
     echo "Rank 0 preview: ${preview_file}"
+fi
+
+if [[ "${mode}" == "benchmark" ]]; then
+    python -m tools.moonep.report --summary "${summary_file}"
 fi

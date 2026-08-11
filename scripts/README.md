@@ -148,7 +148,12 @@ take precedence; existing `ASCEND_RT_VISIBLE_DEVICES` and
 stage by default and print the first eight values of each tensor. Override the preview
 length with `--tensor-preview-elements COUNT`, or disable snapshots with
 `--no-dump-stage-tensors`. `benchmark` runs never enable snapshots because device-to-CPU
-copies would invalidate performance measurements.
+copies would invalidate performance measurements. Benchmark mode defaults to
+`--warmup 5 --iterations 20`. Both options accept zero, but their sum must be at least
+one. Warmup iterations are excluded from `samples.jsonl` and all performance statistics;
+reported means are arithmetic means over the measured iterations. With `--iterations 0`,
+the warmup-only run succeeds and the six-stage performance fields are `N/A`. The script
+automatically prints the aggregated six-stage table at the end.
 
 Each binary `input.pt`/`output.pt` has a matching `input.txt`/`output.txt` that includes
 the field path, shape, dtype, original device, and every value without ellipsis. JSON
@@ -244,7 +249,20 @@ bash scripts/run_moonep.sh --mode reference --rank-size 64 --case-id 12 \
 ```
 
 Each node writes its own global-rank directories. Merge those node-local result trees
-before running aggregation.
+before running aggregation. After the merged directory contains every `rank_<rank>`
+directory and `node_<node-rank>_complete.json` marker, run the benchmark aggregation
+without launching NPU workers:
+
+```bash
+export TILEXR_MOONEP_OUTPUT_DIR="$PWD/run/moonep/moonep-64r-example-merged"
+bash scripts/run_moonep.sh --mode benchmark --rank-size 64 --case-id 12 \
+  --node-count 8 --aggregate-only
+```
+
+The command validates that node rank ranges cover the complete world, aggregates all
+global ranks, and prints the benchmark inputs plus a six-stage performance table as its
+final terminal section. Each row joins native status and Kernel/API version on the left
+with timing, algorithm bytes, and algorithm bandwidth on the right.
 
 ID `14` / `planning-16rank-16card-single-route` is the compact two-node topology:
 `rank_size=16`, `rank_per_dev=1`, two servers, and eight NPUs per server. Multi-node

@@ -7,7 +7,7 @@ import sys
 import time
 from pathlib import Path
 
-from .config import build_case_parser
+from .config import build_case_parser, validate_iteration_overrides
 from .launcher import (
     DISPATCH_AIV_CORE_COUNT_ENV,
     PLANNER_BLOCK_DIM_ENV,
@@ -99,6 +99,7 @@ def _require_shared_environment(
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    validate_iteration_overrides(args.warmup, args.iterations)
     if args.wait_iterations <= 0 or args.timeout_sec <= 0:
         raise ValueError("wait_iterations and timeout_sec must be positive")
     if args.tensor_preview_elements <= 0:
@@ -122,6 +123,9 @@ def main(argv: list[str] | None = None) -> int:
     integration = root / "integrations" / "moonep_torch"
     base_env = os.environ.copy()
     _require_shared_environment(base_env, mode=args.mode)
+    selected_case_ids = [
+        value.strip() for value in (args.case_ids or "").split(",") if value.strip()
+    ]
     pythonpath = [str(root), str(integration)]
     if base_env.get("PYTHONPATH"):
         pythonpath.append(base_env["PYTHONPATH"])
@@ -154,6 +158,7 @@ def main(argv: list[str] | None = None) -> int:
         "master_addr": base_env.get("MASTER_ADDR"),
         "master_port": base_env.get("MASTER_PORT"),
         "launch_id": base_env["TILEXR_MOONEP_LAUNCH_ID"],
+        "case_ids": selected_case_ids,
         "command": command,
     })
 
@@ -211,6 +216,9 @@ def main(argv: list[str] | None = None) -> int:
     write_json(output_dir / f"node_{args.node_rank}_complete.json", {
         "schema_version": 1,
         "status": "passed",
+        "mode": args.mode,
+        "launch_id": base_env["TILEXR_MOONEP_LAUNCH_ID"],
+        "case_ids": selected_case_ids,
         "topology": topology,
     })
     return 0

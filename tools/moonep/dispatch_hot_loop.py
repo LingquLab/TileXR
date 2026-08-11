@@ -648,7 +648,8 @@ def run_case(torch_module, case, args) -> None:
         torch_module=torch_module)
     result = {"schema_version": 1, "benchmark_kind": "dispatch_hot_loop",
         "dispatch_modes": list(dispatch_modes),
-        "status": "failed", "failure_reason": None, "rank": rank,
+        "status": "failed", "failure_reason": None, "mode": "benchmark",
+        "launch_id": os.environ.get("TILEXR_MOONEP_LAUNCH_ID", ""), "rank": rank,
         "case": case.as_dict(), "capabilities": context.runtime.capabilities.as_dict(),
         "topology": topology_metadata(context),
         "environment": environment_metadata(torch_module, ROOT),
