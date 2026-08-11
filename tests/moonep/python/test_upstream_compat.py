@@ -477,7 +477,7 @@ class CombineCompatibilityTests(unittest.TestCase):
         self.assertIsNone(buffer._zero_copy_aliases)
         buffer.destroy()
 
-    def test_cross_node_combine_hides_native_phase_barrier(self):
+    def test_cross_node_combine_uses_v2_internal_synchronization(self):
         torch, runtime, buffer = compat_buffer(node_count=2)
         hidden_nvsh, _, _, plan = buffer.dispatch(
             tensor((4, 8), torch.bfloat16),
@@ -489,9 +489,9 @@ class CombineCompatibilityTests(unittest.TestCase):
 
         buffer.combine(plan=plan, hidden_nvsh=hidden_nvsh)
 
-        self.assertEqual(phases, ["published", "consumed"])
+        self.assertEqual(phases, [])
         combine_calls = [call for call in runtime.calls if call[0] == "combine"]
-        self.assertEqual([call[-1] for call in combine_calls], [1 << 3, 1 << 4])
+        self.assertEqual([call[-1] for call in combine_calls], [0])
         buffer.destroy()
 
     def test_host_phase_barrier_uses_upstream_process_group(self):

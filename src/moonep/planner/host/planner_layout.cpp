@@ -144,14 +144,19 @@ int TileXRMoonEpBuildPlannerLayout(int64_t rankSize, int64_t s, int64_t k,
         !AppendRegion(rankSizeU, sizeof(int32_t), &cursor, &next.groupTotalsOffset) ||
         !AppendRegion(2U * (expertCountU + static_cast<uint64_t>(b)), sizeof(int32_t),
             &cursor, &next.compatZeroFillOffset) ||
-        !AppendRegion(2U, sizeof(int32_t), &cursor, &next.compatDupCountsOffset)) {
+        !AppendRegion(2U, sizeof(int32_t), &cursor, &next.compatDupCountsOffset) ||
+        !AppendRegion(nvS, sizeof(int32_t), &cursor, &next.dstLocalOffset)) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
 
     const uint64_t workspaceBytes = TileXRMoonEpAlignUp(cursor, kPlannerWorkspaceAlignment);
+    const uint64_t peerDstOffset = TileXRMoonEpAlignUp(
+        expertCountU * sizeof(int32_t), kPlannerWorkspaceAlignment);
     uint64_t peerPublicationBytes = 0;
     if (workspaceBytes == std::numeric_limits<uint64_t>::max() ||
-        !CheckedMul(expertCountU, sizeof(int32_t), &peerPublicationBytes) ||
+        peerDstOffset == std::numeric_limits<uint64_t>::max() ||
+        !CheckedMul(routeCount, sizeof(int32_t), &peerPublicationBytes) ||
+        !CheckedAdd(peerDstOffset, peerPublicationBytes, &peerPublicationBytes) ||
         peerPublicationBytes > static_cast<uint64_t>(TileXR::IPC_BUFF_MAX_SIZE)) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
@@ -166,6 +171,7 @@ int TileXRMoonEpBuildPlannerLayout(int64_t rankSize, int64_t s, int64_t k,
     next.routeCount = static_cast<int64_t>(routeCount);
     next.nvS = static_cast<int64_t>(nvS);
     next.blockDim = blockDim;
+    next.peerDstOffset = peerDstOffset;
     next.workspaceBytes = workspaceBytes;
     next.peerPublicationBytes = peerPublicationBytes;
     *out = next;

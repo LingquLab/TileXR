@@ -217,6 +217,12 @@ MoonEpCombineV2NextCqTarget(
     return finalBatch ? cqTail + 1U : cqTail;
 }
 
+TILEXR_MOONEP_COMBINE_V2_INLINE uint32_t
+MoonEpCombineV2CompletionCount(bool finalBatch)
+{
+    return finalBatch ? 1U : 0U;
+}
+
 TILEXR_MOONEP_COMBINE_V2_INLINE bool
 MoonEpCombineV2CqTargetReached(
     uint32_t cqTail, uint32_t cqTarget)
@@ -228,12 +234,8 @@ TILEXR_MOONEP_COMBINE_V2_INLINE bool
 MoonEpCombineV2ShapeValid(
     int64_t bs, int64_t h, int64_t topK, int64_t nvS)
 {
-    return h == kMoonEpCombineV2TargetH &&
-        topK == kMoonEpCombineV2TargetTopK &&
-        ((bs == kMoonEpCombineV2SmallBs &&
-            nvS == kMoonEpCombineV2SmallSlots) ||
-        (bs == kMoonEpCombineV2TargetBs &&
-            nvS == kMoonEpCombineV2TargetSlots));
+    return bs > 0 && h > 0 && topK > 0 && topK <= 32 && nvS > 0 &&
+        bs <= nvS / topK && nvS <= std::numeric_limits<int32_t>::max();
 }
 
 TILEXR_MOONEP_COMBINE_V2_INLINE bool
@@ -241,13 +243,11 @@ MoonEpCombineV2DestinationValid(
     int32_t encodedDestination, uint64_t slots, uint32_t rankSize)
 {
     return MoonEpCombineV2RankSizeSupported(rankSize) &&
-        encodedDestination >= 0 &&
-        (slots == static_cast<uint64_t>(
-            kMoonEpCombineV2SmallSlots) ||
-        slots == static_cast<uint64_t>(
-            kMoonEpCombineV2TargetSlots)) &&
-        static_cast<uint64_t>(encodedDestination) <
-            static_cast<uint64_t>(rankSize) * slots;
+        slots != 0U &&
+        (encodedDestination == -1 ||
+            (encodedDestination >= 0 &&
+            static_cast<uint64_t>(encodedDestination) <
+                static_cast<uint64_t>(rankSize) * slots));
 }
 
 TILEXR_MOONEP_COMBINE_V2_INLINE uint32_t

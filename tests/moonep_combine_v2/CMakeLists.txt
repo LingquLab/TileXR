@@ -25,12 +25,15 @@ file(WRITE "${TILEXR_MOONEP_COMBINE_V2_FAKE_INCLUDE_DIR}/acl/acl_base.h"
 file(WRITE "${TILEXR_MOONEP_COMBINE_V2_FAKE_INCLUDE_DIR}/acl/acl_rt.h"
 "#ifndef TILEXR_MOONEP_COMBINE_V2_TEST_ACL_RT_H\n"
 "#define TILEXR_MOONEP_COMBINE_V2_TEST_ACL_RT_H\n"
+"#include <stddef.h>\n"
 "#include <stdint.h>\n"
 "#include \"acl_base.h\"\n"
 "typedef enum aclrtDevAttr { ACL_DEV_ATTR_VECTOR_CORE_NUM = 0, ACL_DEV_ATTR_UBUF_PER_VECTOR_CORE = 1 } aclrtDevAttr;\n"
+"typedef enum aclrtMemcpyKind { ACL_MEMCPY_DEVICE_TO_DEVICE = 3 } aclrtMemcpyKind;\n"
 "#ifdef __cplusplus\nextern \"C\" {\n#endif\n"
 "aclError aclrtGetDevice(int32_t *deviceId);\n"
 "aclError aclrtGetDeviceInfo(uint32_t deviceId, aclrtDevAttr attr, int64_t *value);\n"
+"aclError aclrtMemcpyAsync(void *dst, size_t dstMax, const void *src, size_t count, aclrtMemcpyKind kind, aclrtStream stream);\n"
 "#ifdef __cplusplus\n}\n#endif\n"
 "#endif\n")
 
@@ -95,7 +98,7 @@ target_include_directories(test_tilexr_moonep_combine_v2_host PRIVATE
 add_executable(test_tilexr_moonep_combine_v2_launch
     unit/test_combine_v2_launch.cpp
     ${TILEXR_ROOT}/src/moonep/combine_v2/host/combine_v2_launch.cpp)
-target_include_directories(test_tilexr_moonep_combine_v2_launch PRIVATE
+target_include_directories(test_tilexr_moonep_combine_v2_launch BEFORE PRIVATE
     ${TILEXR_MOONEP_COMBINE_V2_INCLUDE_DIRS})
 
 add_executable(test_tilexr_moonep_combine_v2_public_abi

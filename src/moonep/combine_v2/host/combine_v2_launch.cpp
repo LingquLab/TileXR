@@ -31,14 +31,17 @@ struct CombineV2KernelArgs {
     uint64_t grantOffset;
     uint64_t controlSourceOffset;
     uint64_t failureOffset;
+    uint64_t outputOffset;
     int64_t bs;
     int64_t h;
     int64_t topK;
     int64_t nvS;
+    uint64_t rowBytes;
+    uint64_t reduceHidden;
     int64_t magic;
 };
 
-static_assert(sizeof(CombineV2KernelArgs) == 15U * sizeof(uint64_t),
+static_assert(sizeof(CombineV2KernelArgs) == 18U * sizeof(uint64_t),
     "Combine V2 kernel argument ABI changed");
 
 int ConfigureCombineV2SimtMemory(rtTaskCfgInfo_t &cfgInfo)
@@ -78,10 +81,13 @@ int TileXRMoonEpLaunchCombineV2Kernel(
         context.layout.grantOffset,
         context.layout.controlSourceOffset,
         context.layout.failureOffset,
+        context.layout.outputOffset,
         params.bs,
         params.h,
         params.topK,
         params.nvS,
+        context.layout.rowBytes,
+        params.reduceHidden ? 1U : 0U,
         context.magic
     };
     rtTaskCfgInfo_t cfgInfo {};

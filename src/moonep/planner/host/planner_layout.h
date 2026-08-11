@@ -25,6 +25,8 @@ struct PlannerLayout {
     uint64_t groupTotalsOffset = 0;
     uint64_t compatZeroFillOffset = 0;
     uint64_t compatDupCountsOffset = 0;
+    uint64_t dstLocalOffset = 0;
+    uint64_t peerDstOffset = 0;
     uint64_t workspaceBytes = 0;
     uint64_t peerPublicationBytes = 0;
 };

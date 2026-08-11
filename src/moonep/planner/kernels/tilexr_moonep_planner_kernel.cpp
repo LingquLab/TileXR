@@ -81,7 +81,8 @@ public:
         uint64_t waitIterations,
         uint64_t tpePrefixOffset, uint64_t blockHistogramOffset,
         uint64_t allocPrefixOffset, uint64_t expertOffsetsOffset, uint64_t zOffset,
-        uint64_t groupTotalsOffset, int64_t magic)
+        uint64_t groupTotalsOffset, uint64_t dstLocalOffset,
+        uint64_t peerDstOffset, int64_t magic)
     {
         args_ = reinterpret_cast<__gm__ TileXR::CommArgs *>(commArgs);
         rank_ = args_->rank;
@@ -126,6 +127,9 @@ public:
         zGm_.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(workBase + zOffset), rankSize_ * rankSize_);
         groupTotalsGm_.SetGlobalBuffer(
             reinterpret_cast<__gm__ int32_t *>(workBase + groupTotalsOffset), rankSize_);
+        dstLocalGm_.SetGlobalBuffer(
+            reinterpret_cast<__gm__ int32_t *>(workBase + dstLocalOffset), nvS_);
+        peerDstOffset_ = peerDstOffset;
 
         pipe_.InitBuffer(syncBuf_, kPlannerSyncUbBytes);
         pipe_.InitBuffer(workBuf_, kPlannerWorkUbBytes);
@@ -138,6 +142,7 @@ public:
     __aicore__ inline void Process()
     {
         InitializeStatus();
+        InitializeDstLocal();
         AscendC::SyncAll<true>();
 
         PublishTpe();
@@ -172,6 +177,23 @@ public:
         AscendC::SyncAll<true>();
 
         BuildDst();
+        AscendC::SyncAll<true>();
+
+        PublishDst();
+        AscendC::SyncAll<true>();
+        PublishCrossRankReady(kPlannerDstReadyStep);
+        AscendC::SyncAll<true>();
+
+        CrossRankReady(kPlannerDstReadyStep);
+        AscendC::SyncAll<true>();
+        FinalizeCrossRankReady();
+        AscendC::SyncAll<true>();
+        if (!PlannerSucceeded()) {
+            return;
+        }
+
+        BuildDstLocal();
+        AscendC::SyncAll<true>();
     }
 
 private:
@@ -206,6 +228,13 @@ private:
         *end = (s_ * (blockIdx_ + 1)) / blockCount_;
     }
 
+    __aicore__ inline void ContiguousRange(
+        int64_t count, int64_t *begin, int64_t *end) const
+    {
+        *begin = (count * blockIdx_) / blockCount_;
+        *end = (count * (blockIdx_ + 1)) / blockCount_;
+    }
+
     __aicore__ inline void InitializeStatus()
     {
         if (blockIdx_ != 0) {
@@ -216,6 +245,22 @@ private:
         CopyUbToGm(plannerStatusGm_, status, 1);
         status.SetValue(1, 0);
         CopyUbToGm(dupCountsGm_, status, 2);
+    }
+
+    __aicore__ inline void InitializeDstLocal()
+    {
+        int64_t begin = 0;
+        int64_t end = 0;
+        ContiguousRange(nvS_, &begin, &end);
+        AscendC::LocalTensor<int32_t> local = RouteTile();
+        for (int64_t offset = begin; offset < end;
+             offset += kPlannerRouteTileInts) {
+            const int64_t count = MinInt64(
+                end - offset, kPlannerRouteTileInts);
+            AscendC::Duplicate(local, static_cast<int32_t>(-1), count);
+            WaitVectorForMte3();
+            CopyUbToGm(dstLocalGm_[offset], local, count);
+        }
     }
 
     __aicore__ inline bool PlannerSucceeded()
@@ -262,7 +307,7 @@ private:
         CopyUbToGm(blockHistogramGm_[blockIdx_ * expertCount_], histogram, expertCount_);
     }
 
-    __aicore__ inline bool WaitReadyFlag(int32_t peer)
+    __aicore__ inline bool WaitReadyFlag(int32_t peer, int32_t step)
     {
         AscendC::GlobalTensor<int64_t> readyGm;
         readyGm.SetGlobalBuffer(
@@ -271,7 +316,7 @@ private:
             FLAG_UNIT_INT_NUM);
         const int64_t expected =
             (static_cast<int64_t>(static_cast<int32_t>(magic_)) << MAGIC_OFFSET) |
-            static_cast<int64_t>(kPlannerReadyStep);
+            static_cast<int64_t>(step);
         for (uint64_t iteration = 0; iteration < waitIterations_; ++iteration) {
             __asm__ __volatile__("");
             AscendC::DataCacheCleanAndInvalid<int64_t, AscendC::CacheLine::SINGLE_CACHE_LINE,
@@ -286,15 +331,16 @@ private:
         return false;
     }
 
-    __aicore__ inline void PublishCrossRankReady()
+    __aicore__ inline void PublishCrossRankReady(
+        int32_t step = kPlannerReadyStep)
     {
         if (blockIdx_ != 0) {
             return;
         }
-        sync_.SetSyncFlag(static_cast<int32_t>(magic_), kPlannerReadyStep, kPlannerReadyEventId);
+        sync_.SetSyncFlag(static_cast<int32_t>(magic_), step, kPlannerReadyEventId);
     }
 
-    __aicore__ inline void CrossRankReady()
+    __aicore__ inline void CrossRankReady(int32_t step = kPlannerReadyStep)
     {
         if (blockIdx_ >= rankSize_) {
             return;
@@ -304,7 +350,7 @@ private:
              peerOffset += blockCount_) {
             const int32_t peer = static_cast<int32_t>(
                 (static_cast<int64_t>(rank_) + peerOffset) % rankSize_);
-            if (!WaitReadyFlag(peer)) {
+            if (!WaitReadyFlag(peer, step)) {
                 readyStatus = kPlannerStatusTimeoutBase + peer;
                 break;
             }
@@ -983,6 +1029,58 @@ private:
         }
     }
 
+    __aicore__ inline void PublishDst()
+    {
+        int64_t begin = 0;
+        int64_t end = 0;
+        ContiguousRange(routeCount_, &begin, &end);
+        AscendC::GlobalTensor<int32_t> peerDst;
+        peerDst.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(
+            shareAddrs_[rank_] + TileXR::IPC_DATA_OFFSET + peerDstOffset_),
+            routeCount_);
+        AscendC::LocalTensor<int32_t> local = RouteTile();
+        for (int64_t offset = begin; offset < end;
+             offset += kPlannerRouteTileInts) {
+            const int64_t count = MinInt64(
+                end - offset, kPlannerRouteTileInts);
+            CopyGmToUb(local, dstGm_[offset], count);
+            CopyUbToGm(peerDst[offset], local, count);
+        }
+    }
+
+    __aicore__ inline void BuildDstLocal()
+    {
+        if (blockIdx_ != 0) {
+            return;
+        }
+        AscendC::LocalTensor<int32_t> published = RouteTile();
+        for (int64_t sourceRankValue = 0; sourceRankValue < rankSize_;
+             ++sourceRankValue) {
+            const int32_t sourceRank = static_cast<int32_t>(sourceRankValue);
+            AscendC::GlobalTensor<int32_t> peerDst;
+            peerDst.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(
+                shareAddrs_[sourceRank] + TileXR::IPC_DATA_OFFSET +
+                    peerDstOffset_), routeCount_);
+            for (int64_t tileBegin = 0; tileBegin < routeCount_;
+                 tileBegin += kPlannerRouteTileInts) {
+                const int64_t count = MinInt64(
+                    routeCount_ - tileBegin, kPlannerRouteTileInts);
+                CopyGmToUb(published, peerDst[tileBegin], count);
+                for (int64_t route = 0; route < count; ++route) {
+                    const int32_t encoded = published.GetValue(route);
+                    if (encoded / nvS_ != rank_) {
+                        continue;
+                    }
+                    const int64_t targetSlot = encoded % nvS_;
+                    const int32_t reverse = static_cast<int32_t>(
+                        sourceRankValue * nvS_ + tileBegin + route);
+                    dstLocalGm_.SetValue(targetSlot, reverse);
+                }
+            }
+        }
+        AscendC::PipeBarrier<PIPE_ALL>();
+    }
+
     __gm__ TileXR::CommArgs *args_ = nullptr;
     int32_t rank_ = 0;
     int32_t rankSize_ = 0;
@@ -998,6 +1096,7 @@ private:
     int64_t magic_ = 0;
     int64_t blockIdx_ = 0;
     int64_t blockCount_ = 0;
+    uint64_t peerDstOffset_ = 0;
     GM_ADDR shareAddrs_[TileXR::TILEXR_MAX_RANK_SIZE] = {};
 
     AscendC::TPipe pipe_;
@@ -1019,6 +1118,7 @@ private:
     AscendC::GlobalTensor<int32_t> expertOffsetsGm_;
     AscendC::GlobalTensor<int32_t> zGm_;
     AscendC::GlobalTensor<int32_t> groupTotalsGm_;
+    AscendC::GlobalTensor<int32_t> dstLocalGm_;
 };
 
 } // namespace Kernel
@@ -1032,7 +1132,8 @@ extern "C" __global__ __aicore__ void tilexr_moonep_planner_kernel(GM_ADDR commA
     int64_t b, int64_t tokenPadding, int64_t routeCount, int64_t nvS,
     uint64_t waitIterations,
     uint64_t tpePrefixOffset, uint64_t blockHistogramOffset, uint64_t allocPrefixOffset,
-    uint64_t expertOffsetsOffset, uint64_t zOffset, uint64_t groupTotalsOffset, int64_t magic)
+    uint64_t expertOffsetsOffset, uint64_t zOffset, uint64_t groupTotalsOffset,
+    uint64_t dstLocalOffset, uint64_t peerDstOffset, int64_t magic)
 {
     TileXRMoonEpV3::Kernel::PlannerKernel op;
     op.Init(commArgs, topkExpertIds, tokensPerExpert, workspace, dst, cuSeqlens,
@@ -1040,6 +1141,6 @@ extern "C" __global__ __aicore__ void tilexr_moonep_planner_kernel(GM_ADDR commA
         s, k, expertCount, expertsPerRank, b, tokenPadding, routeCount, nvS,
         waitIterations, tpePrefixOffset,
         blockHistogramOffset, allocPrefixOffset, expertOffsetsOffset, zOffset,
-        groupTotalsOffset, magic);
+        groupTotalsOffset, dstLocalOffset, peerDstOffset, magic);
     op.Process();
 }

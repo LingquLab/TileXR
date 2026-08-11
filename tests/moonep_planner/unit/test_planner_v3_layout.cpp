@@ -1,6 +1,7 @@
 #include <cstdlib>
 #include <iostream>
 
+#include "planner_common.h"
 #include "planner_layout.h"
 #include "tilexr_types.h"
 
@@ -39,6 +40,24 @@ int main()
         128, 8, 1, 128, 1, 1, &layout) == TileXR::TILEXR_SUCCESS,
         "128-rank Planner V3 layout rejected 64 AIV blocks");
     Check(layout.blockDim == 64, "128-rank Planner V3 blockDim mismatch");
+    Check(layout.dstLocalOffset % TileXRMoonEpV3::kPlannerWorkspaceAlignment == 0,
+        "Planner V3 dstLocal offset is not aligned");
+    Check(layout.dstLocalOffset + static_cast<uint64_t>(layout.nvS) * sizeof(int32_t) <=
+            layout.workspaceBytes,
+        "Planner V3 dstLocal exceeds workspace");
+    Check(layout.peerDstOffset >= 128U * sizeof(int32_t),
+        "Planner V3 peer dst overlaps tokens-per-expert publication");
+    Check(layout.peerPublicationBytes ==
+            layout.peerDstOffset + static_cast<uint64_t>(layout.routeCount) * sizeof(int32_t),
+        "Planner V3 peer publication size excludes dst routes");
+
+    Check(TileXRMoonEpV3::TileXRMoonEpBuildPlannerLayout(
+        8, 256, 4, 32, 2, 128, &layout) == TileXR::TILEXR_SUCCESS,
+        "PR113 Planner V3 layout rejected");
+    Check(layout.nvS == 2040, "PR113 Planner V3 NvS mismatch");
+    Check(layout.workspaceBytes >=
+            layout.dstLocalOffset + 2040U * sizeof(int32_t),
+        "PR113 Planner V3 dstLocal allocation is incomplete");
 
     SetBlockDimOverride("65");
     Check(TileXRMoonEpV3::TileXRMoonEpBuildPlannerLayout(

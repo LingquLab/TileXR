@@ -8,6 +8,7 @@ namespace TileXRMoonEpV3 {
 constexpr int64_t kPlannerAivBlockCount = 64;
 constexpr uint64_t kPlannerWorkspaceAlignment = 32;
 constexpr int32_t kPlannerReadyStep = 91;
+constexpr int32_t kPlannerDstReadyStep = 92;
 constexpr int32_t kPlannerReadyEventId = 4096;
 constexpr int32_t kPlannerStatusSuccess = 0;
 constexpr int32_t kPlannerStatusTimeoutBase = 1000;

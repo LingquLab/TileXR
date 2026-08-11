@@ -744,6 +744,7 @@ def run_case(torch_module, case, args) -> None:
         if failure is not None:
             print(f"rank {rank} pre-teardown failure: {result['failure_reason']}",
                 file=sys.stderr, flush=True)
+        write_json(rank_dir / "result.pre_teardown.json", result)
         decision = completion_barrier_from_env(rank,
             int(os.environ.get("WORLD_SIZE", "1")), case_id=case.case_id,
             quiesced=quiesced, passed=failure is None)

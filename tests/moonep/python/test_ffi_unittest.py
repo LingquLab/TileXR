@@ -51,17 +51,20 @@ class FakeCDLLLoader:
         self.next_udma_handle = 7
         self.planning_records = []
         self.stage_records = []
+        self.combine_v2_workspace_records = []
         self.reduce_grad_records = []
         self.register_calls = []
         self.unregister_calls = []
         self.comm = self._comm_library()
-        self.planner = FakeLibrary()
+        self.planner = self._planner_library()
+        self.combine_v2 = self._combine_v2_library()
         self.moonep = self._moonep_library()
 
     def _comm_library(self):
         library = FakeLibrary()
 
-        def init_rank_local(world, rank, output):
+        def init_rank_shared(domain, world, rank, output):
+            self.assert_scalar(domain, 0)
             self.assert_scalar(world, 2)
             self.assert_scalar(rank, 0)
             ctypes.cast(output, ctypes.POINTER(ctypes.c_void_p)).contents.value = 0x1234
@@ -100,7 +103,7 @@ class FakeCDLLLoader:
             ctypes.cast(qp_count, ctypes.POINTER(ctypes.c_uint32)).contents.value = 3
             return 0
 
-        library.TileXRCommInitRankLocal = FakeFunction(init_rank_local)
+        library.TileXRCommInitRankWithSharedQpDomain = FakeFunction(init_rank_shared)
         library.TileXRCommDestroy = FakeFunction(destroy)
         library.TileXRUDMARegister = FakeFunction(register)
         library.TileXRUDMAUnregister = FakeFunction(unregister)
@@ -112,6 +115,84 @@ class FakeCDLLLoader:
         actual = value.value if hasattr(value, "value") else value
         if int(actual) != expected:
             raise AssertionError(f"expected {expected}, got {actual}")
+
+    def _planner_library(self):
+        library = FakeLibrary()
+
+        def dst_local_offset(comm, s, k, e, b, token_padding, output):
+            self.assert_scalar(comm, 0x1234)
+            for value, expected in (
+                (s, 4), (k, 2), (e, 4), (b, 2), (token_padding, 2)
+            ):
+                self.assert_scalar(value, expected)
+            ctypes.cast(output, ctypes.POINTER(ctypes.c_uint64)).contents.value = 128
+            return 0
+
+        library.TileXRMoonEpPlannerGetDstLocalOffsetV3 = FakeFunction(
+            dst_local_offset
+        )
+        return library
+
+    def _combine_v2_library(self):
+        library = FakeLibrary()
+
+        def workspace(bs, h, topk, nv_s, dtype, workspace_bytes,
+                      profile_offset, output_epoch0_offset, output_epoch1_offset):
+            record = tuple(
+                int(value.value if hasattr(value, "value") else value)
+                for value in (bs, h, topk, nv_s, dtype)
+            )
+            self.combine_v2_workspace_records.append(record)
+            ctypes.cast(workspace_bytes, ctypes.POINTER(ctypes.c_uint64)).contents.value = (
+                2 * 1024 * 1024
+            )
+            ctypes.cast(profile_offset, ctypes.POINTER(ctypes.c_uint64)).contents.value = 0x1000
+            ctypes.cast(
+                output_epoch0_offset, ctypes.POINTER(ctypes.c_uint64)
+            ).contents.value = 0x2000
+            ctypes.cast(
+                output_epoch1_offset, ctypes.POINTER(ctypes.c_uint64)
+            ).contents.value = 0x3000
+            return 0
+
+        def stage(registered_workspace, registered_workspace_bytes, dst_local,
+                  comm, bs, h, topk, nv_s, aiv_core_num, hidden_nvsh,
+                  hidden_sh, route_weights_nvs, route_weights_sk, dtype, stream):
+            def scalar(value):
+                raw = value.value if hasattr(value, "value") else value
+                return 0 if raw is None else int(raw)
+
+            record = {
+                "name": "combine",
+                "stream": scalar(stream),
+                "flags": 0,
+                "plan_capacity": scalar(nv_s),
+                "workspace": scalar(registered_workspace),
+                "workspace_bytes": scalar(registered_workspace_bytes),
+                "dst_local": scalar(dst_local),
+                "aiv_core_num": scalar(aiv_core_num),
+                "dtype": scalar(dtype),
+                "shapes": {
+                    "hiddenNvsh": (scalar(nv_s), scalar(h)),
+                    "routeWeightsNvs": (scalar(nv_s),)
+                    if scalar(route_weights_nvs) else None,
+                    "hiddenSh": (scalar(bs), scalar(h)),
+                    "routeWeightsSk": (scalar(bs), scalar(topk))
+                    if scalar(route_weights_sk) else None,
+                },
+                "pointers": {
+                    "hiddenNvsh": scalar(hidden_nvsh),
+                    "hiddenSh": scalar(hidden_sh),
+                    "routeWeightsNvs": scalar(route_weights_nvs),
+                    "routeWeightsSk": scalar(route_weights_sk),
+                },
+            }
+            self.stage_records.append(record)
+            return 0
+
+        library.TileXRMoonEpCombineGetWorkspaceSizeV2 = FakeFunction(workspace)
+        library.TileXRMoonEpCombineStageV2 = FakeFunction(stage)
+        return library
 
     def _moonep_library(self):
         library = FakeLibrary()
@@ -177,14 +258,12 @@ class FakeCDLLLoader:
         for name, args_type in (
             ("dispatch", TileXRMoonEPDispatchArgsV1),
             ("prefetch_weight", TileXRMoonEPPrefetchWeightArgsV1),
-            ("combine", TileXRMoonEPCombineArgsV1),
         ):
             setattr(
                 library,
                 {
                     "dispatch": "TileXRMoonEpDispatchV1",
                     "prefetch_weight": "TileXRMoonEpPrefetchWeightV1",
-                    "combine": "TileXRMoonEpCombineV1",
                 }[name],
                 FakeFunction(self._stage_callback(name, args_type)),
             )
@@ -240,7 +319,6 @@ class FakeCDLLLoader:
             fields = {
                 "dispatch": ("hiddenSh", "routeWeightsSk", "hiddenNvsh", "routeWeightsNvs"),
                 "prefetch_weight": ("gate", "up", "down"),
-                "combine": ("hiddenNvsh", "routeWeightsNvs", "hiddenSh", "routeWeightsSk"),
             }[name]
             shapes = {}
             for field in fields:
@@ -261,7 +339,9 @@ class FakeCDLLLoader:
 
     def __call__(self, path, mode):
         self.loads.append((str(path), mode))
-        return (self.comm, self.planner, self.moonep)[len(self.loads) - 1]
+        return (self.comm, self.planner, self.combine_v2, self.moonep)[
+            len(self.loads) - 1
+        ]
 
 
 def tensor(shape, dtype):
@@ -289,7 +369,7 @@ class FfiAbiTests(unittest.TestCase):
         self.assertEqual(TileXRMoonEPDispatchArgsV1.registeredWorkspace.offset, 64)
         self.assertEqual(TileXRMoonEPDispatchArgsV1.registeredWorkspaceBytes.offset, 72)
 
-    def test_fake_cdll_receives_exact_v1_descriptors_and_current_stream(self):
+    def test_fake_cdll_receives_v1_descriptors_and_combine_v2_pointers(self):
         loader = FakeCDLLLoader()
         runtime = TileXRMoonEPRuntime(
             rank=0,
@@ -297,6 +377,7 @@ class FfiAbiTests(unittest.TestCase):
             library_paths={
                 "comm": "libtile-comm.so",
                 "planner": "libtilexr-moonep-planner.so",
+                "combine_v2": "libtilexr-moonep-combine-v2.so.2",
                 "moonep": "libtilexr-moonep.so.1",
             },
             cdll_loader=loader,
@@ -345,7 +426,9 @@ class FfiAbiTests(unittest.TestCase):
         buffer.register_projection_buffers(projections)
         buffer.dispatch(tensor((4, 8), torch.bfloat16), plan=plan)
         buffer.prefetch_weight(plan, projections)
-        buffer.combine(plan, hidden_nvsh, route_weights_nvs)
+        hidden_sh, route_weights_sk, _ = buffer.combine(
+            plan, hidden_nvsh, route_weights_nvs
+        )
         gradients = ProjectionBuffers(
             tensor((6, 2, 4), torch.float32),
             tensor((6, 4, 3), torch.float32),
@@ -358,13 +441,18 @@ class FfiAbiTests(unittest.TestCase):
             full_down_grad=gradients.down,
         )
         self.assertEqual(tuple(cu_seqlens.shape), (6,))
-        plan.status._item = 3000
+        plan.status._item = 4000
         plan.reduce_grad_status._item = 0
         buffer.close()
 
         self.assertEqual(
             [Path(path).name for path, _ in loader.loads],
-            ["libtile-comm.so", "libtilexr-moonep-planner.so", "libtilexr-moonep.so.1"],
+            [
+                "libtile-comm.so",
+                "libtilexr-moonep-planner.so",
+                "libtilexr-moonep-combine-v2.so.2",
+                "libtilexr-moonep.so.1",
+            ],
         )
         self.assertEqual(runtime.capabilities.stage_mask, 31)
         self.assertEqual(runtime.capabilities.stub_mask, 0)
@@ -378,7 +466,8 @@ class FfiAbiTests(unittest.TestCase):
                 ("register", 2 * 1024 * 1024, 8),
                 ("register", 2 * 1024 * 1024, 9),
                 ("register", 2 * 1024 * 1024, 10),
-                ("unregister", 10),
+                ("register", 2 * 1024 * 1024, 11),
+                ("unregister", 11),
                 "destroy",
             ],
         )
@@ -395,6 +484,11 @@ class FfiAbiTests(unittest.TestCase):
                 "plan": (8, 2, 4, 2, 12, 2),
             }],
         )
+        self.assertEqual(plan.dst_local_offset, 128)
+        self.assertEqual(
+            loader.combine_v2_workspace_records,
+            [(4, 8, 2, 12, 11), (4, 1, 2, 12, 4)],
+        )
         self.assertEqual(
             [record["name"] for record in loader.stage_records],
             ["dispatch", "dispatch", "prefetch_weight", "combine"],
@@ -406,6 +500,21 @@ class FfiAbiTests(unittest.TestCase):
         self.assertEqual(loader.stage_records[0]["shapes"]["routeWeightsNvs"], (12,))
         self.assertEqual(loader.stage_records[2]["shapes"]["up"], (4, 4, 8))
         self.assertEqual(loader.stage_records[3]["shapes"]["routeWeightsSk"], (4, 2))
+        self.assertEqual(loader.stage_records[3]["aiv_core_num"], 16)
+        self.assertEqual(loader.stage_records[3]["dtype"], 11)
+        self.assertEqual(
+            loader.stage_records[3]["dst_local"],
+            int(plan.workspace.data_ptr()) + 128,
+        )
+        self.assertEqual(
+            loader.stage_records[3]["pointers"],
+            {
+                "hiddenNvsh": int(hidden_nvsh.data_ptr()),
+                "hiddenSh": int(hidden_sh.data_ptr()),
+                "routeWeightsNvs": int(route_weights_nvs.data_ptr()),
+                "routeWeightsSk": int(route_weights_sk.data_ptr()),
+            },
+        )
         self.assertEqual(loader.reduce_grad_records, [{
             "stream": 0xCAFE,
             "flags": 0,
@@ -416,11 +525,12 @@ class FfiAbiTests(unittest.TestCase):
         }])
         self.assertEqual(
             [byte_count for _, byte_count in loader.register_calls],
-            [2 * 1024 * 1024] * 4,
+            [2 * 1024 * 1024] * 5,
         )
         self.assertEqual(loader.register_calls[0], loader.register_calls[2])
         self.assertEqual(loader.register_calls[1], loader.register_calls[3])
-        self.assertEqual(loader.unregister_calls, [10])
+        self.assertEqual(loader.register_calls[0], loader.register_calls[4])
+        self.assertEqual(loader.unregister_calls, [11])
 
     def test_versioned_planner_library_is_preferred(self):
         import tempfile

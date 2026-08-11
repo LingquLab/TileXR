@@ -64,6 +64,8 @@ int TileXRMoonEpLaunchKernel(const PlannerParams &params, const PlannerLaunchCon
         uint64_t expertOffsetsOffset;
         uint64_t zOffset;
         uint64_t groupTotalsOffset;
+        uint64_t dstLocalOffset;
+        uint64_t peerDstOffset;
         int64_t magic;
     } args {
         context.devArgs,
@@ -79,7 +81,8 @@ int TileXRMoonEpLaunchKernel(const PlannerParams &params, const PlannerLaunchCon
         layout.expertCount, layout.expertsPerRank, layout.b, layout.tokenPadding,
         layout.routeCount, layout.nvS, params.waitIterations, layout.tpePrefixOffset,
         layout.blockHistogramOffset, layout.allocPrefixOffset,
-        layout.expertOffsetsOffset, layout.zOffset, layout.groupTotalsOffset, magic
+        layout.expertOffsetsOffset, layout.zOffset, layout.groupTotalsOffset,
+        layout.dstLocalOffset, layout.peerDstOffset, magic
     };
 
     rtArgsEx_t argsInfo {};

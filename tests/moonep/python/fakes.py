@@ -308,6 +308,10 @@ class FakeRuntime:
 
     def planning_workspace_size(self, context):
         self.calls.append(("planning_workspace_size", None))
+        return 64 + int(context.nv_s) * 4
+
+    def planning_dst_local_offset(self, context):
+        self.calls.append(("planning_dst_local_offset", None))
         return 64
 
     def dispatch_workspace_size(self, context):
@@ -400,6 +404,8 @@ class FakeRuntime:
         *,
         inter_rank_sync,
         flags=0,
+        registered_workspace=None,
+        registered_workspace_bytes=0,
     ):
         self.calls.append(
             (
@@ -411,11 +417,11 @@ class FakeRuntime:
                 output_route_weights,
                 stream,
                 inter_rank_sync,
+                registered_workspace,
+                registered_workspace_bytes,
                 flags,
             )
         )
-        if self.write_status_markers:
-            plan.status._item = 3000
 
     def reduce_grad_workspace_info(
         self, context, plan, gradients, *, requested_udma_chunk_bytes=0

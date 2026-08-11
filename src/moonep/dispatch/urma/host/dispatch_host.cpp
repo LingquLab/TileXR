@@ -222,8 +222,10 @@ int ValidateRegisteredWorkspace(TileXRCommPtr comm, const TileXR::CommArgs &comm
         return TILEXR_MOONEP_ERROR_NOT_SUPPORTED;
     }
     uint32_t qpCount = 0U;
+    const bool sharedQp =
+        (commArgs.extraFlag & TileXR::ExtraFlag::UDMA_SHARED_QP) != 0U;
     if (TileXRUDMAGetQpCount(comm, &qpCount) != TileXR::TILEXR_SUCCESS ||
-        qpCount < kDispatchQpCount) {
+        !DispatchQpCountSupported(qpCount, sharedQp)) {
         return TILEXR_MOONEP_ERROR_NOT_SUPPORTED;
     }
     const TileXR::TileXRUDMARegistry *registry = nullptr;

@@ -53,7 +53,10 @@ void TestTargetLayout()
     Check(layout.grantBytes == 229376U, "grant bytes mismatch");
     Check(layout.controlSourceBytes == 2048U, "control source bytes mismatch");
     Check(layout.failureBytes == 2048U, "failure bytes mismatch");
-    Check(layout.totalBytes == 2820669440ULL, "target total bytes mismatch");
+    Check(layout.outputOffset == layout.failureOffset + layout.failureBytes,
+        "output offset mismatch");
+    Check(layout.outputBytes == 58720256U, "output bytes mismatch");
+    Check(layout.totalBytes == 2879389696ULL, "target total bytes mismatch");
 }
 
 void TestSmallAndInvalidLayouts()
@@ -67,13 +70,24 @@ void TestSmallAndInvalidLayouts()
     Check(layout.totalBytes == 4194304U, "small total bytes mismatch");
     Check(layout.totalBytes % kCombineV2RegistrationAlignmentBytes == 0U,
         "workspace is not registration aligned");
+    Check(layout.outputOffset >= layout.failureOffset + layout.failureBytes &&
+        layout.outputOffset + layout.outputBytes <= layout.totalBytes,
+        "small output overlaps control workspace");
 
     CheckStatus(TileXRMoonEpBuildCombineV2Layout(
-        16, 3584, 16, 256, TILEXR_MOONEP_DTYPE_BFLOAT16, &layout),
-        TILEXR_MOONEP_ERROR_INVALID_ARGUMENT, "unsupported shape");
+        256, 1024, 4, 2040, TILEXR_MOONEP_DTYPE_BFLOAT16, &layout),
+        TILEXR_MOONEP_SUCCESS, "PR113 hidden layout");
+    Check(layout.rowBytes == 2048U && layout.slots == 2040U,
+        "PR113 hidden layout mismatch");
+    Check(layout.outputBytes == 524288U,
+        "PR113 hidden output bytes mismatch");
+    CheckStatus(TileXRMoonEpBuildCombineV2Layout(
+        256, 1, 4, 2040, TILEXR_MOONEP_DTYPE_FLOAT32, &layout),
+        TILEXR_MOONEP_SUCCESS, "PR113 route-weight layout");
+    Check(layout.rowBytes == sizeof(float), "route-weight row size mismatch");
     CheckStatus(TileXRMoonEpBuildCombineV2Layout(
         8192, 3584, 16, 131071, TILEXR_MOONEP_DTYPE_BFLOAT16, &layout),
-        TILEXR_MOONEP_ERROR_INVALID_ARGUMENT, "slot mismatch");
+        TILEXR_MOONEP_ERROR_INVALID_ARGUMENT, "undersized slots");
     CheckStatus(TileXRMoonEpBuildCombineV2Layout(
         8192, 3584, 16, 131072, TILEXR_MOONEP_DTYPE_FLOAT16, &layout),
         TILEXR_MOONEP_ERROR_INVALID_ARGUMENT, "unsupported dtype");

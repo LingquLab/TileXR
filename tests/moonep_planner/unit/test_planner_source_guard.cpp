@@ -146,6 +146,11 @@ int main()
         "Planner V3 does not reduce per-block readiness results");
     ok &= Require(v3Kernel, "groupTotalsGm_[blockIdx_]",
         "Planner V3 readiness waiters do not report through block-local slots");
+    ok &= Require(v3Kernel,
+        "if (blockIdx_ != 0) {\n            return;\n        }\n"
+        "        AscendC::LocalTensor<int32_t> published = RouteTile();\n"
+        "        for (int64_t sourceRankValue = 0; sourceRankValue < rankSize_;",
+        "Planner V3 dstLocal construction is not single-writer");
     ok &= Require(moonEpHost, "TileXRMoonEpPlannerV3",
         "MoonEP V1 no longer routes planning through the V3 compatibility backend");
 

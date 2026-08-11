@@ -145,6 +145,10 @@ void TestQpAndBatchContract()
         "SQ wrap split mismatch");
     Check(MoonEpCombineV2NextCqTarget(UINT32_MAX, true) == 0U,
         "CQ target must wrap as uint32");
+    Check(MoonEpCombineV2CompletionCount(false) == 0U,
+        "payload-only batch must not publish a CQ completion");
+    Check(MoonEpCombineV2CompletionCount(true) == 1U,
+        "final batch must publish exactly one CQ completion per lane");
     Check(MoonEpCombineV2CqTargetReached(0U, 0U),
         "wrapped CQ target must be reachable");
 }
@@ -158,9 +162,10 @@ void TestTokensAndShapes()
     Check(MoonEpCombineV2ShapeValid(kMoonEpCombineV2SmallBs,
         kMoonEpCombineV2TargetH, kMoonEpCombineV2TargetTopK,
         kMoonEpCombineV2SmallSlots), "small shape rejected");
-    Check(!MoonEpCombineV2ShapeValid(16,
-        kMoonEpCombineV2TargetH, kMoonEpCombineV2TargetTopK, 256),
-        "unsupported shape accepted");
+    Check(MoonEpCombineV2ShapeValid(256, 1024, 4, 2040),
+        "PR113 shape rejected");
+    Check(!MoonEpCombineV2ShapeValid(256, 1024, 4, 1023),
+        "undersized NvS accepted");
 
     const uint64_t magic = 17U;
     const uint64_t token = MoonEpCombineV2Token(magic, 6U);
@@ -174,8 +179,10 @@ void TestTokensAndShapes()
         "grant epoch layout mismatch");
     Check(MoonEpCombineV2DestinationValid(0,
         kMoonEpCombineV2SmallSlots, 128U), "valid destination rejected");
-    Check(!MoonEpCombineV2DestinationValid(-1,
-        kMoonEpCombineV2SmallSlots, 128U), "negative destination accepted");
+    Check(MoonEpCombineV2DestinationValid(-1,
+        2040U, 8U), "padding sentinel rejected");
+    Check(!MoonEpCombineV2DestinationValid(-2,
+        2040U, 8U), "invalid negative destination accepted");
 }
 
 void TestWqeBatchHelpers()

@@ -28,6 +28,16 @@ GM_ADDR devArgs = reinterpret_cast<GM_ADDR>(uintptr_t {0x9000});
 TileXRMoonEp::CombineV2Params launchedParams {};
 TileXRMoonEp::CombineV2LaunchContext launchedContext {};
 
+struct MemcpyRecord {
+    void *dst = nullptr;
+    size_t dstMax = 0;
+    const void *src = nullptr;
+    size_t count = 0;
+};
+
+MemcpyRecord memcpyRecords[4] = {};
+size_t memcpyCount = 0;
+
 void Check(bool condition, const char *message)
 {
     if (!condition) {
@@ -59,6 +69,7 @@ TileXRMoonEp::CombineV2Params ValidParams()
     static uint64_t activeOutputOffset = 0;
     params.activeOutputOffset = &activeOutputOffset;
     params.dtype = TILEXR_MOONEP_DTYPE_BFLOAT16;
+    params.reduceHidden = true;
     params.stream = reinterpret_cast<aclrtStream>(uintptr_t {0x4000});
     return params;
 }
@@ -99,6 +110,10 @@ void Reset()
     devArgs = reinterpret_cast<GM_ADDR>(uintptr_t {0x9000});
     launchedParams = TileXRMoonEp::CombineV2Params {};
     launchedContext = TileXRMoonEp::CombineV2LaunchContext {};
+    memcpyCount = 0;
+    for (MemcpyRecord &record : memcpyRecords) {
+        record = MemcpyRecord {};
+    }
 
     commArgs = TileXR::CommArgs {};
     commArgs.extraFlag = TileXR::ExtraFlag::UDMA | TileXR::ExtraFlag::UDMA_SHARED_QP;
@@ -171,7 +186,7 @@ void TestValidation()
 
     Reset();
     params.bs = 16;
-    params.nvS = 256;
+    params.nvS = 255;
     CheckStatus(TileXRMoonEp::TileXRMoonEpRunCombineV2(params),
         TILEXR_MOONEP_ERROR_INVALID_ARGUMENT, "unsupported shape rejected");
 }
@@ -278,6 +293,54 @@ extern "C" aclError aclrtGetDeviceInfo(uint32_t, aclrtDevAttr, int64_t *value)
     return aclInfoReturn;
 }
 
+void TestStageUsesDedicatedHiddenOutput()
+{
+    Reset();
+    const TileXRMoonEp::CombineV2Params params = ValidParams();
+    TileXRMoonEp::CombineV2Layout hiddenLayout {};
+    TileXRMoonEp::CombineV2Layout weightLayout {};
+    CheckStatus(TileXRMoonEp::TileXRMoonEpBuildCombineV2Layout(
+        params.bs, params.h, params.topK, params.nvS, params.dtype,
+        &hiddenLayout), TILEXR_MOONEP_SUCCESS, "stage hidden layout");
+    CheckStatus(TileXRMoonEp::TileXRMoonEpBuildCombineV2Layout(
+        params.bs, 1, params.topK, params.nvS,
+        TILEXR_MOONEP_DTYPE_FLOAT32, &weightLayout),
+        TILEXR_MOONEP_SUCCESS, "stage weight layout");
+
+    const void *hiddenNvsh = reinterpret_cast<const void *>(
+        uintptr_t {0x700000000ULL});
+    void *hiddenSh = reinterpret_cast<void *>(uintptr_t {0x710000000ULL});
+    const float *weightsNvs = reinterpret_cast<const float *>(
+        uintptr_t {0x720000000ULL});
+    float *weightsSk = reinterpret_cast<float *>(uintptr_t {0x730000000ULL});
+    CheckStatus(TileXRMoonEpCombineStageV2(params.registeredWorkspace,
+        hiddenLayout.totalBytes, params.dstLocal, params.comm, params.bs,
+        params.h, params.topK, params.nvS, params.aivCoreNum, hiddenNvsh,
+        hiddenSh, weightsNvs, weightsSk, params.dtype, params.stream),
+        TILEXR_MOONEP_SUCCESS, "valid V2 stage");
+
+    const uint8_t *workspace = static_cast<const uint8_t *>(
+        params.registeredWorkspace);
+    Check(memcpyCount == 4U, "V2 stage memcpy count mismatch");
+    Check(memcpyRecords[1].dst == hiddenSh &&
+        memcpyRecords[1].src == workspace + hiddenLayout.outputOffset &&
+        memcpyRecords[1].count == hiddenLayout.outputBytes,
+        "hidden output copy does not use the dedicated workspace region");
+    Check(hiddenLayout.outputOffset >= weightLayout.totalBytes,
+        "hidden output can be overwritten by the weight workspace");
+}
+
+extern "C" aclError aclrtMemcpyAsync(
+    void *dst, size_t dstMax, const void *src, size_t count,
+    aclrtMemcpyKind, aclrtStream)
+{
+    if (memcpyCount < 4U) {
+        memcpyRecords[memcpyCount] = MemcpyRecord {dst, dstMax, src, count};
+    }
+    ++memcpyCount;
+    return ACL_SUCCESS;
+}
+
 namespace TileXRMoonEp {
 int TileXRMoonEpLaunchCombineV2Kernel(
     const CombineV2Params &params,
@@ -297,6 +360,7 @@ int main()
 {
     TestValidLaunch();
     TestValidation();
+    TestStageUsesDedicatedHiddenOutput();
     TestRankAndCoreGeneralization();
     return failures == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
 }

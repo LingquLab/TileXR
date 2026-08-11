@@ -44,11 +44,15 @@ int TileXRMoonEpBuildCombineV2Layout(int64_t bs, int64_t h,
     CombineV2Layout *layout)
 {
     if (layout == nullptr || !MoonEpCombineV2ShapeValid(bs, h, topK, nvS) ||
-        dtype != TILEXR_MOONEP_DTYPE_BFLOAT16) {
+        (dtype != TILEXR_MOONEP_DTYPE_BFLOAT16 &&
+            dtype != TILEXR_MOONEP_DTYPE_FLOAT32) ||
+        (dtype == TILEXR_MOONEP_DTYPE_FLOAT32 && h != 1)) {
         return TILEXR_MOONEP_ERROR_INVALID_ARGUMENT;
     }
 
     const uint64_t slots = static_cast<uint64_t>(nvS);
+    const uint64_t elementBytes = dtype == TILEXR_MOONEP_DTYPE_BFLOAT16 ?
+        sizeof(uint16_t) : sizeof(float);
     uint64_t rowBytes = 0;
     uint64_t expertBytes = 0;
     uint64_t profileOffset = 0;
@@ -64,9 +68,11 @@ int TileXRMoonEpBuildCombineV2Layout(int64_t bs, int64_t h,
     uint64_t controlSourceBytes = 0;
     uint64_t failureOffset = 0;
     uint64_t failureBytes = 0;
+    uint64_t outputOffset = 0;
+    uint64_t outputBytes = 0;
     uint64_t totalBytes = 0;
 
-    if (!CheckedMultiply(static_cast<uint64_t>(h), sizeof(uint16_t), &rowBytes) ||
+    if (!CheckedMultiply(static_cast<uint64_t>(h), elementBytes, &rowBytes) ||
         !CheckedMultiply(slots, rowBytes, &expertBytes) ||
         !CheckedAlign(expertBytes, kCombineV2ScratchAlignmentBytes, &profileOffset) ||
         !CheckedMultiply(kMoonEpCombineV2CoreCount,
@@ -93,6 +99,10 @@ int TileXRMoonEpBuildCombineV2Layout(int64_t bs, int64_t h,
                 kMoonEpCombineV2CoreCount,
             kMoonEpCombineV2TokenStrideBytes, &failureBytes) ||
         !CheckedAdd(failureOffset, failureBytes, &requiredBytes) ||
+        !CheckedAlign(requiredBytes, kCombineV2ScratchAlignmentBytes,
+            &outputOffset) ||
+        !CheckedMultiply(static_cast<uint64_t>(bs), rowBytes, &outputBytes) ||
+        !CheckedAdd(outputOffset, outputBytes, &requiredBytes) ||
         !CheckedAlign(requiredBytes, kCombineV2RegistrationAlignmentBytes, &totalBytes) ||
         totalBytes > std::numeric_limits<uint32_t>::max() ||
         totalBytes > std::numeric_limits<std::size_t>::max()) {
@@ -116,6 +126,8 @@ int TileXRMoonEpBuildCombineV2Layout(int64_t bs, int64_t h,
     next.controlSourceBytes = controlSourceBytes;
     next.failureOffset = failureOffset;
     next.failureBytes = failureBytes;
+    next.outputOffset = outputOffset;
+    next.outputBytes = outputBytes;
     next.totalBytes = totalBytes;
     *layout = next;
     return TILEXR_MOONEP_SUCCESS;

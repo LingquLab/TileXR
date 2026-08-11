@@ -187,7 +187,10 @@ class MoonEPSmokeTests(unittest.TestCase):
             gradients=gradients,
         )
         buffer.close()
-        names = [item[0] for item in runtime.calls if item[0] != "planning_workspace_size"]
+        names = [
+            item[0] for item in runtime.calls
+            if item[0] not in ("planning_workspace_size", "planning_dst_local_offset")
+        ]
         self.assertEqual(
             names,
             [
@@ -464,7 +467,7 @@ class MoonEPSmokeTests(unittest.TestCase):
         buffer.synchronize()
 
         buffer.combine(plan, hidden_nvsh)
-        self.assertEqual(plan.status.item(), 3000)
+        self.assertEqual(plan.status.item(), 4000)
         buffer.synchronize()
 
         buffer.reduce_grad(
@@ -476,12 +479,12 @@ class MoonEPSmokeTests(unittest.TestCase):
             up_reduce_buffer=tensor((2, 2, 4, 3), torch.float32),
             down_reduce_buffer=tensor((2, 2, 3, 2), torch.float32),
         )
-        self.assertEqual(plan.status.item(), 3000)
+        self.assertEqual(plan.status.item(), 4000)
         self.assertEqual(plan.reduce_grad_status.item(), 0)
         buffer.synchronize()
         buffer.close()
 
-    def test_cross_node_combine_uses_host_coordinated_split_phases(self):
+    def test_cross_node_combine_uses_one_v2_launch(self):
         torch, runtime, buffer = make_buffer(
             write_status_markers=True, node_count=2
         )
@@ -499,17 +502,17 @@ class MoonEPSmokeTests(unittest.TestCase):
         )
 
         combine_calls = [call for call in runtime.calls if call[0] == "combine"]
-        self.assertEqual(phases, ["published", "consumed"])
-        self.assertEqual([call[-1] for call in combine_calls], [1 << 3, 1 << 4])
+        self.assertEqual(phases, [])
+        self.assertEqual([call[-1] for call in combine_calls], [0])
         self.assertEqual(runtime._active_udma_owner, "dispatch")
-        self.assertIs(combine_calls[0][3], combine_calls[1][3])
+        self.assertEqual(len(combine_calls), 1)
         self.assertEqual(tuple(hidden.shape), (4, 8))
         self.assertIsNone(weights)
         self.assertIsNone(event)
-        self.assertTrue(buffer._quiesced)
+        self.assertFalse(buffer._quiesced)
         buffer.close()
 
-    def test_cross_node_combine_requires_phase_barrier(self):
+    def test_cross_node_combine_does_not_require_phase_barrier(self):
         torch, runtime, buffer = make_buffer(
             write_status_markers=True, node_count=2
         )
@@ -518,9 +521,10 @@ class MoonEPSmokeTests(unittest.TestCase):
         )
         buffer.synchronize()
 
-        with self.assertRaisesRegex(RuntimeError, "phase barrier"):
-            buffer.combine(plan, tensor((8, 8), torch.bfloat16))
-        self.assertFalse(any(call[0] == "combine" for call in runtime.calls))
+        buffer.combine(plan, tensor((8, 8), torch.bfloat16))
+        self.assertEqual(
+            len([call for call in runtime.calls if call[0] == "combine"]), 1
+        )
         buffer.close()
 
     def test_native_stage_mismatched_success_marker_fails(self):

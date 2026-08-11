@@ -4,14 +4,9 @@ import os
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from .abi import (
-    TILEXR_MOONEP_FLAG_COMBINE_CONSUME_ONLY,
-    TILEXR_MOONEP_FLAG_COMBINE_PUBLISH_ONLY,
-)
 from .runtime import TileXRMoonEPRuntime
 
 
-_COMBINE_STATUS_SUCCESS = 3000
 _PREFETCH_WEIGHT_STATUS_SUCCESS = 4000
 _UDMA_REGISTRATION_ALIGNMENT = 2 * 1024 * 1024
 
@@ -195,6 +190,7 @@ class MoonEPPlan:
     epoch: int
     backend: str
     runtime: Any
+    dst_local_offset: int = 0
 
     @property
     def dispatched_capacity(self) -> int:
@@ -657,6 +653,18 @@ class TileXRMoonEPBuffer:
         self._trace_stage("planning_workspace_end")
         if workspace_bytes <= 0:
             raise RuntimeError(f"native planner returned invalid workspace size {workspace_bytes}")
+        dst_local_offset = int(self.runtime.planning_dst_local_offset(c))
+        dst_local_bytes = int(c.nv_s) * 4
+        if (
+            dst_local_offset < 0
+            or dst_local_offset % 4 != 0
+            or dst_local_offset + dst_local_bytes > workspace_bytes
+        ):
+            raise RuntimeError(
+                "native Planner returned invalid dstLocal workspace range "
+                f"offset={dst_local_offset} bytes={dst_local_bytes} "
+                f"workspace={workspace_bytes}"
+            )
         self._epoch += 1
         cu_seqlens = self._empty(
             (c.expert_count + c.prefetch_slots,), self._torch.int32
@@ -687,6 +695,7 @@ class TileXRMoonEPBuffer:
             epoch=self._epoch,
             backend="native",
             runtime=self.runtime,
+            dst_local_offset=dst_local_offset,
         )
         self._trace_stage("planning_kernel_launch_begin")
         self.runtime.planning(
@@ -932,56 +941,33 @@ class TileXRMoonEPBuffer:
                 shape=(c.nv_s,),
                 device_index=c.device_index,
             )
-        split_combine = int(c.node_count) > 1
-        if split_combine and phase_barrier is None:
-            raise RuntimeError("cross-node Combine requires a Host phase barrier")
-        if split_combine:
-            self._trace_stage("combine_workspace_activation_begin")
-            self._synchronize_device()
-            self.context.activate_dispatch_workspace()
-            self._trace_stage("combine_workspace_activation_end")
+        del phase_barrier
+        self._trace_stage("combine_workspace_activation_begin")
+        self._synchronize_device()
+        self.context.activate_dispatch_workspace()
+        self._trace_stage("combine_workspace_activation_end")
         hidden_sh = self._empty((c.tokens_per_rank, c.hidden_size), c.dtype)
         route_weights_sk = (
             self._empty((c.tokens_per_rank, c.topk), self._torch.float32)
             if route_weights_nvs is not None
             else None
         )
-        def launch(flags: int) -> None:
-            self._retain(plan, hidden_nvsh, hidden_sh, route_weights_nvs, route_weights_sk)
-            self.runtime.combine(
-                c,
-                plan,
-                hidden_nvsh,
-                hidden_sh,
-                self._stream_ptr(),
-                route_weights_nvs,
-                route_weights_sk,
-                inter_rank_sync=bool(inter_rank_sync),
-                flags=flags,
-            )
-            self._expect_status(plan, _COMBINE_STATUS_SUCCESS)
-
-        if split_combine:
-            self._trace_stage("combine_publish_launch_begin")
-            launch(TILEXR_MOONEP_FLAG_COMBINE_PUBLISH_ONLY)
-            self._trace_stage("combine_publish_launch_end")
-            self._trace_stage("combine_publish_sync_begin")
-            self.synchronize()
-            self._trace_stage("combine_publish_sync_end")
-            self._trace_stage("combine_publish_barrier_begin")
-            phase_barrier("published")
-            self._trace_stage("combine_publish_barrier_end")
-            self._trace_stage("combine_consume_launch_begin")
-            launch(TILEXR_MOONEP_FLAG_COMBINE_CONSUME_ONLY)
-            self._trace_stage("combine_consume_launch_end")
-            self._trace_stage("combine_consume_sync_begin")
-            self.synchronize()
-            self._trace_stage("combine_consume_sync_end")
-            self._trace_stage("combine_consume_barrier_begin")
-            phase_barrier("consumed")
-            self._trace_stage("combine_consume_barrier_end")
-        else:
-            launch(0)
+        self._retain(plan, hidden_nvsh, hidden_sh, route_weights_nvs, route_weights_sk)
+        self._trace_stage("combine_v2_launch_begin")
+        self.runtime.combine(
+            c,
+            plan,
+            hidden_nvsh,
+            hidden_sh,
+            self._stream_ptr(),
+            route_weights_nvs,
+            route_weights_sk,
+            inter_rank_sync=bool(inter_rank_sync),
+            flags=0,
+            registered_workspace=self.context.dispatch_workspace[0],
+            registered_workspace_bytes=self.context.dispatch_workspace[1],
+        )
+        self._trace_stage("combine_v2_launch_end")
         event = self._record_event() if async_finish else None
         return hidden_sh, route_weights_sk, event
 

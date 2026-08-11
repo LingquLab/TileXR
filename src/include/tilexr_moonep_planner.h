@@ -28,6 +28,10 @@ int TileXRMoonEpPlannerGetWorkspaceSizeV3(TileXRCommPtr comm, int64_t s, int64_t
     int64_t expertCount, int64_t b, int64_t tokenPadding,
     uint64_t *workspaceBytes, int64_t *nvS);
 
+int TileXRMoonEpPlannerGetDstLocalOffsetV3(TileXRCommPtr comm, int64_t s, int64_t k,
+    int64_t expertCount, int64_t b, int64_t tokenPadding,
+    uint64_t *dstLocalOffset);
+
 int TileXRMoonEpPlannerV3(const int32_t *topkExpertIds, const int32_t *tokensPerExpert,
     TileXRCommPtr comm, int64_t s, int64_t k, int64_t expertCount,
     int64_t b, int64_t tokenPadding, void *workspace, uint64_t workspaceBytes,

@@ -19,6 +19,42 @@ constexpr uint32_t kDispatchLogicalWqeBatchCapacity =
 constexpr uint32_t kDispatchQpCount = 2U;
 constexpr uint32_t kDispatchQpSplitPeriod = 4U;
 constexpr uint32_t kDispatchSqPollReserve = 10U;
+constexpr uint32_t kDispatchSharedQpCoreCount = 16U;
+constexpr uint32_t kDispatchSharedQpCount =
+    kDispatchQpCount * kDispatchSharedQpCoreCount;
+
+TILEXR_MOONEP_WQE_BATCH_INLINE bool DispatchQpCountSupported(
+    uint32_t availableQpCount, bool sharedQp = false)
+{
+    return sharedQp ? availableQpCount == kDispatchSharedQpCount :
+        availableQpCount >= kDispatchQpCount;
+}
+
+TILEXR_MOONEP_WQE_BATCH_INLINE uint32_t DispatchPeerCoreCount(
+    uint32_t launchedCoreCount, bool sharedQp)
+{
+    if (launchedCoreCount == 0U ||
+        launchedCoreCount > kDispatchAivCoreCount) {
+        return 0U;
+    }
+    return sharedQp && launchedCoreCount > kDispatchSharedQpCoreCount ?
+        kDispatchSharedQpCoreCount : launchedCoreCount;
+}
+
+TILEXR_MOONEP_WQE_BATCH_INLINE uint32_t DispatchPhysicalQpIndex(
+    uint32_t logicalQpIdx, uint32_t coreIdx, bool sharedQp)
+{
+    if (logicalQpIdx >= kDispatchQpCount) {
+        return UINT32_MAX;
+    }
+    if (!sharedQp) {
+        return logicalQpIdx;
+    }
+    if (coreIdx >= kDispatchSharedQpCoreCount) {
+        return UINT32_MAX;
+    }
+    return logicalQpIdx * kDispatchSharedQpCoreCount + coreIdx;
+}
 
 TILEXR_MOONEP_WQE_BATCH_INLINE uint32_t DispatchWqeBatchCount(
     uint64_t remainingWqes, uint32_t sqHead, uint32_t sqEntryCount)

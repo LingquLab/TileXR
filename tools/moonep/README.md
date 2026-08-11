@@ -95,9 +95,8 @@ torchrun --nproc-per-node=8 tools/moonep/test_npu_e2e.py
 The tool requires `torch`, `torch_npu`, the `tilexr_moonep` integration package,
 an installed TileXR runtime, and at least five ranks for its duplicate-free remote
 PrefetchWeight route. It exercises Planning, Dispatch, PrefetchWeight, ExpertForward,
-Combine, and ReduceGrad through the public API. Combine intentionally remains on
-`TileXRMoonEpCombineV1`; the standalone Combine V2 implementation is not selected by
-this E2E tool yet.
+Combine, and ReduceGrad through the public API. The native integration selects
+Combine V2 and consumes Planner V3's reverse `dstLocal` route map.
 
 Run the Torch-NPU/HCCL reference on four devices:
 

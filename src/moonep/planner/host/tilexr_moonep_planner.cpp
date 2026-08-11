@@ -25,6 +25,25 @@ int TileXRMoonEpPlannerGetWorkspaceSizeV3(TileXRCommPtr comm, int64_t s, int64_t
     return TileXR::TILEXR_SUCCESS;
 }
 
+int TileXRMoonEpPlannerGetDstLocalOffsetV3(TileXRCommPtr comm, int64_t s, int64_t k,
+    int64_t expertCount, int64_t b, int64_t tokenPadding,
+    uint64_t *dstLocalOffset)
+{
+    if (dstLocalOffset == nullptr) {
+        return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    *dstLocalOffset = 0;
+
+    TileXRMoonEpV3::PlannerLayout layout {};
+    const int ret = TileXRMoonEpV3::TileXRMoonEpPrepareLayout(
+        comm, s, k, expertCount, b, tokenPadding, &layout);
+    if (ret != TileXR::TILEXR_SUCCESS) {
+        return ret;
+    }
+    *dstLocalOffset = layout.dstLocalOffset;
+    return TileXR::TILEXR_SUCCESS;
+}
+
 int TileXRMoonEpPlannerV3(const int32_t *topkExpertIds, const int32_t *tokensPerExpert,
     TileXRCommPtr comm, int64_t s, int64_t k, int64_t expertCount,
     int64_t b, int64_t tokenPadding, void *workspace, uint64_t workspaceBytes,

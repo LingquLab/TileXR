@@ -18,6 +18,7 @@ struct CombineV2Params {
     uint32_t aivCoreNum = 0;
     uint64_t *activeOutputOffset = nullptr;
     uint32_t dtype = 0;
+    bool reduceHidden = false;
     aclrtStream stream = nullptr;
 };
 

@@ -23,6 +23,8 @@ rtError_t launchReturn = RT_ERROR_NONE;
 int registrationCalls = 0;
 int launchCalls = 0;
 uint32_t capturedBlockDim = 0;
+std::size_t capturedArgsSize = 0;
+uint64_t capturedArgs[18] = {};
 rtTaskCfgInfo_t capturedCfg {};
 
 void Check(bool condition, const char *message)
@@ -52,6 +54,10 @@ void Reset()
     registrationCalls = 0;
     launchCalls = 0;
     capturedBlockDim = 0;
+    capturedArgsSize = 0;
+    for (uint64_t &value : capturedArgs) {
+        value = 0;
+    }
     capturedCfg = rtTaskCfgInfo_t {};
 }
 
@@ -66,6 +72,8 @@ TileXRMoonEp::CombineV2Params ValidParams(uint64_t *activeOutputOffset)
     params.nvS = 128;
     params.aivCoreNum = 32;
     params.activeOutputOffset = activeOutputOffset;
+    params.dtype = TILEXR_MOONEP_DTYPE_BFLOAT16;
+    params.reduceHidden = true;
     params.stream = reinterpret_cast<aclrtStream>(uintptr_t {0x3000});
     return params;
 }
@@ -76,6 +84,8 @@ TileXRMoonEp::CombineV2LaunchContext ValidContext()
     context.devArgs = reinterpret_cast<GM_ADDR>(uintptr_t {0x4000});
     context.layout.scratchOffset[0] = 4096;
     context.layout.scratchOffset[1] = 8192;
+    context.layout.outputOffset = 12288;
+    context.layout.rowBytes = 7168;
     context.magic = 1;
     return context;
 }
@@ -98,6 +108,11 @@ void TestConfiguresDynamicUb()
         "configured launch did not preserve batch scheduling mode");
     Check(capturedCfg.localMemorySize == static_cast<uint32_t>(kA5UbBytes),
         "configured launch did not pass the device UB size");
+    Check(capturedArgsSize == sizeof(capturedArgs),
+        "configured launch used the wrong kernel ABI size");
+    Check(capturedArgs[10] == context.layout.outputOffset &&
+        capturedArgs[15] == context.layout.rowBytes && capturedArgs[16] == 1U,
+        "configured launch did not pass reduction layout arguments");
     Check(activeOutputOffset == context.layout.scratchOffset[1],
         "configured launch did not publish the active epoch");
 }
@@ -158,11 +173,21 @@ aclError aclrtGetDeviceInfo(uint32_t, aclrtDevAttr attr, int64_t *value)
 }
 
 rtError_t rtKernelLaunchWithFlagV2(const void *, uint32_t blockDim,
-    rtArgsEx_t *,
+    rtArgsEx_t *argsInfo,
     void *, rtStream_t, uint32_t, const rtTaskCfgInfo_t *cfgInfo)
 {
     ++launchCalls;
     capturedBlockDim = blockDim;
+    if (argsInfo != nullptr) {
+        capturedArgsSize = argsInfo->argsSize;
+        if (argsInfo->args != nullptr && argsInfo->argsSize ==
+                sizeof(capturedArgs)) {
+            const uint64_t *args = static_cast<const uint64_t *>(argsInfo->args);
+            for (std::size_t index = 0; index < 18U; ++index) {
+                capturedArgs[index] = args[index];
+            }
+        }
+    }
     if (cfgInfo != nullptr) {
         capturedCfg = *cfgInfo;
     }
