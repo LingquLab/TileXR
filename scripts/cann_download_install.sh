@@ -40,12 +40,12 @@ success "TILEXR_CANN_VER = ${TILEXR_CANN_VER}"
 
 success "start download cann from ${cann_url}"
 cd "${TILEXR_TEMP_HOME}" || exit 1
-curl --fail --location --continue-at - --remote-name "${cann_url}" \
+curl -k --fail --location --continue-at - --remote-name "${cann_url}" \
     > "${TILEXR_TEMP_HOME}/toolkit.log" 2>&1 &
 pid_cann=$!
 
 success "start download ops from ${ops_url}"
-curl --fail --location --continue-at - --remote-name "${ops_url}" \
+curl -k --fail --location --continue-at - --remote-name "${ops_url}" \
     > "${TILEXR_TEMP_HOME}/ops.log" 2>&1 &
 pid_ops=$!
 cd "${TILEXR_HOME}" || exit 1

@@ -48,7 +48,7 @@ fi
 
 downloader=()
 if command -v curl >/dev/null 2>&1; then
-    downloader=(curl -fL --retry 3 --connect-timeout 20 -o)
+    downloader=(curl -kfL --retry 3 --connect-timeout 20 -o)
 elif command -v wget >/dev/null 2>&1; then
     downloader=(wget --tries=3 --timeout=20 -O)
 elif [[ ${check_only} -eq 0 ]]; then

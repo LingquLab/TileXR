@@ -131,7 +131,7 @@ fi
 release_json="${stage}/release.json"
 
 run install -d -o root -g "${CI_GROUP}" -m 0750 "${stage}"
-run env "${proxy_env[@]}" curl --fail --location --silent --show-error \
+run env "${proxy_env[@]}" curl -k --fail --location --silent --show-error \
     https://api.github.com/repos/actions/runner/releases/latest -o "${release_json}"
 
 if [[ "${DRY_RUN}" == 1 ]]; then
@@ -173,7 +173,7 @@ PY
 fi
 
 asset_path="${stage}/${asset_name}"
-run env "${proxy_env[@]}" curl --fail --location --silent --show-error \
+run env "${proxy_env[@]}" curl -k --fail --location --silent --show-error \
     "${asset_url}" -o "${asset_path}"
 if [[ "${DRY_RUN}" == 1 ]]; then
     run sha256sum --check "${asset_path}.sha256"
