@@ -14,7 +14,8 @@ int TileXRMoonEpPrepareCombineLaunch(const TileXRMoonEpCombineArgsV1 *args,
     *context = CombineLaunchContext {};
     if (args == nullptr || args->structSize < sizeof(*args) ||
         args->abiVersion != TILEXR_MOONEP_ABI_VERSION_V1 || args->comm == nullptr ||
-        args->plan == nullptr || args->hiddenNvsh == nullptr || args->hiddenSh == nullptr ||
+        args->plan == nullptr || args->dstLocal == nullptr ||
+        args->hiddenNvsh == nullptr || args->hiddenSh == nullptr ||
         stream == nullptr) {
         return TILEXR_MOONEP_ERROR_INVALID_ARGUMENT;
     }
@@ -40,6 +41,7 @@ int TileXRMoonEpPrepareCombineLaunch(const TileXRMoonEpCombineArgsV1 *args,
     }
 
     params->comm = args->comm;
+    params->dstLocal = args->dstLocal;
     params->dst = static_cast<const int32_t *>(args->plan->dst);
     params->dupGroups = static_cast<const int32_t *>(args->plan->dupGroups);
     params->dupLoffs = static_cast<const int32_t *>(args->plan->dupLoffs);

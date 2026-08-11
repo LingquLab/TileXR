@@ -99,6 +99,20 @@ void TestLaunch()
         seenContext.layout.expertsPerRank == 4,
         "prefetch UDMA layout mismatch");
 
+    Reset();
+    qpNum = 32;
+    plan = Plan();
+    gate = Weight(0x100000, 4, 8);
+    up = Weight(0x101000, 4, 16);
+    down = Weight(0x102000, 8, 8);
+    args = Args(&plan, &gate, &up, &down);
+    Status("prefetch shared-domain QPs",
+        TileXRMoonEp::TileXRMoonEpRunPrefetchWeightV1(&args, stream),
+        TILEXR_MOONEP_SUCCESS);
+    Check(launchCalls == 1 && seenContext.layout.qpNum == 32 &&
+        seenContext.layout.blockDim == 4,
+        "prefetch must cap workers without rejecting the shared-domain QP count");
+
     gate.dtype = TILEXR_MOONEP_DTYPE_FLOAT32;
     Status("prefetch dtype", TileXRMoonEp::TileXRMoonEpRunPrefetchWeightV1(&args, stream), TILEXR_MOONEP_ERROR_INVALID_ARGUMENT);
     gate = Weight(0x100000, 4, 8); args.flags = 1;

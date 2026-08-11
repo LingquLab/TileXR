@@ -106,6 +106,8 @@ int main()
     Contains("public header", header, "TileXRMoonEpPlanV1");
     Contains("public header", header, "registeredWorkspace");
     Contains("public header", header, "TileXRMoonEpDispatchGetWorkspaceSizeV1");
+    Contains("public header", header, "TileXRMoonEpDispatchGetWorkspaceSizeV2");
+    Contains("public header", header, "TileXRMoonEpDispatchV2");
     Excludes("public header", header, "tilexr_api.h");
     Excludes("public header", header, "std::");
 
@@ -116,6 +118,8 @@ int main()
     Contains("host", host, "dupCounts");
     Contains("host", host, "TileXRMoonEpRunDispatchV1");
     Contains("host", host, "TileXRMoonEpRunDispatchUrmaV1");
+    Contains("host", host, "TileXRMoonEpRunDispatchUrmaV2");
+    Contains("host", host, "TileXRMoonEpDispatchV2");
     Contains("host", host, "TileXRMoonEpRunCombineV1");
     Excludes("host dispatch stub", host,
         "RunLocalStub(args, stream, StubStage::Dispatch)");
@@ -156,6 +160,7 @@ int main()
     Contains("dispatch CMake", dispatchCmake, "INSTALL_RPATH \"$ORIGIN\"");
     Contains("URMA dispatch Host", dispatchUrmaHost,
         "TileXRMoonEpBuildDispatchUrmaLayout");
+    Contains("URMA dispatch Host", dispatchUrmaHost, "aclrtMemsetAsync");
     Contains("URMA dispatch Host", dispatchUrmaHost, "registeredWorkspaceBytes");
     Contains("URMA dispatch Host", dispatchUrmaHost,
         "params.zeroFillRanges = static_cast<const int32_t *>(args->plan->zeroFillRanges)");

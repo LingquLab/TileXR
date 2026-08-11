@@ -1276,6 +1276,9 @@ __aicore__ inline bool MoonEpCombineV2::ReduceHidden()
             const int64_t tileElements = h_ - hiddenOffset <
                     static_cast<int64_t>(kReduceTileElements) ?
                 h_ - hiddenOffset : static_cast<int64_t>(kReduceTileElements);
+            const uint32_t inputStrideElements =
+                TileXRMoonEp::MoonEpCombineV2ReduceInputStrideElements(
+                    static_cast<uint32_t>(tileElements));
             Duplicate(accumulator, 0.0f,
                 static_cast<int32_t>(tileElements));
             PipeBarrier<PIPE_V>();
@@ -1298,7 +1301,7 @@ __aicore__ inline bool MoonEpCombineV2::ReduceHidden()
                             tileElements * sizeof(bfloat16_t)), 0U, 0U, 0U};
                     const DataCopyPadExtParams<bfloat16_t> pad {
                         false, 0U, 0U, 0U};
-                    DataCopyPad(inputRows[batchRoute * tileElements],
+                    DataCopyPad(inputRows[batchRoute * inputStrideElements],
                         input, copyIn, pad);
                 }
                 reduceInputQueue_.EnQue(inputRows);
@@ -1306,7 +1309,7 @@ __aicore__ inline bool MoonEpCombineV2::ReduceHidden()
 
                 for (int64_t batchRoute = 0; batchRoute < batchRoutes;
                      ++batchRoute) {
-                    Cast(row, inputRows[batchRoute * tileElements],
+                    Cast(row, inputRows[batchRoute * inputStrideElements],
                         RoundMode::CAST_NONE,
                         static_cast<int32_t>(tileElements));
                     PipeBarrier<PIPE_V>();

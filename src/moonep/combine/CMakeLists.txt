@@ -59,6 +59,7 @@ tilexr_add_moonep_kernel(tilexr_moonep_combine_kernel
     DEPENDS
         "${CMAKE_CURRENT_SOURCE_DIR}/common/combine_common.h"
         "${CMAKE_SOURCE_DIR}/src/moonep/common/moonep_peer_window.h"
+        "${CMAKE_SOURCE_DIR}/src/moonep/common/moonep_combine_schedule.h"
 )
 
 add_library(tilexr-moonep-combine SHARED

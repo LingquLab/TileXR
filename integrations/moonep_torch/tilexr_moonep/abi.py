@@ -104,6 +104,10 @@ class TileXRMoonEPDispatchArgsV1(ctypes.Structure):
     ]
 
 
+class TileXRMoonEPDispatchArgsV2(ctypes.Structure):
+    _fields_ = TileXRMoonEPDispatchArgsV1._fields_
+
+
 class TileXRMoonEPPrefetchWeightArgsV1(ctypes.Structure):
     _fields_ = [
         ("structSize", ctypes.c_uint32),
@@ -123,6 +127,7 @@ class TileXRMoonEPCombineArgsV1(ctypes.Structure):
         ("abiVersion", ctypes.c_uint32),
         ("comm", ctypes.c_void_p),
         ("plan", ctypes.POINTER(TileXRMoonEPPlanV1)),
+        ("dstLocal", ctypes.c_void_p),
         ("hiddenNvsh", ctypes.POINTER(TileXRMoonEPTensorV1)),
         ("routeWeightsNvs", ctypes.POINTER(TileXRMoonEPTensorV1)),
         ("hiddenSh", ctypes.POINTER(TileXRMoonEPTensorV1)),

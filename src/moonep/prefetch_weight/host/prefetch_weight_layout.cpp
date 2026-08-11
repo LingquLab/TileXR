@@ -120,7 +120,7 @@ int TileXRMoonEpBuildPrefetchWeightLayout(
         commArgs.udmaInfoPtr == nullptr || commArgs.udmaRegistryPtr == nullptr ||
         !TileXR::UDMARegistryValid(&registry, commArgs.rankSize) ||
         commArgs.rank < 0 || commArgs.rank >= commArgs.rankSize ||
-        !SupportedWorkerCount(qpNum) || qpNum > kPrefetchWeightMaxWorkers) {
+        qpNum == 0) {
         return TILEXR_MOONEP_ERROR_INVALID_ARGUMENT;
     }
 
@@ -147,7 +147,8 @@ int TileXRMoonEpBuildPrefetchWeightLayout(
     }
 
     const bool hasOverride = blockDimOverride != nullptr && blockDimOverride[0] != '\0';
-    uint32_t workers = qpNum;
+    uint32_t workers = qpNum < kPrefetchWeightMaxWorkers ?
+        qpNum : kPrefetchWeightMaxWorkers;
     if (!ParseWorkerOverride(blockDimOverride, &workers) || workers > qpNum ||
         (hasOverride && workers > static_cast<uint32_t>(args.plan->b))) {
         return TILEXR_MOONEP_ERROR_INVALID_ARGUMENT;

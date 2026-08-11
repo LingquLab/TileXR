@@ -66,6 +66,24 @@ def test_algorithm_bytes_follow_routes_and_runtime_tensor_dtypes() -> None:
     }
 
 
+def test_stage_metadata_reports_selected_combine_v1_memory_kernel() -> None:
+    capabilities = {
+        "implementations": {
+            "planning": "native",
+            "dispatch": "native",
+            "prefetch_weight": "native",
+            "combine": "native",
+            "reduce_grad": "native",
+        }
+    }
+    metadata = stage_execution_metadata(
+        capabilities, torch_npu_version="test", combine_version=1
+    )
+    assert metadata["combine"]["kernel_version"] == (
+        "tilexr_moonep_combine_kernel (CombineV1Memory)"
+    )
+
+
 def _result(rank: int, world_size: int, node_count: int) -> dict[str, object]:
     capabilities = {
         "stage_mask": 31,
@@ -261,7 +279,8 @@ def test_flow_report_uses_stage_critical_rank_and_its_bytes(tmp_path: Path) -> N
     assert "Native" in table
     assert "Kernel/API version" in table
     assert "tilexr_ep_plan_kernel (PlannerV3)" in table
-    assert "tilexr_moonep_dispatch_urma_kernel (DispatchV1)" in table
+    assert "tilexr_moonep_dispatch_urma_kernel (DispatchV2)" in table
+    assert "tilexr_moonep_combine_v2_kernel (CombineV2)" in table
     assert "torch_npu 2.10.0.post2 (GMM+SwiGLU)" in table
     stage_csv_header = (case_dir / "stage_summary.csv").read_text(
         encoding="utf-8"

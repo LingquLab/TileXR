@@ -131,12 +131,13 @@ void TestChunkingAndPlanAgreement()
     CheckStatus("chunked combine", TileXRMoonEp::TileXRMoonEpBuildCombineLayout(
         0, 2, &plan, &output, nullptr, &input, nullptr, 0, &combine),
         TILEXR_MOONEP_SUCCESS);
-    CHECK_TRUE(combine.chunkCount == 2 &&
-        combine.hiddenPayloadBytes <= static_cast<uint64_t>(TileXR::IPC_BUFF_MAX_SIZE));
+    CHECK_TRUE(combine.chunkCount >= 3 && combine.hiddenPayloadBytes > 0 &&
+        combine.receiveHiddenOffset >= combine.hiddenPayloadBytes &&
+        combine.windowBytes <= static_cast<uint64_t>(TileXR::IPC_BUFF_MAX_SIZE));
     CheckStatus("chunked split combine", TileXRMoonEp::TileXRMoonEpBuildCombineLayout(
         0, 2, &plan, &output, nullptr, &input, nullptr,
         TILEXR_MOONEP_FLAG_COMBINE_PUBLISH_ONLY, &combine),
-        TILEXR_MOONEP_ERROR_NOT_SUPPORTED);
+        TILEXR_MOONEP_ERROR_INVALID_ARGUMENT);
 
     plan.r = 4;
     CheckStatus("world mismatch", TileXRMoonEp::TileXRMoonEpBuildCombineLayout(
@@ -169,15 +170,21 @@ void TestCombinePairedLayout()
         TILEXR_MOONEP_SUCCESS);
     CHECK_TRUE(layout.s == 4 && layout.n == 8 && layout.nvS == 12);
     CHECK_TRUE(layout.hiddenRowBytes == 32 && layout.hiddenChunkStride == 32);
-    CHECK_TRUE(layout.hiddenPayloadBytes == 384 && layout.routeWeightsOffset == 384);
-    CHECK_TRUE(layout.routeWeightsBytes == 48 && layout.windowBytes == 432);
+    CHECK_TRUE(layout.blockDim == 2 && layout.stepCount == 1);
+    CHECK_TRUE(layout.hiddenPayloadBytes == 384 && layout.receiveHiddenOffset == 384);
+    CHECK_TRUE(layout.sourceWeightsOffset == 768 && layout.receiveWeightsOffset == 832);
+    CHECK_TRUE(layout.routeWeightsBytes == 48 && layout.duplicateMaskOffset == 896);
+    CHECK_TRUE(layout.doneOffset == 960 && layout.doneBytes == 128);
+    CHECK_TRUE(layout.coreStatusOffset == 1088 && layout.windowBytes == 1216);
 
     CheckStatus("publish-only combine", TileXRMoonEp::TileXRMoonEpBuildCombineLayout(
         0, 2, &plan, &hiddenNvsh, &weightsNvs, &hiddenSh, &weightsSk,
-        TILEXR_MOONEP_FLAG_COMBINE_PUBLISH_ONLY, &layout), TILEXR_MOONEP_SUCCESS);
+        TILEXR_MOONEP_FLAG_COMBINE_PUBLISH_ONLY, &layout),
+        TILEXR_MOONEP_ERROR_INVALID_ARGUMENT);
     CheckStatus("consume-only combine", TileXRMoonEp::TileXRMoonEpBuildCombineLayout(
         0, 2, &plan, &hiddenNvsh, &weightsNvs, &hiddenSh, &weightsSk,
-        TILEXR_MOONEP_FLAG_COMBINE_CONSUME_ONLY, &layout), TILEXR_MOONEP_SUCCESS);
+        TILEXR_MOONEP_FLAG_COMBINE_CONSUME_ONLY, &layout),
+        TILEXR_MOONEP_ERROR_INVALID_ARGUMENT);
     CheckStatus("ambiguous split combine", TileXRMoonEp::TileXRMoonEpBuildCombineLayout(
         0, 2, &plan, &hiddenNvsh, &weightsNvs, &hiddenSh, &weightsSk,
         TILEXR_MOONEP_FLAG_COMBINE_PUBLISH_ONLY |

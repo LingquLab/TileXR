@@ -11,6 +11,7 @@ namespace TileXRMoonEp {
 
 struct CombineParams {
     TileXRCommPtr comm = nullptr;
+    const int32_t *dstLocal = nullptr;
     const int32_t *dst = nullptr;
     const int32_t *dupGroups = nullptr;
     const int32_t *dupLoffs = nullptr;

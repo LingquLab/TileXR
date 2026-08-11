@@ -306,11 +306,13 @@ int TileXRMoonEpQueryDispatchUrmaWorkspace(TileXRCommPtr comm, int64_t s,
     return TILEXR_MOONEP_SUCCESS;
 }
 
-int TileXRMoonEpRunDispatchUrmaV1(const TileXRMoonEpDispatchArgsV1 *args,
-    aclrtStream stream)
+static int RunDispatchUrma(const TileXRMoonEpDispatchArgsV1 *args,
+    aclrtStream stream, bool resetStatus)
 {
     if (args == nullptr || args->structSize < sizeof(*args) ||
-        args->abiVersion != TILEXR_MOONEP_ABI_VERSION_V1 || stream == nullptr ||
+        (args->abiVersion != TILEXR_MOONEP_ABI_VERSION_V1 &&
+            args->abiVersion != TILEXR_MOONEP_ABI_VERSION_V2) ||
+        stream == nullptr ||
         args->comm == nullptr || args->plan == nullptr || args->hiddenSh == nullptr ||
         args->hiddenNvsh == nullptr || args->flags != TILEXR_MOONEP_FLAG_NONE ||
         !PlanValid(args->plan) || !TensorDescriptorValid(args->hiddenSh) ||
@@ -438,6 +440,11 @@ int TileXRMoonEpRunDispatchUrmaV1(const TileXRMoonEpDispatchArgsV1 *args,
         }
     }
 
+    if (resetStatus && aclrtMemsetAsync(args->plan->status,
+            sizeof(int32_t), 0, sizeof(int32_t), stream) != ACL_SUCCESS) {
+        return TILEXR_MOONEP_ERROR_INTERNAL;
+    }
+
     DispatchUrmaLaunchParams params {};
     params.commArgs = devArgs;
     params.dst = static_cast<const int32_t *>(args->plan->dst);
@@ -463,6 +470,18 @@ int TileXRMoonEpRunDispatchUrmaV1(const TileXRMoonEpDispatchArgsV1 *args,
     params.output = args->routeWeightsNvs->data;
     params.mode = DispatchPayloadMode::RouteWeight;
     return MapLaunchStatus(TileXRMoonEpLaunchDispatchUrmaKernel(params));
+}
+
+int TileXRMoonEpRunDispatchUrmaV1(const TileXRMoonEpDispatchArgsV1 *args,
+    aclrtStream stream)
+{
+    return RunDispatchUrma(args, stream, false);
+}
+
+int TileXRMoonEpRunDispatchUrmaV2(const TileXRMoonEpDispatchArgsV2 *args,
+    aclrtStream stream)
+{
+    return RunDispatchUrma(args, stream, true);
 }
 
 } // namespace TileXRMoonEp

@@ -17,6 +17,8 @@ int TileXRMoonEpQueryDispatchUrmaWorkspace(TileXRCommPtr comm, int64_t s,
     uint64_t *workspaceAlignment);
 int TileXRMoonEpRunDispatchUrmaV1(
     const TileXRMoonEpDispatchArgsV1 *args, aclrtStream stream);
+int TileXRMoonEpRunDispatchUrmaV2(
+    const TileXRMoonEpDispatchArgsV2 *args, aclrtStream stream);
 int TileXRMoonEpRunCombineV1(
     const TileXRMoonEpCombineArgsV1 *args, aclrtStream stream);
 int TileXRMoonEpRunPrefetchWeightV1(
@@ -326,6 +328,26 @@ extern "C" int TileXRMoonEpDispatchGetWorkspaceSizeV1(TileXRCommPtr comm,
 {
     return TileXRMoonEp::TileXRMoonEpQueryDispatchUrmaWorkspace(
         comm, s, k, h, hiddenDtype, workspaceBytes, workspaceAlignment);
+}
+
+extern "C" int TileXRMoonEpDispatchGetWorkspaceSizeV2(TileXRCommPtr comm,
+    int64_t s, int64_t k, int64_t h, uint32_t hiddenDtype,
+    uint64_t *workspaceBytes, uint64_t *workspaceAlignment)
+{
+    return TileXRMoonEp::TileXRMoonEpQueryDispatchUrmaWorkspace(
+        comm, s, k, h, hiddenDtype, workspaceBytes, workspaceAlignment);
+}
+
+extern "C" int TileXRMoonEpDispatchV2(const TileXRMoonEpDispatchArgsV2 *args,
+    aclrtStream stream)
+{
+    if (args == nullptr || args->structSize < sizeof(*args) ||
+        args->abiVersion != TILEXR_MOONEP_ABI_VERSION_V2 ||
+        args->registeredWorkspace == nullptr ||
+        args->registeredWorkspaceBytes == 0) {
+        return TILEXR_MOONEP_ERROR_INVALID_ARGUMENT;
+    }
+    return TileXRMoonEp::TileXRMoonEpRunDispatchUrmaV2(args, stream);
 }
 
 extern "C" int TileXRMoonEpPrefetchWeightV1(

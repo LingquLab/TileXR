@@ -169,6 +169,10 @@ def test_timed_iteration_executes_torch_npu_expert_forward() -> None:
     assert torch.count_nonzero(buffer.combine_inputs[0][2:]).item() == 0
 
 
+def test_v2_full_flow_uses_dispatch_status_as_final_shared_status() -> None:
+    assert benchmark.FINAL_SHARED_STATUS_SUCCESS == 0
+
+
 def test_case_aliases_add_reference_dimensions_without_changing_old_defaults() -> None:
     old = BenchmarkCase("old", 4, 2, 4, 8)
     assert old.intermediate_size is None

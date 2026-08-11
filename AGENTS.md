@@ -56,6 +56,7 @@ Optional CMake switches are `TILEXR_BUILD_COLLECTIVES`, `TILEXR_BUILD_EP`, `TILE
 - Ring a UDMA doorbell only with `st_dev`, after the corresponding MTE3 WQE write has completed. Scalar stores must never be used for doorbells.
 - Never put `${ASCEND_HOME_PATH}/${ARCH}-linux/devlib` in runtime RPATH/RUNPATH; runtime must resolve the real driver HAL.
 - Never use Host wrappers that launch Ascend C kernels with `kernel<<<...>>>` syntax. Build and embed pure AICore binaries, register them with `rtDevBinaryRegister` and `rtFunctionRegister`, then launch the registered signature with `rtKernelLaunchWithFlagV2`.
+- MoonEP source changes must preserve the API contract consumed by `tools/moonep/test_npu_e2e.py`; do not change that test's calls to accommodate an implementation change. Preserve the `Buffer` and `MoonEPCommPlan` names, method signatures and keyword arguments, return tuple arity and order, exposed plan fields, and async-event and zero-copy call contracts exercised by the test.
 - Host, simulator, and 910B fallback tests do not prove UDMA data-plane transfer. Keep validation claims scoped to the hardware actually exercised.
 
 <!-- karpathy-guidelines:start -->

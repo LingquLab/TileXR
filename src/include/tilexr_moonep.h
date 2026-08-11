@@ -115,6 +115,12 @@ typedef struct TileXRMoonEpDispatchArgsV1 {
     uint64_t registeredWorkspaceBytes;
 } TileXRMoonEpDispatchArgsV1;
 
+/*
+ * V2 preserves the tensor and plan descriptors while requiring the registered
+ * workspace path. It never falls back to the legacy peer-memory kernel.
+ */
+typedef TileXRMoonEpDispatchArgsV1 TileXRMoonEpDispatchArgsV2;
+
 typedef struct TileXRMoonEpPrefetchWeightArgsV1 {
     uint32_t structSize;
     uint32_t abiVersion;
@@ -131,6 +137,7 @@ typedef struct TileXRMoonEpCombineArgsV1 {
     uint32_t abiVersion;
     TileXRCommPtr comm;
     const TileXRMoonEpPlanV1 *plan;
+    const int32_t *dstLocal;
     const TileXRMoonEpTensorV1 *hiddenNvsh;
     const TileXRMoonEpTensorV1 *routeWeightsNvs;
     TileXRMoonEpTensorV1 *hiddenSh;
@@ -206,6 +213,12 @@ int TileXRMoonEpDispatchGetWorkspaceSizeV1(TileXRCommPtr comm, int64_t s,
     uint64_t *workspaceAlignment);
 
 int TileXRMoonEpDispatchV1(const TileXRMoonEpDispatchArgsV1 *args, aclrtStream stream);
+
+int TileXRMoonEpDispatchGetWorkspaceSizeV2(TileXRCommPtr comm, int64_t s,
+    int64_t k, int64_t h, uint32_t hiddenDtype, uint64_t *workspaceBytes,
+    uint64_t *workspaceAlignment);
+
+int TileXRMoonEpDispatchV2(const TileXRMoonEpDispatchArgsV2 *args, aclrtStream stream);
 
 int TileXRMoonEpPrefetchWeightV1(const TileXRMoonEpPrefetchWeightArgsV1 *args,
     aclrtStream stream);

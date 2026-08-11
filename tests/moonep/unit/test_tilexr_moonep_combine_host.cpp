@@ -116,6 +116,7 @@ TileXRMoonEpCombineArgsV1 Args(const TileXRMoonEpPlanV1 *plan,
     args.abiVersion = TILEXR_MOONEP_ABI_VERSION_V1;
     args.comm = reinterpret_cast<TileXRCommPtr>(uintptr_t {0x1000});
     args.plan = plan;
+    args.dstLocal = reinterpret_cast<const int32_t *>(uintptr_t {0x3800});
     args.hiddenNvsh = hiddenNvsh;
     args.routeWeightsNvs = weightsNvs;
     args.hiddenSh = hiddenSh;
@@ -137,14 +138,15 @@ void TestPairedLaunch()
     TileXRMoonEpTensorV1 weightsSk = Tensor(reinterpret_cast<void *>(uintptr_t {0x7000}),
         TILEXR_MOONEP_DTYPE_FLOAT32, 2, 2, 2, 4);
     TileXRMoonEpCombineArgsV1 args = Args(&plan, &hiddenNvsh, &weightsNvs,
-        &hiddenSh, &weightsSk, TILEXR_MOONEP_FLAG_SKIP_INTER_RANK_SYNC);
+        &hiddenSh, &weightsSk, TILEXR_MOONEP_FLAG_NONE);
     aclrtStream stream = reinterpret_cast<aclrtStream>(uintptr_t {0x8000});
 
     CheckStatus("paired combine", TileXRMoonEp::TileXRMoonEpRunCombineV1(&args, stream),
         TILEXR_MOONEP_SUCCESS);
     Check(hostCalls == 1 && devCalls == 1 && magicCalls == 1 && launchCalls == 1,
         "paired combine call counts mismatch");
-    Check(launchedParams.dst == plan.dst && launchedParams.dupGroups == plan.dupGroups &&
+    Check(launchedParams.dstLocal == args.dstLocal &&
+        launchedParams.dst == plan.dst && launchedParams.dupGroups == plan.dupGroups &&
         launchedParams.dupLoffs == plan.dupLoffs && launchedParams.dupCounts == plan.dupCounts &&
         launchedParams.hiddenNvsh == hiddenNvsh.data && launchedParams.hiddenSh == hiddenSh.data &&
         launchedParams.routeWeightsNvs == weightsNvs.data &&
@@ -182,6 +184,10 @@ void TestValidationAndFailures()
     CheckStatus("unpaired weights", TileXRMoonEp::TileXRMoonEpRunCombineV1(&args, stream),
         TILEXR_MOONEP_ERROR_INVALID_ARGUMENT);
     args.routeWeightsNvs = nullptr;
+    args.dstLocal = nullptr;
+    CheckStatus("missing reverse route", TileXRMoonEp::TileXRMoonEpRunCombineV1(
+        &args, stream), TILEXR_MOONEP_ERROR_INVALID_ARGUMENT);
+    args.dstLocal = reinterpret_cast<const int32_t *>(uintptr_t {0x3800});
     args.flags = TILEXR_MOONEP_FLAG_BUILD_DEDUP;
     CheckStatus("build dedup", TileXRMoonEp::TileXRMoonEpRunCombineV1(&args, stream),
         TILEXR_MOONEP_ERROR_INVALID_ARGUMENT);
@@ -234,7 +240,7 @@ void TestValidationAndFailures()
     CheckStatus("launch error", TileXRMoonEp::TileXRMoonEpRunCombineV1(&args, stream), -54);
 }
 
-void TestSplitPhaseLaunch()
+void TestSplitPhaseRejected()
 {
     Reset();
     TileXRMoonEpPlanV1 plan = ValidPlan();
@@ -247,17 +253,13 @@ void TestSplitPhaseLaunch()
     aclrtStream stream = reinterpret_cast<aclrtStream>(uintptr_t {0x8000});
 
     CheckStatus("publish-only launch", TileXRMoonEp::TileXRMoonEpRunCombineV1(
-        &args, stream), TILEXR_MOONEP_SUCCESS);
-    Check(launchCalls == 1 && launchedParams.flags ==
-        TILEXR_MOONEP_FLAG_COMBINE_PUBLISH_ONLY,
-        "publish-only flags were not forwarded");
+        &args, stream), TILEXR_MOONEP_ERROR_INVALID_ARGUMENT);
+    Check(launchCalls == 0, "publish-only unexpectedly launched a kernel");
 
     args.flags = TILEXR_MOONEP_FLAG_COMBINE_CONSUME_ONLY;
     CheckStatus("consume-only launch", TileXRMoonEp::TileXRMoonEpRunCombineV1(
-        &args, stream), TILEXR_MOONEP_SUCCESS);
-    Check(launchCalls == 2 && launchedParams.flags ==
-        TILEXR_MOONEP_FLAG_COMBINE_CONSUME_ONLY,
-        "consume-only flags were not forwarded");
+        &args, stream), TILEXR_MOONEP_ERROR_INVALID_ARGUMENT);
+    Check(launchCalls == 0, "consume-only unexpectedly launched a kernel");
 }
 
 } // namespace
@@ -300,6 +302,6 @@ int main()
 {
     TestPairedLaunch();
     TestValidationAndFailures();
-    TestSplitPhaseLaunch();
+    TestSplitPhaseRejected();
     return failures == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
 }

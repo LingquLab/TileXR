@@ -54,13 +54,21 @@ int main()
         "Unexpected DispatchArgsV1 registered workspace offset");
     static_assert(offsetof(TileXRMoonEpDispatchArgsV1, registeredWorkspaceBytes) == 72,
         "Unexpected DispatchArgsV1 registered workspace size offset");
+    static_assert(std::is_standard_layout<TileXRMoonEpDispatchArgsV2>::value,
+        "Dispatch V2 args must be standard layout");
+    static_assert(sizeof(TileXRMoonEpDispatchArgsV2) == 80,
+        "Unexpected DispatchArgsV2 size");
+    static_assert(offsetof(TileXRMoonEpDispatchArgsV2, registeredWorkspace) == 64,
+        "Unexpected DispatchArgsV2 registered workspace offset");
     static_assert(sizeof(TileXRMoonEpPrefetchWeightArgsV1) == 56,
         "Unexpected PrefetchWeightArgsV1 size");
     static_assert(offsetof(TileXRMoonEpPrefetchWeightArgsV1, gate) == 24,
         "Unexpected PrefetchWeightArgsV1 gate offset");
-    static_assert(sizeof(TileXRMoonEpCombineArgsV1) == 64,
+    static_assert(sizeof(TileXRMoonEpCombineArgsV1) == 72,
         "Unexpected CombineArgsV1 size");
-    static_assert(offsetof(TileXRMoonEpCombineArgsV1, hiddenNvsh) == 24,
+    static_assert(offsetof(TileXRMoonEpCombineArgsV1, dstLocal) == 24,
+        "Unexpected CombineArgsV1 reverse-route offset");
+    static_assert(offsetof(TileXRMoonEpCombineArgsV1, hiddenNvsh) == 32,
         "Unexpected CombineArgsV1 hidden input offset");
     static_assert(sizeof(TileXRMoonEpReduceGradArgsV1) == 48,
         "Unexpected ReduceGradArgsV1 size");

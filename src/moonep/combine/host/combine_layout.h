@@ -16,14 +16,25 @@ struct CombineLayout {
     int64_t nvS = 0;
     int64_t hiddenSize = 0;
     int64_t blockDim = 0;
+    int64_t stepCount = 0;
+    int64_t sourcesPerCore = 0;
     int64_t chunkCount = 0;
     uint64_t flags = 0;
     uint64_t hiddenRowBytes = 0;
     uint64_t hiddenChunkBytes = 0;
     uint64_t hiddenChunkStride = 0;
+    uint64_t sourceHiddenOffset = 0;
     uint64_t hiddenPayloadBytes = 0;
-    uint64_t routeWeightsOffset = 0;
+    uint64_t receiveHiddenOffset = 0;
+    uint64_t sourceWeightsOffset = 0;
+    uint64_t receiveWeightsOffset = 0;
     uint64_t routeWeightsBytes = 0;
+    uint64_t duplicateMaskOffset = 0;
+    uint64_t duplicateMaskBytes = 0;
+    uint64_t doneOffset = 0;
+    uint64_t doneBytes = 0;
+    uint64_t coreStatusOffset = 0;
+    uint64_t coreStatusBytes = 0;
     uint64_t windowBytes = 0;
 };
 

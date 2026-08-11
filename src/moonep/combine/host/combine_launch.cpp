@@ -22,6 +22,7 @@ int TileXRMoonEpLaunchCombineKernel(
 {
     struct CombineKernelArgs {
         GM_ADDR commArgs;
+        GM_ADDR dstLocal;
         GM_ADDR dst;
         GM_ADDR dupGroups;
         GM_ADDR dupLoffs;
@@ -39,14 +40,22 @@ int TileXRMoonEpLaunchCombineKernel(
         int64_t hiddenChunkBytes;
         int64_t hiddenChunkStride;
         int64_t chunkCount;
+        uint64_t sourceHiddenOffset;
+        uint64_t receiveHiddenOffset;
         uint64_t hiddenPayloadBytes;
-        uint64_t routeWeightsOffset;
+        uint64_t sourceWeightsOffset;
+        uint64_t receiveWeightsOffset;
         uint64_t routeWeightsBytes;
+        uint64_t duplicateMaskOffset;
+        uint64_t doneOffset;
+        uint64_t coreStatusOffset;
+        uint64_t windowBytes;
         uint64_t waitIterations;
         uint64_t flags;
         int64_t magic;
     } args {
         static_cast<GM_ADDR>(context.devArgs),
+        reinterpret_cast<GM_ADDR>(const_cast<int32_t *>(params.dstLocal)),
         reinterpret_cast<GM_ADDR>(const_cast<int32_t *>(params.dst)),
         reinterpret_cast<GM_ADDR>(const_cast<int32_t *>(params.dupGroups)),
         reinterpret_cast<GM_ADDR>(const_cast<int32_t *>(params.dupLoffs)),
@@ -60,8 +69,12 @@ int TileXRMoonEpLaunchCombineKernel(
         static_cast<int64_t>(context.layout.hiddenRowBytes),
         static_cast<int64_t>(context.layout.hiddenChunkBytes),
         static_cast<int64_t>(context.layout.hiddenChunkStride), context.layout.chunkCount,
-        context.layout.hiddenPayloadBytes, context.layout.routeWeightsOffset,
-        context.layout.routeWeightsBytes, context.waitIterations, params.flags,
+        context.layout.sourceHiddenOffset, context.layout.receiveHiddenOffset,
+        context.layout.hiddenPayloadBytes, context.layout.sourceWeightsOffset,
+        context.layout.receiveWeightsOffset, context.layout.routeWeightsBytes,
+        context.layout.duplicateMaskOffset, context.layout.doneOffset,
+        context.layout.coreStatusOffset, context.layout.windowBytes,
+        context.waitIterations, params.flags,
         context.magic
     };
 

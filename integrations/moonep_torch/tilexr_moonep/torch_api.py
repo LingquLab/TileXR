@@ -953,7 +953,8 @@ class TileXRMoonEPBuffer:
             else None
         )
         self._retain(plan, hidden_nvsh, hidden_sh, route_weights_nvs, route_weights_sk)
-        self._trace_stage("combine_v2_launch_begin")
+        combine_version = int(getattr(self.runtime, "combine_version", 2))
+        self._trace_stage(f"combine_v{combine_version}_launch_begin")
         self.runtime.combine(
             c,
             plan,
@@ -967,7 +968,9 @@ class TileXRMoonEPBuffer:
             registered_workspace=self.context.dispatch_workspace[0],
             registered_workspace_bytes=self.context.dispatch_workspace[1],
         )
-        self._trace_stage("combine_v2_launch_end")
+        self._trace_stage(f"combine_v{combine_version}_launch_end")
+        if combine_version == 1:
+            self._expect_status(plan, 0)
         event = self._record_event() if async_finish else None
         return hidden_sh, route_weights_sk, event
 

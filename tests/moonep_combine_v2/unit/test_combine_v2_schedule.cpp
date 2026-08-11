@@ -164,6 +164,10 @@ void TestTokensAndShapes()
         kMoonEpCombineV2SmallSlots), "small shape rejected");
     Check(MoonEpCombineV2ShapeValid(256, 1024, 4, 2040),
         "PR113 shape rejected");
+    Check(MoonEpCombineV2ReduceInputStrideElements(8U) == 16U,
+        "short BF16 reduction rows must use a 32-byte UB stride");
+    Check(MoonEpCombineV2ReduceInputStrideElements(4096U) == 4096U,
+        "aligned BF16 reduction rows changed stride");
     Check(!MoonEpCombineV2ShapeValid(256, 1024, 4, 1023),
         "undersized NvS accepted");
 

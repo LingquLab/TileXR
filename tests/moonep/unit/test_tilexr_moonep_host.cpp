@@ -22,6 +22,7 @@ int queryCalls = 0;
 int plannerCalls = 0;
 int dispatchCalls = 0;
 int dispatchUrmaCalls = 0;
+int dispatchUrmaV2Calls = 0;
 int dispatchWorkspaceQueryCalls = 0;
 int combineCalls = 0;
 int prefetchCalls = 0;
@@ -71,6 +72,7 @@ void Reset()
         TILEXR_MOONEP_SUCCESS;
     prefetchReturn = TILEXR_MOONEP_SUCCESS;
     queryCalls = plannerCalls = dispatchCalls = dispatchUrmaCalls =
+        dispatchUrmaV2Calls =
         dispatchWorkspaceQueryCalls = combineCalls = prefetchCalls = 0;
     queryWorkspaceBytes = 512;
     queryNvS = 12;
@@ -205,6 +207,11 @@ void TestWorkspaceQuery()
         &dispatchBytes, &dispatchAlignment), TILEXR_MOONEP_SUCCESS);
     Check(dispatchWorkspaceQueryCalls == 1 && dispatchBytes == 4096 &&
         dispatchAlignment == 2097152, "dispatch workspace query delegation mismatch");
+    CheckStatus("dispatch V2 workspace query", TileXRMoonEpDispatchGetWorkspaceSizeV2(
+        comm, 2, 2, 64, TILEXR_MOONEP_DTYPE_BFLOAT16,
+        &dispatchBytes, &dispatchAlignment), TILEXR_MOONEP_SUCCESS);
+    Check(dispatchWorkspaceQueryCalls == 2,
+        "dispatch V2 workspace query delegation mismatch");
 }
 
 void TestPlanningDelegation()
@@ -277,6 +284,23 @@ void TestStageDelegation()
         dispatchUrmaReturn);
     Check(dispatchCalls == 1 && dispatchUrmaCalls == 1 &&
         seenDispatchUrma == &dispatch, "URMA dispatch selection mismatch");
+
+    TileXRMoonEpDispatchArgsV2 dispatchV2 {};
+    dispatchV2.structSize = sizeof(dispatchV2);
+    dispatchV2.abiVersion = TILEXR_MOONEP_ABI_VERSION_V2;
+    CheckStatus("V2 dispatch requires workspace",
+        TileXRMoonEpDispatchV2(&dispatchV2, stream),
+        TILEXR_MOONEP_ERROR_INVALID_ARGUMENT);
+    Check(dispatchUrmaCalls == 1,
+        "invalid V2 dispatch must not reach the URMA implementation");
+    dispatchV2.registeredWorkspace =
+        reinterpret_cast<void *>(uintptr_t {0x800000});
+    dispatchV2.registeredWorkspaceBytes = 2097152;
+    CheckStatus("V2 dispatch", TileXRMoonEpDispatchV2(&dispatchV2, stream),
+        dispatchUrmaReturn);
+    Check(dispatchUrmaCalls == 1 && dispatchUrmaV2Calls == 1 &&
+        seenDispatchUrma == &dispatchV2,
+        "V2 dispatch must select the URMA implementation");
 
     TileXRMoonEpCombineArgsV1 combine {};
     combine.structSize = sizeof(combine);
@@ -383,6 +407,14 @@ int TileXRMoonEpRunDispatchUrmaV1(
     const TileXRMoonEpDispatchArgsV1 *args, aclrtStream)
 {
     ++dispatchUrmaCalls;
+    seenDispatchUrma = args;
+    return dispatchUrmaReturn;
+}
+
+int TileXRMoonEpRunDispatchUrmaV2(
+    const TileXRMoonEpDispatchArgsV2 *args, aclrtStream)
+{
+    ++dispatchUrmaV2Calls;
     seenDispatchUrma = args;
     return dispatchUrmaReturn;
 }

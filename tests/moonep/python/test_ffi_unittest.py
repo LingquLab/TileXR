@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import ctypes
+import os
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -17,6 +20,7 @@ from tilexr_moonep import ProjectionBuffers, TileXRMoonEPBuffer, TileXRMoonEPCon
 from tilexr_moonep.abi import (
     TileXRMoonEPCombineArgsV1,
     TileXRMoonEPDispatchArgsV1,
+    TileXRMoonEPDispatchArgsV2,
     TileXRMoonEPPlanV1,
     TileXRMoonEPPlanningArgsV1,
     TileXRMoonEPPrefetchWeightArgsV1,
@@ -253,20 +257,46 @@ class FakeCDLLLoader:
         library.TileXRMoonEpGetCapabilitiesV1 = FakeFunction(capabilities)
         library.TileXRMoonEpGetCapabilitiesV2 = FakeFunction(capabilities)
         library.TileXRMoonEpPlanningGetWorkspaceSizeV1 = FakeFunction(workspace)
-        library.TileXRMoonEpDispatchGetWorkspaceSizeV1 = FakeFunction(dispatch_workspace)
+        library.TileXRMoonEpDispatchGetWorkspaceSizeV2 = FakeFunction(dispatch_workspace)
         library.TileXRMoonEpPlanningV1 = FakeFunction(planning)
         for name, args_type in (
-            ("dispatch", TileXRMoonEPDispatchArgsV1),
+            ("dispatch", TileXRMoonEPDispatchArgsV2),
             ("prefetch_weight", TileXRMoonEPPrefetchWeightArgsV1),
         ):
             setattr(
                 library,
                 {
-                    "dispatch": "TileXRMoonEpDispatchV1",
+                    "dispatch": "TileXRMoonEpDispatchV2",
                     "prefetch_weight": "TileXRMoonEpPrefetchWeightV1",
                 }[name],
                 FakeFunction(self._stage_callback(name, args_type)),
             )
+
+        def combine_v1(args_ptr, stream):
+            args = ctypes.cast(
+                args_ptr, ctypes.POINTER(TileXRMoonEPCombineArgsV1)
+            ).contents
+            plan = args.plan.contents
+            self.stage_records.append({
+                "name": "combine_v1",
+                "stream": stream.value,
+                "flags": args.flags,
+                "plan_capacity": plan.nvS,
+                "dst_local": int(args.dstLocal),
+                "shapes": {
+                    name: None if not getattr(args, name) else tuple(
+                        getattr(args, name).contents.shape[
+                            : getattr(args, name).contents.rank
+                        ]
+                    )
+                    for name in (
+                        "hiddenNvsh", "routeWeightsNvs", "hiddenSh", "routeWeightsSk"
+                    )
+                },
+            })
+            return 0
+
+        library.TileXRMoonEpCombineV1 = FakeFunction(combine_v1)
         def reduce_grad_query(query_ptr, info_ptr):
             query = ctypes.cast(
                 query_ptr, ctypes.POINTER(TileXRMoonEPReduceGradWorkspaceQueryV2)
@@ -330,6 +360,7 @@ class FakeCDLLLoader:
                 "name": name,
                 "stream": stream.value,
                 "flags": args.flags,
+                "abi_version": args.abiVersion,
                 "plan_capacity": plan.nvS,
                 "shapes": shapes,
             })
@@ -339,9 +370,16 @@ class FakeCDLLLoader:
 
     def __call__(self, path, mode):
         self.loads.append((str(path), mode))
-        return (self.comm, self.planner, self.combine_v2, self.moonep)[
-            len(self.loads) - 1
-        ]
+        name = Path(path).name
+        if name == "libtile-comm.so":
+            return self.comm
+        if "planner" in name:
+            return self.planner
+        if "combine-v2" in name:
+            return self.combine_v2
+        if "moonep" in name:
+            return self.moonep
+        raise AssertionError(f"unexpected library path {path}")
 
 
 def tensor(shape, dtype):
@@ -354,8 +392,10 @@ class FfiAbiTests(unittest.TestCase):
         self.assertEqual(ctypes.sizeof(TileXRMoonEPPlanV1), 120)
         self.assertEqual(ctypes.sizeof(TileXRMoonEPPlanningArgsV1), 80)
         self.assertEqual(ctypes.sizeof(TileXRMoonEPDispatchArgsV1), 80)
+        self.assertEqual(ctypes.sizeof(TileXRMoonEPDispatchArgsV2), 80)
         self.assertEqual(ctypes.sizeof(TileXRMoonEPPrefetchWeightArgsV1), 56)
-        self.assertEqual(ctypes.sizeof(TileXRMoonEPCombineArgsV1), 64)
+        self.assertEqual(ctypes.sizeof(TileXRMoonEPCombineArgsV1), 72)
+        self.assertEqual(TileXRMoonEPCombineArgsV1.dstLocal.offset, 24)
         self.assertEqual(ctypes.sizeof(TileXRMoonEPReduceGradArgsV1), 48)
         self.assertEqual(ctypes.sizeof(TileXRMoonEPReduceGradWorkspaceQueryV2), 64)
         self.assertEqual(ctypes.sizeof(TileXRMoonEPReduceGradWorkspaceInfoV2), 96)
@@ -368,6 +408,88 @@ class FfiAbiTests(unittest.TestCase):
         self.assertEqual(TileXRMoonEPDispatchArgsV1.flags.offset, 56)
         self.assertEqual(TileXRMoonEPDispatchArgsV1.registeredWorkspace.offset, 64)
         self.assertEqual(TileXRMoonEPDispatchArgsV1.registeredWorkspaceBytes.offset, 72)
+        self.assertEqual(TileXRMoonEPDispatchArgsV2.registeredWorkspace.offset, 64)
+
+    def test_invalid_combine_version_fails_before_library_load(self):
+        loader = FakeCDLLLoader()
+        with patch.dict(os.environ, {"TILEXR_MOONEP_COMBINE_VERSION": "3"}):
+            with self.assertRaisesRegex(ValueError, "TILEXR_MOONEP_COMBINE_VERSION"):
+                TileXRMoonEPRuntime(
+                    rank=0,
+                    world_size=2,
+                    library_paths={
+                        "comm": "libtile-comm.so",
+                        "planner": "libtilexr-moonep-planner.so",
+                        "combine_v2": "libtilexr-moonep-combine-v2.so.2",
+                        "moonep": "libtilexr-moonep.so.1",
+                    },
+                    cdll_loader=loader,
+                )
+        self.assertEqual(loader.loads, [])
+
+    def test_explicit_combine_v1_uses_one_descriptor_call(self):
+        loader = FakeCDLLLoader()
+        with patch.dict(os.environ, {"TILEXR_MOONEP_COMBINE_VERSION": "1"}):
+            runtime = TileXRMoonEPRuntime(
+                rank=0,
+                world_size=2,
+                library_paths={
+                    "comm": "libtile-comm.so",
+                    "planner": "libtilexr-moonep-planner.so",
+                    "combine_v2": "libtilexr-moonep-combine-v2.so.2",
+                    "moonep": "libtilexr-moonep.so.1",
+                },
+                cdll_loader=loader,
+            )
+        torch = FakeTorch()
+        context = SimpleNamespace(
+            tokens_per_rank=4,
+            hidden_size=8,
+            topk=2,
+            expert_count=4,
+            prefetch_slots=2,
+            nv_s=12,
+            dtype=torch.bfloat16,
+        )
+        plan = SimpleNamespace(
+            n=8,
+            rank_size=2,
+            expert_count=4,
+            prefetch_slots=2,
+            nv_s=12,
+            topk=2,
+            dst=tensor((8,), torch.int32),
+            experts_to_copy=tensor((4,), torch.int32),
+            zero_fill_ranges=tensor((6, 2), torch.int32),
+            remote_stats=tensor((2,), torch.int32),
+            dup_groups=tensor((12, 3), torch.int32),
+            dup_loffs=tensor((12,), torch.int32),
+            dup_counts=tensor((2,), torch.int32),
+            status=tensor((1,), torch.int32),
+            workspace=tensor((256,), torch.uint8),
+            dst_local_offset=128,
+        )
+        runtime.combine(
+            context,
+            plan,
+            tensor((12, 8), torch.bfloat16),
+            tensor((4, 8), torch.bfloat16),
+            0xCAFE,
+            tensor((12,), torch.float32),
+            tensor((4, 2), torch.float32),
+            inter_rank_sync=True,
+        )
+        self.assertEqual(runtime.combine_version, 1)
+        self.assertNotIn(
+            "libtilexr-moonep-combine-v2.so.2",
+            [Path(path).name for path, _ in loader.loads],
+        )
+        records = [record for record in loader.stage_records if record["name"] == "combine_v1"]
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["dst_local"], plan.workspace.data_ptr() + 128)
+        self.assertEqual(records[0]["shapes"]["hiddenNvsh"], (12, 8))
+        self.assertEqual(records[0]["shapes"]["routeWeightsSk"], (4, 2))
+        runtime.close()
 
     def test_fake_cdll_receives_v1_descriptors_and_combine_v2_pointers(self):
         loader = FakeCDLLLoader()
@@ -495,6 +617,8 @@ class FfiAbiTests(unittest.TestCase):
         )
         self.assertTrue(all(record["stream"] == 0xCAFE for record in loader.stage_records))
         self.assertEqual(loader.stage_records[0]["flags"], 0)
+        self.assertEqual(loader.stage_records[0]["abi_version"], 2)
+        self.assertEqual(loader.stage_records[1]["abi_version"], 2)
         self.assertTrue(all(record["flags"] == 0 for record in loader.stage_records[1:]))
         self.assertEqual(loader.stage_records[0]["shapes"]["hiddenNvsh"], (12, 8))
         self.assertEqual(loader.stage_records[0]["shapes"]["routeWeightsNvs"], (12,))
