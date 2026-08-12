@@ -36,6 +36,11 @@ cmake --install build
 
 Optional CMake switches are `TILEXR_BUILD_COLLECTIVES`, `TILEXR_BUILD_EP`, `TILEXR_BUILD_TESTS`, and `TILEXR_BUILD_CHECKER`. Run focused tests for the changed module; use [docs/BUILD_VERIFICATION.md](docs/BUILD_VERIFICATION.md) for build and hardware validation details. The complete script catalog is in [scripts/README.md](scripts/README.md).
 
+## Debugging
+
+- Before debugging TileXR, read [docs/moonep/MINDSPEED_DEBUGGING_EXPERIENCE.md](docs/moonep/MINDSPEED_DEBUGGING_EXPERIENCE.md) and use its evidence-driven workflow, test ladder, and state, queue, and ownership checklists to guide the investigation.
+- Treat the historical root causes in that document as hypotheses rather than conclusions. Reproduce the current failure, identify the first failing boundary, and verify the actual source and binary provenance before changing code.
+
 ## Architecture
 
 - `src/comm` builds `libtile-comm.so`, owns communicator setup, peer mappings, capability flags, and `CommArgs`, and exposes the core API through `tilexr_api.h`.

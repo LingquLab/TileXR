@@ -131,6 +131,14 @@ int main()
     Contains("host", host, "aclrtMemcpyAsync");
     Contains("host", host, "ACL_MEMCPY_DEVICE_TO_DEVICE");
     Excludes("host", host, "aclrtSynchronizeStream");
+    Contains("URMA dispatch Host", dispatchUrmaHost,
+        "TILEXR_MOONEP_FLAG_RESET_STATUS");
+    CheckOrdered("URMA dispatch status reset", dispatchUrmaHost, {
+        "for (uint32_t lhs = 0; lhs < rangeCount; ++lhs)",
+        "DispatchUrmaLaunchParams params {}",
+        "aclrtMemsetAsync(args->plan->status",
+        "TileXRMoonEpLaunchDispatchUrmaKernel(params)",
+    });
 
     Contains("CMake", cmake, "add_library(tilexr-moonep SHARED");
     Contains("CMake", cmake, "SOVERSION 1");
@@ -175,6 +183,62 @@ int main()
         "ClearDispatchZeroFillRanges");
     Contains("URMA dispatch kernel", dispatchUrmaKernel, "udmaIssueQp0Buf");
     Contains("URMA dispatch kernel", dispatchUrmaKernel, "udmaIssueQp1Buf");
+    Contains("URMA dispatch kernel", dispatchUrmaKernel,
+        "uint32_t completionCount;");
+    Contains("URMA dispatch kernel", dispatchUrmaKernel,
+        "state.outstanding = state.head - state.tail;");
+    Contains("URMA dispatch kernel", dispatchUrmaKernel,
+        "state.completionCount += 1U;");
+    Contains("URMA dispatch kernel", dispatchUrmaKernel,
+        "DispatchGroupedBatchNeedsCompletion(batchCount)");
+    Contains("URMA dispatch kernel", dispatchUrmaKernel,
+        "routeId - context->routePlanStart");
+    Contains("URMA dispatch kernel", dispatchUrmaKernel,
+        "DispatchRouteTileCount(");
+    Contains("URMA dispatch kernel", dispatchUrmaKernel,
+        "useVectorSlotSelect && !groupedPeerMode");
+    Contains("URMA dispatch kernel", dispatchUrmaKernel,
+        "LoadDispatchPlanStatus(planStatus, relayLocal)");
+    Contains("URMA dispatch kernel", dispatchUrmaKernel,
+        "SyncFunc<AscendC::HardEvent::MTE2_S>()");
+    CheckOrdered("URMA dispatch signal publication", dispatchUrmaKernel, {
+        "PublishDispatchSignalSource(",
+        "signalLocal.SetValue(",
+        "SyncFunc<AscendC::HardEvent::S_MTE3>()",
+        "AscendC::DataCopyPad(signalGlobal, signalLocal, copyOut)",
+        "SyncFunc<AscendC::HardEvent::MTE3_S>()",
+        "TileXR::UDMACleanCacheLines(",
+    });
+    CheckOrdered("URMA dispatch completion flag cache invalidation",
+        dispatchUrmaKernel, {
+            "LoadCompletionFlag(",
+            "TileXR::UDMACleanCacheLines(",
+            "AscendC::PipeBarrier<PIPE_ALL>()",
+            "return flag[0]",
+        });
+    Excludes("URMA dispatch kernel", dispatchUrmaKernel,
+        "AscendC::DataCopyPad(relayLocal, flagGlobal, copyIn, padIn)");
+    CheckOrdered("URMA dispatch credit cache invalidation",
+        dispatchUrmaKernel, {
+            "LoadDispatchCredit(",
+            "reinterpret_cast<__gm__ uint8_t *>(credit)",
+            "SyncFunc<AscendC::HardEvent::S_MTE2>()",
+            "AscendC::DataCopy(creditLocal, creditGlobal,",
+            "SyncFunc<AscendC::HardEvent::MTE2_S>()",
+        });
+    Excludes("URMA dispatch kernel", dispatchUrmaKernel,
+        "signalSource[qpIdx] = expectedFlag");
+    Excludes("URMA dispatch kernel", dispatchUrmaKernel,
+        "AppendDispatchSignalWqe");
+    Excludes("URMA dispatch kernel", dispatchUrmaKernel,
+        "InvalidateDispatchInboundCache");
+    Excludes("URMA dispatch kernel", dispatchUrmaKernel, "state.wqeCount");
+    Excludes("URMA dispatch kernel", dispatchUrmaKernel,
+        "state.completionCount += batchCount");
+    Contains("URMA dispatch Host", dispatchUrmaHost,
+        "DispatchPeerWqesStreamable");
+    Excludes("URMA dispatch Host", dispatchUrmaHost,
+        "DispatchPeerWqesFitSq");
     Excludes("URMA dispatch kernel", dispatchUrmaKernel, "<<<");
     Contains("combine CMake", combineCmake, "add_library(tilexr-moonep-combine SHARED");
     Contains("combine CMake", combineCmake, "TILEXR_MOONEP_COMBINE_KERNEL_EMBED_CPP");

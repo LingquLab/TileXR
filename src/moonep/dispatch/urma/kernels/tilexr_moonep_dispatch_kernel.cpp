@@ -61,6 +61,7 @@ struct alignas(32) DispatchWqeBatchContext {
     uint32_t rmtTokenValue;
     uint32_t selectedStart;
     uint32_t qpSelection;
+    uint32_t routePlanStart;
 };
 
 constexpr uint32_t kDispatchWqeBatchContextBytes =
@@ -115,7 +116,8 @@ inline void DispatchBuildWriteWqeBatchVf(__ubuf__ uint8_t *wqeBytes,
             const uint32_t routeId = static_cast<uint16_t>(
                 selectedRouteIndices[selectedIndex]);
             const uint64_t targetSlot = static_cast<uint64_t>(
-                static_cast<uint32_t>(dstValues[routeId])) &
+                static_cast<uint32_t>(
+                    dstValues[routeId - context->routePlanStart])) &
                 context->routeCountMask;
             const uint32_t sourceRow = context->hiddenMode != 0U ?
                 AscendC::Simt::UintDiv(routeId, context->topKMagic,
@@ -469,6 +471,33 @@ __aicore__ inline uint32_t SelectDispatchPeerRoutes(
     return static_cast<uint32_t>(selectedCount);
 }
 
+__aicore__ inline bool PrepareDispatchRouteTile(
+    AscendC::GlobalTensor<int32_t> dstGlobal,
+    AscendC::LocalTensor<int32_t> routePlanLocal,
+    AscendC::LocalTensor<int32_t> routeRankLocal,
+    AscendC::LocalTensor<int16_t> routeIndexLocal,
+    uint32_t routeTileStart, uint32_t routeTileCount, uint32_t routeShift)
+{
+    if (routeTileCount == 0U || routeTileStart > INT16_MAX ||
+        routeTileCount > static_cast<uint32_t>(INT16_MAX) + 1U - routeTileStart) {
+        return false;
+    }
+    const uint32_t routePlanDataBytes = routeTileCount * sizeof(int32_t);
+    const AscendC::DataCopyExtParams copyIn {
+        1U, routePlanDataBytes, 0U, 0U, 0U};
+    const AscendC::DataCopyPadExtParams<int32_t> padIn {
+        false, 0U, 0U, 0U};
+    AscendC::DataCopyPad(routePlanLocal, dstGlobal[routeTileStart],
+        copyIn, padIn);
+    SyncFunc<AscendC::HardEvent::MTE2_V>();
+    AscendC::ShiftRight(routeRankLocal, routePlanLocal,
+        static_cast<int32_t>(routeShift), static_cast<int32_t>(routeTileCount));
+    AscendC::CreateVecIndex(routeIndexLocal,
+        static_cast<int16_t>(routeTileStart), routeTileCount);
+    AscendC::PipeBarrier<PIPE_V>();
+    return true;
+}
+
 __aicore__ inline bool BuildDispatchWriteWqeBatch(
     AscendC::LocalTensor<uint8_t> issueLocal,
     AscendC::LocalTensor<int16_t> selectedRouteIndices,
@@ -477,7 +506,7 @@ __aicore__ inline bool BuildDispatchWriteWqeBatch(
     uint64_t rowBytes, uint64_t routeCountMask, uint32_t topKMagic,
     uint32_t topKShift, bool hiddenMode, uint32_t selectedStart, uint32_t tokenCount,
     bool appendSignal, uint64_t signalLocalAddr,
-    uint32_t sequencePhase)
+    uint32_t sequencePhase, uint32_t routePlanStart)
 {
     __ubuf__ uint8_t *issueAddr = reinterpret_cast<__ubuf__ uint8_t *>(
         issueLocal.GetPhyAddr());
@@ -510,6 +539,7 @@ __aicore__ inline bool BuildDispatchWriteWqeBatch(
     context->selectedStart = selectedStart;
     context->qpSelection =
         (state.qpIdx << 2U) | (sequencePhase & 3U);
+    context->routePlanStart = routePlanStart;
 
 #if defined(CATLASS_ARCH) && CATLASS_ARCH == 3510
     AscendC::PipeBarrier<PIPE_ALL>();
@@ -676,7 +706,7 @@ __aicore__ inline bool SubmitDispatchWqeBatch(DispatchWqeBatchState &state,
 
     state.head = batchEndHead;
     state.completionCount = batchEndCompletionCount;
-    state.outstanding += batchCount;
+    state.outstanding = state.head - state.tail;
     state.batchCount = 0U;
     state.batchLimit = TileXRMoonEp::DispatchWqeBatchCount(
         UINT64_MAX, state.head, TileXR::TILEXR_UDMA_SQ_BB_COUNT);
@@ -692,7 +722,7 @@ __aicore__ inline bool AppendDispatchWqes(DispatchWqeBatchState &state,
     uint32_t topKShift, bool hiddenMode, uint32_t selectedRouteCount, bool appendSignal,
     uint64_t signalLocalAddr, uint32_t phase, uint32_t &dfxFlags,
     uint32_t &firstQuietStatus, uint32_t &firstQuietPhase,
-    uint32_t sequencePhase)
+    uint32_t sequencePhase, uint32_t routePlanStart)
 {
     uint32_t selectedStart = 0U;
     bool signalPending = appendSignal;
@@ -715,7 +745,8 @@ __aicore__ inline bool AppendDispatchWqes(DispatchWqeBatchState &state,
                 selectedRouteIndices, dstValues, state, localSourceBase,
                 rowBytes, routeCountMask, topKMagic, topKShift, hiddenMode,
                 selectedStart, tokenCount,
-                appendSignalNow, signalLocalAddr, sequencePhase)) {
+                appendSignalNow, signalLocalAddr, sequencePhase,
+                routePlanStart)) {
             return false;
         }
         state.batchCount += tokenCount + (appendSignalNow ? 1U : 0U);
@@ -804,7 +835,7 @@ __aicore__ inline bool DispatchBuildGroupedQpBatch(
     uint64_t rowBytes, uint64_t routeCountMask, uint32_t topKMagic,
     uint32_t topKShift, bool hiddenMode, uint32_t selectedRouteCount,
     uint32_t &selectedStart, bool &signalPending, uint64_t signalLocalAddr,
-    uint32_t sequencePhase, bool &finalBatch)
+    uint32_t sequencePhase, uint32_t routePlanStart, bool &finalBatch)
 {
     finalBatch = false;
     state.batchCount = 0U;
@@ -827,7 +858,8 @@ __aicore__ inline bool DispatchBuildGroupedQpBatch(
     if (!BuildDispatchWriteWqeBatch(issueLocal, selectedRouteIndices,
             dstValues, state, localSourceBase, rowBytes, routeCountMask,
             topKMagic, topKShift, hiddenMode, selectedStart, tokenCount,
-            appendSignalNow, signalLocalAddr, sequencePhase)) {
+            appendSignalNow, signalLocalAddr, sequencePhase,
+            routePlanStart)) {
         return false;
     }
     state.batchCount = tokenCount + (appendSignalNow ? 1U : 0U);
@@ -846,12 +878,21 @@ __aicore__ inline bool StageDispatchQpBatch(
     uint32_t &firstQuietPhase)
 {
     const uint32_t batchCount = state.batchCount;
-    if (batchCount == 0U || state.doorbellPending != 0U ||
+    if (!TileXRMoonEp::DispatchGroupedBatchNeedsCompletion(batchCount) ||
+        state.doorbellPending != 0U ||
         batchCount > state.batchLimit ||
         !DispatchEnsureSqBatchCapacity(state, batchCount, cqeLocal,
             phase, dfxFlags, firstQuietStatus, firstQuietPhase)) {
         return false;
     }
+
+    __ubuf__ uint8_t *issueAddr = reinterpret_cast<__ubuf__ uint8_t *>(
+        issueLocal.GetPhyAddr());
+    __ubuf__ TileXR::UDMASqeCtx *lastSqe =
+        reinterpret_cast<__ubuf__ TileXR::UDMASqeCtx *>(
+            issueAddr + (batchCount - 1U) * kDispatchUdmaWqeBytes);
+    lastSqe->flag = static_cast<uint32_t>(lastSqe->flag) |
+        TileXR::TILEXR_UDMA_SQE_FLAG_COMPLETION;
 
     __gm__ uint8_t *wqeAddr = reinterpret_cast<__gm__ uint8_t *>(
         state.qpCtxEntry->bufAddr + kDispatchUdmaWqeBytes *
@@ -866,9 +907,8 @@ __aicore__ inline bool StageDispatchQpBatch(
     SyncFunc<AscendC::HardEvent::MTE3_S>();
 
     state.head += batchCount;
-    state.completionCount +=
-        TileXRMoonEp::DispatchBatchNeedsCompletion(finalBatch) ? 1U : 0U;
-    state.outstanding += batchCount;
+    state.completionCount += 1U;
+    state.outstanding = state.head - state.tail;
     state.stagedDoorbellHead = state.head;
     state.doorbellPending = 1U;
     if (finalBatch) {
@@ -916,6 +956,22 @@ __aicore__ inline bool DispatchDrainPeerFinalCq(
         }
     }
     return true;
+}
+
+__aicore__ inline void ProbeDispatchPeerFinalCq(
+    DispatchPreparedPeer &peer, AscendC::LocalTensor<uint8_t> cqeLocal,
+    uint64_t &pollStatuses, uint64_t &remainingSqEntries)
+{
+    pollStatuses = 0U;
+    remainingSqEntries = 0U;
+    for (uint32_t qpIdx = 0U;
+        qpIdx < TileXRMoonEp::kDispatchQpCount; ++qpIdx) {
+        DispatchWqeBatchState &state = peer.qpState[qpIdx];
+        const uint32_t pollStatus = DispatchPollCqBatch(state, cqeLocal);
+        const uint32_t remaining = state.finalHead - state.tail;
+        pollStatuses |= static_cast<uint64_t>(pollStatus) << (qpIdx * 32U);
+        remainingSqEntries |= static_cast<uint64_t>(remaining) << (qpIdx * 32U);
+    }
 }
 
 __aicore__ inline bool DecodeSendDst(int32_t encoded, uint64_t destinationCapacity,
@@ -1033,31 +1089,50 @@ __aicore__ inline void CopyContiguousBytesGmToGmPipelined(
     outputCopyQueue.FreeTensor(pendingLocal);
 }
 
-__aicore__ inline uint64_t LoadCompletionFlag(__gm__ uint64_t *flag,
+__aicore__ inline void PublishDispatchSignalSource(
+    __gm__ uint64_t *signalSource, uint64_t expectedFlag,
     AscendC::LocalTensor<uint8_t> relayLocal)
 {
-    AscendC::GlobalTensor<uint8_t> flagGlobal;
-    flagGlobal.SetGlobalBuffer(reinterpret_cast<__gm__ uint8_t *>(flag));
-    const AscendC::DataCopyExtParams copyIn {
-        1U, static_cast<uint32_t>(sizeof(uint64_t)), 0U, 0U, 0U};
-    const AscendC::DataCopyPadExtParams<uint8_t> padIn {false, 0U, 0U, 0U};
-    AscendC::DataCopyPad(relayLocal, flagGlobal, copyIn, padIn);
-    AscendC::SetFlag<AscendC::HardEvent::MTE2_S>(EVENT_ID0);
-    AscendC::WaitFlag<AscendC::HardEvent::MTE2_S>(EVENT_ID0);
-    return relayLocal.ReinterpretCast<uint64_t>().GetValue(0);
+    AscendC::LocalTensor<uint64_t> signalLocal =
+        relayLocal.ReinterpretCast<uint64_t>();
+    for (uint32_t qpIdx = 0U;
+        qpIdx < TileXRMoonEp::kDispatchQpCount; ++qpIdx) {
+        signalLocal.SetValue(qpIdx, expectedFlag);
+    }
+    AscendC::GlobalTensor<uint64_t> signalGlobal;
+    signalGlobal.SetGlobalBuffer(signalSource,
+        TileXRMoonEp::kDispatchQpCount);
+    const AscendC::DataCopyExtParams copyOut {
+        1U, TileXRMoonEp::kDispatchQpCount *
+            static_cast<uint32_t>(sizeof(uint64_t)), 0U, 0U, 0U};
+    SyncFunc<AscendC::HardEvent::S_MTE3>();
+    AscendC::DataCopyPad(signalGlobal, signalLocal, copyOut);
+    SyncFunc<AscendC::HardEvent::MTE3_S>();
+    TileXR::UDMACleanCacheLines(
+        reinterpret_cast<__gm__ uint8_t *>(signalSource),
+        TileXRMoonEp::kDispatchQpCount * sizeof(uint64_t));
+    AscendC::PipeBarrier<PIPE_ALL>();
+}
+
+__aicore__ inline uint64_t LoadCompletionFlag(__gm__ uint64_t *flag)
+{
+    TileXR::UDMACleanCacheLines(
+        reinterpret_cast<__gm__ uint8_t *>(flag), sizeof(uint64_t));
+    AscendC::PipeBarrier<PIPE_ALL>();
+    return flag[0];
 }
 
 __aicore__ inline bool WaitCompletionFlag(__gm__ uint64_t *flag,
     uint64_t expected, uint64_t waitStart, uint64_t timeoutTicks,
-    uint64_t &observed, AscendC::LocalTensor<uint8_t> relayLocal)
+    uint64_t &observed)
 {
-    observed = LoadCompletionFlag(flag, relayLocal);
+    observed = LoadCompletionFlag(flag);
     while (observed < expected) {
         if (static_cast<uint64_t>(AscendC::GetSystemCycle()) - waitStart >=
             timeoutTicks) {
             return false;
         }
-        observed = LoadCompletionFlag(flag, relayLocal);
+        observed = LoadCompletionFlag(flag);
     }
     return true;
 }
@@ -1069,6 +1144,10 @@ __aicore__ inline uint64_t LoadDispatchCredit(
     creditGlobal.SetGlobalBuffer(credit,
         TileXRMoonEp::kDispatchCreditStrideBytes / sizeof(uint64_t));
     auto creditLocal = relayLocal.ReinterpretCast<uint64_t>();
+    TileXR::UDMACleanCacheLines(
+        reinterpret_cast<__gm__ uint8_t *>(credit),
+        TileXRMoonEp::kDispatchCreditStrideBytes);
+    SyncFunc<AscendC::HardEvent::S_MTE2>();
     AscendC::DataCopy(creditLocal, creditGlobal,
         TileXRMoonEp::kDispatchCreditStrideBytes / sizeof(uint64_t));
     SyncFunc<AscendC::HardEvent::MTE2_S>();
@@ -1162,7 +1241,7 @@ __aicore__ inline bool WaitDispatchIncomingPeerAndPublishCredit(
         uint64_t observed = 0U;
         if (!WaitCompletionFlag(receiveFlags + peerFlagBase + qpIdx,
                 static_cast<uint64_t>(magic), waitStart, timeoutTicks,
-                observed, relayLocal)) {
+                observed)) {
             dfxFlags |= TileXRMoonEp::kDispatchDfxCompletionTimeout;
             if (timeoutPeer == UINT32_MAX) {
                 timeoutPeer = static_cast<uint32_t>(incomingPeer);
@@ -1203,7 +1282,10 @@ __aicore__ inline void WriteDfxRecord(__gm__ uint8_t *dfx,
     uint32_t firstQuietStatus, uint32_t firstQuietPhase,
     uint32_t timeoutPeer, uint32_t timeoutPhase, uint64_t expectedRouteCount,
     uint64_t processedRouteCount, uint64_t magic, uint64_t timeoutExpectedMagic,
-    uint64_t timeoutObservedFlag, AscendC::LocalTensor<uint8_t> diagnosticLocal)
+    uint64_t timeoutObservedFlag, uint64_t localSignalObserved,
+    uint64_t completionFlagCount, uint64_t outgoingCqStatuses,
+    uint64_t outgoingRemainingSqEntries,
+    AscendC::LocalTensor<uint8_t> diagnosticLocal)
 {
     __ubuf__ TileXRMoonEp::DispatchDfxRecord *record =
         reinterpret_cast<__ubuf__ TileXRMoonEp::DispatchDfxRecord *>(
@@ -1227,9 +1309,10 @@ __aicore__ inline void WriteDfxRecord(__gm__ uint8_t *dfx,
     record->magic = magic;
     record->timeoutExpectedMagic = timeoutExpectedMagic;
     record->timeoutObservedFlag = timeoutObservedFlag;
-    for (uint32_t index = 0U; index < 4U; ++index) {
-        record->reserved[index] = 0U;
-    }
+    record->reserved[0] = localSignalObserved;
+    record->reserved[1] = completionFlagCount;
+    record->reserved[2] = outgoingCqStatuses;
+    record->reserved[3] = outgoingRemainingSqEntries;
     SyncFunc<AscendC::HardEvent::S_MTE3>();
 
     AscendC::GlobalTensor<uint8_t> dfxGlobal;
@@ -1348,6 +1431,21 @@ __aicore__ inline int32_t StatusFromDfxFlags(uint32_t flags)
         return TileXRMoonEp::kDispatchStatusQuietError;
     }
     return TileXRMoonEp::kDispatchStatusSuccess;
+}
+
+__aicore__ inline int32_t LoadDispatchPlanStatus(__gm__ int32_t *planStatus,
+    AscendC::LocalTensor<uint8_t> relayLocal)
+{
+    AscendC::GlobalTensor<uint8_t> statusGlobal;
+    statusGlobal.SetGlobalBuffer(reinterpret_cast<__gm__ uint8_t *>(planStatus),
+        sizeof(int32_t));
+    const AscendC::DataCopyExtParams copyIn {
+        1U, static_cast<uint32_t>(sizeof(int32_t)), 0U, 0U, 0U};
+    const AscendC::DataCopyPadExtParams<uint8_t> padIn {
+        false, 0U, 0U, 0U};
+    AscendC::DataCopyPad(relayLocal, statusGlobal, copyIn, padIn);
+    SyncFunc<AscendC::HardEvent::MTE2_S>();
+    return relayLocal.ReinterpretCast<int32_t>().GetValue(0U);
 }
 
 __aicore__ inline void DispatchPublishFirstStatus(
@@ -1542,13 +1640,20 @@ extern "C" __global__ __aicore__ void tilexr_moonep_dispatch_urma_kernel(
         uint32_t routeIndexUbBytes = 0U;
         uint32_t compareMaskUbBytes = 0U;
         if (useVectorSlotSelect) {
+            const uint32_t vectorElementCount = groupedPeerMode ?
+                TileXRMoonEp::DispatchRouteTileCount(
+                    static_cast<uint32_t>(routeCount), 0U,
+                    kRouteTileElements) :
+                static_cast<uint32_t>(routeCount);
             routePlanUbBytes = static_cast<uint32_t>(AlignUp(
-                routeCount * sizeof(int32_t), kUbAlignBytes));
+                static_cast<uint64_t>(vectorElementCount) * sizeof(int32_t),
+                kUbAlignBytes));
             routeRankUbBytes = routePlanUbBytes;
             routeIndexUbBytes = static_cast<uint32_t>(AlignUp(
-                routeCount * sizeof(int16_t), kUbAlignBytes));
+                static_cast<uint64_t>(vectorElementCount) * sizeof(int16_t),
+                kUbAlignBytes));
             compareMaskUbBytes = static_cast<uint32_t>(AlignUp(
-                CeilDiv(routeCount, 8U), kUbAlignBytes));
+                CeilDiv(vectorElementCount, 8U), kUbAlignBytes));
             const uint64_t fixedBytes = static_cast<uint64_t>(routePlanUbBytes) +
                 routeRankUbBytes + 2ULL * routeIndexUbBytes + compareMaskUbBytes +
                 kDiagnosticUbBytes +
@@ -1640,19 +1745,14 @@ extern "C" __global__ __aicore__ void tilexr_moonep_dispatch_urma_kernel(
         const uint64_t stagingCycles = stagingEndCycle - stagingStartCycle;
 #endif
 
-        const int32_t upstreamStatus = *planStatus;
+        const int32_t upstreamStatus = LoadDispatchPlanStatus(planStatus, relayLocal);
         auto currentScratch = workspace + scratchOffset + scratchIndex * scratchSlotBytes;
         auto receiveFlags = reinterpret_cast<__gm__ uint64_t *>(
             workspace + completionFlagsOffset);
         auto signalSource = reinterpret_cast<__gm__ uint64_t *>(
             workspace + signalOffset + blockIdx * TileXRMoonEp::kDispatchSignalStrideBytes);
         if (!localOnly) {
-            for (uint32_t qpIdx = 0U;
-                qpIdx < TileXRMoonEp::kDispatchQpCount; ++qpIdx) {
-                signalSource[qpIdx] = expectedFlag;
-            }
-            TileXR::UDMACleanCacheLines(reinterpret_cast<__gm__ uint8_t *>(signalSource),
-                TileXRMoonEp::kDispatchQpCount * sizeof(uint64_t));
+            PublishDispatchSignalSource(signalSource, expectedFlag, relayLocal);
         }
 
         AscendC::GlobalTensor<int32_t> dstGlobal;
@@ -1666,6 +1766,8 @@ extern "C" __global__ __aicore__ void tilexr_moonep_dispatch_urma_kernel(
         uint32_t timeoutPeer = UINT32_MAX;
         uint32_t timeoutPhase = UINT32_MAX;
         uint64_t timeoutObservedFlag = 0U;
+        uint64_t outgoingCqStatuses = UINT64_MAX;
+        uint64_t outgoingRemainingSqEntries = UINT64_MAX;
         uint64_t scannedRouteCount = 0U;
         uint64_t matchedRouteCount = 0U;
         uint64_t selectedRouteCount = 0U;
@@ -1682,22 +1784,16 @@ extern "C" __global__ __aicore__ void tilexr_moonep_dispatch_urma_kernel(
         uint64_t quietCycles = 0U;
 #endif
 
-        if (useVectorSlotSelect && upstreamStatus == TileXRMoonEp::kDispatchStatusSuccess) {
-            const uint32_t routePlanDataBytes = static_cast<uint32_t>(
-                routeCount * sizeof(int32_t));
-            const AscendC::DataCopyExtParams copyIn {1U, routePlanDataBytes, 0U, 0U, 0U};
-            const AscendC::DataCopyPadExtParams<int32_t> padIn {false, 0U, 0U, 0U};
-            AscendC::DataCopyPad(routePlanLocal, dstGlobal, copyIn, padIn);
-            SyncFunc<AscendC::HardEvent::MTE2_V>();
-            uint32_t routeShift = 0U;
-            for (uint64_t value = destinationCapacity; value > 1U; value >>= 1U) {
-                ++routeShift;
-            }
-            AscendC::ShiftRight(routeRankLocal, routePlanLocal,
-                static_cast<int32_t>(routeShift), static_cast<int32_t>(routeCount));
-            AscendC::CreateVecIndex(routeIndexLocal, static_cast<int16_t>(0),
-                static_cast<uint32_t>(routeCount));
-            AscendC::PipeBarrier<PIPE_V>();
+        uint32_t routeShift = 0U;
+        for (uint64_t value = destinationCapacity; value > 1U; value >>= 1U) {
+            ++routeShift;
+        }
+        if (useVectorSlotSelect && !groupedPeerMode &&
+            upstreamStatus == TileXRMoonEp::kDispatchStatusSuccess &&
+            !PrepareDispatchRouteTile(dstGlobal, routePlanLocal,
+                routeRankLocal, routeIndexLocal, 0U,
+                static_cast<uint32_t>(routeCount), routeShift)) {
+            dfxFlags |= TileXRMoonEp::kDispatchDfxInvalidConfig;
         }
 
 #if defined(TILEXR_MOONEP_DISPATCH_ENABLE_PROFILING)
@@ -1748,82 +1844,107 @@ extern "C" __global__ __aicore__ void tilexr_moonep_dispatch_urma_kernel(
                     break;
                 }
 
-                const uint32_t selectedCount = SelectDispatchPeerRoutes(
-                    compareMaskLocal, routeRankLocal, routeIndexLocal,
-                    selectedRouteIndexLocal, peer,
-                    static_cast<uint32_t>(routeCount));
-                scannedRouteCount += routeCount;
-                matchedRouteCount += selectedCount;
-                selectedRouteCount += selectedCount;
-
-                uint32_t qpSelectedCount[TileXRMoonEp::kDispatchQpCount] = {};
-                uint32_t qpSelectedStart[TileXRMoonEp::kDispatchQpCount] = {};
-                bool qpSignalPending[TileXRMoonEp::kDispatchQpCount] = {true, true};
-                for (uint32_t qpIdx = 0U;
-                    qpIdx < TileXRMoonEp::kDispatchQpCount; ++qpIdx) {
-                    qpSelectedCount[qpIdx] = TileXRMoonEp::DispatchQpRouteCount(
-                        selectedCount, 0U, qpIdx);
-                }
-
                 bool firstLogicalBatch = true;
                 bool sendOk = true;
-                while (sendOk && (qpSelectedStart[0] < qpSelectedCount[0] ||
-                        qpSelectedStart[1] < qpSelectedCount[1] ||
-                        qpSignalPending[0] || qpSignalPending[1])) {
-                    bool finalBatch[TileXRMoonEp::kDispatchQpCount] = {};
-                    for (uint32_t qpIdx = 0U;
-                        sendOk && qpIdx < TileXRMoonEp::kDispatchQpCount;
-                        ++qpIdx) {
-                        DispatchWqeBatchState &qpState =
-                            preparedPeer.qpState[qpIdx];
-                        AscendC::LocalTensor<uint8_t> issueLocal = qpIdx == 0U ?
-                            udmaIssueQp0Local : udmaIssueQp1Local;
-                        sendOk = DispatchBuildGroupedQpBatch(qpState,
-                            issueLocal, selectedRouteIndexLocal, routePlanLocal,
-                            reinterpret_cast<uint64_t>(workspace), rowBytes,
-                            destinationCapacity - 1U, topKMagic, topKShift, hiddenMode,
-                            qpSelectedCount[qpIdx], qpSelectedStart[qpIdx],
-                            qpSignalPending[qpIdx], reinterpret_cast<uint64_t>(
-                                signalSource + qpIdx), 0U, finalBatch[qpIdx]);
+                uint64_t peerSelectedCount = 0U;
+                for (uint32_t routeTileStart = 0U;
+                    sendOk && routeTileStart < routeCount;) {
+                    const uint32_t routeTileCount =
+                        TileXRMoonEp::DispatchRouteTileCount(
+                            static_cast<uint32_t>(routeCount), routeTileStart,
+                            kRouteTileElements);
+                    if (!PrepareDispatchRouteTile(dstGlobal, routePlanLocal,
+                            routeRankLocal, routeIndexLocal, routeTileStart,
+                            routeTileCount, routeShift)) {
+                        sendOk = false;
+                        break;
                     }
+                    const uint32_t selectedCount = SelectDispatchPeerRoutes(
+                        compareMaskLocal, routeRankLocal, routeIndexLocal,
+                        selectedRouteIndexLocal, peer, routeTileCount);
+                    scannedRouteCount += routeTileCount;
+                    matchedRouteCount += selectedCount;
+                    selectedRouteCount += selectedCount;
+                    peerSelectedCount += selectedCount;
+
+                    uint32_t qpSelectedCount[TileXRMoonEp::kDispatchQpCount] = {};
+                    uint32_t qpSelectedStart[TileXRMoonEp::kDispatchQpCount] = {};
+                    const bool finalRouteTile =
+                        routeTileStart + routeTileCount == routeCount;
+                    bool qpSignalPending[TileXRMoonEp::kDispatchQpCount] = {
+                        finalRouteTile, finalRouteTile};
                     for (uint32_t qpIdx = 0U;
-                        sendOk && qpIdx < TileXRMoonEp::kDispatchQpCount;
-                        ++qpIdx) {
-                        if (preparedPeer.qpState[qpIdx].batchCount == 0U) {
-                            continue;
+                        qpIdx < TileXRMoonEp::kDispatchQpCount; ++qpIdx) {
+                        qpSelectedCount[qpIdx] =
+                            TileXRMoonEp::DispatchQpRouteCount(
+                                selectedCount, 0U, qpIdx);
+                    }
+
+                    while (sendOk &&
+                        (qpSelectedStart[0] < qpSelectedCount[0] ||
+                         qpSelectedStart[1] < qpSelectedCount[1] ||
+                         qpSignalPending[0] || qpSignalPending[1])) {
+                        bool finalBatch[TileXRMoonEp::kDispatchQpCount] = {};
+                        for (uint32_t qpIdx = 0U;
+                            sendOk && qpIdx < TileXRMoonEp::kDispatchQpCount;
+                            ++qpIdx) {
+                            DispatchWqeBatchState &qpState =
+                                preparedPeer.qpState[qpIdx];
+                            AscendC::LocalTensor<uint8_t> issueLocal =
+                                qpIdx == 0U ? udmaIssueQp0Local :
+                                    udmaIssueQp1Local;
+                            sendOk = DispatchBuildGroupedQpBatch(qpState,
+                                issueLocal, selectedRouteIndexLocal,
+                                routePlanLocal,
+                                reinterpret_cast<uint64_t>(workspace), rowBytes,
+                                destinationCapacity - 1U, topKMagic, topKShift,
+                                hiddenMode, qpSelectedCount[qpIdx],
+                                qpSelectedStart[qpIdx], qpSignalPending[qpIdx],
+                                reinterpret_cast<uint64_t>(signalSource + qpIdx),
+                                0U, routeTileStart, finalBatch[qpIdx]);
                         }
-                        sendOk = StageDispatchQpBatch(
-                            preparedPeer.qpState[qpIdx],
-                            qpIdx == 0U ? udmaIssueQp0Local : udmaIssueQp1Local,
-                            relayLocal, finalBatch[qpIdx], group, dfxFlags,
-                            firstQuietStatus, firstQuietPhase);
-                    }
-                    if (sendOk && firstLogicalBatch && previousPeerValid) {
-                        sendOk = DispatchDrainPeerFinalCq(previousPeer,
-                            relayLocal, completionTimeoutTicks, dfxFlags,
-                            firstQuietStatus, firstQuietPhase, timeoutPeer,
-                            timeoutPhase, timeoutObservedFlag);
-                        previousPeerValid = false;
-                    }
-                    if (sendOk && firstLogicalBatch && creditPeerMode &&
-                        TileXRMoonEp::DispatchCreditRequired(group)) {
-                        uint64_t observedCredit = 0U;
-                        if (!WaitDispatchPeerCredit(args, rank, peer, group,
-                                magic, completionTimeoutTicks, relayLocal,
-                                observedCredit)) {
-                            dfxFlags |= TileXRMoonEp::kDispatchDfxCreditTimeout;
-                            if (timeoutPeer == UINT32_MAX) {
-                                timeoutPeer = static_cast<uint32_t>(peer);
-                                timeoutPhase = group;
-                                timeoutObservedFlag = observedCredit;
+                        for (uint32_t qpIdx = 0U;
+                            sendOk && qpIdx < TileXRMoonEp::kDispatchQpCount;
+                            ++qpIdx) {
+                            if (preparedPeer.qpState[qpIdx].batchCount == 0U) {
+                                continue;
                             }
-                            sendOk = false;
+                            sendOk = StageDispatchQpBatch(
+                                preparedPeer.qpState[qpIdx],
+                                qpIdx == 0U ? udmaIssueQp0Local :
+                                    udmaIssueQp1Local,
+                                relayLocal, finalBatch[qpIdx], group, dfxFlags,
+                                firstQuietStatus, firstQuietPhase);
                         }
+                        if (sendOk && firstLogicalBatch && previousPeerValid) {
+                            sendOk = DispatchDrainPeerFinalCq(previousPeer,
+                                relayLocal, completionTimeoutTicks, dfxFlags,
+                                firstQuietStatus, firstQuietPhase, timeoutPeer,
+                                timeoutPhase, timeoutObservedFlag);
+                            previousPeerValid = false;
+                        }
+                        if (sendOk && firstLogicalBatch && creditPeerMode &&
+                            TileXRMoonEp::DispatchCreditRequired(group)) {
+                            uint64_t observedCredit = 0U;
+                            if (!WaitDispatchPeerCredit(args, rank, peer, group,
+                                    magic, completionTimeoutTicks, relayLocal,
+                                    observedCredit)) {
+                                dfxFlags |=
+                                    TileXRMoonEp::kDispatchDfxCreditTimeout;
+                                if (timeoutPeer == UINT32_MAX) {
+                                    timeoutPeer = static_cast<uint32_t>(peer);
+                                    timeoutPhase = group;
+                                    timeoutObservedFlag = observedCredit;
+                                }
+                                sendOk = false;
+                            }
+                        }
+                        if (sendOk) {
+                            RingDispatchPeerDoorbells(preparedPeer);
+                        }
+                        firstLogicalBatch = false;
                     }
-                    if (sendOk) {
-                        RingDispatchPeerDoorbells(preparedPeer);
-                    }
-                    firstLogicalBatch = false;
+                    routeTileStart += routeTileCount;
                 }
 
                 if (!sendOk || preparedPeer.qpState[0].finalStaged == 0U ||
@@ -1835,9 +1956,9 @@ extern "C" __global__ __aicore__ void tilexr_moonep_dispatch_urma_kernel(
                     break;
                 }
 
-                issuedPutCount += selectedCount;
-                issuedPutBytes += static_cast<uint64_t>(selectedCount) * rowBytes;
-                processedRouteCount += selectedCount;
+                issuedPutCount += peerSelectedCount;
+                issuedPutBytes += peerSelectedCount * rowBytes;
+                processedRouteCount += peerSelectedCount;
                 completionFlagCount += TileXRMoonEp::kDispatchQpCount;
                 previousPeer = preparedPeer;
                 previousPeerValid = true;
@@ -1847,6 +1968,8 @@ extern "C" __global__ __aicore__ void tilexr_moonep_dispatch_urma_kernel(
                         groupWidth, magic, creditPeerMode,
                         completionTimeoutTicks, relayLocal, dfxFlags,
                         timeoutPeer, timeoutPhase, timeoutObservedFlag)) {
+                    ProbeDispatchPeerFinalCq(previousPeer, relayLocal,
+                        outgoingCqStatuses, outgoingRemainingSqEntries);
                     break;
                 }
 #if defined(TILEXR_MOONEP_DISPATCH_ENABLE_PROFILING)
@@ -1930,7 +2053,7 @@ extern "C" __global__ __aicore__ void tilexr_moonep_dispatch_urma_kernel(
                                     reinterpret_cast<uint64_t>(
                                         signalSource + qpIdx),
                                     issuePhase, dfxFlags, firstQuietStatus,
-                                    firstQuietPhase, sequencePhase);
+                                    firstQuietPhase, sequencePhase, 0U);
                             }
                             if (batchOk) {
                                 issuedPutCount += selectedCount;
@@ -2153,7 +2276,7 @@ extern "C" __global__ __aicore__ void tilexr_moonep_dispatch_urma_kernel(
             static_cast<uint64_t>(AscendC::GetSystemCycle());
 #endif
         if (upstreamStatus == TileXRMoonEp::kDispatchStatusSuccess) {
-            if (useVectorSlotSelect) {
+            if (useVectorSlotSelect && !groupedPeerMode) {
                 const uint32_t localRouteCount = SelectDispatchPeerRoutes(
                     compareMaskLocal, routeRankLocal, routeIndexLocal,
                     selectedRouteIndexLocal, rank,
@@ -2267,8 +2390,7 @@ extern "C" __global__ __aicore__ void tilexr_moonep_dispatch_urma_kernel(
                             if (!WaitCompletionFlag(
                                     receiveFlags + peerFlagBase + qpIdx,
                                     expectedFlag, flagWaitStartCycle,
-                                    completionTimeoutTicks, observed,
-                                    relayLocal)) {
+                                    completionTimeoutTicks, observed)) {
                                 dfxFlags |= TileXRMoonEp::
                                     kDispatchDfxCompletionTimeout;
                                 if (timeoutPeer == UINT32_MAX) {
@@ -2301,11 +2423,17 @@ extern "C" __global__ __aicore__ void tilexr_moonep_dispatch_urma_kernel(
         const int32_t localExecutionStatus = StatusFromDfxFlags(dfxFlags);
         DispatchPublishFirstStatus(planStatus, localExecutionStatus);
 #if defined(TILEXR_MOONEP_DISPATCH_ENABLE_DFX)
+        uint64_t localSignalObserved = expectedFlag;
+        if (!localOnly && dfxFlags != 0U) {
+            localSignalObserved = LoadCompletionFlag(signalSource);
+        }
         WriteDfxRecord(workspace + dfxOffset, static_cast<uint32_t>(payloadMode),
             static_cast<uint32_t>(rank), static_cast<uint32_t>(blockIdx), dfxFlags,
             firstInvalidRouteId, firstInvalidRawDst, firstQuietStatus, firstQuietPhase,
             timeoutPeer, timeoutPhase, routeCount, processedRouteCount, expectedFlag,
-            expectedFlag, timeoutObservedFlag, diagnosticLocal);
+            expectedFlag, timeoutObservedFlag, localSignalObserved,
+            completionFlagCount, outgoingCqStatuses,
+            outgoingRemainingSqEntries, diagnosticLocal);
 #endif
 #if defined(TILEXR_MOONEP_DISPATCH_ENABLE_PROFILING)
         const uint64_t dfxWriteEndCycle =
@@ -2327,7 +2455,7 @@ extern "C" __global__ __aicore__ void tilexr_moonep_dispatch_urma_kernel(
         }
         const int32_t executionStatus = StatusFromDfxFlags(globalDfxFlags);
 #else
-        const int32_t executionStatus = *planStatus;
+        const int32_t executionStatus = LoadDispatchPlanStatus(planStatus, relayLocal);
 #endif
         auto kernelStatus = reinterpret_cast<__gm__ TileXRMoonEp::DispatchKernelStatus *>(
             workspace + kernelStatusOffset);
@@ -2423,7 +2551,9 @@ extern "C" __global__ __aicore__ void tilexr_moonep_dispatch_urma_kernel(
             static_cast<uint32_t>(rank), static_cast<uint32_t>(blockIdx), dfxFlags,
             firstInvalidRouteId, firstInvalidRawDst, firstQuietStatus, firstQuietPhase,
             timeoutPeer, timeoutPhase, routeCount, processedRouteCount, expectedFlag,
-            expectedFlag, timeoutObservedFlag, diagnosticLocal);
+            expectedFlag, timeoutObservedFlag, localSignalObserved,
+            completionFlagCount, outgoingCqStatuses,
+            outgoingRemainingSqEntries, diagnosticLocal);
 #endif
 
 #if defined(TILEXR_MOONEP_DISPATCH_ENABLE_PROFILING)

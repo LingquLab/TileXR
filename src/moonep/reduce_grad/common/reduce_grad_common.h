@@ -30,7 +30,7 @@ static_assert(kReduceGradUdmaPollScratchOffset +
     kReduceGradUdmaPeerStateBytes, "ReduceGrad UDMA peer state exceeds its stride");
 constexpr uint64_t kReduceGradKernelTileBytes = UINT64_C(30) * 1024;
 constexpr uint32_t kReduceGradProjectionCount = 3;
-constexpr uint32_t kReduceGradMaxUdmaQpCount = 8;
+constexpr uint32_t kReduceGradMaxUdmaQpCount = 32;
 constexpr int64_t kReduceGradMaxAivBlockCount = 64;
 constexpr uint32_t kReduceGradTransportPeer = 1;
 constexpr uint32_t kReduceGradTransportUdma = 2;

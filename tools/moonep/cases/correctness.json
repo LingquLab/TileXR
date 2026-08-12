@@ -208,5 +208,35 @@
     "warmup": 0,
     "iters": 1,
     "correctness": true
+  },
+  {
+    "id": "dispatch-8rank-4k-ep8-grouped-urma",
+    "S": 4096,
+    "K": 8,
+    "E": 32,
+    "H": 7168,
+    "Hf": 2048,
+    "B": 4,
+    "P": 1,
+    "routing": "unique_destinations",
+    "route_distribution": "rank_shifted_uniform",
+    "warmup": 0,
+    "iters": 8,
+    "correctness": true
+  },
+  {
+    "id": "flow-8rank-4k-ep8-grouped-urma-plan-reuse",
+    "S": 4096,
+    "K": 8,
+    "E": 32,
+    "H": 7168,
+    "Hf": 2048,
+    "B": 4,
+    "P": 1,
+    "routing": "unique_destinations",
+    "route_distribution": "rank_shifted_uniform",
+    "warmup": 0,
+    "iters": 8,
+    "correctness": true
   }
 ]

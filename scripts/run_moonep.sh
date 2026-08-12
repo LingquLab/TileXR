@@ -49,6 +49,8 @@ Available case IDs:
   12 planning-64rank-single-route 64-rank, 8 nodes x 8 NPUs single route (rank_size=64, rank_per_dev=1, S=8, K=1, E=64, H=8, Hf=4, B=1, P=1)
   13 planning-128rank-single-route 128-rank, 16 nodes x 8 NPUs single route (rank_size=128, rank_per_dev=1, S=8, K=1, E=128, H=8, Hf=4, B=1, P=1)
   14 planning-16rank-16card-single-route 16-rank, 2 nodes x 8 NPUs single route (rank_size=16, rank_per_dev=1, S=8, K=1, E=16, H=8, Hf=4, B=1, P=1)
+  15 dispatch-8rank-4k-ep8-grouped-urma 8-rank Dispatch-only grouped-URMA repro (rank_size=8, rank_per_dev=1, S=4096, K=8, E=32, H=7168, Hf=2048, B=4, P=1)
+  16 flow-8rank-4k-ep8-grouped-urma-plan-reuse 8-rank full flow with Combine V2 then saved-plan backward Dispatch (rank_size=8, rank_per_dev=1, S=4096, K=8, E=32, H=7168, Hf=2048, B=4, P=1)
 
 Environment:
   ASCEND_RT_VISIBLE_DEVICES    Legacy fallback when --visible-devices is omitted
@@ -386,6 +388,32 @@ PY
     fi
     case_id="${resolved_case_id}"
 fi
+
+benchmark_kind="flow"
+dispatch_modes=()
+dispatch_repro_case_id="dispatch-8rank-4k-ep8-grouped-urma"
+plan_reuse_repro_case_id="flow-8rank-4k-ep8-grouped-urma-plan-reuse"
+if [[ "${case_id}" == "${dispatch_repro_case_id}" ||
+      "${case_id}" == "${plan_reuse_repro_case_id}" ]]; then
+    if [[ "${mode}" != "benchmark" ]]; then
+        echo "${case_id} requires --mode benchmark" >&2
+        exit 2
+    fi
+    if [[ "${rank_size}" != "8" || "${node_count}" != "1" ]]; then
+        echo "${case_id} requires --rank-size 8 on one node" >&2
+        exit 2
+    fi
+    unset TILEXR_MOONEP_DISPATCH_TRANSPORT
+    export TILEXR_MOONEP_DISPATCH_PEER_MODE="group"
+    export TILEXR_MOONEP_DISPATCH_GROUP_WIDTH="16"
+fi
+if [[ "${case_id}" == "${dispatch_repro_case_id}" ]]; then
+    benchmark_kind="dispatch_hot_loop"
+    dispatch_modes=("hidden")
+elif [[ "${case_id}" == "${plan_reuse_repro_case_id}" ]]; then
+    warmup="${warmup:-0}"
+    iterations="${iterations:-8}"
+fi
 summary_file="${output_dir}/${case_id}/summary.json"
 
 if [[ "${aggregate_only}" == "true" ]]; then
@@ -564,6 +592,7 @@ if (( node_count > 1 )); then
 fi
 launcher_args=(
     --mode "${mode}"
+    --benchmark-kind "${benchmark_kind}"
     --cases "${case_file}"
     --case-ids "${case_id}"
     --world-size "${rank_size}"
@@ -573,6 +602,9 @@ launcher_args=(
     --output-dir "${output_dir}"
     --timeout-sec "${timeout_sec}"
 )
+if [[ "${benchmark_kind}" == "dispatch_hot_loop" ]]; then
+    launcher_args+=("--dispatch-modes" "${dispatch_modes[@]}")
+fi
 if [[ "${dump_stage_tensors}" == "true" ]]; then
     launcher_args+=("--dump-stage-tensors")
     launcher_args+=("--tensor-preview-elements" "${tensor_preview_elements}")

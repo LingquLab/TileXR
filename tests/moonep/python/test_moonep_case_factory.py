@@ -28,6 +28,14 @@ RUNNER_WORLD_SIZES = {
     "planning-16rank-16card-single-route": 16,
     "planning-64rank-single-route": 64,
     "planning-128rank-single-route": 128,
+    "dispatch-8rank-4k-ep8-grouped-urma": 8,
+    "flow-8rank-4k-ep8-grouped-urma-plan-reuse": 8,
+}
+
+DISPATCH_ONLY_REPRO_CASE = "dispatch-8rank-4k-ep8-grouped-urma"
+PRODUCTION_SCALE_REPRO_CASES = {
+    DISPATCH_ONLY_REPRO_CASE,
+    "flow-8rank-4k-ep8-grouped-urma-plan-reuse",
 }
 
 
@@ -147,6 +155,8 @@ def test_runner_case_matrix_uses_fixed_padding_and_unique_token_destinations() -
         world_size = RUNNER_WORLD_SIZES[case.case_id]
         assert case.token_padding == 1
         assert case.prefetch_slots == case.expert_count // world_size
+        if case.case_id in PRODUCTION_SCALE_REPRO_CASES:
+            continue
         assert (case.hidden_size, case.intermediate_size) == (8, 4)
         assert case.hidden_size * case.intermediate_size * 2 % 64 == 0
         for rank in range(world_size):
@@ -178,6 +188,8 @@ def test_runner_plans_do_not_assign_one_token_to_the_same_rank_twice() -> None:
     cases = load_cases(root / "tools" / "moonep" / "cases" / "correctness.json")
 
     for case in cases:
+        if case.case_id in PRODUCTION_SCALE_REPRO_CASES:
+            continue
         world_size = RUNNER_WORLD_SIZES[case.case_id]
         dimensions_by_rank = [
             MoonEPDimensions(
@@ -312,9 +324,9 @@ def test_runner_cases_support_one_based_numeric_selection() -> None:
 
     for number, case in enumerate(cases, start=1):
         assert select_cases(cases, str(number)) == [case]
-    assert select_cases(cases, "1,14") == [cases[0], cases[13]]
-    for invalid in ("0", "15"):
-        with pytest.raises(ValueError, match=r"case number must be in \[1, 14\]"):
+    assert select_cases(cases, "1,16") == [cases[0], cases[15]]
+    for invalid in ("0", "17"):
+        with pytest.raises(ValueError, match=r"case number must be in \[1, 16\]"):
             select_cases(cases, invalid)
 
 
@@ -322,7 +334,7 @@ def test_case_14_is_the_two_node_one_rank_per_device_case() -> None:
     root = Path(__file__).resolve().parents[3]
     cases = load_cases(root / "tools" / "moonep" / "cases" / "correctness.json")
 
-    assert len(cases) == 14
+    assert len(cases) == 16
     case = cases[13]
     assert case.case_id == "planning-16rank-16card-single-route"
     assert (
@@ -336,3 +348,69 @@ def test_case_14_is_the_two_node_one_rank_per_device_case() -> None:
         case.routing_pattern,
         case.route_distribution,
     ) == (8, 1, 16, 8, 4, 1, 1, "balanced", "rank_shifted_uniform")
+
+
+def test_case_15_matches_the_4k_ep8_grouped_urma_dispatch_repro() -> None:
+    root = Path(__file__).resolve().parents[3]
+    cases = load_cases(root / "tools" / "moonep" / "cases" / "correctness.json")
+
+    case = cases[14]
+    assert case.case_id == "dispatch-8rank-4k-ep8-grouped-urma"
+    assert (
+        case.tokens_per_rank,
+        case.topk,
+        case.expert_count,
+        case.hidden_size,
+        case.intermediate_size,
+        case.prefetch_slots,
+        case.token_padding,
+        case.routing_pattern,
+        case.route_distribution,
+        case.warmup,
+        case.iterations,
+    ) == (
+        4096,
+        8,
+        32,
+        7168,
+        2048,
+        4,
+        1,
+        "unique_destinations",
+        "rank_shifted_uniform",
+        0,
+        8,
+    )
+
+
+def test_case_16_matches_the_4k_ep8_grouped_urma_plan_reuse_repro() -> None:
+    root = Path(__file__).resolve().parents[3]
+    cases = load_cases(root / "tools" / "moonep" / "cases" / "correctness.json")
+
+    case = cases[15]
+    assert case.case_id == "flow-8rank-4k-ep8-grouped-urma-plan-reuse"
+    assert (
+        case.tokens_per_rank,
+        case.topk,
+        case.expert_count,
+        case.hidden_size,
+        case.intermediate_size,
+        case.prefetch_slots,
+        case.token_padding,
+        case.routing_pattern,
+        case.route_distribution,
+        case.warmup,
+        case.iterations,
+    ) == (
+        4096,
+        8,
+        32,
+        7168,
+        2048,
+        4,
+        1,
+        "unique_destinations",
+        "rank_shifted_uniform",
+        0,
+        8,
+    )
