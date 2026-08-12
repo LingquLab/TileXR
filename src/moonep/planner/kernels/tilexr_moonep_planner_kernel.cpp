@@ -307,8 +307,7 @@ private:
         CopyUbToGm(blockHistogramGm_[blockIdx_ * expertCount_], histogram, expertCount_);
     }
 
-    __aicore__ inline bool WaitReadyFlag(
-        int32_t peer, int32_t step, int64_t *lastObserved)
+    __aicore__ inline bool WaitReadyFlag(int32_t peer, int32_t step)
     {
         AscendC::GlobalTensor<int64_t> readyGm;
         readyGm.SetGlobalBuffer(
@@ -325,7 +324,6 @@ private:
             __asm__ __volatile__("");
             AscendC::PipeBarrier<PIPE_ALL>();
             const int64_t value = readyGm.GetValue(0);
-            *lastObserved = value;
             if ((value & MAGIC_MASK) == (expected & MAGIC_MASK) && value >= expected) {
                 return true;
             }
@@ -352,9 +350,8 @@ private:
              peerOffset += blockCount_) {
             const int32_t peer = static_cast<int32_t>(
                 (static_cast<int64_t>(rank_) + peerOffset) % rankSize_);
-            int64_t lastObserved = 0;
-            if (!WaitReadyFlag(peer, step, &lastObserved)) {
-                readyStatus = EncodePlannerObservedFlagStatus(peer, step, lastObserved);
+            if (!WaitReadyFlag(peer, step)) {
+                readyStatus = kPlannerStatusTimeoutBase + peer;
                 break;
             }
         }

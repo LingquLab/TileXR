@@ -1,8 +1,6 @@
 #include "planner_launch.h"
 
-#include <atomic>
 #include <cstddef>
-#include <cstdlib>
 #include <iostream>
 
 #include "moonep_kernel_registration.h"
@@ -20,13 +18,6 @@ namespace {
 
 constexpr const char *kPlannerKernelName = "tilexr_moonep_planner_kernel";
 TileXRMoonEp::KernelRegistrationState g_plannerRegistration;
-std::atomic<uint64_t> g_plannerLaunchSequence {0};
-
-bool PlannerMagicTraceEnabled()
-{
-    const char *value = std::getenv("TILEXR_MOONEP_TRACE_PLANNER_MAGIC");
-    return value != nullptr && value[0] == '1' && value[1] == '\0';
-}
 
 } // namespace
 
@@ -44,13 +35,6 @@ int TileXRMoonEpLaunchKernel(const PlannerParams &params, const PlannerLaunchCon
     if (ret != TileXR::TILEXR_SUCCESS) {
         return ret;
     }
-    if (PlannerMagicTraceEnabled()) {
-        const uint64_t sequence = g_plannerLaunchSequence.fetch_add(1) + 1;
-        std::cerr << "TileXR MoonEP planner trace rank=" << context.hostArgs->rank
-                  << " sequence=" << sequence << " magic=" << magic
-                  << " stream=" << params.stream << std::endl;
-    }
-
     const PlannerLayout &layout = context.layout;
     struct PlannerKernelArgs {
         GM_ADDR commArgs;

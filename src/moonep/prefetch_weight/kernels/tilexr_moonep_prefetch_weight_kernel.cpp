@@ -19,8 +19,7 @@ public:
         uint64_t gateOffset, uint64_t upOffset, uint64_t downOffset,
         uint32_t gateRowBytes, uint32_t upRowBytes, uint32_t downRowBytes,
         int32_t rank, int32_t rankSize, int64_t expertsPerRank,
-        int64_t prefetchSlots, uint32_t qpNum, GM_ADDR debug,
-        uint64_t debugRecordCount)
+        int64_t prefetchSlots, uint32_t qpNum)
     {
         args_ = reinterpret_cast<__gm__ TileXR::CommArgs *>(commArgs);
         expertsToCopy_ = reinterpret_cast<__gm__ int32_t *>(expertsToCopy);
@@ -39,8 +38,6 @@ public:
         rank_ = rank;
         rankSize_ = rankSize;
         qpNum_ = qpNum;
-        debug_ = reinterpret_cast<__gm__ PrefetchWeightUdmaDebugRecord *>(debug);
-        debugRecordCount_ = debugRecordCount;
         const uint32_t subBlockCount = static_cast<uint32_t>(get_subblockdim());
         worker_ = static_cast<uint32_t>(get_block_idx()) * subBlockCount +
             static_cast<uint32_t>(get_subblockid());
@@ -181,8 +178,6 @@ private:
                         (submitStatus & 0xFFU);
                 } else if (submitStatus == TileXR::TILEXR_UDMA_STATUS_SUCCESS) {
                     ++completionTargets[completionQueue];
-                    RecordPostTarget(completionQueue,
-                        completionTargets[completionQueue]);
                 }
             }
         }
@@ -211,47 +206,7 @@ private:
         completionQueuePeers[queue] = peer;
         completionTargets[queue] = ld_dev(
             reinterpret_cast<__gm__ uint32_t *>(queueId), 0);
-        InitializeDebugRecord(queue, queueId, peer, completionTargets[queue]);
         return queue;
-    }
-
-    __aicore__ inline __gm__ PrefetchWeightUdmaDebugRecord *DebugRecord(
-        uint32_t queue) const
-    {
-        const uint64_t record = static_cast<uint64_t>(worker_) *
-            static_cast<uint64_t>(rankSize_) + queue;
-        return debug_ != nullptr && record < debugRecordCount_ ?
-            debug_ + record : nullptr;
-    }
-
-    __aicore__ inline void InitializeDebugRecord(
-        uint32_t queue, uint64_t queueId, int32_t peer,
-        uint32_t initialTarget) const
-    {
-        __gm__ PrefetchWeightUdmaDebugRecord *record = DebugRecord(queue);
-        if (record == nullptr) {
-            return;
-        }
-        record->worker = worker_;
-        record->queue = queue;
-        record->peer = peer;
-        record->queueId = queueId;
-        record->initialTarget = initialTarget;
-        record->magic = kPrefetchWeightUdmaDebugMagic;
-    }
-
-    __aicore__ inline void RecordPostTarget(
-        uint32_t queue, uint32_t target) const
-    {
-        __gm__ PrefetchWeightUdmaDebugRecord *record = DebugRecord(queue);
-        if (record == nullptr) {
-            return;
-        }
-        const uint32_t post = record->postCount;
-        if (post < 3U) {
-            record->targetAfterPost[post] = target;
-        }
-        record->postCount = post + 1U;
     }
 
     __aicore__ inline void CompleteReads(
@@ -268,34 +223,8 @@ private:
                 }
                 continue;
             }
-            __gm__ TileXR::UDMAInfo *info = TileXR::GetUDMAInfo(args_);
-            __gm__ TileXR::UDMAWQCtx *wq = TileXR::UDMAGetWQCtx(
-                info, static_cast<uint32_t>(peer), worker_);
-            __gm__ TileXR::UDMACQCtx *cq = TileXR::UDMAGetSCQCtx(
-                info, static_cast<uint32_t>(peer), worker_);
-            __gm__ PrefetchWeightUdmaDebugRecord *record = DebugRecord(queue);
-            if (record != nullptr && wq != nullptr && cq != nullptr) {
-                const uint32_t cqTail = ld_dev(
-                    reinterpret_cast<__gm__ uint32_t *>(cq->tailAddr), 0);
-                record->quietTarget = completionTargets[queue];
-                record->cqTailAtQuiet = cqTail;
-                record->completionCount = completionTargets[queue] - cqTail;
-                record->sqHeadAtQuiet = ld_dev(
-                    reinterpret_cast<__gm__ uint32_t *>(wq->headAddr), 0);
-                record->sqTailAtQuiet = ld_dev(
-                    reinterpret_cast<__gm__ uint32_t *>(wq->tailAddr), 0);
-            }
             const uint32_t cqStatus = TileXR::UDMAQuietStatusOnQpUntil(
                 args_, peer, worker_, completionTargets[queue]);
-            if (record != nullptr && wq != nullptr && cq != nullptr) {
-                record->pollStatus = cqStatus;
-                record->cqTailAfter = ld_dev(
-                    reinterpret_cast<__gm__ uint32_t *>(cq->tailAddr), 0);
-                record->sqTailAfter = ld_dev(
-                    reinterpret_cast<__gm__ uint32_t *>(wq->tailAddr), 0);
-                record->wqeCountAfter = ld_dev(
-                    reinterpret_cast<__gm__ uint32_t *>(wq->wqeCntAddr), 0);
-            }
             if (cqStatus != 0 && workerStatus == 0) {
                 workerStatus = kPrefetchWeightStatusCqErrorBase + (cqStatus & 0xFFU);
             }
@@ -322,8 +251,6 @@ private:
     uint32_t qpNum_ = 0;
     uint32_t worker_ = 0;
     uint32_t workerCount_ = 0;
-    __gm__ PrefetchWeightUdmaDebugRecord *debug_ = nullptr;
-    uint64_t debugRecordCount_ = 0;
     AscendC::TPipe pipe_;
     AscendC::TBuf<AscendC::QuePosition::VECCALC> wqeBuf_;
 };
@@ -336,15 +263,13 @@ extern "C" __global__ __aicore__ void tilexr_moonep_prefetch_weight_kernel(
     GM_ADDR status, uint64_t gateOffset, uint64_t upOffset, uint64_t downOffset,
     uint64_t gateRowBytes, uint64_t upRowBytes, uint64_t downRowBytes,
     int64_t rank, int64_t rankSize, int64_t expertsPerRank,
-    int64_t prefetchSlots, uint64_t qpNum, GM_ADDR debug,
-    uint64_t debugRecordCount)
+    int64_t prefetchSlots, uint64_t qpNum)
 {
     TileXRMoonEp::Kernel::PrefetchWeightKernel op;
     op.Init(commArgs, expertsToCopy, gate, up, down, status,
         gateOffset, upOffset, downOffset, static_cast<uint32_t>(gateRowBytes),
         static_cast<uint32_t>(upRowBytes), static_cast<uint32_t>(downRowBytes),
         static_cast<int32_t>(rank), static_cast<int32_t>(rankSize),
-        expertsPerRank, prefetchSlots, static_cast<uint32_t>(qpNum), debug,
-        debugRecordCount);
+        expertsPerRank, prefetchSlots, static_cast<uint32_t>(qpNum));
     op.Process();
 }

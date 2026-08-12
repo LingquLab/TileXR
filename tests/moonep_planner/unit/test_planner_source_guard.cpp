@@ -64,8 +64,6 @@ int main()
         root + "/src/moonep/planner/host/planner_layout.cpp");
     const std::string v3Kernel = Read(
         root + "/src/moonep/planner/kernels/tilexr_moonep_planner_kernel.cpp");
-    const std::string v3Launch = Read(
-        root + "/src/moonep/planner/host/planner_launch.cpp");
     const std::string moonEpHost = Read(root + "/src/moonep/host/tilexr_moonep.cpp");
 
     bool ok = true;
@@ -143,12 +141,6 @@ int main()
         "Planner V3 readiness wait is not partitioned across AIV blocks");
     ok &= Require(v3Kernel, "peerOffset += blockCount_",
         "Planner V3 readiness wait does not stride over peers");
-    ok &= Require(v3Kernel, "EncodePlannerObservedFlagStatus(peer, step, lastObserved)",
-        "Planner V3 timeout does not preserve the observed peer flag");
-    ok &= Require(v3Launch, "TILEXR_MOONEP_TRACE_PLANNER_MAGIC",
-        "Planner V3 launch trace gate is missing");
-    ok &= Require(v3Launch, "sequence=\" << sequence << \" magic=\" << magic",
-        "Planner V3 launch trace omits sequence or magic");
     ok &= Require(v3Kernel,
         "CrossRankReady();\n        AscendC::SyncAll<true>();\n        FinalizeCrossRankReady();",
         "Planner V3 does not reduce per-block readiness results");

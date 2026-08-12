@@ -419,8 +419,7 @@ __aicore__ inline void MoonEpCombineV2::Init(
     failureBase_ = workspace_ + failureOffset;
     valid_ = true;
     const bool laneStatesReady = InitLaneStates();
-    if (kEnableSafetyChecks && !laneStatesReady &&
-        failureStatus_ == TileXRMoonEp::MOONEP_COMBINE_V2_SUCCESS) {
+    if (kEnableSafetyChecks && !laneStatesReady) {
         SetFailure(TileXRMoonEp::MOONEP_COMBINE_V2_INVALID_CONFIG,
             UINT32_MAX, UINT32_MAX, UINT32_MAX);
     }
@@ -544,10 +543,6 @@ __aicore__ inline bool MoonEpCombineV2::InitLaneStates()
         state.cqTarget = state.cqTail;
         state.submittedHead = state.head;
         if (kEnableSafetyChecks && state.head != state.tail) {
-            SetFailure(TileXRMoonEp::MOONEP_COMBINE_V2_INVALID_CONFIG,
-                UINT32_MAX, firstPeer, lane, 0U,
-                static_cast<uint64_t>(state.tail),
-                static_cast<uint64_t>(state.head));
             return false;
         }
     }

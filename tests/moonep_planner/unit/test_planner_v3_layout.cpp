@@ -34,32 +34,6 @@ void SetBlockDimOverride(const char *value)
 
 int main()
 {
-    const uint32_t firstBarrierStatus = static_cast<uint32_t>(
-        TileXRMoonEpV3::EncodePlannerObservedFlagStatus(
-            3, TileXRMoonEpV3::kPlannerReadyStep, (INT64_C(5) << 32) | 92));
-    Check((firstBarrierStatus & UINT32_C(0x80000000)) != 0,
-        "Planner observed-flag status marker is missing");
-    Check(((firstBarrierStatus >> 28) & UINT32_C(0x7)) == 3,
-        "Planner observed-flag peer encoding mismatch");
-    Check(((firstBarrierStatus >> 27) & UINT32_C(0x1)) == 0,
-        "Planner first-barrier phase encoding mismatch");
-    Check(((firstBarrierStatus >> 16) & UINT32_C(0x7FF)) == 5,
-        "Planner observed-flag magic encoding mismatch");
-    Check((firstBarrierStatus & UINT32_C(0xFFFF)) == 92,
-        "Planner observed-flag step encoding mismatch");
-
-    const uint32_t dstBarrierStatus = static_cast<uint32_t>(
-        TileXRMoonEpV3::EncodePlannerObservedFlagStatus(
-            7, TileXRMoonEpV3::kPlannerDstReadyStep, (INT64_C(9) << 32) | 91));
-    Check(((dstBarrierStatus >> 28) & UINT32_C(0x7)) == 7,
-        "Planner dst-barrier peer encoding mismatch");
-    Check(((dstBarrierStatus >> 27) & UINT32_C(0x1)) == 1,
-        "Planner dst-barrier phase encoding mismatch");
-    Check(((dstBarrierStatus >> 16) & UINT32_C(0x7FF)) == 9,
-        "Planner dst-barrier magic encoding mismatch");
-    Check((dstBarrierStatus & UINT32_C(0xFFFF)) == 91,
-        "Planner dst-barrier step encoding mismatch");
-
     TileXRMoonEpV3::PlannerLayout layout {};
     SetBlockDimOverride("64");
     Check(TileXRMoonEpV3::TileXRMoonEpBuildPlannerLayout(
