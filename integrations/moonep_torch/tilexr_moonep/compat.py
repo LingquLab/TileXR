@@ -464,28 +464,9 @@ class Buffer:
         if not isinstance(plan, MoonEPCommPlan):
             raise AssertionError("Buffer.reduce_grad: plan is required")
         native_plan = plan._require_native()
-        full_gradients = (full_gate_grad, full_up_grad, full_down_grad)
-        reduce_buffers = (
-            gate_reduce_buffer,
-            up_reduce_buffer,
-            down_reduce_buffer,
-        )
-        full_slot_snapshots = tuple(
-            value.narrow(0, self.E, self.B).clone() for value in full_gradients
-        )
-        local_reduce_buffers = tuple(
-            value[self._context.planner_group_rank] for value in reduce_buffers
-        )
-        local_reduce_snapshots = tuple(
-            value.clone() for value in local_reduce_buffers
-        )
-        valid_slots = native_plan.experts_to_copy[
-            self._context.planner_group_rank
-        ] >= 0
-
-        self._native_buffer.reduce_grad(
+        event = self._native_buffer.reduce_grad(
             plan=native_plan,
-            async_finish=False,
+            async_finish=bool(async_finish),
             full_gate_grad=full_gate_grad,
             full_up_grad=full_up_grad,
             full_down_grad=full_down_grad,
@@ -493,17 +474,9 @@ class Buffer:
             up_reduce_buffer=up_reduce_buffer,
             down_reduce_buffer=down_reduce_buffer,
         )
-        for full_gradient, snapshot in zip(full_gradients, full_slot_snapshots):
-            full_gradient.narrow(0, self.E, self.B).copy_(snapshot)
-        for local_buffer, snapshot in zip(
-            local_reduce_buffers, local_reduce_snapshots
-        ):
-            local_buffer.copy_(snapshot)
-            mask_shape = (self.B,) + (1,) * (len(local_buffer.shape) - 1)
-            local_buffer.masked_fill_(valid_slots.reshape(mask_shape), 0.0)
         if async_finish:
             return _CompletionEvent(
-                self._record_event(),
+                event,
                 self._native_buffer.synchronize,
             )
         self._native_buffer.synchronize()

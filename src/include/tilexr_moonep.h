@@ -16,7 +16,8 @@ typedef void *TileXRCommPtr;
 #define TILEXR_MOONEP_ABI_VERSION_V2 UINT32_C(2)
 #define TILEXR_MOONEP_MAX_TENSOR_RANK UINT32_C(4)
 #define TILEXR_MOONEP_FLAG_NONE UINT64_C(0)
-#define TILEXR_MOONEP_REDUCE_GRAD_UDMA_THRESHOLD_BYTES UINT64_C(1048576)
+#define TILEXR_MOONEP_REDUCE_GRAD_DEFAULT_CHUNK_BYTES UINT64_C(8388608)
+#define TILEXR_MOONEP_REDUCE_GRAD_WORKSPACE_ALIGNMENT UINT64_C(2097152)
 #define TILEXR_MOONEP_FLAG_BUILD_DEDUP (UINT64_C(1) << 0)
 #define TILEXR_MOONEP_FLAG_SKIP_INTER_RANK_SYNC (UINT64_C(1) << 1)
 #define TILEXR_MOONEP_FLAG_ZERO_COPY (UINT64_C(1) << 2)
@@ -45,16 +46,10 @@ typedef enum TileXRMoonEpStage {
     TILEXR_MOONEP_STAGE_REDUCE_GRAD = 1u << 4
 } TileXRMoonEpStage;
 
-typedef enum TileXRMoonEpReduceGradTransport {
-    TILEXR_MOONEP_REDUCE_GRAD_TRANSPORT_NONE = 0,
-    TILEXR_MOONEP_REDUCE_GRAD_TRANSPORT_PEER = 1,
-    TILEXR_MOONEP_REDUCE_GRAD_TRANSPORT_UDMA = 2
-} TileXRMoonEpReduceGradTransport;
-
 typedef enum TileXRMoonEpReduceGradDeviceStatus {
     TILEXR_MOONEP_REDUCE_GRAD_DEVICE_SUCCESS = 0,
     TILEXR_MOONEP_REDUCE_GRAD_DEVICE_INVALID_STATE = 1,
-    TILEXR_MOONEP_REDUCE_GRAD_DEVICE_PEER_TIMEOUT = 2,
+    TILEXR_MOONEP_REDUCE_GRAD_DEVICE_UDMA_TIMEOUT = 2,
     TILEXR_MOONEP_REDUCE_GRAD_DEVICE_UDMA_CQ_ERROR = 3
 } TileXRMoonEpReduceGradDeviceStatus;
 
@@ -173,15 +168,28 @@ typedef struct TileXRMoonEpReduceGradWorkspaceInfoV2 {
     uint64_t workspaceBytes;
     uint64_t workspaceAlignment;
     uint64_t udmaChunkBytes;
-    uint64_t peerWindowBytes;
-    uint64_t peerHalfBytes;
-    uint64_t peerSlotStrideBytes;
+    uint64_t laneStateBytes;
+    uint64_t laneStateStrideBytes;
+    uint64_t bankStrideBytes;
+    uint64_t laneStrideBytes;
     uint64_t rowBytes[3];
-    uint32_t transports[3];
+    uint64_t chunkCounts[3];
+    uint32_t projectionQpCounts[3];
+    uint32_t qpCount;
     uint32_t blockDim;
+    uint32_t reserved;
 } TileXRMoonEpReduceGradWorkspaceInfoV2;
 
-typedef struct TileXRMoonEpReduceGradArgsV2 {
+typedef struct TileXRMoonEpReduceGradSourceSliceV2 {
+    void *data;
+    uint64_t bytes;
+    void *registrationBase;
+    uint64_t registrationBytes;
+} TileXRMoonEpReduceGradSourceSliceV2;
+
+typedef void *TileXRMoonEpReduceGradPreparedV2;
+
+typedef struct TileXRMoonEpReduceGradPrepareArgsV2 {
     uint32_t structSize;
     uint32_t abiVersion;
     TileXRCommPtr comm;
@@ -189,11 +197,24 @@ typedef struct TileXRMoonEpReduceGradArgsV2 {
     TileXRMoonEpTensorV1 *gate;
     TileXRMoonEpTensorV1 *up;
     TileXRMoonEpTensorV1 *down;
+    TileXRMoonEpReduceGradSourceSliceV2 sources[3];
     void *workspace;
     uint64_t workspaceBytes;
+    uint64_t requestedUdmaChunkBytes;
+    uint64_t flags;
+} TileXRMoonEpReduceGradPrepareArgsV2;
+
+typedef struct TileXRMoonEpReduceGradArgsV2 {
+    uint32_t structSize;
+    uint32_t abiVersion;
+    TileXRMoonEpReduceGradPreparedV2 prepared;
+    const TileXRMoonEpPlanV1 *plan;
+    TileXRMoonEpTensorV1 *gate;
+    TileXRMoonEpTensorV1 *up;
+    TileXRMoonEpTensorV1 *down;
+    TileXRMoonEpReduceGradSourceSliceV2 sources[3];
     TileXRMoonEpTensorV1 *status;
     uint64_t waitIterations;
-    uint64_t requestedUdmaChunkBytes;
     uint64_t flags;
 } TileXRMoonEpReduceGradArgsV2;
 
@@ -233,12 +254,21 @@ int TileXRMoonEpReduceGradGetWorkspaceSizeV2(
     TileXRMoonEpReduceGradWorkspaceInfoV2 *info);
 
 /*
- * Enqueues asynchronously and is non-reentrant per communicator. Successful
- * calls on one stream may be queued in order. Before switching streams,
- * unregistering workspace, destroying the communicator, or releasing device
- * buffers referenced by args, the caller must synchronize the last used stream.
- * If the status reset is queued but kernel launch fails, this function attempts
- * to drain that stream; a drain failure is reported as a runtime error.
+ * Collective for multi-rank communicators. Registers one persistent UDMA
+ * profile and returns an immutable prepared handle. All referenced allocations
+ * must remain alive until the handle is destroyed after stream quiescence.
+ */
+int TileXRMoonEpReduceGradPrepareV2(
+    const TileXRMoonEpReduceGradPrepareArgsV2 *args,
+    TileXRMoonEpReduceGradPreparedV2 *prepared);
+
+int TileXRMoonEpReduceGradDestroyPreparedV2(
+    TileXRMoonEpReduceGradPreparedV2 prepared);
+
+/*
+ * Enqueues asynchronously from an immutable prepared handle. The hot path does
+ * not synchronize or register memory. The caller must quiesce before destroying
+ * the handle or releasing any referenced allocation.
  */
 int TileXRMoonEpReduceGradV2(const TileXRMoonEpReduceGradArgsV2 *args,
     aclrtStream stream);

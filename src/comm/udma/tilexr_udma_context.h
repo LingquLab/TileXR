@@ -8,6 +8,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <vector>
 
@@ -58,12 +59,17 @@ public:
 
     int RegisterMemory(GM_ADDR localPtr, size_t bytes, TileXRUDMAMemHandle* handle);
     int UnregisterMemory(TileXRUDMAMemHandle handle);
+    int RegisterProfile(const TileXRUDMAProfileDesc& desc, TileXRUDMAProfileHandle* handle);
+    int UnregisterProfile(TileXRUDMAProfileHandle handle);
+    int QueryProfile(TileXRUDMAProfileHandle handle, TileXRUDMAProfileView* view) const;
 
     GM_ADDR GetRegistryDev() const;
     const TileXRUDMARegistry* GetRegistryHost() const;
     uint32_t GetQpCount() const;
 
 private:
+    struct ProfileRecord;
+
     enum class Lifecycle {
         Unavailable,
         TransportReady,
@@ -77,8 +83,10 @@ private:
     int FreeDeviceRegistry(GM_ADDR& registryDev) const;
     int CleanupRetiredRegistries();
     int CleanupAllRegistries();
+    int CleanupAllProfiles();
     void RetainRegistry(GM_ADDR& registryDev);
     void EnterCleanupPending(const char* reason);
+    TileXRUDMAProfileHandle NextProfileHandle() const;
 
     TileXRUDMAContextOptions options_ {};
     Lifecycle lifecycle_ = Lifecycle::Unavailable;
@@ -88,6 +96,8 @@ private:
     GM_ADDR registeredPtr_ = nullptr;
     size_t registeredBytes_ = 0;
     TileXRUDMARegistry registry_ {};
+    std::map<TileXRUDMAProfileHandle, std::unique_ptr<ProfileRecord>> profiles_;
+    TileXRUDMAProfileHandle nextProfileHandle_ = 1;
     std::unique_ptr<TileXRUDMATransport> transport_;
 };
 

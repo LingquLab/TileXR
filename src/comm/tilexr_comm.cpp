@@ -385,6 +385,43 @@ int TileXRComm::UnregisterUDMAMemory(TileXRUDMAMemHandle handle)
     return udmaContext_->UnregisterMemory(handle);
 }
 
+int TileXRComm::RegisterUDMAProfile(
+    const TileXRUDMAProfileDesc &desc, TileXRUDMAProfileHandle *handle)
+{
+    if (!inited_) {
+        TILEXR_LOG(ERROR) << "TileXRUDMAProfileRegister requires initialized communicator";
+        return TILEXR_ERROR_NOT_INITIALIZED;
+    }
+    if (handle == nullptr) {
+        return TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    if (udmaContext_ == nullptr || !udmaContext_->IsAvailable()) {
+        TILEXR_LOG(ERROR) << "TileXRUDMAProfileRegister called while UDMA is unavailable";
+        return TILEXR_ERROR_NOT_SUPPORT;
+    }
+    return udmaContext_->RegisterProfile(desc, handle);
+}
+
+int TileXRComm::UnregisterUDMAProfile(TileXRUDMAProfileHandle handle)
+{
+    if (handle == 0 || udmaContext_ == nullptr) {
+        return TILEXR_ERROR_NOT_FOUND;
+    }
+    return udmaContext_->UnregisterProfile(handle);
+}
+
+int TileXRComm::QueryUDMAProfile(
+    TileXRUDMAProfileHandle handle, TileXRUDMAProfileView *view) const
+{
+    if (view == nullptr || handle == 0) {
+        return TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    if (udmaContext_ == nullptr || !udmaContext_->IsAvailable()) {
+        return TILEXR_ERROR_NOT_SUPPORT;
+    }
+    return udmaContext_->QueryProfile(handle, view);
+}
+
 int TileXRComm::GetUDMAQpCount(uint32_t *qpCount) const
 {
     if (qpCount == nullptr) {

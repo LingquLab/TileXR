@@ -174,15 +174,15 @@ void TestUDMAMemoryCleanupIsRetryable()
     const std::string transportPath = "src/comm/udma/tilexr_udma_transport.cpp";
     const auto transport = ReadFile(transportPath);
     CheckContains(transportPath, transport,
-                  "const int localRet = CleanupLocalRegistrations(registration.localRegistrations);");
+                  "const int localRet = CleanupLocalRegistrations(region.localRegistrations);");
     CheckContains(transportPath, transport, "const int cleanupRet = CleanupAllMemory();");
     CheckContains(transportPath, transport, "GM_ADDR TileXRUDMATransport::GetRegisteredMemoryPtr() const");
-    CheckContains(transportPath, transport, "RaCtxRmemUnimport failed for peer");
+    CheckContains(transportPath, transport, "RaCtxRmemUnimport failed for region");
     CheckContains(transportPath, transport, "RaCtxLmemUnregister failed for eid");
     CheckContains(transportPath, transport,
                   "sq[index].localTokenId = registrationIt->second.tokenId;");
     CheckContains(transportPath, transport, "it = byEid.erase(it);");
-    CheckContains(transportPath, transport, "it = registration.remoteMemHandles.erase(it);");
+    CheckContains(transportPath, transport, "it = handles.erase(it);");
 
     const std::string contextPath = "src/comm/udma/tilexr_udma_context.cpp";
     const auto context = ReadFile(contextPath);
@@ -229,13 +229,13 @@ void TestUDMAUnregisterIsLocalAfterPublication()
     const std::string path = "src/comm/udma/tilexr_udma_context.cpp";
     const auto text = ReadFile(path);
     const auto unregisterPos = text.find("int TileXRUDMAContext::UnregisterMemory");
-    const auto getterPos = text.find("GM_ADDR TileXRUDMAContext::GetRegistryDev", unregisterPos);
-    if (unregisterPos == std::string::npos || getterPos == std::string::npos) {
+    const auto profileRegisterPos = text.find("int TileXRUDMAContext::RegisterProfile", unregisterPos);
+    if (unregisterPos == std::string::npos || profileRegisterPos == std::string::npos) {
         std::cerr << "failed to locate UDMA unregister body" << std::endl;
         ++g_failures;
         return;
     }
-    const auto body = text.substr(unregisterPos, getterPos - unregisterPos);
+    const auto body = text.substr(unregisterPos, profileRegisterPos - unregisterPos);
     CheckContains(path, body, "transport_->GetBaseUDMAInfoDev()");
     CheckContains(path, body, "transport_->CleanupAllMemory()");
     CheckNotContains(path, body, "AllGather(");
@@ -334,8 +334,7 @@ void TestUDMAMultiQpHostTransportContract()
                   "if (remoteClean && state.qpHandle != nullptr)");
     CheckContains(transportPath, transport,
                   "const bool hardwareClean = remoteClean && state.qpHandle == nullptr");
-    CheckContains(transportPath, transport,
-                  "registration.remoteMemHandles.count(importKey) == 0");
+    CheckContains(transportPath, transport, "region.remoteMemHandles.count(importKey) == 0");
     CheckContains(transportPath, transport,
                   "BuildUDMAInfoImage(reinterpret_cast<uintptr_t>(registration.infoDev), qpCount_");
     CheckContains(transportPath, transport, "return IsAvailable() ? qpCount_ : 0U;");
@@ -519,6 +518,69 @@ void TestUDMALocalRegistrationFlags()
     CheckContains(commPath, comm, "physicalInfo_.chipName == ChipName::CHIP_950PR");
 }
 
+void TestUDMAPersistentProfilesStayIndependent()
+{
+    const std::string apiPath = "src/include/tilexr_api.h";
+    const auto api = ReadFile(apiPath);
+    CheckContains(apiPath, api, "typedef uint32_t TileXRUDMAProfileHandle;");
+    CheckContains(apiPath, api, "int TileXRUDMAProfileRegister(");
+    CheckContains(apiPath, api, "int TileXRUDMAProfileUnregister(");
+    CheckContains(apiPath, api, "int TileXRUDMAProfileQuery(");
+
+    const std::string registryPath = "src/include/tilexr_udma_reg.h";
+    const auto registry = ReadFile(registryPath);
+    CheckContains(registryPath, registry, "TILEXR_UDMA_PROFILE_MAX_REGIONS = 8U");
+    CheckContains(registryPath, registry, "TILEXR_UDMA_PROFILE_MAX_QP_BINDINGS = 32U");
+    CheckContains(registryPath, registry, "struct TileXRUDMAProfileQpBinding");
+    CheckContains(registryPath, registry, "struct TileXRUDMAProfileView");
+    CheckContains(registryPath, registry, "registrationBase");
+    CheckContains(registryPath, registry, "registrationBytes");
+    CheckContains(registryPath, registry,
+                  "TileXRUDMAProfileQpBinding qpBindings[TILEXR_UDMA_PROFILE_MAX_QP_BINDINGS]");
+
+    const std::string contextPath = "src/comm/udma/tilexr_udma_context.cpp";
+    const auto context = ReadFile(contextPath);
+    const auto registerPos = context.find("int TileXRUDMAContext::RegisterProfile");
+    const auto unregisterPos = context.find("int TileXRUDMAContext::UnregisterProfile", registerPos);
+    if (registerPos == std::string::npos || unregisterPos == std::string::npos) {
+        std::cerr << "failed to locate persistent profile registration body" << std::endl;
+        ++g_failures;
+    } else {
+        const auto body = context.substr(registerPos, unregisterPos - registerPos);
+        CheckContains(contextPath, body, "transport_->PrepareProfile(desc)");
+        CheckContains(contextPath, body,
+                      "candidate->registry.regions[index].registrationBase = nullptr;");
+        CheckContains(contextPath, body, "transport_->CommitPreparedProfile(candidateHandle)");
+        CheckContains(contextPath, body, "profiles_.emplace(candidateHandle, std::move(candidate))");
+        CheckNotContains(contextPath, body, "ApplyCommArgsState(");
+        CheckNotContains(contextPath, body, "udmaInfoDev_ =");
+    }
+
+    const std::string transportPath = "src/comm/udma/tilexr_udma_transport.cpp";
+    const auto transport = ReadFile(transportPath);
+    CheckContains(transportPath, transport,
+                  "registration.qpBindings[qpIdx].localRegion");
+    CheckContains(transportPath, transport,
+                  "registration.qpBindings[qpIdx].remoteRegion");
+    CheckContains(transportPath, transport,
+                  "UDMAProfileRegistrationBase(desc.regions[region])");
+    CheckContains(transportPath, transport,
+                  "profiles_.emplace(handle, std::move(preparedProfile_))");
+    CheckContains(transportPath, transport, "registration.cleanupPending = true;");
+    CheckContains(transportPath, transport,
+                  "if (ret == TILEXR_SUCCESS && it->second->regions.empty()");
+
+    const std::string devicePath = "src/include/tilexr_udma.h";
+    const auto device = ReadFile(devicePath);
+    CheckContains(devicePath, device, "UDMAProfileRegisteredRangeValid(");
+    CheckContains(devicePath, device, "UDMAProfileGetNbiOnQpDeferred(");
+    CheckContains(devicePath, device,
+                  "UDMAPostSend<UDMAOpcode::READ, false>(udmaInfo, wqeScratch");
+    CheckContains(devicePath, device, "UDMAProfileCompletionFrontier(");
+    CheckContains(devicePath, device, "UDMAProfileFlushQpDoorbell(");
+    CheckContains(devicePath, device, "UDMAProfileQuietStatusOnQpUntil(");
+}
+
 } // namespace
 
 int main()
@@ -530,6 +592,7 @@ int main()
     TestPublicHeadersDoNotExposeUDMAContext();
     TestCommSourcesDoNotUseShmem();
     TestUDMALocalRegistrationFlags();
+    TestUDMAPersistentProfilesStayIndependent();
     TestUDMAMemoryCleanupIsRetryable();
     TestUDMARegistrationIsTransactional();
     TestUDMAUnregisterIsLocalAfterPublication();

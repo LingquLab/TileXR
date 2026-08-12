@@ -2,6 +2,32 @@
 
 This demo shows TileXR-initialized UDMA communication with verbose diagnostics. UDMA means UnifiedBus DMA and this runtime path currently targets A5 / Ascend950 / 950 hardware. The host demo uses TileXR public APIs, registers ordinary `aclrtMalloc` memory with `TileXRUDMARegister`, and the AICore kernel uses `tilexr_udma.h`.
 
+## Persistent Profile Hardware Probe
+
+`tilexr_udma_profile_probe` is the Ascend950 stop-gate for persistent multi-MR
+profiles. It registers one legacy region alongside four 2 MiB-aligned profile
+regions, binds every QP to local staging and one of three remote sources, and
+issues four deferred READ WQEs per batch. The per-WQE sizes are 48 KiB, 256 KiB,
+1 MiB, 2 MiB, 4 MiB, 8 MiB, and 16 MiB.
+
+The probe kernel is a pure AICore binary. The Host executable registers it with
+`rtDevBinaryRegister` and `rtFunctionRegister`, then launches it with
+`rtKernelLaunchWithFlagV2`.
+
+```bash
+cd tests/udma
+bash build.sh
+bash demo/run_tilexr_udma_profile_probe_mpi.sh \
+  --hosts 141.61.53.106:1,141.61.53.110:1 \
+  --comm-id 172.27.12.106:10167
+```
+
+The runner retains the combined log and JSONL timing records under
+`tests/udma/logs/`. `wqe_bytes` is the size of one UDMA copy and `batch_bytes`
+is the four-WQE aggregate. The launcher uses MPI when `mpirun` is available and
+otherwise starts one bounded SSH process on each host; use `--launcher` to
+select either mode explicitly.
+
 ## Build
 
 ```bash

@@ -104,6 +104,65 @@ __aicore__ inline __gm__ TileXRUDMARegistry* GetUDMARegistry(const __gm__ CommAr
     return reinterpret_cast<__gm__ TileXRUDMARegistry*>(args->udmaRegistryPtr);
 }
 
+__aicore__ inline bool UDMAProfileRegistryValid(
+    const __gm__ CommArgs* args, const __gm__ UDMAInfo* udmaInfo,
+    const __gm__ TileXRUDMAProfileRegistry* registry)
+{
+    if (args == nullptr || (args->extraFlag & ExtraFlag::UDMA) == 0U ||
+        udmaInfo == nullptr || registry == nullptr ||
+        registry->magic != TILEXR_UDMA_PROFILE_MAGIC ||
+        registry->version != TILEXR_UDMA_PROFILE_VERSION ||
+        args->rankSize <= 0 || args->rankSize > TILEXR_MAX_RANK_SIZE ||
+        args->rank < 0 || args->rank >= args->rankSize ||
+        registry->rankSize != static_cast<uint32_t>(args->rankSize) ||
+        registry->regionCount == 0 ||
+        registry->regionCount > TILEXR_UDMA_PROFILE_MAX_REGIONS ||
+        registry->qpCount == 0 || registry->qpCount > TILEXR_UDMA_DEVICE_MAX_QP_COUNT ||
+        udmaInfo->qpNum != registry->qpCount || udmaInfo->sqPtr == 0U ||
+        udmaInfo->memPtr == 0U) {
+        return false;
+    }
+    return true;
+}
+
+__aicore__ inline const __gm__ TileXRUDMAProfileRegionDesc* UDMAProfileGetRegion(
+    const __gm__ TileXRUDMAProfileRegistry* registry, int rank, uint32_t region)
+{
+    if (registry == nullptr || rank < 0 || static_cast<uint32_t>(rank) >= registry->rankSize ||
+        region >= registry->regionCount || registry->rankSize > TILEXR_MAX_RANK_SIZE ||
+        registry->regionCount > TILEXR_UDMA_PROFILE_MAX_REGIONS) {
+        return nullptr;
+    }
+    const uint64_t index = static_cast<uint64_t>(rank) *
+        TILEXR_UDMA_PROFILE_MAX_REGIONS + region;
+    return &registry->regions[index];
+}
+
+__aicore__ inline bool UDMAProfileRegisteredRangeValid(
+    const __gm__ TileXRUDMAProfileRegistry* registry, int rank, uint32_t region,
+    uint64_t byteOffset, uint64_t byteCount)
+{
+    const __gm__ TileXRUDMAProfileRegionDesc* desc =
+        UDMAProfileGetRegion(registry, rank, region);
+    if (desc == nullptr || desc->base == nullptr || desc->bytes == 0 ||
+        byteOffset > desc->bytes) {
+        return false;
+    }
+    return byteCount <= desc->bytes - byteOffset;
+}
+
+__aicore__ inline __gm__ uint8_t* UDMAProfileRegisteredAddr(
+    const __gm__ TileXRUDMAProfileRegistry* registry, int rank, uint32_t region,
+    uint64_t byteOffset)
+{
+    const __gm__ TileXRUDMAProfileRegionDesc* desc =
+        UDMAProfileGetRegion(registry, rank, region);
+    if (desc == nullptr || desc->base == nullptr || byteOffset > desc->bytes) {
+        return nullptr;
+    }
+    return reinterpret_cast<__gm__ uint8_t*>(desc->base + byteOffset);
+}
+
 __aicore__ inline bool UDMARegisteredRangeValid(
     const __gm__ TileXRUDMARegistry* registry, int targetRank, uint64_t byteOffset, uint64_t byteCount)
 {
@@ -534,15 +593,20 @@ __attribute__((always_inline)) inline __aicore__ uint32_t UDMAWrite(
         localAddr, pe, qpIdx, messageLen, nullptr, sqeFlag);
 }
 
-__aicore__ inline uint32_t UDMARead(
+__attribute__((always_inline)) inline __aicore__ uint32_t UDMARead(
     const __gm__ CommArgs* args, const AscendC::LocalTensor<uint8_t>& wqeScratch,
     __gm__ uint8_t* localAddr, __gm__ uint8_t* remoteAddr,
-    uint32_t pe, uint32_t qpIdx, uint64_t messageLen)
+    uint32_t pe, uint32_t qpIdx, uint64_t messageLen, bool ringDoorbell = true)
 {
     if (TILEXR_UDMA_ARCH_SUPPORTED && UDMAQueueOperationValid(
             args, static_cast<int>(pe), qpIdx)) {
-        return UDMAPostSend<UDMAOpcode::READ, true>(GetUDMAInfo(args), wqeScratch, remoteAddr,
-            localAddr, pe, qpIdx, messageLen, nullptr,
+        if (ringDoorbell) {
+            return UDMAPostSend<UDMAOpcode::READ, true>(GetUDMAInfo(args), wqeScratch,
+                remoteAddr, localAddr, pe, qpIdx, messageLen, nullptr,
+                TILEXR_UDMA_SQE_FLAG_ORDERED_COMPLETION);
+        }
+        return UDMAPostSend<UDMAOpcode::READ, false>(GetUDMAInfo(args), wqeScratch,
+            remoteAddr, localAddr, pe, qpIdx, messageLen, nullptr,
             TILEXR_UDMA_SQE_FLAG_ORDERED_COMPLETION);
     }
     return TILEXR_UDMA_STATUS_INVALID;
@@ -680,6 +744,113 @@ __aicore__ inline void UDMAGetRegisteredNbi(
     int sourceRank, __gm__ T* localDst, uint64_t byteOffset, uint32_t byteCount)
 {
     UDMAGetNbi<T>(args, wqeScratch, sourceRank, localDst, byteOffset, byteCount);
+}
+
+__attribute__((always_inline)) inline __aicore__ bool UDMAProfileGetOperationValid(
+    const __gm__ CommArgs* args, const __gm__ UDMAInfo* udmaInfo,
+    const __gm__ TileXRUDMAProfileRegistry* registry,
+    int sourceRank, uint32_t qpIdx, uint32_t localRegion, uint64_t localByteOffset,
+    uint32_t remoteRegion, uint64_t remoteByteOffset, uint64_t byteCount)
+{
+    if (!TILEXR_UDMA_ARCH_SUPPORTED ||
+        !UDMAProfileRegistryValid(args, udmaInfo, registry) ||
+        sourceRank < 0 || sourceRank >= args->rankSize || sourceRank == args->rank ||
+        qpIdx >= registry->qpCount || byteCount == 0U || byteCount > 0xFFFFFFFFULL) {
+        return false;
+    }
+    const __gm__ TileXRUDMAProfileQpBinding* binding = &registry->qpBindings[qpIdx];
+    if (binding->localRegion != localRegion || binding->remoteRegion != remoteRegion) {
+        return false;
+    }
+    return UDMAProfileRegisteredRangeValid(registry, args->rank, localRegion,
+               localByteOffset, byteCount) &&
+        UDMAProfileRegisteredRangeValid(registry, sourceRank, remoteRegion,
+            remoteByteOffset, byteCount);
+}
+
+__attribute__((always_inline)) inline __aicore__ uint32_t UDMAProfileGetNbiOnQpDeferred(
+    const __gm__ CommArgs* args, __gm__ UDMAInfo* udmaInfo,
+    const __gm__ TileXRUDMAProfileRegistry* registry,
+    const AscendC::LocalTensor<uint8_t>& wqeScratch,
+    int sourceRank, uint32_t qpIdx, uint32_t localRegion, uint64_t localByteOffset,
+    uint32_t remoteRegion, uint64_t remoteByteOffset, uint64_t byteCount)
+{
+    if (!UDMAProfileGetOperationValid(args, udmaInfo, registry, sourceRank, qpIdx,
+            localRegion, localByteOffset, remoteRegion, remoteByteOffset, byteCount)) {
+        return TILEXR_UDMA_STATUS_INVALID;
+    }
+    __gm__ uint8_t* localAddr = UDMAProfileRegisteredAddr(
+        registry, args->rank, localRegion, localByteOffset);
+    __gm__ uint8_t* remoteAddr = UDMAProfileRegisteredAddr(
+        registry, sourceRank, remoteRegion, remoteByteOffset);
+    return UDMAPostSend<UDMAOpcode::READ, false>(udmaInfo, wqeScratch,
+        remoteAddr, localAddr, static_cast<uint32_t>(sourceRank), qpIdx, byteCount,
+        nullptr, TILEXR_UDMA_SQE_FLAG_ORDERED_COMPLETION);
+}
+
+__aicore__ inline uint32_t UDMAProfileCompletionFrontier(
+    const __gm__ CommArgs* args, __gm__ UDMAInfo* udmaInfo,
+    const __gm__ TileXRUDMAProfileRegistry* registry, int sourceRank, uint32_t qpIdx)
+{
+    if (!UDMAProfileRegistryValid(args, udmaInfo, registry) || sourceRank < 0 ||
+        sourceRank >= args->rankSize || sourceRank == args->rank || qpIdx >= registry->qpCount) {
+        return 0U;
+    }
+    __gm__ UDMAWQCtx* qpCtxEntry = UDMAGetWQCtx(
+        udmaInfo, static_cast<uint32_t>(sourceRank), qpIdx);
+    if (qpCtxEntry == nullptr || qpCtxEntry->wqeCntAddr == 0U) {
+        return 0U;
+    }
+    return ld_dev(reinterpret_cast<__gm__ uint32_t*>(qpCtxEntry->wqeCntAddr), 0);
+}
+
+__aicore__ inline uint32_t UDMAProfileFlushQpDoorbell(
+    const __gm__ CommArgs* args, __gm__ UDMAInfo* udmaInfo,
+    const __gm__ TileXRUDMAProfileRegistry* registry, int sourceRank, uint32_t qpIdx)
+{
+    if (!UDMAProfileRegistryValid(args, udmaInfo, registry) || sourceRank < 0 ||
+        sourceRank >= args->rankSize || sourceRank == args->rank || qpIdx >= registry->qpCount) {
+        return TILEXR_UDMA_STATUS_INVALID;
+    }
+    __gm__ UDMAWQCtx* qpCtxEntry = UDMAGetWQCtx(
+        udmaInfo, static_cast<uint32_t>(sourceRank), qpIdx);
+    if (qpCtxEntry == nullptr || qpCtxEntry->headAddr == 0U ||
+        qpCtxEntry->tailAddr == 0U || qpCtxEntry->dbAddr == 0U ||
+        qpCtxEntry->depth != TILEXR_UDMA_SQ_BB_COUNT) {
+        return TILEXR_UDMA_STATUS_INVALID;
+    }
+    const uint32_t head = ld_dev(reinterpret_cast<__gm__ uint32_t*>(qpCtxEntry->headAddr), 0);
+    const uint32_t tail = ld_dev(reinterpret_cast<__gm__ uint32_t*>(qpCtxEntry->tailAddr), 0);
+    if (head - tail > qpCtxEntry->depth) {
+        return TILEXR_UDMA_STATUS_INVALID;
+    }
+    UDMARingDoorbell(head, qpCtxEntry);
+    return TILEXR_UDMA_STATUS_SUCCESS;
+}
+
+__aicore__ inline uint32_t UDMAProfileQuietStatusOnQpUntil(
+    const __gm__ CommArgs* args, __gm__ UDMAInfo* udmaInfo,
+    const __gm__ TileXRUDMAProfileRegistry* registry,
+    int sourceRank, uint32_t qpIdx, uint32_t completionFrontier)
+{
+    if (!UDMAProfileRegistryValid(args, udmaInfo, registry) || sourceRank < 0 ||
+        sourceRank >= args->rankSize || sourceRank == args->rank || qpIdx >= registry->qpCount ||
+        udmaInfo->scqPtr == 0U) {
+        return TILEXR_UDMA_STATUS_INVALID;
+    }
+    __gm__ UDMAWQCtx* qpCtxEntry = UDMAGetWQCtx(
+        udmaInfo, static_cast<uint32_t>(sourceRank), qpIdx);
+    if (qpCtxEntry == nullptr || qpCtxEntry->wqeCntAddr == 0U ||
+        qpCtxEntry->depth != TILEXR_UDMA_SQ_BB_COUNT) {
+        return TILEXR_UDMA_STATUS_INVALID;
+    }
+    const uint32_t submitted = ld_dev(
+        reinterpret_cast<__gm__ uint32_t*>(qpCtxEntry->wqeCntAddr), 0);
+    if (submitted - completionFrontier > qpCtxEntry->depth) {
+        return TILEXR_UDMA_STATUS_INVALID;
+    }
+    return UDMAPollCQ(udmaInfo, static_cast<uint32_t>(sourceRank), qpIdx,
+        completionFrontier);
 }
 
 template <typename T>

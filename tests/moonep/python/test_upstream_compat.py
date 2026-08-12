@@ -548,13 +548,16 @@ class ReduceGradAndPublicApiTests(unittest.TestCase):
         )
         self.assertIsNone(result)
         for value in full:
-            self.assertGreaterEqual(
-                sum(call[2] == (2, 8, 8) for call in value.copy_calls), 2
-            )
+            self.assertEqual(value.copy_calls, [])
         for value in reduced:
-            self.assertEqual(len(value.zero_calls), 1)
-            self.assertEqual(len(value.copy_calls), 1)
-            self.assertEqual(len(value.masked_fill_calls), 1)
+            self.assertEqual(value.zero_calls, [])
+            self.assertEqual(value.copy_calls, [])
+            self.assertEqual(value.masked_fill_calls, [])
+        prepared = [
+            call for call in runtime.calls if call[0] == "prepare_reduce_grad"
+        ][-1]
+        for source, value in zip(prepared[4], reduced):
+            self.assertEqual(source.data_ptr(), value[0].data_ptr())
 
         event = buffer.reduce_grad(
             plan=plan,

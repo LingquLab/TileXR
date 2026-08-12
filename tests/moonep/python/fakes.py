@@ -271,6 +271,8 @@ class FakeRuntime:
             stub_mask=0,
         )
         self.registered_workspace = None
+        self.reduce_grad_prepared = None
+        self._next_reduce_grad_prepared = 1
         self.reduce_grad_query_calls = 0
         self._reduce_grad_lock = threading.RLock()
         self._reduce_grad_owner_token = None
@@ -432,49 +434,69 @@ class FakeRuntime:
             int(getattr(gradients, name).numel() // getattr(gradients, name).shape[0]) * 4
             for name in ("gate", "up", "down")
         )
-        transports = tuple("udma" if value > (1 << 20) else "peer" for value in row_bytes)
-        workspace_bytes = 4096 if "udma" in transports else 0
+        chunk_bytes = int(requested_udma_chunk_bytes) or (8 << 20)
+        qp_count = max(3, self._udma_qp_count)
+        qp_counts = (1, 1, qp_count - 2)
+        lane_state_bytes = qp_count * 4096
+        bank_stride_bytes = self.world_size * chunk_bytes
+        lane_stride_bytes = 2 * bank_stride_bytes
+        payload_bytes = qp_count * lane_stride_bytes
+        workspace_bytes = (
+            (lane_state_bytes + payload_bytes + (2 << 20) - 1) // (2 << 20)
+        ) * (2 << 20)
         self.reduce_grad_query_calls += 1
         return ReduceGradWorkspaceInfo(
             workspace_bytes=workspace_bytes,
             workspace_alignment=2 << 20,
-            udma_chunk_bytes=2 << 20 if workspace_bytes else 0,
-            peer_window_bytes=100 << 20,
-            peer_half_bytes=49 << 20,
-            peer_slot_stride_bytes=1 << 20,
+            udma_chunk_bytes=chunk_bytes,
+            lane_state_bytes=lane_state_bytes,
+            lane_state_stride_bytes=4096,
+            bank_stride_bytes=bank_stride_bytes,
+            lane_stride_bytes=lane_stride_bytes,
             row_bytes=row_bytes,
-            transports=transports,
+            chunk_counts=tuple(
+                (value + chunk_bytes - 1) // chunk_bytes for value in row_bytes
+            ),
+            projection_qp_counts=qp_counts,
+            qp_count=qp_count,
             block_dim=64,
         )
 
-    def register_reduce_grad_workspace(
-        self, workspace, required_bytes, *, owner_token=None
+    def prepare_reduce_grad(
+        self,
+        context,
+        plan,
+        gradients,
+        sources,
+        source_registrations,
+        workspace,
+        *,
+        requested_udma_chunk_bytes=0,
     ):
-        with self._reduce_grad_lock:
-            self._require_reduce_grad_workspace_owner(
-                owner_token, "register_reduce_grad_workspace"
+        prepared = self._next_reduce_grad_prepared
+        self._next_reduce_grad_prepared += 1
+        self.registered_workspace = workspace
+        self.reduce_grad_prepared = prepared
+        self.calls.append(
+            (
+                "prepare_reduce_grad",
+                prepared,
+                plan,
+                gradients,
+                sources,
+                source_registrations,
+                workspace,
+                requested_udma_chunk_bytes,
             )
-            if (
-                self._active_udma_owner == "reduce_grad"
-                and self.registered_workspace is workspace
-            ):
-                return
-            self.registered_workspace = workspace
-            self._active_udma_owner = "reduce_grad"
-            self._active_projection = None
-            self.calls.append(("register_reduce_grad_workspace", required_bytes))
+        )
+        return prepared
 
-    def unregister_reduce_grad_workspace(self, *, owner_token=None):
-        with self._reduce_grad_lock:
-            self._require_reduce_grad_workspace_owner(
-                owner_token, "unregister_reduce_grad_workspace"
-            )
-            if (
-                self.registered_workspace is not None
-                and self._active_udma_owner == "reduce_grad"
-            ):
-                self.calls.append(("unregister_reduce_grad_workspace", None))
-                self._active_udma_owner = None
+    def destroy_reduce_grad(self, prepared):
+        if prepared is None:
+            return
+        self.calls.append(("destroy_reduce_grad", prepared))
+        if self.reduce_grad_prepared == prepared:
+            self.reduce_grad_prepared = None
             self.registered_workspace = None
 
     def reduce_grad(
@@ -482,21 +504,22 @@ class FakeRuntime:
         context,
         plan,
         gradients,
-        workspace,
+        sources,
+        source_registrations,
+        prepared,
         stream,
         wait_iterations,
-        *,
-        requested_udma_chunk_bytes=0,
     ):
         self.calls.append(
             (
                 "reduce_grad",
                 plan,
                 gradients,
-                workspace,
+                sources,
+                source_registrations,
+                prepared,
                 stream,
                 wait_iterations,
-                requested_udma_chunk_bytes,
             )
         )
         plan.reduce_grad_status._item = 0

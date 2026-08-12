@@ -80,27 +80,45 @@ int main()
         "ReduceGrad workspace query must be standard layout");
     static_assert(std::is_standard_layout<TileXRMoonEpReduceGradWorkspaceInfoV2>::value,
         "ReduceGrad workspace info must be standard layout");
+    static_assert(std::is_standard_layout<TileXRMoonEpReduceGradSourceSliceV2>::value,
+        "ReduceGrad source slice must be standard layout");
+    static_assert(std::is_standard_layout<TileXRMoonEpReduceGradPrepareArgsV2>::value,
+        "ReduceGrad prepare args must be standard layout");
     static_assert(std::is_standard_layout<TileXRMoonEpReduceGradArgsV2>::value,
         "ReduceGrad V2 args must be standard layout");
     static_assert(sizeof(TileXRMoonEpReduceGradWorkspaceQueryV2) == 64,
         "Unexpected ReduceGrad workspace query size");
-    static_assert(sizeof(TileXRMoonEpReduceGradWorkspaceInfoV2) == 96,
+    static_assert(sizeof(TileXRMoonEpReduceGradWorkspaceInfoV2) == 136,
         "Unexpected ReduceGrad workspace info size");
-    static_assert(offsetof(TileXRMoonEpReduceGradWorkspaceInfoV2, rowBytes) == 56,
+    static_assert(offsetof(TileXRMoonEpReduceGradWorkspaceInfoV2, rowBytes) == 64,
         "Unexpected ReduceGrad rowBytes offset");
-    static_assert(offsetof(TileXRMoonEpReduceGradWorkspaceInfoV2, transports) == 80,
-        "Unexpected ReduceGrad transports offset");
-    static_assert(sizeof(TileXRMoonEpReduceGradArgsV2) == 96,
+    static_assert(offsetof(TileXRMoonEpReduceGradWorkspaceInfoV2, chunkCounts) == 88,
+        "Unexpected ReduceGrad chunkCounts offset");
+    static_assert(offsetof(TileXRMoonEpReduceGradWorkspaceInfoV2, projectionQpCounts) == 112,
+        "Unexpected ReduceGrad projection QP offset");
+    static_assert(sizeof(TileXRMoonEpReduceGradSourceSliceV2) == 32,
+        "Unexpected ReduceGrad source slice size");
+    static_assert(sizeof(TileXRMoonEpReduceGradPrepareArgsV2) == 176,
+        "Unexpected ReduceGrad prepare args size");
+    static_assert(offsetof(TileXRMoonEpReduceGradPrepareArgsV2, sources) == 48,
+        "Unexpected ReduceGrad prepare source offset");
+    static_assert(offsetof(TileXRMoonEpReduceGradPrepareArgsV2, workspace) == 144,
+        "Unexpected ReduceGrad prepare workspace offset");
+    static_assert(sizeof(TileXRMoonEpReduceGradArgsV2) == 168,
         "Unexpected ReduceGrad V2 args size");
-    static_assert(offsetof(TileXRMoonEpReduceGradArgsV2, workspace) == 48,
-        "Unexpected ReduceGrad workspace offset");
-    static_assert(offsetof(TileXRMoonEpReduceGradArgsV2, status) == 64,
+    static_assert(offsetof(TileXRMoonEpReduceGradArgsV2, prepared) == 8,
+        "Unexpected ReduceGrad prepared handle offset");
+    static_assert(offsetof(TileXRMoonEpReduceGradArgsV2, sources) == 48,
+        "Unexpected ReduceGrad launch source offset");
+    static_assert(offsetof(TileXRMoonEpReduceGradArgsV2, status) == 144,
         "Unexpected ReduceGrad status offset");
 
     Check(TILEXR_MOONEP_ABI_VERSION_V1 == 1, "ABI version must be 1");
     Check(TILEXR_MOONEP_ABI_VERSION_V2 == 2, "V2 ABI version must be 2");
-    Check(TILEXR_MOONEP_REDUCE_GRAD_UDMA_THRESHOLD_BYTES == UINT64_C(1048576),
-        "ReduceGrad UDMA threshold must be exactly 1 MiB");
+    Check(TILEXR_MOONEP_REDUCE_GRAD_DEFAULT_CHUNK_BYTES == UINT64_C(8388608),
+        "ReduceGrad default owner-pull chunk must be 8 MiB");
+    Check(TILEXR_MOONEP_REDUCE_GRAD_WORKSPACE_ALIGNMENT == UINT64_C(2097152),
+        "ReduceGrad workspace alignment must be 2 MiB");
     Check((TILEXR_MOONEP_STAGE_PLANNING & TILEXR_MOONEP_STAGE_DISPATCH) == 0,
         "Stage capability bits must not overlap");
     Check(TILEXR_MOONEP_MAX_TENSOR_RANK == 4, "Tensor rank must remain fixed at four");

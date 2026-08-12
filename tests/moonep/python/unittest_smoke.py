@@ -204,7 +204,9 @@ class MoonEPSmokeTests(unittest.TestCase):
                 "dispatch",
                 "expert_backward",
                 "combine",
+                "prepare_reduce_grad",
                 "reduce_grad",
+                "destroy_reduce_grad",
                 "udma_unregister",
                 "close",
             ],
@@ -216,7 +218,7 @@ class MoonEPSmokeTests(unittest.TestCase):
         with self.assertRaises((AttributeError, TypeError)):
             forward.state.plan.epoch = 99
 
-    def test_reduce_grad_udma_workspace_is_registered_once_and_released(self):
+    def test_reduce_grad_profile_is_prepared_once_and_released(self):
         torch, runtime, buffer = make_buffer()
         plan, _ = buffer.planning(
             tensor((4, 2), torch.int32), tensor((4,), torch.int32)
@@ -229,7 +231,8 @@ class MoonEPSmokeTests(unittest.TestCase):
         )
 
         info = buffer.prepare_reduce_grad(plan, gradients)
-        self.assertEqual(info.transports, ("peer", "udma", "peer"))
+        self.assertEqual(info.qp_count, 3)
+        self.assertEqual(info.projection_qp_counts, (1, 1, 1))
         self.assertIsNotNone(runtime.registered_workspace)
         self.assertEqual(runtime.registered_workspace.numel(), info.workspace_bytes)
         self.assertEqual(
@@ -237,7 +240,7 @@ class MoonEPSmokeTests(unittest.TestCase):
         )
         self.assertEqual(
             [call[0] for call in runtime.calls].count(
-                "register_reduce_grad_workspace"
+                "prepare_reduce_grad"
             ),
             1,
         )
@@ -251,7 +254,7 @@ class MoonEPSmokeTests(unittest.TestCase):
         self.assertEqual(runtime.reduce_grad_query_calls, 1)
         self.assertEqual(
             [call[0] for call in runtime.calls].count(
-                "register_reduce_grad_workspace"
+                "prepare_reduce_grad"
             ),
             1,
         )
@@ -259,7 +262,7 @@ class MoonEPSmokeTests(unittest.TestCase):
         self.assertIsNone(runtime.registered_workspace)
         names = [call[0] for call in runtime.calls]
         self.assertLess(
-            names.index("unregister_reduce_grad_workspace"), names.index("close")
+            names.index("destroy_reduce_grad"), names.index("close")
         )
 
     def test_reduce_grad_rejects_second_inflight_call_and_reuses_after_sync(self):
@@ -320,6 +323,28 @@ class MoonEPSmokeTests(unittest.TestCase):
         )
         self.assertEqual([call[0] for call in runtime.calls].count("reduce_grad"), 2)
         buffer.close()
+
+    def test_reduce_grad_transport_failure_poisons_context(self):
+        torch, runtime, buffer = make_buffer()
+        plan, _ = buffer.planning(
+            tensor((4, 2), torch.int32), tensor((4,), torch.int32)
+        )
+        gradients = ProjectionBuffers(
+            tensor((6, 8), torch.float32),
+            tensor((6, 8), torch.float32),
+            tensor((6, 8), torch.float32),
+        )
+        buffer.reduce_grad(
+            plan,
+            full_gate_grad=gradients.gate,
+            full_up_grad=gradients.up,
+            full_down_grad=gradients.down,
+        )
+        plan.reduce_grad_status._item = 3
+        with self.assertRaisesRegex(RuntimeError, "actual 3"):
+            buffer.synchronize()
+        self.assertTrue(buffer.context._poisoned)
+        self.assertIsNone(runtime._reduce_grad_owner_token)
 
     def test_strict_tensor_checks(self):
         torch, _, buffer = make_buffer()

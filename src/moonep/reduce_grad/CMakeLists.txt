@@ -59,9 +59,11 @@ tilexr_add_moonep_kernel(tilexr_moonep_reduce_grad_kernel
     INCLUDES ${TILEXR_MOONEP_REDUCE_GRAD_KERNEL_INCLUDES}
     DEPENDS
         "${CMAKE_CURRENT_SOURCE_DIR}/common/reduce_grad_common.h"
-        "${CMAKE_SOURCE_DIR}/src/moonep/common/moonep_peer_window.h"
         "${CMAKE_SOURCE_DIR}/src/include/comm_args.h"
         "${CMAKE_SOURCE_DIR}/src/include/tilexr_sync.h"
+        "${CMAKE_SOURCE_DIR}/src/include/tilexr_udma.h"
+        "${CMAKE_SOURCE_DIR}/src/include/tilexr_udma_reg.h"
+        "${CMAKE_SOURCE_DIR}/src/include/tilexr_udma_types.h"
 )
 
 add_library(tilexr-moonep-reduce-grad SHARED

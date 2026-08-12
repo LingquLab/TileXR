@@ -147,8 +147,10 @@ int TileXRMoonEpBuildPrefetchWeightLayout(
     }
 
     const bool hasOverride = blockDimOverride != nullptr && blockDimOverride[0] != '\0';
-    uint32_t workers = qpNum < kPrefetchWeightMaxWorkers ?
-        qpNum : kPrefetchWeightMaxWorkers;
+    uint32_t workers = kPrefetchWeightMaxWorkers;
+    while (workers > qpNum) {
+        workers >>= 1;
+    }
     if (!ParseWorkerOverride(blockDimOverride, &workers) || workers > qpNum ||
         (hasOverride && workers > static_cast<uint32_t>(args.plan->b))) {
         return TILEXR_MOONEP_ERROR_INVALID_ARGUMENT;

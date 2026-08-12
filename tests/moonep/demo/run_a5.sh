@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-export TILEXR_UDMA_QP_ROUTE_SPEC=port_count:6,port_count:2
+export TILEXR_UDMA_QP_ROUTE_SPEC=port_count:6,port_count:6,port_count:2
 if [[ -x "${SCRIPT_DIR}/tilexr_moonep_flow_demo" ]]; then
     TILEXR_INSTALL_PREFIX="$(cd "${SCRIPT_DIR}/.." && pwd)"
 else
@@ -17,7 +17,7 @@ experts="${4:-$((rank_size * 2))}"
 hidden="${5:-32}"
 physical_device_count="${6:-$((rank_size < 8 ? rank_size : 8))}"
 
-if ((rank_size <= 0 || rank_size > 128 || physical_device_count <= 0 ||
+if ((rank_size < 4 || rank_size > 128 || physical_device_count <= 0 ||
      s <= 0 || k < 2 || experts <= 0 || hidden <= 0 || hidden % 32 != 0 ||
      experts % rank_size != 0)); then
     echo "invalid rank/dimension configuration" >&2

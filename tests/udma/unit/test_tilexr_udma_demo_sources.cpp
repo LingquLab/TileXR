@@ -179,6 +179,41 @@ int main()
     CheckNotContains(kernelPath, kernel, "aclshmem");
     CheckNotContains(kernelPath, kernel, "shmem_");
 
+    const std::string profileHostPath = "tests/udma/demo/tilexr_udma_profile_probe.cpp";
+    const std::string profileKernelPath =
+        "tests/udma/demo/tilexr_udma_profile_probe_kernel.cpp";
+    const std::string profileRunnerPath =
+        "tests/udma/demo/run_tilexr_udma_profile_probe_mpi.sh";
+    const std::string profileHost = ReadFile(profileHostPath);
+    const std::string profileKernel = ReadFile(profileKernelPath);
+    const std::string profileRunner = ReadFile(profileRunnerPath);
+    CheckContains(profileHostPath, profileHost, "TileXRUDMAProfileRegister");
+    CheckContains(profileHostPath, profileHost, "TileXRUDMAProfileUnregister");
+    CheckContains(profileHostPath, profileHost, "TileXRUDMAProfileQuery");
+    CheckContains(profileHostPath, profileHost, "TileXRUDMARegister");
+    CheckContains(profileHostPath, profileHost, "TileXRUDMAUnregister");
+    CheckContains(profileHostPath, profileHost, "rtDevBinaryRegister");
+    CheckContains(profileHostPath, profileHost, "rtFunctionRegister");
+    CheckContains(profileHostPath, profileHost, "rtKernelLaunchWithFlagV2");
+    CheckNotContains(profileHostPath, profileHost, "<<<");
+    CheckContains(profileKernelPath, profileKernel, "UDMAProfileGetNbiOnQpDeferred");
+    CheckContains(profileKernelPath, profileKernel, "UDMAProfileCompletionFrontier");
+    CheckContains(profileKernelPath, profileKernel, "UDMAProfileFlushQpDoorbell");
+    CheckContains(profileKernelPath, profileKernel, "UDMAProfileQuietStatusOnQpUntil");
+    CheckContains(profileKernelPath, profileKernel, "HardEvent::MTE2_MTE3");
+    CheckContains(profileKernelPath, profileKernel, "HardEvent::MTE3_MTE2");
+    CheckNotContains(profileKernelPath, profileKernel, "<<<");
+    CheckNotContains(profileKernelPath, profileKernel, "launch_tilexr_udma_profile");
+    CheckContains(profileRunnerPath, profileRunner,
+        "port_count:6,port_count:6,port_count:2");
+    CheckContains(profileRunnerPath, profileRunner, "--launcher <mode>");
+    CheckContains(profileRunnerPath, profileRunner, "LAUNCHER=\"ssh\"");
+    CheckContains(profileRunnerPath, profileRunner, "run_ssh_rank()");
+    CheckContains(profileRunnerPath, profileRunner, "root@${host}");
+    CheckContains(profileRunnerPath, profileRunner, "timings.jsonl");
+    CheckContains(profileRunnerPath, profileRunner,
+        "timeout --signal=TERM --kill-after=30");
+
     CheckContains(hccpDefsPath, hccpDefs, "MEM_SEG_ACCESS_LOCAL_ONLY = 1");
     CheckContains(hccpDefsPath, hccpDefs, "MEM_SEG_ACCESS_READ = (1 << 1)");
     CheckContains(hccpDefsPath, hccpDefs, "MEM_SEG_ACCESS_WRITE = (1 << 2)");

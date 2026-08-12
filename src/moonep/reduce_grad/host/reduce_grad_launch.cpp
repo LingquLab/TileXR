@@ -63,8 +63,8 @@ int EnsureReduceGradKernelRegistered()
 
 } // namespace
 
-int TileXRMoonEpLaunchReduceGradKernel(const ReduceGradParams &params,
-    const ReduceGradLaunchContext &context)
+int TileXRMoonEpLaunchReduceGradKernel(const ReduceGradLaunchParams &params,
+    const ReduceGradPreparedContext &context)
 {
     const int registerRet = EnsureReduceGradKernelRegistered();
     if (registerRet != TileXR::TILEXR_SUCCESS) {
@@ -72,49 +72,50 @@ int TileXRMoonEpLaunchReduceGradKernel(const ReduceGradParams &params,
     }
 
     int64_t magic = 0;
-    const int ret = TileXRCommNextMagic(params.comm, &magic);
+    const int ret = TileXRCommNextMagic(context.comm, &magic);
     if (ret != TileXR::TILEXR_SUCCESS) {
         return ret;
     }
     const ReduceGradLayout &layout = context.layout;
     static_assert(sizeof(ReduceGradKernelArgs) <= std::numeric_limits<uint32_t>::max(),
         "ReduceGrad kernel argument block exceeds Runtime V2 argsSize");
-    ReduceGradKernelArgs args {
-        context.devArgs,
-        reinterpret_cast<GM_ADDR>(params.plan->expertsToCopy),
-        reinterpret_cast<GM_ADDR>(params.gradients[kReduceGradGate]->data),
-        reinterpret_cast<GM_ADDR>(params.gradients[kReduceGradUp]->data),
-        reinterpret_cast<GM_ADDR>(params.gradients[kReduceGradDown]->data),
-        reinterpret_cast<GM_ADDR>(params.workspace),
-        reinterpret_cast<GM_ADDR>(params.status->data),
-        layout.rank,
-        layout.rankSize,
-        layout.expertCount,
-        layout.expertsPerRank,
-        layout.prefetchSlots,
-        layout.controlBlockCount,
-        layout.rowElements[kReduceGradGate],
-        layout.rowElements[kReduceGradUp],
-        layout.rowElements[kReduceGradDown],
-        layout.rowBytes[kReduceGradGate],
-        layout.rowBytes[kReduceGradUp],
-        layout.rowBytes[kReduceGradDown],
-        layout.transports[kReduceGradGate],
-        layout.transports[kReduceGradUp],
-        layout.transports[kReduceGradDown],
-        layout.udmaQpCount,
-        layout.peerRecordBaseOffset,
-        layout.peerHalfBytes,
-        layout.peerSlotStrideBytes,
-        layout.peerChunkPayloadBytes,
-        layout.udmaStateOffset,
-        layout.udmaOutboundOffset,
-        layout.udmaInboundOffset,
-        layout.udmaChunkBytes,
-        layout.workspaceBytes,
-        params.waitIterations,
-        magic,
-    };
+    ReduceGradKernelArgs args {};
+    args.commArgs = context.devArgs;
+    args.profileInfo = context.profileView.infoDev;
+    args.profileRegistry = context.profileView.registryDev;
+    args.expertsToCopy = reinterpret_cast<GM_ADDR>(context.expertsToCopy);
+    args.workspace = reinterpret_cast<GM_ADDR>(context.workspace);
+    args.status = reinterpret_cast<GM_ADDR>(params.status->data);
+    args.rank = layout.rank;
+    args.rankSize = layout.rankSize;
+    args.expertCount = layout.expertCount;
+    args.expertsPerRank = layout.expertsPerRank;
+    args.prefetchSlots = layout.prefetchSlots;
+    args.transportQpCount = layout.transportQpCount;
+    args.qpCount = layout.qpCount;
+    args.laneCount = layout.laneCount;
+    args.laneStateBytes = layout.laneStateBytes;
+    args.stagingOffset = layout.stagingOffset;
+    args.bankStrideBytes = layout.bankStrideBytes;
+    args.laneStrideBytes = layout.laneStrideBytes;
+    args.chunkBytes = layout.chunkBytes;
+    args.workspaceBytes = layout.workspaceBytes;
+    args.waitIterations = params.waitIterations;
+    args.magic = magic;
+    for (uint32_t projection = 0; projection < kReduceGradProjectionCount; ++projection) {
+        args.gradients[projection] = reinterpret_cast<GM_ADDR>(
+            context.gradients[projection].data);
+        args.sources[projection] = reinterpret_cast<GM_ADDR>(
+            context.sources[projection].data);
+        args.rowElements[projection] = layout.rowElements[projection];
+        args.rowBytes[projection] = layout.rowBytes[projection];
+        args.chunkCounts[projection] = layout.chunkCounts[projection];
+        args.projectionQpBase[projection] = layout.projectionQpBase[projection];
+        args.projectionQpCounts[projection] = layout.projectionQpCounts[projection];
+    }
+    for (uint32_t lane = 0; lane < layout.laneCount; ++lane) {
+        args.lanePhysicalQps[lane] = layout.lanePhysicalQps[lane];
+    }
 
     rtArgsEx_t argsInfo {};
     argsInfo.args = &args;

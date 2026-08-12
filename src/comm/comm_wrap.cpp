@@ -191,6 +191,42 @@ int TileXRUDMAUnregister(TileXRCommPtr comm, TileXRUDMAMemHandle handle)
     return c->UnregisterUDMAMemory(handle);
 }
 
+int TileXRUDMAProfileRegister(TileXRCommPtr comm,
+    const TileXR::TileXRUDMAProfileDesc *desc, TileXRUDMAProfileHandle *handle)
+{
+    if (comm == nullptr || desc == nullptr || handle == nullptr) {
+        TILEXR_LOG(ERROR) << "TileXRUDMAProfileRegister invalid input";
+        return TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    *handle = 0;
+    auto* c = static_cast<TileXRComm *>(comm);
+    return c->RegisterUDMAProfile(*desc, handle);
+}
+
+int TileXRUDMAProfileUnregister(TileXRCommPtr comm, TileXRUDMAProfileHandle handle)
+{
+    if (comm == nullptr || handle == 0) {
+        TILEXR_LOG(ERROR) << "TileXRUDMAProfileUnregister invalid input";
+        return TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    auto* c = static_cast<TileXRComm *>(comm);
+    return c->UnregisterUDMAProfile(handle);
+}
+
+int TileXRUDMAProfileQuery(TileXRCommPtr comm, TileXRUDMAProfileHandle handle,
+    TileXR::TileXRUDMAProfileView *view)
+{
+    if (view != nullptr) {
+        *view = TileXR::TileXRUDMAProfileView {};
+    }
+    if (comm == nullptr || handle == 0 || view == nullptr) {
+        TILEXR_LOG(ERROR) << "TileXRUDMAProfileQuery invalid input";
+        return TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    auto* c = static_cast<TileXRComm *>(comm);
+    return c->QueryUDMAProfile(handle, view);
+}
+
 int TileXRUDMAGetQpCount(TileXRCommPtr comm, uint32_t *qpCount)
 {
     if (qpCount != nullptr) {

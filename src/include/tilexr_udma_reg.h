@@ -8,6 +8,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 
 #include "comm_args.h"
 
@@ -16,6 +17,10 @@ namespace TileXR {
 constexpr uint32_t TILEXR_UDMA_REGISTRY_MAGIC = 0x54585255U; // TXRU
 constexpr uint32_t TILEXR_UDMA_REGISTRY_VERSION = 1U;
 constexpr uint32_t TILEXR_UDMA_MAX_REGIONS = 1U;
+constexpr uint32_t TILEXR_UDMA_PROFILE_MAGIC = 0x54585052U; // TXPR
+constexpr uint32_t TILEXR_UDMA_PROFILE_VERSION = 1U;
+constexpr uint32_t TILEXR_UDMA_PROFILE_MAX_REGIONS = 8U;
+constexpr uint32_t TILEXR_UDMA_PROFILE_MAX_QP_BINDINGS = 32U;
 
 struct TileXRUDMARegionDesc {
     GM_ADDR base = nullptr;
@@ -29,6 +34,178 @@ struct TileXRUDMARegistry {
     uint32_t regionCount = 0;
     TileXRUDMARegionDesc regions[TILEXR_MAX_RANK_SIZE] = {};
 };
+
+struct TileXRUDMAProfileRegionDesc {
+    GM_ADDR base = nullptr;
+    uint64_t bytes = 0;
+    GM_ADDR registrationBase = nullptr;
+    uint64_t registrationBytes = 0;
+};
+
+struct TileXRUDMAProfileQpBinding {
+    uint32_t localRegion = 0;
+    uint32_t remoteRegion = 0;
+};
+
+struct TileXRUDMAProfileDesc {
+    uint32_t version = TILEXR_UDMA_PROFILE_VERSION;
+    uint32_t regionCount = 0;
+    uint32_t qpBindingCount = 0;
+    uint32_t reserved = 0;
+    TileXRUDMAProfileRegionDesc regions[TILEXR_UDMA_PROFILE_MAX_REGIONS] = {};
+    TileXRUDMAProfileQpBinding qpBindings[TILEXR_UDMA_PROFILE_MAX_QP_BINDINGS] = {};
+};
+
+struct TileXRUDMAProfileRegistry {
+    uint32_t magic = TILEXR_UDMA_PROFILE_MAGIC;
+    uint32_t version = TILEXR_UDMA_PROFILE_VERSION;
+    uint32_t rankSize = 0;
+    uint32_t regionCount = 0;
+    uint32_t qpCount = 0;
+    uint32_t reserved = 0;
+    TileXRUDMAProfileQpBinding qpBindings[TILEXR_UDMA_PROFILE_MAX_QP_BINDINGS] = {};
+    TileXRUDMAProfileRegionDesc
+        regions[TILEXR_MAX_RANK_SIZE * TILEXR_UDMA_PROFILE_MAX_REGIONS] = {};
+};
+
+struct TileXRUDMAProfileView {
+    uint32_t version = TILEXR_UDMA_PROFILE_VERSION;
+    uint32_t rankSize = 0;
+    uint32_t regionCount = 0;
+    uint32_t qpCount = 0;
+    GM_ADDR infoDev = nullptr;
+    GM_ADDR registryDev = nullptr;
+    const TileXRUDMAProfileRegistry* registryHost = nullptr;
+};
+
+inline bool UDMAProfileRegionValid(const TileXRUDMAProfileRegionDesc& region)
+{
+    if (region.base == nullptr || region.bytes == 0) {
+        return false;
+    }
+    const uintptr_t base = reinterpret_cast<uintptr_t>(region.base);
+    if (region.bytes > static_cast<uint64_t>(std::numeric_limits<uintptr_t>::max() - base)) {
+        return false;
+    }
+    if (region.registrationBase == nullptr && region.registrationBytes == 0) {
+        return true;
+    }
+    if (region.registrationBase == nullptr || region.registrationBytes == 0) {
+        return false;
+    }
+    const uintptr_t registrationBase =
+        reinterpret_cast<uintptr_t>(region.registrationBase);
+    if (region.registrationBytes > static_cast<uint64_t>(
+            std::numeric_limits<uintptr_t>::max() - registrationBase) ||
+        base < registrationBase) {
+        return false;
+    }
+    const uint64_t offset = static_cast<uint64_t>(base - registrationBase);
+    return offset <= region.registrationBytes &&
+        region.bytes <= region.registrationBytes - offset;
+}
+
+inline GM_ADDR UDMAProfileRegistrationBase(const TileXRUDMAProfileRegionDesc& region)
+{
+    return region.registrationBase == nullptr ? region.base : region.registrationBase;
+}
+
+inline uint64_t UDMAProfileRegistrationBytes(const TileXRUDMAProfileRegionDesc& region)
+{
+    return region.registrationBase == nullptr ? region.bytes : region.registrationBytes;
+}
+
+inline bool UDMAProfileDescValid(const TileXRUDMAProfileDesc* desc, uint32_t expectedQpCount)
+{
+    if (desc == nullptr || desc->version != TILEXR_UDMA_PROFILE_VERSION ||
+        desc->regionCount == 0 || desc->regionCount > TILEXR_UDMA_PROFILE_MAX_REGIONS ||
+        expectedQpCount == 0 || expectedQpCount > TILEXR_UDMA_PROFILE_MAX_QP_BINDINGS ||
+        desc->qpBindingCount != expectedQpCount) {
+        return false;
+    }
+    for (uint32_t region = 0; region < desc->regionCount; ++region) {
+        if (!UDMAProfileRegionValid(desc->regions[region])) {
+            return false;
+        }
+    }
+    for (uint32_t qp = 0; qp < desc->qpBindingCount; ++qp) {
+        if (desc->qpBindings[qp].localRegion >= desc->regionCount ||
+            desc->qpBindings[qp].remoteRegion >= desc->regionCount) {
+            return false;
+        }
+    }
+    return true;
+}
+
+inline bool UDMAProfileContractsEqual(
+    const TileXRUDMAProfileDesc& lhs, const TileXRUDMAProfileDesc& rhs)
+{
+    if (lhs.version != rhs.version || lhs.regionCount != rhs.regionCount ||
+        lhs.qpBindingCount != rhs.qpBindingCount) {
+        return false;
+    }
+    for (uint32_t qp = 0; qp < lhs.qpBindingCount; ++qp) {
+        if (lhs.qpBindings[qp].localRegion != rhs.qpBindings[qp].localRegion ||
+            lhs.qpBindings[qp].remoteRegion != rhs.qpBindings[qp].remoteRegion) {
+            return false;
+        }
+    }
+    return true;
+}
+
+inline bool UDMAProfileRegistryValid(const TileXRUDMAProfileRegistry* registry,
+    int expectedRankSize, uint32_t expectedRegionCount, uint32_t expectedQpCount = 0)
+{
+    if (registry == nullptr || registry->magic != TILEXR_UDMA_PROFILE_MAGIC ||
+        registry->version != TILEXR_UDMA_PROFILE_VERSION || expectedRankSize <= 0 ||
+        expectedRankSize > TILEXR_MAX_RANK_SIZE ||
+        registry->rankSize != static_cast<uint32_t>(expectedRankSize) ||
+        expectedRegionCount == 0 || expectedRegionCount > TILEXR_UDMA_PROFILE_MAX_REGIONS ||
+        registry->regionCount != expectedRegionCount || registry->qpCount == 0 ||
+        registry->qpCount > TILEXR_UDMA_PROFILE_MAX_QP_BINDINGS ||
+        (expectedQpCount != 0 && registry->qpCount != expectedQpCount)) {
+        return false;
+    }
+    for (uint32_t qp = 0; qp < registry->qpCount; ++qp) {
+        if (registry->qpBindings[qp].localRegion >= registry->regionCount ||
+            registry->qpBindings[qp].remoteRegion >= registry->regionCount) {
+            return false;
+        }
+    }
+    return true;
+}
+
+inline const TileXRUDMAProfileRegionDesc* UDMAProfileRegion(
+    const TileXRUDMAProfileRegistry* registry, int rank, uint32_t region)
+{
+    if (registry == nullptr || rank < 0 || static_cast<uint32_t>(rank) >= registry->rankSize ||
+        region >= registry->regionCount || registry->rankSize > TILEXR_MAX_RANK_SIZE ||
+        registry->regionCount > TILEXR_UDMA_PROFILE_MAX_REGIONS) {
+        return nullptr;
+    }
+    const size_t index = static_cast<size_t>(rank) * TILEXR_UDMA_PROFILE_MAX_REGIONS + region;
+    return &registry->regions[index];
+}
+
+inline bool UDMAProfileRegionContains(const TileXRUDMAProfileRegistry* registry,
+    int rank, uint32_t region, uint64_t byteOffset, uint64_t byteCount)
+{
+    const auto* desc = UDMAProfileRegion(registry, rank, region);
+    if (desc == nullptr || !UDMAProfileRegionValid(*desc) || byteOffset > desc->bytes) {
+        return false;
+    }
+    return byteCount <= desc->bytes - byteOffset;
+}
+
+inline GM_ADDR UDMAProfileRemoteAddr(const TileXRUDMAProfileRegistry* registry,
+    int rank, uint32_t region, uint64_t byteOffset)
+{
+    const auto* desc = UDMAProfileRegion(registry, rank, region);
+    if (desc == nullptr || byteOffset > desc->bytes) {
+        return nullptr;
+    }
+    return desc->base + byteOffset;
+}
 
 inline bool UDMARegistryValid(const TileXRUDMARegistry *registry, int expectedRankSize)
 {

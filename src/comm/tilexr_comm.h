@@ -47,6 +47,9 @@ public:
     int64_t NextMagic();
     int RegisterUDMAMemory(GM_ADDR localPtr, size_t bytes, TileXRUDMAMemHandle *handle);
     int UnregisterUDMAMemory(TileXRUDMAMemHandle handle);
+    int RegisterUDMAProfile(const TileXRUDMAProfileDesc &desc, TileXRUDMAProfileHandle *handle);
+    int UnregisterUDMAProfile(TileXRUDMAProfileHandle handle);
+    int QueryUDMAProfile(TileXRUDMAProfileHandle handle, TileXRUDMAProfileView *view) const;
     int GetUDMAQpCount(uint32_t *qpCount) const;
     GM_ADDR GetUDMARegistryPtr() const;
     const TileXRUDMARegistry* GetUDMARegistryHost() const;

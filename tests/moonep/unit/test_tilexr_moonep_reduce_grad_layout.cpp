@@ -1,13 +1,10 @@
 #include <cstdint>
-#include <cstdlib>
 #include <iostream>
 #include <limits>
 #include <string>
 
-#include "comm_args.h"
 #include "reduce_grad_common.h"
 #include "reduce_grad_layout.h"
-#include "tilexr_moonep.h"
 #include "tilexr_types.h"
 
 namespace {
@@ -30,148 +27,155 @@ void CheckStatus(const std::string &label, int actual, int expected)
     }
 }
 
-void TestThresholdAndMixedLayout()
+void TestEqualProjectionAllocationAndWorkspace()
 {
     const uint64_t rows[TileXRMoonEp::kReduceGradProjectionCount] = {
-        (TILEXR_MOONEP_REDUCE_GRAD_UDMA_THRESHOLD_BYTES - sizeof(float)) / sizeof(float),
-        TILEXR_MOONEP_REDUCE_GRAD_UDMA_THRESHOLD_BYTES / sizeof(float),
-        TILEXR_MOONEP_REDUCE_GRAD_UDMA_THRESHOLD_BYTES / sizeof(float) + 1,
-    };
+        UINT64_C(14) << 20, UINT64_C(14) << 20, UINT64_C(14) << 20};
     TileXRMoonEp::ReduceGradLayout layout {};
-    CheckStatus("mixed layout", TileXRMoonEp::TileXRMoonEpBuildReduceGradLayout(
-        0, 2, 4, rows, UINT64_C(512) << 20, 0, &layout), TileXR::TILEXR_SUCCESS);
-    Check(layout.transports[0] == TILEXR_MOONEP_REDUCE_GRAD_TRANSPORT_PEER,
-        "below-threshold row must use peer memory");
-    Check(layout.transports[1] == TILEXR_MOONEP_REDUCE_GRAD_TRANSPORT_PEER,
-        "exactly 1 MiB row must use peer memory");
-    Check(layout.transports[2] == TILEXR_MOONEP_REDUCE_GRAD_TRANSPORT_UDMA,
-        "row above 1 MiB must use UDMA");
-    Check(layout.udmaQpCount == 0,
-        "layout builder must leave negotiated UDMA QP count to the host");
-    Check(layout.rowBytes[1] == UINT64_C(1) << 20,
-        "exact-threshold row byte calculation mismatch");
-    Check(layout.rowBytes[2] == (UINT64_C(1) << 20) + sizeof(float),
-        "above-threshold row byte calculation mismatch");
-    Check(layout.peerRecordBaseOffset == UINT64_C(1) << 20,
-        "peer state reservation mismatch");
-    Check(layout.peerHalfBytes > 0 && layout.peerSlotStrideBytes >= 512 &&
-        layout.peerChunkPayloadBytes > 0, "peer layout must provide usable records");
-    Check(layout.udmaChunkBytes >= (UINT64_C(1) << 20) &&
-        layout.udmaChunkBytes <= UINT32_MAX, "UDMA chunk bounds mismatch");
-    Check(layout.udmaOutboundOffset % TileXRMoonEp::kReduceGradUdmaAlignment == 0 &&
-        layout.udmaInboundOffset % TileXRMoonEp::kReduceGradUdmaAlignment == 0 &&
-        layout.workspaceBytes % TileXRMoonEp::kReduceGradUdmaWorkspaceAlignment == 0,
-        "UDMA workspace alignment mismatch");
-    Check(layout.udmaInboundOffset > layout.udmaOutboundOffset &&
-        layout.workspaceBytes > layout.udmaInboundOffset,
-        "UDMA workspace regions overlap or are empty");
-    Check(TileXRMoonEp::kReduceGradUdmaSignalStageStride ==
-            TileXR::TILEXR_UDMA_CACHE_LINE_SIZE &&
-        TileXRMoonEp::kReduceGradUdmaCompletionOffset >=
-            2 * TileXR::TILEXR_UDMA_CACHE_LINE_SIZE &&
-        TileXRMoonEp::kReduceGradUdmaPollScratchOffset >=
-            TileXRMoonEp::kReduceGradUdmaCompletionOffset +
-                2 * TileXR::TILEXR_UDMA_CACHE_LINE_SIZE &&
-        TileXRMoonEp::kReduceGradUdmaPeerStateBytes >=
-            6 * TileXR::TILEXR_UDMA_CACHE_LINE_SIZE,
-        "each UDMA stage signal must use a distinct cache line");
-}
+    CheckStatus("8-rank layout", TileXRMoonEp::TileXRMoonEpBuildReduceGradLayout(
+        3, 8, 384, 48, rows, 8, 0, &layout), TileXR::TILEXR_SUCCESS);
 
-void TestCapacityInjection()
-{
-    const uint64_t rows[TileXRMoonEp::kReduceGradProjectionCount] = {64, 128, 256};
-    TileXRMoonEp::ReduceGradLayout mainLayout {};
-    TileXRMoonEp::ReduceGradLayout pr90Layout {};
-    CheckStatus("main capacity", TileXRMoonEp::TileXRMoonEpBuildReduceGradLayout(
-        0, 8, 64, rows, UINT64_C(100) << 20, 0, &mainLayout), TileXR::TILEXR_SUCCESS);
-    CheckStatus("PR90 capacity", TileXRMoonEp::TileXRMoonEpBuildReduceGradLayout(
-        0, 8, 64, rows, UINT64_C(512) << 20, 0, &pr90Layout), TileXR::TILEXR_SUCCESS);
-    Check(pr90Layout.peerHalfBytes > mainLayout.peerHalfBytes,
-        "injected PR90 capacity must increase the peer half");
-    Check(pr90Layout.peerSlotStrideBytes > mainLayout.peerSlotStrideBytes,
-        "injected PR90 capacity must increase the slot stride");
-    Check(TileXRMoonEp::TileXRMoonEpReduceGradPeerWindowBytes() ==
-        static_cast<uint64_t>(TileXR::IPC_BUFF_MAX_SIZE),
-        "capacity resolver must follow IPC_BUFF_MAX_SIZE");
-}
+    Check(layout.projectionQpCounts[0] == 3 &&
+        layout.projectionQpCounts[1] == 3 &&
+        layout.projectionQpCounts[2] == 2,
+        "equal projection bytes must receive stable 3/3/2 QP allocation");
+    Check(layout.projectionQpBase[0] == 0 && layout.projectionQpBase[1] == 3 &&
+        layout.projectionQpBase[2] == 6,
+        "projection QP bases must be contiguous");
+    for (uint32_t qp = 0; qp < 8; ++qp) {
+        const uint32_t expected = qp < 3 ? 0 : (qp < 6 ? 1 : 2);
+        Check(layout.qpProjection[qp] == expected,
+            "QP-to-projection mapping is not stable");
+    }
 
-void TestPureTransportLayouts()
-{
-    const uint64_t peerRows[TileXRMoonEp::kReduceGradProjectionCount] = {1, 2, 3};
-    const uint64_t udmaRows[TileXRMoonEp::kReduceGradProjectionCount] = {
-        (UINT64_C(1) << 18) + 1,
-        (UINT64_C(1) << 18) + 2,
-        (UINT64_C(1) << 18) + 3,
-    };
-    TileXRMoonEp::ReduceGradLayout layout {};
-    CheckStatus("peer without capacity", TileXRMoonEp::TileXRMoonEpBuildReduceGradLayout(
-        0, 2, 4, peerRows, 0, 0, &layout), TileXR::TILEXR_ERROR_PARA_CHECK_FAIL);
-    CheckStatus("UDMA without peer capacity", TileXRMoonEp::TileXRMoonEpBuildReduceGradLayout(
-        0, 2, 4, udmaRows, 0, UINT64_C(2) << 20, &layout), TileXR::TILEXR_SUCCESS);
-    Check(layout.peerHalfBytes == 0 && layout.workspaceBytes > 0,
-        "UDMA-only layout must not reserve peer records");
-    Check(layout.controlBlockCount == 1,
-        "two-rank UDMA layout must assign one control block");
-}
-
-void TestSingleRankLargeRowsStayLocal()
-{
-    const uint64_t largeRow =
-        TILEXR_MOONEP_REDUCE_GRAD_UDMA_THRESHOLD_BYTES / sizeof(float) + 1;
-    const uint64_t rows[TileXRMoonEp::kReduceGradProjectionCount] = {
-        largeRow, largeRow + 1, largeRow + 2};
-    TileXRMoonEp::ReduceGradLayout layout {};
-    CheckStatus("single-rank large rows", TileXRMoonEp::TileXRMoonEpBuildReduceGradLayout(
-        0, 1, 4, rows, UINT64_C(100) << 20, 0, &layout), TileXR::TILEXR_SUCCESS);
-    Check(layout.transports[0] == TILEXR_MOONEP_REDUCE_GRAD_TRANSPORT_PEER &&
-        layout.transports[1] == TILEXR_MOONEP_REDUCE_GRAD_TRANSPORT_PEER &&
-        layout.transports[2] == TILEXR_MOONEP_REDUCE_GRAD_TRANSPORT_PEER,
-        "single-rank rows must stay on the local peer path regardless of row size");
-    Check(layout.workspaceBytes == 0 && layout.udmaChunkBytes == 0,
-        "single-rank rows must not request a UDMA workspace");
-    Check(layout.controlBlockCount == 0 && layout.peerChunkPayloadBytes > 0,
-        "single-rank layout must reserve all blocks for local reduction");
-}
-
-void TestLargeRankScheduling()
-{
-    const uint64_t rows[TileXRMoonEp::kReduceGradProjectionCount] = {64, 128, 256};
-    TileXRMoonEp::ReduceGradLayout layout {};
-    CheckStatus("128-rank layout", TileXRMoonEp::TileXRMoonEpBuildReduceGradLayout(
-        0, 128, 128, rows, UINT64_C(512) << 20, 0, &layout), TileXR::TILEXR_SUCCESS);
+    Check(layout.chunkBytes == TileXRMoonEp::kReduceGradDefaultChunkBytes,
+        "default chunk must be 8 MiB");
+    Check(layout.laneStateBytes ==
+            8 * TileXRMoonEp::kReduceGradLaneStateStrideBytes &&
+        layout.stagingOffset == layout.laneStateBytes,
+        "lane state sizing mismatch");
+    Check(layout.bankStrideBytes == UINT64_C(64) << 20 &&
+        layout.laneStrideBytes == UINT64_C(128) << 20,
+        "rank-sized bank strides mismatch");
+    Check(layout.workspaceBytes == UINT64_C(1026) << 20,
+        "8-rank owner-pull workspace mismatch");
+    Check(layout.workspaceBytes % TileXRMoonEp::kReduceGradWorkspaceAlignment == 0,
+        "workspace must retain 2 MiB registration alignment");
     Check(layout.blockDim == TileXRMoonEp::kReduceGradMaxAivBlockCount,
-        "128-rank layout must use all available AIV blocks");
-    Check(layout.controlBlockCount == TileXRMoonEp::kReduceGradMaxAivBlockCount - 1,
-        "128-rank layout must reserve one AIV block for receiving");
+        "default launch must use all AIV blocks");
 }
 
-void TestInvalidInputs()
+void TestProportionalAllocationIsStable()
+{
+    const uint64_t rows[TileXRMoonEp::kReduceGradProjectionCount] = {
+        UINT64_C(16) << 20, UINT64_C(8) << 20, UINT64_C(4) << 20};
+    TileXRMoonEp::ReduceGradLayout layout {};
+    CheckStatus("weighted layout", TileXRMoonEp::TileXRMoonEpBuildReduceGradLayout(
+        0, 16, 384, 24, rows, 8, UINT64_C(2) << 20, &layout),
+        TileXR::TILEXR_SUCCESS);
+    Check(layout.projectionQpCounts[0] == 5 &&
+        layout.projectionQpCounts[1] == 2 &&
+        layout.projectionQpCounts[2] == 1,
+        "weighted QP allocation must follow projection bytes with stable ties");
+    Check(layout.bankStrideBytes == UINT64_C(32) << 20 &&
+        layout.laneStrideBytes == UINT64_C(64) << 20 &&
+        layout.workspaceBytes == UINT64_C(514) << 20,
+        "16-rank 2 MiB workspace arithmetic mismatch");
+    Check(layout.chunkCounts[0] == 32 && layout.chunkCounts[1] == 16 &&
+        layout.chunkCounts[2] == 8,
+        "projection chunk counts mismatch");
+}
+
+void TestSharedDomainUsesBoundedActiveLanes()
+{
+    const uint64_t rows[TileXRMoonEp::kReduceGradProjectionCount] = {
+        UINT64_C(14) << 20, UINT64_C(14) << 20, UINT64_C(14) << 20};
+    TileXRMoonEp::ReduceGradLayout layout {};
+    CheckStatus("32-QP shared-domain layout",
+        TileXRMoonEp::TileXRMoonEpBuildReduceGradLayout(
+            0, 4, 4, 1, rows, 32, UINT64_C(8) << 20, &layout),
+        TileXR::TILEXR_SUCCESS);
+    Check(layout.transportQpCount == 32 && layout.qpCount == 3 &&
+        layout.laneCount == 3,
+        "shared domain must expose all transport QPs and use three active lanes");
+    Check(layout.lanePhysicalQps[0] == 0 && layout.lanePhysicalQps[1] == 1 &&
+        layout.lanePhysicalQps[2] == 16,
+        "shared-domain lanes must preserve the measured 6/6/2 route mapping");
+    Check(layout.projectionQpCounts[0] == 1 &&
+        layout.projectionQpCounts[1] == 1 &&
+        layout.projectionQpCounts[2] == 1,
+        "32-QP shared domain must allocate one active lane per projection");
+    Check(layout.workspaceBytes == UINT64_C(194) << 20,
+        "inactive shared-domain QPs must not increase ReduceGrad workspace");
+}
+
+void TestMinimumRankCount()
+{
+    const uint64_t rows[TileXRMoonEp::kReduceGradProjectionCount] = {64, 128, 256};
+    TileXRMoonEp::ReduceGradLayout layout {};
+    CheckStatus("one-rank layout", TileXRMoonEp::TileXRMoonEpBuildReduceGradLayout(
+        0, 1, 8, 8, rows, 3, 0, &layout), TileXR::TILEXR_ERROR_PARA_CHECK_FAIL);
+    CheckStatus("three-rank layout", TileXRMoonEp::TileXRMoonEpBuildReduceGradLayout(
+        0, 3, 6, 2, rows, 3, 0, &layout), TileXR::TILEXR_ERROR_PARA_CHECK_FAIL);
+    CheckStatus("four-rank layout", TileXRMoonEp::TileXRMoonEpBuildReduceGradLayout(
+        0, 4, 8, 2, rows, 3, 0, &layout), TileXR::TILEXR_SUCCESS);
+    Check(layout.bankStrideBytes == UINT64_C(32) << 20 &&
+        layout.laneStrideBytes == UINT64_C(64) << 20 &&
+        layout.workspaceBytes == UINT64_C(194) << 20,
+        "4-rank workspace arithmetic mismatch");
+}
+
+void TestSlotsMayExceedExpertsPerRank()
+{
+    const uint64_t rows[TileXRMoonEp::kReduceGradProjectionCount] = {1024, 1024, 1024};
+    TileXRMoonEp::ReduceGradLayout layout {};
+    CheckStatus("native dedicated-suite layout",
+        TileXRMoonEp::TileXRMoonEpBuildReduceGradLayout(
+            0, 8, 64, 14, rows, 8, 0, &layout), TileXR::TILEXR_SUCCESS);
+    Check(layout.expertsPerRank == 8 && layout.prefetchSlots == 14,
+        "ReduceGrad must support source slots independently of local expert count");
+}
+
+void TestChunkAlignment()
+{
+    const uint64_t rows[TileXRMoonEp::kReduceGradProjectionCount] = {1024, 2048, 4096};
+    TileXRMoonEp::ReduceGradLayout layout {};
+    const uint64_t requested = (UINT64_C(2) << 20) + 1;
+    CheckStatus("unaligned chunk", TileXRMoonEp::TileXRMoonEpBuildReduceGradLayout(
+        0, 8, 64, 8, rows, 3, requested, &layout), TileXR::TILEXR_SUCCESS);
+    Check(layout.chunkBytes == requested + 511,
+        "chunk must align up to the 512-byte UDMA boundary");
+}
+
+void TestInvalidInputsAndOverflow()
 {
     const uint64_t rows[TileXRMoonEp::kReduceGradProjectionCount] = {1, 1, 1};
     TileXRMoonEp::ReduceGradLayout layout {};
     CheckStatus("null output", TileXRMoonEp::TileXRMoonEpBuildReduceGradLayout(
-        0, 2, 4, rows, UINT64_C(100) << 20, 0, nullptr), TileXR::TILEXR_ERROR_PARA_CHECK_FAIL);
+        0, 8, 16, 2, rows, 3, 0, nullptr), TileXR::TILEXR_ERROR_PARA_CHECK_FAIL);
     CheckStatus("bad rank", TileXRMoonEp::TileXRMoonEpBuildReduceGradLayout(
-        2, 2, 4, rows, UINT64_C(100) << 20, 0, &layout), TileXR::TILEXR_ERROR_PARA_CHECK_FAIL);
+        8, 8, 16, 2, rows, 3, 0, &layout), TileXR::TILEXR_ERROR_PARA_CHECK_FAIL);
     CheckStatus("nondivisible experts", TileXRMoonEp::TileXRMoonEpBuildReduceGradLayout(
-        0, 2, 3, rows, UINT64_C(100) << 20, 0, &layout), TileXR::TILEXR_ERROR_PARA_CHECK_FAIL);
+        0, 8, 17, 2, rows, 3, 0, &layout), TileXR::TILEXR_ERROR_PARA_CHECK_FAIL);
+    CheckStatus("too few QPs", TileXRMoonEp::TileXRMoonEpBuildReduceGradLayout(
+        0, 8, 16, 2, rows, 2, 0, &layout), TileXR::TILEXR_ERROR_PARA_CHECK_FAIL);
+    CheckStatus("too many transport QPs", TileXRMoonEp::TileXRMoonEpBuildReduceGradLayout(
+        0, 8, 16, 2, rows, 33, 0, &layout), TileXR::TILEXR_ERROR_PARA_CHECK_FAIL);
+    CheckStatus("oversized chunk", TileXRMoonEp::TileXRMoonEpBuildReduceGradLayout(
+        0, 8, 16, 2, rows, 3, UINT64_C(1) << 32, &layout),
+        TileXR::TILEXR_ERROR_PARA_CHECK_FAIL);
+    CheckStatus("aligned chunk overflow", TileXRMoonEp::TileXRMoonEpBuildReduceGradLayout(
+        0, 8, 16, 2, rows, 3, UINT32_MAX, &layout),
+        TileXR::TILEXR_ERROR_PARA_CHECK_FAIL);
+    CheckStatus("contributor index overflow",
+        TileXRMoonEp::TileXRMoonEpBuildReduceGradLayout(
+            0, 8, 64, std::numeric_limits<int32_t>::max() / 8 + 1,
+            rows, 3, 0, &layout), TileXR::TILEXR_ERROR_PARA_CHECK_FAIL);
 
     uint64_t overflowRows[TileXRMoonEp::kReduceGradProjectionCount] = {
         std::numeric_limits<uint64_t>::max(), 1, 1};
     CheckStatus("row byte overflow", TileXRMoonEp::TileXRMoonEpBuildReduceGradLayout(
-        0, 2, 4, overflowRows, UINT64_C(100) << 20, 0, &layout),
-        TileXR::TILEXR_ERROR_PARA_CHECK_FAIL);
-
-    const uint64_t udmaRows[TileXRMoonEp::kReduceGradProjectionCount] = {
-        (UINT64_C(1) << 18) + 1,
-        (UINT64_C(1) << 18) + 1,
-        (UINT64_C(1) << 18) + 1,
-    };
-    CheckStatus("small UDMA chunk", TileXRMoonEp::TileXRMoonEpBuildReduceGradLayout(
-        0, 2, 4, udmaRows, 0, (UINT64_C(1) << 20) - 1, &layout),
-        TileXR::TILEXR_ERROR_PARA_CHECK_FAIL);
-    CheckStatus("oversized UDMA chunk", TileXRMoonEp::TileXRMoonEpBuildReduceGradLayout(
-        0, 2, 4, udmaRows, 0, UINT64_C(1) << 32, &layout),
+        0, 8, 16, 2, overflowRows, 3, 0, &layout),
         TileXR::TILEXR_ERROR_PARA_CHECK_FAIL);
 }
 
@@ -179,11 +183,12 @@ void TestInvalidInputs()
 
 int main()
 {
-    TestThresholdAndMixedLayout();
-    TestCapacityInjection();
-    TestPureTransportLayouts();
-    TestSingleRankLargeRowsStayLocal();
-    TestLargeRankScheduling();
-    TestInvalidInputs();
+    TestEqualProjectionAllocationAndWorkspace();
+    TestProportionalAllocationIsStable();
+    TestSharedDomainUsesBoundedActiveLanes();
+    TestMinimumRankCount();
+    TestSlotsMayExceedExpertsPerRank();
+    TestChunkAlignment();
+    TestInvalidInputsAndOverflow();
     return g_failures == 0 ? 0 : 1;
 }

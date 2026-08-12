@@ -231,22 +231,63 @@ int main()
     Excludes("reduce launch", reduceLaunch, "LaunchMoonEpKernel(");
     Contains("reduce kernel", reduceKernel,
         "extern \"C\" __global__ __aicore__ void tilexr_moonep_reduce_grad_kernel");
-    Contains("reduce kernel", reduceKernel, "RunSender");
-    Contains("reduce kernel", reduceKernel, "RunSenderTo");
+    Contains("reduce kernel", reduceKernel, "RunLaneLeader");
+    Contains("reduce kernel", reduceKernel, "RunLaneHelper");
+    Contains("reduce kernel", reduceKernel, "IssueWave");
     Contains("reduce kernel", reduceKernel,
-        "controlIndex += controlBlockCount_");
-    Contains("reduce kernel", reduceKernel, "RunReceiver");
+        "__attribute__((always_inline)) inline __aicore__ bool IssueWave");
     Contains("reduce kernel", reduceKernel,
-        "sourceRank * prefetchSlots_ + slot");
+        "__attribute__((always_inline)) inline __aicore__ bool CompleteWave");
     Contains("reduce kernel", reduceKernel,
-        "source * prefetchSlots_ + slot");
-    Contains("reduce kernel", reduceKernel, "slot < prefetchSlots_");
+        "__attribute__((always_inline)) inline __aicore__ void PublishItem");
+    Contains("reduce kernel", reduceKernel,
+        "__attribute__((always_inline)) inline __aicore__ void LoadItem");
+    Excludes("reduce kernel", reduceKernel, "const ReduceGradBankItem &item");
+    Excludes("reduce kernel", reduceKernel, "ReduceGradBankItem item");
+    Contains("reduce kernel", reduceKernel,
+        "entry / static_cast<uint64_t>(prefetchSlots_)");
+    Excludes("reduce kernel", reduceKernel, "prefetchSlots_ > expertsPerRank_");
+    Contains("reduce kernel", reduceKernel, "CollectWaveContributors");
     Excludes("reduce kernel", reduceKernel, "reduceBuffers_");
-    Contains("reduce kernel", reduceKernel, "DataAsFlagSend");
-    Contains("reduce kernel", reduceKernel, "DataAsFlagCheckBatchCleared");
     Contains("reduce kernel", reduceKernel, "AscendC::Add");
-    Contains("reduce kernel", reduceKernel, "UDMAPutRegisteredSignalNbiOnQp");
-    Contains("reduce kernel", reduceKernel, "UDMAQuietStatusOnQp");
+    Contains("reduce kernel", reduceKernel, "accumPongBuf_");
+    Contains("reduce kernel", reduceKernel, "HardEvent::MTE3_MTE2");
+    Contains("reduce kernel", reduceKernel, "UDMAProfileGetNbiOnQpDeferred");
+    Contains("reduce kernel", reduceKernel, "UDMAProfileFlushQpDoorbell");
+    Contains("reduce kernel", reduceKernel, "UDMAProfileQuietStatusOnQpUntil");
+    Contains("reduce kernel", reduceKernel, "AscendC::AtomicAdd");
+    Contains("reduce kernel", reduceKernel, "bankIssued[kReduceGradBankCount]");
+    Contains("reduce kernel", reduceKernel, "bankPublished[kReduceGradBankCount]");
+    Contains("reduce kernel", reduceKernel, "nextReadySequence");
+    Contains("reduce kernel", reduceKernel, "sequence >= kReduceGradBankCount");
+    Contains("reduce kernel", reduceKernel, "ProjectionForLane");
+    Contains("reduce kernel", reduceKernel,
+        "workOrdinal % projectionQpCounts_[projection]");
+    Excludes("reduce kernel", reduceKernel, "StageWave");
+    Excludes("reduce kernel", reduceKernel, "PublishLaneReadDone");
+    Excludes("reduce kernel", reduceKernel, "PublishLaneWorkDone");
+    Excludes("reduce kernel", reduceKernel, "ReleaseSources");
+    Contains("reduce kernel", reduceKernel, "AscendC::SyncAll<true>()");
+    Contains("reduce kernel", reduceKernel, "SyncCollectives");
+    Contains("reduce kernel", reduceKernel, "kReduceGradBarrierStep");
+    Contains("reduce kernel", reduceKernel, "kReduceGradBarrierFailureStep");
+    Contains("reduce kernel", reduceKernel, "CollectiveConfigurationValid");
+    Contains("reduce kernel", reduceKernel,
+        "const bool configured = ConfigurationValid()");
+    Contains("reduce kernel", reduceKernel, "if (!configured)");
+    Contains("reduce kernel", reduceKernel, "sync.GetInnerFlag(peer, 0)");
+    Contains("reduce kernel", reduceKernel, "if (DeviceStatus() == 0U)");
+    Contains("reduce kernel", reduceKernel, "ClearLocalSources");
+    Contains("reduce kernel clear", reduceKernel,
+        "tile += static_cast<uint64_t>(blockCount_)");
+    Excludes("reduce kernel clear", reduceKernel,
+        "rowOrdinal % blockCount_ != blockIdx_");
+    Excludes("reduce kernel", reduceKernel, "RunSender");
+    Excludes("reduce kernel", reduceKernel, "RunReceiver");
+    Excludes("reduce kernel", reduceKernel, "DataAsFlag");
+    Excludes("reduce kernel", reduceKernel, "UDMAPut");
+    Excludes("reduce kernel", reduceKernel, "Acknowledgement");
+    Excludes("reduce kernel", reduceKernel, "peerRecord");
     Excludes("reduce kernel", reduceKernel,
         "tilexr_moonep_reduce_grad_status_kernel");
     Excludes("reduce kernel", reduceKernel, "kReduceGradDeviceStatusSuccess");

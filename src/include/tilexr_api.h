@@ -20,6 +20,7 @@ extern "C" {
 
 typedef void *TileXRCommPtr;
 typedef uint32_t TileXRUDMAMemHandle;
+typedef uint32_t TileXRUDMAProfileHandle;
 #define TILEXRUNIQUE_ID_BYTES 128
 typedef struct { char internal[TILEXRUNIQUE_ID_BYTES]; } TileXRUniqueId;
 
@@ -45,6 +46,14 @@ int TileXRCommNextMagic(TileXRCommPtr comm, int64_t *magic);
 int TileXRUDMARegister(TileXRCommPtr comm, GM_ADDR localPtr, size_t bytes, TileXRUDMAMemHandle *handle);
 
 int TileXRUDMAUnregister(TileXRCommPtr comm, TileXRUDMAMemHandle handle);
+
+int TileXRUDMAProfileRegister(TileXRCommPtr comm, const TileXR::TileXRUDMAProfileDesc *desc,
+    TileXRUDMAProfileHandle *handle);
+
+int TileXRUDMAProfileUnregister(TileXRCommPtr comm, TileXRUDMAProfileHandle handle);
+
+int TileXRUDMAProfileQuery(TileXRCommPtr comm, TileXRUDMAProfileHandle handle,
+    TileXR::TileXRUDMAProfileView *view);
 
 int TileXRUDMAGetQpCount(TileXRCommPtr comm, uint32_t *qpCount);
 

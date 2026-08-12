@@ -49,6 +49,7 @@ struct Fixture {
     CommArgs args = {};
     UDMAInfo info = {};
     TileXRUDMARegistry registry = {};
+    TileXRUDMAProfileRegistry profileRegistry = {};
     std::array<UDMAWQCtx, kEntryCount> wq = {};
     std::array<UDMACQCtx, kEntryCount> cq = {};
     std::array<UDMAMemInfo, kEntryCount> mem = {};
@@ -65,6 +66,8 @@ struct Fixture {
         std::array<uint8_t, TILEXR_UDMA_WQE_SCRATCH_BYTES> wqeScratch = {};
     std::array<uint8_t, 256> localRegion = {};
     std::array<uint8_t, 256> remoteRegion = {};
+    std::array<uint8_t, 256> remoteRegionTwo = {};
+    std::array<uint8_t, 256> remoteRegionThree = {};
 
     Fixture()
     {
@@ -85,6 +88,21 @@ struct Fixture {
         registry.regions[0].bytes = localRegion.size();
         registry.regions[1].base = remoteRegion.data();
         registry.regions[1].bytes = remoteRegion.size();
+
+        profileRegistry.rankSize = kRankSize;
+        profileRegistry.regionCount = 4U;
+        profileRegistry.qpCount = kQpNum;
+        profileRegistry.qpBindings[0] = {0U, 1U};
+        profileRegistry.qpBindings[1] = {0U, 2U};
+        profileRegistry.regions[0].base = localRegion.data();
+        profileRegistry.regions[0].bytes = localRegion.size();
+        const size_t remoteBase = TILEXR_UDMA_PROFILE_MAX_REGIONS;
+        profileRegistry.regions[remoteBase + 1U].base = remoteRegion.data();
+        profileRegistry.regions[remoteBase + 1U].bytes = remoteRegion.size();
+        profileRegistry.regions[remoteBase + 2U].base = remoteRegionTwo.data();
+        profileRegistry.regions[remoteBase + 2U].bytes = remoteRegionTwo.size();
+        profileRegistry.regions[remoteBase + 3U].base = remoteRegionThree.data();
+        profileRegistry.regions[remoteBase + 3U].bytes = remoteRegionThree.size();
 
         for (uint32_t qp = 0U; qp < kQpNum; ++qp) {
             const uint32_t entry = kQpNum + qp;
@@ -360,6 +378,81 @@ void TestGetAndLegacyQp0Wrappers()
         "legacy PUT uses named ordered-completion flag");
 }
 
+void TestDeferredProfileGetAndCompletionFrontier()
+{
+    Fixture fixture;
+    auto scratch = fixture.Scratch();
+    fixture.sqDoorbell[0] = 77U;
+
+    Check(UDMAProfileGetNbiOnQpDeferred(&fixture.args, &fixture.info,
+        &fixture.profileRegistry, scratch, 1, 0U, 0U, 8U, 1U, 16U, 0U) ==
+        TILEXR_UDMA_STATUS_INVALID, "profile GET rejects zero bytes");
+    Check(UDMAProfileGetNbiOnQpDeferred(&fixture.args, &fixture.info,
+        &fixture.profileRegistry, scratch, 1, 0U, 1U, 8U, 1U, 16U, 32U) ==
+        TILEXR_UDMA_STATUS_INVALID, "profile GET rejects wrong local region binding");
+    Check(UDMAProfileGetNbiOnQpDeferred(&fixture.args, &fixture.info,
+        &fixture.profileRegistry, scratch, 1, 0U, 0U, 8U, 2U, 16U, 32U) ==
+        TILEXR_UDMA_STATUS_INVALID, "profile GET rejects wrong remote region binding");
+    Check(UDMAProfileGetNbiOnQpDeferred(&fixture.args, &fixture.info,
+        &fixture.profileRegistry, scratch, 1, 0U, 0U, 240U, 1U, 16U, 32U) ==
+        TILEXR_UDMA_STATUS_INVALID, "profile GET rejects local staging overflow");
+
+    Check(UDMAProfileGetNbiOnQpDeferred(&fixture.args, &fixture.info,
+        &fixture.profileRegistry, scratch, 1, 0U, 0U, 8U, 1U, 16U, 32U) ==
+        TILEXR_UDMA_STATUS_SUCCESS, "first deferred profile GET succeeds");
+    Check(UDMAProfileGetNbiOnQpDeferred(&fixture.args, &fixture.info,
+        &fixture.profileRegistry, scratch, 1, 0U, 0U, 64U, 1U, 64U, 16U) ==
+        TILEXR_UDMA_STATUS_SUCCESS, "second deferred profile GET succeeds");
+    Check(fixture.sqHead[0] == 2U && fixture.wqeCount[0] == 2U,
+        "deferred profile GETs advance SQ and completion frontier");
+    Check(fixture.sqDoorbell[0] == 77U,
+        "deferred profile GET batch does not ring the doorbell");
+
+    const UDMASqeCtx* firstSqe = fixture.Sqe(0U, 0U);
+    Check(firstSqe->opcode == static_cast<uint32_t>(UDMAOpcode::READ),
+        "deferred profile GET emits READ");
+    const uint64_t firstRemoteAddr = static_cast<uint64_t>(firstSqe->rmtAddrLOrTokenId) |
+        (static_cast<uint64_t>(firstSqe->rmtAddrHOrTokenValue) << 32U);
+    Check(firstRemoteAddr == AddressOf(fixture.remoteRegion.data() + 16U),
+        "profile GET uses bound remote region offset");
+    const UDMASgeCtx* firstSge = reinterpret_cast<const UDMASgeCtx*>(
+        fixture.sqBuffers[0].data() + sizeof(UDMASqeCtx));
+    Check(firstSge->va == AddressOf(fixture.localRegion.data() + 8U) &&
+        firstSge->len == 32U, "profile GET uses registered local staging address");
+    Check(firstSge->tokenId == fixture.wq[Fixture::kQpNum].localTokenId,
+        "profile GET uses profile QP local token");
+
+    const uint32_t frontier = UDMAProfileCompletionFrontier(&fixture.args,
+        &fixture.info, &fixture.profileRegistry, 1, 0U);
+    Check(frontier == 2U, "profile completion frontier covers the full batch");
+    Check(UDMAProfileFlushQpDoorbell(&fixture.args, &fixture.info,
+        &fixture.profileRegistry, 1, 0U) == TILEXR_UDMA_STATUS_SUCCESS,
+        "one profile doorbell flush succeeds");
+    Check(fixture.sqDoorbell[0] == 2U, "one profile flush publishes the final SQ head");
+
+    fixture.Cqe(0U, 0U)->owner = 1U;
+    fixture.Cqe(0U, 0U)->entryIdx = 0U;
+    fixture.Cqe(0U, 1U)->owner = 1U;
+    fixture.Cqe(0U, 1U)->entryIdx = 1U;
+    Check(UDMAProfileQuietStatusOnQpUntil(&fixture.args, &fixture.info,
+        &fixture.profileRegistry, 1, 0U, frontier) == TILEXR_UDMA_STATUS_SUCCESS,
+        "one profile quiet consumes the batch frontier");
+    Check(fixture.sqTail[0] == 2U && fixture.cqTail[0] == 2U,
+        "profile quiet reclaims the full deferred batch");
+    Check(UDMAProfileQuietStatusOnQpUntil(&fixture.args, &fixture.info,
+        &fixture.profileRegistry, 1, 0U, frontier + 1U) == TILEXR_UDMA_STATUS_INVALID,
+        "profile quiet rejects a future completion frontier");
+
+    Check(UDMAProfileGetNbiOnQpDeferred(&fixture.args, &fixture.info,
+        &fixture.profileRegistry, scratch, 1, 1U, 0U, 0U, 2U, 24U, 8U) ==
+        TILEXR_UDMA_STATUS_SUCCESS, "second QP uses its independent profile binding");
+    const UDMASqeCtx* qpOneSqe = fixture.Sqe(1U, 0U);
+    const uint64_t qpOneRemoteAddr = static_cast<uint64_t>(qpOneSqe->rmtAddrLOrTokenId) |
+        (static_cast<uint64_t>(qpOneSqe->rmtAddrHOrTokenValue) << 32U);
+    Check(qpOneRemoteAddr == AddressOf(fixture.remoteRegionTwo.data() + 24U),
+        "second QP selects its bound remote region");
+}
+
 void TestWriteNotifyWrapsWithinSqRing()
 {
     Fixture fixture;
@@ -521,6 +614,7 @@ int main()
     TestDeferredPutAndFlushAreQpSpecific();
     TestImmediatePutReclaimsCompletedFullSq();
     TestGetAndLegacyQp0Wrappers();
+    TestDeferredProfileGetAndCompletionFrontier();
     TestWriteNotifyWrapsWithinSqRing();
     TestWriteNotifyCompletionUsesFinalBbIndex();
     TestLegacyQuietWithoutRegistry();

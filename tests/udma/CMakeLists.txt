@@ -228,6 +228,93 @@ if(BUILD_TILEXR_UDMA_DEMO)
             -I${TILEXR_ROOT}/3rdparty
             -I${TILEXR_ROOT}/src/include
         )
+
+        if(TILEXR_UDMA_DEMO_SOC_TYPE STREQUAL "Ascend950")
+            find_program(TILEXR_UDMA_CCE_LINKER
+                NAMES ld.lld cce-ld
+                HINTS
+                    "${ASCEND_HOME_PATH}/bin"
+                    "${ASCEND_HOME_PATH}/tools/bisheng_compiler/bin"
+            )
+            if(NOT TILEXR_UDMA_CCE_LINKER)
+                message(FATAL_ERROR "CCE linker not found in the selected CANN installation")
+            endif()
+            set(TILEXR_UDMA_PROFILE_PROBE_KERNEL_SOURCE
+                "${CMAKE_CURRENT_SOURCE_DIR}/demo/tilexr_udma_profile_probe_kernel.cpp")
+            set(TILEXR_UDMA_PROFILE_PROBE_KERNEL_RELOCATABLE
+                "${CMAKE_CURRENT_BINARY_DIR}/tilexr_udma_profile_probe_kernel_rel.o")
+            set(TILEXR_UDMA_PROFILE_PROBE_KERNEL_BINARY
+                "${CMAKE_CURRENT_BINARY_DIR}/tilexr_udma_profile_probe_kernel.o")
+            set(TILEXR_UDMA_PROFILE_PROBE_KERNEL_EMBED
+                "${CMAKE_CURRENT_BINARY_DIR}/tilexr_udma_profile_probe_kernel_embed.cpp")
+            set(TILEXR_UDMA_PROFILE_PROBE_KERNEL_INCLUDES
+                ${TILEXR_UDMA_DEMO_KERNEL_INCLUDES}
+                -I${ASCEND_HOME_PATH}/${ARCH}-linux/asc/include
+                -I${ASCEND_HOME_PATH}/${ARCH}-linux/ascendc/include
+            )
+            add_custom_command(
+                OUTPUT "${TILEXR_UDMA_PROFILE_PROBE_KERNEL_BINARY}"
+                COMMAND ${BISHENG_EXECUTABLE}
+                    -xcce
+                    -mllvm -cce-aicore-stack-size=0x8000
+                    -mllvm -cce-aicore-function-stack-size=0x8000
+                    -mllvm -cce-aicore-record-overflow=true
+                    -mllvm -cce-aicore-addr-transform
+                    -mllvm -cce-aicore-dcci-insert-for-scalar=false
+                    --cce-aicore-arch=dav-c310-vec
+                    --cce-aicore-only
+                    -std=gnu++17
+                    ${TILEXR_UDMA_PROFILE_PROBE_KERNEL_INCLUDES}
+                    -c "${TILEXR_UDMA_PROFILE_PROBE_KERNEL_SOURCE}"
+                    -o "${TILEXR_UDMA_PROFILE_PROBE_KERNEL_RELOCATABLE}"
+                COMMAND ${TILEXR_UDMA_CCE_LINKER}
+                    -m aicorelinux -Ttext=0
+                    "${TILEXR_UDMA_PROFILE_PROBE_KERNEL_RELOCATABLE}"
+                    --static --allow-multiple-definition
+                    -o "${TILEXR_UDMA_PROFILE_PROBE_KERNEL_BINARY}"
+                DEPENDS
+                    "${TILEXR_UDMA_PROFILE_PROBE_KERNEL_SOURCE}"
+                    "${TILEXR_ROOT}/src/include/tilexr_udma.h"
+                    "${TILEXR_ROOT}/src/include/tilexr_udma_reg.h"
+                VERBATIM
+                COMMENT "Building pure AICore TileXR UDMA profile probe kernel"
+            )
+            add_custom_target(tilexr_udma_profile_probe_kernel ALL
+                DEPENDS "${TILEXR_UDMA_PROFILE_PROBE_KERNEL_BINARY}")
+            add_custom_command(
+                OUTPUT "${TILEXR_UDMA_PROFILE_PROBE_KERNEL_EMBED}"
+                COMMAND ${CMAKE_COMMAND}
+                    -DTILEXR_MOONEP_KERNEL_BINARY=${TILEXR_UDMA_PROFILE_PROBE_KERNEL_BINARY}
+                    -DTILEXR_MOONEP_KERNEL_EMBED_CPP=${TILEXR_UDMA_PROFILE_PROBE_KERNEL_EMBED}
+                    -DTILEXR_MOONEP_KERNEL_DATA_SYMBOL=TileXRUDMAProfileProbeKernelBinaryData
+                    -DTILEXR_MOONEP_KERNEL_SIZE_SYMBOL=TileXRUDMAProfileProbeKernelBinarySize
+                    -P "${TILEXR_ROOT}/src/moonep/cmake/embed_moonep_kernel.cmake"
+                DEPENDS
+                    "${TILEXR_UDMA_PROFILE_PROBE_KERNEL_BINARY}"
+                    "${TILEXR_ROOT}/src/moonep/cmake/embed_moonep_kernel.cmake"
+                VERBATIM
+                COMMENT "Embedding pure AICore TileXR UDMA profile probe kernel"
+            )
+
+            add_executable(tilexr_udma_profile_probe
+                demo/tilexr_udma_profile_probe.cpp
+                "${TILEXR_UDMA_PROFILE_PROBE_KERNEL_EMBED}"
+            )
+            add_dependencies(tilexr_udma_profile_probe tilexr_udma_profile_probe_kernel)
+            target_link_libraries(tilexr_udma_profile_probe
+                ${TILEXR_LIB}
+                ascendcl
+                runtime
+                ascend_hal
+            )
+            set_target_properties(tilexr_udma_profile_probe PROPERTIES
+                BUILD_WITH_INSTALL_RPATH TRUE
+                INSTALL_RPATH "$ORIGIN/../lib"
+            )
+            list(APPEND INSTALL_TARGETS tilexr_udma_profile_probe)
+            message(STATUS "TileXR UDMA persistent-profile hardware probe enabled")
+        endif()
+
         add_custom_command(
             OUTPUT "${TILEXR_UDMA_DEMO_KERNEL_SO}"
             COMMAND ${BISHENG_EXECUTABLE}

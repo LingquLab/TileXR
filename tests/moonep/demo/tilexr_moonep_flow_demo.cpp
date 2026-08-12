@@ -32,6 +32,7 @@ constexpr int32_t kExpectedCombineStatusSuccess = 3000;
 constexpr int32_t kExpectedPrefetchStatusSuccess = 4000;
 constexpr uint64_t kPrefetchWeightAlignment = 64;
 constexpr int32_t kExpectedReduceGradStatusSuccess = 0;
+constexpr int kMinReduceGradRankCount = 4;
 
 struct Options {
     int world = 8;
@@ -59,6 +60,7 @@ struct RuntimeResources {
     TileXRCommPtr comm = nullptr;
     bool udmaRegistered = false;
     TileXRUDMAMemHandle udmaHandle = 0;
+    TileXRMoonEpReduceGradPreparedV2 reduceGradPrepared = nullptr;
     std::vector<void *> allocations;
 };
 
@@ -239,7 +241,7 @@ bool ValidateOptions(const Options &options, uint64_t *routeCount,
 {
     if (routeCount == nullptr || tokenHiddenCount == nullptr ||
         routeHiddenCount == nullptr || expertHiddenCount == nullptr ||
-        options.world <= 0 || options.world > 128 || options.rank < 0 ||
+        options.world < kMinReduceGradRankCount || options.world > 128 || options.rank < 0 ||
         options.rank >= options.world || options.physicalDeviceCount <= 0 ||
         options.device < 0 || options.device >= options.physicalDeviceCount ||
         options.s <= 0 || options.k < 2 || options.experts <= 0 ||
@@ -551,6 +553,26 @@ bool Allocate(RuntimeResources *resources, uint64_t bytes, const std::string &na
     return true;
 }
 
+bool AllocateAligned(RuntimeResources *resources, uint64_t bytes, uint64_t alignment,
+                     const std::string &name, DeviceBuffer *buffer)
+{
+    uint64_t allocationBytes = 0;
+    if (resources == nullptr || buffer == nullptr || bytes == 0 || alignment == 0 ||
+        !CheckedAdd(bytes, alignment - 1, &allocationBytes)) {
+        return false;
+    }
+    DeviceBuffer allocation;
+    if (!Allocate(resources, allocationBytes, name, &allocation)) {
+        return false;
+    }
+    const uintptr_t address = reinterpret_cast<uintptr_t>(allocation.data);
+    const uint64_t remainder = static_cast<uint64_t>(address % alignment);
+    const uint64_t offset = remainder == 0 ? 0 : alignment - remainder;
+    buffer->data = static_cast<uint8_t *>(allocation.data) + offset;
+    buffer->bytes = bytes;
+    return true;
+}
+
 bool AllocateInt32(RuntimeResources *resources, uint64_t elements,
                    const std::string &name, DeviceBuffer *buffer)
 {
@@ -564,6 +586,16 @@ bool AllocateTyped(RuntimeResources *resources, uint64_t elements,
 {
     uint64_t bytes = 0;
     return CountTypedBytes<T>(elements, &bytes) && Allocate(resources, bytes, name, buffer);
+}
+
+template <typename T>
+bool AllocateTypedAligned(RuntimeResources *resources, uint64_t elements,
+                          uint64_t alignment, const std::string &name,
+                          DeviceBuffer *buffer)
+{
+    uint64_t bytes = 0;
+    return CountTypedBytes<T>(elements, &bytes) &&
+        AllocateAligned(resources, bytes, alignment, name, buffer);
 }
 
 bool CopyHostToDevice(int rank, const DeviceBuffer &buffer,
@@ -631,6 +663,16 @@ bool Cleanup(RuntimeResources *resources)
     if (resources->stream != nullptr) {
         ok = CheckAcl(resources->rank, "cleanup stream synchronize",
             aclrtSynchronizeStream(resources->stream)) && ok;
+    }
+    if (resources->reduceGradPrepared != nullptr) {
+        const int destroyRet = TileXRMoonEpReduceGradDestroyPreparedV2(
+            resources->reduceGradPrepared);
+        ok = CheckTileXR(resources->rank,
+            "TileXRMoonEpReduceGradDestroyPreparedV2", destroyRet) && ok;
+        if (destroyRet != TILEXR_MOONEP_SUCCESS) {
+            return false;
+        }
+        resources->reduceGradPrepared = nullptr;
     }
     if (resources->udmaRegistered && resources->comm != nullptr) {
         const int unregisterRet =
@@ -1077,6 +1119,7 @@ bool RunFlow(const Options &options, RuntimeResources *resources,
     DeviceBuffer upGradDev;
     DeviceBuffer downGradDev;
     DeviceBuffer reduceGradStatus;
+    DeviceBuffer reduceGradWorkspace;
 
     if (!AllocateInt32(resources, routeCount, "topk", &topk) ||
         !AllocateInt32(resources, options.experts, "tokens per expert", &tpe) ||
@@ -1108,9 +1151,15 @@ bool RunFlow(const Options &options, RuntimeResources *resources,
             "backward dispatch", &backwardDispatchDev) ||
         !AllocateTyped<uint16_t>(resources, tokenHiddenCount,
             "backward combine", &backwardCombineDev) ||
-        !AllocateTyped<float>(resources, gateFullElements, "gate grad", &gateGradDev) ||
-        !AllocateTyped<float>(resources, upFullElements, "up grad", &upGradDev) ||
-        !AllocateTyped<float>(resources, downFullElements, "down grad", &downGradDev) ||
+        !AllocateTypedAligned<float>(resources, gateFullElements,
+            TILEXR_MOONEP_REDUCE_GRAD_WORKSPACE_ALIGNMENT,
+            "gate grad", &gateGradDev) ||
+        !AllocateTypedAligned<float>(resources, upFullElements,
+            TILEXR_MOONEP_REDUCE_GRAD_WORKSPACE_ALIGNMENT,
+            "up grad", &upGradDev) ||
+        !AllocateTypedAligned<float>(resources, downFullElements,
+            TILEXR_MOONEP_REDUCE_GRAD_WORKSPACE_ALIGNMENT,
+            "down grad", &downGradDev) ||
         !AllocateInt32(resources, 1, "ReduceGrad status", &reduceGradStatus)) {
         return false;
     }
@@ -1296,7 +1345,6 @@ bool RunFlow(const Options &options, RuntimeResources *resources,
     TileXRMoonEpReduceGradArgsV2 reduceGrad {};
     reduceGrad.structSize = sizeof(reduceGrad);
     reduceGrad.abiVersion = TILEXR_MOONEP_ABI_VERSION_V2;
-    reduceGrad.comm = resources->comm;
     reduceGrad.plan = &plan;
     reduceGrad.gate = &gateGradTensor;
     reduceGrad.up = &upGradTensor;
@@ -1322,18 +1370,63 @@ bool RunFlow(const Options &options, RuntimeResources *resources,
     if (!CheckTileXR(rank, "TileXRMoonEpReduceGradGetWorkspaceSizeV2",
             TileXRMoonEpReduceGradGetWorkspaceSizeV2(
                 &reduceGradQuery, &reduceGradInfo)) ||
-        reduceGradInfo.workspaceBytes != 0 ||
-        reduceGradInfo.transports[0] != TILEXR_MOONEP_REDUCE_GRAD_TRANSPORT_PEER ||
-        reduceGradInfo.transports[1] != TILEXR_MOONEP_REDUCE_GRAD_TRANSPORT_PEER ||
-        reduceGradInfo.transports[2] != TILEXR_MOONEP_REDUCE_GRAD_TRANSPORT_PEER) {
+        reduceGradInfo.workspaceBytes == 0 || reduceGradInfo.workspaceAlignment == 0 ||
+        reduceGradInfo.udmaChunkBytes == 0 || reduceGradInfo.qpCount < 3 ||
+        !AllocateAligned(resources, reduceGradInfo.workspaceBytes,
+            reduceGradInfo.workspaceAlignment, "ReduceGrad workspace",
+            &reduceGradWorkspace)) {
         std::cerr << "[rank " << rank
-                  << "] flow demo requires the peer-only ReduceGrad V2 path"
+                  << "] ReduceGrad owner-pull workspace preparation failed"
                   << " workspace_bytes=" << reduceGradInfo.workspaceBytes
-                  << " transports=" << reduceGradInfo.transports[0] << ","
-                  << reduceGradInfo.transports[1] << ","
-                  << reduceGradInfo.transports[2] << std::endl;
+                  << " alignment=" << reduceGradInfo.workspaceAlignment
+                  << " chunk_bytes=" << reduceGradInfo.udmaChunkBytes
+                  << " qp_count=" << reduceGradInfo.qpCount << std::endl;
         return false;
     }
+    DeviceBuffer *gradBuffers[3] = {&gateGradDev, &upGradDev, &downGradDev};
+    TileXRMoonEpReduceGradSourceSliceV2 reduceGradSources[3] {};
+    for (uint32_t projection = 0; projection < 3; ++projection) {
+        uint64_t sourceOffset = 0;
+        uint64_t sourceBytes = 0;
+        uint64_t sourceEnd = 0;
+        if (!CheckedMultiply(static_cast<uint64_t>(options.experts),
+                reduceGradInfo.rowBytes[projection], &sourceOffset) ||
+            !CheckedMultiply(static_cast<uint64_t>(b),
+                reduceGradInfo.rowBytes[projection], &sourceBytes) ||
+            !CheckedAdd(sourceOffset, sourceBytes, &sourceEnd) ||
+            sourceEnd > gradBuffers[projection]->bytes) {
+            return false;
+        }
+        reduceGradSources[projection].data =
+            static_cast<uint8_t *>(gradBuffers[projection]->data) + sourceOffset;
+        reduceGradSources[projection].bytes = sourceBytes;
+        reduceGradSources[projection].registrationBase =
+            gradBuffers[projection]->data;
+        reduceGradSources[projection].registrationBytes =
+            gradBuffers[projection]->bytes;
+        reduceGrad.sources[projection] = reduceGradSources[projection];
+    }
+    TileXRMoonEpReduceGradPrepareArgsV2 reduceGradPrepare {};
+    reduceGradPrepare.structSize = sizeof(reduceGradPrepare);
+    reduceGradPrepare.abiVersion = TILEXR_MOONEP_ABI_VERSION_V2;
+    reduceGradPrepare.comm = resources->comm;
+    reduceGradPrepare.plan = &plan;
+    reduceGradPrepare.gate = &gateGradTensor;
+    reduceGradPrepare.up = &upGradTensor;
+    reduceGradPrepare.down = &downGradTensor;
+    reduceGradPrepare.workspace = reduceGradWorkspace.data;
+    reduceGradPrepare.workspaceBytes = reduceGradWorkspace.bytes;
+    reduceGradPrepare.requestedUdmaChunkBytes = reduceGradQuery.requestedUdmaChunkBytes;
+    reduceGradPrepare.flags = TILEXR_MOONEP_FLAG_NONE;
+    for (uint32_t projection = 0; projection < 3; ++projection) {
+        reduceGradPrepare.sources[projection] = reduceGradSources[projection];
+    }
+    if (!CheckTileXR(rank, "TileXRMoonEpReduceGradPrepareV2",
+            TileXRMoonEpReduceGradPrepareV2(
+                &reduceGradPrepare, &resources->reduceGradPrepared))) {
+        return false;
+    }
+    reduceGrad.prepared = resources->reduceGradPrepared;
     if (!CheckTileXR(rank, "Dispatch forward",
             TileXRMoonEpDispatchV1(&forwardDispatch, resources->stream)) ||
         !CheckStageCompletion(rank, "dispatch_forward", kExpectedDispatchStatusSuccess,
@@ -1526,11 +1619,11 @@ bool RunFlow(const Options &options, RuntimeResources *resources,
                   << " prefetch_weight_status=" << kExpectedPrefetchStatusSuccess
                   << " combine_status=" << kExpectedCombineStatusSuccess
                   << " reduce_grad_status=" << kExpectedReduceGradStatusSuccess
-                  << " reduce_grad_transport=peer"
+                  << " reduce_grad_transport=owner_pull_udma"
                   << " cu_last=" << cuHost.back()
                   << " planning=native"
                   << " dispatch=native prefetch_weight=native_udma_registered"
-                  << " combine=native reduce_grad=native"
+                  << " combine=native reduce_grad=native_owner_pull_udma"
                   << " torch_validated=false"
                   << " transport_performance_valid=false"
                   << std::endl;

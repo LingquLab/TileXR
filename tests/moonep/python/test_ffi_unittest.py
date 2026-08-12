@@ -26,6 +26,8 @@ from tilexr_moonep.abi import (
     TileXRMoonEPPrefetchWeightArgsV1,
     TileXRMoonEPReduceGradArgsV1,
     TileXRMoonEPReduceGradArgsV2,
+    TileXRMoonEPReduceGradPrepareArgsV2,
+    TileXRMoonEPReduceGradSourceSliceV2,
     TileXRMoonEPReduceGradWorkspaceInfoV2,
     TileXRMoonEPReduceGradWorkspaceQueryV2,
     TileXRMoonEPTensorV1,
@@ -57,6 +59,8 @@ class FakeCDLLLoader:
         self.stage_records = []
         self.combine_v2_workspace_records = []
         self.reduce_grad_records = []
+        self.reduce_grad_prepare_records = []
+        self.reduce_grad_destroy_records = []
         self.register_calls = []
         self.unregister_calls = []
         self.comm = self._comm_library()
@@ -305,18 +309,44 @@ class FakeCDLLLoader:
                 info_ptr, ctypes.POINTER(TileXRMoonEPReduceGradWorkspaceInfoV2)
             ).contents
             descriptors = (query.gate.contents, query.up.contents, query.down.contents)
-            info.workspaceBytes = 0
+            info.workspaceBytes = 2 << 20
             info.workspaceAlignment = 2 << 20
-            info.udmaChunkBytes = 0
-            info.peerWindowBytes = 100 << 20
-            info.peerHalfBytes = 49 << 20
-            info.peerSlotStrideBytes = 1 << 20
+            info.udmaChunkBytes = 4 << 20
+            info.laneStateBytes = 3 * 4096
+            info.laneStateStrideBytes = 4096
+            info.bankStrideBytes = 8 << 20
+            info.laneStrideBytes = 16 << 20
+            info.qpCount = 3
             info.blockDim = 64
             for index, tensor_value in enumerate(descriptors):
                 info.rowBytes[index] = int(
                     tensor_value.elementCount // tensor_value.shape[0]
                 ) * 4
-                info.transports[index] = 1
+                info.chunkCounts[index] = 1
+                info.projectionQpCounts[index] = 1
+            return 0
+
+        def reduce_grad_prepare(args_ptr, prepared_ptr):
+            args = ctypes.cast(
+                args_ptr, ctypes.POINTER(TileXRMoonEPReduceGradPrepareArgsV2)
+            ).contents
+            self.reduce_grad_prepare_records.append({
+                "workspace_bytes": args.workspaceBytes,
+                "requested_chunk_bytes": args.requestedUdmaChunkBytes,
+                "source_bytes": tuple(int(value.bytes) for value in args.sources),
+                "source_ptrs": tuple(int(value.data) for value in args.sources),
+                "registration_bytes": tuple(
+                    int(value.registrationBytes) for value in args.sources
+                ),
+                "registration_ptrs": tuple(
+                    int(value.registrationBase) for value in args.sources
+                ),
+            })
+            ctypes.cast(prepared_ptr, ctypes.POINTER(ctypes.c_void_p)).contents.value = 0x5678
+            return 0
+
+        def reduce_grad_destroy(prepared):
+            self.reduce_grad_destroy_records.append(int(prepared.value))
             return 0
 
         def reduce_grad(args_ptr, stream):
@@ -327,7 +357,11 @@ class FakeCDLLLoader:
                 "stream": stream.value,
                 "flags": args.flags,
                 "wait_iterations": args.waitIterations,
-                "workspace_bytes": args.workspaceBytes,
+                "prepared": int(args.prepared),
+                "source_bytes": tuple(int(value.bytes) for value in args.sources),
+                "registration_bytes": tuple(
+                    int(value.registrationBytes) for value in args.sources
+                ),
                 "shapes": tuple(
                     tuple(pointer.contents.shape[: pointer.contents.rank])
                     for pointer in (args.gate, args.up, args.down)
@@ -339,6 +373,8 @@ class FakeCDLLLoader:
             return 0
 
         library.TileXRMoonEpReduceGradGetWorkspaceSizeV2 = FakeFunction(reduce_grad_query)
+        library.TileXRMoonEpReduceGradPrepareV2 = FakeFunction(reduce_grad_prepare)
+        library.TileXRMoonEpReduceGradDestroyPreparedV2 = FakeFunction(reduce_grad_destroy)
         library.TileXRMoonEpReduceGradV2 = FakeFunction(reduce_grad)
         return library
 
@@ -398,8 +434,10 @@ class FfiAbiTests(unittest.TestCase):
         self.assertEqual(TileXRMoonEPCombineArgsV1.dstLocal.offset, 24)
         self.assertEqual(ctypes.sizeof(TileXRMoonEPReduceGradArgsV1), 48)
         self.assertEqual(ctypes.sizeof(TileXRMoonEPReduceGradWorkspaceQueryV2), 64)
-        self.assertEqual(ctypes.sizeof(TileXRMoonEPReduceGradWorkspaceInfoV2), 96)
-        self.assertEqual(ctypes.sizeof(TileXRMoonEPReduceGradArgsV2), 96)
+        self.assertEqual(ctypes.sizeof(TileXRMoonEPReduceGradWorkspaceInfoV2), 136)
+        self.assertEqual(ctypes.sizeof(TileXRMoonEPReduceGradSourceSliceV2), 32)
+        self.assertEqual(ctypes.sizeof(TileXRMoonEPReduceGradPrepareArgsV2), 176)
+        self.assertEqual(ctypes.sizeof(TileXRMoonEPReduceGradArgsV2), 168)
         self.assertEqual(TileXRMoonEPTensorV1.shape.offset, 32)
         self.assertEqual(TileXRMoonEPPlanV1.dst.offset, 56)
         self.assertEqual(TileXRMoonEPPlanV1.status.offset, 112)
@@ -409,6 +447,10 @@ class FfiAbiTests(unittest.TestCase):
         self.assertEqual(TileXRMoonEPDispatchArgsV1.registeredWorkspace.offset, 64)
         self.assertEqual(TileXRMoonEPDispatchArgsV1.registeredWorkspaceBytes.offset, 72)
         self.assertEqual(TileXRMoonEPDispatchArgsV2.registeredWorkspace.offset, 64)
+        self.assertEqual(TileXRMoonEPReduceGradWorkspaceInfoV2.rowBytes.offset, 64)
+        self.assertEqual(TileXRMoonEPReduceGradWorkspaceInfoV2.chunkCounts.offset, 88)
+        self.assertEqual(TileXRMoonEPReduceGradPrepareArgsV2.sources.offset, 48)
+        self.assertEqual(TileXRMoonEPReduceGradArgsV2.sources.offset, 48)
 
     def test_invalid_combine_version_fails_before_library_load(self):
         loader = FakeCDLLLoader()
@@ -551,6 +593,7 @@ class FfiAbiTests(unittest.TestCase):
         hidden_sh, route_weights_sk, _ = buffer.combine(
             plan, hidden_nvsh, route_weights_nvs
         )
+        plan.status._item = 4000
         gradients = ProjectionBuffers(
             tensor((6, 2, 4), torch.float32),
             tensor((6, 4, 3), torch.float32),
@@ -643,10 +686,30 @@ class FfiAbiTests(unittest.TestCase):
             "stream": 0xCAFE,
             "flags": 0,
             "wait_iterations": 1234,
-            "workspace_bytes": 0,
+            "prepared": 0x5678,
+            "source_bytes": (64, 96, 48),
+            "registration_bytes": (192, 288, 144),
             "shapes": ((6, 2, 4), (6, 4, 3), (6, 3, 2)),
             "status_shape": (1,),
         }])
+        self.assertEqual(loader.reduce_grad_prepare_records, [{
+            "workspace_bytes": 2 << 20,
+            "requested_chunk_bytes": 0,
+            "source_bytes": (64, 96, 48),
+            "source_ptrs": tuple(
+                tensor.data_ptr() + 4 * row_bytes
+                for tensor, row_bytes in zip(
+                    (gradients.gate, gradients.up, gradients.down),
+                    (32, 48, 24),
+                )
+            ),
+            "registration_bytes": (192, 288, 144),
+            "registration_ptrs": tuple(
+                tensor.data_ptr()
+                for tensor in (gradients.gate, gradients.up, gradients.down)
+            ),
+        }])
+        self.assertEqual(loader.reduce_grad_destroy_records, [0x5678])
         self.assertEqual(
             [byte_count for _, byte_count in loader.register_calls],
             [2 * 1024 * 1024] * 5,

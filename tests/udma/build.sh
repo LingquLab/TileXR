@@ -69,9 +69,14 @@ if [ -f "${INSTALL_DIR}/bin/tilexr_udma_demo" ]; then
 else
     echo "  - tilexr_udma_demo     : skipped (requires bisheng/AICore toolchain)"
 fi
+if [ -f "${INSTALL_DIR}/bin/tilexr_udma_profile_probe" ]; then
+    echo "  - tilexr_udma_profile_probe : persistent multi-MR deferred-READ hardware probe"
+fi
 echo ""
 echo "Run tests with:"
 echo "  bash run_tests.sh"
 echo "Run demo with:"
 echo "  bash demo/run_tilexr_udma_demo.sh 0 2 16"
+echo "Run the two-host profile probe with:"
+echo "  bash demo/run_tilexr_udma_profile_probe_mpi.sh --hosts host1:1,host2:1 --comm-id host1_data_ip:10067"
 echo "=========================================="

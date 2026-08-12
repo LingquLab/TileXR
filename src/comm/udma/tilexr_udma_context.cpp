@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <array>
+#include <limits>
 #include <new>
 #include <string>
 #include <vector>
@@ -19,6 +20,12 @@
 #include "udma/tilexr_udma_transport.h"
 
 namespace TileXR {
+
+struct TileXRUDMAContext::ProfileRecord {
+    TileXRUDMAProfileRegistry registry {};
+    GM_ADDR registryDev = nullptr;
+    bool cleanupPending = false;
+};
 
 TileXRUDMAContext::TileXRUDMAContext() = default;
 
@@ -94,15 +101,19 @@ void TileXRUDMAContext::Shutdown()
         TILEXR_LOG(ERROR) << "TileXR UDMA shutdown failed to clear comm args: " << publishRet;
     }
 
+    const int profileCleanupRet = CleanupAllProfiles();
     int memoryCleanupRet = TILEXR_SUCCESS;
     if (transport_ != nullptr) {
         memoryCleanupRet = transport_->CleanupAllMemory();
     }
     const int registryCleanupRet = CleanupAllRegistries();
-    if (memoryCleanupRet != TILEXR_SUCCESS || registryCleanupRet != TILEXR_SUCCESS ||
+    if (profileCleanupRet != TILEXR_SUCCESS || memoryCleanupRet != TILEXR_SUCCESS ||
+        registryCleanupRet != TILEXR_SUCCESS ||
         (transport_ != nullptr && transport_->HasMemoryCleanupPending()) ||
-        udmaRegistryDev_ != nullptr || !retiredRegistryDevs_.empty()) {
+        (transport_ != nullptr && transport_->HasProfileCleanupPending()) ||
+        udmaRegistryDev_ != nullptr || !retiredRegistryDevs_.empty() || !profiles_.empty()) {
         TILEXR_LOG(ERROR) << "TileXR UDMA shutdown retains memory cleanup state"
+                          << ", profile ret " << profileCleanupRet
                           << ", transport ret " << memoryCleanupRet
                           << ", registry ret " << registryCleanupRet
                           << ", registry ptr " << reinterpret_cast<uintptr_t>(udmaRegistryDev_)
@@ -115,6 +126,8 @@ void TileXRUDMAContext::Shutdown()
     }
 
     retiredRegistryDevs_.clear();
+    profiles_.clear();
+    nextProfileHandle_ = 1;
     udmaRegistryDev_ = nullptr;
     registry_ = TileXRUDMARegistry {};
     registeredPtr_ = nullptr;
@@ -354,6 +367,216 @@ int TileXRUDMAContext::UnregisterMemory(TileXRUDMAMemHandle handle)
     return TILEXR_SUCCESS;
 }
 
+int TileXRUDMAContext::RegisterProfile(
+    const TileXRUDMAProfileDesc& desc, TileXRUDMAProfileHandle* handle)
+{
+    if (handle == nullptr) {
+        return TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    *handle = 0;
+    if (!IsAvailable() || transport_ == nullptr) {
+        TILEXR_LOG(ERROR) << "TileXRUDMAProfileRegister called while UDMA is unavailable";
+        return TILEXR_ERROR_NOT_SUPPORT;
+    }
+    if (options_.threadMode) {
+        TILEXR_LOG(ERROR) << "TileXRUDMAProfileRegister is not supported in InitThread mode";
+        return TILEXR_ERROR_NOT_SUPPORT;
+    }
+    if (options_.exchange == nullptr) {
+        TILEXR_LOG(ERROR) << "TileXRUDMAProfileRegister requires live socket exchange";
+        return TILEXR_ERROR_INTERNAL;
+    }
+    if (transport_->HasProfileCleanupPending()) {
+        TILEXR_LOG(ERROR) << "TileXRUDMAProfileRegister requires pending profile cleanup first";
+        return TILEXR_ERROR_INTERNAL;
+    }
+
+    const uint32_t qpCount = transport_->GetQpCount();
+    int localStatus = UDMAProfileDescValid(&desc, qpCount)
+        ? TILEXR_SUCCESS : TILEXR_ERROR_PARA_CHECK_FAIL;
+    int ret = AgreeStatus(localStatus);
+    if (ret != TILEXR_SUCCESS) {
+        return ret;
+    }
+
+    std::vector<TileXRUDMAProfileDesc> allDescs(options_.rankSize);
+    ret = options_.exchange->AllGather(&desc, 1, allDescs.data());
+    if (ret != TILEXR_SUCCESS) {
+        return ret;
+    }
+    localStatus = TILEXR_SUCCESS;
+    for (int rank = 0; rank < options_.rankSize; ++rank) {
+        if (!UDMAProfileDescValid(&allDescs[rank], qpCount) ||
+            !UDMAProfileContractsEqual(allDescs[0], allDescs[rank])) {
+            TILEXR_LOG(ERROR) << "TileXR UDMA profile contract mismatch at rank " << rank;
+            localStatus = TILEXR_ERROR_PARA_CHECK_FAIL;
+            break;
+        }
+    }
+    ret = AgreeStatus(localStatus);
+    if (ret != TILEXR_SUCCESS) {
+        return ret;
+    }
+
+    const TileXRUDMAProfileHandle candidateHandle = NextProfileHandle();
+    localStatus = candidateHandle == 0 ? TILEXR_ERROR_INTERNAL : TILEXR_SUCCESS;
+    ret = AgreeStatus(localStatus);
+    if (ret != TILEXR_SUCCESS) {
+        return ret;
+    }
+    std::vector<TileXRUDMAProfileHandle> allHandles(options_.rankSize);
+    ret = options_.exchange->AllGather(&candidateHandle, 1, allHandles.data());
+    if (ret != TILEXR_SUCCESS) {
+        return ret;
+    }
+    for (int rank = 0; rank < options_.rankSize; ++rank) {
+        if (allHandles[rank] != candidateHandle) {
+            localStatus = TILEXR_ERROR_INTERNAL;
+            break;
+        }
+    }
+    ret = AgreeStatus(localStatus);
+    if (ret != TILEXR_SUCCESS) {
+        return ret;
+    }
+
+    ret = transport_->PrepareProfile(desc);
+    if (ret != TILEXR_SUCCESS) {
+        TILEXR_LOG(ERROR) << "TileXR UDMA profile memory registration failed: " << ret;
+        return ret;
+    }
+
+    std::unique_ptr<ProfileRecord> candidate(new (std::nothrow) ProfileRecord());
+    localStatus = candidate == nullptr ? TILEXR_ERROR_INTERNAL : TILEXR_SUCCESS;
+    if (candidate != nullptr) {
+        candidate->registry.rankSize = static_cast<uint32_t>(options_.rankSize);
+        candidate->registry.regionCount = desc.regionCount;
+        candidate->registry.qpCount = qpCount;
+        for (uint32_t qp = 0; qp < qpCount; ++qp) {
+            candidate->registry.qpBindings[qp] = desc.qpBindings[qp];
+        }
+        for (int rank = 0; rank < options_.rankSize; ++rank) {
+            for (uint32_t region = 0; region < desc.regionCount; ++region) {
+                const size_t index = static_cast<size_t>(rank) *
+                    TILEXR_UDMA_PROFILE_MAX_REGIONS + region;
+                candidate->registry.regions[index] = allDescs[rank].regions[region];
+                candidate->registry.regions[index].registrationBase = nullptr;
+                candidate->registry.regions[index].registrationBytes = 0;
+            }
+        }
+        const aclError allocRet = aclrtMalloc(reinterpret_cast<void**>(&candidate->registryDev),
+            sizeof(candidate->registry), ACL_MEM_MALLOC_HUGE_FIRST);
+        if (allocRet != ACL_SUCCESS) {
+            TILEXR_LOG(ERROR) << "aclrtMalloc UDMA profile registry failed: " << allocRet;
+            localStatus = TILEXR_ERROR_INTERNAL;
+        }
+    }
+    if (localStatus == TILEXR_SUCCESS) {
+        const aclError copyRet = aclrtMemcpy(candidate->registryDev, sizeof(candidate->registry),
+            &candidate->registry, sizeof(candidate->registry), ACL_MEMCPY_HOST_TO_DEVICE);
+        if (copyRet != ACL_SUCCESS) {
+            TILEXR_LOG(ERROR) << "aclrtMemcpy UDMA profile registry failed: " << copyRet;
+            localStatus = TILEXR_ERROR_INTERNAL;
+        }
+    }
+
+    int agreedStatus = AgreeStatus(localStatus);
+    if (agreedStatus != TILEXR_SUCCESS) {
+        int cleanupRet = transport_->AbortPreparedProfile();
+        if (candidate != nullptr) {
+            const int registryRet = FreeDeviceRegistry(candidate->registryDev);
+            if (registryRet != TILEXR_SUCCESS) {
+                RetainRegistry(candidate->registryDev);
+            }
+            if (cleanupRet == TILEXR_SUCCESS && registryRet != TILEXR_SUCCESS) {
+                cleanupRet = registryRet;
+            }
+        }
+        const int agreedCleanupStatus = AgreeStatus(cleanupRet);
+        if (agreedCleanupStatus != TILEXR_SUCCESS || transport_->HasProfileCleanupPending()) {
+            TILEXR_LOG(ERROR) << "TileXR UDMA profile candidate cleanup remains pending";
+        }
+        return agreedStatus;
+    }
+
+    localStatus = transport_->GetPreparedProfileInfoDev() == nullptr
+        ? TILEXR_ERROR_NOT_INITIALIZED
+        : transport_->CommitPreparedProfile(candidateHandle);
+    agreedStatus = AgreeStatus(localStatus);
+    if (agreedStatus != TILEXR_SUCCESS) {
+        int cleanupRet = localStatus == TILEXR_SUCCESS
+            ? transport_->CleanupProfile(candidateHandle)
+            : transport_->AbortPreparedProfile();
+        const int registryRet = FreeDeviceRegistry(candidate->registryDev);
+        if (registryRet != TILEXR_SUCCESS) {
+            RetainRegistry(candidate->registryDev);
+        }
+        if (cleanupRet == TILEXR_SUCCESS && registryRet != TILEXR_SUCCESS) {
+            cleanupRet = registryRet;
+        }
+        (void)AgreeStatus(cleanupRet);
+        return agreedStatus;
+    }
+
+    profiles_.emplace(candidateHandle, std::move(candidate));
+    nextProfileHandle_ = candidateHandle == std::numeric_limits<TileXRUDMAProfileHandle>::max()
+        ? 1U : candidateHandle + 1U;
+    *handle = candidateHandle;
+    return TILEXR_SUCCESS;
+}
+
+int TileXRUDMAContext::UnregisterProfile(TileXRUDMAProfileHandle handle)
+{
+    const auto it = profiles_.find(handle);
+    if (handle == 0 || it == profiles_.end() || transport_ == nullptr) {
+        return TILEXR_ERROR_NOT_FOUND;
+    }
+    ProfileRecord& record = *it->second;
+    const bool retrying = record.cleanupPending;
+    record.cleanupPending = true;
+    int transportRet = transport_->CleanupProfile(handle);
+    if (retrying && transportRet == TILEXR_ERROR_NOT_FOUND) {
+        transportRet = TILEXR_SUCCESS;
+    }
+    const int registryRet = FreeDeviceRegistry(record.registryDev);
+    int ret = transportRet;
+    if (ret == TILEXR_SUCCESS && registryRet != TILEXR_SUCCESS) {
+        ret = registryRet;
+    }
+    if (ret == TILEXR_SUCCESS) {
+        profiles_.erase(it);
+    }
+    return ret;
+}
+
+int TileXRUDMAContext::QueryProfile(
+    TileXRUDMAProfileHandle handle, TileXRUDMAProfileView* view) const
+{
+    if (view == nullptr) {
+        return TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    *view = TileXRUDMAProfileView {};
+    const auto it = profiles_.find(handle);
+    if (handle == 0 || it == profiles_.end() || it->second->cleanupPending ||
+        transport_ == nullptr) {
+        return TILEXR_ERROR_NOT_FOUND;
+    }
+    const ProfileRecord& record = *it->second;
+    const GM_ADDR infoDev = transport_->GetProfileInfoDev(handle);
+    if (infoDev == nullptr || record.registryDev == nullptr ||
+        !UDMAProfileRegistryValid(&record.registry, options_.rankSize,
+            record.registry.regionCount, transport_->GetQpCount())) {
+        return TILEXR_ERROR_NOT_INITIALIZED;
+    }
+    view->rankSize = record.registry.rankSize;
+    view->regionCount = record.registry.regionCount;
+    view->qpCount = transport_->GetQpCount();
+    view->infoDev = infoDev;
+    view->registryDev = record.registryDev;
+    view->registryHost = &record.registry;
+    return TILEXR_SUCCESS;
+}
+
 GM_ADDR TileXRUDMAContext::GetRegistryDev() const
 {
     return lifecycle_ == Lifecycle::MemoryReady ? udmaRegistryDev_ : nullptr;
@@ -487,6 +710,48 @@ int TileXRUDMAContext::CleanupAllRegistries()
         firstError = retiredRet;
     }
     return firstError;
+}
+
+int TileXRUDMAContext::CleanupAllProfiles()
+{
+    int firstError = TILEXR_SUCCESS;
+    for (auto it = profiles_.begin(); it != profiles_.end();) {
+        ProfileRecord& record = *it->second;
+        const bool retrying = record.cleanupPending;
+        record.cleanupPending = true;
+        int transportRet = transport_ == nullptr
+            ? TILEXR_ERROR_NOT_FOUND : transport_->CleanupProfile(it->first);
+        if (retrying && transportRet == TILEXR_ERROR_NOT_FOUND) {
+            transportRet = TILEXR_SUCCESS;
+        }
+        const int registryRet = FreeDeviceRegistry(record.registryDev);
+        int ret = transportRet;
+        if (ret == TILEXR_SUCCESS && registryRet != TILEXR_SUCCESS) {
+            ret = registryRet;
+        }
+        if (firstError == TILEXR_SUCCESS && ret != TILEXR_SUCCESS) {
+            firstError = ret;
+        }
+        if (ret == TILEXR_SUCCESS) {
+            it = profiles_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    return firstError;
+}
+
+TileXRUDMAProfileHandle TileXRUDMAContext::NextProfileHandle() const
+{
+    TileXRUDMAProfileHandle candidate = nextProfileHandle_ == 0 ? 1U : nextProfileHandle_;
+    for (size_t checked = 0; checked <= profiles_.size(); ++checked) {
+        if (profiles_.count(candidate) == 0) {
+            return candidate;
+        }
+        candidate = candidate == std::numeric_limits<TileXRUDMAProfileHandle>::max()
+            ? 1U : candidate + 1U;
+    }
+    return 0;
 }
 
 void TileXRUDMAContext::RetainRegistry(GM_ADDR& registryDev)

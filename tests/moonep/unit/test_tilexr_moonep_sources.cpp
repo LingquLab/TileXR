@@ -230,6 +230,8 @@ int main()
     Contains("prefetch Host", prefetchHost, "TileXRGetUDMARegistryHost");
     Contains("ReduceGrad Host", reduceHost, "TileXRMoonEpPrepareReduceGradLayout");
     Contains("ReduceGrad Host", reduceHost, "TileXRMoonEpReduceGradV2");
+    Contains("ReduceGrad launch-failure drain", reduceHost,
+        "aclrtSynchronizeStream(stream)");
     Excludes("ReduceGrad Host", reduceHost, "moonep_stage_host.h");
 
     Contains("test CMake", testCmake, "if(TARGET tilexr-moonep)");
@@ -241,7 +243,11 @@ int main()
     Contains("flow demo", flowDemo, "TileXRUDMAUnregister prefetch arena");
     Contains("flow demo", flowDemo, "TileXRMoonEpGetCapabilitiesV2");
     Contains("flow demo", flowDemo, "TileXRMoonEpReduceGradGetWorkspaceSizeV2");
-    Contains("flow demo", flowDemo, "TILEXR_MOONEP_REDUCE_GRAD_TRANSPORT_PEER");
+    Contains("flow demo", flowDemo, "TileXRMoonEpReduceGradPrepareV2");
+    Contains("flow demo", flowDemo, "TileXRMoonEpReduceGradDestroyPreparedV2");
+    Contains("flow demo", flowDemo, "options.world < kMinReduceGradRankCount");
+    Excludes("flow demo", flowDemo, ".transports");
+    Excludes("flow demo", flowDemo, "TILEXR_MOONEP_REDUCE_GRAD_TRANSPORT_PEER");
     Excludes("flow demo", flowDemo, "TileXRMoonEpReduceGradV1(&reduceGrad");
     Contains("flow demo", flowDemo, "nvS != static_cast<int64_t>(routeCount)");
     Contains("flow demo", flowDemo, "planning_status=");
@@ -265,6 +271,7 @@ int main()
     CheckOrdered("native flow", flowDemo, {
         "TileXRMoonEpPlanningV1(&planning",
         "TileXRMoonEpReduceGradGetWorkspaceSizeV2(",
+        "TileXRMoonEpReduceGradPrepareV2(",
         "TileXRMoonEpDispatchV1(&forwardDispatch",
         "TileXRMoonEpPrefetchWeightV1(&prefetch",
         "TileXRMoonEpCombineV1(&forwardCombine",
@@ -280,9 +287,12 @@ int main()
     Contains("flow demo", flowDemo, "TILEXR_MOONEP_FLOW_BARRIER_ADDR");
     Contains("flow runner", flowRunner, "block_dim=$((64 / ranks_per_device))");
     Contains("flow runner", flowRunner, "export TILEXR_ENABLE_UDMA=1");
+    Contains("flow runner", flowRunner,
+        "TILEXR_UDMA_QP_ROUTE_SPEC=port_count:6,port_count:6,port_count:2");
     Contains("flow runner", flowRunner, "${SCRIPT_DIR}/tilexr_moonep_flow_demo");
     Contains("flow runner", flowRunner, "device=$((rank % physical_device_count))");
     Contains("flow runner", flowRunner, "TILEXR_MOONEP_PLANNER_BLOCK_DIM");
+    Contains("flow runner", flowRunner, "rank_size < 4");
     Contains("flow runner", flowRunner, "torch_validated=false");
     Contains("flow runner", flowRunner, "transport_performance_valid=false");
     Excludes("flow demo", Lower(flowDemo), "hccl");

@@ -1,12 +1,9 @@
 #include "reduce_grad_layout.h"
 
 #include <cerrno>
-#include <climits>
 #include <cstdlib>
 #include <limits>
 
-#include "comm_args.h"
-#include "tilexr_moonep.h"
 #include "tilexr_types.h"
 
 namespace TileXRMoonEp {
@@ -30,11 +27,6 @@ bool CheckedMul(uint64_t lhs, uint64_t rhs, uint64_t *out)
     return true;
 }
 
-uint64_t AlignDown(uint64_t value, uint64_t alignment)
-{
-    return alignment == 0 ? 0 : value / alignment * alignment;
-}
-
 bool AlignUp(uint64_t value, uint64_t alignment, uint64_t *out)
 {
     if (out == nullptr || alignment == 0) {
@@ -54,10 +46,73 @@ bool DivideRoundUp(uint64_t value, uint64_t divisor, uint64_t *out)
     return true;
 }
 
-bool ResolveBlockDim(int64_t rankSize, bool, int64_t *blockDim,
-    int64_t *controlBlockCount)
+bool ScoreGreater(uint64_t lhsBytes, uint32_t lhsCount,
+    uint64_t rhsBytes, uint32_t rhsCount)
 {
-    if (blockDim == nullptr || controlBlockCount == nullptr) {
+    const uint64_t lhsQuotient = lhsBytes / lhsCount;
+    const uint64_t rhsQuotient = rhsBytes / rhsCount;
+    if (lhsQuotient != rhsQuotient) {
+        return lhsQuotient > rhsQuotient;
+    }
+    const uint64_t lhsRemainder = lhsBytes % lhsCount;
+    const uint64_t rhsRemainder = rhsBytes % rhsCount;
+    return lhsRemainder * rhsCount > rhsRemainder * lhsCount;
+}
+
+bool AllocateProjectionQps(ReduceGradLayout *layout)
+{
+    if (layout == nullptr || layout->qpCount < kReduceGradMinMultiRankQpCount ||
+        layout->qpCount > kReduceGradMaxUdmaQpCount) {
+        return false;
+    }
+    for (uint32_t projection = 0; projection < kReduceGradProjectionCount; ++projection) {
+        layout->projectionQpCounts[projection] = 1;
+    }
+    for (uint32_t assigned = kReduceGradProjectionCount;
+        assigned < layout->qpCount; ++assigned) {
+        uint32_t selected = 0;
+        for (uint32_t projection = 1; projection < kReduceGradProjectionCount; ++projection) {
+            if (ScoreGreater(layout->rowBytes[projection],
+                    layout->projectionQpCounts[projection],
+                    layout->rowBytes[selected], layout->projectionQpCounts[selected])) {
+                selected = projection;
+            }
+        }
+        ++layout->projectionQpCounts[selected];
+    }
+
+    uint32_t cursor = 0;
+    for (uint32_t projection = 0; projection < kReduceGradProjectionCount; ++projection) {
+        layout->projectionQpBase[projection] = cursor;
+        for (uint32_t lane = 0; lane < layout->projectionQpCounts[projection]; ++lane) {
+            if (cursor >= layout->qpCount || cursor >= kReduceGradMaxUdmaQpCount) {
+                return false;
+            }
+            layout->qpProjection[cursor++] = projection;
+        }
+    }
+    return cursor == layout->qpCount;
+}
+
+bool MapPhysicalQps(ReduceGradLayout *layout)
+{
+    if (layout == nullptr || layout->laneCount == 0 ||
+        layout->laneCount > kReduceGradMaxUdmaQpCount ||
+        layout->transportQpCount < layout->laneCount) {
+        return false;
+    }
+    for (uint32_t lane = 0; lane < layout->laneCount; ++lane) {
+        layout->lanePhysicalQps[lane] = lane;
+    }
+    if (layout->transportQpCount == kReduceGradMaxTransportQpCount) {
+        layout->lanePhysicalQps[kReduceGradDown] = 16U;
+    }
+    return true;
+}
+
+bool ResolveBlockDim(uint32_t laneCount, int64_t *blockDim)
+{
+    if (blockDim == nullptr || laneCount == 0) {
         return false;
     }
     const char *value = std::getenv("TILEXR_MOONEP_REDUCE_GRAD_BLOCK_DIM");
@@ -71,43 +126,33 @@ bool ResolveBlockDim(int64_t rankSize, bool, int64_t *blockDim,
         }
         selected = static_cast<int64_t>(parsed);
     }
-    if (selected <= 0 || selected > kReduceGradMaxAivBlockCount) {
+    const uint64_t minimum = 2U * laneCount;
+    if (selected <= 0 || selected > kReduceGradMaxAivBlockCount ||
+        static_cast<uint64_t>(selected) < minimum) {
         return false;
     }
-
-    int64_t controls = 0;
-    if (rankSize > 1) {
-        if (selected < 2) {
-            return false;
-        }
-        controls = rankSize - 1;
-        if (controls >= selected) {
-            controls = selected - 1;
-        }
-    }
     *blockDim = selected;
-    *controlBlockCount = controls;
     return true;
 }
 
 } // namespace
 
-uint64_t TileXRMoonEpReduceGradPeerWindowBytes()
-{
-    return TileXR::IPC_BUFF_MAX_SIZE > 0 ?
-        static_cast<uint64_t>(TileXR::IPC_BUFF_MAX_SIZE) : 0;
-}
-
 int TileXRMoonEpBuildReduceGradLayout(int64_t rank, int64_t rankSize,
     int64_t expertCount, int64_t prefetchSlots,
     const uint64_t rowElements[kReduceGradProjectionCount],
-    uint64_t peerWindowBytes, uint64_t requestedUdmaChunkBytes,
+    uint32_t transportQpCount, uint64_t requestedChunkBytes,
     ReduceGradLayout *out)
 {
-    if (out == nullptr || rowElements == nullptr || rankSize <= 0 ||
+    if (out == nullptr || rowElements == nullptr || rankSize < kReduceGradMinRankCount ||
         rankSize > TileXR::TILEXR_MAX_RANK_SIZE || rank < 0 || rank >= rankSize ||
         expertCount <= 0 || expertCount % rankSize != 0 || prefetchSlots <= 0 ||
-        prefetchSlots > expertCount / rankSize) {
+        expertCount > std::numeric_limits<int32_t>::max() ||
+        prefetchSlots > std::numeric_limits<int32_t>::max() ||
+        prefetchSlots > std::numeric_limits<int32_t>::max() / rankSize ||
+        transportQpCount < kReduceGradMinMultiRankQpCount ||
+        transportQpCount > kReduceGradMaxTransportQpCount ||
+        (transportQpCount > kReduceGradMaxUdmaQpCount &&
+            transportQpCount != kReduceGradMaxTransportQpCount)) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
 
@@ -117,119 +162,62 @@ int TileXRMoonEpBuildReduceGradLayout(int64_t rank, int64_t rankSize,
     next.expertCount = expertCount;
     next.expertsPerRank = expertCount / rankSize;
     next.prefetchSlots = prefetchSlots;
-    next.peerWindowBytes = peerWindowBytes;
+    next.transportQpCount = transportQpCount;
+    next.qpCount = transportQpCount == kReduceGradMaxTransportQpCount ?
+        kReduceGradProjectionCount : transportQpCount;
+    next.laneCount = next.qpCount;
 
-    bool usesPeer = false;
-    bool usesUdma = false;
-    uint64_t maxUdmaRowBytes = 0;
-    for (uint32_t q = 0; q < kReduceGradProjectionCount; ++q) {
+    for (uint32_t projection = 0; projection < kReduceGradProjectionCount; ++projection) {
         uint64_t bytes = 0;
-        if (rowElements[q] == 0 || !CheckedMul(rowElements[q], sizeof(float), &bytes)) {
+        if (rowElements[projection] == 0 ||
+            !CheckedMul(rowElements[projection], sizeof(float), &bytes)) {
             return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
         }
-        next.rowElements[q] = rowElements[q];
-        next.rowBytes[q] = bytes;
-        if (rankSize == 1 || bytes <= kReduceGradUdmaThresholdBytes) {
-            next.transports[q] = TILEXR_MOONEP_REDUCE_GRAD_TRANSPORT_PEER;
-            usesPeer = true;
-        } else {
-            next.transports[q] = TILEXR_MOONEP_REDUCE_GRAD_TRANSPORT_UDMA;
-            usesUdma = true;
-            if (bytes > maxUdmaRowBytes) {
-                maxUdmaRowBytes = bytes;
-            }
-        }
+        next.rowElements[projection] = rowElements[projection];
+        next.rowBytes[projection] = bytes;
     }
 
-    if (!ResolveBlockDim(rankSize, usesUdma, &next.blockDim, &next.controlBlockCount)) {
+    if (!ResolveBlockDim(next.laneCount, &next.blockDim)) {
+        return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    if (!AllocateProjectionQps(&next)) {
+        return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    if (!MapPhysicalQps(&next)) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
 
-    if (usesPeer) {
-        if (peerWindowBytes <= kReduceGradStateWindowBytes) {
+    const uint64_t desiredChunk = requestedChunkBytes == 0 ?
+        kReduceGradDefaultChunkBytes : requestedChunkBytes;
+    if (desiredChunk == 0 || desiredChunk > UINT32_MAX ||
+        !AlignUp(desiredChunk, kReduceGradUdmaAlignment, &next.chunkBytes) ||
+        next.chunkBytes > UINT32_MAX) {
+        return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    for (uint32_t projection = 0; projection < kReduceGradProjectionCount; ++projection) {
+        if (!DivideRoundUp(next.rowBytes[projection], next.chunkBytes,
+                &next.chunkCounts[projection])) {
             return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
-        }
-        next.peerRecordBaseOffset = kReduceGradStateWindowBytes;
-        next.peerHalfBytes = AlignDown(
-            (peerWindowBytes - kReduceGradStateWindowBytes) / 2,
-            kReduceGradDataAsFlagRecordBytes);
-        uint64_t incomingSlots = 0;
-        if (!CheckedMul(static_cast<uint64_t>(rankSize),
-                static_cast<uint64_t>(prefetchSlots), &incomingSlots)) {
-            return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
-        }
-        next.peerSlotStrideBytes = AlignDown(next.peerHalfBytes / incomingSlots,
-            kReduceGradDataAsFlagRecordBytes);
-        if (next.peerSlotStrideBytes < kReduceGradDataAsFlagRecordBytes ||
-            !CheckedMul(next.peerSlotStrideBytes / kReduceGradDataAsFlagRecordBytes,
-                kReduceGradDataAsFlagPayloadBytes, &next.peerChunkPayloadBytes) ||
-            next.peerChunkPayloadBytes == 0) {
-            return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
-        }
-        for (uint32_t q = 0; q < kReduceGradProjectionCount; ++q) {
-            if (next.transports[q] == TILEXR_MOONEP_REDUCE_GRAD_TRANSPORT_PEER &&
-                !DivideRoundUp(next.rowBytes[q], next.peerChunkPayloadBytes,
-                    &next.peerChunkCounts[q])) {
-                return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
-            }
         }
     }
 
-    if (usesUdma) {
-        uint64_t desiredChunk = requestedUdmaChunkBytes == 0 ?
-            kReduceGradDefaultUdmaChunkBytes : requestedUdmaChunkBytes;
-        if (desiredChunk < kReduceGradUdmaThresholdBytes || desiredChunk > UINT32_MAX) {
-            return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
-        }
-        if (desiredChunk > maxUdmaRowBytes) {
-            desiredChunk = maxUdmaRowBytes;
-        }
-        if (!AlignUp(desiredChunk, kReduceGradUdmaAlignment, &next.udmaChunkBytes) ||
-            next.udmaChunkBytes > UINT32_MAX) {
-            return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
-        }
-
-        uint64_t stateBytes = 0;
-        uint64_t stageCount = 0;
-        uint64_t payloadBytes = 0;
-        uint64_t cursor = 0;
-        if (!CheckedMul(static_cast<uint64_t>(rankSize), kReduceGradUdmaPeerStateBytes,
-                &stateBytes) ||
-            !AlignUp(stateBytes, kReduceGradUdmaAlignment, &cursor) ||
-            !CheckedMul(static_cast<uint64_t>(rankSize), 2, &stageCount) ||
-            !CheckedMul(stageCount, next.udmaChunkBytes, &payloadBytes)) {
-            return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
-        }
-        next.udmaStateOffset = 0;
-        next.udmaOutboundOffset = cursor;
-        if (!CheckedAdd(cursor, payloadBytes, &cursor) ||
-            !AlignUp(cursor, kReduceGradUdmaAlignment, &cursor)) {
-            return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
-        }
-        next.udmaInboundOffset = cursor;
-        if (!CheckedAdd(cursor, payloadBytes, &cursor) ||
-            !AlignUp(cursor, kReduceGradUdmaWorkspaceAlignment, &next.workspaceBytes)) {
-            return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
-        }
-        for (uint32_t q = 0; q < kReduceGradProjectionCount; ++q) {
-            if (next.transports[q] == TILEXR_MOONEP_REDUCE_GRAD_TRANSPORT_UDMA &&
-                !DivideRoundUp(next.rowBytes[q], next.udmaChunkBytes,
-                    &next.udmaChunkCounts[q])) {
-                return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
-            }
-        }
-        uint64_t sequenceCount = 0;
-        for (uint32_t q = 0; q < kReduceGradProjectionCount; ++q) {
-            uint64_t projectionSequences = 0;
-            if (!CheckedMul(static_cast<uint64_t>(next.prefetchSlots),
-                    next.udmaChunkCounts[q], &projectionSequences) ||
-                !CheckedAdd(sequenceCount, projectionSequences, &sequenceCount)) {
-                return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
-            }
-        }
-        if (sequenceCount > UINT32_MAX) {
-            return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
-        }
+    uint64_t stateBytes = 0;
+    uint64_t payloadBytes = 0;
+    uint64_t cursor = 0;
+    if (!CheckedMul(next.laneCount, kReduceGradLaneStateStrideBytes, &stateBytes) ||
+        !AlignUp(stateBytes, kReduceGradUdmaAlignment, &next.laneStateBytes) ||
+        !CheckedMul(static_cast<uint64_t>(rankSize), next.chunkBytes,
+            &next.bankStrideBytes) ||
+        !CheckedMul(kReduceGradBankCount, next.bankStrideBytes,
+            &next.laneStrideBytes) ||
+        !CheckedMul(next.laneCount, next.laneStrideBytes, &payloadBytes)) {
+        return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    next.stagingOffset = next.laneStateBytes;
+    cursor = next.stagingOffset;
+    if (!CheckedAdd(cursor, payloadBytes, &cursor) ||
+        !AlignUp(cursor, kReduceGradWorkspaceAlignment, &next.workspaceBytes)) {
+        return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
 
     *out = next;
@@ -238,14 +226,13 @@ int TileXRMoonEpBuildReduceGradLayout(int64_t rank, int64_t rankSize,
 
 int TileXRMoonEpBuildReduceGradLayout(int64_t rank, int64_t rankSize,
     int64_t expertCount, const uint64_t rowElements[kReduceGradProjectionCount],
-    uint64_t peerWindowBytes, uint64_t requestedUdmaChunkBytes,
+    uint32_t transportQpCount, uint64_t requestedChunkBytes,
     ReduceGradLayout *out)
 {
     const int64_t prefetchSlots = rankSize > 0 && expertCount > 0 ?
         expertCount / rankSize : 0;
     return TileXRMoonEpBuildReduceGradLayout(rank, rankSize, expertCount,
-        prefetchSlots, rowElements, peerWindowBytes,
-        requestedUdmaChunkBytes, out);
+        prefetchSlots, rowElements, transportQpCount, requestedChunkBytes, out);
 }
 
 } // namespace TileXRMoonEp

@@ -187,10 +187,15 @@ class TileXRCorrectnessAdapterTests(unittest.TestCase):
         self.assertIs(native_reduce.gate_reduce, reduce_buffers.gate)
         self.assertIs(native_reduce.down_reduce, reduce_buffers.down)
         for _, full_tensor in full_grads.items():
-            self.assertEqual(len(full_tensor.copy_calls), 2)
+            self.assertEqual(full_tensor.copy_calls, [])
         for _, reduce_tensor in reduce_buffers.items():
             self.assertEqual(reduce_tensor.masked_fill_calls, [])
-            self.assertEqual(len(reduce_tensor.zero_calls), 1)
+            self.assertEqual(reduce_tensor.zero_calls, [])
+        prepared = [
+            call for call in runtime.calls if call[0] == "prepare_reduce_grad"
+        ][-1]
+        for source, (_, value) in zip(prepared[4], reduce_buffers.items()):
+            self.assertEqual(source.data_ptr(), value[dimensions().rank].data_ptr())
         native_plan = backend._native_plans[id(plan)].native
         self.assertEqual(native_plan.reduce_grad_status.item(), 0)
         backend.synchronize()
@@ -211,7 +216,7 @@ class TileXRCorrectnessAdapterTests(unittest.TestCase):
             self.assertEqual(projection.copy_calls, [])
         backend.close()
 
-    def test_reduce_grad_restores_legacy_tail_and_unused_slots(self):
+    def test_reduce_grad_uses_direct_sources_without_tail_copies(self):
         torch, _, _, backend = make_backend()
         plan = self._planned(backend, torch)
         backend.synchronize()
@@ -229,10 +234,10 @@ class TileXRCorrectnessAdapterTests(unittest.TestCase):
         backend.synchronize()
 
         for _, full_tensor in full_grads.items():
-            self.assertEqual(len(full_tensor.copy_calls), 2)
+            self.assertEqual(full_tensor.copy_calls, [])
         for _, reduce_tensor in reduce_buffers.items():
-            self.assertEqual(len(reduce_tensor.copy_calls), dimensions().prefetch_slots)
-            self.assertEqual(len(reduce_tensor.zero_calls), 1)
+            self.assertEqual(reduce_tensor.copy_calls, [])
+            self.assertEqual(reduce_tensor.zero_calls, [])
         backend.close()
 
     def test_unknown_or_cloned_plan_is_rejected(self):

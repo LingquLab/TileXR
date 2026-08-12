@@ -11,35 +11,58 @@
 
 namespace TileXRMoonEp {
 
-struct ReduceGradParams {
+struct ReduceGradPrepareParams {
     TileXRCommPtr comm = nullptr;
     const TileXRMoonEpPlanV1 *plan = nullptr;
     TileXRMoonEpTensorV1 *gradients[kReduceGradProjectionCount] = {};
+    TileXRMoonEpReduceGradSourceSliceV2 sources[kReduceGradProjectionCount] = {};
     void *workspace = nullptr;
     uint64_t workspaceBytes = 0;
+    uint64_t requestedChunkBytes = 0;
+};
+
+struct ReduceGradLaunchParams {
+    const TileXRMoonEpPlanV1 *plan = nullptr;
+    TileXRMoonEpTensorV1 *gradients[kReduceGradProjectionCount] = {};
+    TileXRMoonEpReduceGradSourceSliceV2 sources[kReduceGradProjectionCount] = {};
     TileXRMoonEpTensorV1 *status = nullptr;
     uint64_t waitIterations = 0;
-    uint64_t requestedUdmaChunkBytes = 0;
     aclrtStream stream = nullptr;
 };
 
-struct ReduceGradLaunchContext {
+struct ReduceGradPreparedContext {
+    TileXRCommPtr comm = nullptr;
     TileXR::CommArgs *hostArgs = nullptr;
     GM_ADDR devArgs = nullptr;
-    const TileXR::TileXRUDMARegistry *registry = nullptr;
+    TileXRUDMAProfileHandle profileHandle = 0;
+    TileXR::TileXRUDMAProfileView profileView {};
     ReduceGradLayout layout {};
+
+    int64_t planN = 0;
+    int64_t planK = 0;
+    void *expertsToCopy = nullptr;
+    TileXRMoonEpTensorV1 gradients[kReduceGradProjectionCount] = {};
+    TileXRMoonEpReduceGradSourceSliceV2 sources[kReduceGradProjectionCount] = {};
+    void *workspace = nullptr;
+    uint64_t workspaceBytes = 0;
 };
 
 int TileXRMoonEpPrepareReduceGradLayout(TileXRCommPtr comm,
     const TileXRMoonEpPlanV1 *plan,
     const TileXRMoonEpTensorV1 *const gradients[kReduceGradProjectionCount],
-    uint64_t requestedUdmaChunkBytes, ReduceGradLayout *layout);
+    uint64_t requestedChunkBytes, ReduceGradLayout *layout);
 
-int TileXRMoonEpPrepareReduceGradLaunchContext(const ReduceGradParams &params,
-    ReduceGradLaunchContext *context);
+int TileXRMoonEpCreateReduceGradPreparedContext(
+    const ReduceGradPrepareParams &params, ReduceGradPreparedContext **context);
 
-int TileXRMoonEpLaunchReduceGradKernel(const ReduceGradParams &params,
-    const ReduceGradLaunchContext &context);
+int TileXRMoonEpDestroyReduceGradPreparedContext(
+    ReduceGradPreparedContext *context);
+
+int TileXRMoonEpValidateReduceGradLaunch(const ReduceGradLaunchParams &params,
+    const ReduceGradPreparedContext &context);
+
+int TileXRMoonEpLaunchReduceGradKernel(const ReduceGradLaunchParams &params,
+    const ReduceGradPreparedContext &context);
 
 } // namespace TileXRMoonEp
 

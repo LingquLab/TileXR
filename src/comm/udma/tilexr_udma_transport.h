@@ -51,6 +51,14 @@ public:
     int CleanupRetiredMemory();
     int CleanupAllMemory();
     int UnregisterMemory(GM_ADDR localPtr);
+    int PrepareProfile(const TileXRUDMAProfileDesc& desc);
+    GM_ADDR GetPreparedProfileInfoDev() const;
+    int CommitPreparedProfile(TileXRUDMAProfileHandle handle);
+    int AbortPreparedProfile();
+    int CleanupProfile(TileXRUDMAProfileHandle handle);
+    int CleanupAllProfiles();
+    GM_ADDR GetProfileInfoDev(TileXRUDMAProfileHandle handle) const;
+    bool HasProfileCleanupPending() const;
     void Shutdown();
 
     bool IsAvailable() const;
@@ -66,6 +74,7 @@ private:
     struct PerEidState;
     struct PerPeerQpState;
     struct SharedQpState;
+    struct RegisteredRegionState;
     struct RegistrationState;
 
     int AgreeInitStatus(int localStatus) const;
@@ -90,6 +99,8 @@ private:
     int BuildRegistrationUDMAInfo(RegistrationState& registration);
     int RegisterMemoryOnContexts(RegistrationState& registration);
     int ExchangeAndImportMemory(RegistrationState& registration);
+    int PrepareRegistration(const TileXRUDMAProfileDesc& desc,
+        std::unique_ptr<RegistrationState>& registration);
     int AgreeRegistrationStatus(int localStatus) const;
     int CleanupLocalRegistrations(std::map<uint32_t, RegMemResultInfo>& byEid);
     int CleanupRemoteImports(RegistrationState& registration);
@@ -130,6 +141,8 @@ private:
     std::unique_ptr<RegistrationState> activeRegistration_;
     std::unique_ptr<RegistrationState> preparedRegistration_;
     std::vector<std::unique_ptr<RegistrationState>> retiredRegistrations_;
+    std::unique_ptr<RegistrationState> preparedProfile_;
+    std::map<TileXRUDMAProfileHandle, std::unique_ptr<RegistrationState>> profiles_;
     GM_ADDR udmaInfoDev_ = nullptr;
     GM_ADDR baseUDMAInfoDev_ = nullptr;
     GM_ADDR eidTableDev_ = nullptr;
