@@ -36,6 +36,12 @@ cmake --install build
 
 Optional CMake switches are `TILEXR_BUILD_COLLECTIVES`, `TILEXR_BUILD_EP`, `TILEXR_BUILD_TESTS`, and `TILEXR_BUILD_CHECKER`. Run focused tests for the changed module; use [docs/BUILD_VERIFICATION.md](docs/BUILD_VERIFICATION.md) for build and hardware validation details. The complete script catalog is in [scripts/README.md](scripts/README.md).
 
+## Continuous Improvement
+
+- Before completing a development change, identify reusable lessons and pitfalls that are likely to matter in future work. Record them in the most relevant maintained Markdown document and include that documentation update in the same commit as the change that produced the lesson.
+- Keep these notes concise, actionable, and evidence-based. Capture the triggering context, failure mode or impact, root cause, correct approach, and validation boundary; update an existing module, architecture, validation, or troubleshooting document instead of creating scattered task notes when possible.
+- Add a lesson to `AGENTS.md` only when it is project-wide, high-impact, and easy to get wrong repeatedly. Keep task-specific details, transient environment observations, and long investigations in the relevant documentation instead.
+
 ## Architecture
 
 - `src/comm` builds `libtile-comm.so`, owns communicator setup, peer mappings, capability flags, and `CommArgs`, and exposes the core API through `tilexr_api.h`.
