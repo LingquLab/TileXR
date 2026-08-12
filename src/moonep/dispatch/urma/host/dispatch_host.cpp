@@ -64,7 +64,8 @@ bool DispatchVectorBatchShapeSupported(uint64_t routeCount,
         destinationCapacity >= routeCount &&
         destinationCapacity <= UINT32_MAX &&
         (destinationCapacity & (destinationCapacity - 1U)) == 0U &&
-        DispatchPeerWqesFitSq(routeCount, TileXR::TILEXR_UDMA_SQ_BB_COUNT);
+        DispatchPeerWqesStreamable(routeCount,
+            TileXR::TILEXR_UDMA_SQ_BB_COUNT);
 }
 
 int ValidateDispatchPeerConfig(const DispatchPeerConfig &config,
@@ -312,7 +313,8 @@ int TileXRMoonEpRunDispatchUrmaV1(const TileXRMoonEpDispatchArgsV1 *args,
     if (args == nullptr || args->structSize < sizeof(*args) ||
         args->abiVersion != TILEXR_MOONEP_ABI_VERSION_V1 || stream == nullptr ||
         args->comm == nullptr || args->plan == nullptr || args->hiddenSh == nullptr ||
-        args->hiddenNvsh == nullptr || args->flags != TILEXR_MOONEP_FLAG_NONE ||
+        args->hiddenNvsh == nullptr ||
+        (args->flags & ~TILEXR_MOONEP_FLAG_RESET_STATUS) != 0 ||
         !PlanValid(args->plan) || !TensorDescriptorValid(args->hiddenSh) ||
         !TensorDescriptorValid(args->hiddenNvsh) ||
         (args->routeWeightsSk == nullptr) != (args->routeWeightsNvs == nullptr) ||
@@ -451,18 +453,34 @@ int TileXRMoonEpRunDispatchUrmaV1(const TileXRMoonEpDispatchArgsV1 *args,
     params.zeroFillRangeCount = args->plan->e + args->plan->b;
     params.layout = layout;
 
+    const bool statusResetEnqueued =
+        (args->flags & TILEXR_MOONEP_FLAG_RESET_STATUS) != 0;
+    if (statusResetEnqueued && aclrtMemsetAsync(args->plan->status,
+            sizeof(int32_t), 0, sizeof(int32_t), stream) != ACL_SUCCESS) {
+        return TILEXR_MOONEP_ERROR_INTERNAL;
+    }
+
     params.input = args->hiddenSh->data;
     params.output = args->hiddenNvsh->data;
     params.mode = DispatchPayloadMode::Hidden;
     ret = MapLaunchStatus(TileXRMoonEpLaunchDispatchUrmaKernel(params));
     if (ret != TILEXR_MOONEP_SUCCESS || args->routeWeightsSk == nullptr) {
+        if (ret != TILEXR_MOONEP_SUCCESS && statusResetEnqueued &&
+            aclrtSynchronizeStream(stream) != ACL_SUCCESS) {
+            return TILEXR_MOONEP_ERROR_INTERNAL;
+        }
         return ret;
     }
 
     params.input = args->routeWeightsSk->data;
     params.output = args->routeWeightsNvs->data;
     params.mode = DispatchPayloadMode::RouteWeight;
-    return MapLaunchStatus(TileXRMoonEpLaunchDispatchUrmaKernel(params));
+    ret = MapLaunchStatus(TileXRMoonEpLaunchDispatchUrmaKernel(params));
+    if (ret != TILEXR_MOONEP_SUCCESS && statusResetEnqueued &&
+        aclrtSynchronizeStream(stream) != ACL_SUCCESS) {
+        return TILEXR_MOONEP_ERROR_INTERNAL;
+    }
+    return ret;
 }
 
 } // namespace TileXRMoonEp

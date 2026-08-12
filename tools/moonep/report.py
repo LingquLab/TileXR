@@ -393,6 +393,66 @@ def format_stage_performance(summary: Mapping[str, object]) -> str:
     )
 
 
+def format_dispatch_performance(summary: Mapping[str, object]) -> str:
+    if summary.get("benchmark_kind") != "dispatch_hot_loop":
+        raise ValueError("summary is not a Dispatch hot-loop report")
+    modes = summary.get("dispatch_modes")
+    metrics = summary.get("metrics_us")
+    throughput = summary.get("tokens_per_second_by_mode")
+    if not isinstance(modes, list) or not modes:
+        raise ValueError("Dispatch hot-loop summary has no modes")
+    if not isinstance(metrics, dict) or not isinstance(throughput, dict):
+        raise ValueError("Dispatch hot-loop summary has incomplete metrics")
+
+    headers = (
+        "Mode",
+        "Host mean us",
+        "Kernel mean us",
+        "Kernel P50 us",
+        "Kernel P95 us",
+        "Mean token/s",
+    )
+    rows = []
+    for mode in modes:
+        host = metrics.get(f"{mode}_host")
+        kernel = metrics.get(f"{mode}_kernel")
+        mode_throughput = throughput.get(mode)
+        if not all(isinstance(value, dict) for value in (host, kernel, mode_throughput)):
+            raise ValueError(f"Dispatch hot-loop summary is missing {mode} metrics")
+        rows.append(
+            (
+                str(mode),
+                _format_number(float(host["mean"]), precision=3),
+                _format_number(float(kernel["mean"]), precision=3),
+                _format_number(float(kernel["p50"]), precision=3),
+                _format_number(float(kernel["p95"]), precision=3),
+                _format_number(float(mode_throughput["mean"]), precision=3),
+            )
+        )
+
+    widths = [
+        max(len(headers[index]), *(len(row[index]) for row in rows))
+        for index in range(len(headers))
+    ]
+
+    def format_row(row: tuple[str, ...]) -> str:
+        return "  ".join(
+            value.ljust(widths[index]) if index == 0 else value.rjust(widths[index])
+            for index, value in enumerate(row)
+        )
+
+    return "\n".join(
+        (
+            _format_benchmark_inputs(summary),
+            "",
+            "MoonEP Dispatch-only performance (global critical rank per iteration)",
+            format_row(headers),
+            format_row(tuple("-" * width for width in widths)),
+            *(format_row(row) for row in rows),
+        )
+    )
+
+
 def _write_stage_csv(
     path: Path,
     stage_performance: Mapping[str, object],
@@ -920,7 +980,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.summary is not None:
         with Path(args.summary).open("r", encoding="utf-8") as handle:
             summary = json.load(handle)
-        print(format_stage_performance(summary))
+        formatter = (
+            format_dispatch_performance
+            if summary.get("benchmark_kind") == "dispatch_hot_loop"
+            else format_stage_performance
+        )
+        print(formatter(summary))
         return 0
     if not args.case_ids or args.node_count is None or args.world_size is None:
         raise ValueError(

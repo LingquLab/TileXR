@@ -149,7 +149,7 @@ def test_usage_describes_rank_size_and_rank_per_device_for_every_case() -> None:
         "\n\nEnvironment:", 1
     )[0]
     descriptions = [line for line in usage_cases.splitlines() if line.strip()]
-    assert len(descriptions) == 14
+    assert len(descriptions) == 16
     assert all("rank_size=" in line for line in descriptions)
     assert all("rank_per_dev=" in line for line in descriptions)
 
@@ -190,6 +190,69 @@ def test_usage_describes_eight_and_sixteen_rank_cases() -> None:
         SCRIPT,
         re.MULTILINE,
     )
+    assert re.search(
+        r"^  15\s+dispatch-8rank-4k-ep8-grouped-urma\s+8-rank Dispatch-only .+rank_size=8, rank_per_dev=1.+S=4096, K=8, E=32, H=7168, Hf=2048, B=4, P=1\)$",
+        SCRIPT,
+        re.MULTILINE,
+    )
+    assert re.search(
+        r"^  16\s+flow-8rank-4k-ep8-grouped-urma-plan-reuse\s+8-rank full flow with Combine V2 then saved-plan backward Dispatch .+rank_size=8, rank_per_dev=1.+S=4096, K=8, E=32, H=7168, Hf=2048, B=4, P=1\)$",
+        SCRIPT,
+        re.MULTILINE,
+    )
+
+
+def test_case_15_selects_hidden_only_grouped_urma_dispatch_hot_loop() -> None:
+    assert 'dispatch_repro_case_id="dispatch-8rank-4k-ep8-grouped-urma"' in SCRIPT
+    assert 'benchmark_kind="dispatch_hot_loop"' in SCRIPT
+    assert 'dispatch_modes=("hidden")' in SCRIPT
+    assert "unset TILEXR_MOONEP_DISPATCH_TRANSPORT" in SCRIPT
+    assert 'export TILEXR_MOONEP_DISPATCH_PEER_MODE="group"' in SCRIPT
+    assert 'export TILEXR_MOONEP_DISPATCH_GROUP_WIDTH="16"' in SCRIPT
+    assert '--benchmark-kind "${benchmark_kind}"' in SCRIPT
+    assert 'launcher_args+=("--dispatch-modes" "${dispatch_modes[@]}")' in SCRIPT
+
+
+def test_case_16_selects_grouped_urma_full_flow_with_plan_reuse() -> None:
+    assert (
+        'plan_reuse_repro_case_id="flow-8rank-4k-ep8-grouped-urma-plan-reuse"'
+        in SCRIPT
+    )
+    assert 'elif [[ "${case_id}" == "${plan_reuse_repro_case_id}" ]]' in SCRIPT
+    assert 'warmup="${warmup:-0}"' in SCRIPT
+    assert 'iterations="${iterations:-8}"' in SCRIPT
+    assert 'benchmark_kind="flow"' in SCRIPT
+    assert "unset TILEXR_MOONEP_DISPATCH_TRANSPORT" in SCRIPT
+    assert 'export TILEXR_MOONEP_DISPATCH_PEER_MODE="group"' in SCRIPT
+    assert 'export TILEXR_MOONEP_DISPATCH_GROUP_WIDTH="16"' in SCRIPT
+
+
+def test_full_flow_reuses_the_plan_after_forward_combine() -> None:
+    benchmark = (ROOT / "tools" / "moonep" / "benchmark.py").read_text(
+        encoding="utf-8"
+    )
+    flow = benchmark.split("def execute_iteration(", 1)[1].split(
+        "\ndef _tensor_row_bytes", 1
+    )[0]
+    combine = flow.index('"combine_forward"')
+    backward = flow.index('"dispatch_backward"')
+    reuse = flow.index('buffer.dispatch(inputs["grad_output"], plan=plan)')
+    assert combine < backward < reuse
+
+    runtime = (
+        ROOT
+        / "integrations"
+        / "moonep_torch"
+        / "tilexr_moonep"
+        / "runtime.py"
+    ).read_text(encoding="utf-8")
+    assert "self._combine_v2_lib.TileXRMoonEpCombineStageV2(" in runtime
+
+
+def test_single_node_launcher_accepts_dispatch_hot_loop_controls() -> None:
+    assert '"--benchmark-kind"' in LAUNCHER
+    assert 'choices=("flow", "dispatch_hot_loop")' in LAUNCHER
+    assert '"--dispatch-modes"' in LAUNCHER
 
 
 def test_script_exposes_managed_multinode_three_mode_launch() -> None:

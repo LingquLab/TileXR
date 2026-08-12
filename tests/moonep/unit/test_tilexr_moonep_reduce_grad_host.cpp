@@ -289,6 +289,29 @@ void TestMixedUdma()
         "invalid UDMA QP counts must be validated after every query");
 }
 
+void TestMaximumUdmaQpCount()
+{
+    Reset();
+    g_commArgs.localRankSize = 1;
+    TileXRMoonEpPlanV1 plan = Plan();
+    const uint64_t largeRow =
+        TILEXR_MOONEP_REDUCE_GRAD_UDMA_THRESHOLD_BYTES / sizeof(float) + 1;
+    TileXRMoonEpTensorV1 gate = Gradient(
+        reinterpret_cast<void *>(UINTPTR_C(0x400000)), largeRow);
+    TileXRMoonEpTensorV1 up = Gradient(
+        reinterpret_cast<void *>(UINTPTR_C(0x500000)), largeRow);
+    TileXRMoonEpTensorV1 down = Gradient(
+        reinterpret_cast<void *>(UINTPTR_C(0x600000)), largeRow);
+
+    g_qpCount = 32;
+    const auto info = Query(&plan, &gate, &up, &down, TileXR::TILEXR_SUCCESS);
+    Check(info.workspaceBytes > 0,
+        "32-QP ReduceGrad query must return a UDMA workspace");
+
+    g_qpCount = 33;
+    (void)Query(&plan, &gate, &up, &down, TileXR::TILEXR_ERROR_NOT_INITIALIZED);
+}
+
 void TestSingleRankLargeRowsDoNotRequireUdma()
 {
     Reset();
@@ -487,6 +510,7 @@ int main()
     TestPeerOnly();
     TestCompactPrefetchSlots();
     TestMixedUdma();
+    TestMaximumUdmaQpCount();
     TestSingleRankLargeRowsDoNotRequireUdma();
     TestLargeRankWorkspaceQuery();
     TestLaunchFailureDrainsEnqueuedStatusReset();

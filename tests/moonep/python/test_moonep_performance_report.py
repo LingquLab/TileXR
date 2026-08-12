@@ -12,11 +12,57 @@ from tools.moonep.report import (
     FLOW_STAGE_ORDER,
     aggregate_distributed_artifacts,
     aggregate_rank_artifacts,
+    format_dispatch_performance,
     format_stage_performance,
     main as report_main,
     write_json,
     write_jsonl,
 )
+
+
+def test_dispatch_hot_loop_summary_prints_dispatch_metrics(
+    tmp_path: Path, capsys
+) -> None:
+    summary = {
+        "benchmark_kind": "dispatch_hot_loop",
+        "mode": "benchmark",
+        "case": {
+            "case_id": "dispatch-8rank-4k-ep8-grouped-urma",
+            "tokens_per_rank": 4096,
+            "topk": 8,
+            "expert_count": 32,
+            "hidden_size": 7168,
+            "intermediate_size": 2048,
+            "prefetch_slots": 4,
+            "token_padding": 1,
+            "dtype": "bfloat16",
+            "seed": 1234,
+            "routing_pattern": "unique_destinations",
+            "route_distribution": "rank_shifted_uniform",
+            "correctness": True,
+            "warmup": 0,
+            "iterations": 8,
+        },
+        "dispatch_modes": ["hidden"],
+        "metrics_us": {
+            "hidden_host": {"mean": 40.0, "p50": 35.0, "p95": 80.0},
+            "hidden_kernel": {"mean": 2200.0, "p50": 2150.0, "p95": 2300.0},
+        },
+        "tokens_per_second_by_mode": {
+            "hidden": {"mean": 14_000_000.0},
+        },
+    }
+
+    table = format_dispatch_performance(summary)
+    assert "MoonEP Dispatch-only performance" in table
+    assert "hidden" in table
+    assert "2200.000" in table
+    assert "14000000.000" in table
+
+    summary_path = tmp_path / "summary.json"
+    write_json(summary_path, summary)
+    assert report_main(["--summary", str(summary_path)]) == 0
+    assert "MoonEP Dispatch-only performance" in capsys.readouterr().out
 
 
 RAW_TIMINGS = {

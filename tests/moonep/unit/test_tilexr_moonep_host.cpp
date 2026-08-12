@@ -25,11 +25,13 @@ int dispatchUrmaCalls = 0;
 int dispatchWorkspaceQueryCalls = 0;
 int combineCalls = 0;
 int prefetchCalls = 0;
+int memsetCalls = 0;
 uint64_t queryWorkspaceBytes = 512;
 int64_t queryNvS = 12;
 TileXR::CommArgs commArgs {};
 const TileXRMoonEpDispatchArgsV1 *seenDispatch = nullptr;
 const TileXRMoonEpDispatchArgsV1 *seenDispatchUrma = nullptr;
+uint64_t seenDispatchUrmaFlags = UINT64_MAX;
 const TileXRMoonEpCombineArgsV1 *seenCombine = nullptr;
 aclrtStream seenDispatchStream = nullptr;
 aclrtStream seenCombineStream = nullptr;
@@ -72,6 +74,7 @@ void Reset()
     prefetchReturn = TILEXR_MOONEP_SUCCESS;
     queryCalls = plannerCalls = dispatchCalls = dispatchUrmaCalls =
         dispatchWorkspaceQueryCalls = combineCalls = prefetchCalls = 0;
+    memsetCalls = 0;
     queryWorkspaceBytes = 512;
     queryNvS = 12;
     commArgs = TileXR::CommArgs {};
@@ -81,6 +84,7 @@ void Reset()
     plannerCall = PlannerCall {};
     seenDispatch = nullptr;
     seenDispatchUrma = nullptr;
+    seenDispatchUrmaFlags = UINT64_MAX;
     seenCombine = nullptr;
     seenDispatchStream = nullptr;
     seenCombineStream = nullptr;
@@ -278,6 +282,17 @@ void TestStageDelegation()
     Check(dispatchCalls == 1 && dispatchUrmaCalls == 1 &&
         seenDispatchUrma == &dispatch, "URMA dispatch selection mismatch");
 
+    TileXRMoonEpPlanV1 plan = ValidPlan();
+    dispatch.plan = &plan;
+    dispatch.flags = TILEXR_MOONEP_FLAG_RESET_STATUS;
+    CheckStatus("URMA dispatch reset routing", TileXRMoonEpDispatchV1(&dispatch, stream),
+        dispatchUrmaReturn);
+    Check(memsetCalls == 0 && dispatchUrmaCalls == 2 &&
+        seenDispatchUrma == &dispatch &&
+        seenDispatchUrmaFlags == TILEXR_MOONEP_FLAG_RESET_STATUS,
+        "URMA dispatch reset flag must be delegated unchanged");
+    dispatch.flags = TILEXR_MOONEP_FLAG_NONE;
+
     TileXRMoonEpCombineArgsV1 combine {};
     combine.structSize = sizeof(combine);
     combine.abiVersion = TILEXR_MOONEP_ABI_VERSION_V1;
@@ -285,7 +300,6 @@ void TestStageDelegation()
     Check(combineCalls == 1 && seenCombine == &combine && seenCombineStream == stream,
         "combine delegation mismatch");
 
-    TileXRMoonEpPlanV1 plan = ValidPlan();
     TileXRMoonEpPrefetchWeightArgsV1 prefetch {};
     prefetch.structSize = sizeof(prefetch);
     prefetch.abiVersion = TILEXR_MOONEP_ABI_VERSION_V1;
@@ -346,16 +360,12 @@ extern "C" int TileXRMoonEpPlannerV3(const int32_t *topk, const int32_t *tpe,
 extern "C" aclError aclrtMemsetAsync(
     void *, size_t, int32_t, size_t, aclrtStream)
 {
+    ++memsetCalls;
     return ACL_SUCCESS;
 }
 
 extern "C" aclError aclrtMemcpyAsync(
     void *, size_t, const void *, size_t, aclrtMemcpyKind, aclrtStream)
-{
-    return ACL_SUCCESS;
-}
-
-extern "C" aclError aclrtSynchronizeStream(aclrtStream)
 {
     return ACL_SUCCESS;
 }
@@ -384,6 +394,7 @@ int TileXRMoonEpRunDispatchUrmaV1(
 {
     ++dispatchUrmaCalls;
     seenDispatchUrma = args;
+    seenDispatchUrmaFlags = args->flags;
     return dispatchUrmaReturn;
 }
 
