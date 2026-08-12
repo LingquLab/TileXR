@@ -58,6 +58,12 @@ Optional CMake switches are `TILEXR_BUILD_COLLECTIVES`, `TILEXR_BUILD_EP`, `TILE
 - Never use Host wrappers that launch Ascend C kernels with `kernel<<<...>>>` syntax. Build and embed pure AICore binaries, register them with `rtDevBinaryRegister` and `rtFunctionRegister`, then launch the registered signature with `rtKernelLaunchWithFlagV2`.
 - Host, simulator, and 910B fallback tests do not prove UDMA data-plane transfer. Keep validation claims scoped to the hardware actually exercised.
 
+### Communication Environment Baseline
+
+- For communication, peer-memory, MTE, `507035`, or device-dependent failures, run the installed official HCCL Test on the same devices and topology before investigating TileXR or operator code. The test mode must exercise the failing data path; use `all_reduce_test -a aiv_only` for AIV-only peer-memory cases.
+- Treat the matching HCCL Test as the environment-health baseline, judging it by per-rank correctness output rather than exit status alone; operation failures may still exit with code 0.
+- A pass on a different device subset, topology, or accelerator mode does not validate the failing path. If the matching HCCL Test also fails, classify the environment or platform baseline as unhealthy, preserve the bounded logs, stop operator-side debugging, and ask the user to provide a repaired or new known-good environment before continuing. Do not modify TileXR code to work around an unproven environment failure.
+
 <!-- karpathy-guidelines:start -->
 # Karpathy Guidelines
 
