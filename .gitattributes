@@ -1,1 +1,4 @@
 *.sh text eol=lf
+
+# Unified diff context lines intentionally contain the required leading space.
+tools/moonep/mindspeed/*.patch whitespace=-blank-at-eol

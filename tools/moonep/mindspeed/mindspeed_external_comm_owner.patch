@@ -1,0 +1,113 @@
+diff --git a/mindspeed/core/transformer/moe/moonep_model_arena.py b/mindspeed/core/transformer/moe/moonep_model_arena.py
+--- a/mindspeed/core/transformer/moe/moonep_model_arena.py
++++ b/mindspeed/core/transformer/moe/moonep_model_arena.py
+@@ -133,11 +133,17 @@ class MoonEPModelArenaLayout:
+         ).total_bytes
+ 
+-    def owned_requests(self) -> tuple["ModelArenaAllocationRequest", ...]:
+-        return (
++    def owned_requests(
++        self, *, include_communication_buffer: bool = True
++    ) -> tuple["ModelArenaAllocationRequest", ...]:
++        if not isinstance(include_communication_buffer, bool):
++            raise TypeError("include_communication_buffer must be a boolean")
++        communication = (
+             ModelArenaAllocationRequest(
+                 "communication.boundary_pool", "communication",
+                 (self.communication_boundary_pool_bytes,), torch.uint8,
+             ),
++        ) if include_communication_buffer else ()
++        return communication + (
+             ModelArenaAllocationRequest(
+                 "global.weight_slot.fc1", "weight_slot",
+                 (self.B, self.H, 2 * self.F), torch.bfloat16,
+@@ -322,4 +328,5 @@ class MoonEPModelArenaOrchestrator:
+         native_library_path: str | None = None,
+         include_legacy_share_handles: bool = True,
+         pass_mem_handles: bool = True,
++        install_communication_runtime: bool = True,
+     ) -> None:
+@@ -345,10 +352,13 @@ class MoonEPModelArenaOrchestrator:
+             raise TypeError("include_legacy_share_handles must be a boolean")
+         if not isinstance(pass_mem_handles, bool):
+             raise TypeError("pass_mem_handles must be a boolean")
++        if not isinstance(install_communication_runtime, bool):
++            raise TypeError("install_communication_runtime must be a boolean")
+         if include_legacy_share_handles and not pass_mem_handles:
+             raise ValueError(
+                 "legacy share handles require caller-provided memory handles"
+             )
+         self._include_legacy_share_handles = include_legacy_share_handles
+         self._pass_mem_handles = pass_mem_handles
++        self._install_communication_runtime = install_communication_runtime
+         self._arena = MoonEPSymmetricArena(
+@@ -399,5 +409,7 @@ class MoonEPModelArenaOrchestrator:
+                 )
+ 
+                 owned = []
+-                for request in self.layout.owned_requests():
++                for request in self.layout.owned_requests(
++                    include_communication_buffer=self._install_communication_runtime
++                ):
+                     binding = self._allocation_provider(request)
+@@ -432,11 +444,16 @@ class MoonEPModelArenaOrchestrator:
+                     manifest_gatherer=self._manifest_gatherer
+                 )
+                 self._state = ModelArenaState.FROZEN
+-                communication_ids = ("communication.boundary_pool",)
+-                self._runtime_installer(
+-                    self._arena,
+-                    communication_buffer_ids=communication_ids,
+-                    data_op_engine_type=self._data_op_engine_type,
+-                    library_path=self._native_library_path,
++                communication_ids = tuple(
++                    binding.request.buffer_id
++                    for binding in owned
++                    if binding.request.role == "communication"
+                 )
++                if self._install_communication_runtime:
++                    self._runtime_installer(
++                        self._arena,
++                        communication_buffer_ids=communication_ids,
++                        data_op_engine_type=self._data_op_engine_type,
++                        library_path=self._native_library_path,
++                    )
+                 self._installed = InstalledModelArena(
+diff --git a/mindspeed/core/transformer/moe/moonep_unified_arena_wiring.py b/mindspeed/core/transformer/moe/moonep_unified_arena_wiring.py
+--- a/mindspeed/core/transformer/moe/moonep_unified_arena_wiring.py
++++ b/mindspeed/core/transformer/moe/moonep_unified_arena_wiring.py
+@@ -51,4 +51,9 @@ from .moonep_model_arena import (
+ from .moonep_registration import get_current_expert_registry
+ 
+ 
++EXTERNAL_COMMUNICATION_OWNER_ATTRIBUTE = (
++    "__mindspeed_external_communication_owner__"
++)
++
++
+ class UnifiedArenaWiringError(ModelArenaContractError):
+@@ -438,5 +443,18 @@ class MoonEPUnifiedArenaFeatureState:
+         if not collected:
+             raise UnifiedArenaWiringError("get_model produced no expert external buffers")
+-        layout = layout_from_args(self._training_args(), deps.world_size)
++        training_args = self._training_args()
++        layout = layout_from_args(training_args, deps.world_size)
++        from .moonep_backend import resolve_native_backend_factory
++
++        backend_factory = resolve_native_backend_factory(
++            getattr(training_args, "moonep_backend_factory", None)
++        )
++        external_communication_owner = getattr(
++            backend_factory, EXTERNAL_COMMUNICATION_OWNER_ATTRIBUTE, False
++        )
++        if not isinstance(external_communication_owner, bool):
++            raise UnifiedArenaWiringError(
++                f"{EXTERNAL_COMMUNICATION_OWNER_ATTRIBUTE} must be a boolean"
++            )
+ 
+         def allocate(request: ModelArenaAllocationRequest):
+@@ -480,3 +498,4 @@ class MoonEPUnifiedArenaFeatureState:
+             # only share handle. 950 uses Fabric V2; 910B uses legacy V1.
+             pass_mem_handles=True,
++            install_communication_runtime=not external_communication_owner,
+         )
