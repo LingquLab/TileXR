@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import struct
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -9,6 +10,37 @@ from .runtime import TileXRMoonEPRuntime
 
 _PREFETCH_WEIGHT_STATUS_SUCCESS = 4000
 _UDMA_REGISTRATION_ALIGNMENT = 2 * 1024 * 1024
+_DISPATCH_COMPLETION_FLAG_RANKS = 512
+_DISPATCH_COMPLETION_QP_COUNT = 2
+_DISPATCH_COMPLETION_FLAGS_BYTES = (
+    _DISPATCH_COMPLETION_FLAG_RANKS * _DISPATCH_COMPLETION_QP_COUNT * 8
+)
+_DISPATCH_SIGNAL_BYTES = 64 * 64
+_DISPATCH_PROFILE_BYTES = 64 * 256
+_DISPATCH_DFX_BYTES = 64 * 128
+_DISPATCH_KERNEL_STATUS_BYTES = 64
+_DISPATCH_COMMON_TAIL_BYTES = (
+    _DISPATCH_COMPLETION_FLAGS_BYTES
+    + _DISPATCH_SIGNAL_BYTES
+    + 2 * _DISPATCH_PROFILE_BYTES
+    + 2 * _DISPATCH_DFX_BYTES
+    + _DISPATCH_KERNEL_STATUS_BYTES
+)
+
+
+def _format_dispatch_completion_flags(data: bytes, rank_size: int) -> str:
+    rows = tuple(struct.iter_unpack("<QQ", data))
+    if len(rows) != _DISPATCH_COMPLETION_FLAG_RANKS:
+        return f"host_flags=invalid_bytes:{len(data)}"
+    active_rank_size = max(0, min(int(rank_size), len(rows)))
+    active = ",".join(
+        f"r{rank}:{rows[rank][0]}/{rows[rank][1]}"
+        for rank in range(active_rank_size)
+    )
+    inactive_nonzero = sum(
+        qp0 != 0 or qp1 != 0 for qp0, qp1 in rows[active_rank_size:]
+    )
+    return f"host_flags={active};inactive_nonzero={inactive_nonzero}"
 
 
 def _torch():
@@ -108,6 +140,7 @@ class ProjectionBuffers:
                 f"local_weights.{name}",
                 dtype=context.dtype,
                 device_index=context.device_index,
+                allow_storage_offset=True,
             )
             source_shape = _shape(source)
             if (len(source_shape) < 2 or len(source_shape) > 4 or
@@ -479,6 +512,8 @@ class TileXRMoonEPBuffer:
         self._torch = torch_module or _torch()
         self._closed = False
         self._epoch = 0
+        self._dispatch_call_count = 0
+        self._dispatch_flag_before_snapshots: dict[int, tuple[Any, ...]] = {}
         self._bound_stream_ptr: int | None = None
         self._pending_refs: list[tuple[Any, ...]] = []
         self._pending_plans: list[MoonEPPlan] = []
@@ -545,6 +580,158 @@ class TileXRMoonEPBuffer:
 
     def _expect_status(self, plan: MoonEPPlan, status: int) -> None:
         self._pending_statuses[id(plan)] = int(status)
+
+    def _check_plan_status(self, plan: MoonEPPlan) -> None:
+        expected = self._pending_statuses.get(id(plan))
+        if expected is None:
+            return
+        actual = int(plan.status.item())
+        if actual == expected:
+            self._dispatch_flag_before_snapshots.pop(id(plan), None)
+            return
+        if os.environ.get("TILEXR_MOONEP_FLAG_DUMP_MODE") == "failure":
+            self._dump_failed_dispatch_completion_flags(plan, actual)
+        if actual in (2005, 2006, 2007):
+            self.context.mark_poisoned()
+        dfx = self._dispatch_dfx_summary()
+        raise RuntimeError(
+            "MoonEP device status failures: "
+            f"epoch {plan.epoch}: actual {actual}, expected {expected}"
+            f"{'; dispatch_dfx=' + dfx if dfx else ''}"
+        )
+
+    def _dispatch_completion_flags_view(self):
+        raw = self.context._dispatch_workspace_owner
+        if raw is None:
+            raise RuntimeError("Dispatch workspace is unavailable")
+        aligned_offset = self.context._dispatch_workspace_ptr - int(raw.data_ptr())
+        flags_start = (
+            aligned_offset
+            + self.context._dispatch_workspace_bytes
+            - _DISPATCH_COMMON_TAIL_BYTES
+        )
+        return raw.narrow(0, flags_start, _DISPATCH_COMPLETION_FLAGS_BYTES)
+
+    def _dispatch_completion_flags_bytes(self) -> bytes:
+        return bytes(
+            self._dispatch_completion_flags_view().detach()
+            .cpu()
+            .tolist()
+        )
+
+    def _write_dispatch_completion_flags(
+        self,
+        data: bytes,
+        direction: str,
+        stage: str,
+        plan: MoonEPPlan,
+        call_count: int,
+        status: int,
+    ) -> None:
+        dump_dir = os.environ.get("TILEXR_MOONEP_FLAG_DUMP_DIR")
+        if not dump_dir:
+            return
+        os.makedirs(dump_dir, exist_ok=True)
+        stem = (
+            f"rank{self.context.planner_group_rank}_pid{os.getpid()}_"
+            f"call{call_count:04d}_{direction}_"
+            f"epoch{plan.epoch}_{stage}_status{status}"
+        )
+        with open(os.path.join(dump_dir, f"{stem}.bin"), "wb") as output:
+            output.write(data)
+        with open(
+            os.path.join(dump_dir, f"{stem}.txt"), "w", encoding="ascii"
+        ) as output:
+            output.write(
+                _format_dispatch_completion_flags(
+                    data, self.context.planner_group_size
+                )
+            )
+            output.write("\n")
+
+    def _dump_dispatch_completion_flags(
+        self, direction: str, stage: str, plan: MoonEPPlan
+    ) -> None:
+        self._write_dispatch_completion_flags(
+            self._dispatch_completion_flags_bytes(),
+            direction,
+            stage,
+            plan,
+            self._dispatch_call_count,
+            int(plan.status.item()),
+        )
+
+    def _capture_dispatch_completion_flags_before(
+        self, direction: str, plan: MoonEPPlan
+    ) -> None:
+        self._dispatch_flag_before_snapshots[id(plan)] = (
+            self._dispatch_call_count,
+            direction,
+            self._dispatch_completion_flags_view().clone(),
+        )
+
+    def _dump_failed_dispatch_completion_flags(
+        self, plan: MoonEPPlan, actual_status: int
+    ) -> None:
+        snapshot = self._dispatch_flag_before_snapshots.get(id(plan))
+        if snapshot is None:
+            return
+        call_count, direction, before = snapshot
+        before_data = bytes(before.detach().cpu().tolist())
+        self._write_dispatch_completion_flags(
+            before_data, direction, "before", plan, call_count, 0
+        )
+        self._write_dispatch_completion_flags(
+            self._dispatch_completion_flags_bytes(),
+            direction,
+            "after",
+            plan,
+            call_count,
+            actual_status,
+        )
+
+    def _dispatch_dfx_summary(self) -> str:
+        if os.environ.get("TILEXR_MOONEP_DUMP_DFX_ON_ERROR", "0") != "1":
+            return ""
+        raw = self.context._dispatch_workspace_owner
+        if raw is None:
+            return "workspace-unavailable"
+        aligned_offset = self.context._dispatch_workspace_ptr - int(raw.data_ptr())
+        workspace_bytes = self.context._dispatch_workspace_bytes
+        record = struct.Struct("<IHHIIIIIiIIIII4xQQQQQ4Q")
+        marker = 0x54584444
+        summaries = []
+        for payload, distance in (
+            ("hidden", 2 * _DISPATCH_DFX_BYTES + _DISPATCH_KERNEL_STATUS_BYTES),
+            ("weight", _DISPATCH_DFX_BYTES + _DISPATCH_KERNEL_STATUS_BYTES),
+        ):
+            start = aligned_offset + workspace_bytes - distance
+            data = bytes(
+                raw.narrow(0, start, _DISPATCH_DFX_BYTES).detach().cpu().tolist()
+            )
+            for core in range(64):
+                fields = record.unpack_from(data, core * record.size)
+                if fields[0] != marker or (
+                    core != 0 and fields[6] == 0 and fields[9] == 0
+                ):
+                    continue
+                summaries.append(
+                    f"{payload}:core={fields[5]},flags=0x{fields[6]:x},"
+                    f"quiet=0x{fields[9]:x},phase={fields[10]},"
+                    f"timeout_peer={fields[11]},timeout_phase={fields[12]},"
+                    f"routes={fields[15]}/{fields[14]},magic={fields[16]},"
+                    f"expected_magic={fields[17]},observed=0x{fields[18]:x},"
+                    f"signal_source=0x{fields[19]:x},signals={fields[20]},"
+                    f"cq_probe=0x{fields[21]:x},"
+                    f"remaining_sq=0x{fields[22]:x}"
+                )
+        flags_data = self._dispatch_completion_flags_bytes()
+        summaries.append(
+            _format_dispatch_completion_flags(
+                flags_data, self.context.planner_group_size
+            )
+        )
+        return "|".join(summaries) if summaries else "no-error-record"
 
     def _empty(self, shape: tuple[int, ...], dtype):
         return self._torch.empty(
@@ -734,6 +921,8 @@ class TileXRMoonEPBuffer:
                 "peer protocol synchronization is required"
             )
         inline_plan = plan is None
+        self._dispatch_call_count += 1
+        dispatch_direction = "forward" if inline_plan else "reverse"
         if inline_plan:
             if topk_experts_sk is None or tokens_per_expert is None:
                 raise ValueError(
@@ -780,10 +969,26 @@ class TileXRMoonEPBuffer:
                 self._trace_stage(f"planning_experts_to_copy_nonnegative={copy_count}")
             if planner_status != 0:
                 raise RuntimeError(f"MoonEP Planner device status is {planner_status}")
+        else:
+            self._check_plan_status(plan)
         self.context.activate_dispatch_workspace()
         self._retain(
             plan, hidden_sh, hidden_nvsh, route_weights_sk, route_weights_nvs, cu_seqlens
         )
+        flag_dump_mode = os.environ.get("TILEXR_MOONEP_FLAG_DUMP_MODE", "all")
+        flag_dump_enabled = bool(os.environ.get("TILEXR_MOONEP_FLAG_DUMP_DIR"))
+        if flag_dump_enabled and flag_dump_mode == "all":
+            self._dump_dispatch_completion_flags(
+                dispatch_direction, "before", plan
+            )
+        elif (
+            flag_dump_enabled
+            and flag_dump_mode == "failure"
+            and dispatch_direction == "reverse"
+        ):
+            self._capture_dispatch_completion_flags_before(
+                dispatch_direction, plan
+            )
         self._trace_stage("dispatch_kernel_launch_begin")
         self.runtime.dispatch(
             c,
@@ -799,6 +1004,14 @@ class TileXRMoonEPBuffer:
             registered_workspace_bytes=self.context.dispatch_workspace[1],
         )
         self._trace_stage("dispatch_kernel_launch_end")
+        if (
+            flag_dump_enabled
+            and flag_dump_mode == "all"
+        ):
+            self._synchronize_device()
+            self._dump_dispatch_completion_flags(
+                dispatch_direction, "after", plan
+            )
         if build_dedup:
             self._plans_needing_dedup.pop(id(plan), None)
         self._expect_status(plan, 0)
@@ -1203,17 +1416,17 @@ class TileXRMoonEPBuffer:
             raise RuntimeError("check_pending_status requires a successful quiesce")
         try:
             statuses = []
+            failed_dispatch_plans = []
             for plan in self._pending_plans:
                 expected = self._pending_statuses.get(id(plan))
                 if expected is None:
                     continue
-                statuses.append(
-                    (
-                        plan.epoch,
-                        int(plan.status.item()),
-                        expected,
-                    )
-                )
+                actual = int(plan.status.item())
+                statuses.append((plan.epoch, actual, expected))
+                if actual == expected:
+                    self._dispatch_flag_before_snapshots.pop(id(plan), None)
+                else:
+                    failed_dispatch_plans.append((plan, actual, expected))
             for plan in self._pending_reduce_plans:
                 statuses.append((plan.epoch, int(plan.reduce_grad_status.item()), 0))
             self._pending_refs.clear()
@@ -1228,12 +1441,18 @@ class TileXRMoonEPBuffer:
                 if status != expected
             ]
             if failed:
+                if os.environ.get("TILEXR_MOONEP_FLAG_DUMP_MODE") == "failure":
+                    for plan, actual, _ in failed_dispatch_plans:
+                        self._dump_failed_dispatch_completion_flags(plan, actual)
+                dispatch_dfx = self._dispatch_dfx_summary()
                 if any(status in (2005, 2006, 2007) for _, status, _ in failed):
                     self.context.mark_poisoned()
                 details = ", ".join(
                     f"epoch {epoch}: actual {status}, expected {expected}"
                     for epoch, status, expected in failed
                 )
+                if dispatch_dfx:
+                    details += f"; dispatch_dfx={dispatch_dfx}"
                 raise RuntimeError(f"MoonEP device status failures: {details}")
         finally:
             if self._reduce_grad_inflight:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ctypes
 import os
+import struct
 import sys
 import unittest
 from pathlib import Path
@@ -31,6 +32,7 @@ from tilexr_moonep.abi import (
     TileXRMoonEPTensorV1,
 )
 from tilexr_moonep.runtime import TileXRMoonEPRuntime, _resolve_library
+from tilexr_moonep.torch_api import _format_dispatch_completion_flags
 
 
 class FakeFunction:
@@ -387,6 +389,18 @@ def tensor(shape, dtype):
 
 
 class FfiAbiTests(unittest.TestCase):
+    def test_dispatch_completion_flag_matrix_format(self):
+        flags = bytearray(512 * 2 * 8)
+        struct.pack_into("<QQ", flags, 0 * 16, 0, 0)
+        struct.pack_into("<QQ", flags, 1 * 16, 23, 25)
+        struct.pack_into("<QQ", flags, 2 * 16, 25, 25)
+        struct.pack_into("<QQ", flags, 9 * 16, 21, 21)
+
+        self.assertEqual(
+            _format_dispatch_completion_flags(bytes(flags), rank_size=3),
+            "host_flags=r0:0/0,r1:23/25,r2:25/25;inactive_nonzero=1",
+        )
+
     def test_ctypes_layout_matches_tilexr_moonep_header(self):
         self.assertEqual(ctypes.sizeof(TileXRMoonEPTensorV1), 64)
         self.assertEqual(ctypes.sizeof(TileXRMoonEPPlanV1), 120)
@@ -533,12 +547,14 @@ class FfiAbiTests(unittest.TestCase):
             tensor((4, 2), torch.int32),
             tensor((4,), torch.int32),
         )
+        gate = tensor((3, 4, 8), torch.bfloat16).narrow(0, 1, 2)
+        up = tensor((3, 4, 8), torch.bfloat16).narrow(0, 1, 2)
+        down = tensor((3, 8, 4), torch.bfloat16).narrow(0, 1, 2)
+        self.assertGreater(gate.storage_offset(), 0)
+        self.assertGreater(up.storage_offset(), 0)
+        self.assertGreater(down.storage_offset(), 0)
         projections = ProjectionBuffers.from_local_weights(
-            context,
-            tensor((2, 4, 8), torch.bfloat16),
-            tensor((2, 4, 8), torch.bfloat16),
-            tensor((2, 8, 4), torch.bfloat16),
-            torch_module=torch,
+            context, gate, up, down, torch_module=torch
         )
         self.assertEqual(projections.backing.data_ptr() % (2 * 1024 * 1024), 0)
         self.assertEqual(
@@ -546,7 +562,16 @@ class FfiAbiTests(unittest.TestCase):
             2 * 1024 * 1024,
         )
         buffer.register_projection_buffers(projections)
+        plan.status._item = 2004
+        with self.assertRaisesRegex(
+            RuntimeError, r"actual 2004, expected 0"
+        ):
+            buffer.dispatch(tensor((4, 8), torch.bfloat16), plan=plan)
+        self.assertEqual(plan.status.item(), 2004)
+        buffer._pending_statuses[id(plan)] = 3000
+        plan.status._item = 3000
         buffer.dispatch(tensor((4, 8), torch.bfloat16), plan=plan)
+        self.assertEqual(plan.status.item(), 3000)
         buffer.prefetch_weight(plan, projections)
         hidden_sh, route_weights_sk, _ = buffer.combine(
             plan, hidden_nvsh, route_weights_nvs
@@ -616,10 +641,11 @@ class FfiAbiTests(unittest.TestCase):
             ["dispatch", "dispatch", "prefetch_weight", "combine"],
         )
         self.assertTrue(all(record["stream"] == 0xCAFE for record in loader.stage_records))
-        self.assertEqual(loader.stage_records[0]["flags"], 0)
+        self.assertEqual(loader.stage_records[0]["flags"], 1 << 5)
         self.assertEqual(loader.stage_records[0]["abi_version"], 2)
         self.assertEqual(loader.stage_records[1]["abi_version"], 2)
-        self.assertTrue(all(record["flags"] == 0 for record in loader.stage_records[1:]))
+        self.assertEqual(loader.stage_records[1]["flags"], 1 << 5)
+        self.assertTrue(all(record["flags"] == 0 for record in loader.stage_records[2:]))
         self.assertEqual(loader.stage_records[0]["shapes"]["hiddenNvsh"], (12, 8))
         self.assertEqual(loader.stage_records[0]["shapes"]["routeWeightsNvs"], (12,))
         self.assertEqual(loader.stage_records[2]["shapes"]["up"], (4, 4, 8))

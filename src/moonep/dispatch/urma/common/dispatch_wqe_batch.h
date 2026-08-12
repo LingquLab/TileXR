@@ -157,29 +157,30 @@ TILEXR_MOONEP_WQE_BATCH_INLINE uint32_t DispatchQpSelectedIndex(
         afterPrefix % 3U;
 }
 
-TILEXR_MOONEP_WQE_BATCH_INLINE bool DispatchPeerWqesFitSq(
+TILEXR_MOONEP_WQE_BATCH_INLINE bool DispatchPeerWqesStreamable(
     uint64_t routeCount, uint32_t sqEntryCount,
     uint32_t reserve = kDispatchSqPollReserve)
 {
     if (routeCount > UINT32_MAX || sqEntryCount <= reserve) {
         return false;
     }
-    const uint32_t count = static_cast<uint32_t>(routeCount);
-    const uint32_t available = sqEntryCount - reserve;
-    for (uint32_t qpIdx = 0U; qpIdx < kDispatchQpCount; ++qpIdx) {
-        const uint32_t qpPayloadWqes = DispatchQpRouteCount(
-            count, 0U, qpIdx);
-        if (qpPayloadWqes >= available || qpPayloadWqes + 1U > available) {
-            return false;
-        }
-    }
-    return true;
+    return sqEntryCount - reserve >= kDispatchWqeBatchCapacity;
 }
 
-TILEXR_MOONEP_WQE_BATCH_INLINE bool DispatchBatchNeedsCompletion(
-    bool finalBatchForPeer)
+TILEXR_MOONEP_WQE_BATCH_INLINE bool DispatchGroupedBatchNeedsCompletion(
+    uint32_t batchCount)
 {
-    return finalBatchForPeer;
+    return batchCount != 0U;
+}
+
+TILEXR_MOONEP_WQE_BATCH_INLINE uint32_t DispatchRouteTileCount(
+    uint32_t routeCount, uint32_t tileStart, uint32_t tileCapacity)
+{
+    if (tileStart >= routeCount || tileCapacity == 0U) {
+        return 0U;
+    }
+    const uint32_t remaining = routeCount - tileStart;
+    return remaining < tileCapacity ? remaining : tileCapacity;
 }
 
 } // namespace TileXRMoonEp

@@ -10,6 +10,7 @@ from typing import Callable, Mapping, Sequence
 from .abi import (
     TILEXR_MOONEP_ABI_VERSION,
     TILEXR_MOONEP_FLAG_NONE,
+    TILEXR_MOONEP_FLAG_RESET_STATUS,
     TILEXR_SUCCESS,
     TileXRMoonEPDType,
     TileXRMoonEPCombineArgsV1,
@@ -686,7 +687,7 @@ class TileXRMoonEPRuntime:
         args.routeWeightsNvs = (
             ctypes.pointer(weights_nvs) if weights_nvs is not None else None
         )
-        args.flags = TILEXR_MOONEP_FLAG_NONE
+        args.flags = TILEXR_MOONEP_FLAG_RESET_STATUS
         args.registeredWorkspace = void_p(registered_workspace)
         args.registeredWorkspaceBytes = int(registered_workspace_bytes)
         ret = self._moonep_lib.TileXRMoonEpDispatchV2(
@@ -709,7 +710,29 @@ class TileXRMoonEPRuntime:
         ret = self._moonep_lib.TileXRMoonEpPrefetchWeightV1(
             ctypes.byref(args), void_p(stream_ptr)
         )
-        self._check("TileXRMoonEpPrefetchWeightV1", ret)
+        if int(ret) != TILEXR_SUCCESS:
+            backing = projections.backing
+            backing_ptr = 0 if backing is None else int(backing.data_ptr())
+            projection_detail = []
+            for name, tensor in (
+                ("gate", projections.gate),
+                ("up", projections.up),
+                ("down", projections.down),
+            ):
+                projection_detail.append(
+                    f"{name}=shape{tuple(tensor.shape)},bytes={tensor_nbytes(tensor)},"
+                    f"offset={int(tensor.data_ptr()) - backing_ptr}"
+                )
+            detail = (
+                f"plan=(r={context.planner_group_size},e={context.expert_count},"
+                f"b={context.prefetch_slots},nvS={context.nv_s},k={context.topk}); "
+                + "; ".join(projection_detail)
+                + f"; backing_bytes={0 if backing is None else tensor_nbytes(backing)}"
+                + f"; active_udma_owner={self._active_udma_owner}"
+                + f"; active_udma_bytes={self._active_udma_bytes}"
+                + f"; udma_qp_count={self._udma_qp_count}"
+            )
+            self._check("TileXRMoonEpPrefetchWeightV1", ret, detail)
 
     def udma_register(self, tensor) -> int:
         size = tensor_nbytes(tensor)
