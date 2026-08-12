@@ -244,22 +244,16 @@ __aicore__ inline uint32_t UDMAPollCQ(__gm__ UDMAInfo* udmaInfo, uint32_t pe, ui
 
         const uint32_t sqHead = ld_dev(reinterpret_cast<__gm__ uint32_t*>(wqCtxEntry->headAddr), 0);
         const uint32_t sqOutstanding = sqHead - sqTail;
-        if (sqOutstanding == 0U || sqOutstanding > wqCtxEntry->depth ||
-            cqeAddr->entryIdx >= wqCtxEntry->depth) {
+        if (sqOutstanding == 0U || sqOutstanding > wqCtxEntry->depth) {
             return TILEXR_UDMA_STATUS_INVALID;
         }
-        __gm__ UDMASqeCtx* completedSqe = reinterpret_cast<__gm__ UDMASqeCtx*>(
-            wqCtxEntry->bufAddr +
-            (1U << wqCtxEntry->baseBkShift) * (sqTail % wqCtxEntry->depth));
-        const UDMAOpcode opcode = static_cast<UDMAOpcode>(completedSqe->opcode);
-        if (opcode != UDMAOpcode::WRITE && opcode != UDMAOpcode::READ &&
-            opcode != UDMAOpcode::WRITE_WITH_NOTIFY) {
-            return TILEXR_UDMA_STATUS_INVALID;
-        }
-        const uint32_t completedBb = UDMAWqeBBCnt(opcode);
-        const uint32_t expectedEntryIdx =
-            (sqTail + completedBb - 1U) % wqCtxEntry->depth;
-        if (completedBb > sqOutstanding || cqeAddr->entryIdx != expectedEntryIdx) {
+        const uint32_t tailIndex = sqTail % wqCtxEntry->depth;
+        const uint32_t completedEntryIndex = cqeAddr->entryIdx % wqCtxEntry->depth;
+        const uint32_t completedBb =
+            (completedEntryIndex + wqCtxEntry->depth - tailIndex) %
+                wqCtxEntry->depth + 1U;
+        if (completedBb > TILEXR_UDMA_MAX_SQE_BB_NUM ||
+            completedBb > sqOutstanding) {
             return TILEXR_UDMA_STATUS_INVALID;
         }
         sqTail += completedBb;
@@ -763,8 +757,9 @@ __aicore__ inline uint32_t UDMAFlushQpDoorbell(
     return TILEXR_UDMA_STATUS_SUCCESS;
 }
 
-__aicore__ inline uint32_t UDMAQuietStatusOnQp(
-    const __gm__ CommArgs* args, int targetRank, uint32_t qpIdx)
+__aicore__ inline uint32_t UDMAQuietStatusOnQpUntil(
+    const __gm__ CommArgs* args, int targetRank, uint32_t qpIdx,
+    uint32_t completionTarget)
 {
     if (!TILEXR_UDMA_ARCH_SUPPORTED) {
         return TILEXR_UDMA_STATUS_INVALID;
@@ -776,13 +771,27 @@ __aicore__ inline uint32_t UDMAQuietStatusOnQp(
     if (udmaInfo->sqPtr == 0U || udmaInfo->scqPtr == 0U) {
         return TILEXR_UDMA_STATUS_INVALID;
     }
-    __gm__ UDMAWQCtx* qpCtxEntry =
-        UDMAGetWQCtx(udmaInfo, static_cast<uint32_t>(targetRank), qpIdx);
-    if (qpCtxEntry->wqeCntAddr == 0U) {
+    return UDMAPollCQ(
+        udmaInfo, static_cast<uint32_t>(targetRank), qpIdx, completionTarget);
+}
+
+__aicore__ inline uint32_t UDMAQuietStatusOnQp(
+    const __gm__ CommArgs* args, int targetRank, uint32_t qpIdx)
+{
+    if (!TILEXR_UDMA_ARCH_SUPPORTED ||
+        !UDMAQueueOperationValid(args, targetRank, qpIdx)) {
         return TILEXR_UDMA_STATUS_INVALID;
     }
-    uint32_t wqeCnt = ld_dev(reinterpret_cast<__gm__ uint32_t*>(qpCtxEntry->wqeCntAddr), 0);
-    return UDMAPollCQ(udmaInfo, static_cast<uint32_t>(targetRank), qpIdx, wqeCnt);
+    __gm__ UDMAInfo* udmaInfo = GetUDMAInfo(args);
+    __gm__ UDMAWQCtx* qpCtxEntry =
+        UDMAGetWQCtx(udmaInfo, static_cast<uint32_t>(targetRank), qpIdx);
+    if (qpCtxEntry == nullptr || qpCtxEntry->wqeCntAddr == 0U) {
+        return TILEXR_UDMA_STATUS_INVALID;
+    }
+    const uint32_t completionTarget = ld_dev(
+        reinterpret_cast<__gm__ uint32_t*>(qpCtxEntry->wqeCntAddr), 0);
+    return UDMAQuietStatusOnQpUntil(
+        args, targetRank, qpIdx, completionTarget);
 }
 
 __aicore__ inline uint32_t UDMAQuietStatus(const __gm__ CommArgs* args, int targetRank)

@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <array>
 #include <climits>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <new>
@@ -20,6 +21,14 @@
 
 namespace TileXR {
 namespace {
+
+constexpr int TILEXR_HCCP_RA_ALREADY_INITIALIZED = 328002;
+
+bool AttachExistingRaEnabled()
+{
+    const char* value = std::getenv("TILEXR_UDMA_ATTACH_EXISTING_RA");
+    return value != nullptr && std::strcmp(value, "1") == 0;
+}
 
 uint32_t Log2Uint64(uint64_t value)
 {
@@ -188,6 +197,11 @@ int TileXRUDMATransport::Init(const TileXRUDMATransportOptions& options)
         Shutdown();
         return ret;
     }
+    ret = AgreeRaOwnership();
+    if (ret != TILEXR_SUCCESS) {
+        Shutdown();
+        return ret;
+    }
     localStatus = BuildRoutes();
     ret = AgreeInitStatus(localStatus);
     if (ret != TILEXR_SUCCESS) {
@@ -250,6 +264,23 @@ int TileXRUDMATransport::AgreeInitStatus(int localStatus) const
     return TILEXR_SUCCESS;
 }
 
+int TileXRUDMATransport::AgreeRaOwnership() const
+{
+    const int32_t local = raAttached_ ? 1 : 0;
+    std::array<int32_t, TILEXR_MAX_RANK_SIZE> allAttached {};
+    const int exchangeRet = options_.exchange->AllGather(&local, 1, allAttached.data());
+    if (exchangeRet != TILEXR_SUCCESS) {
+        return exchangeRet;
+    }
+    for (int rank = 0; rank < options_.rankSize; ++rank) {
+        if (allAttached[rank] != local) {
+            TILEXR_LOG(ERROR) << "TileXR UDMA RA ownership mismatch at rank " << rank;
+            return TILEXR_ERROR_PARA_CHECK_FAIL;
+        }
+    }
+    return TILEXR_SUCCESS;
+}
+
 int TileXRUDMATransport::AgreeEidCount() const
 {
     if (options_.exchange == nullptr || options_.rankSize <= 0 ||
@@ -302,10 +333,16 @@ int TileXRUDMATransport::OpenDevice()
     initConfig.enableHdcAsync = 1;
     int ret = loader_.RaInit(&initConfig);
     if (ret != 0) {
+        if (ret == TILEXR_HCCP_RA_ALREADY_INITIALIZED && AttachExistingRaEnabled()) {
+            raAttached_ = true;
+            TILEXR_LOG(INFO) << "TileXR UDMA attaching to existing RA initialization";
+            return TILEXR_SUCCESS;
+        }
         TILEXR_LOG(WARN) << "TileXR UDMA RaInit failed: " << ret;
         return TILEXR_ERROR_INTERNAL;
     }
     raInitialized_ = true;
+    raAttached_ = false;
     return TILEXR_SUCCESS;
 }
 
@@ -2055,6 +2092,7 @@ void TileXRUDMATransport::CleanupContexts()
         tsdOpened_ = false;
         subPid_ = 0;
     }
+    raAttached_ = false;
 }
 
 void TileXRUDMATransport::Shutdown()

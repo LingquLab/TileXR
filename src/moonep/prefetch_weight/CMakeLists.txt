@@ -75,6 +75,8 @@ add_library(tilexr-moonep-prefetch-weight SHARED
 )
 add_dependencies(tilexr-moonep-prefetch-weight tilexr_moonep_prefetch_weight_kernel)
 target_compile_features(tilexr-moonep-prefetch-weight PRIVATE cxx_std_14)
+target_compile_definitions(tilexr-moonep-prefetch-weight PRIVATE
+    TILEXR_MOONEP_PREFETCH_UDMA_HOST_DEBUG=1)
 target_include_directories(tilexr-moonep-prefetch-weight
     PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/../../include
     PRIVATE

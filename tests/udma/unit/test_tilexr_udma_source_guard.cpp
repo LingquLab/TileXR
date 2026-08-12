@@ -340,6 +340,18 @@ void TestUDMAMultiQpHostTransportContract()
                   "BuildUDMAInfoImage(reinterpret_cast<uintptr_t>(registration.infoDev), qpCount_");
     CheckContains(transportPath, transport, "return IsAvailable() ? qpCount_ : 0U;");
     CheckContains(transportPath, transport, "ret = AgreeInitStatus(localStatus);");
+    CheckContains(transportPath, transport, "ret = AgreeRaOwnership();");
+    CheckContains(transportPath, transport, "int TileXRUDMATransport::AgreeRaOwnership() const");
+    CheckContains(transportPath, transport,
+                  "options_.exchange->AllGather(&local, 1, allAttached.data())");
+    CheckContains(transportPath, transport, "TILEXR_HCCP_RA_ALREADY_INITIALIZED = 328002");
+    CheckContains(transportPath, transport,
+                  "std::getenv(\"TILEXR_UDMA_ATTACH_EXISTING_RA\")");
+    CheckContains(transportPath, transport,
+                  "ret == TILEXR_HCCP_RA_ALREADY_INITIALIZED && AttachExistingRaEnabled()");
+    CheckContains(transportPath, transport,
+                  "TileXR UDMA attaching to existing RA initialization");
+    CheckContains(transportPath, transport, "if (raInitialized_)");
     CheckContains(transportPath, transport, "int TileXRUDMATransport::AgreeEidCount() const");
     CheckContains(transportPath, transport,
                   "std::array<uint32_t, TILEXR_MAX_RANK_SIZE> allEidCounts");

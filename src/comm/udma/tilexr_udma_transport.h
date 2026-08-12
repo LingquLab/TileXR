@@ -69,6 +69,7 @@ private:
     struct RegistrationState;
 
     int AgreeInitStatus(int localStatus) const;
+    int AgreeRaOwnership() const;
     int AgreeEidCount() const;
     int OpenDevice();
     int BuildRoutes();
@@ -113,6 +114,7 @@ private:
     bool available_ = false;
     bool tsdOpened_ = false;
     bool raInitialized_ = false;
+    bool raAttached_ = false;
     pid_t subPid_ = 0;
     uint32_t logicDevId_ = 0;
     uint32_t deviceIdOffset_ = 0;

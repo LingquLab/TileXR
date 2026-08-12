@@ -264,8 +264,29 @@ private:
         return false;
     }
 
+    __aicore__ inline bool InitializeUdmaCompletionTargets(
+        int64_t target, uint32_t completionTargets[kReduceGradMaxUdmaQpCount])
+    {
+        if (!UsesUdma()) {
+            return true;
+        }
+        __gm__ TileXR::UDMAInfo *udmaInfo = TileXR::GetUDMAInfo(args_);
+        for (uint32_t qpIdx = 0; qpIdx < udmaQpCount_; ++qpIdx) {
+            __gm__ TileXR::UDMAWQCtx *queue = TileXR::UDMAGetWQCtx(
+                udmaInfo, static_cast<uint32_t>(target), qpIdx);
+            if (queue == nullptr || queue->wqeCntAddr == 0U) {
+                SetStatus(kReduceGradDeviceUdmaCqError);
+                return false;
+            }
+            completionTargets[qpIdx] = ld_dev(
+                reinterpret_cast<__gm__ uint32_t *>(queue->wqeCntAddr), 0);
+        }
+        return true;
+    }
+
     __aicore__ inline bool WaitUdmaCompletion(int64_t target, uint32_t qpIdx,
-        uint64_t stage, uint64_t sequence)
+        uint64_t stage, uint64_t sequence,
+        uint32_t completionTargets[kReduceGradMaxUdmaQpCount])
     {
         const uint64_t remoteOffset = UDMACompletionOffset(rank_, stage);
         GM_ADDR localScratch = workspace_ + UDMAPollScratchOffset(target, stage);
@@ -275,8 +296,13 @@ private:
                 static_cast<int>(target), qpIdx,
                 reinterpret_cast<__gm__ uint8_t *>(localScratch), remoteOffset,
                 static_cast<uint32_t>(sizeof(uint64_t)));
-            if (getStatus != TileXR::TILEXR_UDMA_STATUS_SUCCESS ||
-                TileXR::UDMAQuietStatusOnQp(args_, static_cast<int>(target), qpIdx) !=
+            if (getStatus != TileXR::TILEXR_UDMA_STATUS_SUCCESS) {
+                SetStatus(kReduceGradDeviceUdmaCqError);
+                return false;
+            }
+            const uint32_t completionTarget = ++completionTargets[qpIdx];
+            if (TileXR::UDMAQuietStatusOnQpUntil(args_,
+                    static_cast<int>(target), qpIdx, completionTarget) !=
                     TileXR::TILEXR_UDMA_STATUS_SUCCESS) {
                 SetStatus(kReduceGradDeviceUdmaCqError);
                 return false;
@@ -455,7 +481,8 @@ private:
     }
 
     __aicore__ inline bool PostUdmaChunk(int64_t target, int64_t slot,
-        uint32_t projection, uint64_t chunk, GM_ADDR source, uint64_t bytes)
+        uint32_t projection, uint64_t chunk, GM_ADDR source, uint64_t bytes,
+        uint32_t completionTargets[kReduceGradMaxUdmaQpCount])
     {
         const uint64_t stage = chunk & 1U;
         const uint64_t outboundOffset = UDMAOutboundOffset(target, stage);
@@ -472,8 +499,13 @@ private:
             reinterpret_cast<__gm__ uint8_t *>(outbound),
             UDMAInboundOffset(rank_, stage), static_cast<uint32_t>(bytes),
             UDMAReadyOffset(rank_, stage), sequence);
-        if (putStatus != TileXR::TILEXR_UDMA_STATUS_SUCCESS ||
-            TileXR::UDMAQuietStatusOnQp(args_, static_cast<int>(target), qpIdx) !=
+        if (putStatus != TileXR::TILEXR_UDMA_STATUS_SUCCESS) {
+            SetStatus(kReduceGradDeviceUdmaCqError);
+            return false;
+        }
+        const uint32_t completionTarget = ++completionTargets[qpIdx];
+        if (TileXR::UDMAQuietStatusOnQpUntil(args_,
+                static_cast<int>(target), qpIdx, completionTarget) !=
                 TileXR::TILEXR_UDMA_STATUS_SUCCESS) {
             SetStatus(kReduceGradDeviceUdmaCqError);
             return false;
@@ -482,7 +514,8 @@ private:
     }
 
     __aicore__ inline bool CompleteChunk(int64_t target, int64_t slot,
-        uint32_t projection, uint64_t chunk, GM_ADDR source, uint64_t bytes)
+        uint32_t projection, uint64_t chunk, GM_ADDR source, uint64_t bytes,
+        uint32_t completionTargets[kReduceGradMaxUdmaQpCount])
     {
         bool complete = false;
         if (transports_[projection] == kReduceGradTransportPeer) {
@@ -491,7 +524,8 @@ private:
         } else {
             const uint32_t qpIdx = UDMAQpFor(projection, slot, chunk);
             complete = WaitUdmaCompletion(
-                target, qpIdx, chunk & 1U, Sequence(projection, slot, chunk));
+                target, qpIdx, chunk & 1U, Sequence(projection, slot, chunk),
+                completionTargets);
         }
         if (!complete) {
             return false;
@@ -504,6 +538,10 @@ private:
     {
         if (target < 0 || target >= rankSize_) {
             SetStatus(kReduceGradDeviceInvalidState);
+            return false;
+        }
+        uint32_t completionTargets[kReduceGradMaxUdmaQpCount] = {};
+        if (!InitializeUdmaCompletionTargets(target, completionTargets)) {
             return false;
         }
         for (uint32_t projection = 0; projection < kReduceGradProjectionCount; ++projection) {
@@ -534,7 +572,8 @@ private:
                         const uint64_t completedBytes = MinU64(
                             rowBytes_[projection] - completedOffset, chunkBytes);
                         if (!CompleteChunk(target, slot, projection, completedChunk,
-                                sourceRow + completedOffset, completedBytes)) {
+                                sourceRow + completedOffset, completedBytes,
+                                completionTargets)) {
                             return false;
                         }
                     }
@@ -543,7 +582,8 @@ private:
                     const bool ok = transports_[projection] ==
                             kReduceGradTransportPeer ?
                         SendPeerChunk(target, slot, projection, chunk, sourceRow + offset, bytes) :
-                        PostUdmaChunk(target, slot, projection, chunk, sourceRow + offset, bytes);
+                        PostUdmaChunk(target, slot, projection, chunk,
+                            sourceRow + offset, bytes, completionTargets);
                     if (!ok) {
                         return false;
                     }
@@ -553,7 +593,7 @@ private:
                     const uint64_t offset = chunk * chunkBytes;
                     const uint64_t bytes = MinU64(rowBytes_[projection] - offset, chunkBytes);
                     if (!CompleteChunk(target, slot, projection, chunk,
-                            sourceRow + offset, bytes)) {
+                            sourceRow + offset, bytes, completionTargets)) {
                         return false;
                     }
                 }

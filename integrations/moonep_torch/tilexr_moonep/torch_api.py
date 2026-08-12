@@ -26,6 +26,74 @@ _DISPATCH_COMMON_TAIL_BYTES = (
     + 2 * _DISPATCH_DFX_BYTES
     + _DISPATCH_KERNEL_STATUS_BYTES
 )
+_COMBINE_V2_CORE_COUNT = 16
+_COMBINE_V2_EPOCH_COUNT = 2
+_COMBINE_V2_PROFILE_RECORD_BYTES = 320
+_COMBINE_V2_TOKEN_STRIDE_BYTES = 64
+_COMBINE_V2_GRANT_SLOT_BYTES = 512
+_COMBINE_V2_FAILURE_MARKER = 0x47505632
+_COMBINE_V2_FAILURE_RECORD = struct.Struct("<QIIIIIIIIQQII")
+
+
+def _align_up(value: int, alignment: int) -> int:
+    return (int(value) + int(alignment) - 1) // int(alignment) * int(alignment)
+
+
+def _combine_v2_failure_offset(nv_s: int, h: int, element_bytes: int) -> int:
+    expert_bytes = int(nv_s) * int(h) * int(element_bytes)
+    profile_offset = _align_up(expert_bytes, 64)
+    profile_bytes = _align_up(
+        _COMBINE_V2_CORE_COUNT * _COMBINE_V2_PROFILE_RECORD_BYTES, 64
+    )
+    scratch0_offset = profile_offset + profile_bytes
+    scratch1_offset = scratch0_offset + expert_bytes
+    done_offset = _align_up(scratch1_offset + expert_bytes, 64)
+    done_bytes = (
+        _COMBINE_V2_EPOCH_COUNT * 128 * 2 * _COMBINE_V2_TOKEN_STRIDE_BYTES
+    )
+    grant_offset = done_offset + done_bytes
+    grant_bytes = (
+        _COMBINE_V2_EPOCH_COUNT
+        * _COMBINE_V2_CORE_COUNT
+        * 2
+        * 7
+        * _COMBINE_V2_GRANT_SLOT_BYTES
+    )
+    control_source_offset = grant_offset + grant_bytes
+    control_source_bytes = _COMBINE_V2_CORE_COUNT * 2 * _COMBINE_V2_TOKEN_STRIDE_BYTES
+    return control_source_offset + control_source_bytes
+
+
+def _format_combine_v2_failure_records(data: bytes, label: str) -> str:
+    summaries = []
+    for index, fields in enumerate(_COMBINE_V2_FAILURE_RECORD.iter_unpack(data)):
+        (
+            magic,
+            status,
+            rank,
+            core,
+            step,
+            peer,
+            lane,
+            qp,
+            cq_status,
+            expected,
+            observed,
+            poison,
+            marker,
+        ) = fields
+        if magic == 0 and marker == 0:
+            continue
+        if (marker & ~1) != _COMBINE_V2_FAILURE_MARKER:
+            summaries.append(f"{label}:index={index},invalid_marker=0x{marker:x}")
+            continue
+        summaries.append(
+            f"{label}:epoch={index // _COMBINE_V2_CORE_COUNT},rank={rank},"
+            f"core={core},magic={magic},status={status},step={step},peer={peer},"
+            f"lane={lane},qp={qp},cq=0x{cq_status:x},expected=0x{expected:x},"
+            f"observed=0x{observed:x},poison={poison},marker=0x{marker:x}"
+        )
+    return "|".join(summaries) if summaries else f"{label}:empty"
 
 
 def _format_dispatch_completion_flags(data: bytes, rank_size: int) -> str:
@@ -572,6 +640,20 @@ class TileXRMoonEPBuffer:
                 flush=True,
             )
 
+    def _debug_plan_status(
+        self, plan: MoonEPPlan, stage: str, *, synchronize: bool
+    ) -> None:
+        if os.environ.get("TILEXR_MOONEP_DEBUG_SYNC_DISPATCH_STATUS", "0") != "1":
+            return
+        if synchronize:
+            self._synchronize_device()
+        self._trace_stage(
+            f"plan_status_{stage}={int(plan.status.item())},epoch={plan.epoch},"
+            f"reduce_status={int(plan.reduce_grad_status.item())},"
+            f"status_ptr=0x{int(plan.status.data_ptr()):x},"
+            f"reduce_status_ptr=0x{int(plan.reduce_grad_status.data_ptr()):x}"
+        )
+
     def _retain(self, plan: MoonEPPlan, *values: Any) -> None:
         self._quiesced = False
         self._pending_refs.append((plan, *values))
@@ -732,6 +814,32 @@ class TileXRMoonEPBuffer:
             )
         )
         return "|".join(summaries) if summaries else "no-error-record"
+
+    def _combine_v2_failure_summary(self) -> str:
+        raw = self.context._dispatch_workspace_owner
+        if raw is None:
+            return "workspace-unavailable"
+        aligned_offset = self.context._dispatch_workspace_ptr - int(raw.data_ptr())
+        record_bytes = (
+            _COMBINE_V2_EPOCH_COUNT
+            * _COMBINE_V2_CORE_COUNT
+            * _COMBINE_V2_FAILURE_RECORD.size
+        )
+        summaries = []
+        for label, h, element_bytes in (
+            ("hidden", self.context.hidden_size, 2),
+            ("weight", 1, 4),
+        ):
+            failure_offset = _combine_v2_failure_offset(
+                self.context.nv_s, h, element_bytes
+            )
+            data = bytes(
+                raw.narrow(
+                    0, aligned_offset + failure_offset, record_bytes
+                ).detach().cpu().tolist()
+            )
+            summaries.append(_format_combine_v2_failure_records(data, label))
+        return "|".join(summaries)
 
     def _empty(self, shape: tuple[int, ...], dtype):
         return self._torch.empty(
@@ -1004,6 +1112,8 @@ class TileXRMoonEPBuffer:
             registered_workspace_bytes=self.context.dispatch_workspace[1],
         )
         self._trace_stage("dispatch_kernel_launch_end")
+        if dispatch_direction == "reverse":
+            self._debug_plan_status(plan, "after_reverse_dispatch", synchronize=True)
         if (
             flag_dump_enabled
             and flag_dump_mode == "all"
@@ -1182,6 +1292,17 @@ class TileXRMoonEPBuffer:
             registered_workspace_bytes=self.context.dispatch_workspace[1],
         )
         self._trace_stage(f"combine_v{combine_version}_launch_end")
+        if (
+            combine_version == 2
+            and os.environ.get("TILEXR_MOONEP_DEBUG_SYNC_COMBINE", "0") == "1"
+        ):
+            self._trace_stage("combine_v2_sync_begin")
+            self._synchronize_device()
+            self._trace_stage("combine_v2_sync_end")
+            self._debug_plan_status(plan, "after_combine_v2", synchronize=False)
+            self._trace_stage(
+                f"combine_v2_failures={self._combine_v2_failure_summary()}"
+            )
         if combine_version == 1:
             self._expect_status(plan, 0)
         event = self._record_event() if async_finish else None
@@ -1255,6 +1376,7 @@ class TileXRMoonEPBuffer:
     ):
         self._require_open()
         self._validate_plan(plan)
+        self._debug_plan_status(plan, "reduce_grad_entry", synchronize=True)
         gradients = ProjectionBuffers(
             full_gate_grad,
             full_up_grad,
@@ -1273,6 +1395,9 @@ class TileXRMoonEPBuffer:
                 getattr(gradients, full_name)[begin:end].copy_(
                     getattr(gradients, reduce_name)[self.context.planner_group_rank]
                 )
+            self._debug_plan_status(
+                plan, "after_reduce_grad_legacy_copy", synchronize=True
+            )
 
         self.runtime._acquire_reduce_grad(self._reduce_grad_owner_token)
         self._reduce_grad_token_held = True
@@ -1301,6 +1426,7 @@ class TileXRMoonEPBuffer:
                 self.wait_iterations,
                 requested_udma_chunk_bytes=self.requested_udma_chunk_bytes,
             )
+            self._debug_plan_status(plan, "after_reduce_grad_kernel", synchronize=True)
             self._reduce_grad_inflight = True
             if all(value is not None for value in legacy_buffers):
                 for value in legacy_buffers:

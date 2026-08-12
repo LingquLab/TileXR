@@ -14,6 +14,8 @@ struct PrefetchWeightParams {
     void *up = nullptr;
     void *down = nullptr;
     int32_t *status = nullptr;
+    void *debug = nullptr;
+    uint64_t debugRecordCount = 0;
     aclrtStream stream = nullptr;
 };
 
