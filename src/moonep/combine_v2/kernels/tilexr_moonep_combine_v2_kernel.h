@@ -45,8 +45,11 @@ constexpr uint32_t kWqeContextBytes = 256U;
 constexpr uint32_t kSendBufferBytes = kDstSlotBytes + kTotalIssueBytes +
     2U * kSelectionIndexBytes + 2U * kSelectionMaskBytes + kWqeContextBytes +
     2U * TileXRMoonEp::kMoonEpCombineV2SelfRelayHalfBytes;
-constexpr uint32_t kReduceRouteBatch = 4U;
-constexpr uint32_t kReduceTileElements = 4096U;
+constexpr uint32_t kReduceMaxInputBuffers = 8U;
+constexpr uint32_t kReduceOutputBuffers = 2U;
+constexpr uint32_t kReduceMaxRowBytes = 14U * 1024U;
+constexpr uint32_t kReduceMaxRowElements =
+    kReduceMaxRowBytes / sizeof(bfloat16_t);
 constexpr uint64_t kOperationTimeoutCycles = 10000000000ULL;
 constexpr uint32_t kPollNoCompletion = UINT32_MAX;
 constexpr uint32_t kPollInvalidState = UINT32_MAX - 1U;
@@ -372,7 +375,11 @@ private:
     __aicore__ inline bool SubmitSelfGrant(uint32_t step);
     __aicore__ inline bool SendSelfStep(uint32_t peer, uint32_t step);
     __aicore__ inline bool WaitInboundDone();
-    __aicore__ inline void InitReduceBuffers();
+    __aicore__ inline void InitReduceBuffers(uint32_t inputBufferNum,
+        uint32_t inputSlotBytes, uint32_t floatRowBytes,
+        uint32_t outputSlotBytes);
+    __aicore__ inline void CopyReduceInput(uint64_t workOrdinal,
+        int64_t tokenBegin, uint64_t rowCount);
     __aicore__ inline bool ReduceHidden();
     __aicore__ inline uint64_t LoadToken(__gm__ uint64_t *token);
     __aicore__ inline void PublishFailureAndConverge();
@@ -438,7 +445,7 @@ private:
     TBuf<QuePosition::VECCALC> wqeIssueBuf_;
     TBuf<QuePosition::VECCALC> wqeContextBuf_;
     TQue<QuePosition::VECIN, 1> selfCopyQueue_;
-    TQue<QuePosition::VECIN, 1> reduceInputQueue_;
+    TQue<QuePosition::VECIN, kReduceMaxInputBuffers> reduceInputQueue_;
     TQue<QuePosition::VECOUT, 1> reduceOutputQueue_;
     TBuf<QuePosition::VECCALC> reduceRowBuf_;
     TBuf<QuePosition::VECCALC> reduceAccumulatorBuf_;
@@ -1716,20 +1723,51 @@ __aicore__ inline bool MoonEpCombineV2::WaitInboundDone()
     return true;
 }
 
-__aicore__ inline void MoonEpCombineV2::InitReduceBuffers()
+__aicore__ inline void MoonEpCombineV2::InitReduceBuffers(
+    uint32_t inputBufferNum, uint32_t inputSlotBytes,
+    uint32_t floatRowBytes, uint32_t outputSlotBytes)
 {
-    constexpr uint32_t inputBytes = kReduceRouteBatch *
-        kReduceTileElements * sizeof(bfloat16_t);
-    constexpr uint32_t outputBytes =
-        kReduceTileElements * sizeof(bfloat16_t);
-    constexpr uint32_t floatBytes = kReduceTileElements * sizeof(float);
-    static_assert(inputBytes + outputBytes + 2U * floatBytes <= kFullUbBytes,
-        "Combine V2 reduction buffers exceed UB");
+    constexpr uint32_t maxFloatRowBytes =
+        kReduceMaxRowElements * sizeof(float);
+    static_assert(kReduceMaxInputBuffers * kReduceMaxRowBytes +
+            2U * maxFloatRowBytes +
+            kReduceOutputBuffers * kReduceMaxRowBytes <= kFullUbBytes,
+        "Combine V2 multi-buffer reduction exceeds UB");
     pipe_->Reset();
-    pipe_->InitBuffer(reduceInputQueue_, 1U, inputBytes);
-    pipe_->InitBuffer(reduceOutputQueue_, 1U, outputBytes);
-    pipe_->InitBuffer(reduceRowBuf_, floatBytes);
-    pipe_->InitBuffer(reduceAccumulatorBuf_, floatBytes);
+    pipe_->InitBuffer(reduceInputQueue_, inputBufferNum, inputSlotBytes);
+    pipe_->InitBuffer(reduceOutputQueue_, kReduceOutputBuffers,
+        outputSlotBytes);
+    pipe_->InitBuffer(reduceRowBuf_, floatRowBytes);
+    pipe_->InitBuffer(reduceAccumulatorBuf_, floatRowBytes);
+}
+
+__aicore__ inline void MoonEpCombineV2::CopyReduceInput(
+    uint64_t workOrdinal, int64_t tokenBegin, uint64_t rowCount)
+{
+    const uint64_t topK = static_cast<uint64_t>(topK_);
+    const uint64_t groupOrdinal = workOrdinal / topK;
+    const uint64_t route = workOrdinal % topK;
+    const uint64_t tokenLocal = groupOrdinal / rowCount;
+    const uint64_t hiddenRow = groupOrdinal % rowCount;
+    const uint64_t token = static_cast<uint64_t>(tokenBegin) + tokenLocal;
+    const uint64_t hiddenOffset = hiddenRow * kReduceMaxRowElements;
+    const uint32_t rowElements = static_cast<uint32_t>(
+        static_cast<uint64_t>(h_) - hiddenOffset <
+                kReduceMaxRowElements ?
+            static_cast<uint64_t>(h_) - hiddenOffset :
+            kReduceMaxRowElements);
+
+    LocalTensor<bfloat16_t> inputRow =
+        reduceInputQueue_.AllocTensor<bfloat16_t>();
+    GlobalTensor<bfloat16_t> input;
+    input.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(
+        scratch_ + (token * topK + route) * rowBytes_) + hiddenOffset,
+        rowElements);
+    const DataCopyExtParams copyIn {
+        1U, rowElements * sizeof(bfloat16_t), 0U, 0U, 0U};
+    const DataCopyPadExtParams<bfloat16_t> pad {false, 0U, 0U, 0U};
+    DataCopyPad(inputRow, input, copyIn, pad);
+    reduceInputQueue_.EnQue(inputRow);
 }
 
 __aicore__ inline bool MoonEpCombineV2::ReduceHidden()
@@ -1737,78 +1775,103 @@ __aicore__ inline bool MoonEpCombineV2::ReduceHidden()
     if (!reduceHidden_) {
         return true;
     }
-    InitReduceBuffers();
     const int64_t tokenBegin = bs_ * core_ / activeCoreCount_;
     const int64_t tokenEnd = bs_ * (core_ + 1U) / activeCoreCount_;
+    if (tokenBegin >= tokenEnd) {
+        return true;
+    }
+    const uint64_t rowCapacityElements = static_cast<uint64_t>(h_) <
+            kReduceMaxRowElements ?
+        static_cast<uint64_t>(h_) : kReduceMaxRowElements;
+    const uint64_t rowCount = CeilDiv(
+        static_cast<uint64_t>(h_), kReduceMaxRowElements);
+    const uint32_t inputSlotBytes = static_cast<uint32_t>(AlignUp(
+        rowCapacityElements * sizeof(bfloat16_t), kUbAlignBytes));
+    const uint32_t floatRowBytes = static_cast<uint32_t>(AlignUp(
+        rowCapacityElements * sizeof(float), kUbAlignBytes));
+    const uint32_t fixedBytes = 2U * floatRowBytes +
+        kReduceOutputBuffers * inputSlotBytes;
+    if (fixedBytes >= kFullUbBytes) {
+        return false;
+    }
+    const uint64_t totalRouteWorkItems =
+        static_cast<uint64_t>(tokenEnd - tokenBegin) * rowCount *
+        static_cast<uint64_t>(topK_);
+    uint32_t inputBufferNum = static_cast<uint32_t>(
+        (kFullUbBytes - fixedBytes) / inputSlotBytes);
+    inputBufferNum = inputBufferNum < kReduceMaxInputBuffers ?
+        inputBufferNum : kReduceMaxInputBuffers;
+    inputBufferNum = totalRouteWorkItems < inputBufferNum ?
+        static_cast<uint32_t>(totalRouteWorkItems) : inputBufferNum;
+    if (inputBufferNum == 0U) {
+        return false;
+    }
+
+    PipeBarrier<PIPE_ALL>();
+    InitReduceBuffers(inputBufferNum, inputSlotBytes, floatRowBytes,
+        inputSlotBytes);
     LocalTensor<float> row = reduceRowBuf_.Get<float>();
     LocalTensor<float> accumulator = reduceAccumulatorBuf_.Get<float>();
 
-    for (int64_t token = tokenBegin; token < tokenEnd; ++token) {
-        for (int64_t hiddenOffset = 0; hiddenOffset < h_;
-             hiddenOffset += kReduceTileElements) {
-            const int64_t tileElements = h_ - hiddenOffset <
-                    static_cast<int64_t>(kReduceTileElements) ?
-                h_ - hiddenOffset : static_cast<int64_t>(kReduceTileElements);
-            const uint32_t inputStrideElements =
-                TileXRMoonEp::MoonEpCombineV2ReduceInputStrideElements(
-                    static_cast<uint32_t>(tileElements));
+    uint64_t issueOrdinal = 0U;
+    for (; issueOrdinal < inputBufferNum; ++issueOrdinal) {
+        CopyReduceInput(issueOrdinal, tokenBegin, rowCount);
+    }
+
+    const uint64_t topK = static_cast<uint64_t>(topK_);
+    for (uint64_t consumeOrdinal = 0U;
+        consumeOrdinal < totalRouteWorkItems; ++consumeOrdinal) {
+        const uint64_t groupOrdinal = consumeOrdinal / topK;
+        const uint64_t route = consumeOrdinal % topK;
+        const uint64_t tokenLocal = groupOrdinal / rowCount;
+        const uint64_t hiddenRow = groupOrdinal % rowCount;
+        const uint64_t hiddenOffset = hiddenRow * kReduceMaxRowElements;
+        const uint32_t rowElements = static_cast<uint32_t>(
+            static_cast<uint64_t>(h_) - hiddenOffset <
+                    kReduceMaxRowElements ?
+                static_cast<uint64_t>(h_) - hiddenOffset :
+                kReduceMaxRowElements);
+
+        LocalTensor<bfloat16_t> inputRow =
+            reduceInputQueue_.DeQue<bfloat16_t>();
+        if (route == 0U) {
             Duplicate(accumulator, 0.0f,
-                static_cast<int32_t>(tileElements));
+                static_cast<int32_t>(rowElements));
             PipeBarrier<PIPE_V>();
-            for (int64_t topkBegin = 0; topkBegin < topK_;
-                 topkBegin += kReduceRouteBatch) {
-                const int64_t batchRoutes = topK_ - topkBegin <
-                        static_cast<int64_t>(kReduceRouteBatch) ?
-                    topK_ - topkBegin : static_cast<int64_t>(kReduceRouteBatch);
-                LocalTensor<bfloat16_t> inputRows =
-                    reduceInputQueue_.AllocTensor<bfloat16_t>();
-                for (int64_t batchRoute = 0; batchRoute < batchRoutes;
-                     ++batchRoute) {
-                    const int64_t route = token * topK_ + topkBegin + batchRoute;
-                    GlobalTensor<bfloat16_t> input;
-                    input.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(
-                        scratch_ + static_cast<uint64_t>(route) * rowBytes_) +
-                            hiddenOffset, tileElements);
-                    const DataCopyExtParams copyIn {
-                        1U, static_cast<uint32_t>(
-                            tileElements * sizeof(bfloat16_t)), 0U, 0U, 0U};
-                    const DataCopyPadExtParams<bfloat16_t> pad {
-                        false, 0U, 0U, 0U};
-                    DataCopyPad(inputRows[batchRoute * inputStrideElements],
-                        input, copyIn, pad);
-                }
-                reduceInputQueue_.EnQue(inputRows);
-                inputRows = reduceInputQueue_.DeQue<bfloat16_t>();
-
-                for (int64_t batchRoute = 0; batchRoute < batchRoutes;
-                     ++batchRoute) {
-                    Cast(row, inputRows[batchRoute * inputStrideElements],
-                        RoundMode::CAST_NONE,
-                        static_cast<int32_t>(tileElements));
-                    PipeBarrier<PIPE_V>();
-                    Add(accumulator, accumulator, row,
-                        static_cast<int32_t>(tileElements));
-                    PipeBarrier<PIPE_V>();
-                }
-                reduceInputQueue_.FreeTensor(inputRows);
-            }
-
-            LocalTensor<bfloat16_t> outputRow =
-                reduceOutputQueue_.AllocTensor<bfloat16_t>();
-            Cast(outputRow, accumulator, RoundMode::CAST_RINT,
-                static_cast<int32_t>(tileElements));
-            reduceOutputQueue_.EnQue(outputRow);
-            outputRow = reduceOutputQueue_.DeQue<bfloat16_t>();
-            GlobalTensor<bfloat16_t> output;
-            output.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(
-                workspace_ + outputOffset_) + token * h_ + hiddenOffset,
-                tileElements);
-            const DataCopyExtParams copyOut {
-                1U, static_cast<uint32_t>(
-                    tileElements * sizeof(bfloat16_t)), 0U, 0U, 0U};
-            DataCopyPad(output, outputRow, copyOut);
-            reduceOutputQueue_.FreeTensor(outputRow);
         }
+        Cast(row, inputRow, RoundMode::CAST_NONE,
+            static_cast<int32_t>(rowElements));
+        PipeBarrier<PIPE_V>();
+        Add(accumulator, accumulator, row,
+            static_cast<int32_t>(rowElements));
+        PipeBarrier<PIPE_V>();
+        reduceInputQueue_.FreeTensor(inputRow);
+
+        if (issueOrdinal < totalRouteWorkItems) {
+            CopyReduceInput(issueOrdinal, tokenBegin, rowCount);
+            ++issueOrdinal;
+        }
+
+        if (route + 1U != topK) {
+            continue;
+        }
+        LocalTensor<bfloat16_t> outputRow =
+            reduceOutputQueue_.AllocTensor<bfloat16_t>();
+        Cast(outputRow, accumulator, RoundMode::CAST_RINT,
+            static_cast<int32_t>(rowElements));
+        reduceOutputQueue_.EnQue(outputRow);
+        outputRow = reduceOutputQueue_.DeQue<bfloat16_t>();
+        GlobalTensor<bfloat16_t> output;
+        const uint64_t token =
+            static_cast<uint64_t>(tokenBegin) + tokenLocal;
+        output.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(
+            workspace_ + outputOffset_) + token *
+                static_cast<uint64_t>(h_) + hiddenOffset,
+            rowElements);
+        const DataCopyExtParams copyOut {
+            1U, rowElements * sizeof(bfloat16_t), 0U, 0U, 0U};
+        DataCopyPad(output, outputRow, copyOut);
+        reduceOutputQueue_.FreeTensor(outputRow);
     }
     PipeBarrier<PIPE_ALL>();
     return true;
