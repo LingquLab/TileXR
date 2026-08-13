@@ -74,6 +74,56 @@ Run the CPU/fake-backend suite without NPU hardware:
 python -m pytest tests/moonep/python -q
 ```
 
+## Standalone PrefetchWeight Benchmark
+
+`prefetch_weight_benchmark.py` compares only the PrefetchWeight stage. It uses
+eight physical ranks by default in the validated EP8 case: 32 experts, four
+experts and four remote slots per rank, BF16 `H=7168`, and `Hf=2048`. Each slot
+copies three 28 MiB projections, so one rank transfers 336 MiB per measured
+iteration.
+
+Build and install the MoonEP targets, then run TileXR with the Python module
+launcher. The `torchrun` executable can contain a stale Conda shebang on shared
+hosts, so it is intentionally not used here.
+
+```bash
+source scripts/common_env.sh
+export TILEXR_INSTALL_PREFIX="$PWD/install"
+export PYTHONPATH="$PWD/integrations/moonep_torch:$PWD:${PYTHONPATH:-}"
+export TILEXR_COMM_ID=127.0.0.1:10067
+
+python -m torch.distributed.run --standalone --nproc-per-node=8 \
+  tools/moonep/prefetch_weight_benchmark.py \
+  --backend tilexr \
+  --install-prefix "$TILEXR_INSTALL_PREFIX" \
+  --output-dir output/prefetch-weight-tilexr \
+  --warmup 5 --iterations 20 --repeats 3 \
+  --tilexr-commit "$(git rev-parse HEAD)"
+```
+
+Run the native MoonEP comparison with the same case and iteration counts:
+
+```bash
+python -m torch.distributed.run --standalone --nproc-per-node=8 \
+  tools/moonep/prefetch_weight_benchmark.py \
+  --backend native \
+  --native-root /path/to/ascend-moonep \
+  --output-dir output/prefetch-weight-native \
+  --warmup 5 --iterations 20 --repeats 3 \
+  --native-commit "$(git -C /path/to/ascend-moonep rev-parse HEAD)"
+```
+
+Both backends initialize and validate exact BF16 slot contents before timing.
+Each sample uses NPU events around only the stage launch, and rank 0 aggregates
+the slowest rank for every iteration. Allocation, memory registration, barriers,
+correctness checks, and status reads are excluded. Raw per-rank samples and the
+aggregate are retained in `rank_<rank>.json` and `summary.json`. Event readings
+at or below 1 us remain in `cross_rank_max_us` for diagnosis but are excluded
+from `valid_cross_rank_max_us`, P50, P99, and effective bandwidth.
+
+The validated Ascend950 results and known experimental dead ends are recorded in
+`docs/moonep/PREFETCH_WEIGHT_PERFORMANCE.md`.
+
 ## Public API NPU E2E Tool
 
 `test_npu_e2e.py` is a standalone base test tool for the upstream-compatible

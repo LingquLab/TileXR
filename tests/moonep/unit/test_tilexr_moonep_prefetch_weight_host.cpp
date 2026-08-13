@@ -96,11 +96,13 @@ void TestLaunch()
         seenContext.layout.up.registryOffset == 0x1000 &&
         seenContext.layout.down.registryOffset == 0x2000 &&
         seenContext.layout.qpNum == 4 && seenContext.layout.blockDim == 4 &&
+        seenContext.layout.physicalQpMap == UINT64_C(0x03020100) &&
         seenContext.layout.expertsPerRank == 4,
         "prefetch UDMA layout mismatch");
 
     Reset();
     qpNum = 32;
+    commArgs.extraFlag |= TileXR::ExtraFlag::UDMA_SHARED_QP;
     plan = Plan();
     gate = Weight(0x100000, 4, 8);
     up = Weight(0x101000, 4, 16);
@@ -110,8 +112,30 @@ void TestLaunch()
         TileXRMoonEp::TileXRMoonEpRunPrefetchWeightV1(&args, stream),
         TILEXR_MOONEP_SUCCESS);
     Check(launchCalls == 1 && seenContext.layout.qpNum == 32 &&
-        seenContext.layout.blockDim == 4,
+        seenContext.layout.blockDim == 4 &&
+        TileXRMoonEp::TileXRMoonEpPrefetchWeightPhysicalQp(
+            seenContext.layout.physicalQpMap, 0) == 0 &&
+        TileXRMoonEp::TileXRMoonEpPrefetchWeightPhysicalQp(
+            seenContext.layout.physicalQpMap, 1) == 1 &&
+        TileXRMoonEp::TileXRMoonEpPrefetchWeightPhysicalQp(
+            seenContext.layout.physicalQpMap, 2) == 2 &&
+        TileXRMoonEp::TileXRMoonEpPrefetchWeightPhysicalQp(
+            seenContext.layout.physicalQpMap, 3) == 16,
         "prefetch must cap workers without rejecting the shared-domain QP count");
+
+    uint64_t physicalQpMap = 0;
+    Status("prefetch eight-worker shared QP map",
+        TileXRMoonEp::TileXRMoonEpBuildPrefetchWeightQpMap(
+            8, 32, true, &physicalQpMap), TILEXR_MOONEP_SUCCESS);
+    const uint32_t expectedSharedQps[8] = {0, 1, 2, 3, 4, 5, 16, 17};
+    for (uint32_t worker = 0; worker < 8; ++worker) {
+        Check(TileXRMoonEp::TileXRMoonEpPrefetchWeightPhysicalQp(
+            physicalQpMap, worker) == expectedSharedQps[worker],
+            "prefetch eight-worker shared QP mapping mismatch");
+    }
+    Status("prefetch malformed shared QP domain",
+        TileXRMoonEp::TileXRMoonEpBuildPrefetchWeightQpMap(
+            4, 4, true, &physicalQpMap), TILEXR_MOONEP_ERROR_INVALID_ARGUMENT);
 
     Reset();
     qpNum = 3;

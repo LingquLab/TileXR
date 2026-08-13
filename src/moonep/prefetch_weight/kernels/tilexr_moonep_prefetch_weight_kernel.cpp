@@ -19,7 +19,7 @@ public:
         uint64_t gateOffset, uint64_t upOffset, uint64_t downOffset,
         uint32_t gateRowBytes, uint32_t upRowBytes, uint32_t downRowBytes,
         int32_t rank, int32_t rankSize, int64_t expertsPerRank,
-        int64_t prefetchSlots, uint32_t qpNum)
+        int64_t prefetchSlots, uint32_t qpNum, uint64_t physicalQpMap)
     {
         args_ = reinterpret_cast<__gm__ TileXR::CommArgs *>(commArgs);
         expertsToCopy_ = reinterpret_cast<__gm__ int32_t *>(expertsToCopy);
@@ -42,6 +42,8 @@ public:
         worker_ = static_cast<uint32_t>(get_block_idx()) * subBlockCount +
             static_cast<uint32_t>(get_subblockid());
         workerCount_ = static_cast<uint32_t>(get_block_num()) * subBlockCount;
+        physicalQp_ = static_cast<uint32_t>(
+            (physicalQpMap >> (worker_ * 8U)) & UINT64_C(0xFF));
         pipe_.InitBuffer(wqeBuf_, TileXR::TILEXR_UDMA_WQE_SCRATCH_BYTES);
     }
 
@@ -100,7 +102,8 @@ private:
             prefetchSlots_ > expertsPerRank_ ||
             rank_ < 0 || rank_ >= rankSize_ ||
             rankSize_ > static_cast<int32_t>(kMaxTrackedRankSize) ||
-            workerCount_ == 0 || worker_ >= workerCount_ || worker_ >= qpNum_ ||
+            workerCount_ == 0 || worker_ >= workerCount_ ||
+            physicalQp_ >= qpNum_ ||
             !TileXR::UDMARegistryEnabled(args_) || args_->rank != rank_ ||
             args_->rankSize != rankSize_) {
             return kPrefetchWeightStatusInvalidRuntime;
@@ -156,7 +159,8 @@ private:
                 expert % static_cast<int32_t>(expertsPerRank_);
             MarkPeer(usedPeers, owner);
             __gm__ TileXR::UDMAWQCtx *queue = TileXR::UDMAGetWQCtx(
-                TileXR::GetUDMAInfo(args_), static_cast<uint32_t>(owner), worker_);
+                TileXR::GetUDMAInfo(args_), static_cast<uint32_t>(owner),
+                physicalQp_);
             const uint32_t completionQueue = TrackCompletionQueue(
                 queue->wqeCntAddr, owner, completionQueueIds, completionQueuePeers,
                 completionTargets, completionQueueCount, workerStatus);
@@ -170,8 +174,8 @@ private:
                     static_cast<uint64_t>(expertsPerRank_ + slot) *
                         rowBytes_[projection];
                 const uint32_t submitStatus = TileXR::UDMAGetNbiOnQp<uint8_t>(
-                    args_, wqeScratch, owner, worker_, destination, sourceOffset,
-                    rowBytes_[projection]);
+                    args_, wqeScratch, owner, physicalQp_, destination,
+                    sourceOffset, rowBytes_[projection]);
                 if (submitStatus != TileXR::TILEXR_UDMA_STATUS_SUCCESS &&
                     workerStatus == 0) {
                     workerStatus = kPrefetchWeightStatusSubmitErrorBase +
@@ -224,7 +228,7 @@ private:
                 continue;
             }
             const uint32_t cqStatus = TileXR::UDMAQuietStatusOnQpUntil(
-                args_, peer, worker_, completionTargets[queue]);
+                args_, peer, physicalQp_, completionTargets[queue]);
             if (cqStatus != 0 && workerStatus == 0) {
                 workerStatus = kPrefetchWeightStatusCqErrorBase + (cqStatus & 0xFFU);
             }
@@ -251,6 +255,7 @@ private:
     uint32_t qpNum_ = 0;
     uint32_t worker_ = 0;
     uint32_t workerCount_ = 0;
+    uint32_t physicalQp_ = 0;
     AscendC::TPipe pipe_;
     AscendC::TBuf<AscendC::QuePosition::VECCALC> wqeBuf_;
 };
@@ -263,13 +268,14 @@ extern "C" __global__ __aicore__ void tilexr_moonep_prefetch_weight_kernel(
     GM_ADDR status, uint64_t gateOffset, uint64_t upOffset, uint64_t downOffset,
     uint64_t gateRowBytes, uint64_t upRowBytes, uint64_t downRowBytes,
     int64_t rank, int64_t rankSize, int64_t expertsPerRank,
-    int64_t prefetchSlots, uint64_t qpNum)
+    int64_t prefetchSlots, uint64_t qpNum, uint64_t physicalQpMap)
 {
     TileXRMoonEp::Kernel::PrefetchWeightKernel op;
     op.Init(commArgs, expertsToCopy, gate, up, down, status,
         gateOffset, upOffset, downOffset, static_cast<uint32_t>(gateRowBytes),
         static_cast<uint32_t>(upRowBytes), static_cast<uint32_t>(downRowBytes),
         static_cast<int32_t>(rank), static_cast<int32_t>(rankSize),
-        expertsPerRank, prefetchSlots, static_cast<uint32_t>(qpNum));
+        expertsPerRank, prefetchSlots, static_cast<uint32_t>(qpNum),
+        physicalQpMap);
     op.Process();
 }

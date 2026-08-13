@@ -10,6 +10,8 @@ namespace TileXRMoonEp {
 
 constexpr uint32_t kPrefetchWeightMaxWorkers = 8;
 constexpr uint32_t kPrefetchWeightAlignment = 64;
+constexpr uint32_t kPrefetchWeightSharedQpCount = 32;
+constexpr uint32_t kPrefetchWeightSecondClosQpBase = 16;
 
 struct PrefetchWeightProjectionLayout {
     GM_ADDR localBase = nullptr;
@@ -27,7 +29,19 @@ struct PrefetchWeightLayout {
     int32_t rankSize = 0;
     uint32_t qpNum = 0;
     uint32_t blockDim = 0;
+    uint64_t physicalQpMap = 0;
 };
+
+int TileXRMoonEpBuildPrefetchWeightQpMap(uint32_t workers, uint32_t qpNum,
+    bool sharedQps, uint64_t *physicalQpMap);
+
+inline uint32_t TileXRMoonEpPrefetchWeightPhysicalQp(
+    uint64_t physicalQpMap, uint32_t worker)
+{
+    return worker < kPrefetchWeightMaxWorkers ?
+        static_cast<uint32_t>((physicalQpMap >> (worker * 8U)) & UINT64_C(0xFF)) :
+        UINT32_MAX;
+}
 
 int TileXRMoonEpBuildPrefetchWeightLayout(
     const TileXRMoonEpPrefetchWeightArgsV1 &args,

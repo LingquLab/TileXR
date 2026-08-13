@@ -101,6 +101,33 @@ bool RangesOverlap(uint64_t lhsBegin, uint64_t lhsEnd,
 
 } // namespace
 
+int TileXRMoonEpBuildPrefetchWeightQpMap(uint32_t workers, uint32_t qpNum,
+    bool sharedQps, uint64_t *physicalQpMap)
+{
+    if (physicalQpMap == nullptr || !SupportedWorkerCount(workers) ||
+        workers > qpNum ||
+        (sharedQps && qpNum != kPrefetchWeightSharedQpCount)) {
+        return TILEXR_MOONEP_ERROR_INVALID_ARGUMENT;
+    }
+
+    uint64_t packed = 0;
+    for (uint32_t worker = 0; worker < workers; ++worker) {
+        uint32_t physicalQp = worker;
+        if (sharedQps && workers == 4U && worker == 3U) {
+            physicalQp = kPrefetchWeightSecondClosQpBase;
+        } else if (sharedQps && workers == kPrefetchWeightMaxWorkers &&
+            worker >= 6U) {
+            physicalQp = kPrefetchWeightSecondClosQpBase + worker - 6U;
+        }
+        if (physicalQp >= qpNum || physicalQp > UINT8_MAX) {
+            return TILEXR_MOONEP_ERROR_INVALID_ARGUMENT;
+        }
+        packed |= static_cast<uint64_t>(physicalQp) << (worker * 8U);
+    }
+    *physicalQpMap = packed;
+    return TILEXR_MOONEP_SUCCESS;
+}
+
 int TileXRMoonEpBuildPrefetchWeightLayout(
     const TileXRMoonEpPrefetchWeightArgsV1 &args,
     const TileXR::CommArgs &commArgs,
@@ -157,6 +184,13 @@ int TileXRMoonEpBuildPrefetchWeightLayout(
     }
     while (workers > static_cast<uint32_t>(args.plan->b)) {
         workers >>= 1;
+    }
+    const bool sharedQps =
+        (commArgs.extraFlag & TileXR::ExtraFlag::UDMA_SHARED_QP) != 0U;
+    if (TileXRMoonEpBuildPrefetchWeightQpMap(
+            workers, qpNum, sharedQps, &next.physicalQpMap) !=
+        TILEXR_MOONEP_SUCCESS) {
+        return TILEXR_MOONEP_ERROR_INVALID_ARGUMENT;
     }
     next.expertsPerRank = expertsPerRank;
     next.prefetchSlots = args.plan->b;

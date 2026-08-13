@@ -207,6 +207,10 @@ int main()
     Contains("prefetch launch", prefetchLaunch, "LaunchRegisteredMoonEpKernel(");
     Excludes("prefetch launch", prefetchLaunch, "rtKernelLaunchWithFlagV2");
     Contains("prefetch launch", prefetchLaunch, "kPrefetchWeightKernelSignature");
+    Contains("prefetch launch", prefetchLaunch,
+        "context.layout.qpNum, context.layout.physicalQpMap");
+    Contains("prefetch launch", prefetchLaunch,
+        "18U * sizeof(uint64_t)");
     Contains("prefetch kernel", prefetchKernel,
         "extern \"C\" __global__ __aicore__ void tilexr_moonep_prefetch_weight_kernel");
     Contains("prefetch kernel", prefetchKernel, "expertsToCopy");
@@ -218,6 +222,11 @@ int main()
     Excludes("prefetch kernel", prefetchKernel, "e_ + slot");
     Contains("prefetch kernel", prefetchKernel, "UDMAGetNbiOnQp");
     Contains("prefetch kernel", prefetchKernel, "UDMAQuietStatusOnQpUntil");
+    Contains("prefetch kernel", prefetchKernel, "physicalQp_");
+    Contains("prefetch kernel", prefetchKernel,
+        "owner, physicalQp_, destination");
+    Contains("prefetch kernel", prefetchKernel,
+        "peer, physicalQp_, completionTargets[queue]");
     Contains("prefetch kernel", prefetchKernel, "completionQueueIds");
     Contains("prefetch kernel", prefetchKernel,
         "++completionTargets[completionQueue]");
