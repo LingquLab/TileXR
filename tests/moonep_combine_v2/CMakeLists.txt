@@ -117,6 +117,7 @@ if(TARGET tilexr-moonep-combine-v2 AND TARGET tile-comm)
         demo/tilexr_moonep_combine_v2_hardware_probe.cpp)
     target_include_directories(tilexr_moonep_combine_v2_perf PRIVATE
         ${TILEXR_ROOT}/src/include
+        ${TILEXR_ROOT}/src/moonep/common
         ${TILEXR_ROOT}/src/moonep/combine_v2/common
         ${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc
         ${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc/runtime

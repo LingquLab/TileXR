@@ -9,8 +9,7 @@ bandwidth for both times.
 
 ## Scope
 
-- Add a runtime expert-count option to the C++ benchmark, Bash launcher, and
-  PowerShell orchestration entry.
+- Add a runtime expert-count option to the C++ benchmark and Bash launchers.
 - Accept the operator-supported world sizes through 128 ranks.
 - Compile on cabinet 2 CPU1 (`141.61.52.35`).
 - Flat-sync runtime artifacts from that server to all 16 cabinet 0/2 hosts.
@@ -27,7 +26,7 @@ which remains `BS * K * H * sizeof(BF16)` per rank.
    configured value.
 2. Update `tools/moonep/run_combine_v2_perf_multihost.sh` to accept and forward
    `--experts`, validate 128P, and emit the configured value in final results.
-3. Update `tools/moonep/run_combine_v2_perf_cluster.ps1` and the performance
+3. Update `tools/moonep/run_combine_v2_perf_cluster.sh` and the performance
    guide with the same interface and semantics.
 4. Use the cabinet mapping from `D:\3_codex\512P环境信息.txt` to construct the
    16-host, 128-rank hostfile in cabinet 0 then cabinet 2 order.

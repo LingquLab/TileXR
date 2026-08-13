@@ -49,7 +49,7 @@ max_alg_bw_GBps = data_bytes / max_ms / 1e6
 
 | 文件 | 执行位置 | 职责 |
 | --- | --- | --- |
-| `tools/moonep/run_combine_v2_perf_cluster.ps1` | 本地 Windows | 完整入口：Mutagen flush、远端编译、平铺同步、启动测试 |
+| `tools/moonep/run_combine_v2_perf_cluster.sh` | 主服务器 | 完整入口：远端编译、平铺同步、启动测试 |
 | `tools/moonep/build_combine_v2_perf.sh` | 主服务器 | 编译 benchmark，整理 `bin/` 和 `lib64/`，检查 RPATH 和 MPI 依赖 |
 | `tools/moonep/sync_combine_v2_perf_runtime.sh` | 主服务器 | 主服务器直接 rsync 到 hostfile 中的每台服务器并校验 SHA-256 |
 | `tools/moonep/run_combine_v2_perf_multihost.sh` | 主服务器 | NPU 预检、rank 映射、SSH 拉起、日志校验和性能聚合 |
@@ -81,8 +81,8 @@ max_alg_bw_GBps = data_bytes / max_ms / 1e6
 
 开始前确认：
 
-1. 本地 Windows 已安装 `mutagen` 和 `ssh`。
-2. 本地能够免密 SSH 登录主服务器。
+1. 本地已安装 `mutagen`、`scp` 和 `ssh`。
+2. 本地能够免密 SSH 登录主服务器，并可用 `scp` 上传临时 bash 入口到测试目录。
 3. 主服务器能够免密 SSH 登录 hostfile 中的每一台服务器。
 4. 所有服务器存在兼容的 CANN 和驱动；CANN 路径按第 4.2 节的环境规则选择，
    不要求所有环境统一使用 B150。
@@ -176,99 +176,102 @@ WORKER_7_IP:8
 
 每个主服务器和远端根目录使用独立会话，不要重定向已有的无关会话：
 
-```powershell
-mutagen sync create `
-  --name tilexr-combine-v2-64p `
-  --mode one-way-replica `
-  --ignore-vcs `
-  --ignore build `
-  --ignore "build_*" `
-  --ignore install `
-  --compression zstandard `
-  "D:\3_codex\TileXR-PR-DEBUG\TileXR" `
+```bash
+mutagen sync create \
+  --name tilexr-combine-v2-64p \
+  --mode one-way-replica \
+  --ignore-vcs \
+  --ignore build \
+  --ignore "build_*" \
+  --ignore install \
+  --compression zstandard \
+  "D:\3_codex\TileXR-PR-DEBUG\TileXR" \
   "root@PRIMARY_IP:/home/h00580772/tilexr_combine_v2/source"
 ```
 
-完整入口会先检查会话目标是否严格匹配：
+运行前由本地手动 flush 源码会话：
 
-```text
-<ssh-user>@<primary-host>:<remote-root>/source
+```bash
+mutagen sync flush tilexr-combine-v2-64p
 ```
 
-目标不匹配或会话存在同步问题时，流程会在编译前停止。
+源码只通过 Mutagen 同步到主服务器，不同步到计算节点。测试入口不再封装
+Mutagen；需要先确认会话目标是 `<ssh-user>@<primary-host>:<remote-root>/source`。
 
 ## 7. 完整流程
 
 ### 7.1 16P 单 BS
 
-在本地仓库根目录执行：
+先在本地仓库根目录将服务器端入口上传到主服务器测试目录，再通过 SSH 在主服务器上执行：
 
-```powershell
-powershell -ExecutionPolicy Bypass -File `
-  tools\moonep\run_combine_v2_perf_cluster.ps1 `
-  -MutagenSession tilexr-combine-v2-16p-cdf2b01-226 `
-  -PrimaryHost 141.61.49.226 `
-  -RemoteRoot /home/h00580772/tilexr_combine_v2_16p_cdf2b01_20260811 `
-  -Bs 128
+```bash
+scp tools/moonep/run_combine_v2_perf_cluster.sh \
+  root@141.61.49.226:/home/h00580772/tilexr_combine_v2_16p_cdf2b01_20260811/run_combine_v2_perf_cluster.sh
+
+ssh root@141.61.49.226 \
+  "bash /home/h00580772/tilexr_combine_v2_16p_cdf2b01_20260811/run_combine_v2_perf_cluster.sh \
+    --remote-root /home/h00580772/tilexr_combine_v2_16p_cdf2b01_20260811 \
+    --bs 128"
 ```
 
 该命令依次执行：
 
-1. 校验并 flush Mutagen 会话。
-2. 在主服务器配置和增量编译 benchmark。
-3. 检查可执行文件没有 MPI 依赖和 build 目录 RPATH。
-4. 主服务器将 `install/` 直接同步到全部节点。
-5. 每台服务器校验相同的 SHA-256 manifest。
-6. 对全部服务器执行 NPU 占用预检。
-7. 主服务器通过 SSH 并发拉起所有 rank。
-8. 收集逐 rank 结果并输出全局聚合性能。
+1. 在主服务器配置和增量编译 benchmark。
+2. 检查可执行文件没有 MPI 依赖和 build 目录 RPATH。
+3. 主服务器将 `install/` 直接同步到全部节点。
+4. 每台服务器校验相同的 SHA-256 manifest。
+5. 对全部服务器执行 NPU 占用预检。
+6. 主服务器通过 SSH 并发拉起所有 rank。
+7. 收集逐 rank 结果并输出全局聚合性能。
 
 ### 7.2 多 BS 批量测试
 
-```powershell
-powershell -ExecutionPolicy Bypass -File `
-  tools\moonep\run_combine_v2_perf_cluster.ps1 `
-  -MutagenSession tilexr-combine-v2-64p `
-  -PrimaryHost PRIMARY_IP `
-  -RemoteRoot /home/h00580772/tilexr_combine_v2 `
-  -BsList "128,256,512,1024,8192" `
-  -Experts 64 `
-  -Warmup 20 `
-  -Iterations 80
+```bash
+scp tools/moonep/run_combine_v2_perf_cluster.sh \
+  root@PRIMARY_IP:/home/h00580772/tilexr_combine_v2/run_combine_v2_perf_cluster.sh
+
+ssh root@PRIMARY_IP \
+  "bash /home/h00580772/tilexr_combine_v2/run_combine_v2_perf_cluster.sh \
+    --remote-root /home/h00580772/tilexr_combine_v2 \
+    --bs-list 128,256,512,1024,8192 \
+    --experts 64 \
+    --warmup 20 \
+    --iterations 80"
 ```
 
-`-Bs` 与 `-BsList` 互斥。没有指定时默认测试 `BS=128`。
+`--bs` 与 `--bs-list` 互斥。没有指定时默认测试 `BS=128`。
 
 当 `PRIMARY_IP` 和 hostfile 属于 9 号柜或 15 号柜时，上述命令必须额外传入：
 
-```powershell
--CannPath /home/pkg/910_B150/cann-9.1.0
+```bash
+--cann-path /home/pkg/910_B150/cann-9.1.0
 ```
 
 在 `141.61.49.223` 等 A10-64P 节点上不要机械添加该参数，应按第 4.2 节使用
 该节点实际可用且与产物匹配的 CANN。
 
-### 7.3 常用 PowerShell 参数
+### 7.3 常用 Bash 参数
 
 | 参数 | 默认值 | 说明 |
 | --- | --- | --- |
-| `-MutagenSession` | 必填 | 专用 Mutagen 会话名 |
-| `-PrimaryHost` | 必填 | hostfile 第一台服务器 |
-| `-RemoteRoot` | 必填 | 远端任务根目录 |
-| `-Hostfile` | `<RemoteRoot>/hostfile` | 远端 hostfile 绝对路径 |
-| `-CannPath` | `/home/pkg/b061/cann-9.1.T560` | CANN 根目录；该值只是脚本默认值，9/15 号柜必须显式改为 `/home/pkg/910_B150/cann-9.1.0`，223 不强制 B150 |
-| `-Bs` | `128` | 单个 BS 点位 |
-| `-BsList` | 空 | 逗号分隔的多个 BS 点位 |
-| `-Warmup` | `20` | 每个 BS 的预热次数 |
-| `-Iterations` | `80` | 每个 BS 的计时次数，也称 loop 数 |
-| `-Experts` | `64` | 专家总数，必须能被 world size 整除 |
-| `-CommDomain` | `141` | Shared-QP 通信域 |
-| `-CommPort` | `10067` | rank 0 bootstrap 端口 |
-| `-WaitSeconds` | `120` | NPU 最大等待时间 |
-| `-RetrySeconds` | `15` | NPU 占用重试间隔 |
-| `-RankTimeout` | `600` | 每个 rank 的任务超时 |
-| `-BuildJobs` | `16` | 编译并发度 |
-| `-LogFile` | 自动生成 | 主服务器控制日志绝对路径 |
+| `--remote-root` | 必填 | 远端任务根目录 |
+| `--hostfile` | `<remote-root>/hostfile` | 远端 hostfile 绝对路径 |
+| `--source-dir` | `<remote-root>/source` | 远端源码目录 |
+| `--build-dir` | `<remote-root>/build` | 远端构建目录 |
+| `--install-dir` | `<remote-root>/install` | 远端运行产物目录 |
+| `--cann-path` | 当前 `ASCEND_HOME_PATH` 或 toolkit latest | CANN 根目录；9/15 号柜必须显式改为 `/home/pkg/910_B150/cann-9.1.0`，223 不强制 B150 |
+| `--bs` | `128` | 单个 BS 点位 |
+| `--bs-list` | 空 | 逗号分隔的多个 BS 点位 |
+| `--warmup` | `20` | 每个 BS 的预热次数 |
+| `--iterations` | `80` | 每个 BS 的计时次数，也称 loop 数 |
+| `--experts` | `64` | 专家总数，必须能被 world size 整除 |
+| `--comm-domain` | `141` | Shared-QP 通信域 |
+| `--comm-port` | `10067` | rank 0 bootstrap 端口 |
+| `--wait-seconds` | `120` | NPU 最大等待时间 |
+| `--retry-seconds` | `15` | NPU 占用重试间隔 |
+| `--rank-timeout` | `600` | 每个 rank 的任务超时 |
+| `--build-jobs` | `nproc` | 编译并发度 |
+| `--log-file` | 自动生成 | 主服务器控制日志绝对路径 |
 
 ## 8. 免编译快速测试
 
@@ -292,8 +295,8 @@ bash /home/h00580772/tilexr_combine_v2_16p_cdf2b01_20260811/source/tools/moonep/
   --timeout 600
 ```
 
-PowerShell 完整入口当前总会执行一次增量 build；源码未变化时通常很快，但若要
-严格跳过编译，应使用上述服务器端 launcher。
+服务器端完整入口默认会执行一次增量 build；源码未变化时通常很快。若要严格跳过
+编译，可以向完整入口传入 `--skip-build`，或直接使用上述服务器端 launcher。
 
 上述免编译示例针对 A10-64P 的 226/223 环境，因此使用 b061。若目标是 9/15
 号柜，`--cann-path` 必须改为 `/home/pkg/910_B150/cann-9.1.0`，并确认现有
@@ -311,7 +314,7 @@ PowerShell 完整入口当前总会执行一次增量 build；源码未变化时
 
 ### 9.1 本地同步源码
 
-```powershell
+```bash
 mutagen sync flush tilexr-combine-v2-16p-cdf2b01-226
 ```
 
@@ -376,7 +379,7 @@ bash ${REMOTE_ROOT}/source/tools/moonep/sync_combine_v2_perf_runtime.sh \
 1. 在主服务器的 hostfile 中按期望 rank 顺序增加 `IP:slots`。
 2. 配置主服务器到新节点的免密 SSH。
 3. 确认新节点的 CANN、驱动和工具路径满足第 4 节要求。
-4. 重新运行平铺同步或完整 PowerShell 入口。
+4. 重新运行平铺同步或服务器端完整入口。
 5. launcher 会自动把新节点加入 NPU 预检和 rank 映射。
 
 只增加节点且代码不变时不要求重新编译，但必须把当前 `install/` 同步到新节点。
@@ -386,7 +389,7 @@ bash ${REMOTE_ROOT}/source/tools/moonep/sync_combine_v2_perf_runtime.sh \
 1. 创建指向新主服务器 `<RemoteRoot>/source` 的新 Mutagen 会话。
 2. 将 `-PrimaryHost` 改为 hostfile 第一项。
 3. 确认新主服务器存在 hostfile，并能免密 SSH 到全部节点。
-4. 使用新的 `-MutagenSession` 运行完整入口。
+4. flush 新的 Mutagen 会话，并通过 `scp` 上传入口后用 `ssh` 运行服务器端完整入口。
 
 ## 11. NPU 占用规则
 

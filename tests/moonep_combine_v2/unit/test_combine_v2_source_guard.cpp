@@ -101,6 +101,10 @@ int main()
         "/src/moonep/combine_v2/common/combine_v2_profile.h");
     const std::string hardwareProbe = Read(root +
         "/tests/moonep_combine_v2/demo/tilexr_moonep_combine_v2_hardware_probe.cpp");
+    const std::string clusterLauncher = Read(root +
+        "/tools/moonep/run_combine_v2_perf_cluster.sh");
+    const std::string multihostLauncher = Read(root +
+        "/tools/moonep/run_combine_v2_perf_multihost.sh");
     const std::string host = Read(root +
         "/src/moonep/combine_v2/host/combine_v2_host.cpp");
     const std::string launch = Read(root +
@@ -384,11 +388,21 @@ int main()
         "Combine V2 probe does not print remote-submit profiling");
     ok &= Require(hardwareProbe, "enum class OutputCheckResult",
         "Combine V2 probe does not classify correctness failures");
-    ok &= Require(hardwareProbe,
-        "if (sourceRank != rank) {\n                    return OutputCheckResult::Failed;",
+    ok &= Require(hardwareProbe, "if (sourceRank != rank)",
+        "Combine V2 probe does not inspect remote-output source ranks");
+    ok &= Require(hardwareProbe, "return OutputCheckResult::Failed;",
         "Combine V2 probe does not reject remote-output mismatches");
     ok &= Require(hardwareProbe, "OutputCheckResult::SelfOnlyFailed",
         "Combine V2 probe does not identify disabled self-copy mismatches");
+    ok &= Require(clusterLauncher, "#!/usr/bin/env bash",
+        "Combine V2 cluster launcher is not a Bash script");
+    ok &= Require(clusterLauncher,
+        "bash \"${run_script}\" \"${run_args[@]}\"",
+        "Combine V2 cluster launcher does not start the server-side launcher");
+    ok &= Reject(Lower(clusterLauncher), "powershell",
+        "Combine V2 cluster launcher must not depend on PowerShell");
+    ok &= Reject(Lower(multihostLauncher), "powershell",
+        "Combine V2 multihost launcher must not depend on PowerShell");
 
     const std::vector<std::string> v2Files {
         root + "/src/include/tilexr_moonep_combine_v2.h",
@@ -405,6 +419,8 @@ int main()
         root + "/src/moonep/combine_v2/host/tilexr_moonep_combine_v2.cpp",
         root + "/src/moonep/combine_v2/kernels/tilexr_moonep_combine_v2_kernel.h",
         root + "/src/moonep/combine_v2/kernels/tilexr_moonep_combine_v2_kernel.cpp",
+        root + "/tools/moonep/run_combine_v2_perf_cluster.sh",
+        root + "/tools/moonep/run_combine_v2_perf_multihost.sh",
     };
     std::string allV2;
     for (const std::string &path : v2Files) {
