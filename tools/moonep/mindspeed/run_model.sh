@@ -363,9 +363,15 @@ while (( remaining > 0 )); do
     (( remaining > 0 )) && sleep 1
 done
 
+if [[ "${failed}" -eq 0 ]] && grep -Eiq \
+    'grad norm:[[:space:]]*(-?inf|nan)' "${controller_dir}"/node_*.log; then
+    echo "A node reported a non-finite gradient norm" >&2
+    failed=1
+fi
 if [[ "${failed}" -eq 0 ]] && ! grep -Eq \
-    'iteration[[:space:]]+8/[[:space:]]*8' "${controller_dir}"/node_*.log; then
-    echo "No node reported completion of iteration 8/8" >&2
+    'iteration[[:space:]]+8/[[:space:]]*8.*lm loss:[[:space:]]*[0-9]' \
+    "${controller_dir}"/node_*.log; then
+    echo "No node reported iteration 8/8 with a finite language-model loss" >&2
     failed=1
 fi
 if [[ "${failed}" -ne 0 ]]; then

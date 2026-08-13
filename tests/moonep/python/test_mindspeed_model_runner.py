@@ -195,8 +195,13 @@ def test_scripts_do_not_invoke_file_transfer_tools_and_define_failure_cleanup() 
     assert 'wait "${cleanup_pid}" || true' in controller
     assert "trap 'handle_signal" in controller
     assert "remaining=$((remaining - 1))" in controller
-    assert "No node reported completion of iteration 8/8" in controller
+    assert "A node reported a non-finite gradient norm" in controller
+    assert "No node reported iteration 8/8 with a finite language-model loss" in controller
     assert "status=91" not in node
+    assert "nonfinite_grad=$(grep -Eic" in node
+    assert "finite_final_loss=$(grep -Ec" in node
+    assert '"${node_count}" -eq 1' in node
+    assert "status=93" in node
     assert "runner.pid" in node
     assert "kill -- -\"${model_pid}\"" in node
 

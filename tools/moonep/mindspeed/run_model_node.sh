@@ -354,13 +354,23 @@ iterations=$(grep -Ec 'iteration[[:space:]]+[0-9]+/[[:space:]]*[0-9]+' "${output
 last_iteration=$(grep -E 'iteration[[:space:]]+[0-9]+/[[:space:]]*[0-9]+' "${output}/controller.log" | tail -1 || true)
 skipped=$(grep -Ec 'number of skipped iterations:[[:space:]]+[1-9]' "${output}/controller.log" || true)
 nan=$(grep -Ec 'number of nan iterations:[[:space:]]+[1-9]' "${output}/controller.log" || true)
+nonfinite_grad=$(grep -Eic 'grad norm:[[:space:]]*(-?inf|nan)' \
+    "${output}/controller.log" || true)
+finite_final_loss=$(grep -Ec \
+    'iteration[[:space:]]+8/[[:space:]]*8.*lm loss:[[:space:]]*[0-9]' \
+    "${output}/controller.log" || true)
 profile_done=$(find "${profile_output}" -type f -name analyse.done 2>/dev/null | wc -l || true)
 npu-smi info >"${output}/npu_after.log" || true
 post_idle=$(grep -c 'No running processes found in NPU' "${output}/npu_after.log" || true)
 if [[ "${status}" -eq 0 && ( "${skipped}" -ne 0 || "${nan}" -ne 0 ) ]]; then
     status=92
 fi
-printf 'exit_code=%s\niterations=%s\nlast_iteration=%s\nskipped_nonzero=%s\nnan_nonzero=%s\nprofile_done=%s\npost_idle=%s\ncompleted=%s\n' \
+if [[ "${status}" -eq 0 && "${node_count}" -eq 1 && \
+      ( "${nonfinite_grad}" -ne 0 || "${finite_final_loss}" -eq 0 ) ]]; then
+    status=93
+fi
+printf 'exit_code=%s\niterations=%s\nlast_iteration=%s\nskipped_nonzero=%s\nnan_nonzero=%s\nnonfinite_grad=%s\nfinite_final_loss=%s\nprofile_done=%s\npost_idle=%s\ncompleted=%s\n' \
     "${status}" "${iterations}" "${last_iteration}" "${skipped}" "${nan}" \
-    "${profile_done}" "${post_idle}" "$(date '+%F %T %z')" | tee "${output}/result.txt"
+    "${nonfinite_grad}" "${finite_final_loss}" "${profile_done}" "${post_idle}" \
+    "$(date '+%F %T %z')" | tee "${output}/result.txt"
 exit "${status}"

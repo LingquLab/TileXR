@@ -400,6 +400,7 @@ private:
         uint32_t targetRank, uint64_t remoteOffset,
         __gm__ uint64_t *localSource, uint32_t flag);
     __aicore__ inline void PublishLocalGrant(uint32_t step, uint32_t lane);
+    __aicore__ inline void PublishSelfDone(uint32_t step);
     __aicore__ inline void CopyIssueToSq(LocalTensor<uint8_t> issue,
         MoonEpCombineV2LaneState &state, uint32_t count);
     __aicore__ inline bool SubmitPair(uint32_t peer, uint32_t step,
@@ -1118,6 +1119,21 @@ __aicore__ inline void MoonEpCombineV2::PublishLocalGrant(
         TileXRMoonEp::kMoonEpCombineV2TokenStrideBytes);
 }
 
+__aicore__ inline void MoonEpCombineV2::PublishSelfDone(uint32_t step)
+{
+    for (uint32_t lane = 0U;
+        lane < TileXRMoonEp::kMoonEpCombineV2LaneCount; ++lane) {
+        const uint64_t index = TileXRMoonEp::MoonEpCombineV2DoneIndex(
+            epoch_, rank_, lane);
+        __gm__ uint64_t *done = reinterpret_cast<__gm__ uint64_t *>(
+            doneBase_ + index *
+                TileXRMoonEp::kMoonEpCombineV2TokenStrideBytes);
+        *done = TileXRMoonEp::MoonEpCombineV2Token(magic_, step);
+        TileXR::UDMACleanCacheLines(reinterpret_cast<__gm__ uint8_t *>(done),
+            TileXRMoonEp::kMoonEpCombineV2TokenStrideBytes);
+    }
+}
+
 __aicore__ inline void MoonEpCombineV2::CopyIssueToSq(
     LocalTensor<uint8_t> issue, MoonEpCombineV2LaneState &state,
     uint32_t count)
@@ -1649,35 +1665,32 @@ __aicore__ inline bool MoonEpCombineV2::SendSelfStep(
             firstPass = false;
         } while (pausedThreadCount != 0U);
     }
+    PublishSelfDone(step);
     return SubmitSelfGrant(step);
 }
 
 __aicore__ inline bool MoonEpCombineV2::WaitInboundDone()
 {
-    bool ready[TileXRMoonEp::kMoonEpCombineV2MaxSourcesPerCore]
+    bool ready[TileXRMoonEp::kMoonEpCombineV2RankCount]
         [TileXRMoonEp::kMoonEpCombineV2LaneCount] = {};
-    uint64_t observed[TileXRMoonEp::kMoonEpCombineV2MaxSourcesPerCore]
+    uint64_t observed[TileXRMoonEp::kMoonEpCombineV2RankCount]
         [TileXRMoonEp::kMoonEpCombineV2LaneCount] = {};
     uint32_t remaining = 0U;
     for (uint32_t sourceIndex = 0U;
-        sourceIndex < sourcesPerCore_; ++sourceIndex) {
-        const uint32_t source = TileXRMoonEp::MoonEpCombineV2SourceForCore(
-            core_, sourceIndex, rankSize_);
+        sourceIndex < rankSize_; ++sourceIndex) {
         for (uint32_t lane = 0U;
             lane < TileXRMoonEp::kMoonEpCombineV2LaneCount; ++lane) {
-            ready[sourceIndex][lane] = source == rank_;
-            if (!ready[sourceIndex][lane]) {
-                ++remaining;
-            }
+            ready[sourceIndex][lane] = false;
+            ++remaining;
         }
     }
-    const uint32_t conditionCount = sourcesPerCore_ *
+    const uint32_t conditionCount = rankSize_ *
         TileXRMoonEp::kMoonEpCombineV2LaneCount;
     uint32_t cursor = 0U;
     while (remaining != 0U) {
         for (uint32_t offset = 0U; offset < conditionCount; ++offset) {
             const uint32_t condition =
-                (cursor + offset) & (conditionCount - 1U);
+                (cursor + offset) % conditionCount;
             const uint32_t sourceIndex = condition /
                 TileXRMoonEp::kMoonEpCombineV2LaneCount;
             const uint32_t lane = condition &
@@ -1685,9 +1698,7 @@ __aicore__ inline bool MoonEpCombineV2::WaitInboundDone()
             if (ready[sourceIndex][lane]) {
                 continue;
             }
-            const uint32_t source =
-                TileXRMoonEp::MoonEpCombineV2SourceForCore(
-                    core_, sourceIndex, rankSize_);
+            const uint32_t source = sourceIndex;
             const uint32_t step =
                 TileXRMoonEp::MoonEpCombineV2ReceiveStep(
                     rank_, source, rankSize_, kCombineV2ScheduleMode);
@@ -1704,7 +1715,7 @@ __aicore__ inline bool MoonEpCombineV2::WaitInboundDone()
                 --remaining;
             }
         }
-        cursor = (cursor + 1U) & (conditionCount - 1U);
+        cursor = (cursor + 1U) % conditionCount;
         if (kEnableSafetyChecks && TimedOut(operationStartCycles_)) {
             for (uint32_t condition = 0U;
                 condition < conditionCount; ++condition) {
@@ -1715,9 +1726,7 @@ __aicore__ inline bool MoonEpCombineV2::WaitInboundDone()
                 if (ready[sourceIndex][lane]) {
                     continue;
                 }
-                const uint32_t source =
-                    TileXRMoonEp::MoonEpCombineV2SourceForCore(
-                        core_, sourceIndex, rankSize_);
+                const uint32_t source = sourceIndex;
                 const uint32_t step =
                     TileXRMoonEp::MoonEpCombineV2ReceiveStep(
                         rank_, source, rankSize_, kCombineV2ScheduleMode);

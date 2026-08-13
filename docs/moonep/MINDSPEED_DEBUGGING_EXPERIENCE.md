@@ -184,6 +184,31 @@ reset 等单一变量。一次同时修改 Kernel、Host、timeout 和路由，�
 - 不要因某次补丁通过完整模型就跳过最小 reproducer；最小 reproducer 才能证明因果。
 - 不要删除被推翻的假设记录。保留否定证据可以防止后续重复猜测。
 
+## Combine V2 共享 scratch 的 completion 约束
+
+ring 调度可以把发送工作分给不同 AIV core，但不能据此把接收完成条件也按 core
+分片。每个 core 的 reduction 都会读取包含所有 source 写入的共享 scratch，因此每个
+consumer core 必须在 reduction 前观察全部 source 和 lane 的 Done token；只等待本 core
+负责发送的 source 会在远端写仍在进行时提前读取，表现为偶发少聚合，而不是稳定超时。
+
+本地 Self copy 也必须进入同一 completion 协议。只有在 Self 的最后一笔 MTE3 写完成后
+才能发布本地 Done，然后才能发布 step grant。不能把 `source == rank` 直接视为 ready，
+否则其他 core 仍可能早于本地 copy 完成开始 reduction。
+
+不要用 launch-wide barrier 修复这个问题。Host 的 launch block 数可能大于运行时 active
+block 数，inactive block 会提前返回，`SyncAll` 的参与者集合因而无法收敛。应使用现有
+magic/epoch/step 编码的 GM Done token 表达真实 producer-consumer 依赖。验证至少覆盖：
+
+- 非 2 次幂 rank 的轮询游标，不能用位与代替取模；
+- route weights、Prefetch、额外 plan、registration 切换和 plan reuse；
+- 所有 rank 的 Dispatch/Combine hidden 与 weight 逐元素比较；
+- 完整前反向模型的有限 loss/gradient，而不能只看进程退出码。
+
+2026-08-13 的根因 oracle 使用单机 8 rank、S=4096、K=8、H=7168、model-skew
+路由。修复后 5 轮严格 oracle 全 rank exact，随后单机 8 卡和双机 16 卡完整模型均达到
+8/8 且 loss/gradient 有限。该结果只证明已测试的 Ascend950PR、B131 CANN 和对应拓扑；
+其他硬件、rank 规模和 topology 仍需按相同测试阶梯验证。
+
 ## Dispatch V2 fused epoch 约束与验证边界
 
 一次 paired `TileXRMoonEpDispatchV2` 应只有一个 magic、一次 AICore launch 和

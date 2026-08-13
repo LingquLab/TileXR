@@ -125,6 +125,9 @@ int main()
     const std::string selfGrant = Section(kernelImpl,
         "__aicore__ inline bool MoonEpCombineV2::SubmitSelfGrant(",
         "__aicore__ inline bool MoonEpCombineV2::SendSelfStep(");
+    const std::string inboundDone = Section(kernelImpl,
+        "__aicore__ inline bool MoonEpCombineV2::WaitInboundDone()",
+        "__aicore__ inline void MoonEpCombineV2::InitReduceBuffers()");
     const std::string localGrant = Section(kernelImpl,
         "__aicore__ inline void MoonEpCombineV2::PublishLocalGrant(",
         "__aicore__ inline void MoonEpCombineV2::CopyIssueToSq(");
@@ -243,6 +246,11 @@ int main()
         "Combine V2 Self step does not consume compacted route batches");
     ok &= Require(selfStep, "SubmitSelfGrant(step)",
         "Combine V2 Self step does not publish its step grant");
+    ok &= Require(selfStep, "PublishSelfDone(step)",
+        "Combine V2 Self step does not publish local completion");
+    ok &= RequireBefore(selfStep, "PublishSelfDone(step)",
+        "SubmitSelfGrant(step)",
+        "Combine V2 Self completion is not published before its grant");
     ok &= Require(selfGrant,
         "TileXR::TILEXR_UDMA_SQE_FLAG_ORDERED_COMPLETION",
         "Combine V2 Self grant does not request ordered completion");
@@ -315,6 +323,22 @@ int main()
     ok &= RequireBefore(process, "WaitStepGrant(step)",
         "WaitInboundDone()",
         "Combine V2 final grant wait does not precede finalization");
+    ok &= Require(inboundDone,
+        "bool ready[TileXRMoonEp::kMoonEpCombineV2RankCount]",
+        "Combine V2 Done wait does not cover every source rank");
+    ok &= Require(inboundDone, "sourceIndex < rankSize_",
+        "Combine V2 Done wait stops at the per-core source partition");
+    ok &= Require(inboundDone, "const uint32_t source = sourceIndex;",
+        "Combine V2 Done wait does not address every source directly");
+    ok &= Require(inboundDone,
+        "const uint32_t conditionCount = rankSize_ *",
+        "Combine V2 Done condition count is not derived from all sources");
+    ok &= Require(inboundDone, "% conditionCount",
+        "Combine V2 Done cursor assumes a power-of-two rank size");
+    ok &= Reject(inboundDone, "source == rank_",
+        "Combine V2 Done wait treats unfinished Self copies as ready");
+    ok &= Reject(inboundDone, "MoonEpCombineV2SourceForCore(",
+        "Combine V2 Done wait still observes only its core-owned sources");
     ok &= Require(kernelImpl, "st_dev(",
         "Combine V2 implementation does not ring device doorbells");
     ok &= Require(kernelImpl, "rank_, 0U, core_, rankSize_",
@@ -338,8 +362,8 @@ int main()
         "Combine V2 failure convergence does not use active cores");
     ok &= Require(kernelImpl, "encoded, slots_, rankSize_",
         "Combine V2 destination validation does not use runtime rank size");
-    ok &= Require(kernelImpl, "kMoonEpCombineV2MaxSourcesPerCore",
-        "Combine V2 inbound Done polling is not rank generalized");
+    ok &= Require(inboundDone, "kMoonEpCombineV2RankCount",
+        "Combine V2 inbound Done storage is not rank generalized");
     ok &= Require(kernelImpl, "MOONEP_COMBINE_V2_METRIC_SELF_COPY",
         "Combine V2 detailed self-copy profiling is missing");
     ok &= Require(kernelImpl, "MOONEP_COMBINE_V2_METRIC_REMOTE_WQE_BUILD",
