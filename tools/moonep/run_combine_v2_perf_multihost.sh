@@ -1,0 +1,540 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+HOSTFILE=""
+INSTALL_DIR=""
+CANN_PATH="${ASCEND_HOME_PATH:-/usr/local/Ascend/ascend-toolkit/latest}"
+SSH_USER="$(id -un)"
+BS=""
+BS_LIST=""
+WARMUP=20
+ITERATIONS=80
+EXPERTS=64
+COMM_DOMAIN=141
+COMM_ID=""
+WAIT_SECONDS=120
+RETRY_SECONDS=15
+TIMEOUT_SECONDS=600
+LOG_FILE=""
+SKIP_ITERATION_BARRIERS=0
+PROFILE=0
+SKIP_NPU_PREFLIGHT=0
+ALLOW_SELF_ONLY_FAILURE=0
+
+usage() {
+    cat <<'EOF'
+Usage: bash tools/moonep/run_combine_v2_perf_multihost.sh --hostfile PATH --install-dir PATH [options]
+
+Options:
+  --bs N                 Run one batch size (default: benchmark default 128)
+  --bs-list N[,N...]     Run multiple BS points after one TileXR initialization
+  --warmup N             Warmup launches per BS (default: 20)
+  --iterations N         Timed launches per BS (default: 80)
+  --experts N            Total expert count (default: 64)
+  --comm-domain N        Shared-QP domain (default: 141)
+  --comm-id IP:PORT      Bootstrap address (default: first host:10067)
+  --cann-path PATH       CANN root
+  --ssh-user USER        SSH user for rank launch (default: current user)
+  --wait-seconds N       Maximum NPU wait (default: 120)
+  --retry-seconds N      NPU retry interval (default: 15)
+  --timeout N            Per-rank timeout (default: 600)
+  --log-file PATH        Controller log path on the primary host
+  --skip-iteration-barriers
+                         Skip host barriers between warmup/timed launches
+  --profile              Capture per-AIV kernel cycle timestamps
+  --skip-npu-preflight   Skip npu-smi process checks after manual validation
+  --allow-self-only-failure
+                         Continue timing when only Self-copy validation fails
+  --help                 Show this help
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --hostfile) HOSTFILE="$2"; shift 2 ;;
+        --install-dir) INSTALL_DIR="$2"; shift 2 ;;
+        --bs) BS="$2"; shift 2 ;;
+        --bs-list) BS_LIST="$2"; shift 2 ;;
+        --warmup) WARMUP="$2"; shift 2 ;;
+        --iterations) ITERATIONS="$2"; shift 2 ;;
+        --experts) EXPERTS="$2"; shift 2 ;;
+        --comm-domain) COMM_DOMAIN="$2"; shift 2 ;;
+        --comm-id) COMM_ID="$2"; shift 2 ;;
+        --cann-path) CANN_PATH="$2"; shift 2 ;;
+        --ssh-user) SSH_USER="$2"; shift 2 ;;
+        --wait-seconds) WAIT_SECONDS="$2"; shift 2 ;;
+        --retry-seconds) RETRY_SECONDS="$2"; shift 2 ;;
+        --timeout) TIMEOUT_SECONDS="$2"; shift 2 ;;
+        --log-file) LOG_FILE="$2"; shift 2 ;;
+        --skip-iteration-barriers) SKIP_ITERATION_BARRIERS=1; shift ;;
+        --profile) PROFILE=1; shift ;;
+        --skip-npu-preflight) SKIP_NPU_PREFLIGHT=1; shift ;;
+        --allow-self-only-failure) ALLOW_SELF_ONLY_FAILURE=1; shift ;;
+        --help|-h) usage; exit 0 ;;
+        *) echo "unknown argument: $1" >&2; usage >&2; exit 2 ;;
+    esac
+done
+
+if [[ -z "${HOSTFILE}" || -z "${INSTALL_DIR}" ]]; then
+    usage >&2
+    exit 2
+fi
+if [[ -n "${BS}" && -n "${BS_LIST}" ]]; then
+    echo "--bs and --bs-list are mutually exclusive" >&2
+    exit 2
+fi
+if [[ ! "${WARMUP}" =~ ^[0-9]+$ || ! "${WAIT_SECONDS}" =~ ^[0-9]+$ ]]; then
+    echo "--warmup and --wait-seconds must be non-negative integers" >&2
+    exit 2
+fi
+for value in "${ITERATIONS}" "${EXPERTS}" "${COMM_DOMAIN}" "${RETRY_SECONDS}" \
+    "${TIMEOUT_SECONDS}"; do
+    if [[ ! "${value}" =~ ^[1-9][0-9]*$ ]]; then
+        echo "iterations, domains, retry intervals, and timeouts must be positive integers" >&2
+        exit 2
+    fi
+done
+if [[ ! -f "${HOSTFILE}" ||
+      ! -x "${INSTALL_DIR}/bin/tilexr_moonep_combine_v2_perf" ]]; then
+    echo "hostfile or staged benchmark is missing" >&2
+    exit 1
+fi
+if [[ "${INSTALL_DIR}" != /* || "${CANN_PATH}" != /* ||
+      "${INSTALL_DIR}" == *"'"* || "${CANN_PATH}" == *"'"* ]]; then
+    echo "install and CANN paths must be absolute and cannot contain single quotes" >&2
+    exit 2
+fi
+if ! help wait 2>&1 | grep -q -- '-n'; then
+    echo "the launcher requires Bash 4.3 or newer for wait -n" >&2
+    exit 1
+fi
+
+mapfile -t host_entries < <(awk '
+    /^[[:space:]]*($|#)/ { next }
+    { gsub(/[[:space:]]/, "", $0); print $0 }
+' "${HOSTFILE}")
+if [[ ${#host_entries[@]} -eq 0 ]]; then
+    echo "hostfile has no hosts: ${HOSTFILE}" >&2
+    exit 1
+fi
+
+ranks=0
+hosts=()
+slots_by_host=()
+declare -A seen_hosts=()
+for entry in "${host_entries[@]}"; do
+    host="${entry%%:*}"
+    slots="${entry#*:}"
+    if [[ -z "${host}" || "${host}" == "${slots}" ||
+          ! "${slots}" =~ ^[1-8]$ || -n "${seen_hosts[${host}]:-}" ]]; then
+        echo "invalid or duplicate hostfile entry: ${entry}" >&2
+        exit 2
+    fi
+    seen_hosts["${host}"]=1
+    hosts+=("${host}")
+    slots_by_host+=("${slots}")
+    ranks=$((ranks + slots))
+done
+case "${ranks}" in
+    2|3|4|5|6|7|8|16|32|64|128) ;;
+    *)
+        echo "unsupported Combine V2 world size ${ranks}; expected 2-8, 16, 32, 64, or 128" >&2
+        exit 2
+        ;;
+esac
+if (( EXPERTS % ranks != 0 )); then
+    echo "expert count ${EXPERTS} must be divisible by world size ${ranks}" >&2
+    exit 2
+fi
+
+requested_bs="${BS_LIST:-${BS:-128}}"
+if [[ ! "${requested_bs}" =~ ^[1-9][0-9]*(,[1-9][0-9]*)*$ ]]; then
+    echo "batch sizes must be a comma-separated list of positive integers" >&2
+    exit 2
+fi
+IFS=',' read -r -a requested_batch_sizes <<<"${requested_bs}"
+for batch_size in "${requested_batch_sizes[@]}"; do
+    if (( batch_size % ranks != 0 )); then
+        echo "batch size ${batch_size} must be divisible by world size ${ranks}" >&2
+        exit 2
+    fi
+done
+
+if [[ -z "${COMM_ID}" ]]; then
+    COMM_ID="${hosts[0]}:10067"
+fi
+if [[ ! "${COMM_ID}" =~ ^([^:]+):([1-9][0-9]*)$ ]]; then
+    echo "--comm-id must use the first host and a valid TCP port" >&2
+    exit 2
+fi
+comm_host="${BASH_REMATCH[1]}"
+comm_port="${BASH_REMATCH[2]}"
+if [[ "${comm_host}" != "${hosts[0]}" || ${comm_port} -gt 65535 ]]; then
+    echo "--comm-id must use the first host and a valid TCP port" >&2
+    exit 2
+fi
+barrier_port=$((comm_port + 97))
+if (( barrier_port > 65535 )); then
+    barrier_port=$((comm_port - 97))
+fi
+if (( barrier_port <= 0 )); then
+    echo "cannot derive a valid barrier port from ${comm_port}" >&2
+    exit 2
+fi
+BARRIER_ID="${hosts[0]}:${barrier_port}"
+
+if [[ -z "${LOG_FILE}" ]]; then
+    run_root="$(cd "${INSTALL_DIR}/.." && pwd)"
+    LOG_FILE="${run_root}/logs/combine_v2_${ranks}p_$(date +%Y%m%d_%H%M%S).log"
+fi
+if [[ "${LOG_FILE}" != /* || "${LOG_FILE}" == *"'"* ]]; then
+    echo "--log-file must be an absolute path without single quotes" >&2
+    exit 2
+fi
+mkdir -p "$(dirname "${LOG_FILE}")"
+rank_log_dir="${LOG_FILE}.ranks"
+preflight_log_dir="${LOG_FILE}.npu_preflight"
+mkdir -p "${rank_log_dir}" "${preflight_log_dir}"
+
+ssh_options=(-o BatchMode=yes -o ConnectTimeout=10)
+for host in "${hosts[@]}"; do
+    if ! ssh "${ssh_options[@]}" "${SSH_USER}@${host}" \
+        "test -x '${INSTALL_DIR}/bin/tilexr_moonep_combine_v2_perf' && test -d '${CANN_PATH}/aarch64-linux' && command -v timeout >/dev/null && command -v ss >/dev/null"; then
+        echo "remote runtime validation failed on ${host}" >&2
+        exit 1
+    fi
+done
+if ssh "${ssh_options[@]}" "${SSH_USER}@${hosts[0]}" \
+    "ss -ltnH | awk '{print \$4}' | grep -Eq ':(${comm_port}|${barrier_port})\$'"; then
+    echo "bootstrap or barrier port is already listening on ${hosts[0]} (${comm_port}, ${barrier_port})" >&2
+    exit 1
+fi
+
+snapshot_processes() {
+    awk -F'|' '
+        /Process id[[:space:]]*\|[[:space:]]*Process name/ { in_process_table = 1; next }
+        in_process_table && $2 ~ /^[[:space:]]*[0-9]+[[:space:]]*$/ {
+            pid = $3; name = $4
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", pid)
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", name)
+            print pid "|" name
+        }
+    ' "$1"
+}
+
+if (( SKIP_NPU_PREFLIGHT )); then
+    echo "NPU preflight skipped after manual validation on: ${hosts[*]}" | tee -a "${LOG_FILE}"
+else
+    deadline=$((SECONDS + WAIT_SECONDS))
+    attempt=0
+    while true; do
+        attempt=$((attempt + 1))
+        attempt_dir="${preflight_log_dir}/attempt_$(printf '%02d' "${attempt}")"
+        mkdir -p "${attempt_dir}"
+        blocked=()
+        for host in "${hosts[@]}"; do
+            snapshot="${attempt_dir}/${host}.log"
+            if ! ssh "${ssh_options[@]}" "${SSH_USER}@${host}" npu-smi info \
+                >"${snapshot}" 2>&1; then
+                echo "npu-smi failed on ${host}; see ${snapshot}" >&2
+                exit 2
+            fi
+            while IFS='|' read -r pid name; do
+                [[ -z "${pid}" ]] && continue
+                if [[ "${name}" != tilexr_* ]]; then
+                    blocked+=("${host}:${pid}:${name}")
+                fi
+            done < <(snapshot_processes "${snapshot}")
+        done
+        if [[ ${#blocked[@]} -eq 0 ]]; then
+            echo "NPU preflight passed on: ${hosts[*]}" | tee -a "${LOG_FILE}"
+            break
+        fi
+        echo "NPU preflight blocked by: ${blocked[*]}" | tee -a "${LOG_FILE}" >&2
+        if (( SECONDS >= deadline )); then
+            echo "NPU preflight timed out after ${WAIT_SECONDS}s; no workload was started" | \
+                tee -a "${LOG_FILE}" >&2
+            exit 75
+        fi
+        sleep "${RETRY_SECONDS}"
+    done
+fi
+
+benchmark_args=(
+    --warmup "${WARMUP}"
+    --iterations "${ITERATIONS}"
+    --experts "${EXPERTS}"
+    --comm-domain "${COMM_DOMAIN}"
+)
+if [[ -n "${BS}" ]]; then
+    benchmark_args+=(--bs "${BS}")
+elif [[ -n "${BS_LIST}" ]]; then
+    benchmark_args+=(--bs-list "${BS_LIST}")
+fi
+if (( SKIP_ITERATION_BARRIERS )); then
+    benchmark_args+=(--skip-iteration-barriers)
+fi
+if (( PROFILE )); then
+    benchmark_args+=(--profile)
+fi
+if (( ALLOW_SELF_ONLY_FAILURE )); then
+    benchmark_args+=(--allow-self-only-failure)
+fi
+
+job_id="combine_v2_${ranks}p_$(date +%Y%m%d_%H%M%S)_$$"
+remote_job_dir="$(cd "${INSTALL_DIR}/.." && pwd)/logs/.combine_v2_jobs/${job_id}"
+rank_hosts=()
+rank_devices=()
+rank_pidfiles=()
+global_rank=0
+for host_index in "${!hosts[@]}"; do
+    host="${hosts[${host_index}]}"
+    slots="${slots_by_host[${host_index}]}"
+    for ((local_rank = 0; local_rank < slots; ++local_rank)); do
+        rank_hosts[${global_rank}]="${host}"
+        rank_devices[${global_rank}]="${local_rank}"
+        rank_pidfiles[${global_rank}]="${remote_job_dir}/rank_${global_rank}.pid"
+        echo "RANK_MAP rank=${global_rank} host=${host} local_rank=${local_rank} device=${local_rank}" | \
+            tee -a "${LOG_FILE}"
+        global_rank=$((global_rank + 1))
+    done
+done
+
+remote_rank_script=$(cat <<'REMOTE_SCRIPT'
+set -euo pipefail
+job_id=$1
+pidfile=$2
+rank_timeout=$3
+install_dir=$4
+cann_path=$5
+comm_id=$6
+barrier_id=$7
+rank=$8
+world=$9
+device=${10}
+shift 10
+mkdir -p "$(dirname "${pidfile}")"
+printf '%s %s\n' "$$" "${job_id}" >"${pidfile}"
+child_pid=""
+cleanup_rank() {
+    status=$?
+    trap - EXIT HUP INT TERM
+    if [[ -n "${child_pid}" ]] && kill -0 "${child_pid}" 2>/dev/null; then
+        kill -TERM "${child_pid}" 2>/dev/null || true
+        wait "${child_pid}" 2>/dev/null || true
+    fi
+    rm -f "${pidfile}"
+    exit "${status}"
+}
+trap cleanup_rank EXIT HUP INT TERM
+export ASCEND_HOME_PATH="${cann_path}"
+export ASCEND_DRIVER_PATH=/usr/local/Ascend/driver
+export TILEXR_COMM_ID="${comm_id}"
+export TILEXR_DEMO_BARRIER_ADDR="${barrier_id}"
+export TILEXR_ENABLE_IPC=0
+export TILEXR_ENABLE_SDMA=0
+export LD_LIBRARY_PATH="${install_dir}/lib64:${cann_path}/aarch64-linux/lib64:${cann_path}/lib64:${ASCEND_DRIVER_PATH}/lib64:${ASCEND_DRIVER_PATH}/lib64/common:${ASCEND_DRIVER_PATH}/lib64/driver:${LD_LIBRARY_PATH:-}"
+timeout --signal=TERM --kill-after=30 "${rank_timeout}" \
+    "${install_dir}/bin/tilexr_moonep_combine_v2_perf" \
+    --rank "${rank}" --world-size "${world}" --device "${device}" "$@" &
+child_pid=$!
+set +e
+wait "${child_pid}"
+status=$?
+set -e
+child_pid=""
+rm -f "${pidfile}"
+trap - EXIT HUP INT TERM
+exit "${status}"
+REMOTE_SCRIPT
+)
+
+build_remote_command() {
+    local script=$1
+    shift
+    local command quoted argument
+    printf -v quoted '%q' "${script}"
+    command="bash -c ${quoted} --"
+    for argument in "$@"; do
+        printf -v quoted '%q' "${argument}"
+        command+=" ${quoted}"
+    done
+    printf '%s' "${command}"
+}
+
+launch_rank() {
+    local rank=$1
+    local host="${rank_hosts[${rank}]}"
+    local device="${rank_devices[${rank}]}"
+    local remote_command
+    remote_command=$(build_remote_command "${remote_rank_script}" \
+        "${job_id}" "${rank_pidfiles[${rank}]}" "${TIMEOUT_SECONDS}" \
+        "${INSTALL_DIR}" "${CANN_PATH}" "${COMM_ID}" "${BARRIER_ID}" \
+        "${rank}" "${ranks}" "${device}" "${benchmark_args[@]}")
+    exec ssh "${ssh_options[@]}" "${SSH_USER}@${host}" "${remote_command}"
+}
+
+terminate_remote_tasks() {
+    local rank host pidfile cleanup_script cleanup_command
+    cleanup_script='pidfile=$1; job_id=$2; [[ -f "${pidfile}" ]] || exit 0; read -r pid stored_job <"${pidfile}"; [[ "${stored_job}" == "${job_id}" && -r "/proc/${pid}/cmdline" ]] || exit 0; cmdline=$(tr "\0" " " <"/proc/${pid}/cmdline"); [[ "${cmdline}" == *"${job_id}"* ]] || exit 0; kill -TERM "${pid}" 2>/dev/null || true'
+    for ((rank = 0; rank < ranks; ++rank)); do
+        host="${rank_hosts[${rank}]}"
+        pidfile="${rank_pidfiles[${rank}]}"
+        cleanup_command=$(build_remote_command "${cleanup_script}" \
+            "${pidfile}" "${job_id}")
+        ssh "${ssh_options[@]}" "${SSH_USER}@${host}" "${cleanup_command}" \
+            >/dev/null 2>&1 &
+    done
+    wait || true
+}
+
+run_active=0
+ssh_pids=()
+cleanup_controller() {
+    status=$?
+    trap - EXIT
+    if (( run_active )); then
+        for pid in "${ssh_pids[@]}"; do
+            kill -TERM "${pid}" 2>/dev/null || true
+        done
+        terminate_remote_tasks
+        for pid in "${ssh_pids[@]}"; do
+            wait "${pid}" 2>/dev/null || true
+        done
+    fi
+    exit "${status}"
+}
+trap cleanup_controller EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+echo "RUN job_id=${job_id} ranks=${ranks} experts=${EXPERTS} comm_id=${COMM_ID} barrier_id=${BARRIER_ID} bs=${requested_bs} warmup=${WARMUP} iterations=${ITERATIONS}" | \
+    tee -a "${LOG_FILE}"
+run_active=1
+for ((rank = 0; rank < ranks; ++rank)); do
+    rank_log="${rank_log_dir}/rank_$(printf '%04d' "${rank}").log"
+    launch_rank "${rank}" >"${rank_log}" 2>&1 &
+    ssh_pids+=("$!")
+done
+
+completed=0
+while (( completed < ranks )); do
+    set +e
+    wait -n
+    rank_status=$?
+    set -e
+    completed=$((completed + 1))
+    if (( rank_status != 0 )); then
+        echo "a rank launcher failed with status ${rank_status}; see ${rank_log_dir}" | \
+            tee -a "${LOG_FILE}" >&2
+        exit "${rank_status}"
+    fi
+done
+run_active=0
+
+rank_logs=()
+for ((rank = 0; rank < ranks; ++rank)); do
+    rank_log="${rank_log_dir}/rank_$(printf '%04d' "${rank}").log"
+    rank_logs+=("${rank_log}")
+    {
+        echo "===== RANK ${rank} host=${rank_hosts[${rank}]} device=${rank_devices[${rank}]} ====="
+        cat "${rank_log}"
+    } >>"${LOG_FILE}"
+done
+
+rank_averages_file="${rank_log_dir}/rank_averages.tsv"
+rm -f "${rank_averages_file}"
+if ! awk -v ranks="${ranks}" -v iterations="${ITERATIONS}" \
+    -v allow_self_only_failure="${ALLOW_SELF_ONLY_FAILURE}" \
+    -v output="${rank_averages_file}" '
+    $1 == "COMBINE_V2_SAMPLE" {
+        bs = iteration = rank = elapsed = ""
+        for (field = 2; field <= NF; ++field) {
+            split($field, item, "=")
+            if (item[1] == "bs") bs = item[2]
+            else if (item[1] == "iteration") iteration = item[2]
+            else if (item[1] == "rank") rank = item[2]
+            else if (item[1] == "elapsed_ms") elapsed = item[2]
+        }
+        sample_key = bs SUBSEP iteration SUBSEP rank
+        rank_key = bs SUBSEP rank
+        if (bs == "" || iteration == "" || rank == "" || elapsed == "" ||
+            iteration !~ /^[0-9]+$/ || rank !~ /^[0-9]+$/ ||
+            iteration + 0 < 0 || iteration + 0 >= iterations ||
+            rank + 0 < 0 || rank + 0 >= ranks || sample_seen[sample_key]++) {
+            invalid = 1
+            next
+        }
+        batches[bs] = 1
+        sample_count[rank_key]++
+        sample_total[rank_key] += elapsed + 0
+    }
+    $1 == "COMBINE_V2_RANK_PERF" {
+        bs = rank = correctness = ""
+        for (field = 2; field <= NF; ++field) {
+            split($field, item, "=")
+            if (item[1] == "bs") bs = item[2]
+            else if (item[1] == "rank") rank = item[2]
+            else if (item[1] == "correctness") correctness = item[2]
+        }
+        rank_key = bs SUBSEP rank
+        if (correctness == "passed" ||
+            (allow_self_only_failure && correctness == "self_only_failed")) {
+            rank_result[rank_key]++
+        } else {
+            invalid = 1
+        }
+    }
+    END {
+        batch_count = 0
+        for (bs in batches) {
+            batch_count++
+            for (rank = 0; rank < ranks; ++rank) {
+                rank_key = bs SUBSEP rank
+                if (rank_result[rank_key] != 1 ||
+                    sample_count[rank_key] != iterations) {
+                    invalid = 1
+                } else {
+                    print bs, rank, sample_total[rank_key] / iterations >> output
+                }
+            }
+        }
+        if (batch_count == 0 || invalid) exit 1
+    }
+' "${rank_logs[@]}"; then
+    echo "rank logs do not contain one accepted result and one sample per iteration for every rank" | \
+        tee -a "${LOG_FILE}" >&2
+    exit 1
+fi
+
+sort -n -k1,1 -k2,2 "${rank_averages_file}" | awk \
+    -v ranks="${ranks}" -v iterations="${ITERATIONS}" \
+    -v experts="${EXPERTS}" \
+    -v allow_self_only_failure="${ALLOW_SELF_ONLY_FAILURE}" '
+    function emit(    average, data_bytes, average_bandwidth, max_bandwidth, correctness) {
+        if (count == 0) return
+        if (count != ranks) exit 1
+        average = total / count
+        data_bytes = current_bs * 16 * 3584 * 2
+        average_bandwidth = data_bytes / average / 1000000
+        max_bandwidth = data_bytes / maximum / 1000000
+        correctness = allow_self_only_failure ? "self_only_failed_allowed" : "passed"
+        printf "COMBINE_V2_PERF bs=%s k=16 h=3584 experts=%d dtype=bf16 ranks=%d iterations=%d avg_ms=%.6f avg_alg_bw_GBps=%.6f max_ms=%.6f max_alg_bw_GBps=%.6f correctness=%s\n", current_bs, experts, ranks, iterations, average, average_bandwidth, maximum, max_bandwidth, correctness
+    }
+    current_bs != "" && $1 != current_bs {
+        emit()
+        total = 0
+        count = 0
+        maximum = 0
+    }
+    {
+        current_bs = $1
+        total += $3 + 0
+        if (count == 0 || $3 + 0 > maximum) maximum = $3 + 0
+        count++
+    }
+    END { emit() }
+' | tee -a "${LOG_FILE}"
+
+echo "Combine V2 benchmark log: ${LOG_FILE}"
+echo "Per-rank logs: ${rank_log_dir}"

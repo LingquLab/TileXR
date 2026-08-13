@@ -19,7 +19,7 @@ constexpr uint32_t kMoonEpCombineV2GroupCount = 16U;
 constexpr uint32_t kMoonEpCombineV2GroupsPerHalf = 8U;
 constexpr uint32_t kMoonEpCombineV2StepCount = 8U;
 constexpr uint32_t kMoonEpCombineV2GrantStepCount =
-    kMoonEpCombineV2StepCount - 1U;
+    kMoonEpCombineV2StepCount;
 constexpr uint32_t kMoonEpCombineV2CoreCount = 16U;
 constexpr uint32_t kMoonEpCombineV2LaneCount = 2U;
 constexpr uint32_t kMoonEpCombineV2QpCount = 32U;
@@ -50,6 +50,13 @@ enum MoonEpCombineV2Lane : uint32_t {
     MOONEP_COMBINE_V2_SIX_PORT = 0U,
     MOONEP_COMBINE_V2_TWO_PORT = 1U,
 };
+
+enum MoonEpCombineV2ScheduleMode : uint32_t {
+    MOONEP_COMBINE_V2_SINGLE_RING = 0U,
+    MOONEP_COMBINE_V2_BIDIRECTIONAL_RING = 1U,
+};
+
+constexpr uint32_t kMoonEpCombineV2InvalidPeer = UINT32_MAX;
 
 enum MoonEpCombineV2FailureStatus : uint32_t {
     MOONEP_COMBINE_V2_SUCCESS = 0U,
@@ -180,8 +187,13 @@ TILEXR_MOONEP_COMBINE_V2_INLINE uint32_t
 MoonEpCombineV2ControlWqesPerLane(
     uint32_t step, uint32_t stepCount, bool finalBatch)
 {
-    return !finalBatch ? 0U :
-        (step + 1U < stepCount ? 2U : 1U);
+    return finalBatch ? 2U : 0U;
+}
+
+TILEXR_MOONEP_COMBINE_V2_INLINE uint32_t
+MoonEpCombineV2NextStep(uint32_t step, uint32_t stepCount)
+{
+    return step + 1U == stepCount ? 0U : step + 1U;
 }
 
 TILEXR_MOONEP_COMBINE_V2_INLINE MoonEpCombineV2LaneCounts
@@ -261,7 +273,7 @@ MoonEpCombineV2DestinationValid(
 }
 
 TILEXR_MOONEP_COMBINE_V2_INLINE uint32_t
-MoonEpCombineV2Peer(
+MoonEpCombineV2SingleRingPeer(
     uint32_t sourceRank, uint32_t step, uint32_t core, uint32_t rankSize)
 {
     if (rankSize <= kMoonEpCombineV2GroupSize) {
@@ -282,7 +294,97 @@ MoonEpCombineV2Peer(
 }
 
 TILEXR_MOONEP_COMBINE_V2_INLINE uint32_t
-MoonEpCombineV2Successor(
+MoonEpCombineV2RingOffset(
+    uint32_t position, int32_t offset, uint32_t ringSize)
+{
+    if (offset >= 0) {
+        return (position + static_cast<uint32_t>(offset)) % ringSize;
+    }
+    return (position + ringSize - static_cast<uint32_t>(-offset)) % ringSize;
+}
+
+TILEXR_MOONEP_COMBINE_V2_INLINE int32_t
+MoonEpCombineV2BidirectionalOffset(
+    uint32_t step, uint32_t lane, uint32_t ringSize, bool sameHalf)
+{
+    const uint32_t ordinal = step * kMoonEpCombineV2GroupSize + lane;
+    if (sameHalf) {
+        if (ordinal + 1U == ringSize) {
+            return 0;
+        }
+        const int32_t distance = static_cast<int32_t>(ordinal / 2U + 1U);
+        return (ordinal & 1U) == 0U ? distance : -distance;
+    }
+    if (ordinal == 0U) {
+        return 0;
+    }
+    if (ordinal == 1U) {
+        return static_cast<int32_t>(ringSize / 2U);
+    }
+    const uint32_t pairOrdinal = ordinal - 2U;
+    const int32_t distance = static_cast<int32_t>(pairOrdinal / 2U + 1U);
+    return (pairOrdinal & 1U) == 0U ? distance : -distance;
+}
+
+TILEXR_MOONEP_COMBINE_V2_INLINE bool
+MoonEpCombineV2BidirectionalScheduleEnabled(
+    uint32_t rankSize, MoonEpCombineV2ScheduleMode mode)
+{
+    return mode == MOONEP_COMBINE_V2_BIDIRECTIONAL_RING &&
+        (rankSize == kMoonEpCombineV2GroupSize || rankSize >= 16U);
+}
+
+TILEXR_MOONEP_COMBINE_V2_INLINE uint32_t
+MoonEpCombineV2BidirectionalPeer(
+    uint32_t sourceRank, uint32_t step, uint32_t core, uint32_t rankSize)
+{
+    if (rankSize == kMoonEpCombineV2GroupSize) {
+        if (core + 1U == rankSize) {
+            return kMoonEpCombineV2InvalidPeer;
+        }
+        return MoonEpCombineV2RingOffset(sourceRank,
+            MoonEpCombineV2BidirectionalOffset(
+                step, core, rankSize, true), rankSize);
+    }
+
+    const uint32_t halfRankCount = rankSize / 2U;
+    const uint32_t sourceHalf = sourceRank / halfRankCount;
+    const uint32_t targetHalf = core / kMoonEpCombineV2GroupSize;
+    const uint32_t lane = core % kMoonEpCombineV2GroupSize;
+    const uint32_t ordinal = step * kMoonEpCombineV2GroupSize + lane;
+    const bool sameHalf = sourceHalf == targetHalf;
+    if (sameHalf && ordinal + 1U == halfRankCount) {
+        return kMoonEpCombineV2InvalidPeer;
+    }
+    const uint32_t targetLocal = MoonEpCombineV2RingOffset(
+        sourceRank % halfRankCount,
+        MoonEpCombineV2BidirectionalOffset(
+            step, lane, halfRankCount, sameHalf),
+        halfRankCount);
+    return targetHalf * halfRankCount + targetLocal;
+}
+
+TILEXR_MOONEP_COMBINE_V2_INLINE uint32_t
+MoonEpCombineV2Peer(
+    uint32_t sourceRank, uint32_t step, uint32_t core, uint32_t rankSize,
+    MoonEpCombineV2ScheduleMode mode)
+{
+    return MoonEpCombineV2BidirectionalScheduleEnabled(rankSize, mode) ?
+        MoonEpCombineV2BidirectionalPeer(
+            sourceRank, step, core, rankSize) :
+        MoonEpCombineV2SingleRingPeer(sourceRank, step, core, rankSize);
+}
+
+TILEXR_MOONEP_COMBINE_V2_INLINE uint32_t
+MoonEpCombineV2Peer(
+    uint32_t sourceRank, uint32_t step, uint32_t core, uint32_t rankSize)
+{
+    return MoonEpCombineV2Peer(sourceRank, step, core, rankSize,
+        MOONEP_COMBINE_V2_SINGLE_RING);
+}
+
+TILEXR_MOONEP_COMBINE_V2_INLINE uint32_t
+MoonEpCombineV2SingleRingSuccessor(
     uint32_t sourceRank, uint32_t core, uint32_t rankSize)
 {
     if (rankSize <= kMoonEpCombineV2GroupSize) {
@@ -301,7 +403,43 @@ MoonEpCombineV2Successor(
 }
 
 TILEXR_MOONEP_COMBINE_V2_INLINE uint32_t
-MoonEpCombineV2ReceiveStep(
+MoonEpCombineV2Successor(
+    uint32_t sourceRank, uint32_t step, uint32_t core, uint32_t rankSize,
+    MoonEpCombineV2ScheduleMode mode)
+{
+    if (!MoonEpCombineV2BidirectionalScheduleEnabled(rankSize, mode) ||
+        rankSize <= kMoonEpCombineV2GroupSize) {
+        return MoonEpCombineV2SingleRingSuccessor(
+            sourceRank, core, rankSize);
+    }
+    const uint32_t halfRankCount = rankSize / 2U;
+    const uint32_t sourceHalf = sourceRank / halfRankCount;
+    const uint32_t targetHalf = core / kMoonEpCombineV2GroupSize;
+    const uint32_t lane = core % kMoonEpCombineV2GroupSize;
+    const bool sameHalf = sourceHalf == targetHalf;
+    const uint32_t nextStep = MoonEpCombineV2NextStep(
+        step, MoonEpCombineV2StepCount(rankSize));
+    const int32_t currentOffset = MoonEpCombineV2BidirectionalOffset(
+        step, lane, halfRankCount, sameHalf);
+    const int32_t nextOffset = MoonEpCombineV2BidirectionalOffset(
+        nextStep, lane, halfRankCount, sameHalf);
+    const uint32_t targetLocal = MoonEpCombineV2RingOffset(
+        sourceRank % halfRankCount, currentOffset, halfRankCount);
+    const uint32_t successorLocal = MoonEpCombineV2RingOffset(
+        targetLocal, -nextOffset, halfRankCount);
+    return sourceHalf * halfRankCount + successorLocal;
+}
+
+TILEXR_MOONEP_COMBINE_V2_INLINE uint32_t
+MoonEpCombineV2Successor(
+    uint32_t sourceRank, uint32_t core, uint32_t rankSize)
+{
+    return MoonEpCombineV2SingleRingSuccessor(
+        sourceRank, core, rankSize);
+}
+
+TILEXR_MOONEP_COMBINE_V2_INLINE uint32_t
+MoonEpCombineV2SingleRingReceiveStep(
     uint32_t destinationRank, uint32_t sourceRank, uint32_t rankSize)
 {
     if (rankSize <= kMoonEpCombineV2GroupSize) {
@@ -323,6 +461,42 @@ MoonEpCombineV2ReceiveStep(
 }
 
 TILEXR_MOONEP_COMBINE_V2_INLINE uint32_t
+MoonEpCombineV2ReceiveStep(
+    uint32_t destinationRank, uint32_t sourceRank, uint32_t rankSize,
+    MoonEpCombineV2ScheduleMode mode)
+{
+    if (!MoonEpCombineV2BidirectionalScheduleEnabled(rankSize, mode) ||
+        rankSize <= kMoonEpCombineV2GroupSize) {
+        return MoonEpCombineV2SingleRingReceiveStep(
+            destinationRank, sourceRank, rankSize);
+    }
+    const uint32_t halfRankCount = rankSize / 2U;
+    const uint32_t sourceLocal = sourceRank % halfRankCount;
+    const uint32_t destinationLocal = destinationRank % halfRankCount;
+    const uint32_t clockwise =
+        (destinationLocal + halfRankCount - sourceLocal) % halfRankCount;
+    const uint32_t counterClockwise =
+        clockwise == 0U ? 0U : halfRankCount - clockwise;
+    const uint32_t distance = clockwise < counterClockwise ?
+        clockwise : counterClockwise;
+    const bool sameHalf = destinationRank / halfRankCount ==
+        sourceRank / halfRankCount;
+    if (sameHalf) {
+        return distance == 0U ? MoonEpCombineV2StepCount(rankSize) - 1U :
+            (distance - 1U) / 4U;
+    }
+    return distance == halfRankCount / 2U ? 0U : distance / 4U;
+}
+
+TILEXR_MOONEP_COMBINE_V2_INLINE uint32_t
+MoonEpCombineV2ReceiveStep(
+    uint32_t destinationRank, uint32_t sourceRank, uint32_t rankSize)
+{
+    return MoonEpCombineV2ReceiveStep(destinationRank, sourceRank, rankSize,
+        MOONEP_COMBINE_V2_SINGLE_RING);
+}
+
+TILEXR_MOONEP_COMBINE_V2_INLINE uint32_t
 MoonEpCombineV2SourceForCore(
     uint32_t core, uint32_t sourceIndex, uint32_t rankSize)
 {
@@ -334,6 +508,14 @@ MoonEpCombineV2Token(
     uint64_t magic, uint32_t step)
 {
     return (magic << 3U) | static_cast<uint64_t>(step);
+}
+
+TILEXR_MOONEP_COMBINE_V2_INLINE uint64_t
+MoonEpCombineV2GrantToken(
+    uint64_t magic, uint32_t step, uint32_t stepCount)
+{
+    return MoonEpCombineV2Token(
+        magic, MoonEpCombineV2NextStep(step, stepCount));
 }
 
 TILEXR_MOONEP_COMBINE_V2_INLINE bool
@@ -355,11 +537,12 @@ MoonEpCombineV2DoneIndex(
 
 TILEXR_MOONEP_COMBINE_V2_INLINE uint64_t
 MoonEpCombineV2GrantIndex(
-    uint32_t epoch, uint32_t core, uint32_t lane, uint32_t step)
+    uint32_t epoch, uint32_t core, uint32_t lane,
+    uint32_t transitionRound)
 {
     return (((static_cast<uint64_t>(epoch) * kMoonEpCombineV2CoreCount +
         core) * kMoonEpCombineV2LaneCount + lane) *
-        kMoonEpCombineV2GrantStepCount) + (step - 1U);
+        kMoonEpCombineV2GrantStepCount) + transitionRound;
 }
 
 TILEXR_MOONEP_COMBINE_V2_INLINE uint64_t

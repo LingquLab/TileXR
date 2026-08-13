@@ -49,7 +49,7 @@ extern "C" int TileXRMoonEpCombineV2(void *registeredWorkspace,
     params.aivCoreNum = aivCoreNum;
     params.activeOutputOffset = activeOutputOffset;
     params.dtype = dtype;
-    params.reduceHidden = dtype == TILEXR_MOONEP_DTYPE_BFLOAT16;
+    params.reduceHidden = false;
     params.stream = stream;
     return TileXRMoonEp::TileXRMoonEpRunCombineV2(params);
 }

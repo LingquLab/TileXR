@@ -30,10 +30,12 @@ void CheckStatus(int actual, int expected, const char *message)
 void TestTargetLayout()
 {
     using namespace TileXRMoonEp;
-    Check(sizeof(MoonEpCombineV2ProfileRecord) == 320U,
+    Check(sizeof(MoonEpCombineV2ProfileRecord) == 384U,
         "profile record size mismatch");
     Check(kMoonEpCombineV2ProfileTimePointCount == 22U,
         "profile point count mismatch");
+    Check(kMoonEpCombineV2ProfileMetricCount == 8U,
+        "profile metric count mismatch");
 
     CombineV2Layout layout {};
     CheckStatus(TileXRMoonEpBuildCombineV2Layout(
@@ -50,9 +52,15 @@ void TestTargetLayout()
     Check(layout.scratchOffset[1] == layout.scratchOffset[0] + layout.expertBytes,
         "scratch epoch 1 offset mismatch");
     Check(layout.doneBytes == 32768U, "done bytes mismatch");
-    Check(layout.grantBytes == 229376U, "grant bytes mismatch");
+    Check(layout.grantBytes == 262144U, "grant bytes mismatch");
+    Check(layout.controlSourceOffset == 2818873344ULL,
+        "control source offset mismatch");
+    Check(layout.failureOffset == 2818875392ULL,
+        "failure offset mismatch");
     Check(layout.controlSourceBytes == 2048U, "control source bytes mismatch");
     Check(layout.failureBytes == 2048U, "failure bytes mismatch");
+    Check(layout.outputOffset == 2818877440ULL,
+        "target output offset mismatch");
     Check(layout.outputOffset == layout.failureOffset + layout.failureBytes,
         "output offset mismatch");
     Check(layout.outputBytes == 58720256U, "output bytes mismatch");

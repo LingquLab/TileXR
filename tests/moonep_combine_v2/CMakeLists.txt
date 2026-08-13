@@ -112,6 +112,31 @@ add_executable(test_tilexr_moonep_combine_v2_source_guard
 target_compile_definitions(test_tilexr_moonep_combine_v2_source_guard PRIVATE
     TILEXR_SOURCE_ROOT="${TILEXR_ROOT}")
 
+if(TARGET tilexr-moonep-combine-v2 AND TARGET tile-comm)
+    add_executable(tilexr_moonep_combine_v2_perf
+        demo/tilexr_moonep_combine_v2_hardware_probe.cpp)
+    target_include_directories(tilexr_moonep_combine_v2_perf PRIVATE
+        ${TILEXR_ROOT}/src/include
+        ${TILEXR_ROOT}/src/moonep/combine_v2/common
+        ${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc
+        ${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc/runtime
+        ${ASCEND_HOME_PATH}/${ARCH}-linux/include)
+    target_link_directories(tilexr_moonep_combine_v2_perf PRIVATE
+        ${ASCEND_HOME_PATH}/${ARCH}-linux/lib64
+        ${ASCEND_DRIVER_PATH}/lib64/driver)
+    target_link_libraries(tilexr_moonep_combine_v2_perf PRIVATE
+        tilexr-moonep-combine-v2
+        tile-comm
+        ascendcl
+        runtime)
+    target_link_options(tilexr_moonep_combine_v2_perf PRIVATE
+        "LINKER:-rpath-link,${ASCEND_HOME_PATH}/${ARCH}-linux/lib64"
+        "LINKER:-rpath-link,${ASCEND_DRIVER_PATH}/lib64/driver")
+    set_target_properties(tilexr_moonep_combine_v2_perf PROPERTIES
+        BUILD_WITH_INSTALL_RPATH TRUE
+        INSTALL_RPATH "$ORIGIN/../${CMAKE_INSTALL_LIBDIR};${ASCEND_HOME_PATH}/${ARCH}-linux/lib64;${ASCEND_DRIVER_PATH}/lib64/driver")
+endif()
+
 add_test(NAME test_tilexr_moonep_combine_v2_schedule
     COMMAND test_tilexr_moonep_combine_v2_schedule)
 add_test(NAME test_tilexr_moonep_combine_v2_layout
@@ -133,3 +158,8 @@ install(TARGETS
     test_tilexr_moonep_combine_v2_public_abi
     test_tilexr_moonep_combine_v2_source_guard
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+
+if(TARGET tilexr_moonep_combine_v2_perf)
+    install(TARGETS tilexr_moonep_combine_v2_perf
+        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+endif()
