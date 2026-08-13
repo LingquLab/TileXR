@@ -42,6 +42,11 @@ Optional CMake switches are `TILEXR_BUILD_COLLECTIVES`, `TILEXR_BUILD_EP`, `TILE
 - Keep these notes concise, actionable, and evidence-based. Capture the triggering context, failure mode or impact, root cause, correct approach, and validation boundary; update an existing module, architecture, validation, or troubleshooting document instead of creating scattered task notes when possible.
 - Add a lesson to `AGENTS.md` only when it is project-wide, high-impact, and easy to get wrong repeatedly. Keep task-specific details, transient environment observations, and long investigations in the relevant documentation instead.
 
+## Debugging
+
+- Before debugging TileXR, read [docs/moonep/MINDSPEED_DEBUGGING_EXPERIENCE.md](docs/moonep/MINDSPEED_DEBUGGING_EXPERIENCE.md) and use its evidence-driven workflow, test ladder, and state, queue, and ownership checklists to guide the investigation.
+- Treat the historical root causes in that document as hypotheses rather than conclusions. Reproduce the current failure, identify the first failing boundary, and verify the actual source and binary provenance before changing code.
+
 ## Architecture
 
 - `src/comm` builds `libtile-comm.so`, owns communicator setup, peer mappings, capability flags, and `CommArgs`, and exposes the core API through `tilexr_api.h`.

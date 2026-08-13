@@ -140,6 +140,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--mode", choices=("benchmark", "reference", "correctness"), default="benchmark"
     )
+    parser.add_argument(
+        "--benchmark-kind", choices=("flow", "dispatch_hot_loop"), default="flow"
+    )
+    parser.add_argument(
+        "--dispatch-modes",
+        nargs="+",
+        choices=("hidden", "weight", "pair"),
+        default=("hidden", "weight", "pair"),
+    )
     parser.add_argument("--candidate-backend", default=None, metavar="MODULE:FACTORY")
     parser.add_argument(
         "--dump-stage-tensors",
@@ -198,6 +207,8 @@ def main(argv: list[str] | None = None) -> int:
         )
     if args.mode == "benchmark" and args.dump_stage_tensors:
         raise ValueError("--dump-stage-tensors is only valid in reference/correctness mode")
+    if args.mode != "benchmark" and args.benchmark_kind != "flow":
+        raise ValueError("--benchmark-kind dispatch_hot_loop requires --mode benchmark")
     topology = resolve_topology(
         physical_device_count=args.physical_device_count,
         ranks_per_device=args.ranks_per_device,

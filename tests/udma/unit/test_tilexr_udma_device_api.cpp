@@ -453,6 +453,34 @@ void TestDeferredProfileGetAndCompletionFrontier()
         "second QP selects its bound remote region");
 }
 
+void TestExplicitCompletionTargetDoesNotRereadPublishedCount()
+{
+    Fixture fixture;
+    constexpr uint32_t qp = 1U;
+    auto* local = fixture.localRegion.data();
+    auto scratch = fixture.Scratch();
+    uint32_t completionTarget = fixture.wqeCount[qp];
+
+    for (uint32_t read = 0U; read < 3U; ++read) {
+        Check(UDMAGetNbiOnQp<uint8_t>(&fixture.args, scratch, 1, qp,
+            local + read * 8U, read * 8U, 8U) ==
+                TILEXR_UDMA_STATUS_SUCCESS,
+            "tracked QP-aware GET succeeds");
+        ++completionTarget;
+        Check(completionTarget == read + 1U,
+            "caller tracks the cumulative completion target locally");
+        fixture.Cqe(qp, read)->owner = 1U;
+        fixture.Cqe(qp, read)->entryIdx = read;
+    }
+
+    fixture.wqeCount[qp] = 0U;
+    Check(UDMAQuietStatusOnQpUntil(&fixture.args, 1, qp, completionTarget) ==
+            TILEXR_UDMA_STATUS_SUCCESS,
+        "explicit completion target does not reread a stale published WQE count");
+    Check(fixture.sqTail[qp] == 3U && fixture.cqTail[qp] == 3U,
+        "explicit completion target reclaims all three READs");
+}
+
 void TestWriteNotifyWrapsWithinSqRing()
 {
     Fixture fixture;
@@ -534,6 +562,33 @@ void TestWriteNotifyCompletionUsesFinalBbIndex()
         "WRITE_WITH_NOTIFY completion reclaims both basic blocks");
 }
 
+void TestWriteNotifyExplicitCompletionTargetDoesNotRereadPublishedCount()
+{
+    Fixture fixture;
+    constexpr uint32_t qp = 0U;
+    auto scratch = fixture.Scratch();
+    UDMASignalParams signal = {};
+    signal.sigAddr = reinterpret_cast<uint64_t*>(
+        fixture.remoteRegion.data() + 128U);
+    signal.signal = 9U;
+    uint32_t completionTarget = fixture.wqeCount[qp];
+
+    Check(UDMAWriteNotify(&fixture.args, scratch, fixture.remoteRegion.data(),
+        fixture.localRegion.data(), 1U, qp, 8U, &signal) ==
+            TILEXR_UDMA_STATUS_SUCCESS,
+        "tracked WRITE_WITH_NOTIFY succeeds");
+    ++completionTarget;
+    fixture.Cqe(qp, 0U)->owner = 1U;
+    fixture.Cqe(qp, 0U)->entryIdx = 1U;
+    fixture.wqeCount[qp] = 0U;
+
+    Check(UDMAQuietStatusOnQpUntil(&fixture.args, 1, qp, completionTarget) ==
+            TILEXR_UDMA_STATUS_SUCCESS,
+        "explicit WRITE_WITH_NOTIFY target does not reread a stale WQE count");
+    Check(fixture.sqTail[qp] == 2U && fixture.cqTail[qp] == 1U,
+        "explicit WRITE_WITH_NOTIFY target reclaims both SQ BBs");
+}
+
 void TestLegacyQuietWithoutRegistry()
 {
     Fixture fixture;
@@ -584,6 +639,23 @@ void TestCqReclaimAcrossSqAndCqWrap()
         "quiet rings CQ doorbell with absolute consumer");
 }
 
+void TestCqeEntryIndexNormalizesSqCycle()
+{
+    Fixture fixture;
+    constexpr uint32_t qp = 0U;
+    fixture.sqTail[qp] = TILEXR_UDMA_SQ_BB_COUNT;
+    fixture.sqHead[qp] = TILEXR_UDMA_SQ_BB_COUNT + 1U;
+    fixture.wqeCount[qp] = 1U;
+    fixture.Cqe(qp, 0U)->owner = 1U;
+    fixture.Cqe(qp, 0U)->entryIdx = TILEXR_UDMA_SQ_BB_COUNT;
+
+    Check(UDMAQuietStatusOnQp(&fixture.args, 1, qp) ==
+            TILEXR_UDMA_STATUS_SUCCESS,
+        "CQE entry index carrying an SQ cycle bit is accepted");
+    Check(fixture.sqTail[qp] == TILEXR_UDMA_SQ_BB_COUNT + 1U,
+        "cycle-bearing CQE reclaims the final BB in the current SQ cycle");
+}
+
 void TestInvalidCqeDoesNotReclaim()
 {
     Fixture fixture;
@@ -615,10 +687,13 @@ int main()
     TestImmediatePutReclaimsCompletedFullSq();
     TestGetAndLegacyQp0Wrappers();
     TestDeferredProfileGetAndCompletionFrontier();
+    TestExplicitCompletionTargetDoesNotRereadPublishedCount();
     TestWriteNotifyWrapsWithinSqRing();
     TestWriteNotifyCompletionUsesFinalBbIndex();
+    TestWriteNotifyExplicitCompletionTargetDoesNotRereadPublishedCount();
     TestLegacyQuietWithoutRegistry();
     TestCqReclaimAcrossSqAndCqWrap();
+    TestCqeEntryIndexNormalizesSqCycle();
     TestInvalidCqeDoesNotReclaim();
 
     if (gFailures != 0) {

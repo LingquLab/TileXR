@@ -409,6 +409,27 @@ def test_launcher_forwards_mode_candidate_and_reference_overrides(tmp_path) -> N
     assert command[command.index("--tensor-preview-elements") + 1] == "5"
 
 
+def test_single_node_launcher_builds_hidden_dispatch_hot_loop_command(tmp_path) -> None:
+    args = build_launcher_parser().parse_args(
+        [
+            "--cases",
+            str(tmp_path / "cases.json"),
+            "--output-dir",
+            str(tmp_path / "out"),
+            "--benchmark-kind",
+            "dispatch_hot_loop",
+            "--dispatch-modes",
+            "hidden",
+        ]
+    )
+
+    command = _process_command(args)
+    assert "tools.moonep.dispatch_hot_loop" in command
+    assert "tools.moonep.benchmark" not in command
+    assert command[command.index("--dispatch-modes") + 1 :] == ["hidden"]
+    assert "--mode" not in command
+
+
 def test_candidate_factory_is_protocol_checked(monkeypatch) -> None:
     module = ModuleType("test_candidate_backend")
 

@@ -58,9 +58,9 @@ MANIFEST.in
 
 # Agent planning scratch files
 /.planning/
-/task_plan.md
-/findings.md
-/progress.md
+task_plan.md
+findings.md
+progress.md
 
 # custom
 .worktrees/

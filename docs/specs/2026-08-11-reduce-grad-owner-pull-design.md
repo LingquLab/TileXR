@@ -506,6 +506,11 @@ These were correctness investigations, not viable optimization candidates:
   the old owner-pull layout allowed at most eight lanes. Keep transport-QP
   count separate from active-lane count and require the `UDMA_SHARED_QP`
   capability before applying the fixed `{0,1,16}` physical mapping.
+- UDMA completion must also remain separate from both counts. Capture each
+  queue's completion frontier before posting a batch, advance it only for
+  successful submissions, and wait for that explicit target. Do not reread a
+  shared published WQE count when completing the batch, and do not infer CQE
+  length from SQE contents that hardware may already have consumed.
 
 ## Recommended Next Stage: Sender-PUT Fan-In
 

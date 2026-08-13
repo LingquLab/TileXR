@@ -217,7 +217,10 @@ int main()
     Contains("prefetch kernel", prefetchKernel, "localExpert");
     Excludes("prefetch kernel", prefetchKernel, "e_ + slot");
     Contains("prefetch kernel", prefetchKernel, "UDMAGetNbiOnQp");
-    Contains("prefetch kernel", prefetchKernel, "UDMAQuietStatusOnQp");
+    Contains("prefetch kernel", prefetchKernel, "UDMAQuietStatusOnQpUntil");
+    Contains("prefetch kernel", prefetchKernel, "completionQueueIds");
+    Contains("prefetch kernel", prefetchKernel,
+        "++completionTargets[completionQueue]");
     Contains("prefetch kernel", prefetchKernel, "DataCacheCleanAndInvalid");
     Excludes("prefetch kernel", prefetchKernel, "<<<");
     Excludes("prefetch launch", prefetchLaunch, "launch_tilexr_moonep_prefetch_weight_kernel");

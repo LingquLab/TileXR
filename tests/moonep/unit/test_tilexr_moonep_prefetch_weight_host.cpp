@@ -158,6 +158,7 @@ void TestLaunch()
     Reset(); launchRet = -77;
     Status("prefetch launch failure", TileXRMoonEp::TileXRMoonEpRunPrefetchWeightV1(&args, stream), -77);
 }
+
 }
 
 extern "C" int TileXRGetCommArgsHost(TileXRCommPtr, TileXR::CommArgs *&out) { out = hostRet == 0 ? &commArgs : nullptr; return hostRet; }

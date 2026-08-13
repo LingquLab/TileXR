@@ -248,11 +248,23 @@ void TestWqeBatchBoundaries()
     head += 7U * 128U;
     CHECK_EQ(TileXRMoonEp::DispatchWqeBatchCount(UINT64_MAX, head, 8192U), 121U);
     CHECK_EQ((1017U * sizeof(int16_t)) % 32U, 18U);
-    CHECK_TRUE(TileXRMoonEp::DispatchPeerWqesFitSq(8192U, 16384U));
-    CHECK_TRUE(!TileXRMoonEp::DispatchPeerWqesFitSq(32768U, 16384U));
-    CHECK_TRUE(!TileXRMoonEp::DispatchPeerWqesFitSq(UINT64_MAX, 16384U));
-    CHECK_TRUE(TileXRMoonEp::DispatchBatchNeedsCompletion(true));
-    CHECK_TRUE(!TileXRMoonEp::DispatchBatchNeedsCompletion(false));
+    CHECK_TRUE(TileXRMoonEp::DispatchPeerWqesStreamable(8192U, 16384U));
+    CHECK_TRUE(TileXRMoonEp::DispatchPeerWqesStreamable(32768U, 16384U));
+    CHECK_TRUE(!TileXRMoonEp::DispatchPeerWqesStreamable(UINT64_MAX, 16384U));
+    CHECK_TRUE(!TileXRMoonEp::DispatchPeerWqesStreamable(8192U,
+        TileXRMoonEp::kDispatchSqPollReserve +
+            TileXRMoonEp::kDispatchWqeBatchCapacity - 1U));
+    CHECK_TRUE(!TileXRMoonEp::DispatchGroupedBatchNeedsCompletion(0U));
+    CHECK_TRUE(TileXRMoonEp::DispatchGroupedBatchNeedsCompletion(1U));
+    CHECK_TRUE(TileXRMoonEp::DispatchGroupedBatchNeedsCompletion(
+        TileXRMoonEp::kDispatchWqeBatchCapacity));
+
+    CHECK_EQ(TileXRMoonEp::DispatchRouteTileCount(32768U, 0U, 1024U), 1024U);
+    CHECK_EQ(TileXRMoonEp::DispatchRouteTileCount(32768U, 31744U, 1024U),
+        1024U);
+    CHECK_EQ(TileXRMoonEp::DispatchRouteTileCount(32768U, 32768U, 1024U), 0U);
+    CHECK_EQ(TileXRMoonEp::DispatchRouteTileCount(1000U, 0U, 1024U), 1000U);
+    CHECK_EQ(TileXRMoonEp::DispatchRouteTileCount(1000U, 0U, 0U), 0U);
 
 }
 

@@ -35,7 +35,6 @@ int TileXRMoonEpLaunchKernel(const PlannerParams &params, const PlannerLaunchCon
     if (ret != TileXR::TILEXR_SUCCESS) {
         return ret;
     }
-
     const PlannerLayout &layout = context.layout;
     struct PlannerKernelArgs {
         GM_ADDR commArgs;
