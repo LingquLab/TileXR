@@ -18,53 +18,20 @@ void Check(bool condition, const char *message)
     }
 }
 
-std::vector<uint32_t> SelectPeerRoutesReference(
-    const std::vector<int32_t> &dst, uint32_t chunkStart,
-    uint32_t peer, uint32_t slots)
+std::vector<uint32_t> SelectPeerIndicesReference(
+    const std::vector<int32_t> &dst, uint32_t peer, uint32_t slots)
 {
-    using namespace TileXRMoonEp;
-    std::array<uint32_t, kMoonEpCombineV2MaxSelectorThreads> cursor {};
     std::vector<uint32_t> selected;
-    bool firstPass = true;
-    uint32_t paused = 0U;
-    do {
-        const uint32_t batchBase = static_cast<uint32_t>(selected.size());
-        paused = 0U;
-        for (uint32_t thread = 0U;
-            thread < kMoonEpCombineV2SelectorThreads; ++thread) {
-            uint32_t index = firstPass ?
-                MoonEpCombineV2SelectorFirstIndex(chunkStart, thread) :
-                MoonEpCombineV2SelectorResumeIndex(cursor[thread]);
-            uint32_t lastScanned = index;
-            while (MoonEpCombineV2SelectorIndexInChunk(
-                index, chunkStart, static_cast<uint32_t>(dst.size()))) {
-                lastScanned = index;
-                const int32_t encoded = dst[index - chunkStart];
-                if (encoded >= 0 &&
-                    static_cast<uint32_t>(encoded) / slots == peer) {
-                    const uint32_t routeIndex =
-                        static_cast<uint32_t>(selected.size()) - batchBase;
-                    selected.push_back(index);
-                    if (routeIndex >= kMoonEpCombineV2PayloadBatchRows) {
-                        cursor[thread] = lastScanned;
-                        const uint32_t next =
-                            MoonEpCombineV2SelectorResumeIndex(index);
-                        if (MoonEpCombineV2SelectorIndexInChunk(next,
-                            chunkStart, static_cast<uint32_t>(dst.size()))) {
-                            ++paused;
-                        }
-                        break;
-                    }
-                }
-                index = MoonEpCombineV2SelectorResumeIndex(index);
-            }
-            cursor[thread] = lastScanned;
+    const uint64_t peerBase = static_cast<uint64_t>(peer) * slots;
+    const uint64_t peerEnd = peerBase + slots;
+    for (uint32_t index = 0U; index < dst.size(); ++index) {
+        const int32_t encoded = dst[index];
+        if (encoded >= 0 &&
+            static_cast<uint64_t>(encoded) >= peerBase &&
+            static_cast<uint64_t>(encoded) < peerEnd) {
+            selected.push_back(index);
         }
-        Check(selected.size() - batchBase <=
-                kMoonEpCombineV2MaxSelectedPayloadWqes,
-            "selector reference batch exceeded the route capacity");
-        firstPass = false;
-    } while (paused != 0U);
+    }
     return selected;
 }
 
@@ -245,11 +212,10 @@ void TestWqeBatchHelpers()
     using namespace TileXRMoonEp;
     Check(kMoonEpCombineV2PayloadBatchRows == 128U,
         "payload batch tuning constant mismatch");
-    Check(kMoonEpCombineV2SelectorThreads == 128U &&
-            kMoonEpCombineV2BuilderThreads == 128U,
-        "SIMT thread counts are not derived from payload batch rows");
-    Check(kMoonEpCombineV2MaxSelectedPayloadWqes == 256U,
-        "selector payload bound mismatch");
+    Check(kMoonEpCombineV2BuilderThreads == 128U,
+        "SIMT builder thread count mismatch");
+    Check(kMoonEpCombineV2MaxSelectedPayloadWqes == 128U,
+        "payload submission bound mismatch");
     Check(kMoonEpCombineV2WqeBatchCapacity == 128U,
         "WQE batch capacity mismatch");
     Check(kMoonEpCombineV2BatchQpCount == 2U,
@@ -286,19 +252,6 @@ void TestWqeBatchHelpers()
         "WQE batch capacity not enforced");
     Check(MoonEpCombineV2WqeBatchCount(128U, 16380U, 16384U) == 4U,
         "WQE ring wrap not split");
-    Check(MoonEpCombineV2SelectorFirstIndex(16384U, 127U) == 16511U,
-        "selector first index mismatch");
-    Check(MoonEpCombineV2SelectorResumeIndex(16511U) == 16639U,
-        "selector resume index mismatch");
-    Check(MoonEpCombineV2SelectorIndexInChunk(
-            16511U, 16384U, 128U),
-        "selector rejected the last full-chunk index");
-    Check(!MoonEpCombineV2SelectorIndexInChunk(
-            16512U, 16384U, 128U),
-        "selector accepted an index after the chunk");
-    Check(!MoonEpCombineV2SelectorIndexInChunk(
-            130U, 128U, 2U),
-        "selector accepted a tail-thread index after the chunk");
     Check(MoonEpCombineV2CqePollBatchCount(16380U, 16384U, 128U) == 4U,
         "CQ poll ring wrap not split");
     Check(MoonEpCombineV2CqeOwnerReady(0U, 16384U, 1U),
@@ -345,14 +298,14 @@ void TestWqeBatchHelpers()
             MoonEpCombineV2BatchLaneCounts(
                 kMoonEpCombineV2MaxSelectedPayloadWqes, phase,
                 0U, kMoonEpCombineV2StepCount, false);
-        Check(payload.sixPort == 192U && payload.twoPort == 64U,
-            "maximum payload does not fit the 192/64 QP split");
+        Check(payload.sixPort == 96U && payload.twoPort == 32U,
+            "maximum payload does not fit the 96/32 QP split");
         const MoonEpCombineV2LaneCounts finalBatch =
             MoonEpCombineV2BatchLaneCounts(
                 kMoonEpCombineV2MaxSelectedPayloadWqes, phase,
                 0U, kMoonEpCombineV2StepCount, true);
-        Check(finalBatch.sixPort == 194U && finalBatch.twoPort == 66U,
-            "maximum final batch does not fit the 194/66 issue split");
+        Check(finalBatch.sixPort == 98U && finalBatch.twoPort == 34U,
+            "maximum final batch does not fit the 98/34 issue split");
     }
 }
 
@@ -570,43 +523,41 @@ void TestBidirectionalSchedule()
     TestBidirectionalScheduleAnchors();
 }
 
-void TestSelectorReferenceModel()
+void TestVectorSelectionReferenceModel()
 {
     using namespace TileXRMoonEp;
-    const uint32_t chunkStart = 32768U;
-    const uint32_t slots = 16384U;
+    const uint32_t slots = 2040U;
 
     std::vector<int32_t> noMatches(23U, -1);
-    Check(SelectPeerRoutesReference(noMatches, chunkStart, 3U, slots).empty(),
-        "selector reference produced a route for an empty tail chunk");
+    Check(SelectPeerIndicesReference(noMatches, 3U, slots).empty(),
+        "vector selection produced an index for an empty tail chunk");
 
-    std::vector<int32_t> concentrated(16384U, -1);
+    std::vector<int32_t> mixed(kMoonEpCombineV2SelectionChunkRows, -1);
     std::vector<uint32_t> expected;
-    for (uint32_t index = 7U; index < concentrated.size();
-        index += kMoonEpCombineV2SelectorThreads) {
-        concentrated[index] = static_cast<int32_t>(5U * slots + index);
-        expected.push_back(chunkStart + index);
+    for (uint32_t index = 7U; index < mixed.size(); index += 37U) {
+        mixed[index] = static_cast<int32_t>(5U * slots + index % slots);
+        expected.push_back(index);
     }
-    const std::vector<uint32_t> selected = SelectPeerRoutesReference(
-        concentrated, chunkStart, 5U, slots);
+    mixed[0] = static_cast<int32_t>(5U * slots);
+    expected.insert(expected.begin(), 0U);
+    mixed[1] = static_cast<int32_t>(6U * slots);
+    const std::vector<uint32_t> selected = SelectPeerIndicesReference(
+        mixed, 5U, slots);
     Check(selected == expected,
-        "selector reference skipped or duplicated concentrated routes");
-    Check(selected.size() == 128U,
-        "concentrated selector case did not exercise one owning thread");
+        "vector selection did not preserve compacted chunk indices");
 
     std::vector<int32_t> allMatches(1024U);
     for (uint32_t index = 0U; index < allMatches.size(); ++index) {
         allMatches[index] = static_cast<int32_t>(2U * slots + index);
     }
-    const std::vector<uint32_t> allSelected = SelectPeerRoutesReference(
-        allMatches, chunkStart, 2U, slots);
+    const std::vector<uint32_t> allSelected = SelectPeerIndicesReference(
+        allMatches, 2U, slots);
     Check(allSelected.size() == allMatches.size(),
-        "selector reference did not resume through every matching route");
+        "vector selection did not retain every matching index");
     std::array<bool, 1024U> seen {};
-    for (uint32_t absolute : allSelected) {
-        const uint32_t relative = absolute - chunkStart;
+    for (uint32_t relative : allSelected) {
         Check(relative < seen.size() && !seen[relative],
-            "selector reference duplicated an all-match route");
+            "vector selection duplicated an all-match index");
         if (relative < seen.size()) {
             seen[relative] = true;
         }
@@ -623,6 +574,6 @@ int main()
     TestQpAndBatchContract();
     TestTokensAndShapes();
     TestWqeBatchHelpers();
-    TestSelectorReferenceModel();
+    TestVectorSelectionReferenceModel();
     return failures == 0 ? 0 : 1;
 }

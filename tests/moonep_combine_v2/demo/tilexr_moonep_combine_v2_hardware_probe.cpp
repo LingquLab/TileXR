@@ -20,6 +20,7 @@
 #include <unistd.h>
 
 #include "acl/acl.h"
+#include "combine_v2_host.h"
 #include "combine_v2_profile.h"
 #include "combine_v2_schedule.h"
 #include "tilexr_api.h"
@@ -30,7 +31,7 @@ namespace {
 
 constexpr int kDeviceCount = 8;
 constexpr int kDefaultCommDomain = 141;
-constexpr int64_t kH = 3584;
+constexpr int64_t kDefaultHiddenSize = 3584;
 constexpr int64_t kTopK = 16;
 constexpr int kDefaultExpertCount = 64;
 constexpr uint32_t kAivCoreNum = 16;
@@ -59,13 +60,14 @@ struct Options {
     int warmup = 20;
     int iterations = 80;
     int experts = kDefaultExpertCount;
+    int64_t hiddenSize = kDefaultHiddenSize;
     int commDomain = kDefaultCommDomain;
     int rank = -1;
     int worldSize = 0;
     int device = -1;
     bool skipIterationBarriers = false;
     bool profile = false;
-    bool allowSelfOnlyFailure = false;
+    bool reduceHidden = false;
 };
 
 struct ProfileSample {
@@ -110,6 +112,7 @@ void Usage(std::ostream &out, const char *program)
         << "  --warmup N             Warmup launches per batch size (default: 20)\n"
         << "  --iterations N         Timed launches per batch size (default: 80)\n"
         << "  --experts N            Total expert count (default: 64)\n"
+        << "  --hidden-size N        Hidden size H (default: 3584)\n"
         << "  --comm-domain N        Shared-QP communication domain (default: 141)\n"
         << "  --rank N               Global rank (required)\n"
         << "  --world-size N         Global rank count (required)\n"
@@ -117,8 +120,7 @@ void Usage(std::ostream &out, const char *program)
         << "  --skip-iteration-barriers\n"
         << "                         Skip host barriers between warmup/timed launches\n"
         << "  --profile              Capture per-AIV kernel cycle timestamps\n"
-        << "  --allow-self-only-failure\n"
-        << "                         Continue timing when only Self-copy validation fails\n"
+        << "  --reduce-hidden        Include BF16 TopK hidden reduction in the kernel\n"
         << "  --help                 Show this help\n";
 }
 
@@ -188,8 +190,8 @@ bool ParseOptions(int argc, char **argv, Options *options, bool *showHelp,
             options->profile = true;
             continue;
         }
-        if (argument == "--allow-self-only-failure") {
-            options->allowSelfOnlyFailure = true;
+        if (argument == "--reduce-hidden") {
+            options->reduceHidden = true;
             continue;
         }
         if (index + 1 >= argc) {
@@ -232,6 +234,14 @@ bool ParseOptions(int argc, char **argv, Options *options, bool *showHelp,
                 return false;
             }
             options->experts = static_cast<int>(parsed);
+        } else if (argument == "--hidden-size") {
+            int64_t parsed = 0;
+            if (!ParseInteger(value, 1, std::numeric_limits<int32_t>::max(),
+                    &parsed)) {
+                *error = "invalid hidden size: " + value;
+                return false;
+            }
+            options->hiddenSize = parsed;
         } else if (argument == "--comm-domain") {
             int64_t parsed = 0;
             if (!ParseInteger(value, 1, std::numeric_limits<int>::max(),
@@ -494,25 +504,49 @@ bool BarrierAll(int rank, int world, const std::string &step,
 }
 
 void LaunchCombine(int rank, void *workspace, const int32_t *dst,
-    TileXRCommPtr comm, int64_t bs, aclrtStream stream,
+    TileXRCommPtr comm, int64_t bs, int64_t hiddenSize, aclrtStream stream,
+    bool reduceHidden, uint64_t reduceOutputOffset,
     uint64_t *activeOutputOffset)
 {
     const int64_t slots = bs * kTopK;
-    const int ret = TileXRMoonEpCombineV2(workspace, dst, comm, bs, kH,
-        kTopK, slots, kAivCoreNum, activeOutputOffset,
-        TILEXR_MOONEP_DTYPE_BFLOAT16, stream);
+    int ret = TILEXR_MOONEP_SUCCESS;
+    if (reduceHidden) {
+        TileXRMoonEp::CombineV2Params params {};
+        params.registeredWorkspace = workspace;
+        params.dstLocal = dst;
+        params.comm = comm;
+        params.bs = bs;
+        params.h = hiddenSize;
+        params.topK = kTopK;
+        params.nvS = slots;
+        params.aivCoreNum = kAivCoreNum;
+        params.activeOutputOffset = activeOutputOffset;
+        params.dtype = TILEXR_MOONEP_DTYPE_BFLOAT16;
+        params.reduceHidden = true;
+        params.stream = stream;
+        ret = TileXRMoonEp::TileXRMoonEpRunCombineV2(params);
+        if (ret == TILEXR_MOONEP_SUCCESS) {
+            *activeOutputOffset = reduceOutputOffset;
+        }
+    } else {
+        ret = TileXRMoonEpCombineV2(workspace, dst, comm, bs,
+            hiddenSize, kTopK, slots, kAivCoreNum, activeOutputOffset,
+            TILEXR_MOONEP_DTYPE_BFLOAT16, stream);
+    }
     if (ret != TILEXR_MOONEP_SUCCESS) {
-        Abort(rank, "TileXRMoonEpCombineV2", ret);
+        Abort(rank, reduceHidden ? "TileXRMoonEpRunCombineV2 reduce" :
+            "TileXRMoonEpCombineV2", ret);
     }
 }
 
 OutputCheckResult CheckOutput(int rank, int world, int64_t bs,
-    const void *workspace,
-    uint64_t activeOutputOffset)
+    int64_t hiddenSize, const void *workspace,
+    uint64_t activeOutputOffset, bool reduceHidden)
 {
     const int64_t slots = bs * kTopK;
-    const std::size_t outputElements = static_cast<std::size_t>(slots) *
-        static_cast<std::size_t>(kH);
+    const int64_t outputRows = reduceHidden ? bs : slots;
+    const std::size_t outputElements = static_cast<std::size_t>(outputRows) *
+        static_cast<std::size_t>(hiddenSize);
     const std::size_t outputBytes = outputElements * sizeof(uint16_t);
     std::vector<uint16_t> output(outputElements);
     const void *outputDevice = static_cast<const uint8_t *>(workspace) +
@@ -520,23 +554,26 @@ OutputCheckResult CheckOutput(int rank, int world, int64_t bs,
     CheckAcl(rank, "output D2H copy", aclrtMemcpy(output.data(), outputBytes,
         outputDevice, outputBytes, ACL_MEMCPY_DEVICE_TO_HOST));
 
-    const int64_t slotsPerSourceRank = slots / world;
+    const int64_t rowsPerSourceRank = outputRows / world;
     bool selfMismatch = false;
-    for (int64_t slot = 0; slot < slots; ++slot) {
-        const int sourceRank = static_cast<int>(slot / slotsPerSourceRank);
+    for (int64_t row = 0; row < outputRows; ++row) {
+        const int sourceRank = static_cast<int>(row / rowsPerSourceRank);
         if (sourceRank == rank && selfMismatch) {
             continue;
         }
-        const uint16_t expected = SourceValue(sourceRank);
-        const std::size_t rowOffset = static_cast<std::size_t>(slot) *
-            static_cast<std::size_t>(kH);
-        for (int64_t column = 0; column < kH; ++column) {
+        const uint16_t expected = reduceHidden ? FloatToBfloat16(
+            (1.0F + static_cast<float>(sourceRank % 16) * 0.25F +
+                static_cast<float>(sourceRank / 16) * 0.0625F) *
+                    static_cast<float>(kTopK)) : SourceValue(sourceRank);
+        const std::size_t rowOffset = static_cast<std::size_t>(row) *
+            static_cast<std::size_t>(hiddenSize);
+        for (int64_t column = 0; column < hiddenSize; ++column) {
             const std::size_t index = rowOffset +
                 static_cast<std::size_t>(column);
             if (output[index] != expected) {
                 std::cerr << "[rank " << rank << "] output mismatch"
                           << " bs=" << bs
-                          << " slot=" << slot
+                          << " row=" << row
                           << " column=" << column
                           << " source_rank=" << sourceRank
                           << " got=" << output[index]
@@ -677,7 +714,7 @@ int main(int argc, char **argv)
         uint64_t workspaceBytes = 0;
         uint64_t profileOffset = 0;
         uint64_t outputOffsets[2] = {};
-        ret = TileXRMoonEpCombineGetWorkspaceSizeV2(bs, kH, kTopK,
+        ret = TileXRMoonEpCombineGetWorkspaceSizeV2(bs, options.hiddenSize, kTopK,
             bs * kTopK, TILEXR_MOONEP_DTYPE_BFLOAT16, &workspaceBytes,
             &profileOffset, &outputOffsets[0], &outputOffsets[1]);
         if (ret != TILEXR_MOONEP_SUCCESS || workspaceBytes == 0) {
@@ -714,28 +751,35 @@ int main(int argc, char **argv)
                   << " devices_per_host=" << kDeviceCount
                   << " experts=" << options.experts
                   << " k=" << kTopK
-                  << " h=" << kH
+                  << " h=" << options.hiddenSize
                   << " dtype=bf16"
                   << " qp_count=" << qpCount
                   << " max_bs=" << maxBs
                   << " workspace_bytes=" << maxWorkspaceBytes
+                  << " reduce=" << (options.reduceHidden ? "enabled" : "disabled")
                   << std::endl;
     }
 
-    bool allCasesOk = true;
     for (const int64_t bs : options.batchSizes) {
         const int64_t slots = bs * kTopK;
         uint64_t caseWorkspaceBytes = 0;
         uint64_t profileOffset = 0;
         uint64_t outputOffsets[2] = {};
-        ret = TileXRMoonEpCombineGetWorkspaceSizeV2(bs, kH, kTopK, slots,
-            TILEXR_MOONEP_DTYPE_BFLOAT16, &caseWorkspaceBytes,
+        ret = TileXRMoonEpCombineGetWorkspaceSizeV2(bs, options.hiddenSize,
+            kTopK, slots, TILEXR_MOONEP_DTYPE_BFLOAT16, &caseWorkspaceBytes,
             &profileOffset, &outputOffsets[0], &outputOffsets[1]);
         if (ret != TILEXR_MOONEP_SUCCESS || caseWorkspaceBytes == 0) {
             Abort(rank, "TileXRMoonEpCombineGetWorkspaceSizeV2 profile", ret);
         }
+        TileXRMoonEp::CombineV2Layout caseLayout {};
+        ret = TileXRMoonEp::TileXRMoonEpBuildCombineV2Layout(
+            bs, options.hiddenSize, kTopK, slots,
+            TILEXR_MOONEP_DTYPE_BFLOAT16, &caseLayout);
+        if (ret != TILEXR_MOONEP_SUCCESS) {
+            Abort(rank, "TileXRMoonEpBuildCombineV2Layout", ret);
+        }
         const std::size_t sourceElements = static_cast<std::size_t>(slots) *
-            static_cast<std::size_t>(kH);
+            static_cast<std::size_t>(options.hiddenSize);
         const std::size_t sourceBytes = sourceElements * sizeof(uint16_t);
         const std::size_t dstBytes = static_cast<std::size_t>(slots) *
             sizeof(int32_t);
@@ -764,29 +808,20 @@ int main(int argc, char **argv)
         }
 
         uint64_t activeOutputOffset = 0;
-        LaunchCombine(rank, workspace, dst, comm, bs, stream,
-            &activeOutputOffset);
+        LaunchCombine(rank, workspace, dst, comm, bs, options.hiddenSize, stream,
+            options.reduceHidden, caseLayout.outputOffset, &activeOutputOffset);
         CheckAcl(rank, "correctness stream synchronization",
             aclrtSynchronizeStream(stream));
         const OutputCheckResult outputResult = CheckOutput(
-            rank, world, bs, workspace,
-            activeOutputOffset);
-        const bool validationAccepted =
-            outputResult == OutputCheckResult::Passed ||
-            (options.allowSelfOnlyFailure &&
-                outputResult == OutputCheckResult::SelfOnlyFailed);
-        if (!BarrierAll(rank, world, "correctness validation",
-                validationAccepted)) {
-            allCasesOk = false;
-            std::cout << "COMBINE_V2_RANK_PERF bs=" << bs
-                      << " rank=" << rank
-                      << " correctness=failed" << std::endl;
-            break;
+            rank, world, bs, options.hiddenSize, workspace,
+            activeOutputOffset, options.reduceHidden);
+        if (!BarrierAll(rank, world, "correctness validation")) {
+            Abort(rank, "correctness validation barrier", 1);
         }
 
         for (int iteration = 0; iteration < options.warmup; ++iteration) {
-            LaunchCombine(rank, workspace, dst, comm, bs, stream,
-                &activeOutputOffset);
+            LaunchCombine(rank, workspace, dst, comm, bs, options.hiddenSize, stream,
+                options.reduceHidden, caseLayout.outputOffset, &activeOutputOffset);
             CheckAcl(rank, "warmup stream synchronization",
                 aclrtSynchronizeStream(stream));
             if (!options.skipIterationBarriers &&
@@ -806,8 +841,8 @@ int main(int argc, char **argv)
         for (int iteration = 0; iteration < options.iterations; ++iteration) {
             CheckAcl(rank, "aclrtRecordEvent start",
                 aclrtRecordEvent(startEvent, stream));
-            LaunchCombine(rank, workspace, dst, comm, bs, stream,
-                &activeOutputOffset);
+            LaunchCombine(rank, workspace, dst, comm, bs, options.hiddenSize, stream,
+                options.reduceHidden, caseLayout.outputOffset, &activeOutputOffset);
             CheckAcl(rank, "aclrtRecordEvent stop",
                 aclrtRecordEvent(stopEvent, stream));
             CheckAcl(rank, "aclrtSynchronizeEvent stop",
@@ -862,13 +897,13 @@ int main(int argc, char **argv)
                   << "COMBINE_V2_RANK_PERF bs=" << bs
                   << " rank=" << rank
                   << " avg_ms=" << total / static_cast<float>(rankSamples.size())
+                  << " reduce=" << (options.reduceHidden ? "enabled" : "disabled")
                   << " correctness=" << OutputCheckName(outputResult)
                   << std::endl;
-        allCasesOk = allCasesOk && validationAccepted;
     }
 
     const bool casesSynchronized = BarrierAll(rank, world,
-        "all benchmark cases", allCasesOk);
+        "all benchmark cases");
     const int unregisterRet = TileXRUDMAUnregister(comm, handle);
     const bool unregisterSynchronized = BarrierAll(rank, world,
         "workspace unregistration",
@@ -887,6 +922,5 @@ int main(int argc, char **argv)
         freeDstRet == ACL_SUCCESS && freeWorkspaceRet == ACL_SUCCESS &&
         destroyStreamRet == ACL_SUCCESS && resetRet == ACL_SUCCESS &&
         finalizeRet == ACL_SUCCESS;
-    return allCasesOk && casesSynchronized && unregisterSynchronized &&
-        cleanupOk ? 0 : 1;
+    return casesSynchronized && unregisterSynchronized && cleanupOk ? 0 : 1;
 }

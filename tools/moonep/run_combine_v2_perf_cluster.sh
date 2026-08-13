@@ -13,6 +13,7 @@ BS_LIST=""
 WARMUP=20
 ITERATIONS=80
 EXPERTS=64
+HIDDEN_SIZE=3584
 COMM_DOMAIN=141
 COMM_PORT=10067
 WAIT_SECONDS=120
@@ -24,8 +25,8 @@ SKIP_BUILD=0
 SKIP_RUNTIME_SYNC=0
 SKIP_ITERATION_BARRIERS=0
 PROFILE=0
+REDUCE_HIDDEN=0
 SKIP_NPU_PREFLIGHT=0
-ALLOW_SELF_ONLY_FAILURE=0
 
 usage() {
     cat <<'EOF'
@@ -44,6 +45,7 @@ Options:
   --warmup N                Warmup launches per BS (default: 20)
   --iterations N            Timed launches per BS (default: 80)
   --experts N               Total expert count (default: 64)
+  --hidden-size N           Hidden size H (default: 3584)
   --comm-domain N           Shared-QP domain (default: 141)
   --comm-port N             Bootstrap TCP port on first host (default: 10067)
   --wait-seconds N          Maximum NPU wait (default: 120)
@@ -55,8 +57,8 @@ Options:
   --skip-runtime-sync       Do not rsync install to worker hosts
   --skip-iteration-barriers Forward to benchmark launcher
   --profile                 Capture per-AIV kernel cycle timestamps
+  --reduce-hidden           Include BF16 TopK hidden reduction in the kernel
   --skip-npu-preflight      Forward after manual NPU validation
-  --allow-self-only-failure Forward to benchmark launcher
   --help                    Show this help
 EOF
 }
@@ -75,6 +77,7 @@ while [[ $# -gt 0 ]]; do
         --warmup) WARMUP="$2"; shift 2 ;;
         --iterations) ITERATIONS="$2"; shift 2 ;;
         --experts) EXPERTS="$2"; shift 2 ;;
+        --hidden-size) HIDDEN_SIZE="$2"; shift 2 ;;
         --comm-domain) COMM_DOMAIN="$2"; shift 2 ;;
         --comm-port) COMM_PORT="$2"; shift 2 ;;
         --wait-seconds) WAIT_SECONDS="$2"; shift 2 ;;
@@ -86,8 +89,8 @@ while [[ $# -gt 0 ]]; do
         --skip-runtime-sync) SKIP_RUNTIME_SYNC=1; shift ;;
         --skip-iteration-barriers) SKIP_ITERATION_BARRIERS=1; shift ;;
         --profile) PROFILE=1; shift ;;
+        --reduce-hidden) REDUCE_HIDDEN=1; shift ;;
         --skip-npu-preflight) SKIP_NPU_PREFLIGHT=1; shift ;;
-        --allow-self-only-failure) ALLOW_SELF_ONLY_FAILURE=1; shift ;;
         --help|-h) usage; exit 0 ;;
         *) echo "unknown argument: $1" >&2; usage >&2; exit 2 ;;
     esac
@@ -119,9 +122,9 @@ fi
 if [[ -z "${BS}" && -z "${BS_LIST}" ]]; then
     BS=128
 fi
-for value in "${WARMUP}" "${ITERATIONS}" "${EXPERTS}" "${COMM_DOMAIN}" \
-    "${COMM_PORT}" "${WAIT_SECONDS}" "${RETRY_SECONDS}" "${RANK_TIMEOUT}" \
-    "${BUILD_JOBS}"; do
+for value in "${WARMUP}" "${ITERATIONS}" "${EXPERTS}" "${HIDDEN_SIZE}" \
+    "${COMM_DOMAIN}" "${COMM_PORT}" "${WAIT_SECONDS}" "${RETRY_SECONDS}" \
+    "${RANK_TIMEOUT}" "${BUILD_JOBS}"; do
     if [[ ! "${value}" =~ ^[0-9]+$ ]]; then
         echo "numeric arguments must be non-negative integers" >&2
         exit 2
@@ -137,7 +140,6 @@ if [[ ! -f "${HOSTFILE}" ]]; then
     echo "hostfile is missing: ${HOSTFILE}" >&2
     exit 1
 fi
-
 first_host="$(awk '
     /^[[:space:]]*($|#)/ { next }
     { gsub(/[[:space:]]/, "", $0); split($0, item, ":"); print item[1]; exit }
@@ -158,12 +160,17 @@ for script in "${build_script}" "${sync_script}" "${run_script}"; do
 done
 
 if (( ! SKIP_BUILD )); then
-    bash "${build_script}" \
+    build_args=(
         --source-dir "${SOURCE_DIR}" \
         --build-dir "${BUILD_DIR}" \
         --install-dir "${INSTALL_DIR}" \
         --cann-path "${CANN_PATH}" \
         --jobs "${BUILD_JOBS}"
+    )
+    if (( PROFILE )); then
+        build_args+=(--enable-profiling)
+    fi
+    bash "${build_script}" "${build_args[@]}"
 fi
 
 if (( ! SKIP_RUNTIME_SYNC )); then
@@ -181,6 +188,7 @@ run_args=(
     --warmup "${WARMUP}"
     --iterations "${ITERATIONS}"
     --experts "${EXPERTS}"
+    --hidden-size "${HIDDEN_SIZE}"
     --comm-domain "${COMM_DOMAIN}"
     --comm-id "${first_host}:${COMM_PORT}"
     --wait-seconds "${WAIT_SECONDS}"
@@ -199,12 +207,11 @@ fi
 if (( PROFILE )); then
     run_args+=(--profile)
 fi
+if (( REDUCE_HIDDEN )); then
+    run_args+=(--reduce-hidden)
+fi
 if (( SKIP_NPU_PREFLIGHT )); then
     run_args+=(--skip-npu-preflight)
 fi
-if (( ALLOW_SELF_ONLY_FAILURE )); then
-    run_args+=(--allow-self-only-failure)
-fi
-
 bash "${run_script}" "${run_args[@]}"
 echo "Completed. Primary log: ${LOG_FILE}"

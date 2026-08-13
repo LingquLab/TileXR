@@ -119,6 +119,7 @@ if(TARGET tilexr-moonep-combine-v2 AND TARGET tile-comm)
         ${TILEXR_ROOT}/src/include
         ${TILEXR_ROOT}/src/moonep/common
         ${TILEXR_ROOT}/src/moonep/combine_v2/common
+        ${TILEXR_ROOT}/src/moonep/combine_v2/host
         ${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc
         ${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc/runtime
         ${ASCEND_HOME_PATH}/${ARCH}-linux/include)

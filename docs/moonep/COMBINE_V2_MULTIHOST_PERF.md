@@ -12,7 +12,7 @@
 | --- | --- | --- |
 | `BS` | 默认 `128` | 是，使用 `--bs` 或 `--bs-list` |
 | `K` | `16` | 否，当前写在 benchmark C++ 中 |
-| `H` | `3584` | 否，当前写在 benchmark C++ 中 |
+| `H` | 默认 `3584` | 是，使用 `--hidden-size` |
 | 专家总数 | 默认 `64` | 是，使用 `--experts` 或 `-Experts` |
 | dtype | `BF16` | 否，当前写在 benchmark C++ 中 |
 | 每台服务器 rank 数 | `1-8` | 是，由 hostfile 配置 |
@@ -44,6 +44,13 @@ max_alg_bw_GBps = data_bytes / max_ms / 1e6
 同 rank、同服务器跨卡和跨服务器的数据均计入 `data_bytes`，不再分别统计卡内、
 跨卡或跨机比例。算法带宽使用单 rank 完整逻辑数据量，不额外乘 world size。
 `GB/s` 使用十进制单位 `1 GB = 10^9 bytes`。
+
+正确性检查与性能采集相互独立。输出不正确时，benchmark 仍继续完成 warmup、计时，
+并在启用 `--profile` 时输出全部 profiling 记录；`COMBINE_V2_RANK_PERF` 和
+`COMBINE_V2_PERF` 的 `correctness` 字段记录实际状态。只有算子启动、ACL Event、
+通信同步、profiling 读取或资源清理本身失败时，任务才中断且不声明完整性能结果。
+完整入口的 `--profile` 会自动启用 profiling 编译；使用 `--skip-build --profile` 时，
+则由调用者保证复用的产物已包含 profiling 埋点。
 
 ## 2. 脚本职责
 
@@ -265,6 +272,7 @@ ssh root@PRIMARY_IP \
 | `--warmup` | `20` | 每个 BS 的预热次数 |
 | `--iterations` | `80` | 每个 BS 的计时次数，也称 loop 数 |
 | `--experts` | `64` | 专家总数，必须能被 world size 整除 |
+| `--hidden-size` | `3584` | 隐藏维度 H；日志和算法带宽均按该值计算 |
 | `--comm-domain` | `141` | Shared-QP 通信域 |
 | `--comm-port` | `10067` | rank 0 bootstrap 端口 |
 | `--wait-seconds` | `120` | NPU 最大等待时间 |
@@ -572,3 +580,43 @@ launcher 返回码为 1，未输出正常的 `COMBINE_V2_PERF` 聚合行。上�
 | `a rank launcher failed` | 查看 `.ranks/rank_NNNN.log` |
 | `rank logs do not contain...` | 检查缺失的 rank 正确性或 iteration 样本 |
 | SHA-256 校验失败 | 重新从主服务器执行平铺同步，不要直接在 worker 修改 install |
+
+## 16. 最后一轮 Chrome Trace 拆解
+
+使用 `--profile` 构建和运行后，可从完整控制日志生成最后一轮最快卡、P50 卡和
+最慢卡的 Chrome Trace JSON：
+
+```bash
+python3 tools/moonep/combine_v2_trace.py COMBINE_LOG \
+  --output combine_v2_last_iteration_trace.json \
+  --bs 8192 --world-size 8 --topk 16 --hidden-size 3584 --experts 32
+```
+
+带 hidden reduce 的 kernel-only 对比使用 launcher 的 `--reduce-hidden`，该路径直接把
+`reduceHidden=true` 传给 Combine V2 runner，避免把 Stage API 的输入和输出 D2D copy
+计入 ACL Event。对应 trace 必须传 `--reduce enabled`；要直接生成三个独立文件，使用：
+
+```bash
+python3 tools/moonep/combine_v2_trace.py COMBINE_LOG \
+  --split-output-dir TRACE_DIR --prefix combine_v2_reduce \
+  --host HOST --reduce enabled \
+  --bs 8192 --world-size 8 --topk 16 --hidden-size 3584 --experts 32
+```
+
+三个文件分别是最后一轮的 fastest、P50 和 slowest rank，格式与历史
+`*_edge_trace.json` 一致。`t20 -> t21` 在 reduce 模式下标记为 `Reduce hidden`。
+算法带宽仍以 `BS * K * H * sizeof(BF16)` 作为等效算法字节数，便于与 no-reduce
+结果按同一宏观口径比较；它不是 reduce 读写流量的物理带宽。
+
+P50 使用 nearest-rank 定义：将最后一轮各 rank 的 ACL Event 耗时升序排列，选择
+第 `ceil(0.5 * rank_count)` 个 rank；8P 即第 4 张卡。相同耗时按 rank 编号排序，
+确保选择结果可重复。工具要求所选 rank 的 8 个 AIV profile record 全部存在且时间戳
+单调，否则拒绝生成结果。
+
+工具按 world size 的 runtime schedule step 数输出事件；例如 8P 只有 step0，
+不会把 profile record 中为兼容固定容量而补齐的未执行 step 输出为零时长事件。
+每个所选 rank 独立以该 NPU 最早的 AIV `t0` 为零点。这样可保留同一 NPU 内各 core
+的相对起点，但不假设不同 NPU 的系统 cycle 已同步，因此不能从 JSON 中各 rank 的
+横向绝对位置推导跨卡先后。`selection_*`、`self_copy` 和 `remote_*` 是 kernel 内累计
+计数，作为 `combine_v2_no_reduce` 事件参数展示，不应被解释为可顺序拼接的时间段。
+profile build 包含打点扰动，只用于归因；正式无打点性能仍需用非 profile 产物复测。

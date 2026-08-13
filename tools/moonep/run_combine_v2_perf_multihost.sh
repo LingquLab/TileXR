@@ -10,6 +10,7 @@ BS_LIST=""
 WARMUP=20
 ITERATIONS=80
 EXPERTS=64
+HIDDEN_SIZE=3584
 COMM_DOMAIN=141
 COMM_ID=""
 WAIT_SECONDS=120
@@ -18,8 +19,8 @@ TIMEOUT_SECONDS=600
 LOG_FILE=""
 SKIP_ITERATION_BARRIERS=0
 PROFILE=0
+REDUCE_HIDDEN=0
 SKIP_NPU_PREFLIGHT=0
-ALLOW_SELF_ONLY_FAILURE=0
 
 usage() {
     cat <<'EOF'
@@ -31,6 +32,7 @@ Options:
   --warmup N             Warmup launches per BS (default: 20)
   --iterations N         Timed launches per BS (default: 80)
   --experts N            Total expert count (default: 64)
+  --hidden-size N        Hidden size H (default: 3584)
   --comm-domain N        Shared-QP domain (default: 141)
   --comm-id IP:PORT      Bootstrap address (default: first host:10067)
   --cann-path PATH       CANN root
@@ -42,9 +44,8 @@ Options:
   --skip-iteration-barriers
                          Skip host barriers between warmup/timed launches
   --profile              Capture per-AIV kernel cycle timestamps
+  --reduce-hidden        Include BF16 TopK hidden reduction in the kernel
   --skip-npu-preflight   Skip npu-smi process checks after manual validation
-  --allow-self-only-failure
-                         Continue timing when only Self-copy validation fails
   --help                 Show this help
 EOF
 }
@@ -58,6 +59,7 @@ while [[ $# -gt 0 ]]; do
         --warmup) WARMUP="$2"; shift 2 ;;
         --iterations) ITERATIONS="$2"; shift 2 ;;
         --experts) EXPERTS="$2"; shift 2 ;;
+        --hidden-size) HIDDEN_SIZE="$2"; shift 2 ;;
         --comm-domain) COMM_DOMAIN="$2"; shift 2 ;;
         --comm-id) COMM_ID="$2"; shift 2 ;;
         --cann-path) CANN_PATH="$2"; shift 2 ;;
@@ -68,8 +70,8 @@ while [[ $# -gt 0 ]]; do
         --log-file) LOG_FILE="$2"; shift 2 ;;
         --skip-iteration-barriers) SKIP_ITERATION_BARRIERS=1; shift ;;
         --profile) PROFILE=1; shift ;;
+        --reduce-hidden) REDUCE_HIDDEN=1; shift ;;
         --skip-npu-preflight) SKIP_NPU_PREFLIGHT=1; shift ;;
-        --allow-self-only-failure) ALLOW_SELF_ONLY_FAILURE=1; shift ;;
         --help|-h) usage; exit 0 ;;
         *) echo "unknown argument: $1" >&2; usage >&2; exit 2 ;;
     esac
@@ -87,8 +89,8 @@ if [[ ! "${WARMUP}" =~ ^[0-9]+$ || ! "${WAIT_SECONDS}" =~ ^[0-9]+$ ]]; then
     echo "--warmup and --wait-seconds must be non-negative integers" >&2
     exit 2
 fi
-for value in "${ITERATIONS}" "${EXPERTS}" "${COMM_DOMAIN}" "${RETRY_SECONDS}" \
-    "${TIMEOUT_SECONDS}"; do
+for value in "${ITERATIONS}" "${EXPERTS}" "${HIDDEN_SIZE}" "${COMM_DOMAIN}" \
+    "${RETRY_SECONDS}" "${TIMEOUT_SECONDS}"; do
     if [[ ! "${value}" =~ ^[1-9][0-9]*$ ]]; then
         echo "iterations, domains, retry intervals, and timeouts must be positive integers" >&2
         exit 2
@@ -264,6 +266,7 @@ benchmark_args=(
     --warmup "${WARMUP}"
     --iterations "${ITERATIONS}"
     --experts "${EXPERTS}"
+    --hidden-size "${HIDDEN_SIZE}"
     --comm-domain "${COMM_DOMAIN}"
 )
 if [[ -n "${BS}" ]]; then
@@ -277,10 +280,9 @@ fi
 if (( PROFILE )); then
     benchmark_args+=(--profile)
 fi
-if (( ALLOW_SELF_ONLY_FAILURE )); then
-    benchmark_args+=(--allow-self-only-failure)
+if (( REDUCE_HIDDEN )); then
+    benchmark_args+=(--reduce-hidden)
 fi
-
 job_id="combine_v2_${ranks}p_$(date +%Y%m%d_%H%M%S)_$$"
 remote_job_dir="$(cd "${INSTALL_DIR}/.." && pwd)/logs/.combine_v2_jobs/${job_id}"
 rank_hosts=()
@@ -408,7 +410,7 @@ trap cleanup_controller EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-echo "RUN job_id=${job_id} ranks=${ranks} experts=${EXPERTS} comm_id=${COMM_ID} barrier_id=${BARRIER_ID} bs=${requested_bs} warmup=${WARMUP} iterations=${ITERATIONS}" | \
+echo "RUN job_id=${job_id} ranks=${ranks} experts=${EXPERTS} hidden_size=${HIDDEN_SIZE} comm_id=${COMM_ID} barrier_id=${BARRIER_ID} bs=${requested_bs} warmup=${WARMUP} iterations=${ITERATIONS}" | \
     tee -a "${LOG_FILE}"
 run_active=1
 for ((rank = 0; rank < ranks; ++rank)); do
@@ -445,7 +447,6 @@ done
 rank_averages_file="${rank_log_dir}/rank_averages.tsv"
 rm -f "${rank_averages_file}"
 if ! awk -v ranks="${ranks}" -v iterations="${ITERATIONS}" \
-    -v allow_self_only_failure="${ALLOW_SELF_ONLY_FAILURE}" \
     -v output="${rank_averages_file}" '
     $1 == "COMBINE_V2_SAMPLE" {
         bs = iteration = rank = elapsed = ""
@@ -478,9 +479,10 @@ if ! awk -v ranks="${ranks}" -v iterations="${ITERATIONS}" \
             else if (item[1] == "correctness") correctness = item[2]
         }
         rank_key = bs SUBSEP rank
-        if (correctness == "passed" ||
-            (allow_self_only_failure && correctness == "self_only_failed")) {
+        if (correctness == "passed" || correctness == "self_only_failed" ||
+            correctness == "failed") {
             rank_result[rank_key]++
+            rank_correctness[rank_key] = correctness
         } else {
             invalid = 1
         }
@@ -495,42 +497,47 @@ if ! awk -v ranks="${ranks}" -v iterations="${ITERATIONS}" \
                     sample_count[rank_key] != iterations) {
                     invalid = 1
                 } else {
-                    print bs, rank, sample_total[rank_key] / iterations >> output
+                    print bs, rank, sample_total[rank_key] / iterations, \
+                        rank_correctness[rank_key] >> output
                 }
             }
         }
         if (batch_count == 0 || invalid) exit 1
     }
 ' "${rank_logs[@]}"; then
-    echo "rank logs do not contain one accepted result and one sample per iteration for every rank" | \
+    echo "rank logs do not contain one result and one sample per iteration for every rank" | \
         tee -a "${LOG_FILE}" >&2
     exit 1
 fi
 
 sort -n -k1,1 -k2,2 "${rank_averages_file}" | awk \
     -v ranks="${ranks}" -v iterations="${ITERATIONS}" \
-    -v experts="${EXPERTS}" \
-    -v allow_self_only_failure="${ALLOW_SELF_ONLY_FAILURE}" '
-    function emit(    average, data_bytes, average_bandwidth, max_bandwidth, correctness) {
+    -v experts="${EXPERTS}" -v hidden_size="${HIDDEN_SIZE}" \
+    -v reduce="$((REDUCE_HIDDEN))" '
+    function emit(    average, data_bytes, average_bandwidth, max_bandwidth) {
         if (count == 0) return
         if (count != ranks) exit 1
         average = total / count
-        data_bytes = current_bs * 16 * 3584 * 2
+        data_bytes = current_bs * 16 * hidden_size * 2
         average_bandwidth = data_bytes / average / 1000000
         max_bandwidth = data_bytes / maximum / 1000000
-        correctness = allow_self_only_failure ? "self_only_failed_allowed" : "passed"
-        printf "COMBINE_V2_PERF bs=%s k=16 h=3584 experts=%d dtype=bf16 ranks=%d iterations=%d avg_ms=%.6f avg_alg_bw_GBps=%.6f max_ms=%.6f max_alg_bw_GBps=%.6f correctness=%s\n", current_bs, experts, ranks, iterations, average, average_bandwidth, maximum, max_bandwidth, correctness
+        printf "COMBINE_V2_PERF bs=%s k=16 h=%d experts=%d dtype=bf16 ranks=%d iterations=%d avg_ms=%.6f avg_alg_bw_GBps=%.6f max_ms=%.6f max_alg_bw_GBps=%.6f reduce=%s correctness=%s\n", current_bs, hidden_size, experts, ranks, iterations, average, average_bandwidth, maximum, max_bandwidth, reduce ? "enabled" : "disabled", batch_correctness
     }
     current_bs != "" && $1 != current_bs {
         emit()
         total = 0
         count = 0
         maximum = 0
+        batch_correctness = "passed"
     }
     {
+        if (count == 0) batch_correctness = "passed"
         current_bs = $1
         total += $3 + 0
         if (count == 0 || $3 + 0 > maximum) maximum = $3 + 0
+        if ($4 == "failed") batch_correctness = "failed"
+        else if ($4 == "self_only_failed" && batch_correctness == "passed")
+            batch_correctness = "self_only_failed"
         count++
     }
     END { emit() }

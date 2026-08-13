@@ -68,17 +68,18 @@ Combine V2 consumes the internal inverse route table:
 dstLocal[expertRecvSlot] = srcRank * NvS + token * K + topk
 ```
 
-For a non-negative `dstLocal` entry, the Combine V2 send path continues to
-decode it as:
+For peer `p`, the Combine V2 send path precomputes the encoded interval:
 
 ```cpp
-peer = static_cast<uint64_t>(encoded) / slots;
-targetSlot = static_cast<uint64_t>(encoded) % slots;
+peerBase = static_cast<uint64_t>(p) * slots;
+peerEnd = peerBase + slots;
 ```
 
-`-1` remains the invalid or padding value. `NvS` is not required to be a power
-of two. In particular, existing shapes such as `NvS = 2040` must keep working.
-This design therefore does not replace division and modulo with shift and mask.
+The selector accepts a non-negative entry when
+`peerBase <= encoded < peerEnd`, then obtains `targetSlot` with
+`encoded - peerBase`. `-1` remains the invalid or padding value. This removes
+per-entry division and per-match modulo without requiring `NvS` to be a power
+of two, so shapes such as `NvS = 2040` retain the original encoding contract.
 
 The compacted route contains:
 
@@ -424,9 +425,10 @@ The selector:
 1. obtains the first absolute index from `firstPass` or the thread cursor;
 2. walks that thread's strided entries in the resident UB chunk;
 3. skips `-1` entries;
-4. obtains `peer` with division by `slots`;
-5. skips entries for other peers;
-6. obtains `targetSlot` with modulo by `slots` only for a match;
+4. checks whether the encoded destination is in the peer's precomputed
+   `[peerBase, peerEnd)` interval;
+5. skips entries outside that interval;
+6. obtains `targetSlot` by subtracting `peerBase` for a match;
 7. atomically reserves the route-buffer index;
 8. stores `sourceSlotIndex` and `targetSlot` before testing the threshold; and
 9. records its private cursor before returning.

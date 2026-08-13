@@ -11,7 +11,6 @@
 #include "comm_args.h"
 #include "combine_v2_profile.h"
 #include "kernel_operator.h"
-#include "simt_api/device_atomic_functions.h"
 #include "combine_v2_schedule.h"
 #include "combine_v2_wqe_batch.h"
 #include "tilexr_udma.h"
@@ -24,30 +23,27 @@ constexpr uint32_t kUbAlignBytes = 32U;
 constexpr uint32_t kFullUbBytes = 216U * 1024U;
 constexpr uint32_t kWqeBytes = 64U;
 constexpr uint32_t kControlWqesPerLane = 2U;
-constexpr uint32_t kSixPortPayloadCapacity = 192U;
-constexpr uint32_t kTwoPortPayloadCapacity = 64U;
-constexpr uint32_t kSixPortIssueCapacity = 194U;
-constexpr uint32_t kTwoPortIssueCapacity = 66U;
+constexpr uint32_t kSixPortPayloadCapacity = 96U;
+constexpr uint32_t kTwoPortPayloadCapacity = 32U;
+constexpr uint32_t kSixPortIssueCapacity = 98U;
+constexpr uint32_t kTwoPortIssueCapacity = 34U;
 constexpr uint32_t kTotalIssueCapacity =
     kSixPortIssueCapacity + kTwoPortIssueCapacity;
 constexpr uint32_t kSixPortIssueBytes = kSixPortIssueCapacity * kWqeBytes;
 constexpr uint32_t kTwoPortIssueBytes = kTwoPortIssueCapacity * kWqeBytes;
 constexpr uint32_t kTotalIssueBytes = kTotalIssueCapacity * kWqeBytes;
-constexpr uint32_t kRouteEntryCapacity =
-    2U * TileXRMoonEp::kMoonEpCombineV2MaxSelectorThreads;
-constexpr uint32_t kThreadCursorCapacity =
-    TileXRMoonEp::kMoonEpCombineV2MaxSelectorThreads;
 constexpr uint32_t kDstSlotBytes =
     TileXRMoonEp::kMoonEpCombineV2SelectionChunkRows * sizeof(int32_t);
-constexpr uint32_t kRouteEntryBytes =
-    kRouteEntryCapacity * 2U * sizeof(uint32_t);
-constexpr uint32_t kThreadCursorBytes =
-    kThreadCursorCapacity * sizeof(uint32_t);
-constexpr uint32_t kSelectionStateBytes = 32U;
+constexpr uint32_t kSelectionIndexBytes =
+    TileXRMoonEp::kMoonEpCombineV2SelectionChunkRows * sizeof(int16_t);
+constexpr uint32_t kSelectionMaskBytes =
+    ((TileXRMoonEp::kMoonEpCombineV2SelectionChunkRows + 7U) / 8U +
+        kUbAlignBytes - 1U) / kUbAlignBytes * kUbAlignBytes;
+constexpr uint32_t kSelectionMaskElements =
+    kSelectionMaskBytes / sizeof(uint16_t);
 constexpr uint32_t kWqeContextBytes = 256U;
 constexpr uint32_t kSendBufferBytes = kDstSlotBytes + kTotalIssueBytes +
-    kRouteEntryBytes + kThreadCursorBytes + kSelectionStateBytes +
-    kWqeContextBytes +
+    2U * kSelectionIndexBytes + 2U * kSelectionMaskBytes + kWqeContextBytes +
     2U * TileXRMoonEp::kMoonEpCombineV2SelfRelayHalfBytes;
 constexpr uint32_t kReduceRouteBatch = 4U;
 constexpr uint32_t kReduceTileElements = 4096U;
@@ -82,12 +78,14 @@ static_assert(kSixPortPayloadCapacity + kControlWqesPerLane ==
 static_assert(kTwoPortPayloadCapacity + kControlWqesPerLane ==
         kTwoPortIssueCapacity,
     "Combine V2 two-port issue buffer cannot hold payload plus controls");
-static_assert(kTotalIssueCapacity == 260U,
-    "Combine V2 issue buffer must contain 256 payload and four controls");
-static_assert(kSendBufferBytes == 216096U,
-    "Combine V2 send buffer layout must occupy 216096 bytes");
-static_assert(kFullUbBytes - kSendBufferBytes == 5088U,
-    "Combine V2 send buffer layout must leave 5088 bytes of UB");
+static_assert(kTotalIssueCapacity == 132U,
+    "Combine V2 issue buffer must contain 128 payload and four controls");
+static_assert(kSelectionMaskBytes == 1024U,
+    "Combine V2 selection mask size changed unexpectedly");
+static_assert(kSendBufferBytes == 207360U,
+    "Combine V2 send buffer layout must occupy 207360 bytes");
+static_assert(kFullUbBytes - kSendBufferBytes == 13824U,
+    "Combine V2 send buffer layout must leave 13824 bytes of UB");
 
 template <HardEvent event> __aicore__ inline void SyncFunc()
 {
@@ -111,22 +109,6 @@ __aicore__ inline bool TimedOut(uint64_t startCycles)
     return static_cast<uint64_t>(GetSystemCycle()) - startCycles >=
         kOperationTimeoutCycles;
 }
-
-struct MoonEpCombineV2RouteEntry {
-    uint32_t sourceSlotIndex;
-    uint32_t targetSlot;
-};
-
-struct alignas(32) MoonEpCombineV2SelectState {
-    uint32_t curWqeNum;
-    uint32_t batchBase;
-    uint32_t batchSelected;
-    uint32_t pausedThreadCount;
-    uint32_t reserved[4];
-};
-
-static_assert(sizeof(MoonEpCombineV2SelectState) == kSelectionStateBytes,
-    "Combine V2 selector state must occupy 32 bytes");
 
 struct MoonEpCombineV2RemoteFields {
     uint64_t remoteRowBase;
@@ -156,7 +138,10 @@ struct alignas(32) MoonEpCombineV2BuildContext {
     uint64_t localRowBase;
     uint64_t rowBytes;
     uint64_t remoteRowBase[TileXRMoonEp::kMoonEpCombineV2LaneCount];
-    uint32_t selectedCount;
+    uint64_t peerBase;
+    uint32_t chunkStart;
+    uint32_t batchOffset;
+    uint32_t batchCount;
     uint32_t sequencePhase;
     uint32_t head[TileXRMoonEp::kMoonEpCombineV2LaneCount];
 };
@@ -265,61 +250,22 @@ inline void MoonEpCombineV2PrefillPeerWqesVf(
 }
 
 __simt_vf__ __aicore__ LAUNCH_BOUND(
-    TileXRMoonEp::kMoonEpCombineV2SelectorThreads)
-inline void MoonEpCombineV2SelectPeerRoutesVf(
-    __ubuf__ const int32_t *dstSlots, uint32_t chunkStart,
-    uint32_t chunkElements, uint32_t peer, uint64_t slots,
-    bool firstPass, __ubuf__ MoonEpCombineV2SelectState *state,
-    __ubuf__ uint32_t *threadMaxSlotIdx,
-    __ubuf__ MoonEpCombineV2RouteEntry *routes)
-{
-    const uint32_t thread = static_cast<uint32_t>(threadIdx.x);
-    uint32_t index = firstPass ?
-        TileXRMoonEp::MoonEpCombineV2SelectorFirstIndex(chunkStart, thread) :
-        TileXRMoonEp::MoonEpCombineV2SelectorResumeIndex(
-            threadMaxSlotIdx[thread]);
-    uint32_t lastScanned = index;
-    while (TileXRMoonEp::MoonEpCombineV2SelectorIndexInChunk(
-        index, chunkStart, chunkElements)) {
-        lastScanned = index;
-        const int32_t encoded = dstSlots[index - chunkStart];
-        if (encoded >= 0 &&
-            static_cast<uint32_t>(static_cast<uint64_t>(encoded) / slots) ==
-                peer) {
-            const uint32_t old = asc_atomic_add(&state->curWqeNum, 1U);
-            const uint32_t routeIndex = old - state->batchBase;
-            if (routeIndex < kRouteEntryCapacity) {
-                routes[routeIndex].sourceSlotIndex = index;
-                routes[routeIndex].targetSlot = static_cast<uint32_t>(
-                    static_cast<uint64_t>(encoded) % slots);
-            }
-            if (routeIndex >=
-                TileXRMoonEp::kMoonEpCombineV2PayloadBatchRows) {
-                threadMaxSlotIdx[thread] = lastScanned;
-                const uint32_t next =
-                    TileXRMoonEp::MoonEpCombineV2SelectorResumeIndex(index);
-                if (TileXRMoonEp::MoonEpCombineV2SelectorIndexInChunk(
-                    next, chunkStart, chunkElements)) {
-                    (void)asc_atomic_add(&state->pausedThreadCount, 1U);
-                }
-                return;
-            }
-        }
-        index = TileXRMoonEp::MoonEpCombineV2SelectorResumeIndex(index);
-    }
-    threadMaxSlotIdx[thread] = lastScanned;
-}
-
-__simt_vf__ __aicore__ LAUNCH_BOUND(
     TileXRMoonEp::kMoonEpCombineV2BuilderThreads)
 inline void MoonEpCombineV2BuildPayloadWqesVf(
     __ubuf__ uint8_t *sixPortWqes, __ubuf__ uint8_t *twoPortWqes,
-    __ubuf__ const MoonEpCombineV2RouteEntry *routes,
+    __ubuf__ const int32_t *dstSlots,
+    __ubuf__ const int16_t *selectedIndices,
     __ubuf__ const MoonEpCombineV2BuildContext *context)
 {
-    for (uint32_t task = static_cast<uint32_t>(threadIdx.x);
-        task < context->selectedCount;
-        task += TileXRMoonEp::kMoonEpCombineV2BuilderThreads) {
+    const uint32_t task = static_cast<uint32_t>(threadIdx.x);
+    if (task < context->batchCount) {
+        const uint32_t densePosition = context->batchOffset + task;
+        const uint32_t relativeIndex = static_cast<uint16_t>(
+            selectedIndices[densePosition]);
+        const uint32_t sourceSlotIndex = context->chunkStart + relativeIndex;
+        const uint32_t targetSlot = static_cast<uint32_t>(
+            static_cast<uint64_t>(dstSlots[relativeIndex]) -
+                context->peerBase);
         const uint32_t position = context->sequencePhase + task;
         const uint32_t lane =
             TileXRMoonEp::MoonEpCombineV2LaneForPosition(position);
@@ -334,10 +280,10 @@ inline void MoonEpCombineV2BuildPayloadWqesVf(
             (lane == TileXRMoonEp::MOONEP_COMBINE_V2_SIX_PORT ?
                 sixPortWqes : twoPortWqes) + laneIndex * kWqeBytes;
         const uint64_t localAddr = context->localRowBase +
-            static_cast<uint64_t>(routes[task].sourceSlotIndex) *
+            static_cast<uint64_t>(sourceSlotIndex) *
                 context->rowBytes;
         const uint64_t remoteAddr = context->remoteRowBase[lane] +
-            static_cast<uint64_t>(routes[task].targetSlot) *
+            static_cast<uint64_t>(targetSlot) *
                 context->rowBytes;
         const uint32_t absoluteHead = context->head[lane] + laneIndex;
 
@@ -382,9 +328,8 @@ private:
     __aicore__ inline bool ValidateDestinations();
     __aicore__ inline void LoadSelectionChunk(uint64_t chunkStart,
         uint32_t chunkElements);
-    __aicore__ inline uint32_t SelectPeerRoutes(uint32_t peer,
-        uint32_t chunkStart, uint32_t chunkElements, bool firstPass,
-        uint32_t &pausedThreadCount);
+    __aicore__ inline uint32_t SelectPeerIndices(uint32_t peer,
+        uint32_t chunkElements);
     __aicore__ inline bool InitLaneStates();
     __aicore__ inline bool ResolveRemoteFields(uint32_t targetRank,
         uint32_t lane, uint64_t remoteBaseOffset,
@@ -393,8 +338,9 @@ private:
         MoonEpCombineV2LaneState &state);
     __aicore__ inline bool WaitStepCqs(uint32_t step);
     __aicore__ inline bool WaitStepGrant(uint32_t step);
-    __aicore__ inline bool BuildPayloadWqes(uint32_t selectedCount,
-        uint32_t sequenceBase);
+    __aicore__ inline bool BuildPayloadWqes(uint32_t chunkStart,
+        uint32_t batchOffset, uint32_t batchCount, uint32_t sequenceBase,
+        uint64_t peerBase);
     __aicore__ inline bool AppendControlWqe(LocalTensor<uint8_t> issue,
         uint32_t outputIndex, MoonEpCombineV2LaneState &state,
         uint32_t targetRank, uint64_t remoteOffset,
@@ -404,19 +350,25 @@ private:
     __aicore__ inline void CopyIssueToSq(LocalTensor<uint8_t> issue,
         MoonEpCombineV2LaneState &state, uint32_t count);
     __aicore__ inline bool SubmitPair(uint32_t peer, uint32_t step,
-        uint32_t selectedCount, uint32_t sequenceBase, bool finalBatch);
+        uint32_t chunkStart, uint32_t batchOffset, uint32_t batchCount,
+        uint32_t sequenceBase, uint64_t peerBase, bool finalBatch);
     __aicore__ inline bool SendRemoteStep(uint32_t peer, uint32_t step);
-    __aicore__ inline void CopySelfRowsIn(uint32_t routeStart,
-        uint32_t routeCount, uint32_t localRowStride,
+    __aicore__ inline void CopySelfRowsIn(uint32_t selectedStart,
+        uint32_t selectedCount, uint32_t chunkStart,
+        uint32_t localRowStride,
         LocalTensor<uint8_t> relay);
-    __aicore__ inline void CopySelfRowsOut(uint32_t routeStart,
-        uint32_t routeCount, uint32_t localRowStride,
+    __aicore__ inline void CopySelfRowsOut(uint32_t selectedStart,
+        uint32_t selectedCount, uint64_t peerBase,
+        uint32_t localRowStride,
         LocalTensor<uint8_t> relay);
-    __aicore__ inline void CopySelfTileIn(uint32_t routeIndex,
-        uint64_t rowOffset, uint32_t tileBytes, LocalTensor<uint8_t> relay);
-    __aicore__ inline void CopySelfTileOut(uint32_t routeIndex,
-        uint64_t rowOffset, uint32_t tileBytes, LocalTensor<uint8_t> relay);
-    __aicore__ inline bool CopySelfRouteBatch(uint32_t selectedCount);
+    __aicore__ inline void CopySelfTileIn(uint32_t selectedIndex,
+        uint32_t chunkStart, uint64_t rowOffset, uint32_t tileBytes,
+        LocalTensor<uint8_t> relay);
+    __aicore__ inline void CopySelfTileOut(uint32_t selectedIndex,
+        uint64_t peerBase, uint64_t rowOffset, uint32_t tileBytes,
+        LocalTensor<uint8_t> relay);
+    __aicore__ inline bool CopySelfSelectedIndices(uint32_t selectedCount,
+        uint32_t chunkStart, uint64_t peerBase);
     __aicore__ inline bool SubmitSelfGrant(uint32_t step);
     __aicore__ inline bool SendSelfStep(uint32_t peer, uint32_t step);
     __aicore__ inline bool WaitInboundDone();
@@ -479,10 +431,11 @@ private:
         TileXRMoonEp::kMoonEpCombineV2LaneCount] {};
 
     TBuf<QuePosition::VECCALC> dstSlotBuf_;
+    TBuf<QuePosition::VECCALC> slotIndexBuf_;
+    TBuf<QuePosition::VECCALC> selectedIndexBuf_;
+    TBuf<QuePosition::VECCALC> lowerMaskBuf_;
+    TBuf<QuePosition::VECCALC> upperMaskBuf_;
     TBuf<QuePosition::VECCALC> wqeIssueBuf_;
-    TBuf<QuePosition::VECCALC> routeEntryBuf_;
-    TBuf<QuePosition::VECCALC> threadMaxSlotIdxBuf_;
-    TBuf<QuePosition::VECCALC> selectStateBuf_;
     TBuf<QuePosition::VECCALC> wqeContextBuf_;
     TQue<QuePosition::VECIN, 1> selfCopyQueue_;
     TQue<QuePosition::VECIN, 1> reduceInputQueue_;
@@ -599,20 +552,21 @@ __aicore__ inline void MoonEpCombineV2::Init(
 
 __aicore__ inline void MoonEpCombineV2::InitBuffers()
 {
-    static_assert(kRouteEntryBytes ==
-            kRouteEntryCapacity * sizeof(MoonEpCombineV2RouteEntry),
-        "Combine V2 route entry size changed without updating UB layout");
     static_assert(kSendBufferBytes <= kFullUbBytes,
         "Combine V2 send buffers exceed 216 KiB UB");
     pipe_->Reset();
     pipe_->InitBuffer(dstSlotBuf_, kDstSlotBytes);
+    pipe_->InitBuffer(slotIndexBuf_, kSelectionIndexBytes);
+    pipe_->InitBuffer(selectedIndexBuf_, kSelectionIndexBytes);
+    pipe_->InitBuffer(lowerMaskBuf_, kSelectionMaskBytes);
+    pipe_->InitBuffer(upperMaskBuf_, kSelectionMaskBytes);
     pipe_->InitBuffer(wqeIssueBuf_, kTotalIssueBytes);
-    pipe_->InitBuffer(routeEntryBuf_, kRouteEntryBytes);
-    pipe_->InitBuffer(threadMaxSlotIdxBuf_, kThreadCursorBytes);
-    pipe_->InitBuffer(selectStateBuf_, kSelectionStateBytes);
     pipe_->InitBuffer(wqeContextBuf_, kWqeContextBytes);
     pipe_->InitBuffer(selfCopyQueue_, 2U,
         TileXRMoonEp::kMoonEpCombineV2SelfRelayHalfBytes);
+    CreateVecIndex(slotIndexBuf_.Get<int16_t>(), static_cast<int16_t>(0),
+        TileXRMoonEp::kMoonEpCombineV2SelectionChunkRows);
+    PipeBarrier<PIPE_V>();
     PrefillOperatorWqes();
 }
 
@@ -809,28 +763,40 @@ __aicore__ inline bool MoonEpCombineV2::ValidateDestinations()
     if (rowCount == 0U) {
         return true;
     }
-    GlobalTensor<int32_t> dstGlobal;
-    dstGlobal.SetGlobalBuffer(dstGlobalAddr_, slots_);
-    LocalTensor<int32_t> dst = dstSlotBuf_.Get<int32_t>();
-    const DataCopyExtParams params {
-        1U, rowCount * static_cast<uint32_t>(sizeof(int32_t)),
-        0U, 0U, 0U};
-    const DataCopyPadExtParams<int32_t> pad {false, 0U, 0U, 0U};
-    DataCopyPad(dst, dstGlobal[firstSlot], params, pad);
-    SyncFunc<HardEvent::MTE2_S>();
-    selectionBuffersUsed_ = true;
-    for (uint32_t localSlot = 0U; localSlot < rowCount; ++localSlot) {
-        const int32_t encoded = dst.GetValue(localSlot);
-        if (!TileXRMoonEp::MoonEpCombineV2DestinationValid(
-                encoded, slots_, rankSize_)) {
-            const uint32_t peer = encoded < 0 ? UINT32_MAX :
-                static_cast<uint32_t>(
-                    static_cast<uint64_t>(encoded) / slots_);
-            SetFailure(TileXRMoonEp::MOONEP_COMBINE_V2_BAD_DESTINATION,
-                UINT32_MAX, peer, UINT32_MAX, firstSlot + localSlot,
-                static_cast<uint64_t>(rankSize_) * slots_,
-                static_cast<uint32_t>(encoded));
-            return false;
+    for (uint32_t validated = 0U; validated < rowCount;
+        validated += TileXRMoonEp::kMoonEpCombineV2SelectionChunkRows) {
+        const uint32_t chunkElements = rowCount - validated <
+                TileXRMoonEp::kMoonEpCombineV2SelectionChunkRows ?
+            rowCount - validated :
+            TileXRMoonEp::kMoonEpCombineV2SelectionChunkRows;
+        GlobalTensor<int32_t> dstGlobal;
+        dstGlobal.SetGlobalBuffer(dstGlobalAddr_, slots_);
+        LocalTensor<int32_t> dst = dstSlotBuf_.Get<int32_t>();
+        const DataCopyExtParams params {
+            1U, chunkElements * static_cast<uint32_t>(sizeof(int32_t)),
+            0U, 0U, 0U};
+        const DataCopyPadExtParams<int32_t> pad {false, 0U, 0U, 0U};
+        if (selectionBuffersUsed_) {
+            SyncFunc<HardEvent::S_MTE2>();
+        }
+        DataCopyPad(dst, dstGlobal[firstSlot + validated], params, pad);
+        SyncFunc<HardEvent::MTE2_S>();
+        selectionBuffersUsed_ = true;
+        for (uint32_t localSlot = 0U; localSlot < chunkElements;
+            ++localSlot) {
+            const int32_t encoded = dst.GetValue(localSlot);
+            if (!TileXRMoonEp::MoonEpCombineV2DestinationValid(
+                    encoded, slots_, rankSize_)) {
+                const uint32_t peer = encoded < 0 ? UINT32_MAX :
+                    static_cast<uint32_t>(
+                        static_cast<uint64_t>(encoded) / slots_);
+                SetFailure(TileXRMoonEp::MOONEP_COMBINE_V2_BAD_DESTINATION,
+                    UINT32_MAX, peer, UINT32_MAX,
+                    firstSlot + validated + localSlot,
+                    static_cast<uint64_t>(rankSize_) * slots_,
+                    static_cast<uint32_t>(encoded));
+                return false;
+            }
         }
     }
     return true;
@@ -850,40 +816,39 @@ __aicore__ inline void MoonEpCombineV2::LoadSelectionChunk(
         0U, 0U, 0U};
     const DataCopyPadExtParams<int32_t> pad {false, 0U, 0U, 0U};
     DataCopyPad(dst, dstGlobal[chunkStart], params, pad);
-    SyncFunc<HardEvent::MTE2_S>();
+    SyncFunc<HardEvent::MTE2_V>();
     selectionBuffersUsed_ = true;
 }
 
-__aicore__ inline uint32_t MoonEpCombineV2::SelectPeerRoutes(
-    uint32_t peer, uint32_t chunkStart, uint32_t chunkElements,
-    bool firstPass, uint32_t &pausedThreadCount)
+__aicore__ inline uint32_t MoonEpCombineV2::SelectPeerIndices(
+    uint32_t peer, uint32_t chunkElements)
 {
-    __ubuf__ MoonEpCombineV2SelectState *state = reinterpret_cast<__ubuf__
-        MoonEpCombineV2SelectState *>(
-            selectStateBuf_.Get<uint8_t>().GetPhyAddr());
-    state->batchBase = state->curWqeNum;
-    state->batchSelected = 0U;
-    state->pausedThreadCount = 0U;
-#if defined(CATLASS_ARCH) && CATLASS_ARCH == 3510
-    PipeBarrier<PIPE_ALL>();
-    Simt::VF_CALL<MoonEpCombineV2SelectPeerRoutesVf>(
-        Simt::Dim3{TileXRMoonEp::kMoonEpCombineV2SelectorThreads, 1U, 1U},
-        reinterpret_cast<__ubuf__ const int32_t *>(
-            dstSlotBuf_.Get<int32_t>().GetPhyAddr()), chunkStart,
-        chunkElements, peer, slots_, firstPass, state,
-        reinterpret_cast<__ubuf__ uint32_t *>(
-            threadMaxSlotIdxBuf_.Get<uint32_t>().GetPhyAddr()),
-        reinterpret_cast<__ubuf__ MoonEpCombineV2RouteEntry *>(
-            routeEntryBuf_.Get<uint8_t>().GetPhyAddr()));
-    PipeBarrier<PIPE_ALL>();
-#endif
-    state->batchSelected = state->curWqeNum - state->batchBase;
-    pausedThreadCount = state->pausedThreadCount;
-    if (kEnableSafetyChecks && state->batchSelected >
-        TileXRMoonEp::kMoonEpCombineV2MaxSelectedPayloadWqes) {
-        return UINT32_MAX;
+    const uint64_t peerBase = static_cast<uint64_t>(peer) * slots_;
+    const uint64_t peerEnd = peerBase + slots_;
+    if (peerBase > static_cast<uint64_t>(INT32_MAX)) {
+        return 0U;
     }
-    return state->batchSelected;
+    LocalTensor<int32_t> dstSlots = dstSlotBuf_.Get<int32_t>();
+    LocalTensor<uint8_t> lowerMask = lowerMaskBuf_.Get<uint8_t>();
+    Compares(lowerMask, dstSlots, static_cast<int32_t>(peerBase),
+        CMPMODE::GE, chunkElements);
+    if (peerEnd <= static_cast<uint64_t>(INT32_MAX)) {
+        LocalTensor<uint8_t> upperMask = upperMaskBuf_.Get<uint8_t>();
+        Compares(upperMask, dstSlots, static_cast<int32_t>(peerEnd),
+            CMPMODE::LT, chunkElements);
+        PipeBarrier<PIPE_V>();
+        And(lowerMask.ReinterpretCast<uint16_t>(),
+            lowerMask.ReinterpretCast<uint16_t>(),
+            upperMask.ReinterpretCast<uint16_t>(),
+            static_cast<int32_t>(kSelectionMaskElements));
+    }
+    PipeBarrier<PIPE_V>();
+    uint64_t selectedCount = 0U;
+    GatherMask(selectedIndexBuf_.Get<int16_t>(),
+        slotIndexBuf_.Get<int16_t>(), lowerMask.ReinterpretCast<uint16_t>(),
+        true, chunkElements, {1U, 1U, 0U, 0U}, selectedCount);
+    SyncFunc<HardEvent::V_S>();
+    return static_cast<uint32_t>(selectedCount);
 }
 
 __aicore__ inline uint64_t MoonEpCombineV2::LoadToken(
@@ -1014,14 +979,18 @@ __aicore__ inline bool MoonEpCombineV2::WaitStepGrant(uint32_t step)
 }
 
 __aicore__ inline bool MoonEpCombineV2::BuildPayloadWqes(
-    uint32_t selectedCount, uint32_t sequenceBase)
+    uint32_t chunkStart, uint32_t batchOffset, uint32_t batchCount,
+    uint32_t sequenceBase, uint64_t peerBase)
 {
     LocalTensor<uint8_t> contextTensor = wqeContextBuf_.Get<uint8_t>();
     __ubuf__ MoonEpCombineV2BuildContext *context = reinterpret_cast<__ubuf__
         MoonEpCombineV2BuildContext *>(contextTensor.GetPhyAddr());
     context->localRowBase = reinterpret_cast<uint64_t>(workspace_);
     context->rowBytes = rowBytes_;
-    context->selectedCount = selectedCount;
+    context->peerBase = peerBase;
+    context->chunkStart = chunkStart;
+    context->batchOffset = batchOffset;
+    context->batchCount = batchCount;
     context->sequencePhase = sequenceBase & 3U;
     for (uint32_t lane = 0U; lane < 2U; ++lane) {
         context->head[lane] = lane_[lane].head;
@@ -1036,8 +1005,10 @@ __aicore__ inline bool MoonEpCombineV2::BuildPayloadWqes(
             issue.GetPhyAddr()),
         reinterpret_cast<__ubuf__ uint8_t *>(
             issue[kSixPortIssueBytes].GetPhyAddr()),
-        reinterpret_cast<__ubuf__ const MoonEpCombineV2RouteEntry *>(
-            routeEntryBuf_.Get<uint8_t>().GetPhyAddr()), context);
+        reinterpret_cast<__ubuf__ const int32_t *>(
+            dstSlotBuf_.Get<int32_t>().GetPhyAddr()),
+        reinterpret_cast<__ubuf__ const int16_t *>(
+            selectedIndexBuf_.Get<int16_t>().GetPhyAddr()), context);
     PipeBarrier<PIPE_ALL>();
 #endif
     return true;
@@ -1162,11 +1133,13 @@ __aicore__ inline void MoonEpCombineV2::CopyIssueToSq(
 }
 
 __aicore__ inline bool MoonEpCombineV2::SubmitPair(
-    uint32_t peer, uint32_t step, uint32_t selectedCount,
-    uint32_t sequenceBase, bool finalBatch)
+    uint32_t peer, uint32_t step, uint32_t chunkStart,
+    uint32_t batchOffset, uint32_t batchCount, uint32_t sequenceBase,
+    uint64_t peerBase, bool finalBatch)
 {
     const uint64_t buildStart = BeginProfileMetric();
-    const bool payloadReady = BuildPayloadWqes(selectedCount, sequenceBase);
+    const bool payloadReady = BuildPayloadWqes(chunkStart, batchOffset,
+        batchCount, sequenceBase, peerBase);
     EndProfileMetric(TileXRMoonEp::MOONEP_COMBINE_V2_METRIC_REMOTE_WQE_BUILD,
         buildStart);
     if (kEnableSafetyChecks && !payloadReady) {
@@ -1179,7 +1152,7 @@ __aicore__ inline bool MoonEpCombineV2::SubmitPair(
     const uint32_t phase = sequenceBase & 3U;
     const TileXRMoonEp::MoonEpCombineV2LaneCounts batchCounts =
         TileXRMoonEp::MoonEpCombineV2BatchLaneCounts(
-            selectedCount, phase, step, stepCount_, false);
+            batchCount, phase, step, stepCount_, false);
     uint32_t count[2] = {batchCounts.sixPort, batchCounts.twoPort};
     LocalTensor<uint8_t> allIssue = wqeIssueBuf_.Get<uint8_t>();
     LocalTensor<uint8_t> laneIssue[2] = {
@@ -1305,7 +1278,7 @@ __aicore__ inline bool MoonEpCombineV2::SubmitPair(
                     lane_[lane].cqTail, true);
         }
     }
-    issuedRows_ += selectedCount;
+    issuedRows_ += batchCount;
     EndProfileMetric(TileXRMoonEp::MOONEP_COMBINE_V2_METRIC_REMOTE_SUBMIT,
         submitStart);
     return true;
@@ -1316,10 +1289,7 @@ __aicore__ inline bool MoonEpCombineV2::SendRemoteStep(
 {
     issuedRows_ = 0U;
     selectedPeerRows_ = 0U;
-    __ubuf__ MoonEpCombineV2SelectState *state = reinterpret_cast<__ubuf__
-        MoonEpCombineV2SelectState *>(
-            selectStateBuf_.Get<uint8_t>().GetPhyAddr());
-    state->curWqeNum = 0U;
+    const uint64_t peerBase = static_cast<uint64_t>(peer) * slots_;
     const bool prefilled = PrefillPeerWqes(peer);
     if (kEnableSafetyChecks && !prefilled) {
         SetFailure(TileXRMoonEp::MOONEP_COMBINE_V2_INVALID_CONFIG,
@@ -1339,58 +1309,61 @@ __aicore__ inline bool MoonEpCombineV2::SendRemoteStep(
         EndProfileMetric(
             TileXRMoonEp::MOONEP_COMBINE_V2_METRIC_SELECTION_LOAD,
             profileStart);
-        bool firstPass = true;
-        uint32_t pausedThreadCount = 0U;
-        do {
-            profileStart = BeginProfileMetric();
-            const uint32_t selectedCount = SelectPeerRoutes(
-                peer, static_cast<uint32_t>(chunkStart), chunkElements,
-                firstPass, pausedThreadCount);
-            EndProfileMetric(
-                TileXRMoonEp::MOONEP_COMBINE_V2_METRIC_SELECTION_SELECT,
-                profileStart);
-            if (kEnableSafetyChecks && selectedCount == UINT32_MAX) {
-                SetFailure(TileXRMoonEp::MOONEP_COMBINE_V2_OUTSTANDING_LIMIT,
-                    step, peer, UINT32_MAX);
+        profileStart = BeginProfileMetric();
+        const uint32_t selectedCount = SelectPeerIndices(peer, chunkElements);
+        EndProfileMetric(
+            TileXRMoonEp::MOONEP_COMBINE_V2_METRIC_SELECTION_SELECT,
+            profileStart);
+        const bool lastChunk = chunkStart + chunkElements == slots_;
+        if (selectedCount == 0U && lastChunk) {
+            const bool submitted = SubmitPair(peer, step,
+                static_cast<uint32_t>(chunkStart), 0U, 0U, issuedRows_,
+                peerBase, true);
+            if (kEnableSafetyChecks && !submitted) {
                 return false;
             }
-            const bool finalBatch = pausedThreadCount == 0U &&
-                chunkStart + chunkElements == slots_;
-            if (selectedCount != 0U || finalBatch) {
-                const bool submitted = SubmitPair(peer, step, selectedCount,
-                    issuedRows_, finalBatch);
-                if (kEnableSafetyChecks && !submitted) {
-                    return false;
-                }
-                (void)submitted;
-                selectedPeerRows_ += selectedCount;
-                if (kEnableSafetyChecks && selectedPeerRows_ >
-                    TileXRMoonEp::kMoonEpCombineV2MaxOutstanding) {
-                    SetFailure(
-                        TileXRMoonEp::MOONEP_COMBINE_V2_OUTSTANDING_LIMIT,
-                        step, peer, UINT32_MAX, selectedPeerRows_);
-                    return false;
-                }
+            (void)submitted;
+        }
+        for (uint32_t batchOffset = 0U; batchOffset < selectedCount;
+            batchOffset += TileXRMoonEp::kMoonEpCombineV2PayloadBatchRows) {
+            const uint32_t remaining = selectedCount - batchOffset;
+            const uint32_t batchCount = remaining <
+                    TileXRMoonEp::kMoonEpCombineV2PayloadBatchRows ?
+                remaining : TileXRMoonEp::kMoonEpCombineV2PayloadBatchRows;
+            const bool finalBatch = lastChunk &&
+                batchOffset + batchCount == selectedCount;
+            const bool submitted = SubmitPair(peer, step,
+                static_cast<uint32_t>(chunkStart), batchOffset, batchCount,
+                issuedRows_, peerBase, finalBatch);
+            if (kEnableSafetyChecks && !submitted) {
+                return false;
             }
-            firstPass = false;
-        } while (pausedThreadCount != 0U);
+            (void)submitted;
+            selectedPeerRows_ += batchCount;
+            if (kEnableSafetyChecks && selectedPeerRows_ >
+                TileXRMoonEp::kMoonEpCombineV2MaxOutstanding) {
+                SetFailure(TileXRMoonEp::MOONEP_COMBINE_V2_OUTSTANDING_LIMIT,
+                    step, peer, UINT32_MAX, selectedPeerRows_);
+                return false;
+            }
+        }
     }
     return true;
 }
 
 __aicore__ inline void MoonEpCombineV2::CopySelfRowsIn(
-    uint32_t routeStart, uint32_t routeCount, uint32_t localRowStride,
-    LocalTensor<uint8_t> relay)
+    uint32_t selectedStart, uint32_t selectedCount, uint32_t chunkStart,
+    uint32_t localRowStride, LocalTensor<uint8_t> relay)
 {
-    __ubuf__ const MoonEpCombineV2RouteEntry *routes = reinterpret_cast<__ubuf__
-        const MoonEpCombineV2RouteEntry *>(
-            routeEntryBuf_.Get<uint8_t>().GetPhyAddr());
+    LocalTensor<int16_t> selectedIndices =
+        selectedIndexBuf_.Get<int16_t>();
     const uint32_t copyBytes = static_cast<uint32_t>(rowBytes_);
     const DataCopyExtParams copyIn {1U, copyBytes, 0U, 0U, 0U};
     const DataCopyPadExtParams<uint8_t> padIn {false, 0U, 0U, 0U};
-    for (uint32_t row = 0U; row < routeCount; ++row) {
-        const uint32_t sourceSlotIndex =
-            routes[routeStart + row].sourceSlotIndex;
+    for (uint32_t row = 0U; row < selectedCount; ++row) {
+        const uint32_t relativeIndex = static_cast<uint16_t>(
+            selectedIndices.GetValue(selectedStart + row));
+        const uint32_t sourceSlotIndex = chunkStart + relativeIndex;
         GlobalTensor<uint8_t> source;
         source.SetGlobalBuffer(workspace_ +
             static_cast<uint64_t>(sourceSlotIndex) * rowBytes_);
@@ -1399,16 +1372,21 @@ __aicore__ inline void MoonEpCombineV2::CopySelfRowsIn(
 }
 
 __aicore__ inline void MoonEpCombineV2::CopySelfRowsOut(
-    uint32_t routeStart, uint32_t routeCount, uint32_t localRowStride,
-    LocalTensor<uint8_t> relay)
+    uint32_t selectedStart, uint32_t selectedCount, uint64_t peerBase,
+    uint32_t localRowStride, LocalTensor<uint8_t> relay)
 {
-    __ubuf__ const MoonEpCombineV2RouteEntry *routes = reinterpret_cast<__ubuf__
-        const MoonEpCombineV2RouteEntry *>(
-            routeEntryBuf_.Get<uint8_t>().GetPhyAddr());
+    LocalTensor<int16_t> selectedIndices =
+        selectedIndexBuf_.Get<int16_t>();
+    LocalTensor<int32_t> dstSlots = dstSlotBuf_.Get<int32_t>();
     const uint32_t copyBytes = static_cast<uint32_t>(rowBytes_);
     const DataCopyExtParams copyOut {1U, copyBytes, 0U, 0U, 0U};
-    for (uint32_t row = 0U; row < routeCount; ++row) {
-        const uint32_t targetSlot = routes[routeStart + row].targetSlot;
+    for (uint32_t row = 0U; row < selectedCount; ++row) {
+        const uint32_t relativeIndex = static_cast<uint16_t>(
+            selectedIndices.GetValue(selectedStart + row));
+        const uint64_t encoded = static_cast<uint64_t>(
+            dstSlots.GetValue(relativeIndex));
+        const uint32_t targetSlot = static_cast<uint32_t>(
+            encoded - peerBase);
         GlobalTensor<uint8_t> target;
         target.SetGlobalBuffer(scratch_ +
             static_cast<uint64_t>(targetSlot) * rowBytes_);
@@ -1417,38 +1395,38 @@ __aicore__ inline void MoonEpCombineV2::CopySelfRowsOut(
 }
 
 __aicore__ inline void MoonEpCombineV2::CopySelfTileIn(
-    uint32_t routeIndex, uint64_t rowOffset, uint32_t tileBytes,
-    LocalTensor<uint8_t> relay)
+    uint32_t selectedIndex, uint32_t chunkStart, uint64_t rowOffset,
+    uint32_t tileBytes, LocalTensor<uint8_t> relay)
 {
-    __ubuf__ const MoonEpCombineV2RouteEntry *routes = reinterpret_cast<__ubuf__
-        const MoonEpCombineV2RouteEntry *>(
-            routeEntryBuf_.Get<uint8_t>().GetPhyAddr());
+    const uint32_t relativeIndex = static_cast<uint16_t>(
+        selectedIndexBuf_.Get<int16_t>().GetValue(selectedIndex));
+    const uint32_t sourceSlotIndex = chunkStart + relativeIndex;
     GlobalTensor<uint8_t> source;
     source.SetGlobalBuffer(workspace_ +
-        static_cast<uint64_t>(routes[routeIndex].sourceSlotIndex) * rowBytes_ +
-        rowOffset);
+        static_cast<uint64_t>(sourceSlotIndex) * rowBytes_ + rowOffset);
     const DataCopyExtParams copyIn {1U, tileBytes, 0U, 0U, 0U};
     const DataCopyPadExtParams<uint8_t> padIn {false, 0U, 0U, 0U};
     DataCopyPad(relay, source, copyIn, padIn);
 }
 
 __aicore__ inline void MoonEpCombineV2::CopySelfTileOut(
-    uint32_t routeIndex, uint64_t rowOffset, uint32_t tileBytes,
-    LocalTensor<uint8_t> relay)
+    uint32_t selectedIndex, uint64_t peerBase, uint64_t rowOffset,
+    uint32_t tileBytes, LocalTensor<uint8_t> relay)
 {
-    __ubuf__ const MoonEpCombineV2RouteEntry *routes = reinterpret_cast<__ubuf__
-        const MoonEpCombineV2RouteEntry *>(
-            routeEntryBuf_.Get<uint8_t>().GetPhyAddr());
+    const uint32_t relativeIndex = static_cast<uint16_t>(
+        selectedIndexBuf_.Get<int16_t>().GetValue(selectedIndex));
+    const uint64_t encoded = static_cast<uint64_t>(
+        dstSlotBuf_.Get<int32_t>().GetValue(relativeIndex));
+    const uint32_t targetSlot = static_cast<uint32_t>(encoded - peerBase);
     GlobalTensor<uint8_t> target;
     target.SetGlobalBuffer(scratch_ +
-        static_cast<uint64_t>(routes[routeIndex].targetSlot) * rowBytes_ +
-        rowOffset);
+        static_cast<uint64_t>(targetSlot) * rowBytes_ + rowOffset);
     const DataCopyExtParams copyOut {1U, tileBytes, 0U, 0U, 0U};
     DataCopyPad(target, relay, copyOut);
 }
 
-__aicore__ inline bool MoonEpCombineV2::CopySelfRouteBatch(
-    uint32_t selectedCount)
+__aicore__ inline bool MoonEpCombineV2::CopySelfSelectedIndices(
+    uint32_t selectedCount, uint32_t chunkStart, uint64_t peerBase)
 {
     if (selectedCount == 0U) {
         return true;
@@ -1456,7 +1434,8 @@ __aicore__ inline bool MoonEpCombineV2::CopySelfRouteBatch(
     const uint64_t localRowStride =
         TileXRMoonEp::MoonEpCombineV2SelfAlignedRowBytes(rowBytes_);
     if (kEnableSafetyChecks && (localRowStride == 0U ||
-        selectedCount > kRouteEntryCapacity)) {
+        selectedCount >
+            TileXRMoonEp::kMoonEpCombineV2SelectionChunkRows)) {
         return false;
     }
 
@@ -1468,7 +1447,8 @@ __aicore__ inline bool MoonEpCombineV2::CopySelfRouteBatch(
         uint32_t pendingRows = selectedCount < rowsPerBatch ?
             selectedCount : rowsPerBatch;
         LocalTensor<uint8_t> first = selfCopyQueue_.AllocTensor<uint8_t>();
-        CopySelfRowsIn(pendingStart, pendingRows, rowStride, first);
+        CopySelfRowsIn(pendingStart, pendingRows, chunkStart,
+            rowStride, first);
         selfCopyQueue_.EnQue(first);
 
         uint32_t nextStart = pendingRows;
@@ -1482,8 +1462,10 @@ __aicore__ inline bool MoonEpCombineV2::CopySelfRouteBatch(
                 remaining : rowsPerBatch;
             LocalTensor<uint8_t> current =
                 selfCopyQueue_.AllocTensor<uint8_t>();
-            CopySelfRowsIn(nextStart, currentRows, rowStride, current);
-            CopySelfRowsOut(pendingStart, pendingRows, rowStride, pending);
+            CopySelfRowsIn(nextStart, currentRows, chunkStart,
+                rowStride, current);
+            CopySelfRowsOut(pendingStart, pendingRows, peerBase,
+                rowStride, pending);
             SyncFunc<HardEvent::MTE3_S>();
             selfCopyQueue_.FreeTensor(pending);
             selfCopyQueue_.EnQue(current);
@@ -1495,7 +1477,8 @@ __aicore__ inline bool MoonEpCombineV2::CopySelfRouteBatch(
 
         LocalTensor<uint8_t> pending = selfCopyQueue_.DeQue<uint8_t>();
         SyncFunc<HardEvent::MTE2_MTE3>();
-        CopySelfRowsOut(pendingStart, pendingRows, rowStride, pending);
+        CopySelfRowsOut(pendingStart, pendingRows, peerBase,
+            rowStride, pending);
         SyncFunc<HardEvent::MTE3_S>();
         selfCopyQueue_.FreeTensor(pending);
         return true;
@@ -1512,7 +1495,8 @@ __aicore__ inline bool MoonEpCombineV2::CopySelfRouteBatch(
     uint32_t pendingBytes =
         TileXRMoonEp::MoonEpCombineV2SelfTileBytes(rowBytes_, 0U);
     LocalTensor<uint8_t> first = selfCopyQueue_.AllocTensor<uint8_t>();
-    CopySelfTileIn(pendingRoute, pendingOffset, pendingBytes, first);
+    CopySelfTileIn(pendingRoute, chunkStart, pendingOffset,
+        pendingBytes, first);
     selfCopyQueue_.EnQue(first);
 
     for (uint64_t task = 1U; task < totalTiles; ++task) {
@@ -1527,9 +1511,10 @@ __aicore__ inline bool MoonEpCombineV2::CopySelfRouteBatch(
             TileXRMoonEp::MoonEpCombineV2SelfTileBytes(
                 rowBytes_, tileInRow);
         LocalTensor<uint8_t> current = selfCopyQueue_.AllocTensor<uint8_t>();
-        CopySelfTileIn(currentRoute, currentOffset, currentBytes, current);
-        CopySelfTileOut(
-            pendingRoute, pendingOffset, pendingBytes, pending);
+        CopySelfTileIn(currentRoute, chunkStart, currentOffset,
+            currentBytes, current);
+        CopySelfTileOut(pendingRoute, peerBase, pendingOffset,
+            pendingBytes, pending);
         SyncFunc<HardEvent::MTE3_S>();
         selfCopyQueue_.FreeTensor(pending);
         selfCopyQueue_.EnQue(current);
@@ -1541,7 +1526,8 @@ __aicore__ inline bool MoonEpCombineV2::CopySelfRouteBatch(
 
     LocalTensor<uint8_t> pending = selfCopyQueue_.DeQue<uint8_t>();
     SyncFunc<HardEvent::MTE2_MTE3>();
-    CopySelfTileOut(pendingRoute, pendingOffset, pendingBytes, pending);
+    CopySelfTileOut(pendingRoute, peerBase, pendingOffset,
+        pendingBytes, pending);
     SyncFunc<HardEvent::MTE3_S>();
     selfCopyQueue_.FreeTensor(pending);
     return true;
@@ -1624,10 +1610,7 @@ __aicore__ inline bool MoonEpCombineV2::SendSelfStep(
     if (kEnableSafetyChecks && peer != rank_) {
         return false;
     }
-    __ubuf__ MoonEpCombineV2SelectState *state = reinterpret_cast<__ubuf__
-        MoonEpCombineV2SelectState *>(
-            selectStateBuf_.Get<uint8_t>().GetPhyAddr());
-    state->curWqeNum = 0U;
+    const uint64_t peerBase = static_cast<uint64_t>(peer) * slots_;
     for (uint64_t chunkStart = 0U; chunkStart < slots_;
         chunkStart += TileXRMoonEp::kMoonEpCombineV2SelectionChunkRows) {
         const uint32_t chunkElements = static_cast<uint32_t>(
@@ -1640,30 +1623,22 @@ __aicore__ inline bool MoonEpCombineV2::SendSelfStep(
         EndProfileMetric(
             TileXRMoonEp::MOONEP_COMBINE_V2_METRIC_SELECTION_LOAD,
             profileStart);
-        bool firstPass = true;
-        uint32_t pausedThreadCount = 0U;
-        do {
-            profileStart = BeginProfileMetric();
-            const uint32_t selectedCount = SelectPeerRoutes(
-                peer, static_cast<uint32_t>(chunkStart), chunkElements,
-                firstPass, pausedThreadCount);
-            EndProfileMetric(
-                TileXRMoonEp::MOONEP_COMBINE_V2_METRIC_SELECTION_SELECT,
-                profileStart);
-            if (kEnableSafetyChecks && selectedCount == UINT32_MAX) {
-                return false;
-            }
-            profileStart = BeginProfileMetric();
-            const bool copied = CopySelfRouteBatch(selectedCount);
-            EndProfileMetric(
-                TileXRMoonEp::MOONEP_COMBINE_V2_METRIC_SELF_COPY,
-                profileStart);
-            if (kEnableSafetyChecks && !copied) {
-                return false;
-            }
-            (void)copied;
-            firstPass = false;
-        } while (pausedThreadCount != 0U);
+        profileStart = BeginProfileMetric();
+        const uint32_t selectedCount =
+            SelectPeerIndices(peer, chunkElements);
+        EndProfileMetric(
+            TileXRMoonEp::MOONEP_COMBINE_V2_METRIC_SELECTION_SELECT,
+            profileStart);
+        profileStart = BeginProfileMetric();
+        const bool copied = CopySelfSelectedIndices(selectedCount,
+            static_cast<uint32_t>(chunkStart), peerBase);
+        EndProfileMetric(
+            TileXRMoonEp::MOONEP_COMBINE_V2_METRIC_SELF_COPY,
+            profileStart);
+        if (kEnableSafetyChecks && !copied) {
+            return false;
+        }
+        (void)copied;
     }
     PublishSelfDone(step);
     return SubmitSelfGrant(step);

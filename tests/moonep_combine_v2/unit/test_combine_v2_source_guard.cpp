@@ -115,7 +115,13 @@ int main()
         "/src/moonep/common/moonep_kernel_registration.h");
     const std::string peerPrefill = Section(kernelImpl,
         "inline void MoonEpCombineV2PrefillPeerWqesVf(",
-        "inline void MoonEpCombineV2SelectPeerRoutesVf(");
+        "inline void MoonEpCombineV2BuildPayloadWqesVf(");
+    const std::string directBuilder = Section(kernelImpl,
+        "inline void MoonEpCombineV2BuildPayloadWqesVf(",
+        "#endif");
+    const std::string vectorSelection = Section(kernelImpl,
+        "__aicore__ inline uint32_t MoonEpCombineV2::SelectPeerIndices(",
+        "__aicore__ inline uint64_t MoonEpCombineV2::LoadToken(");
     const std::string submitPair = Section(kernelImpl,
         "__aicore__ inline bool MoonEpCombineV2::SubmitPair(",
         "__aicore__ inline bool MoonEpCombineV2::SendRemoteStep(");
@@ -208,42 +214,67 @@ int main()
     ok &= Require(peerPrefill, "sge->tokenId = 0U;",
         "Combine V2 peer prefill does not restore the payload SGE token");
     ok &= Require(kernelImpl,
-        "Simt::VF_CALL<MoonEpCombineV2SelectPeerRoutesVf>",
-        "Combine V2 implementation does not use SIMT route selection");
-    ok &= Require(kernelImpl,
         "Simt::VF_CALL<MoonEpCombineV2BuildPayloadWqesVf>",
         "Combine V2 implementation does not use its SIMT WQE builder");
-    ok &= Require(kernelImpl, "dstSlots[index - chunkStart]",
-        "Combine V2 selector does not use a chunk-relative UB index");
     ok &= Require(kernelImpl,
-        "const uint32_t old = asc_atomic_add(&state->curWqeNum, 1U);",
-        "Combine V2 selector does not reserve routes with UB atomic add");
-    ok &= Require(kernelImpl, "old - state->batchBase",
-        "Combine V2 selector does not derive a batch-local route index");
+        "CreateVecIndex(slotIndexBuf_.Get<int16_t>()",
+        "Combine V2 does not initialize reusable chunk indices");
+    ok &= Require(vectorSelection, "Compares(lowerMask, dstSlots",
+        "Combine V2 vector selection lacks the lower-bound comparison");
+    ok &= Require(vectorSelection, "CMPMODE::GE",
+        "Combine V2 vector selection does not include the peer lower bound");
+    ok &= Require(vectorSelection, "Compares(upperMask, dstSlots",
+        "Combine V2 vector selection lacks the upper-bound comparison");
+    ok &= Require(vectorSelection, "CMPMODE::LT",
+        "Combine V2 vector selection does not exclude the peer upper bound");
+    ok &= Require(vectorSelection,
+        "And(lowerMask.ReinterpretCast<uint16_t>()",
+        "Combine V2 vector selection does not combine its masks");
+    ok &= Require(vectorSelection, "GatherMask(selectedIndexBuf_.Get<int16_t>()",
+        "Combine V2 vector selection does not compact chunk indices");
+    ok &= Require(directBuilder,
+        "context->batchOffset + task",
+        "Combine V2 WQE builder does not advance through compacted batches");
+    ok &= Require(directBuilder, "selectedIndices[densePosition]",
+        "Combine V2 WQE builder does not read compacted chunk indices");
+    ok &= Require(directBuilder, "dstSlots[relativeIndex]",
+        "Combine V2 WQE builder does not decode the selected destination");
+    ok &= Require(directBuilder, "context->chunkStart + relativeIndex",
+        "Combine V2 WQE builder does not reconstruct the source slot");
+    ok &= Require(directBuilder, "context->peerBase",
+        "Combine V2 WQE builder does not decode target slots by subtraction");
+    ok &= Reject(kernelImpl, "MoonEpCombineV2RouteEntry",
+        "Combine V2 retained the obsolete RouteEntry representation");
+    ok &= Reject(kernelImpl, "MoonEpCombineV2SelectPeerRoutesVf",
+        "Combine V2 retained the obsolete SIMT route selector");
+    ok &= Reject(kernelImpl, "asc_atomic_add",
+        "Combine V2 retained atomic route reservation");
+    ok &= Reject(kernelImpl, "simt_api/device_atomic_functions.h",
+        "Combine V2 retained the obsolete SIMT atomic include");
     ok &= Require(kernelImpl,
-        "constexpr uint32_t kSixPortPayloadCapacity = 192U;",
+        "constexpr uint32_t kSixPortPayloadCapacity = 96U;",
         "Combine V2 six-port payload capacity is missing");
     ok &= Require(kernelImpl,
-        "constexpr uint32_t kTwoPortPayloadCapacity = 64U;",
+        "constexpr uint32_t kTwoPortPayloadCapacity = 32U;",
         "Combine V2 two-port payload capacity is missing");
     ok &= Require(kernelImpl,
-        "constexpr uint32_t kSixPortIssueCapacity = 194U;",
+        "constexpr uint32_t kSixPortIssueCapacity = 98U;",
         "Combine V2 six-port issue capacity is missing");
     ok &= Require(kernelImpl,
-        "constexpr uint32_t kTwoPortIssueCapacity = 66U;",
+        "constexpr uint32_t kTwoPortIssueCapacity = 34U;",
         "Combine V2 two-port issue capacity is missing");
     ok &= Require(kernelImpl, "TBuf<QuePosition::VECCALC> wqeIssueBuf_;",
         "Combine V2 continuous WQE issue buffer is missing");
     ok &= Require(kernelImpl,
         "issue[kSixPortIssueBytes].GetPhyAddr()",
-        "Combine V2 two-port WQE view does not start after entry 194");
+        "Combine V2 two-port WQE view does not follow the six-port region");
     ok &= Require(kernelImpl,
         "pipe_->InitBuffer(selfCopyQueue_, 2U,",
         "Combine V2 Self copy queue is not double buffered");
-    ok &= Require(selfStep, "SelectPeerRoutes(",
-        "Combine V2 Self step does not reuse SIMT route selection");
-    ok &= Require(selfStep, "CopySelfRouteBatch(selectedCount)",
-        "Combine V2 Self step does not consume compacted route batches");
+    ok &= Require(selfStep, "SelectPeerIndices(peer, chunkElements)",
+        "Combine V2 Self step does not reuse vector selection");
+    ok &= Require(selfStep, "CopySelfSelectedIndices(selectedCount,",
+        "Combine V2 Self step does not consume compacted indices");
     ok &= Require(selfStep, "SubmitSelfGrant(step)",
         "Combine V2 Self step does not publish its step grant");
     ok &= Require(selfStep, "PublishSelfDone(step)",
@@ -271,8 +302,10 @@ int main()
         "MoonEpCombineV2SelfRowsPerBatch(rowBytes_)",
         "Combine V2 Self copy does not derive its runtime row batch");
     ok &= Require(kernelImpl,
-        "routes[routeStart + row]",
-        "Combine V2 Self copy does not consume RouteEntry records");
+        "selectedIndices.GetValue(selectedStart + row)",
+        "Combine V2 Self copy does not consume compacted indices");
+    ok &= Require(kernelImpl, "dstSlots.GetValue(relativeIndex)",
+        "Combine V2 Self copy does not decode compacted destinations");
     ok &= RequireBefore(kernelImpl, "CopySelfRowsIn(",
         "CopySelfRowsOut(",
         "Combine V2 Self copy helpers are not ordered as copy-in/copy-out");
@@ -286,12 +319,20 @@ int main()
         "Combine V2 Self copy frees its relay before copy-out");
     ok &= Reject(kernelImpl, "dstRankBuf_",
         "Combine V2 retained the obsolete dst-rank UB buffer");
-    ok &= Reject(kernelImpl, "selectedIndexBuf_",
-        "Combine V2 retained the obsolete selected-index UB buffer");
+    ok &= Require(kernelImpl, "TBuf<QuePosition::VECCALC> selectedIndexBuf_;",
+        "Combine V2 compacted-index UB buffer is missing");
+    ok &= Require(kernelImpl, "TBuf<QuePosition::VECCALC> lowerMaskBuf_;",
+        "Combine V2 lower-bound mask buffer is missing");
+    ok &= Require(kernelImpl, "TBuf<QuePosition::VECCALC> upperMaskBuf_;",
+        "Combine V2 upper-bound mask buffer is missing");
     ok &= Reject(kernelImpl, "compareMaskBuf_",
         "Combine V2 retained the obsolete compare-mask UB buffer");
-    ok &= Reject(kernelImpl, "GatherMask(",
-        "Combine V2 retained the obsolete gather selection path");
+    ok &= Reject(kernelImpl, "routeEntryBuf_",
+        "Combine V2 retained the obsolete route-entry UB buffer");
+    ok &= Reject(kernelImpl, "selectStateBuf_",
+        "Combine V2 retained obsolete selector state");
+    ok &= Reject(kernelImpl, "threadMaxSlotIdxBuf_",
+        "Combine V2 retained obsolete selector cursors");
     ok &= Reject(kernelImpl, "descriptorBuf_",
         "Combine V2 retained the obsolete descriptor UB buffer");
     ok &= Reject(kernelImpl, "CopyBytesGmToGm(",
@@ -418,8 +459,17 @@ int main()
         "Combine V2 probe does not reject remote-output mismatches");
     ok &= Require(hardwareProbe, "OutputCheckResult::SelfOnlyFailed",
         "Combine V2 probe does not identify disabled self-copy mismatches");
+    ok &= Require(hardwareProbe,
+        "BarrierAll(rank, world, \"correctness validation\")",
+        "Combine V2 correctness check still gates timing on validation status");
+    ok &= Reject(hardwareProbe, "--allow-self-only-failure",
+        "Combine V2 probe still requires an option to time incorrect output");
     ok &= Require(clusterLauncher, "#!/usr/bin/env bash",
         "Combine V2 cluster launcher is not a Bash script");
+    ok &= Require(clusterLauncher, "build_args+=(--enable-profiling)",
+        "Combine V2 --profile does not enable profiling at build time");
+    ok &= Reject(clusterLauncher, "--allow-self-only-failure",
+        "Combine V2 cluster launcher still gates incorrect performance runs");
     ok &= Require(clusterLauncher,
         "bash \"${run_script}\" \"${run_args[@]}\"",
         "Combine V2 cluster launcher does not start the server-side launcher");
@@ -427,6 +477,10 @@ int main()
         "Combine V2 cluster launcher must not depend on PowerShell");
     ok &= Reject(Lower(multihostLauncher), "powershell",
         "Combine V2 multihost launcher must not depend on PowerShell");
+    ok &= Require(multihostLauncher, "correctness == \"failed\"",
+        "Combine V2 launcher does not aggregate failed correctness results");
+    ok &= Reject(multihostLauncher, "--allow-self-only-failure",
+        "Combine V2 multihost launcher still gates incorrect performance runs");
 
     const std::vector<std::string> v2Files {
         root + "/src/include/tilexr_moonep_combine_v2.h",

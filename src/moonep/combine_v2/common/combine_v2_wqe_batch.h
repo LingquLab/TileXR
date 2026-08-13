@@ -12,13 +12,10 @@
 namespace TileXRMoonEp {
 
 constexpr uint32_t kMoonEpCombineV2PayloadBatchRows = 128U;
-constexpr uint32_t kMoonEpCombineV2MaxSelectorThreads = 128U;
-constexpr uint32_t kMoonEpCombineV2SelectorThreads =
-    kMoonEpCombineV2PayloadBatchRows;
 constexpr uint32_t kMoonEpCombineV2BuilderThreads =
     kMoonEpCombineV2PayloadBatchRows;
 constexpr uint32_t kMoonEpCombineV2MaxSelectedPayloadWqes =
-    2U * kMoonEpCombineV2PayloadBatchRows;
+    kMoonEpCombineV2PayloadBatchRows;
 constexpr uint32_t kMoonEpCombineV2WqeBatchCapacity =
     kMoonEpCombineV2PayloadBatchRows;
 constexpr uint32_t kMoonEpCombineV2BatchQpCount = 2U;
@@ -28,12 +25,8 @@ constexpr uint32_t kMoonEpCombineV2SelfMaxBatchRows = 8U;
 constexpr uint32_t kMoonEpCombineV2SelfUbAlignment = 32U;
 
 static_assert(kMoonEpCombineV2PayloadBatchRows > 0U &&
-    kMoonEpCombineV2PayloadBatchRows <=
-        kMoonEpCombineV2MaxSelectorThreads,
+    kMoonEpCombineV2PayloadBatchRows <= 128U,
     "Combine V2 payload batch rows must be in [1, 128]");
-static_assert(kMoonEpCombineV2SelectorThreads ==
-        kMoonEpCombineV2BuilderThreads,
-    "Combine V2 selector and builder widths must match");
 
 TILEXR_MOONEP_COMBINE_V2_WQE_BATCH_INLINE uint64_t
 MoonEpCombineV2SelfAlignedRowBytes(uint64_t rowBytes)
@@ -110,27 +103,6 @@ TILEXR_MOONEP_COMBINE_V2_WQE_BATCH_INLINE uint32_t MoonEpCombineV2WqeBatchCount(
         batchCount = ringRemaining;
     }
     return static_cast<uint32_t>(batchCount);
-}
-
-TILEXR_MOONEP_COMBINE_V2_WQE_BATCH_INLINE uint32_t
-MoonEpCombineV2SelectorFirstIndex(uint32_t chunkStart, uint32_t threadId)
-{
-    return chunkStart + threadId;
-}
-
-TILEXR_MOONEP_COMBINE_V2_WQE_BATCH_INLINE uint32_t
-MoonEpCombineV2SelectorResumeIndex(uint32_t lastScannedIndex)
-{
-    return lastScannedIndex + kMoonEpCombineV2SelectorThreads;
-}
-
-TILEXR_MOONEP_COMBINE_V2_WQE_BATCH_INLINE bool
-MoonEpCombineV2SelectorIndexInChunk(uint32_t absoluteIndex,
-    uint32_t chunkStart, uint32_t chunkElements)
-{
-    return absoluteIndex >= chunkStart &&
-        static_cast<uint64_t>(absoluteIndex) <
-            static_cast<uint64_t>(chunkStart) + chunkElements;
 }
 
 TILEXR_MOONEP_COMBINE_V2_WQE_BATCH_INLINE uint32_t MoonEpCombineV2CqePollBatchCount(
