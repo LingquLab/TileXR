@@ -9,7 +9,7 @@ include(${CMAKE_SOURCE_DIR}/src/moonep/cmake/MoonEpKernel.cmake)
 option(TILEXR_MOONEP_DISPATCH_ENABLE_PROFILING
     "Enable per-AIV profiling in the URMA MoonEP Dispatch kernel" OFF)
 option(TILEXR_MOONEP_DISPATCH_ENABLE_DFX
-    "Enable detailed per-AIV DFX in the URMA MoonEP Dispatch kernel" ON)
+    "Enable detailed per-AIV DFX in the URMA MoonEP Dispatch kernel" OFF)
 if(TILEXR_MOONEP_DISPATCH_ENABLE_PROFILING AND
     NOT TILEXR_MOONEP_DISPATCH_ENABLE_DFX)
     message(FATAL_ERROR

@@ -193,6 +193,7 @@ fi
 [[ -n "${interface}" ]] || { echo "Unable to determine communication interface" >&2; exit 1; }
 
 export HCCL_HOST_SOCKET_PORT_RANGE=auto
+export HCCL_NPU_SOCKET_PORT_RANGE=${MODEL_RUNNER_HCCL_NPU_SOCKET_PORT_RANGE:-47000-47100}
 export HCCL_SOCKET_IFNAME=${interface}
 export GLOO_SOCKET_IFNAME=${interface}
 export HCCL_BUFFSIZE=200

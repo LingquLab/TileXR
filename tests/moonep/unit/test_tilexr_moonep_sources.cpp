@@ -163,6 +163,8 @@ int main()
     Contains("dispatch CMake", dispatchCmake, "--cce-auto-sync");
     Contains("dispatch CMake", dispatchCmake, "-DCATLASS_ARCH=3510");
     Contains("dispatch CMake", dispatchCmake, "TILEXR_MOONEP_DISPATCH_ENABLE_DFX");
+    Contains("dispatch CMake", dispatchCmake,
+        "Enable detailed per-AIV DFX in the URMA MoonEP Dispatch kernel\" OFF)");
     Contains("dispatch CMake", dispatchCmake, "cxx_std_14");
     Contains("dispatch CMake", dispatchCmake, "BUILD_WITH_INSTALL_RPATH TRUE");
     Contains("dispatch CMake", dispatchCmake, "INSTALL_RPATH \"$ORIGIN\"");

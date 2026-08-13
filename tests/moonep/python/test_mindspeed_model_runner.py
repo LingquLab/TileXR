@@ -92,6 +92,10 @@ def test_runner_scripts_expose_the_supported_interface_and_validated_shape() -> 
     assert "TILEXR_MOONEP_DISPATCH_GROUP_WIDTH=16" in node
     assert "TILEXR_MOONEP_COMBINE_VERSION=2" in node
     assert "unset TILEXR_MOONEP_DISPATCH_TRANSPORT" in node
+    assert (
+        "HCCL_NPU_SOCKET_PORT_RANGE=${MODEL_RUNNER_HCCL_NPU_SOCKET_PORT_RANGE:-47000-47100}"
+        in node
+    )
 
 
 def test_first_run_prompts_and_subsequent_dry_run_reuses_cached_answers(tmp_path: Path) -> None:

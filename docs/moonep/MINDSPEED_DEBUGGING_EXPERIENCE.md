@@ -169,7 +169,16 @@ reset 等单一变量。一次同时修改 Kernel、Host、timeout 和路由，�
 - 同时覆盖 1-BB 和多 BB WQE；
 - balanced、model-skew、sparse 和 unique routing；
 - `S=4096`、`K=8`、`H=7168`、EP8 的生产规模；
-- 正确性运行开启失败时 DFX，性能运行关闭 trace、dump、DFX 和 profiler。
+- 正确性运行可按需开启失败时 DFX。纯吞吐性能运行关闭 trace、dump、DFX 和 profiler；
+  需要算子耗时统计时，保持 trace、dump、DFX、调试同步和 stage barrier 关闭，只开启
+  框架 NPU profiler，并单独标注为 profiling-on 数据。
+
+性能复测不能只检查运行时环境变量。Dispatch DFX 和部分 profiling 是编译期 CMake
+选项；即使 provenance 显示 trace/dump/profile 都关闭，已嵌入 `.so` 的 AICore binary
+仍可能包含 DFX 路径。性能运行前必须同时保存并核对 CMake cache、实际加载库哈希和
+运行时环境，普通 Release 构建应默认关闭 DFX，需要诊断时再显式开启并重新构建。
+框架 NPU profiler 与 Kernel 编译期 DFX/profiling 必须分开记录：前者可用于算子计时，
+后者会改变被测 Kernel 路径，不能在默认性能构建中开启。
 
 ## 避免重复踩坑
 
