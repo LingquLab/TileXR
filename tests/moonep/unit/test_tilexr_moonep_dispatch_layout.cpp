@@ -1,6 +1,7 @@
 #include <cstdint>
 #include <iostream>
 #include <limits>
+#include <vector>
 
 #include "dispatch_layout.h"
 #include "dispatch_profile.h"
@@ -16,6 +17,39 @@ int g_failures = 0;
     if (lhsValue != rhsValue) { std::cerr << "CHECK_EQ line " << __LINE__ \
     << ": " #lhs " != " #rhs << std::endl; ++g_failures; } } while (0)
 
+struct Range {
+    uint64_t offset;
+    uint64_t bytes;
+};
+
+void CheckDisjointLayout(const TileXRMoonEp::MoonEpDispatchUrmaLayout &layout)
+{
+    const std::vector<Range> ranges {
+        {layout.hidden.sourceOffset, layout.hidden.sourceBytes},
+        {layout.hidden.scratchOffset, layout.hidden.scratchBytes},
+        {layout.weight.sourceOffset, layout.weight.sourceBytes},
+        {layout.weight.scratchOffset, layout.weight.scratchBytes},
+        {layout.completionFlagsOffset, layout.completionFlagsBytes},
+        {layout.signalOffset, layout.signalBytes},
+        {layout.hiddenProfileOffset, layout.profileBytes},
+        {layout.weightProfileOffset, layout.profileBytes},
+        {layout.hiddenDfxOffset, layout.dfxBytes},
+        {layout.weightDfxOffset, layout.dfxBytes},
+        {layout.kernelStatusOffset, layout.kernelStatusBytes},
+    };
+    for (std::size_t index = 0; index < ranges.size(); ++index) {
+        const Range &current = ranges[index];
+        CHECK_TRUE(current.bytes > 0U);
+        CHECK_TRUE(current.offset <= layout.totalBytes);
+        CHECK_TRUE(current.bytes <= layout.totalBytes - current.offset);
+        for (std::size_t other = index + 1; other < ranges.size(); ++other) {
+            const Range &candidate = ranges[other];
+            CHECK_TRUE(current.offset + current.bytes <= candidate.offset ||
+                candidate.offset + candidate.bytes <= current.offset);
+        }
+    }
+}
+
 void TestReferenceShape()
 {
     TileXRMoonEp::MoonEpDispatchUrmaLayout layout {};
@@ -30,6 +64,15 @@ void TestReferenceShape()
     CHECK_EQ(layout.weight.rowBytes, UINT64_C(4));
     CHECK_EQ(layout.weight.sourceBytes, UINT64_C(8192));
     CHECK_EQ(layout.weight.scratchSlotBytes, UINT64_C(8192));
+    CHECK_EQ(layout.hidden.sourceOffset, UINT64_C(0));
+    CHECK_TRUE(layout.hidden.scratchOffset >=
+        layout.hidden.sourceOffset + layout.hidden.sourceBytes);
+    CHECK_TRUE(layout.weight.sourceOffset >=
+        layout.hidden.scratchOffset + layout.hidden.scratchBytes);
+    CHECK_TRUE(layout.weight.scratchOffset >=
+        layout.weight.sourceOffset + layout.weight.sourceBytes);
+    CHECK_TRUE(layout.commonOffset >=
+        layout.weight.scratchOffset + layout.weight.scratchBytes);
     CHECK_EQ(layout.completionFlagsBytes, UINT64_C(8192));
     CHECK_TRUE(layout.signalOffset >=
         layout.completionFlagsOffset + layout.completionFlagsBytes);
@@ -37,11 +80,11 @@ void TestReferenceShape()
         UINT64_C(64) * sizeof(TileXRMoonEp::DispatchProfileRecord));
     CHECK_EQ(layout.dfxBytes,
         UINT64_C(64) * sizeof(TileXRMoonEp::DispatchDfxRecord));
-    CHECK_TRUE(layout.commonOffset >= layout.hidden.activeDataBytes);
-    CHECK_TRUE(layout.commonOffset >= layout.weight.activeDataBytes);
+    CHECK_EQ(layout.totalBytes, UINT64_C(30) * 1024U * 1024U);
     CHECK_TRUE(layout.requiredBytes <= layout.totalBytes);
     CHECK_EQ(layout.totalBytes % TileXRMoonEp::kDispatchRegistrationAlignmentBytes,
         UINT64_C(0));
+    CheckDisjointLayout(layout);
 
     TileXRMoonEp::MoonEpDispatchUrmaLayout expanded = layout;
     const uint64_t oldCommonOffset = expanded.commonOffset;
@@ -50,6 +93,7 @@ void TestReferenceShape()
         &expanded), TileXR::TILEXR_SUCCESS);
     CHECK_EQ(expanded.commonOffset,
         oldCommonOffset + TileXRMoonEp::kDispatchRegistrationAlignmentBytes);
+    CheckDisjointLayout(expanded);
     CHECK_TRUE(TileXRMoonEp::TileXRMoonEpBindDispatchUrmaWorkspace(
         layout.totalBytes - TileXRMoonEp::kDispatchRegistrationAlignmentBytes,
         &layout) != TileXR::TILEXR_SUCCESS);
@@ -82,6 +126,19 @@ void TestFailuresAndModes()
         layout, TileXRMoonEp::DispatchPayloadMode::Hidden) == &layout.hidden);
     CHECK_TRUE(TileXRMoonEp::TileXRMoonEpGetActiveDispatchUrmaLayout(
         layout, TileXRMoonEp::DispatchPayloadMode::RouteWeight) == &layout.weight);
+
+    CHECK_EQ(TileXRMoonEp::TileXRMoonEpBuildDispatchUrmaLayout(
+        1, 1, 1, 1, 1, &layout), TileXR::TILEXR_SUCCESS);
+    CheckDisjointLayout(layout);
+    CHECK_EQ(layout.hidden.rowBytes, UINT64_C(2));
+    CHECK_EQ(layout.weight.rowBytes, UINT64_C(4));
+
+    CHECK_EQ(TileXRMoonEp::TileXRMoonEpBuildDispatchUrmaLayout(
+        3, 3, 2, 3, 7, &layout), TileXR::TILEXR_SUCCESS);
+    CheckDisjointLayout(layout);
+    CHECK_EQ(layout.routeCount, 6);
+    CHECK_EQ(layout.destinationCapacity, 7);
+    CHECK_EQ(layout.hidden.rowBytes, UINT64_C(6));
 }
 
 } // namespace

@@ -182,6 +182,40 @@ reset 等单一变量。一次同时修改 Kernel、Host、timeout 和路由，�
 - 不要因某次补丁通过完整模型就跳过最小 reproducer；最小 reproducer 才能证明因果。
 - 不要删除被推翻的假设记录。保留否定证据可以防止后续重复猜测。
 
+## Dispatch V2 fused epoch 约束与验证边界
+
+一次 paired `TileXRMoonEpDispatchV2` 应只有一个 magic、一次 AICore launch 和
+一个 UDMA epoch。Hidden 与 RouteWeight 必须使用互不重叠的 source 和双 scratch；
+同一 route 在同一逻辑 QP 上按 Hidden、Weight 顺序发 WQE，ordered completion 必须
+排在该 QP 的全部 payload WQE 之后。completion、group credit、CQ reclaim 和 final
+quiet 每个 fused epoch 只执行一轮。发生上游或设备错误后可以停止 payload work，但
+不能跳过 signal-only completion、incoming wait/credit 和最终 status/quiet 收敛，否则
+健康 rank 会退化为超时发现错误。
+
+诊断仍保留独立 Hidden/Weight Profile 与 DFX，但共享阶段只能有一个 owner。paired
+以 Weight record 承载 route scan、flag wait、credit、CQ 和 quiet；Hidden record 的共享
+耗时为零，并由 kernel status 的 fused feature bit 明确标识。profiling OFF 的延迟运行与
+profiling ON 的阶段分析必须分开，不能把两个 payload record 伪装成两轮独立通信。
+
+实机验证时还要注意以下边界：
+
+- Host 环境值是 `group_credit`，不是 `group-credit`；错误拼写会在 launch 前返回 `-3`。
+- grouped/group-credit 只适用于 vector route selection。小于 64 routes、非 2 的幂
+  `NvS` 或 UB/vector 不满足条件的 shape 应使用 legacy scalar-tiled 路径；同步返回
+  `-6` 不是 UDMA 数据面失败。
+- padded zero-fill 要验证完整输出 tensor，不能只比较有效 slot。若 shape 不满足 grouped
+  条件，用 legacy 路径证明 Hidden 和 Weight 的空 slot 都为零。
+- shared-QP 不能仅凭配置名推断。应同时确认 runtime 调用 shared-QP-domain 初始化、日志
+  显示 domain 启用，且 communicator `extraFlag` 含 UDMA 与 `UDMA_SHARED_QP`；本次
+  Ascend950PR 单机 8 rank 证据对应固定 32 QP shared domain。
+- 参考形状 `S=128,K=16,H=3584,NvS=2048` 的不重叠布局仍为 30 MiB；其他 shape
+  必须使用 checked add/multiply 计算真实容量，并在扩大 workspace 绑定后重新检查全部
+  active region 与 common tail 边界。
+
+这些 Host/mock/source guard 只能证明 ABI、布局和源码协议不变量。只有相同 CANN、设备、
+拓扑上的 HCCL baseline 和 Ascend950 实机逐元素多轮结果，才能证明 UDMA 数据面；性能结论
+还必须使用同 shape、同 pair 模式、同 warmup/迭代和独立 profiling-off 构建做 A/B。
+
 ## 当前实现状态说明
 
 本文记录的是已验证经验，不代表所有修复都已经进入 `main`。截至 2026-08-12：

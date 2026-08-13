@@ -11,6 +11,7 @@ constexpr uint32_t kDispatchKernelStatusMarker = 0x54584453U; // TXDS
 constexpr uint16_t kDispatchDiagnosticVersion = 3U;
 constexpr uint64_t kDispatchKernelStatusFeatureDfxEnabled = 1U << 0;
 constexpr uint64_t kDispatchKernelStatusFeatureProfilingEnabled = 1U << 1;
+constexpr uint64_t kDispatchKernelStatusFeatureFusedEpoch = 1U << 2;
 
 enum DispatchSelectMode : uint32_t {
     kDispatchSelectScalarTiled = 0,

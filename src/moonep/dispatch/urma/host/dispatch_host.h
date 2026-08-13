@@ -12,6 +12,9 @@ int TileXRMoonEpQueryDispatchUrmaWorkspace(TileXRCommPtr comm, int64_t s,
 int TileXRMoonEpRunDispatchUrmaV1(const TileXRMoonEpDispatchArgsV1 *args,
     aclrtStream stream);
 
+int TileXRMoonEpRunDispatchUrmaV2(const TileXRMoonEpDispatchArgsV2 *args,
+    aclrtStream stream);
+
 } // namespace TileXRMoonEp
 
 #endif // TILEXR_MOONEP_DISPATCH_URMA_HOST_H

@@ -420,13 +420,17 @@ def test_single_node_launcher_builds_hidden_dispatch_hot_loop_command(tmp_path) 
             "dispatch_hot_loop",
             "--dispatch-modes",
             "hidden",
+            "--exact-rounds",
+            "100",
         ]
     )
 
     command = _process_command(args)
     assert "tools.moonep.dispatch_hot_loop" in command
     assert "tools.moonep.benchmark" not in command
-    assert command[command.index("--dispatch-modes") + 1 :] == ["hidden"]
+    assert command[command.index("--dispatch-modes") + 1 :] == [
+        "hidden", "--exact-rounds", "100"
+    ]
     assert "--mode" not in command
 
 

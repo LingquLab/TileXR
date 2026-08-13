@@ -266,6 +266,30 @@ void TestWqeBatchBoundaries()
     CHECK_EQ(TileXRMoonEp::DispatchRouteTileCount(1000U, 0U, 1024U), 1000U);
     CHECK_EQ(TileXRMoonEp::DispatchRouteTileCount(1000U, 0U, 0U), 0U);
 
+    uint64_t dataWqes = UINT64_MAX;
+    CHECK_TRUE(TileXRMoonEp::DispatchDataWqeCount(17U, false, dataWqes));
+    CHECK_EQ(dataWqes, UINT64_C(17));
+    CHECK_TRUE(TileXRMoonEp::DispatchDataWqeCount(17U, true, dataWqes));
+    CHECK_EQ(dataWqes, UINT64_C(34));
+    CHECK_TRUE(!TileXRMoonEp::DispatchDataWqeCount(
+        UINT64_MAX, true, dataWqes));
+    CHECK_EQ(dataWqes, UINT64_C(0));
+
+    for (uint32_t route = 0U; route < 129U; ++route) {
+        const uint32_t hiddenTask = route * 2U;
+        const uint32_t weightTask = hiddenTask + 1U;
+        CHECK_EQ(TileXRMoonEp::DispatchDataTaskRouteIndex(hiddenTask, true),
+            route);
+        CHECK_EQ(TileXRMoonEp::DispatchDataTaskRouteIndex(weightTask, true),
+            route);
+        CHECK_TRUE(!TileXRMoonEp::DispatchDataTaskIsWeight(hiddenTask, true));
+        CHECK_TRUE(TileXRMoonEp::DispatchDataTaskIsWeight(weightTask, true));
+    }
+    CHECK_TRUE(!TileXRMoonEp::DispatchSignalFitsAfterData(64U, true, 128U));
+    CHECK_TRUE(TileXRMoonEp::DispatchSignalFitsAfterData(63U, true, 128U));
+    CHECK_TRUE(TileXRMoonEp::DispatchSignalFitsAfterData(127U, false, 128U));
+    CHECK_TRUE(!TileXRMoonEp::DispatchSignalFitsAfterData(128U, false, 128U));
+
 }
 
 void TestSparseCqBatchAndOwnerGeneration()

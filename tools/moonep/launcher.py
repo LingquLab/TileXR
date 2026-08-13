@@ -136,6 +136,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--comm-id", default=None)
     parser.add_argument("--python", default=sys.executable)
     parser.add_argument("--wait-iterations", type=int, default=1_000_000)
+    parser.add_argument("--exact-rounds", type=int, default=0)
     parser.add_argument("--timeout-sec", type=float, default=1800.0)
     parser.add_argument(
         "--mode", choices=("benchmark", "reference", "correctness"), default="benchmark"
@@ -184,6 +185,7 @@ def _process_command(args: argparse.Namespace) -> list[str]:
     if dispatch_hot_loop:
         command.append("--dispatch-modes")
         command.extend(args.dispatch_modes)
+        command.extend(("--exact-rounds", str(getattr(args, "exact_rounds", 0))))
     else:
         if args.candidate_backend:
             command.extend(("--candidate-backend", args.candidate_backend))
@@ -199,11 +201,13 @@ def main(argv: list[str] | None = None) -> int:
     validate_iteration_overrides(args.warmup, args.iterations)
     if (
         args.wait_iterations <= 0
+        or args.exact_rounds < 0
         or args.timeout_sec <= 0
         or args.tensor_preview_elements <= 0
     ):
         raise ValueError(
-            "wait_iterations, timeout_sec, and tensor_preview_elements must be positive"
+            "wait_iterations, timeout_sec, and tensor_preview_elements must be positive; "
+            "exact_rounds must be non-negative"
         )
     if args.mode == "benchmark" and args.dump_stage_tensors:
         raise ValueError("--dump-stage-tensors is only valid in reference/correctness mode")

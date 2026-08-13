@@ -11,7 +11,6 @@ from .benchmark import environment_metadata, topology_metadata, validate_plan
 from .config import apply_overrides, build_case_parser, load_cases, select_cases
 from .planner_reference import (
     build_reference_plan,
-    deterministic_all_topk,
     deterministic_rank_topk,
 )
 from .rendezvous import completion_barrier_from_env
@@ -30,6 +29,7 @@ KERNEL_STATUS_MARKER = 0x54584453
 DIAGNOSTIC_VERSION = 3
 KERNEL_STATUS_FEATURE_DFX_ENABLED = 1 << 0
 KERNEL_STATUS_FEATURE_PROFILING_ENABLED = 1 << 1
+KERNEL_STATUS_FEATURE_FUSED_EPOCH = 1 << 2
 PROFILE_COUNT = 64
 DFX_COUNT = 64
 COMPLETION_BYTES = 512 * 2 * 8
@@ -219,6 +219,28 @@ def _dtype(torch_module, name: str):
     return {"bfloat16": torch_module.bfloat16, "float16": torch_module.float16}[name]
 
 
+def _case_rank_topk(case, rank: int, rank_size: int) -> tuple[int, ...]:
+    route_count = case.tokens_per_rank * case.topk
+    if case.routing_pattern == "skewed":
+        return tuple(route % case.topk for route in range(route_count))
+    return deterministic_rank_topk(
+        rank,
+        rank_size,
+        case.tokens_per_rank,
+        case.topk,
+        case.expert_count,
+        case.route_distribution,
+    )
+
+
+def _all_case_topk(case, rank_size: int) -> tuple[int, ...]:
+    return tuple(
+        expert
+        for rank in range(rank_size)
+        for expert in _case_rank_topk(case, rank, rank_size)
+    )
+
+
 def _inputs(torch_module, case, context):
     device = f"npu:{context.device_index}"
     route_count = case.tokens_per_rank * case.topk
@@ -226,13 +248,8 @@ def _inputs(torch_module, case, context):
         route_count, dtype=torch_module.int32, device=device
     )
     topk = torch_module.tensor(
-        deterministic_rank_topk(
-            context.planner_group_rank,
-            context.planner_group_size,
-            case.tokens_per_rank,
-            case.topk,
-            case.expert_count,
-            case.route_distribution,
+        _case_rank_topk(
+            case, context.planner_group_rank, context.planner_group_size
         ),
         dtype=torch_module.int32,
         device=device,
@@ -253,10 +270,8 @@ def _inputs(torch_module, case, context):
     return topk, tpe, hidden.contiguous(), weights.contiguous()
 
 
-def _expected(torch_module, case, context, destination_roll: int = 0):
-    all_topk = deterministic_all_topk(context.planner_group_size,
-        case.tokens_per_rank, case.topk, case.expert_count,
-        case.route_distribution)
+def _reference_slot_assignments(case, context, destination_roll: int = 0):
+    all_topk = _all_case_topk(case, context.planner_group_size)
     route_count = case.tokens_per_rank * case.topk
     destination_capacity = int(context.nv_s)
     source_by_slot = [-1] * destination_capacity
@@ -279,27 +294,66 @@ def _expected(torch_module, case, context, destination_roll: int = 0):
             raw = encoded
             target, slot = divmod(raw, destination_capacity)
             if target == context.planner_group_rank:
+                if source_by_slot[slot] >= 0:
+                    raise RuntimeError(f"reference destination collision at slot {slot}")
                 source_by_slot[slot] = source
                 token_by_slot[slot] = route // case.topk
                 route_by_slot[slot] = route
-    if min(source_by_slot) < 0:
-        raise RuntimeError("reference destinations do not fill every local slot")
+    return source_by_slot, token_by_slot, route_by_slot
+
+
+def _expected(torch_module, case, context, destination_roll: int = 0):
+    source_by_slot, token_by_slot, route_by_slot = _reference_slot_assignments(
+        case, context, destination_roll
+    )
     device = f"npu:{context.device_index}"
-    source = torch_module.tensor(source_by_slot, dtype=torch_module.int32,
+    valid = torch_module.tensor(
+        [source >= 0 for source in source_by_slot],
+        dtype=torch_module.bool,
+        device=device,
+    )
+    source = torch_module.tensor([max(0, value) for value in source_by_slot],
+        dtype=torch_module.int32,
         device=device).reshape(-1, 1)
-    token = torch_module.tensor(token_by_slot, dtype=torch_module.int32,
+    token = torch_module.tensor([max(0, value) for value in token_by_slot],
+        dtype=torch_module.int32,
         device=device).reshape(-1, 1)
-    route = torch_module.tensor(route_by_slot, dtype=torch_module.int32,
+    route = torch_module.tensor([max(0, value) for value in route_by_slot],
+        dtype=torch_module.int32,
         device=device)
     cols = torch_module.arange(case.hidden_size, dtype=torch_module.int32,
         device=device).reshape(1, -1)
-    hidden = ((token * 13 + cols + source * 7) % 64).to(
+    hidden_values = ((token * 13 + cols + source * 7) % 64).to(
         dtype=_dtype(torch_module, case.dtype)
     )
-    weights = ((route * 5 + source.reshape(-1) * 11) % 97).to(
+    weight_values = ((route * 5 + source.reshape(-1) * 11) % 97).to(
         dtype=torch_module.float32
     ) / 128.0
+    hidden = torch_module.where(
+        valid.reshape(-1, 1), hidden_values, torch_module.zeros_like(hidden_values)
+    )
+    weights = torch_module.where(
+        valid, weight_values, torch_module.zeros_like(weight_values)
+    )
     return hidden, weights, source_by_slot
+
+
+def _launch_dispatch(runtime, context, plan, hidden, hidden_out, stream,
+    weights, weights_out, mode: str, workspace, workspace_bytes) -> None:
+    if mode == "hidden":
+        runtime.dispatch(context, plan, hidden, hidden_out, stream,
+            registered_workspace=workspace,
+            registered_workspace_bytes=workspace_bytes)
+    elif mode == "weight":
+        runtime.dispatch(context, plan, weights, weights_out, stream,
+            registered_workspace=workspace,
+            registered_workspace_bytes=workspace_bytes)
+    elif mode == "pair":
+        runtime.dispatch(context, plan, hidden, hidden_out, stream, weights,
+            weights_out, registered_workspace=workspace,
+            registered_workspace_bytes=workspace_bytes)
+    else:
+        raise ValueError(f"unsupported Dispatch mode: {mode}")
 
 
 def _alternating_plan_check(torch_module, case, buffer, plan, hidden,
@@ -312,20 +366,8 @@ def _alternating_plan_check(torch_module, case, buffer, plan, hidden,
     destination_roll = case.topk
 
     def launch() -> None:
-        if mode == "hidden":
-            runtime.dispatch(context, plan, hidden, hidden_out, stream,
-                registered_workspace=workspace,
-                registered_workspace_bytes=workspace_bytes)
-        elif mode == "weight":
-            runtime.dispatch(context, plan, weights, weights_out, stream,
-                registered_workspace=workspace,
-                registered_workspace_bytes=workspace_bytes)
-        elif mode == "pair":
-            runtime.dispatch(context, plan, hidden, hidden_out, stream, weights,
-                weights_out, registered_workspace=workspace,
-                registered_workspace_bytes=workspace_bytes)
-        else:
-            raise ValueError(f"unsupported Dispatch mode: {mode}")
+        _launch_dispatch(runtime, context, plan, hidden, hidden_out, stream,
+            weights, weights_out, mode, workspace, workspace_bytes)
 
     try:
         launch()
@@ -355,6 +397,52 @@ def _alternating_plan_check(torch_module, case, buffer, plan, hidden,
             "destination_roll": destination_roll,
             "hidden_exact": hidden_ok,
             "weight_exact": weight_ok,
+        }
+    finally:
+        plan.dst.copy_(original_dst)
+        torch_module.npu.synchronize()
+
+
+def _repeated_exact_check(torch_module, case, buffer, plan, hidden,
+    hidden_out, weights, weights_out, mode: str, rounds: int) -> dict[str, object]:
+    if rounds <= 0:
+        return {"enabled": False, "rounds": 0}
+    runtime = buffer.runtime
+    context = buffer.context
+    workspace, workspace_bytes = context.dispatch_workspace
+    stream = buffer._stream_ptr()
+    original_dst = plan.dst.clone()
+    destination_roll = case.topk
+    try:
+        for round_index in range(rounds):
+            roll = destination_roll if round_index % 2 else 0
+            if roll:
+                plan.dst.copy_(torch_module.roll(original_dst, shifts=roll))
+            else:
+                plan.dst.copy_(original_dst)
+            torch_module.npu.synchronize()
+            _launch_dispatch(runtime, context, plan, hidden, hidden_out, stream,
+                weights, weights_out, mode, workspace, workspace_bytes)
+            buffer.quiesce()
+            expected_hidden, expected_weights, _ = _expected(
+                torch_module, case, context, destination_roll=roll)
+            hidden_ok = (bool(torch_module.equal(hidden_out, expected_hidden))
+                if mode in ("hidden", "pair") else None)
+            weight_ok = (bool(torch_module.equal(weights_out, expected_weights))
+                if mode in ("weight", "pair") else None)
+            if hidden_ok is False or weight_ok is False:
+                raise RuntimeError(
+                    "repeated Dispatch mismatch "
+                    f"round={round_index} hidden={hidden_ok} weight={weight_ok} "
+                    f"roll={roll}"
+                )
+        return {
+            "enabled": True,
+            "rounds": rounds,
+            "dispatch_mode": mode,
+            "alternating_plan": True,
+            "hidden_exact": mode in ("hidden", "pair"),
+            "weight_exact": mode in ("weight", "pair"),
         }
     finally:
         plan.dst.copy_(original_dst)
@@ -458,7 +546,13 @@ def _diagnostics(context, *, require_complete: bool = True,
         KERNEL_STATUS_FEATURE_DFX_ENABLED)
     dfx_enabled = bool(features & KERNEL_STATUS_FEATURE_DFX_ENABLED)
     profiling_enabled = bool(features & KERNEL_STATUS_FEATURE_PROFILING_ENABLED)
-    result = {"kernel_status": kernel_status}
+    fused_epoch = bool(features & KERNEL_STATUS_FEATURE_FUSED_EPOCH)
+    shared_owner_mode = "weight" if fused_epoch else None
+    result = {
+        "kernel_status": kernel_status,
+        "fused_epoch": fused_epoch,
+        "shared_owner_mode": shared_owner_mode,
+    }
     rank = int(context.planner_group_rank)
     for payload_mode, mode in enumerate(("hidden", "weight")):
         profile_blob = _workspace_blob(context, offsets[f"{mode}_profile"], profile_bytes)
@@ -524,6 +618,7 @@ def _diagnostics(context, *, require_complete: bool = True,
         result[mode] = {
             "profile_available": profiling_enabled,
             "dfx_available": dfx_enabled,
+            "shared_epoch_owner": fused_epoch and mode == shared_owner_mode,
             "profile": profiles,
             "dfx": dfx,
         }
@@ -586,18 +681,8 @@ def _measure(torch_module, case, buffer, plan, hidden, hidden_out, weights,
     stream = buffer._stream_ptr()
 
     def launch():
-        if mode == "hidden":
-            runtime.dispatch(context, plan, hidden, hidden_out, stream,
-                registered_workspace=workspace,
-                registered_workspace_bytes=workspace_bytes)
-        elif mode == "weight":
-            runtime.dispatch(context, plan, weights, weights_out, stream,
-                registered_workspace=workspace,
-                registered_workspace_bytes=workspace_bytes)
-        else:
-            runtime.dispatch(context, plan, hidden, hidden_out, stream, weights,
-                weights_out, registered_workspace=workspace,
-                registered_workspace_bytes=workspace_bytes)
+        _launch_dispatch(runtime, context, plan, hidden, hidden_out, stream,
+            weights, weights_out, mode, workspace, workspace_bytes)
 
     for _ in range(case.warmup):
         launch()
@@ -662,7 +747,8 @@ def run_case(torch_module, case, args) -> None:
         buffer.synchronize()
         validation = validate_plan(
             plan, context, cu_seqlens,
-            route_distribution=case.route_distribution)
+            route_distribution=case.route_distribution,
+            all_topk=_all_case_topk(case, context.planner_group_size))
         route_count = context.dispatched_capacity
         hidden_out = torch_module.empty((route_count, case.hidden_size),
             dtype=hidden.dtype, device=hidden.device)
@@ -673,6 +759,10 @@ def run_case(torch_module, case, args) -> None:
             alternating_mode = "pair" if "pair" in dispatch_modes else dispatch_modes[0]
             alternating_plan = _alternating_plan_check(torch_module, case, buffer,
                 plan, hidden, hidden_out, weights, weights_out, alternating_mode)
+        exact_mode = "pair" if "pair" in dispatch_modes else dispatch_modes[0]
+        repeated_exact = _repeated_exact_check(torch_module, case, buffer, plan,
+            hidden, hidden_out, weights, weights_out, exact_mode,
+            args.exact_rounds)
         modes = {}
         for mode in dispatch_modes:
             modes[mode] = _measure(torch_module, case, buffer, plan, hidden,
@@ -719,6 +809,7 @@ def run_case(torch_module, case, args) -> None:
         if validate_weight:
             validation["dispatch_weight_exact"] = weight_ok
         validation["alternating_plan"] = alternating_plan
+        validation["repeated_exact"] = repeated_exact
         validation["passed"] = True
         validation["mode"] = "planner_and_dispatch_bit_exact"
         result["validation"] = validation
@@ -773,9 +864,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--install-prefix", default=None)
     parser.add_argument("--wait-iterations", type=int, default=1_000_000)
+    parser.add_argument("--exact-rounds", type=int, default=0)
     parser.add_argument("--dispatch-modes", nargs="+", choices=DISPATCH_MODES,
         default=DISPATCH_MODES)
     args = parser.parse_args(argv)
+    if args.exact_rounds < 0:
+        parser.error("--exact-rounds must be non-negative")
     if os.environ.get("TILEXR_UDMA_QP_ROUTE_SPEC") != "port_count:6,port_count:2":
         raise RuntimeError(
             "TILEXR_UDMA_QP_ROUTE_SPEC=port_count:6,port_count:2 is required before init")

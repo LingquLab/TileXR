@@ -52,6 +52,21 @@ void Excludes(const char *label, const std::string &contents, const char *needle
     }
 }
 
+void CountEquals(const char *label, const std::string &contents,
+    const char *needle, size_t expected)
+{
+    size_t count = 0U;
+    for (size_t position = contents.find(needle); position != std::string::npos;
+        position = contents.find(needle, position + 1U)) {
+        ++count;
+    }
+    if (count != expected) {
+        std::cerr << label << " expected " << expected << " occurrences of "
+                  << needle << ", got " << count << '\n';
+        ++failures;
+    }
+}
+
 } // namespace
 
 int main()
@@ -68,6 +83,10 @@ int main()
         ReadFile("src/moonep/dispatch/host/dispatch_launch.cpp");
     const std::string dispatchKernel =
         ReadFile("src/moonep/dispatch/kernels/tilexr_moonep_dispatch_kernel.cpp");
+    const std::string dispatchUrmaLaunch =
+        ReadFile("src/moonep/dispatch/urma/host/dispatch_launch.cpp");
+    const std::string dispatchUrmaKernel = ReadFile(
+        "src/moonep/dispatch/urma/kernels/tilexr_moonep_dispatch_kernel.cpp");
     const std::string dispatchCmake = ReadFile("src/moonep/dispatch/CMakeLists.txt");
     const std::string combineCommon =
         ReadFile("src/moonep/combine/common/combine_common.h");
@@ -156,6 +175,36 @@ int main()
     Excludes("dispatch kernel", dispatchKernel, "WaitRankInnerFlag");
     Excludes("dispatch kernel", dispatchKernel, "aclrtSynchronizeStream");
     Excludes("dispatch kernel", Lower(dispatchKernel), "udma");
+    CountEquals("URMA dispatch launcher", dispatchUrmaLaunch,
+        "TileXRCommNextMagic(", 1U);
+    CountEquals("URMA dispatch launcher", dispatchUrmaLaunch,
+        "rtKernelLaunchWithFlagV2(", 1U);
+    Contains("URMA Dispatch WQE", dispatchUrmaKernel,
+        "__ubuf__ TileXR::UDMASqeCtx *sqe");
+    Contains("URMA Dispatch WQE", dispatchUrmaKernel,
+        "__ubuf__ TileXR::UDMASgeCtx *sge");
+    Contains("URMA Dispatch SQ publish", dispatchUrmaKernel,
+        "AscendC::DataCopyPad(wqeGlobal, issueLocal, copyParams)");
+    Contains("URMA Dispatch SQ publish", dispatchUrmaKernel,
+        "SyncFunc<AscendC::HardEvent::MTE3_S>()");
+    Contains("URMA Dispatch doorbell", dispatchUrmaKernel,
+        "state.qpCtxEntry->dbAddr), 0)");
+    Contains("URMA Dispatch fused payload", dispatchUrmaKernel,
+        "DispatchDataTaskIsWeight(");
+    Contains("URMA Dispatch fused payload", dispatchUrmaKernel,
+        "DispatchPayloadWqesPerRoute(hasWeight)");
+    Contains("URMA Dispatch grouped convergence", dispatchUrmaKernel,
+        "const bool payloadReady = upstreamStatus ==");
+    Contains("URMA Dispatch grouped convergence", dispatchUrmaKernel,
+        "bool completionSubmitted = optimizedSignalSubmitted");
+    Contains("URMA Dispatch grouped convergence", dispatchUrmaKernel,
+        "WaitDispatchIncomingPeerAndPublishCredit(args");
+    Excludes("URMA Dispatch grouped convergence", dispatchUrmaKernel,
+        "peerValue == rank || upstreamStatus !=");
+    Excludes("URMA Dispatch WQE", dispatchUrmaKernel, "WRITE_WITH_NOTIFY");
+    Excludes("URMA Dispatch WQE", dispatchUrmaKernel, "sgeNum = 2U");
+    Excludes("URMA Dispatch WQE", dispatchUrmaKernel,
+        "__gm__ TileXR::UDMASqeCtx *");
     Contains("combine common", combineCommon, "moonep_peer_window.h");
     Contains("combine launch", combineLaunch, "#include \"moonep_kernel_launch.h\"");
     Contains("combine launch", combineLaunch, "LaunchRegisteredMoonEpKernel(");

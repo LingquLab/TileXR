@@ -614,11 +614,20 @@ def _require_exact(name: str, actual: list[int], expected) -> None:
 def validate_plan(
     plan, context, cu_seqlens=None, *, expected_status: int = 0,
     route_distribution: str = DEFAULT_ROUTE_DISTRIBUTION,
+    all_topk=None,
 ) -> dict[str, object]:
     status = int(plan.status.item())
     if status != int(expected_status):
         raise RuntimeError(
             f"MoonEP device status is {status}, expected {int(expected_status)}"
+        )
+    if all_topk is None:
+        all_topk = deterministic_all_topk(
+            context.planner_group_size,
+            context.tokens_per_rank,
+            context.topk,
+            context.expert_count,
+            route_distribution,
         )
     reference = build_reference_plan(
         rank=context.planner_group_rank,
@@ -628,13 +637,7 @@ def validate_plan(
         expert_count=context.expert_count,
         prefetch_slots=context.prefetch_slots,
         token_padding=context.token_padding,
-        all_topk=deterministic_all_topk(
-            context.planner_group_size,
-            context.tokens_per_rank,
-            context.topk,
-            context.expert_count,
-            route_distribution,
-        ),
+        all_topk=all_topk,
     )
     _require_exact("dst", _tensor_values(plan.dst), reference.dst)
     if cu_seqlens is None:

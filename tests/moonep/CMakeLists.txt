@@ -32,10 +32,13 @@ file(WRITE "${TILEXR_MOONEP_FAKE_INCLUDE_DIR}/acl/acl_rt.h"
 "#include <stdint.h>\n"
 "#include \"acl_base.h\"\n"
 "typedef enum aclrtMemcpyKind { ACL_MEMCPY_DEVICE_TO_DEVICE = 3 } aclrtMemcpyKind;\n"
+"typedef enum aclrtDevAttr { ACL_DEV_ATTR_VECTOR_CORE_NUM = 0, ACL_DEV_ATTR_UBUF_PER_VECTOR_CORE = 1 } aclrtDevAttr;\n"
 "#ifdef __cplusplus\nextern \"C\" {\n#endif\n"
 "aclError aclrtMemsetAsync(void *devPtr, size_t maxCount, int32_t value, size_t count, aclrtStream stream);\n"
 "aclError aclrtMemcpyAsync(void *dst, size_t destMax, const void *src, size_t count, aclrtMemcpyKind kind, aclrtStream stream);\n"
 "aclError aclrtSynchronizeStream(aclrtStream stream);\n"
+"aclError aclrtGetDevice(int32_t *deviceId);\n"
+"aclError aclrtGetDeviceInfo(uint32_t deviceId, aclrtDevAttr attr, int64_t *value);\n"
 "#ifdef __cplusplus\n}\n#endif\n"
 "#endif\n")
 
@@ -50,7 +53,7 @@ file(WRITE "${TILEXR_MOONEP_FAKE_INCLUDE_DIR}/runtime/kernel.h"
 "typedef struct rtDevBinary { uint32_t magic; uint32_t version; const void *data; uint64_t length; } rtDevBinary_t;\n"
 "typedef struct rtArgsEx { void *args; size_t argsSize; } rtArgsEx_t;\n"
 "typedef struct rtSmDesc { uint32_t reserved; } rtSmDesc_t;\n"
-"typedef struct rtTaskCfgInfo { uint32_t schemMode; } rtTaskCfgInfo_t;\n"
+"typedef struct rtTaskCfgInfo { uint32_t schemMode; uint32_t localMemorySize; } rtTaskCfgInfo_t;\n"
 "#define RT_ERROR_NONE 0\n"
 "#define RT_DEV_BINARY_MAGIC_ELF_AIVEC 0x41415246U\n"
 "#ifdef __cplusplus\nextern \"C\" {\n#endif\n"
@@ -165,6 +168,28 @@ target_include_directories(test_tilexr_moonep_dispatch_urma_layout PRIVATE
 add_executable(test_tilexr_moonep_dispatch_urma_schedule
     unit/test_tilexr_moonep_dispatch_schedule.cpp
 )
+
+add_executable(test_tilexr_moonep_dispatch_urma_host
+    unit/test_tilexr_moonep_dispatch_urma_host.cpp
+    ${TILEXR_ROOT}/src/moonep/dispatch/urma/host/dispatch_layout.cpp
+    ${TILEXR_ROOT}/src/moonep/dispatch/urma/host/dispatch_host.cpp
+)
+target_include_directories(test_tilexr_moonep_dispatch_urma_host PRIVATE
+    ${TILEXR_MOONEP_TEST_INCLUDE_DIRS}
+    ${TILEXR_ROOT}/src/moonep/dispatch/urma/common
+    ${TILEXR_ROOT}/src/moonep/dispatch/urma/host
+)
+
+add_executable(test_tilexr_moonep_dispatch_urma_launch
+    unit/test_tilexr_moonep_dispatch_urma_launch.cpp
+    ${TILEXR_ROOT}/src/moonep/dispatch/urma/host/dispatch_layout.cpp
+    ${TILEXR_ROOT}/src/moonep/dispatch/urma/host/dispatch_launch.cpp
+)
+target_include_directories(test_tilexr_moonep_dispatch_urma_launch PRIVATE
+    ${TILEXR_MOONEP_TEST_INCLUDE_DIRS}
+    ${TILEXR_ROOT}/src/moonep/dispatch/urma/common
+    ${TILEXR_ROOT}/src/moonep/dispatch/urma/host
+)
 target_include_directories(test_tilexr_moonep_dispatch_urma_schedule PRIVATE
     ${TILEXR_MOONEP_TEST_INCLUDE_DIRS}
     ${TILEXR_ROOT}/src/moonep/dispatch/urma/common
@@ -248,6 +273,10 @@ add_test(NAME test_tilexr_moonep_dispatch_urma_layout
     COMMAND test_tilexr_moonep_dispatch_urma_layout)
 add_test(NAME test_tilexr_moonep_dispatch_urma_schedule
     COMMAND test_tilexr_moonep_dispatch_urma_schedule)
+add_test(NAME test_tilexr_moonep_dispatch_urma_host
+    COMMAND test_tilexr_moonep_dispatch_urma_host)
+add_test(NAME test_tilexr_moonep_dispatch_urma_launch
+    COMMAND test_tilexr_moonep_dispatch_urma_launch)
 add_test(NAME test_tilexr_moonep_dispatch_host COMMAND test_tilexr_moonep_dispatch_host)
 add_test(NAME test_tilexr_moonep_combine_host COMMAND test_tilexr_moonep_combine_host)
 add_test(NAME test_tilexr_moonep_prefetch_weight_host COMMAND test_tilexr_moonep_prefetch_weight_host)

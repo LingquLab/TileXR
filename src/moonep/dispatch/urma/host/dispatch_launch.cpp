@@ -39,37 +39,6 @@ int gDispatchRegistrationStatus = TileXR::TILEXR_ERROR_NOT_INITIALIZED;
 void *gDispatchBinaryHandle = nullptr;
 uint8_t gDispatchKernelStub = 0;
 
-struct DispatchKernelArgs {
-    GM_ADDR commArgs;
-    GM_ADDR input;
-    GM_ADDR dst;
-    GM_ADDR zeroFillRanges;
-    GM_ADDR workspace;
-    GM_ADDR output;
-    GM_ADDR planStatus;
-    uint64_t profileOffset;
-    uint64_t scratchOffset;
-    uint64_t completionFlagsOffset;
-    uint64_t signalOffset;
-    uint64_t dfxOffset;
-    uint64_t kernelStatusOffset;
-    int64_t s;
-    int64_t k;
-    int64_t h;
-    int64_t routeCount;
-    int64_t destinationCapacity;
-    int64_t zeroFillRangeCount;
-    uint64_t rowBytes;
-    uint64_t payloadMode;
-    int64_t magic;
-    uint64_t completionTimeoutTicks;
-    uint64_t peerMode;
-    uint64_t groupWidth;
-};
-
-static_assert(sizeof(DispatchKernelArgs) == 25U * sizeof(uint64_t),
-    "MoonEP Dispatch Host/Kernel ABI changed");
-
 int EnsureDispatchKernelRegistered()
 {
     std::lock_guard<std::mutex> guard(gDispatchRegistrationMutex);
@@ -152,23 +121,23 @@ uint64_t TileXRMoonEpDispatchCompletionTimeoutTicks()
 
 int TileXRMoonEpLaunchDispatchUrmaKernel(const DispatchUrmaLaunchParams &params)
 {
-    const DispatchUrmaActiveLayout *active = TileXRMoonEpGetActiveDispatchUrmaLayout(
-        params.layout, params.mode);
-    if (active == nullptr) {
+    const bool hasWeight = params.weightInput != nullptr;
+    if (params.hiddenInput == nullptr || params.hiddenOutput == nullptr ||
+        (hasWeight != (params.weightOutput != nullptr))) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
     const uint32_t aivCoreCount = ResolveDispatchAivCoreCount();
     if (aivCoreCount == 0U) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
+    if (!DispatchPeerModeValid(static_cast<uint32_t>(params.peerMode)) ||
+        !DispatchGroupWidthValid(params.groupWidth)) {
+        return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
     int64_t magic = 0;
     int ret = TileXRCommNextMagic(params.comm, &magic);
     if (ret != TileXR::TILEXR_SUCCESS) {
         return ret;
-    }
-    if (!DispatchPeerModeValid(static_cast<uint32_t>(params.peerMode)) ||
-        !DispatchGroupWidthValid(params.groupWidth)) {
-        return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
     if (DispatchPeerModeUsesCredit(static_cast<uint32_t>(params.peerMode))) {
         const uint32_t groupCount = DispatchGroupedGroupCount(
@@ -184,29 +153,36 @@ int TileXRMoonEpLaunchDispatchUrmaKernel(const DispatchUrmaLaunchParams &params)
         return ret;
     }
 
-    const bool hidden = params.mode == DispatchPayloadMode::Hidden;
     DispatchKernelArgs args {
         params.commArgs,
-        reinterpret_cast<GM_ADDR>(const_cast<void *>(params.input)),
+        reinterpret_cast<GM_ADDR>(const_cast<void *>(params.hiddenInput)),
+        reinterpret_cast<GM_ADDR>(const_cast<void *>(params.weightInput)),
         reinterpret_cast<GM_ADDR>(const_cast<int32_t *>(params.dst)),
         reinterpret_cast<GM_ADDR>(const_cast<int32_t *>(params.zeroFillRanges)),
         static_cast<GM_ADDR>(params.workspace),
-        static_cast<GM_ADDR>(params.output),
+        static_cast<GM_ADDR>(params.hiddenOutput),
+        static_cast<GM_ADDR>(params.weightOutput),
         reinterpret_cast<GM_ADDR>(params.planStatus),
-        hidden ? params.layout.hiddenProfileOffset : params.layout.weightProfileOffset,
-        active->scratchOffset,
+        params.layout.hidden.sourceOffset,
+        params.layout.hidden.scratchOffset,
+        params.layout.hidden.rowBytes,
+        params.layout.weight.sourceOffset,
+        params.layout.weight.scratchOffset,
+        params.layout.weight.rowBytes,
         params.layout.completionFlagsOffset,
         params.layout.signalOffset,
-        hidden ? params.layout.hiddenDfxOffset : params.layout.weightDfxOffset,
+        params.layout.hiddenProfileOffset,
+        params.layout.weightProfileOffset,
+        params.layout.hiddenDfxOffset,
+        params.layout.weightDfxOffset,
         params.layout.kernelStatusOffset,
         params.layout.s,
         params.layout.k,
-        hidden ? params.layout.h : 1,
+        params.layout.h,
         params.layout.routeCount,
         params.layout.destinationCapacity,
         params.zeroFillRangeCount,
-        active->rowBytes,
-        static_cast<uint64_t>(params.mode),
+        hasWeight ? 1U : 0U,
         magic,
         TileXRMoonEpDispatchCompletionTimeoutTicks(),
         static_cast<uint64_t>(params.peerMode),

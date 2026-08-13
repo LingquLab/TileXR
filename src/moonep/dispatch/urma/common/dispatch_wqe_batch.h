@@ -23,6 +23,44 @@ constexpr uint32_t kDispatchSharedQpCoreCount = 16U;
 constexpr uint32_t kDispatchSharedQpCount =
     kDispatchQpCount * kDispatchSharedQpCoreCount;
 
+TILEXR_MOONEP_WQE_BATCH_INLINE uint32_t DispatchPayloadWqesPerRoute(
+    bool hasWeight)
+{
+    return hasWeight ? 2U : 1U;
+}
+
+TILEXR_MOONEP_WQE_BATCH_INLINE bool DispatchDataWqeCount(
+    uint64_t routeCount, bool hasWeight, uint64_t &wqeCount)
+{
+    const uint32_t perRoute = DispatchPayloadWqesPerRoute(hasWeight);
+    if (routeCount > UINT64_MAX / perRoute) {
+        wqeCount = 0U;
+        return false;
+    }
+    wqeCount = routeCount * perRoute;
+    return true;
+}
+
+TILEXR_MOONEP_WQE_BATCH_INLINE uint32_t DispatchDataTaskRouteIndex(
+    uint32_t dataTask, bool hasWeight)
+{
+    return hasWeight ? dataTask / 2U : dataTask;
+}
+
+TILEXR_MOONEP_WQE_BATCH_INLINE bool DispatchDataTaskIsWeight(
+    uint32_t dataTask, bool hasWeight)
+{
+    return hasWeight && (dataTask & 1U) != 0U;
+}
+
+TILEXR_MOONEP_WQE_BATCH_INLINE bool DispatchSignalFitsAfterData(
+    uint64_t remainingRoutes, bool hasWeight, uint32_t availableWqes)
+{
+    uint64_t remainingDataWqes = 0U;
+    return DispatchDataWqeCount(remainingRoutes, hasWeight,
+        remainingDataWqes) && remainingDataWqes + 1U <= availableWqes;
+}
+
 TILEXR_MOONEP_WQE_BATCH_INLINE bool DispatchQpCountSupported(
     uint32_t availableQpCount, bool sharedQp = false)
 {
@@ -159,9 +197,12 @@ TILEXR_MOONEP_WQE_BATCH_INLINE uint32_t DispatchQpSelectedIndex(
 
 TILEXR_MOONEP_WQE_BATCH_INLINE bool DispatchPeerWqesStreamable(
     uint64_t routeCount, uint32_t sqEntryCount,
-    uint32_t reserve = kDispatchSqPollReserve)
+    uint32_t reserve = kDispatchSqPollReserve, bool hasWeight = false)
 {
-    if (routeCount > UINT32_MAX || sqEntryCount <= reserve) {
+    uint64_t dataWqeCount = 0U;
+    if (routeCount > UINT32_MAX ||
+        !DispatchDataWqeCount(routeCount, hasWeight, dataWqeCount) ||
+        sqEntryCount <= reserve) {
         return false;
     }
     return sqEntryCount - reserve >= kDispatchWqeBatchCapacity;

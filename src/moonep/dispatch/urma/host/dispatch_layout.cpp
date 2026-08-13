@@ -48,23 +48,24 @@ bool AppendBytes(uint64_t bytes, uint64_t *cursor, uint64_t *offset)
 }
 
 bool BuildActiveLayout(uint64_t sourceRows, uint64_t destinationCapacity,
-    uint64_t rowBytes, DispatchUrmaActiveLayout *out)
+    uint64_t rowBytes, uint64_t *cursor, DispatchUrmaActiveLayout *out)
 {
-    if (out == nullptr || sourceRows == 0 || destinationCapacity == 0 || rowBytes == 0) {
+    if (cursor == nullptr || out == nullptr || sourceRows == 0 ||
+        destinationCapacity == 0 || rowBytes == 0) {
         return false;
     }
     DispatchUrmaActiveLayout next {};
-    uint64_t cursor = 0;
+    const uint64_t begin = *cursor;
     next.rowBytes = rowBytes;
     if (!CheckedMul(sourceRows, rowBytes, &next.sourceBytes) ||
-        !AppendBytes(next.sourceBytes, &cursor, &next.sourceOffset) ||
+        !AppendBytes(next.sourceBytes, cursor, &next.sourceOffset) ||
         !CheckedMul(destinationCapacity, rowBytes, &next.scratchSlotBytes) ||
         !CheckedMul(next.scratchSlotBytes, kDispatchScratchBufferCount,
             &next.scratchBytes) ||
-        !AppendBytes(next.scratchBytes, &cursor, &next.scratchOffset)) {
+        !AppendBytes(next.scratchBytes, cursor, &next.scratchOffset)) {
         return false;
     }
-    next.activeDataBytes = cursor;
+    next.activeDataBytes = *cursor - begin;
     *out = next;
     return true;
 }
@@ -103,16 +104,15 @@ int TileXRMoonEpBuildDispatchUrmaLayout(int64_t rankSize, int64_t s, int64_t k,
     }
 
     MoonEpDispatchUrmaLayout next {};
+    uint64_t cursor = 0;
     if (!BuildActiveLayout(static_cast<uint64_t>(s),
             static_cast<uint64_t>(destinationCapacity), hiddenRowBytes,
-            &next.hidden) ||
+            &cursor, &next.hidden) ||
         !BuildActiveLayout(routeCount, static_cast<uint64_t>(destinationCapacity),
-            sizeof(float), &next.weight)) {
+            sizeof(float), &cursor, &next.weight)) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
 
-    uint64_t cursor = next.hidden.activeDataBytes > next.weight.activeDataBytes ?
-        next.hidden.activeDataBytes : next.weight.activeDataBytes;
     next.commonOffset = TileXRMoonEpDispatchUrmaAlignUp(
         cursor, kDispatchInternalAlignmentBytes);
     cursor = next.commonOffset;
@@ -177,9 +177,7 @@ int TileXRMoonEpBindDispatchUrmaWorkspace(uint64_t workspaceBytes,
     }
     const uint64_t commonBytes = layout->totalBytes - layout->commonOffset;
     const uint64_t nextCommonOffset = workspaceBytes - commonBytes;
-    const uint64_t activeBytes = layout->hidden.activeDataBytes > layout->weight.activeDataBytes ?
-        layout->hidden.activeDataBytes : layout->weight.activeDataBytes;
-    if (nextCommonOffset < activeBytes) {
+    if (nextCommonOffset < layout->commonOffset) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
     const uint64_t shift = nextCommonOffset - layout->commonOffset;
