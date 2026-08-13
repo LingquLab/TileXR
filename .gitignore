@@ -72,6 +72,8 @@ op-simulator/test_template
 
 *.log
 run/
+# Cached answers for the interactive MindSpeed model runner are runtime-only.
+run/moonep/mindspeed/model_runner.env
 env/cann/
 env/temp/
 env/

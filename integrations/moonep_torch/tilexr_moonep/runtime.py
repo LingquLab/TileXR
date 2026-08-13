@@ -30,6 +30,7 @@ from .abi import (
     make_tensor_v1,
     tensor_nbytes,
     tensor_ptr,
+    tensor_registration_range,
     void_p,
 )
 
@@ -893,11 +894,14 @@ class TileXRMoonEPRuntime:
     ) -> tuple[TileXRMoonEPReduceGradSourceSliceV2, ...]:
         slices = []
         for source, registration in zip(sources, registrations):
+            registration_base, registration_bytes = tensor_registration_range(
+                registration
+            )
             value = TileXRMoonEPReduceGradSourceSliceV2()
             value.data = tensor_ptr(source)
             value.bytes = tensor_nbytes(source)
-            value.registrationBase = tensor_ptr(registration)
-            value.registrationBytes = tensor_nbytes(registration)
+            value.registrationBase = registration_base
+            value.registrationBytes = registration_bytes
             slices.append(value)
         return tuple(slices)
 

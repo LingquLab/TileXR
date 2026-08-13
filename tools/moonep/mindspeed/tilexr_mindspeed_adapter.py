@@ -12,6 +12,9 @@ from .moonep_backend import (
 )
 
 
+_UDMA_COMPAT_REGISTRATION_BYTES = 2 * 1024 * 1024
+
+
 def _reject_upstream_buffer_init(*args, **kwargs):
     del args, kwargs
     raise RuntimeError(
@@ -57,6 +60,7 @@ class MindSpeedTileXRBuffer(TileXRBuffer):
         self._packed_projection_signature = None
         self._reduce_dummy = None
         self._reduce_dummy_buffer = None
+        self._reduce_dummy_buffer_allocation = None
         self._tilexr_remote_prefetches = 0
         self._plan_owner_token = object()
         self._dispatch_generation = 0
@@ -140,6 +144,7 @@ class MindSpeedTileXRBuffer(TileXRBuffer):
         )
 
     def dispatch(self, *args, hidden_buffer=None, **kwargs):
+        self._optional_stage_barrier()
         async_finish = bool(kwargs.pop("async_finish", False))
         zero_copy = bool(kwargs.pop("zero_copy", False))
         result = super().dispatch(
@@ -206,6 +211,7 @@ class MindSpeedTileXRBuffer(TileXRBuffer):
         return route_boundary
 
     def combine(self, *args, hidden_buffer=None, **kwargs):
+        self._optional_stage_barrier()
         zero_copy = bool(kwargs.pop("zero_copy", False))
         if hidden_buffer is not None:
             self._validate_boundary(hidden_buffer)
@@ -347,20 +353,39 @@ class MindSpeedTileXRBuffer(TileXRBuffer):
             )
         return self._record_event() if async_finish else None
 
+    def _optional_stage_barrier(self):
+        if os.environ.get("TILEXR_MINDSPEED_STAGE_BARRIER", "0") != "1":
+            return
+        distributed = self._torch.distributed
+        if not distributed.is_available() or not distributed.is_initialized():
+            raise RuntimeError(
+                "TileXR stage barrier requires an initialized process group"
+            )
+        distributed.barrier()
+
     def _ensure_reduce_dummy(self, full_fc1, reduce_fc1):
-        dummy_width = (
-            262160
-            if os.environ.get("TILEXR_MINDSPEED_FORCE_DUMMY_UDMA", "0") == "1"
-            else 16
-        )
+        dummy_width = 16
         full_shape = (self.E + self.B, dummy_width)
         reduce_shape = (self.R, self.B, dummy_width)
         if self._reduce_dummy is None:
             self._reduce_dummy = self._torch.zeros(
                 full_shape, dtype=self._torch.float32, device=full_fc1.device
             )
-            self._reduce_dummy_buffer = self._torch.zeros(
-                reduce_shape, dtype=self._torch.float32, device=reduce_fc1.device
+            reduce_elements = self.R * self.B * dummy_width
+            allocation_elements = max(
+                reduce_elements,
+                _UDMA_COMPAT_REGISTRATION_BYTES // 4,
+            )
+            self._reduce_dummy_buffer_allocation = self._torch.zeros(
+                (allocation_elements,),
+                dtype=self._torch.float32,
+                device=reduce_fc1.device,
+            )
+            self._reduce_dummy_buffer = self._reduce_dummy_buffer_allocation.narrow(
+                0, 0, reduce_elements
+            ).reshape(reduce_shape)
+            self._reduce_dummy_buffer._tilexr_registration_backing = (
+                self._reduce_dummy_buffer_allocation
             )
         else:
             self._reduce_dummy.zero_()
@@ -432,6 +457,7 @@ class MindSpeedTileXRBuffer(TileXRBuffer):
         self._packed_projections = None
         self._reduce_dummy = None
         self._reduce_dummy_buffer = None
+        self._reduce_dummy_buffer_allocation = None
         self.token_buffers = ()
         self.route_buffers = ()
         self._route_by_token_ptr = {}

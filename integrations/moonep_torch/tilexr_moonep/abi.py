@@ -260,6 +260,17 @@ def tensor_ptr(tensor) -> ctypes.c_void_p:
     return ctypes.c_void_p(int(tensor.data_ptr()))
 
 
+def tensor_registration_range(tensor) -> tuple[ctypes.c_void_p, int]:
+    backing = getattr(tensor, "_tilexr_registration_backing", tensor)
+    base = int(backing.data_ptr())
+    size = tensor_nbytes(backing)
+    data = int(tensor.data_ptr())
+    logical_bytes = tensor_nbytes(tensor)
+    if base <= data and logical_bytes <= size - (data - base):
+        return ctypes.c_void_p(base), size
+    raise ValueError("tensor view is outside its registration backing")
+
+
 def make_tensor_v1(tensor) -> TileXRMoonEPTensorV1:
     shape = tuple(int(value) for value in tensor.shape)
     if not shape or len(shape) > TILEXR_MOONEP_MAX_TENSOR_RANK:

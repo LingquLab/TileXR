@@ -1,0 +1,366 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+    cat <<'EOF'
+Usage: run_model_node.sh [options]
+
+This non-interactive node runner is normally invoked by run_model.sh.
+
+Required options:
+  --backend tilexr|native
+  --node-count COUNT --node-rank RANK --master-addr ADDRESS --master-port PORT
+  --devices-per-node COUNT --tilexr-home PATH --model-root PATH
+  --install-prefix PATH --cann-env PATH --conda-sh PATH --conda-env NAME
+  --native-env PATH --tokenizer-path PATH --data-path PATH --run-tag TAG
+
+Optional: --profile --stage-barrier --timeout SECONDS
+Internal cleanup: --stop --backend BACKEND --node-rank RANK
+                  --tilexr-home PATH --run-tag TAG
+EOF
+}
+
+backend=
+node_count=
+node_rank=
+master_addr=
+master_port=
+devices_per_node=
+tilexr_home=
+model_root=
+install_prefix=
+cann_env=
+conda_sh=
+conda_env=
+native_env=
+tokenizer_path=
+data_path=
+run_tag=
+timeout_sec=900
+profile=0
+stage_barrier=0
+stop=0
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --backend) backend=${2:?--backend requires a value}; shift 2 ;;
+        --node-count) node_count=${2:?--node-count requires a value}; shift 2 ;;
+        --node-rank) node_rank=${2:?--node-rank requires a value}; shift 2 ;;
+        --master-addr) master_addr=${2:?--master-addr requires a value}; shift 2 ;;
+        --master-port) master_port=${2:?--master-port requires a value}; shift 2 ;;
+        --devices-per-node) devices_per_node=${2:?--devices-per-node requires a value}; shift 2 ;;
+        --tilexr-home) tilexr_home=${2:?--tilexr-home requires a value}; shift 2 ;;
+        --model-root) model_root=${2:?--model-root requires a value}; shift 2 ;;
+        --install-prefix) install_prefix=${2:?--install-prefix requires a value}; shift 2 ;;
+        --cann-env) cann_env=${2:?--cann-env requires a value}; shift 2 ;;
+        --conda-sh) conda_sh=${2:?--conda-sh requires a value}; shift 2 ;;
+        --conda-env) conda_env=${2:?--conda-env requires a value}; shift 2 ;;
+        --native-env) native_env=${2:?--native-env requires a value}; shift 2 ;;
+        --tokenizer-path) tokenizer_path=${2:?--tokenizer-path requires a value}; shift 2 ;;
+        --data-path) data_path=${2:?--data-path requires a value}; shift 2 ;;
+        --run-tag) run_tag=${2:?--run-tag requires a value}; shift 2 ;;
+        --timeout) timeout_sec=${2:?--timeout requires a value}; shift 2 ;;
+        --profile) profile=1; shift ;;
+        --stage-barrier) stage_barrier=1; shift ;;
+        --stop) stop=1; shift ;;
+        -h|--help) usage; exit 0 ;;
+        *) printf 'Unknown argument: %s\n' "$1" >&2; usage >&2; exit 2 ;;
+    esac
+done
+
+case "${backend}" in tilexr|native) ;; *) printf 'Invalid backend: %s\n' "${backend}" >&2; exit 2 ;; esac
+if [[ -z "${tilexr_home}" || -z "${run_tag}" || -z "${node_rank}" ]]; then
+    echo "--tilexr-home, --run-tag, and --node-rank are required" >&2
+    exit 2
+fi
+if [[ ! "${run_tag}" =~ ^[A-Za-z0-9_.-]+$ ]] || [[ ! "${node_rank}" =~ ^[0-9]+$ ]]; then
+    echo "unsafe run tag or node rank" >&2
+    exit 2
+fi
+
+output=${tilexr_home}/run/moonep/mindspeed/${run_tag}/${backend}/node_${node_rank}
+stop_existing_run() {
+    local model_pid runner_pid
+    if [[ -f "${output}/model.pid" ]]; then
+        model_pid=$(<"${output}/model.pid")
+        if [[ "${model_pid}" =~ ^[0-9]+$ ]] && kill -0 "${model_pid}" 2>/dev/null; then
+            kill -- -"${model_pid}" 2>/dev/null || true
+            sleep 2
+            kill -KILL -- -"${model_pid}" 2>/dev/null || true
+        fi
+    fi
+    if [[ -f "${output}/runner.pid" ]]; then
+        runner_pid=$(<"${output}/runner.pid")
+        if [[ "${runner_pid}" =~ ^[0-9]+$ ]] && kill -0 "${runner_pid}" 2>/dev/null; then
+            kill "${runner_pid}" 2>/dev/null || true
+        fi
+    fi
+}
+if [[ "${stop}" -eq 1 ]]; then
+    stop_existing_run
+    exit 0
+fi
+
+required_values=(
+    node_count master_addr master_port devices_per_node model_root install_prefix
+    cann_env conda_sh conda_env native_env tokenizer_path data_path
+)
+for variable in "${required_values[@]}"; do
+    if [[ -z "${!variable:-}" ]]; then
+        printf 'Missing required option for %s\n' "${variable}" >&2
+        exit 2
+    fi
+done
+for variable in node_count node_rank master_port devices_per_node timeout_sec; do
+    if [[ ! "${!variable}" =~ ^[0-9]+$ ]]; then
+        printf '%s must be an integer\n' "${variable}" >&2
+        exit 2
+    fi
+done
+if (( node_count < 1 || node_rank >= node_count || devices_per_node < 1 || \
+      master_port < 1 || master_port > 65535 || timeout_sec < 1 )); then
+    echo "invalid distributed launcher dimensions" >&2
+    exit 2
+fi
+if [[ "${stage_barrier}" -eq 1 && "${backend}" != tilexr ]]; then
+    echo "stage barriers require the TileXR backend" >&2
+    exit 2
+fi
+
+for path in "${cann_env}" "${conda_sh}" "${native_env}"; do
+    [[ -f "${path}" ]] || { printf 'Required file not found: %s\n' "${path}" >&2; exit 1; }
+done
+for path in "${model_root}/MindSpeed" "${model_root}/MindSpeed-LLM" \
+    "${model_root}/shmem/src/python" "${tokenizer_path}"; do
+    [[ -e "${path}" ]] || { printf 'Required path not found: %s\n' "${path}" >&2; exit 1; }
+done
+
+mkdir -p "${output}"
+printf '%s\n' "$$" >"${output}/runner.pid"
+model_pid=
+cleanup_model() {
+    if [[ -n "${model_pid}" ]] && kill -0 "${model_pid}" 2>/dev/null; then
+        kill -- -"${model_pid}" 2>/dev/null || true
+        sleep 2
+        kill -KILL -- -"${model_pid}" 2>/dev/null || true
+        wait "${model_pid}" 2>/dev/null || true
+    fi
+}
+finish_runner() {
+    if [[ -f "${output}/runner.pid" ]] && [[ "$(<"${output}/runner.pid")" == "$$" ]]; then
+        rm -f "${output}/runner.pid" "${output}/model.pid"
+    fi
+}
+trap 'cleanup_model; finish_runner' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM HUP
+exec > >(tee "${output}/controller.log") 2>&1
+
+# shellcheck disable=SC1090
+source "${cann_env}"
+# shellcheck disable=SC1090
+source "${conda_sh}"
+conda activate "${conda_env}"
+# shellcheck disable=SC1090
+source "${native_env}"
+
+for gate in 1 2; do
+    npu-smi info >"${output}/npu_gate_${gate}.log"
+    idle=$(grep -c 'No running processes found in NPU' "${output}/npu_gate_${gate}.log" || true)
+    if [[ "${idle}" -ne "${devices_per_node}" ]]; then
+        printf 'exit_code=90\nreason=npu_busy\ngate=%s\nidle=%s\n' "${gate}" "${idle}" \
+            | tee "${output}/result.txt"
+        exit 90
+    fi
+    [[ "${gate}" -eq 1 ]] && sleep 5
+done
+
+shmem_python=${model_root}/shmem/src/python
+shmem_backend=${shmem_python}/shmem/backends/950
+mindspeed_home=${model_root}/MindSpeed
+mindspeed_llm_home=${model_root}/MindSpeed-LLM
+export PYTHONPATH="${mindspeed_home}:${shmem_python}:${mindspeed_llm_home}${PYTHONPATH:+:${PYTHONPATH}}"
+export LD_LIBRARY_PATH="${shmem_backend}:${LD_LIBRARY_PATH:-}"
+[[ -f /usr/lib64/libstdc++.so.6 ]] && export LD_PRELOAD=/usr/lib64/libstdc++.so.6
+
+interface=${MODEL_RUNNER_SOCKET_IFNAME:-}
+if [[ -z "${interface}" ]]; then
+    interface=$(ip route get "${master_addr}" 2>/dev/null | awk '{for (i=1; i<=NF; ++i) if ($i == "dev") {print $(i+1); exit}}')
+fi
+if [[ -z "${interface}" || "${interface}" == lo ]]; then
+    interface=$(ip -4 -brief address | awk '$1 != "lo" && $3 != "" {print $1; exit}')
+fi
+[[ -n "${interface}" ]] || { echo "Unable to determine communication interface" >&2; exit 1; }
+
+export HCCL_HOST_SOCKET_PORT_RANGE=auto
+export HCCL_SOCKET_IFNAME=${interface}
+export GLOO_SOCKET_IFNAME=${interface}
+export HCCL_BUFFSIZE=200
+export HCCL_XN_RES_NUM=2000
+export HCCL_DISABLE_NHR=1
+export HCCL_DFS_CONFIG=task_exception:off
+export HCCL_CONNECT_TIMEOUT=120
+export HCCL_EXEC_TIMEOUT=120
+export CUDA_DEVICE_MAX_CONNECTIONS=1
+export TASK_QUEUE_ENABLE=2
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export STREAMS_PER_DEVICE=32
+if [[ "${devices_per_node}" -eq 8 ]]; then
+    export CPU_AFFINITY_CONF=${CPU_AFFINITY_CONF:-1,npu0:192-215,npu1:216-239,npu2:0-23,npu3:24-47,npu4:48-71,npu5:72-95,npu6:240-263,npu7:264-287}
+fi
+
+unset TILEXR_MOONEP_TRACE_STAGES TILEXR_MOONEP_TRACE_PLANNER_MAGIC
+unset TILEXR_MOONEP_DEBUG_SYNC_COMBINE TILEXR_MOONEP_DEBUG_SYNC_DISPATCH_STATUS
+unset TILEXR_MOONEP_DEBUG_PREFETCH_UDMA TILEXR_MOONEP_DUMP_DFX_ON_ERROR
+unset TILEXR_MOONEP_FLAG_DUMP_DIR TILEXR_MOONEP_FLAG_DUMP_MODE
+unset TILEXR_MINDSPEED_TRACE TILEXR_MINDSPEED_PLAN_DUMP_DIR
+unset TILEXR_MINDSPEED_FORCE_DUMMY_UDMA ASCEND_LAUNCH_BLOCKING
+unset PROFILING_MODE PROFILING_OPTIONS ASCEND_MOONEP_DISPATCH_ENABLE_DFX
+unset ASCEND_MOONEP_DISPATCH_ENABLE_TRACE ASCEND_MOONEP_DISPATCH_TRACE
+
+world_size=$((node_count * devices_per_node))
+global_batch_size=${world_size}
+backend_args=()
+if [[ "${backend}" == tilexr ]]; then
+    MINDSPEED_HOME=${mindspeed_home} TILEXR_HOME=${tilexr_home} \
+        TILEXR_INSTALL_PREFIX=${install_prefix} \
+        bash "${tilexr_home}/tools/moonep/mindspeed/preflight_adapter.sh"
+    export PYTHONPATH="${mindspeed_home}:${tilexr_home}/integrations/moonep_torch:${shmem_python}:${shmem_backend}:${mindspeed_llm_home}:${tilexr_home}${PYTHONPATH:+:${PYTHONPATH}}"
+    export LD_LIBRARY_PATH="${install_prefix}/lib64:${shmem_backend}:${LD_LIBRARY_PATH:-}"
+    export TILEXR_INSTALL_PREFIX=${install_prefix}
+    export TILEXR_UDMA_QP_ROUTE_SPEC=port_count:6,port_count:2
+    export TILEXR_UDMA_ATTACH_EXISTING_RA=1
+    export TILEXR_MOONEP_DISPATCH_PEER_MODE=group
+    export TILEXR_MOONEP_DISPATCH_GROUP_WIDTH=16
+    export TILEXR_MOONEP_COMBINE_VERSION=2
+    export TILEXR_MINDSPEED_STAGE_BARRIER=${stage_barrier}
+    unset TILEXR_MOONEP_DISPATCH_TRANSPORT
+    export TILEXR_COMM_ID="${master_addr}:$((master_port + 10000))"
+    ep_size=${world_size}
+    backend_args+=(
+        --moonep-token-padding 1
+        --moonep-backend-factory
+        mindspeed.core.transformer.moe.tilexr_mindspeed_adapter:create_tilexr_moonep_backend
+    )
+else
+    ep_size=${devices_per_node}
+fi
+
+profile_output=${output}/profiling
+profile_args=()
+if [[ "${profile}" -eq 1 ]]; then
+    mkdir -p "${profile_output}"
+    profile_args+=(
+        --profile --profile-step-start 6 --profile-step-end 7
+        --profile-with-cpu --profile-ranks -1 --profile-level level1
+        --profile-export-type text --profile-save-path "${profile_output}"
+    )
+fi
+
+{
+    printf 'backend=%s\nrun_tag=%s\nnode_rank=%s\nworld_size=%s\nrank_per_dev=1\n' \
+        "${backend}" "${run_tag}" "${node_rank}" "${world_size}"
+    printf 'ep_size=%s\nprofile=%s\nstage_barrier=%s\ninterface=%s\n' \
+        "${ep_size}" "${profile}" "${stage_barrier}" "${interface}"
+    printf 'shape=4K/8P layers=4 hidden=7168 experts=32 token_padding=1 iterations=8\n'
+    printf 'debug=disabled flag_dump=disabled plan_dump=disabled\n'
+    env | grep -E '^(TILEXR_|MOONEP_|ASCEND_MOONEP_|HCCL_|GLOO_SOCKET)' | sort
+} >"${output}/provenance.log"
+
+cd "${mindspeed_llm_home}"
+set +e
+setsid timeout --signal=TERM --kill-after=20s "${timeout_sec}s" \
+python -m torch.distributed.launch \
+    --nproc_per_node "${devices_per_node}" \
+    --nnodes "${node_count}" \
+    --node_rank "${node_rank}" \
+    --master_addr "${master_addr}" \
+    --master_port "${master_port}" \
+    pretrain_gpt.py \
+    --te-gmm-mode performance \
+    --transformer-impl transformer_engine \
+    --disable-gloo-group \
+    --no-check-for-nan-in-loss-and-grad \
+    --spec mindspeed_llm.tasks.models.spec.deepseek_spec layer_spec \
+    --gemm-gradient-accumulation-fusion \
+    --manual-gc --manual-gc-interval 50 \
+    --use-distributed-optimizer --use-flash-attn --use-mcore-models \
+    --tensor-model-parallel-size 1 \
+    --pipeline-model-parallel-size 1 \
+    --expert-model-parallel-size "${ep_size}" \
+    --expert-tensor-parallel-size 1 \
+    --sequence-parallel \
+    --context-parallel-size 1 \
+    --context-parallel-algo ulysses_cp_algo \
+    --num-layers 4 \
+    --hidden-size 7168 \
+    --ffn-hidden-size 18432 \
+    --num-attention-heads 128 \
+    --tokenizer-type PretrainedFromHF \
+    --tokenizer-name-or-path "${tokenizer_path}" \
+    --seq-length 4096 \
+    --max-position-embeddings 163840 \
+    --micro-batch-size 1 \
+    --global-batch-size "${global_batch_size}" \
+    --make-vocab-size-divisible-by 1 \
+    --lr 1.0e-5 --train-iters 8 --lr-decay-style cosine \
+    --untie-embeddings-and-output-weights --disable-bias-linear \
+    --attention-dropout 0.0 --hidden-dropout 0.0 --init-method-std 0.02 \
+    --position-embedding-type rope --normalization RMSNorm \
+    --use-fused-rotary-pos-emb --use-rotary-position-embeddings \
+    --use-fused-swiglu --use-fused-rmsnorm --swiglu \
+    --no-masked-softmax-fusion --attention-softmax-in-fp32 \
+    --min-lr 1.0e-7 --weight-decay 1e-2 --lr-warmup-iters 0 \
+    --clip-grad 1.0 --adam-beta1 0.9 --adam-beta2 0.999 \
+    --initial-loss-scale 65536 \
+    --vocab-size 129280 --padded-vocab-size 129280 \
+    --rotary-base 10000 --norm-epsilon 1e-6 \
+    --no-load-optim --no-load-rng --bf16 --distributed-timeout-minutes 2 \
+    --data-path "${data_path}" \
+    --split 100,0,0 \
+    --log-interval 1 --save-interval 20000 --eval-interval 20000 --eval-iters 0 \
+    --no-save-optim --no-save-rng --no-shared-storage --exit-interval 8 \
+    --multi-latent-attention --qk-pos-emb-head-dim 64 --qk-head-dim 128 \
+    --q-lora-rank 1536 --kv-lora-rank 512 --v-head-dim 128 \
+    --qk-layernorm --mla-mm-split --mla-fa-without-pad \
+    --moe-grouped-gemm --moe-token-dispatcher-type flex \
+    --first-k-dense-replace 0 --moe-enable-moonep --moe-layer-freq 1 \
+    --moe-shared-expert-intermediate-size 2048 --num-experts 32 \
+    --moe-router-topk 8 --moe-ffn-hidden-size 2048 \
+    --moe-router-load-balancing-type seq_aux_loss \
+    --moe-router-num-groups 8 --moe-router-group-topk 4 \
+    --moe-router-topk-scaling-factor 2.5 --moe-aux-loss-coeff 0.0001 \
+    --norm-topk-prob --moe-router-score-function sigmoid \
+    --moe-router-enable-expert-bias --moe-router-dtype fp32 \
+    --mtp-num-layers 1 --mtp-loss-scaling-factor 0.3 \
+    --mtp-mem-efficient-logits --recompute-activation-function \
+    --recompute-mla-up-proj --swap-optimizer --swap-optimizer-times 16 \
+    --beta-fast 32 --beta-slow 1 --rope-scaling-factor 40 \
+    --rope-scaling-mscale 1.0 --rope-scaling-mscale-all-dim 1.0 \
+    --rope-scaling-original-max-position-embeddings 4096 \
+    --rope-scaling-type yarn \
+    --moonep-full-vmm-mode performance --moonep-zero-copy-recompute \
+    "${profile_args[@]}" \
+    "${backend_args[@]}" \
+    --distributed-backend nccl &
+model_pid=$!
+printf '%s\n' "${model_pid}" >"${output}/model.pid"
+wait "${model_pid}"
+status=$?
+set -e
+model_pid=
+
+iterations=$(grep -Ec 'iteration[[:space:]]+[0-9]+/[[:space:]]*[0-9]+' "${output}/controller.log" || true)
+last_iteration=$(grep -E 'iteration[[:space:]]+[0-9]+/[[:space:]]*[0-9]+' "${output}/controller.log" | tail -1 || true)
+skipped=$(grep -Ec 'number of skipped iterations:[[:space:]]+[1-9]' "${output}/controller.log" || true)
+nan=$(grep -Ec 'number of nan iterations:[[:space:]]+[1-9]' "${output}/controller.log" || true)
+profile_done=$(find "${profile_output}" -type f -name analyse.done 2>/dev/null | wc -l || true)
+npu-smi info >"${output}/npu_after.log" || true
+post_idle=$(grep -c 'No running processes found in NPU' "${output}/npu_after.log" || true)
+if [[ "${status}" -eq 0 && ( "${skipped}" -ne 0 || "${nan}" -ne 0 ) ]]; then
+    status=92
+fi
+printf 'exit_code=%s\niterations=%s\nlast_iteration=%s\nskipped_nonzero=%s\nnan_nonzero=%s\nprofile_done=%s\npost_idle=%s\ncompleted=%s\n' \
+    "${status}" "${iterations}" "${last_iteration}" "${skipped}" "${nan}" \
+    "${profile_done}" "${post_idle}" "$(date '+%F %T %z')" | tee "${output}/result.txt"
+exit "${status}"

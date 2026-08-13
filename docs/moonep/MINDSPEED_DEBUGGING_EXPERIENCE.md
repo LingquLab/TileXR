@@ -40,6 +40,7 @@ Python 侧的 `plan.status.zero_()` 不是可靠修复：NPU task queue 和 Kern
 | ReduceGrad 第二轮 CQ 失败，`entryIdx=0x4000` | `entryIdx` 携带 SQ cycle，原实现错误地要求它小于 ring depth | 先按 depth 归一化，再依据绝对 SQ tail 计算完成 BB 数 | 两轮同 QP 精确复现；dump raw CQE、SQ head/tail、outstanding |
 | Combine 后复用 plan 的反向 Dispatch 超时 | 旧 `status=3000` 违反 URMA 输入协议，异步 Python reset 又存在跨 stream 竞态 | consumer Host 在同一 stream reset；先检查旧首错误，不能掩盖真实失败 | 生产规模 oracle 对比不清理、异步清理、同步清理和 Host same-stream reset |
 | 4K grouped Dispatch 超时或 SQ 满 | 全量 route 无法一次装入 UB，WQE 也不能一次塞入 SQ | route tiling、WQE 分批发布、每批 CQ 回收，以 `head-tail` 计算 outstanding | case 15 生产规模单算子和 H=7168 grouped oracle |
+| 双机 ReduceGrad prepare 返回 `-4`，HCCP 为 `528101` | packed adapter 的占位 Up source 只有 2 KiB，逻辑 view 同时被当作 MR 注册范围 | 保持 source shape/bytes 不变，为 view 提供实机验证过的 2 MiB backing，并在 FFI 中分别描述逻辑 source 与 registration storage | 双机日志定位失败 region/bytes/返回码；两机 NPU probe 证明 source 2 KiB、MR 2 MiB；2 机 16 卡完整模型 8/8 迭代通过 |
 
 “重复 MR 注册泄漏”“完全没有 poll CQ”“peer 调度不对称”都曾是合理假设，但被后续
 A/B、原始队列状态和成功对照推翻，不应继续作为既定根因传播。
@@ -179,6 +180,7 @@ reset 等单一变量。一次同时修改 Kernel、Host、timeout 和路由，�
 - 不要用 toy shape 证明生产规模的 UB/SQ 容量安全。
 - 不要依赖已消费 SQE 的内容推导 CQ completion。
 - 不要在调试运行和性能运行之间复用未审计的环境变量。
+- 不要把小 Tensor view 的逻辑字节数等同于 HCCP MR 范围；扩大 backing storage 时保持逻辑 shape 不变，否则会污染算子工作量和性能数据。
 - 不要因某次补丁通过完整模型就跳过最小 reproducer；最小 reproducer 才能证明因果。
 - 不要删除被推翻的假设记录。保留否定证据可以防止后续重复猜测。
 

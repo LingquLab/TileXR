@@ -1,0 +1,213 @@
+from __future__ import annotations
+
+import os
+import shutil
+import subprocess
+from pathlib import Path
+
+import pytest
+
+
+ROOT = Path(__file__).resolve().parents[3]
+CONTROLLER = ROOT / "tools" / "moonep" / "mindspeed" / "run_model.sh"
+NODE_RUNNER = ROOT / "tools" / "moonep" / "mindspeed" / "run_model_node.sh"
+GIT_BASH = Path(r"C:\Program Files\Git\bin\bash.exe")
+
+
+def bash_executable() -> str:
+    candidate = shutil.which("bash")
+    if candidate:
+        return candidate
+    if GIT_BASH.is_file():
+        return str(GIT_BASH)
+    pytest.skip("bash is unavailable")
+
+
+def run_controller(*args: str, stdin: str = "") -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [bash_executable(), str(CONTROLLER), *args],
+        cwd=ROOT,
+        input=stdin,
+        text=True,
+        capture_output=True,
+        timeout=20,
+        check=False,
+    )
+
+
+def answers(nodes: str = "node-a node-b", tilexr_home: str = "/srv/Tile XR") -> str:
+    return "\n".join(
+        (
+            nodes,
+            "root",
+            "8",
+            tilexr_home,
+            "/srv/model stack",
+            f"{tilexr_home}/install",
+            "/home/pkg/b131/cann/set_env.sh",
+            "/home/miniconda3/etc/profile.d/conda.sh",
+            "ai_moe_test",
+            "/srv/model stack/native.env",
+            "/home/dataset/deepseek3",
+            "/home/dataset/deepseek3/enwiki_text_document",
+        )
+    ) + "\n"
+
+
+def test_runner_scripts_expose_the_supported_interface_and_validated_shape() -> None:
+    controller = CONTROLLER.read_text(encoding="utf-8")
+    node = NODE_RUNNER.read_text(encoding="utf-8")
+
+    for option in (
+        "--mode",
+        "--backend",
+        "--profile",
+        "--stage-barrier",
+        "--configure",
+        "--config",
+        "--dry-run",
+        "--idle-wait",
+    ):
+        assert option in controller
+    for option in (
+        "--node-count",
+        "--node-rank",
+        "--master-addr",
+        "--master-port",
+        "--devices-per-node",
+    ):
+        assert option in node
+
+    for argument in (
+        "--num-layers 4",
+        "--seq-length 4096",
+        "--hidden-size 7168",
+        "--num-experts 32",
+        "--moe-router-topk 8",
+        "--moonep-token-padding 1",
+        "--train-iters 8",
+    ):
+        assert argument in node
+    assert "TILEXR_MOONEP_DISPATCH_PEER_MODE=group" in node
+    assert "TILEXR_MOONEP_DISPATCH_GROUP_WIDTH=16" in node
+    assert "TILEXR_MOONEP_COMBINE_VERSION=2" in node
+    assert "unset TILEXR_MOONEP_DISPATCH_TRANSPORT" in node
+
+
+def test_first_run_prompts_and_subsequent_dry_run_reuses_cached_answers(tmp_path: Path) -> None:
+    config = tmp_path / "runner.env"
+    first = run_controller(
+        "--mode",
+        "multi",
+        "--backend",
+        "tilexr",
+        "--config",
+        str(config),
+        "--dry-run",
+        stdin=answers(),
+    )
+    assert first.returncode == 0, first.stderr
+    assert config.is_file()
+    assert "MODEL_RUNNER_NODES=node-a\\ node-b" in config.read_text(encoding="utf-8")
+    assert "password" not in config.read_text(encoding="utf-8").lower()
+    assert "node_rank=0 host=node-a" in first.stdout
+    assert "node_rank=1 host=node-b" in first.stdout
+    assert "--node-count 2" in first.stdout
+    assert "--node-rank 1" in first.stdout
+    assert "/srv/Tile\\ XR/tools/moonep/mindspeed/run_model_node.sh" in first.stdout
+
+    reused = run_controller(
+        "--mode",
+        "multi",
+        "--backend",
+        "tilexr",
+        "--config",
+        str(config),
+        "--dry-run",
+    )
+    assert reused.returncode == 0, reused.stderr
+    assert reused.stdout == first.stdout
+    assert "Enter" not in reused.stderr
+
+
+def test_configure_is_the_only_way_to_replace_cached_answers(tmp_path: Path) -> None:
+    config = tmp_path / "runner.env"
+    created = run_controller(
+        "--mode", "multi", "--config", str(config), "--dry-run", stdin=answers()
+    )
+    assert created.returncode == 0, created.stderr
+
+    ignored_input = run_controller(
+        "--mode",
+        "multi",
+        "--config",
+        str(config),
+        "--dry-run",
+        stdin=answers(nodes="replacement-a replacement-b"),
+    )
+    assert ignored_input.returncode == 0, ignored_input.stderr
+    assert "host=node-a" in ignored_input.stdout
+    assert "replacement-a" not in ignored_input.stdout
+
+    updated = run_controller(
+        "--mode",
+        "multi",
+        "--config",
+        str(config),
+        "--configure",
+        "--dry-run",
+        stdin=answers(nodes="replacement-a replacement-b"),
+    )
+    assert updated.returncode == 0, updated.stderr
+    assert "host=replacement-a" in updated.stdout
+    assert "host=node-a" not in updated.stdout
+
+
+def test_single_mode_is_local_and_multi_mode_uses_system_ssh(tmp_path: Path) -> None:
+    config = tmp_path / "runner.env"
+    configured = run_controller(
+        "--mode", "single", "--config", str(config), "--dry-run", stdin=answers()
+    )
+    assert configured.returncode == 0, configured.stderr
+    assert "mode=single local=1 node_rank=0" in configured.stdout
+    assert "ssh " not in configured.stdout
+    assert "--node-count 1" in configured.stdout
+
+    multi = run_controller(
+        "--mode", "multi", "--config", str(config), "--dry-run"
+    )
+    assert multi.returncode == 0, multi.stderr
+    assert multi.stdout.count("ssh ") == 2
+    assert "root@node-a" in multi.stdout
+    assert "root@node-b" in multi.stdout
+    assert "--master-addr node-a" in multi.stdout
+
+
+def test_scripts_do_not_invoke_file_transfer_tools_and_define_failure_cleanup() -> None:
+    controller = CONTROLLER.read_text(encoding="utf-8")
+    node = NODE_RUNNER.read_text(encoding="utf-8")
+    for script in (controller, node):
+        assert "scp " not in script
+        assert "rsync " not in script
+    assert "cleanup_remote_runs" in controller
+    assert "wait_for_stable_idle" in controller
+    assert 'consecutive=$((consecutive + 1))' in controller
+    assert 'wait "${cleanup_pid}" || true' in controller
+    assert "trap 'handle_signal" in controller
+    assert "remaining=$((remaining - 1))" in controller
+    assert "No node reported completion of iteration 8/8" in controller
+    assert "status=91" not in node
+    assert "runner.pid" in node
+    assert "kill -- -\"${model_pid}\"" in node
+
+
+def test_cached_config_is_explicitly_ignored() -> None:
+    ignored = subprocess.run(
+        ["git", "check-ignore", "-v", "run/moonep/mindspeed/model_runner.env"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert ignored.returncode == 0
+    assert "run/moonep/mindspeed/model_runner.env" in ignored.stdout

@@ -425,6 +425,27 @@ def tensor(shape, dtype):
 
 
 class FfiAbiTests(unittest.TestCase):
+    def test_reduce_grad_registration_uses_storage_without_expanding_source(self):
+        backing = FakeTensor((2 * 1024 * 1024 // 4,), "float32")
+        backing._ptr = 0x200000
+        registration = backing.narrow(0, 1024, 512)
+        registration._tilexr_registration_backing = backing
+
+        source = FakeTensor((4, 16), "float32")
+        slices = TileXRMoonEPRuntime._reduce_grad_source_slices(
+            (source, source, source),
+            (registration, registration, registration),
+        )
+        self.assertEqual(tuple(int(value.bytes) for value in slices), (256,) * 3)
+        self.assertEqual(
+            tuple(int(value.registrationBase) for value in slices),
+            (0x200000,) * 3,
+        )
+        self.assertEqual(
+            tuple(int(value.registrationBytes) for value in slices),
+            (2 * 1024 * 1024,) * 3,
+        )
+
     def test_dispatch_completion_flag_matrix_format(self):
         flags = bytearray(512 * 2 * 8)
         struct.pack_into("<QQ", flags, 0 * 16, 0, 0)
