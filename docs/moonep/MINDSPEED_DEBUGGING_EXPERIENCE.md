@@ -98,6 +98,18 @@ root-cause oracle。
 
 ## 推荐调试流程
 
+### 0. 复用一次性 HCCL 环境基线
+
+官方 HCCL Test 是环境准入证据，不是每个任务或每次修改的回归测试。同一环境最多执行
+一次；开始前必须先查找已有记录，存在记录时禁止再次运行。环境身份由 host/container、
+device subset、topology、accelerator mode、CANN、driver、firmware 和 HCCL Test build
+共同确定；重编译 TileXR、重启进程或开始新的调试任务都不构成新环境。
+
+首次运行应选择覆盖当前失败数据路径的 mode，并保存完整命令、环境身份、逐 rank 正确性
+输出和有限日志。后续任务直接复用该结果；如果已有运行没有覆盖当前 device subset、
+topology 或 accelerator mode，应把该路径标记为基线未验证，而不是在同一环境补跑第二次。
+一次性运行失败后，停止算子侧排查，等待环境发生可证明的实质修复或更换新环境。
+
 ### 1. 固定运行身份
 
 每次运行先保存以下信息：

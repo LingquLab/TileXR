@@ -87,7 +87,8 @@ UB-only WQE construction, MTE3 SQ publication, and `st_dev` doorbells. Python
 tests preserve the one-FFI-call contract and parse fused diagnostics.
 
 The target CANN 9.1 build must compile Host and Kernel. Hardware validation on
-`141.61.49.195` starts with the matching official HCCL Test and then covers
-single-rank, two-rank, and full-host Hidden/paired exactness, repeated rounds,
-alternating plans, grouped/group-credit/shared-QP configurations where
+`141.61.49.195` first reuses the retained one-time matching official HCCL Test
+result, creating it only when that environment has no prior record, and then
+covers single-rank, two-rank, and full-host Hidden/paired exactness, repeated
+rounds, alternating plans, grouped/group-credit/shared-QP configurations where
 supported, and profiling-off/on `pair` A/B evidence.

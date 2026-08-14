@@ -44,6 +44,8 @@ Update `dispatch_hot_loop.py`, reporting tests, source guards, and API tests.
 
 Run focused C++ and Python tests, target CANN 9.1 Host/Kernel build, and inspect
 the final diff. On `141.61.49.195`, establish NPU/CANN/source/binary provenance,
-run matching HCCL Test, deploy to a task-specific directory, and execute the
-approved correctness/stability/performance ladder. Record reusable fused-epoch
-workspace and completion-order lessons in the maintained Dispatch design.
+reuse the retained one-time matching HCCL Test result (create it only if this
+environment has no prior record), deploy to a task-specific directory, and
+execute the approved correctness/stability/performance ladder. Record reusable
+fused-epoch workspace and completion-order lessons in the maintained Dispatch
+design.
