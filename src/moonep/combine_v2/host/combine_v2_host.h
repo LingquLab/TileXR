@@ -27,6 +27,7 @@ struct CombineV2LaunchContext {
     GM_ADDR devArgs = nullptr;
     CombineV2Layout layout {};
     int64_t magic = 0;
+    bool fullSync = false;
 };
 
 int TileXRMoonEpPrepareCombineV2Launch(

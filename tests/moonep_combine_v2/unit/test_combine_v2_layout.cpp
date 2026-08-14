@@ -30,9 +30,9 @@ void CheckStatus(int actual, int expected, const char *message)
 void TestTargetLayout()
 {
     using namespace TileXRMoonEp;
-    Check(sizeof(MoonEpCombineV2ProfileRecord) == 384U,
+    Check(sizeof(MoonEpCombineV2ProfileRecord) == 448U,
         "profile record size mismatch");
-    Check(kMoonEpCombineV2ProfileTimePointCount == 22U,
+    Check(kMoonEpCombineV2ProfileTimePointCount == 26U,
         "profile point count mismatch");
     Check(kMoonEpCombineV2ProfileMetricCount == 8U,
         "profile metric count mismatch");
@@ -53,15 +53,28 @@ void TestTargetLayout()
         "scratch epoch 1 offset mismatch");
     Check(layout.doneBytes == 32768U, "done bytes mismatch");
     Check(layout.grantBytes == 262144U, "grant bytes mismatch");
-    Check(layout.controlSourceOffset == 2818873344ULL,
+    Check(layout.controlSourceOffset == 2818874368ULL,
         "control source offset mismatch");
-    Check(layout.failureOffset == 2818875392ULL,
+    Check(layout.failureOffset == 2818876416ULL,
         "failure offset mismatch");
     Check(layout.controlSourceBytes == 2048U, "control source bytes mismatch");
     Check(layout.failureBytes == 2048U, "failure bytes mismatch");
-    Check(layout.outputOffset == 2818877440ULL,
+    Check(layout.fullSyncReceiveOffset == 2818878464ULL,
+        "full-sync receive offset mismatch");
+    Check(layout.fullSyncReceiveBytes == 16384U,
+        "full-sync receive bytes mismatch");
+    Check(layout.fullSyncSourceOffset == 2818894848ULL,
+        "full-sync source offset mismatch");
+    Check(layout.fullSyncSourceBytes == 2048U,
+        "full-sync source bytes mismatch");
+    Check(layout.fullSyncBarrierOffset == 2818896896ULL,
+        "full-sync barrier offset mismatch");
+    Check(layout.fullSyncBarrierBytes == 2048U,
+        "full-sync barrier bytes mismatch");
+    Check(layout.outputOffset == 2818898944ULL,
         "target output offset mismatch");
-    Check(layout.outputOffset == layout.failureOffset + layout.failureBytes,
+    Check(layout.outputOffset ==
+            layout.fullSyncBarrierOffset + layout.fullSyncBarrierBytes,
         "output offset mismatch");
     Check(layout.outputBytes == 58720256U, "output bytes mismatch");
     Check(layout.totalBytes == 2879389696ULL, "target total bytes mismatch");
@@ -78,7 +91,8 @@ void TestSmallAndInvalidLayouts()
     Check(layout.totalBytes == 4194304U, "small total bytes mismatch");
     Check(layout.totalBytes % kCombineV2RegistrationAlignmentBytes == 0U,
         "workspace is not registration aligned");
-    Check(layout.outputOffset >= layout.failureOffset + layout.failureBytes &&
+    Check(layout.outputOffset >=
+            layout.fullSyncBarrierOffset + layout.fullSyncBarrierBytes &&
         layout.outputOffset + layout.outputBytes <= layout.totalBytes,
         "small output overlaps control workspace");
 

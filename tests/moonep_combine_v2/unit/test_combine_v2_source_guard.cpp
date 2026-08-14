@@ -118,6 +118,9 @@ int main()
         "inline void MoonEpCombineV2BuildPayloadWqesVf(");
     const std::string directBuilder = Section(kernelImpl,
         "inline void MoonEpCombineV2BuildPayloadWqesVf(",
+        "inline void MoonEpCombineV2BuildFullSyncWqesVf(");
+    const std::string fullSyncBuilder = Section(kernelImpl,
+        "inline void MoonEpCombineV2BuildFullSyncWqesVf(",
         "#endif");
     const std::string vectorSelection = Section(kernelImpl,
         "__aicore__ inline uint32_t MoonEpCombineV2::SelectPeerIndices(",
@@ -140,6 +143,9 @@ int main()
     const std::string process = Section(kernelImpl,
         "__aicore__ inline void MoonEpCombineV2::Process()",
         "} // namespace");
+    const std::string fullSyncPublisher = Section(kernelImpl,
+        "__aicore__ inline bool MoonEpCombineV2::PublishFullSyncBatch(",
+        "__aicore__ inline bool MoonEpCombineV2::FullSyncSignalMatches(");
 
     bool ok = true;
     ok &= Require(rootCmake, "add_subdirectory(tests/moonep_combine_v2)",
@@ -216,6 +222,27 @@ int main()
     ok &= Require(kernelImpl,
         "Simt::VF_CALL<MoonEpCombineV2BuildPayloadWqesVf>",
         "Combine V2 implementation does not use its SIMT WQE builder");
+    ok &= Require(kernelImpl,
+        "Simt::VF_CALL<MoonEpCombineV2BuildFullSyncWqesVf>",
+        "Combine V2 full-sync path does not use a dedicated SIMT builder");
+    ok &= Require(kernelImpl,
+        "__simt_vf__ __aicore__ LAUNCH_BOUND(\n"
+        "    TileXRMoonEp::kMoonEpCombineV2BuilderThreads)\n"
+        "inline void MoonEpCombineV2BuildFullSyncWqesVf(",
+        "Combine V2 full-sync WQE builder is not a SIMT VF");
+    ok &= Require(fullSyncBuilder, "words[word] = 0U;",
+        "Combine V2 full-sync builder does not clear the complete WQE");
+    ok &= Require(fullSyncBuilder, "sqe->flag = 0U;",
+        "Combine V2 full-sync WQE unexpectedly requests a CQE");
+    ok &= Require(fullSyncBuilder,
+        "sge->len = TileXRMoonEp::kMoonEpCombineV2FullSyncSignalBytes;",
+        "Combine V2 full-sync WQE does not send the 32-byte signal");
+    ok &= Require(fullSyncBuilder, "sge->va = context->localSignalAddr;",
+        "Combine V2 full-sync WQE lacks its local ping-pong source");
+    ok &= Require(fullSyncBuilder, "remote->remoteRowBase",
+        "Combine V2 full-sync WQE lacks its remote receive address");
+    ok &= Reject(fullSyncBuilder, "__gm__",
+        "Combine V2 full-sync SIMT builder accesses GM directly");
     ok &= Require(kernelImpl,
         "CreateVecIndex(slotIndexBuf_.Get<int16_t>()",
         "Combine V2 does not initialize reusable chunk indices");
@@ -384,11 +411,56 @@ int main()
         "Combine V2 implementation does not ring device doorbells");
     ok &= Require(kernelImpl, "rank_, 0U, core_, rankSize_",
         "Combine V2 implementation does not use the runtime Ring schedule");
-    if (CountOccurrences(kernelImpl, "kCombineV2ScheduleMode") != 7U) {
-        std::cerr << "Combine V2 schedule mode is not passed to all six "
-                     "active schedule calls\n";
+    if (CountOccurrences(kernelImpl, "kCombineV2ScheduleMode") != 10U) {
+        std::cerr << "Combine V2 schedule mode is not passed to every "
+                     "active schedule call\n";
         ok = false;
     }
+    ok &= Require(kernelImpl,
+        "core_, TileXRMoonEp::MOONEP_COMBINE_V2_SIX_PORT",
+        "Combine V2 full-sync path does not select the core's six-port QP");
+    ok &= RequireBefore(fullSyncPublisher,
+        "SyncFunc<HardEvent::S_MTE3>();", "CopyIssueToSq(",
+        "Combine V2 full-sync publisher lacks scalar-to-MTE3 ordering");
+    ok &= RequireBefore(fullSyncPublisher, "CopyIssueToSq(",
+        "SyncFunc<HardEvent::MTE3_S>();",
+        "Combine V2 full-sync publisher does not await SQ publication");
+    ok &= RequireBefore(fullSyncPublisher,
+        "SyncFunc<HardEvent::MTE3_S>();", "state.sq->dbAddr",
+        "Combine V2 full-sync publisher rings DB before MTE3 completion");
+    if (CountOccurrences(fullSyncPublisher, "state.sq->headAddr") != 1U ||
+        CountOccurrences(fullSyncPublisher, "state.sq->dbAddr") != 1U) {
+        std::cerr << "Combine V2 full-sync publisher must update one head "
+                     "and ring one doorbell\n";
+        ok = false;
+    }
+    ok &= Reject(fullSyncPublisher, "wqeCntAddr",
+        "Combine V2 full-sync publisher updates the CQ WQE count");
+    ok &= Reject(fullSyncPublisher, "completionCount",
+        "Combine V2 full-sync publisher changes completion accounting");
+    ok &= Reject(fullSyncPublisher, "cqTarget",
+        "Combine V2 full-sync publisher changes the CQ target");
+    ok &= Reject(fullSyncPublisher, "PollCqOnce",
+        "Combine V2 full-sync publisher polls CQ");
+    ok &= Require(kernelImpl, "kEnableSafetyChecks || fullSync_",
+        "Combine V2 full-sync path does not force SQ/WQ validation");
+    ok &= Require(process, "if (fullSyncWqeCount != 0U)",
+        "Combine V2 full-sync path writes a source signal for self-only core");
+    ok &= RequireBefore(process, "BuildFullSyncWqes(&fullSyncWqeCount)",
+        "PrepareFullSyncSignal()",
+        "Combine V2 full-sync source is prepared before peer compression");
+    ok &= RequireBefore(process, "PrepareFullSyncSignal()",
+        "PublishFullSyncBatch(fullSyncWqeCount)",
+        "Combine V2 full-sync source is prepared after SQ publication");
+    ok &= Require(host, "value == nullptr || value[0] == '\\0'",
+        "Combine V2 full-sync environment does not define its default");
+    ok &= Require(host, "*enabled = true;",
+        "Combine V2 full-sync environment is not enabled by default");
+    ok &= Require(host, "if (params.reduceHidden)",
+        "Combine V2 full-sync environment is parsed outside hidden launch");
+    ok &= Require(host,
+        "context->fullSync = params.reduceHidden && fullSyncEnabled;",
+        "Combine V2 full synchronization is not hidden-only");
     ok &= Require(kernelImpl,
         "TileXRMoonEp::MOONEP_COMBINE_V2_SINGLE_RING;",
         "Combine V2 default schedule is not the existing single ring");
@@ -442,8 +514,8 @@ int main()
         "kMoonEpCombineV2ProfileMetricCount = 8U",
         "Combine V2 profile metric ABI is missing");
     ok &= Require(profileHeader,
-        "kMoonEpCombineV2ProfileVersion = 3U",
-        "Combine V2 full-grant profile version is missing");
+        "kMoonEpCombineV2ProfileVersion = 4U",
+        "Combine V2 full-sync profile version is missing");
     ok &= Require(profileHeader,
         "MOONEP_COMBINE_V2_TIME_STEP0_READY_END",
         "Combine V2 profile does not expose post-grant readiness");

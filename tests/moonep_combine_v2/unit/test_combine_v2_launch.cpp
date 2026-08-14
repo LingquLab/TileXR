@@ -24,7 +24,7 @@ int registrationCalls = 0;
 int launchCalls = 0;
 uint32_t capturedBlockDim = 0;
 std::size_t capturedArgsSize = 0;
-uint64_t capturedArgs[18] = {};
+uint64_t capturedArgs[22] = {};
 rtTaskCfgInfo_t capturedCfg {};
 
 void Check(bool condition, const char *message)
@@ -84,9 +84,13 @@ TileXRMoonEp::CombineV2LaunchContext ValidContext()
     context.devArgs = reinterpret_cast<GM_ADDR>(uintptr_t {0x4000});
     context.layout.scratchOffset[0] = 4096;
     context.layout.scratchOffset[1] = 8192;
-    context.layout.outputOffset = 12288;
+    context.layout.fullSyncReceiveOffset = 12288;
+    context.layout.fullSyncSourceOffset = 16384;
+    context.layout.fullSyncBarrierOffset = 20480;
+    context.layout.outputOffset = 24576;
     context.layout.rowBytes = 7168;
     context.magic = 1;
+    context.fullSync = true;
     return context;
 }
 
@@ -110,9 +114,14 @@ void TestConfiguresDynamicUb()
         "configured launch did not pass the device UB size");
     Check(capturedArgsSize == sizeof(capturedArgs),
         "configured launch used the wrong kernel ABI size");
-    Check(capturedArgs[10] == context.layout.outputOffset &&
-        capturedArgs[15] == context.layout.rowBytes && capturedArgs[16] == 1U,
-        "configured launch did not pass reduction layout arguments");
+    Check(capturedArgs[10] == context.layout.fullSyncReceiveOffset &&
+        capturedArgs[11] == context.layout.fullSyncSourceOffset &&
+        capturedArgs[12] == context.layout.fullSyncBarrierOffset &&
+        capturedArgs[13] == context.layout.outputOffset &&
+        capturedArgs[18] == context.layout.rowBytes &&
+        capturedArgs[19] == 1U && capturedArgs[20] == 1U &&
+        capturedArgs[21] == static_cast<uint64_t>(context.magic),
+        "configured launch did not pass full-sync arguments");
     Check(activeOutputOffset == context.layout.scratchOffset[1],
         "configured launch did not publish the active epoch");
 }
@@ -183,7 +192,7 @@ rtError_t rtKernelLaunchWithFlagV2(const void *, uint32_t blockDim,
         if (argsInfo->args != nullptr && argsInfo->argsSize ==
                 sizeof(capturedArgs)) {
             const uint64_t *args = static_cast<const uint64_t *>(argsInfo->args);
-            for (std::size_t index = 0; index < 18U; ++index) {
+            for (std::size_t index = 0; index < 22U; ++index) {
                 capturedArgs[index] = args[index];
             }
         }

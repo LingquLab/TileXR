@@ -27,6 +27,12 @@ TileXR::TileXRUDMARegistry registry {};
 GM_ADDR devArgs = reinterpret_cast<GM_ADDR>(uintptr_t {0x9000});
 TileXRMoonEp::CombineV2Params launchedParams {};
 TileXRMoonEp::CombineV2LaunchContext launchedContext {};
+bool launchedReduceHidden[2] = {};
+bool launchedFullSync[2] = {};
+size_t launchCount = 0;
+
+constexpr const char *kFullSyncEnv =
+    "TILEXR_MOONEP_COMBINE_V2_FULL_SYNC";
 
 struct MemcpyRecord {
     void *dst = nullptr;
@@ -100,6 +106,7 @@ void ConfigureRankSize(int rankSize, int rank = 0)
 
 void Reset()
 {
+    unsetenv(kFullSyncEnv);
     hostReturn = registryReturn = qpReturn = devReturn = magicReturn =
         TileXR::TILEXR_SUCCESS;
     launchReturn = TILEXR_MOONEP_SUCCESS;
@@ -110,6 +117,11 @@ void Reset()
     devArgs = reinterpret_cast<GM_ADDR>(uintptr_t {0x9000});
     launchedParams = TileXRMoonEp::CombineV2Params {};
     launchedContext = TileXRMoonEp::CombineV2LaunchContext {};
+    launchCount = 0;
+    for (size_t index = 0; index < 2U; ++index) {
+        launchedReduceHidden[index] = false;
+        launchedFullSync[index] = false;
+    }
     memcpyCount = 0;
     for (MemcpyRecord &record : memcpyRecords) {
         record = MemcpyRecord {};
@@ -143,10 +155,45 @@ void TestValidLaunch()
         launchedParams.aivCoreNum == params.aivCoreNum,
         "launch parameters mismatch");
     Check(launchedContext.hostArgs == &commArgs &&
-        launchedContext.devArgs == devArgs && launchedContext.magic == nextMagic,
+        launchedContext.devArgs == devArgs && launchedContext.magic == nextMagic &&
+        launchedContext.fullSync,
         "launch context mismatch");
     Check(*params.activeOutputOffset == launchedContext.layout.scratchOffset[1],
         "active output epoch mismatch");
+}
+
+void TestFullSyncEnvironment()
+{
+    Reset();
+    CheckStatus(TileXRMoonEp::TileXRMoonEpRunCombineV2(ValidParams()),
+        TILEXR_MOONEP_SUCCESS, "unset full-sync environment");
+    Check(launchedContext.fullSync,
+        "unset full-sync environment must default to enabled");
+
+    Reset();
+    setenv(kFullSyncEnv, "0", 1);
+    CheckStatus(TileXRMoonEp::TileXRMoonEpRunCombineV2(ValidParams()),
+        TILEXR_MOONEP_SUCCESS, "disabled full-sync environment");
+    Check(!launchedContext.fullSync,
+        "zero full-sync environment did not disable synchronization");
+
+    Reset();
+    setenv(kFullSyncEnv, "invalid", 1);
+    CheckStatus(TileXRMoonEp::TileXRMoonEpRunCombineV2(ValidParams()),
+        TILEXR_MOONEP_ERROR_INVALID_ARGUMENT,
+        "invalid hidden full-sync environment");
+    Check(launchCount == 0U,
+        "invalid hidden full-sync environment reached kernel launch");
+
+    Reset();
+    setenv(kFullSyncEnv, "invalid", 1);
+    TileXRMoonEp::CombineV2Params params = ValidParams();
+    params.reduceHidden = false;
+    CheckStatus(TileXRMoonEp::TileXRMoonEpRunCombineV2(params),
+        TILEXR_MOONEP_SUCCESS,
+        "non-hidden launch must ignore full-sync environment");
+    Check(!launchedContext.fullSync,
+        "non-hidden launch enabled full synchronization");
 }
 
 void TestValidation()
@@ -328,6 +375,10 @@ void TestStageUsesDedicatedHiddenOutput()
         "hidden output copy does not use the dedicated workspace region");
     Check(hiddenLayout.outputOffset >= weightLayout.totalBytes,
         "hidden output can be overwritten by the weight workspace");
+    Check(launchCount == 2U && launchedReduceHidden[0] &&
+        launchedFullSync[0] && !launchedReduceHidden[1] &&
+        !launchedFullSync[1],
+        "V2 stage did not restrict full synchronization to hidden launch");
 }
 
 extern "C" aclError aclrtMemcpyAsync(
@@ -348,6 +399,11 @@ int TileXRMoonEpLaunchCombineV2Kernel(
 {
     launchedParams = params;
     launchedContext = context;
+    if (launchCount < 2U) {
+        launchedReduceHidden[launchCount] = params.reduceHidden;
+        launchedFullSync[launchCount] = context.fullSync;
+    }
+    ++launchCount;
     if (launchReturn == TILEXR_MOONEP_SUCCESS) {
         *params.activeOutputOffset = context.layout.scratchOffset[
             MoonEpCombineV2Epoch(static_cast<uint64_t>(context.magic))];
@@ -359,6 +415,7 @@ int TileXRMoonEpLaunchCombineV2Kernel(
 int main()
 {
     TestValidLaunch();
+    TestFullSyncEnvironment();
     TestValidation();
     TestStageUsesDedicatedHiddenOutput();
     TestRankAndCoreGeneralization();

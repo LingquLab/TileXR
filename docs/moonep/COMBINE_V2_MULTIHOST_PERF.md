@@ -596,6 +596,11 @@ python3 tools/moonep/combine_v2_trace.py COMBINE_LOG \
 `reduceHidden=true` 传给 Combine V2 runner，避免把 Stage API 的输入和输出 D2D copy
 计入 ACL Event。对应 trace 必须传 `--reduce enabled`；要直接生成三个独立文件，使用：
 
+hidden Combine 默认执行发送前全同步。环境变量
+`TILEXR_MOONEP_COMBINE_V2_FULL_SYNC` 未设置或为空时为开启；需要采集原路径 baseline 时，
+在所有 rank 上统一设置为 `0`、`false` 或 `off`。该变量不作用于 route-weight 或直接
+non-reduce launch；非法值只会拒绝 hidden launch，避免配置拼写错误静默改变性能口径。
+
 ```bash
 python3 tools/moonep/combine_v2_trace.py COMBINE_LOG \
   --split-output-dir TRACE_DIR --prefix combine_v2_reduce \
@@ -604,14 +609,15 @@ python3 tools/moonep/combine_v2_trace.py COMBINE_LOG \
 ```
 
 三个文件分别是最后一轮的 fastest、P50 和 slowest rank，格式与历史
-`*_edge_trace.json` 一致。`t20 -> t21` 在 reduce 模式下标记为 `Reduce hidden`。
+`*_edge_trace.json` 一致。profile v4 中 `t24 -> t25` 在 reduce 模式下标记为
+`Reduce hidden`，`t2 -> t6` 则拆分显示 full-sync enter、submit、receive 和 core barrier。
 算法带宽仍以 `BS * K * H * sizeof(BF16)` 作为等效算法字节数，便于与 no-reduce
 结果按同一宏观口径比较；它不是 reduce 读写流量的物理带宽。
 
 P50 使用 nearest-rank 定义：将最后一轮各 rank 的 ACL Event 耗时升序排列，选择
 第 `ceil(0.5 * rank_count)` 个 rank；8P 即第 4 张卡。相同耗时按 rank 编号排序，
-确保选择结果可重复。工具要求所选 rank 的 8 个 AIV profile record 全部存在且时间戳
-单调，否则拒绝生成结果。
+确保选择结果可重复。工具要求所选 rank 的全部 active AIV profile record 存在且时间戳
+单调，否则拒绝生成结果；2-8P 使用与 rank 数相同的 Core 数，16P 及以上使用 16 Core。
 
 工具按 world size 的 runtime schedule step 数输出事件；例如 8P 只有 step0，
 不会把 profile record 中为兼容固定容量而补齐的未执行 step 输出为零时长事件。

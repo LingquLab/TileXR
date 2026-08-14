@@ -564,6 +564,98 @@ void TestVectorSelectionReferenceModel()
     }
 }
 
+void TestFullSyncScheduleContract()
+{
+    using namespace TileXRMoonEp;
+    const uint32_t supported[] = {2U, 3U, 4U, 5U, 6U, 7U, 8U,
+        16U, 32U, 64U, 128U};
+    const MoonEpCombineV2ScheduleMode mode =
+        MOONEP_COMBINE_V2_SINGLE_RING;
+
+    for (uint32_t rankSize : supported) {
+        const uint32_t activeCores = MoonEpCombineV2ActiveCoreCount(rankSize);
+        const uint32_t stepCount = MoonEpCombineV2StepCount(rankSize);
+        for (uint32_t rank = 0U; rank < rankSize; ++rank) {
+            std::array<bool, kMoonEpCombineV2RankCount> sent {};
+            std::array<bool, kMoonEpCombineV2RankCount> waited {};
+            uint32_t sendCount = 0U;
+            uint32_t waitCount = 0U;
+            for (uint32_t core = 0U; core < activeCores; ++core) {
+                std::array<bool, kMoonEpCombineV2RankCount> corePeers {};
+                uint32_t corePeerCount = 0U;
+                for (uint32_t step = 0U; step < stepCount; ++step) {
+                    const uint32_t peer = MoonEpCombineV2Peer(
+                        rank, step, core, rankSize, mode);
+                    if (peer == rank || peer == kMoonEpCombineV2InvalidPeer) {
+                        continue;
+                    }
+                    Check(peer < rankSize && !sent[peer],
+                        "full-sync send peer is invalid or repeated");
+                    sent[peer] = true;
+                    corePeers[peer] = true;
+                    ++corePeerCount;
+                    ++sendCount;
+                }
+                Check(corePeerCount <= kMoonEpCombineV2FullSyncMaxPeersPerCore,
+                    "full-sync core peer count exceeds SIMT batch capacity");
+
+                for (uint32_t peer = 0U; peer < rankSize; ++peer) {
+                    if (!corePeers[peer]) {
+                        continue;
+                    }
+                    Check(peer != rank && !waited[peer],
+                        "full-sync wait source is invalid or repeated");
+                    Check(MoonEpCombineV2SenderCore(
+                            peer, rank, rankSize, mode) < activeCores,
+                        "full-sync wait peer has no inverse sender core");
+                    waited[peer] = true;
+                    ++waitCount;
+                }
+            }
+            Check(sendCount == rankSize - 1U,
+                "full-sync send set does not cover every remote rank");
+            Check(waitCount == rankSize - 1U,
+                "full-sync wait set does not cover every remote rank");
+            Check(!sent[rank] && !waited[rank],
+                "full-sync send or wait set contains self");
+
+            for (uint32_t peer = 0U; peer < rankSize; ++peer) {
+                if (peer == rank) {
+                    Check(MoonEpCombineV2SenderCore(
+                            rank, peer, rankSize, mode) ==
+                            kMoonEpCombineV2InvalidPeer,
+                        "full-sync sender-core helper accepted self");
+                    continue;
+                }
+                const uint32_t senderCore = MoonEpCombineV2SenderCore(
+                    rank, peer, rankSize, mode);
+                Check(senderCore < activeCores,
+                    "full-sync sender-core helper returned invalid core");
+                uint32_t matches = 0U;
+                for (uint32_t step = 0U; step < stepCount; ++step) {
+                    matches += MoonEpCombineV2Peer(rank, step, senderCore,
+                        rankSize, mode) == peer ? 1U : 0U;
+                }
+                Check(matches == 1U,
+                    "full-sync sender-core helper does not invert peer mapping");
+            }
+        }
+    }
+
+    Check(MoonEpCombineV2FullSyncReceiveIndex(0U, 17U) == 17U &&
+        MoonEpCombineV2FullSyncReceiveIndex(1U, 17U) ==
+            kMoonEpCombineV2RankCount + 17U,
+        "full-sync receive ping-pong index mismatch");
+    Check(MoonEpCombineV2FullSyncCoreIndex(0U, 7U) == 7U &&
+        MoonEpCombineV2FullSyncCoreIndex(1U, 7U) ==
+            kMoonEpCombineV2CoreCount + 7U,
+        "full-sync core ping-pong index mismatch");
+    Check(MoonEpCombineV2Epoch(1U) == 1U &&
+        MoonEpCombineV2Epoch(2U) == 0U &&
+        MoonEpCombineV2Epoch(3U) == 1U,
+        "full-sync epoch sequence is not ping-pong");
+}
+
 } // namespace
 
 int main()
@@ -575,5 +667,6 @@ int main()
     TestTokensAndShapes();
     TestWqeBatchHelpers();
     TestVectorSelectionReferenceModel();
+    TestFullSyncScheduleContract();
     return failures == 0 ? 0 : 1;
 }

@@ -14,7 +14,7 @@ PROFILE_PREFIX = "COMBINE_V2_PROFILE"
 RANK_PERF_PREFIX = "COMBINE_V2_RANK_PERF"
 PERF_PREFIX = "COMBINE_V2_PERF"
 
-TIME_POINT_COUNT = 22
+TIME_POINT_COUNT = 26
 METRIC_NAMES = (
     "selection_load_us",
     "selection_select_us",
@@ -127,6 +127,10 @@ def nearest_rank_p50_index(count):
     return int(math.ceil(0.5 * count)) - 1
 
 
+def active_core_count(world_size):
+    return world_size if world_size <= 8 else 16
+
+
 def select_ranks(samples, iteration, world_size):
     elapsed = []
     for rank in range(world_size):
@@ -156,20 +160,24 @@ def stage_ranges(world_size, reduce_mode="disabled"):
     ranges = [
         ("init", "setup", 0, 1),
         ("prepare", "setup", 1, 2),
+        ("full_sync_enter", "sync", 2, 3),
+        ("full_sync_submit", "sync", 3, 4),
+        ("full_sync_receive", "sync", 4, 5),
+        ("full_sync_core_barrier", "sync", 5, 6),
     ]
-    previous = 2
+    previous = 6
     for step in range(step_count):
-        send_end = 3 + step * 2
+        send_end = 7 + step * 2
         ready_end = send_end + 1
         ranges.append(("step{}_send".format(step), "send", previous, send_end))
         ranges.append(("step{}_wait".format(step), "wait", send_end, ready_end))
         previous = ready_end
     ranges.extend((
-        ("step_loop_finalize", "finalize", previous, 19),
-        ("inbound_wait", "wait", 19, 20),
+        ("step_loop_finalize", "finalize", previous, 23),
+        ("inbound_wait", "wait", 23, 24),
         ("reduce_hidden" if reduce_mode == "enabled" else
             "finalize_no_reduce", "reduce" if reduce_mode == "enabled" else
-            "finalize", 20, 21),
+            "finalize", 24, 25),
     ))
     return ranges
 
@@ -206,7 +214,7 @@ def build_trace(samples, profiles, correctness, perf_record, batch_size,
 
     selected_rows = []
     events = []
-    expected_cores = set(range(8))
+    expected_cores = set(range(active_core_count(world_size)))
     for role_index, (role, (elapsed_ms, rank)) in enumerate(selected):
         rank_records = {
             core: profiles[(iteration, rank, core)]
@@ -346,6 +354,10 @@ def edge_stage_ranges(world_size, reduce_mode):
     names = {
         "init": "Init",
         "prepare": "Prepare",
+        "full_sync_enter": "Full sync enter",
+        "full_sync_submit": "Full sync submit",
+        "full_sync_receive": "Full sync receive",
+        "full_sync_core_barrier": "Full sync core barrier",
         "step_loop_finalize": "Final CQ",
         "inbound_wait": "Inbound done",
         "finalize_no_reduce": "Finalize (no reduce)",
@@ -366,7 +378,7 @@ def edge_stage_ranges(world_size, reduce_mode):
 def build_edge_trace(role, elapsed_ms, rank, samples, profiles, correctness,
                      batch_size, world_size, iteration, topk, hidden_size,
                      experts, reduce_mode, host):
-    core_count = min(world_size, 8)
+    core_count = active_core_count(world_size)
     rank_records = {
         core: profiles[(iteration, rank, core)] for core in range(core_count)
         if (iteration, rank, core) in profiles

@@ -32,6 +32,10 @@ constexpr uint32_t kMoonEpCombineV2TwoPortRows = 32U;
 constexpr uint32_t kMoonEpCombineV2SelectionChunkRows = 8192U;
 constexpr uint32_t kMoonEpCombineV2MaxOutstanding = 16384U;
 constexpr uint32_t kMoonEpCombineV2MteBlockBytes = 32U;
+constexpr uint32_t kMoonEpCombineV2FullSyncSignalBytes = 32U;
+constexpr uint32_t kMoonEpCombineV2FullSyncSlotBytes = 64U;
+constexpr uint32_t kMoonEpCombineV2FullSyncMaxPeersPerCore =
+    kMoonEpCombineV2StepCount;
 constexpr int64_t kMoonEpCombineV2SmallBs = 8;
 constexpr int64_t kMoonEpCombineV2SmallSlots = 128;
 constexpr int64_t kMoonEpCombineV2TargetBs = 8192;
@@ -43,6 +47,7 @@ constexpr uint64_t kMoonEpCombineV2GrantSlotBytes = 512U;
 constexpr uint64_t kMoonEpCombineV2GrantReceiveOffsetBytes = 0U;
 constexpr uint64_t kMoonEpCombineV2GrantSourceOffsetBytes = 64U;
 constexpr uint32_t kMoonEpCombineV2FailureMarker = 0x47505632U;
+constexpr uint32_t kMoonEpCombineV2FullSyncMarker = 0x4653594EU; // FSYN
 constexpr uint64_t kMoonEpCombineV2MaxMagic =
     std::numeric_limits<uint64_t>::max() >> 3U;
 
@@ -68,6 +73,17 @@ enum MoonEpCombineV2FailureStatus : uint32_t {
     MOONEP_COMBINE_V2_GRANT_TIMEOUT = 6U,
     MOONEP_COMBINE_V2_DONE_TIMEOUT = 7U,
     MOONEP_COMBINE_V2_BAD_DESTINATION = 8U,
+    MOONEP_COMBINE_V2_FULL_SYNC_TIMEOUT = 9U,
+    MOONEP_COMBINE_V2_FULL_SYNC_BARRIER_TIMEOUT = 10U,
+};
+
+struct alignas(32) MoonEpCombineV2FullSyncSignal {
+    uint64_t magic;
+    uint32_t marker;
+    uint32_t sourceRank;
+    uint32_t sourceCore;
+    uint32_t rankSize;
+    uint64_t guard;
 };
 
 struct alignas(64) MoonEpCombineV2FailureRecord {
@@ -98,6 +114,12 @@ struct MoonEpCombineV2RingSegments {
 
 static_assert(sizeof(MoonEpCombineV2FailureRecord) == 64U,
     "MoonEP Combine V2 failure record ABI changed");
+static_assert(sizeof(MoonEpCombineV2FullSyncSignal) ==
+        kMoonEpCombineV2FullSyncSignalBytes,
+    "MoonEP Combine V2 full-sync signal ABI changed");
+static_assert(kMoonEpCombineV2FullSyncSignalBytes <=
+        kMoonEpCombineV2FullSyncSlotBytes,
+    "MoonEP Combine V2 full-sync signal exceeds its cache-line slot");
 static_assert(kMoonEpCombineV2GrantSourceOffsetBytes + sizeof(uint64_t) <=
         kMoonEpCombineV2GrantSlotBytes,
     "MoonEP Combine V2 Grant source exceeds its slot");
@@ -501,6 +523,44 @@ MoonEpCombineV2SourceForCore(
     uint32_t core, uint32_t sourceIndex, uint32_t rankSize)
 {
     return core + sourceIndex * MoonEpCombineV2ActiveCoreCount(rankSize);
+}
+
+TILEXR_MOONEP_COMBINE_V2_INLINE uint32_t
+MoonEpCombineV2SenderCore(
+    uint32_t sourceRank, uint32_t destinationRank, uint32_t rankSize,
+    MoonEpCombineV2ScheduleMode mode)
+{
+    if (!MoonEpCombineV2RankValid(sourceRank, rankSize) ||
+        !MoonEpCombineV2RankValid(destinationRank, rankSize) ||
+        sourceRank == destinationRank) {
+        return kMoonEpCombineV2InvalidPeer;
+    }
+    const uint32_t activeCoreCount = MoonEpCombineV2ActiveCoreCount(rankSize);
+    const uint32_t stepCount = MoonEpCombineV2StepCount(rankSize);
+    for (uint32_t core = 0U; core < activeCoreCount; ++core) {
+        for (uint32_t step = 0U; step < stepCount; ++step) {
+            if (MoonEpCombineV2Peer(
+                    sourceRank, step, core, rankSize, mode) ==
+                destinationRank) {
+                return core;
+            }
+        }
+    }
+    return kMoonEpCombineV2InvalidPeer;
+}
+
+TILEXR_MOONEP_COMBINE_V2_INLINE uint64_t
+MoonEpCombineV2FullSyncReceiveIndex(
+    uint32_t epoch, uint32_t sourceRank)
+{
+    return static_cast<uint64_t>(epoch) * kMoonEpCombineV2RankCount +
+        sourceRank;
+}
+
+TILEXR_MOONEP_COMBINE_V2_INLINE uint64_t
+MoonEpCombineV2FullSyncCoreIndex(uint32_t epoch, uint32_t core)
+{
+    return static_cast<uint64_t>(epoch) * kMoonEpCombineV2CoreCount + core;
 }
 
 TILEXR_MOONEP_COMBINE_V2_INLINE uint64_t

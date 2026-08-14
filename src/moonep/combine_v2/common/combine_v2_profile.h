@@ -6,9 +6,9 @@
 namespace TileXRMoonEp {
 
 constexpr uint32_t kMoonEpCombineV2ProfileMarker = 0x54584750U; // TXGP
-constexpr uint16_t kMoonEpCombineV2ProfileVersion = 3U;
+constexpr uint16_t kMoonEpCombineV2ProfileVersion = 4U;
 constexpr uint32_t kMoonEpCombineV2ProfileCyclesPerUs = 1000U;
-constexpr uint32_t kMoonEpCombineV2ProfileTimePointCapacity = 32U;
+constexpr uint32_t kMoonEpCombineV2ProfileTimePointCapacity = 40U;
 constexpr uint32_t kMoonEpCombineV2ProfileStepCount = 8U;
 constexpr uint32_t kMoonEpCombineV2ProfileStepPointStride = 2U;
 
@@ -16,8 +16,12 @@ enum MoonEpCombineV2ProfileTimePointIndex : uint32_t {
     MOONEP_COMBINE_V2_TIME_INIT_BEGIN = 0U,
     MOONEP_COMBINE_V2_TIME_INIT_END = 1U,
     MOONEP_COMBINE_V2_TIME_PREPARE_END = 2U,
-    MOONEP_COMBINE_V2_TIME_STEP0_SEND_END = 3U,
-    MOONEP_COMBINE_V2_TIME_STEP0_READY_END = 4U,
+    MOONEP_COMBINE_V2_TIME_FULL_SYNC_BEGIN = 3U,
+    MOONEP_COMBINE_V2_TIME_FULL_SYNC_SUBMIT_END = 4U,
+    MOONEP_COMBINE_V2_TIME_FULL_SYNC_RECEIVE_END = 5U,
+    MOONEP_COMBINE_V2_TIME_FULL_SYNC_BARRIER_END = 6U,
+    MOONEP_COMBINE_V2_TIME_STEP0_SEND_END = 7U,
+    MOONEP_COMBINE_V2_TIME_STEP0_READY_END = 8U,
     MOONEP_COMBINE_V2_TIME_STEP_LOOP_END =
         MOONEP_COMBINE_V2_TIME_STEP0_SEND_END +
         kMoonEpCombineV2ProfileStepCount *
@@ -70,15 +74,15 @@ struct alignas(64) MoonEpCombineV2ProfileRecord {
     uint64_t metric[kMoonEpCombineV2ProfileMetricCount];
 };
 
-static_assert(kMoonEpCombineV2ProfileTimePointCount == 22U,
-    "Combine V2 profile must contain 22 cumulative timestamps");
+static_assert(kMoonEpCombineV2ProfileTimePointCount == 26U,
+    "Combine V2 profile must contain 26 cumulative timestamps");
 static_assert(MOONEP_COMBINE_V2_DIAG_OBSERVED <
         kMoonEpCombineV2ProfileTimePointCapacity,
     "Combine V2 diagnostics exceed the profile record");
 static_assert(MOONEP_COMBINE_V2_METRIC_REMOTE_SUBMIT + 1U ==
         kMoonEpCombineV2ProfileMetricCount,
     "Combine V2 profile metric count mismatch");
-static_assert(sizeof(MoonEpCombineV2ProfileRecord) == 384U,
+static_assert(sizeof(MoonEpCombineV2ProfileRecord) == 448U,
     "Combine V2 profile record ABI changed");
 
 } // namespace TileXRMoonEp

@@ -26,6 +26,12 @@ struct CombineV2Layout {
     uint64_t controlSourceBytes = 0;
     uint64_t failureOffset = 0;
     uint64_t failureBytes = 0;
+    uint64_t fullSyncReceiveOffset = 0;
+    uint64_t fullSyncReceiveBytes = 0;
+    uint64_t fullSyncSourceOffset = 0;
+    uint64_t fullSyncSourceBytes = 0;
+    uint64_t fullSyncBarrierOffset = 0;
+    uint64_t fullSyncBarrierBytes = 0;
     uint64_t outputOffset = 0;
     uint64_t outputBytes = 0;
     uint64_t totalBytes = 0;

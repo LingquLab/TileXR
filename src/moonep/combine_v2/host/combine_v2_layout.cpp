@@ -68,6 +68,12 @@ int TileXRMoonEpBuildCombineV2Layout(int64_t bs, int64_t h,
     uint64_t controlSourceBytes = 0;
     uint64_t failureOffset = 0;
     uint64_t failureBytes = 0;
+    uint64_t fullSyncReceiveOffset = 0;
+    uint64_t fullSyncReceiveBytes = 0;
+    uint64_t fullSyncSourceOffset = 0;
+    uint64_t fullSyncSourceBytes = 0;
+    uint64_t fullSyncBarrierOffset = 0;
+    uint64_t fullSyncBarrierBytes = 0;
     uint64_t outputOffset = 0;
     uint64_t outputBytes = 0;
     uint64_t totalBytes = 0;
@@ -98,7 +104,22 @@ int TileXRMoonEpBuildCombineV2Layout(int64_t bs, int64_t h,
         !CheckedMultiply(static_cast<uint64_t>(kMoonEpCombineV2EpochCount) *
                 kMoonEpCombineV2CoreCount,
             kMoonEpCombineV2TokenStrideBytes, &failureBytes) ||
-        !CheckedAdd(failureOffset, failureBytes, &requiredBytes) ||
+        !CheckedAdd(failureOffset, failureBytes, &fullSyncReceiveOffset) ||
+        !CheckedMultiply(static_cast<uint64_t>(kMoonEpCombineV2EpochCount) *
+                kMoonEpCombineV2RankCount,
+            kMoonEpCombineV2FullSyncSlotBytes, &fullSyncReceiveBytes) ||
+        !CheckedAdd(fullSyncReceiveOffset, fullSyncReceiveBytes,
+            &fullSyncSourceOffset) ||
+        !CheckedMultiply(static_cast<uint64_t>(kMoonEpCombineV2EpochCount) *
+                kMoonEpCombineV2CoreCount,
+            kMoonEpCombineV2FullSyncSlotBytes, &fullSyncSourceBytes) ||
+        !CheckedAdd(fullSyncSourceOffset, fullSyncSourceBytes,
+            &fullSyncBarrierOffset) ||
+        !CheckedMultiply(static_cast<uint64_t>(kMoonEpCombineV2EpochCount) *
+                kMoonEpCombineV2CoreCount,
+            kMoonEpCombineV2FullSyncSlotBytes, &fullSyncBarrierBytes) ||
+        !CheckedAdd(fullSyncBarrierOffset, fullSyncBarrierBytes,
+            &requiredBytes) ||
         !CheckedAlign(requiredBytes, kCombineV2ScratchAlignmentBytes,
             &outputOffset) ||
         !CheckedMultiply(static_cast<uint64_t>(bs), rowBytes, &outputBytes) ||
@@ -126,6 +147,12 @@ int TileXRMoonEpBuildCombineV2Layout(int64_t bs, int64_t h,
     next.controlSourceBytes = controlSourceBytes;
     next.failureOffset = failureOffset;
     next.failureBytes = failureBytes;
+    next.fullSyncReceiveOffset = fullSyncReceiveOffset;
+    next.fullSyncReceiveBytes = fullSyncReceiveBytes;
+    next.fullSyncSourceOffset = fullSyncSourceOffset;
+    next.fullSyncSourceBytes = fullSyncSourceBytes;
+    next.fullSyncBarrierOffset = fullSyncBarrierOffset;
+    next.fullSyncBarrierBytes = fullSyncBarrierBytes;
     next.outputOffset = outputOffset;
     next.outputBytes = outputBytes;
     next.totalBytes = totalBytes;

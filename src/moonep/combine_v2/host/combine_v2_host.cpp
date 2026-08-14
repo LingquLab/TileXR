@@ -1,5 +1,9 @@
 ﻿#include "combine_v2_host.h"
 
+#include <cstdlib>
+#include <iostream>
+#include <string>
+
 #include "acl/acl_rt.h"
 #include "combine_v2_launch.h"
 #include "tilexr_types.h"
@@ -7,6 +11,35 @@
 
 namespace TileXRMoonEp {
 namespace {
+
+constexpr const char *kCombineV2FullSyncEnv =
+    "TILEXR_MOONEP_COMBINE_V2_FULL_SYNC";
+
+int ResolveCombineV2FullSync(bool *enabled)
+{
+    if (enabled == nullptr) {
+        return TILEXR_MOONEP_ERROR_INVALID_ARGUMENT;
+    }
+    const char *value = std::getenv(kCombineV2FullSyncEnv);
+    if (value == nullptr || value[0] == '\0') {
+        *enabled = true;
+        return TILEXR_MOONEP_SUCCESS;
+    }
+    const std::string text(value);
+    if (text == "1" || text == "true" || text == "TRUE" ||
+        text == "on" || text == "ON") {
+        *enabled = true;
+        return TILEXR_MOONEP_SUCCESS;
+    }
+    if (text == "0" || text == "false" || text == "FALSE" ||
+        text == "off" || text == "OFF") {
+        *enabled = false;
+        return TILEXR_MOONEP_SUCCESS;
+    }
+    std::cerr << kCombineV2FullSyncEnv << " has invalid value '" << text
+              << "'" << std::endl;
+    return TILEXR_MOONEP_ERROR_INVALID_ARGUMENT;
+}
 
 bool CombineV2RankSizeSupported(int rankSize)
 {
@@ -79,6 +112,15 @@ int TileXRMoonEpPrepareCombineV2Launch(
     if (ret != TILEXR_MOONEP_SUCCESS) {
         return ret;
     }
+    bool fullSyncEnabled = false;
+    if (params.reduceHidden) {
+        ret = ResolveCombineV2FullSync(&fullSyncEnabled);
+        if (ret != TILEXR_MOONEP_SUCCESS) {
+            *context = CombineV2LaunchContext {};
+            return ret;
+        }
+    }
+    context->fullSync = params.reduceHidden && fullSyncEnabled;
     ret = TileXRGetCommArgsHost(params.comm, context->hostArgs);
     if (ret != TileXR::TILEXR_SUCCESS || context->hostArgs == nullptr) {
         *context = CombineV2LaunchContext {};

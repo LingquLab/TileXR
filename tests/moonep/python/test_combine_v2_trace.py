@@ -35,7 +35,7 @@ def write_log(path, missing_profile=None, experts=32, correctness="passed"):
                     continue
                 base = 1000000 + rank * 100000 + core * 1000 + iteration * 10000
                 points = [base]
-                for index in range(1, 22):
+                for index in range(1, 26):
                     points.append(points[-1] + index * 10)
                 fields = [
                     "COMBINE_V2_PROFILE",
@@ -114,7 +114,7 @@ class CombineV2TraceTest(unittest.TestCase):
             self.assertEqual(len(totals), 24)
             complete = [event for event in trace["traceEvents"]
                         if event.get("ph") == "X"]
-            self.assertEqual(len(complete), 192)
+            self.assertEqual(len(complete), 288)
             self.assertTrue(all(event["dur"] > 0 for event in totals))
             self.assertTrue(all(event["args"]["reduce"] == "disabled"
                                 for event in totals))
@@ -122,6 +122,7 @@ class CombineV2TraceTest(unittest.TestCase):
             self.assertNotIn("step7_wait", stages)
             self.assertIn("inbound_wait", stages)
             self.assertIn("finalize_no_reduce", stages)
+            self.assertIn("full_sync_submit", stages)
 
             summary_path = root / "trace_summary.json"
             summary = json.loads(summary_path.read_text(encoding="utf-8"))
