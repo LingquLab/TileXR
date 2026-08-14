@@ -14,6 +14,10 @@ Options:
   --backend tilexr|native   Select the MoonEP backend (default: tilexr).
   --profile                 Enable the one-iteration NPU profiler window.
   --stage-barrier           Add diagnostic world barriers before Dispatch/Combine.
+  --hccl-inter-hccs-disable true|false
+                            Select HCCL inter-HCCS behavior explicitly.
+  --rank-table-file PATH    Use the same explicit HCCL rank table on every node.
+  --udma-rootinfo-path PATH Use each node's TileXR UDMA RootInfo file.
   --configure               Replace the cached configuration interactively.
   --config PATH             Use an alternate cached configuration file.
   --master-port PORT        Distributed launcher port (default: 29501).
@@ -33,6 +37,9 @@ mode=single
 backend=tilexr
 profile=0
 stage_barrier=0
+hccl_inter_hccs_disable=""
+rank_table_file=""
+udma_rootinfo_path=""
 configure=0
 dry_run=0
 config=${TILEXR_MODEL_RUNNER_CONFIG:-${default_config}}
@@ -47,6 +54,15 @@ while [[ $# -gt 0 ]]; do
         --backend) backend=${2:?--backend requires a value}; shift 2 ;;
         --profile) profile=1; shift ;;
         --stage-barrier) stage_barrier=1; shift ;;
+        --hccl-inter-hccs-disable)
+            hccl_inter_hccs_disable=${2:?--hccl-inter-hccs-disable requires a value}
+            shift 2
+            ;;
+        --rank-table-file) rank_table_file=${2:?--rank-table-file requires a value}; shift 2 ;;
+        --udma-rootinfo-path)
+            udma_rootinfo_path=${2:?--udma-rootinfo-path requires a value}
+            shift 2
+            ;;
         --configure) configure=1; shift ;;
         --config) config=${2:?--config requires a value}; shift 2 ;;
         --master-port) master_port=${2:?--master-port requires a value}; shift 2 ;;
@@ -61,10 +77,9 @@ done
 
 case "${mode}" in single|multi) ;; *) printf 'Invalid mode: %s\n' "${mode}" >&2; exit 2 ;; esac
 case "${backend}" in tilexr|native) ;; *) printf 'Invalid backend: %s\n' "${backend}" >&2; exit 2 ;; esac
-if [[ "${stage_barrier}" -eq 1 && "${backend}" != tilexr ]]; then
-    echo "--stage-barrier is supported only by the TileXR backend" >&2
-    exit 2
-fi
+case "${hccl_inter_hccs_disable}" in ""|true|false) ;;
+    *) printf 'Invalid HCCL inter-HCCS value: %s\n' "${hccl_inter_hccs_disable}" >&2; exit 2 ;;
+esac
 if [[ ! "${master_port}" =~ ^[0-9]+$ ]] || (( master_port < 1 || master_port > 65535 )); then
     printf 'Invalid master port: %s\n' "${master_port}" >&2
     exit 2
@@ -214,10 +229,16 @@ node_arguments() {
     )
     [[ "${profile}" -eq 1 ]] && args+=(--profile)
     [[ "${stage_barrier}" -eq 1 ]] && args+=(--stage-barrier)
+    [[ -n "${hccl_inter_hccs_disable}" ]] && \
+        args+=(--hccl-inter-hccs-disable "${hccl_inter_hccs_disable}")
+    [[ -n "${rank_table_file}" ]] && args+=(--rank-table-file "${rank_table_file}")
+    [[ -n "${udma_rootinfo_path}" ]] && \
+        args+=(--udma-rootinfo-path "${udma_rootinfo_path}")
     quote_command "${args[@]}"
 }
 
 remote_runner=${MODEL_RUNNER_TILEXR_HOME}/tools/moonep/mindspeed/run_model_node.sh
+remote_idle_probe=${MODEL_RUNNER_TILEXR_HOME}/tools/moonep/mindspeed/probe_idle.sh
 local_runner=${script_dir}/run_model_node.sh
 ssh_options=(-o ConnectTimeout=15 -o ServerAliveInterval=30 -o ServerAliveCountMax=3)
 
@@ -265,12 +286,26 @@ done
 wait_for_stable_idle() {
     local deadline=$((SECONDS + idle_wait_sec))
     local consecutive=0
-    local index idle all_idle
+    local index idle all_idle probe_status
+    local probe_dir=${controller_dir}/idle_probe
+    local -a probe_pids=()
+    mkdir -p "${probe_dir}"
     while true; do
         all_idle=1
+        probe_pids=()
         for index in "${!targets[@]}"; do
-            idle=$(ssh "${ssh_options[@]}" "${targets[${index}]}" \
-                "npu-smi info | grep -c 'No running processes found in NPU' || true")
+            ssh "${ssh_options[@]}" "${targets[${index}]}" \
+                "timeout 25s bash ${remote_idle_probe} --devices ${MODEL_RUNNER_DEVICES_PER_NODE}" \
+                >"${probe_dir}/${index}.out" 2>"${probe_dir}/${index}.err" &
+            probe_pids+=("$!")
+        done
+        for index in "${!targets[@]}"; do
+            probe_status=0
+            wait "${probe_pids[${index}]}" || probe_status=$?
+            idle=$(tail -n 1 "${probe_dir}/${index}.out" 2>/dev/null || true)
+            if [[ "${probe_status}" -ne 0 || ! "${idle}" =~ ^[0-9]+$ ]]; then
+                idle=0
+            fi
             if [[ "${idle}" -ne "${MODEL_RUNNER_DEVICES_PER_NODE}" ]]; then
                 all_idle=0
             fi

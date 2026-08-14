@@ -425,6 +425,31 @@ def tensor(shape, dtype):
 
 
 class FfiAbiTests(unittest.TestCase):
+    def test_udma_arena_subregion_reuses_active_registration(self):
+        loader = FakeCDLLLoader()
+        runtime = TileXRMoonEPRuntime(
+            rank=0,
+            world_size=2,
+            library_paths={
+                "comm": "libtile-comm.so",
+                "planner": "libtilexr-moonep-planner.so",
+                "combine_v2": "libtilexr-moonep-combine-v2.so.2",
+                "moonep": "libtilexr-moonep.so.1",
+            },
+            cdll_loader=loader,
+        )
+
+        handle = runtime._activate_udma_region(
+            0x200000, 2 * 1024 * 1024, "dispatch", "arena"
+        )
+        reused = runtime._activate_udma_region(
+            0x300000, 1024 * 1024, "projection", "subregion"
+        )
+
+        self.assertEqual(reused, handle)
+        self.assertEqual(loader.register_calls, [(0x200000, 2 * 1024 * 1024)])
+        runtime.close()
+
     def test_reduce_grad_registration_uses_storage_without_expanding_source(self):
         backing = FakeTensor((2 * 1024 * 1024 // 4,), "float32")
         backing._ptr = 0x200000

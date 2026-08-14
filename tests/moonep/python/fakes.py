@@ -87,6 +87,29 @@ class FakeTensor:
         result.zero_calls = self.zero_calls
         return result
 
+    def view(self, *args):
+        if len(args) == 1 and isinstance(args[0], str):
+            dtype = args[0]
+            source_bytes = self.numel() * self.element_size()
+            target_bytes = {
+                "uint8": 1,
+                "float16": 2,
+                "bfloat16": 2,
+                "int32": 4,
+                "float32": 4,
+                "int64": 8,
+            }[dtype]
+            if source_bytes % target_bytes:
+                raise ValueError("FakeTensor.view dtype has incompatible byte size")
+            result = FakeTensor(
+                (source_bytes // target_bytes,), dtype, self.device,
+                storage_offset=self._storage_offset,
+            )
+            result._ptr = self._ptr
+            result._base = getattr(self, "_base", self)
+            return result
+        return self.reshape(*args)
+
     def narrow(self, dim, start, length):
         dim = int(dim)
         start = int(start)

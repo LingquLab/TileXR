@@ -14,7 +14,9 @@ Required options:
   --install-prefix PATH --cann-env PATH --conda-sh PATH --conda-env NAME
   --native-env PATH --tokenizer-path PATH --data-path PATH --run-tag TAG
 
-Optional: --profile --stage-barrier --timeout SECONDS
+Optional: --profile --stage-barrier --hccl-inter-hccs-disable true|false
+          --rank-table-file PATH --timeout SECONDS
+          --udma-rootinfo-path PATH
 Internal cleanup: --stop --backend BACKEND --node-rank RANK
                   --tilexr-home PATH --run-tag TAG
 EOF
@@ -39,6 +41,9 @@ run_tag=
 timeout_sec=900
 profile=0
 stage_barrier=0
+hccl_inter_hccs_disable=""
+rank_table_file=""
+udma_rootinfo_path=""
 stop=0
 
 while [[ $# -gt 0 ]]; do
@@ -62,11 +67,41 @@ while [[ $# -gt 0 ]]; do
         --timeout) timeout_sec=${2:?--timeout requires a value}; shift 2 ;;
         --profile) profile=1; shift ;;
         --stage-barrier) stage_barrier=1; shift ;;
+        --hccl-inter-hccs-disable)
+            hccl_inter_hccs_disable=${2:?--hccl-inter-hccs-disable requires a value}
+            shift 2
+            ;;
+        --rank-table-file) rank_table_file=${2:?--rank-table-file requires a value}; shift 2 ;;
+        --udma-rootinfo-path)
+            udma_rootinfo_path=${2:?--udma-rootinfo-path requires a value}
+            shift 2
+            ;;
         --stop) stop=1; shift ;;
         -h|--help) usage; exit 0 ;;
         *) printf 'Unknown argument: %s\n' "$1" >&2; usage >&2; exit 2 ;;
     esac
 done
+
+case "${hccl_inter_hccs_disable}" in
+    "") unset HCCL_INTER_HCCS_DISABLE ;;
+    true|false) export HCCL_INTER_HCCS_DISABLE=${hccl_inter_hccs_disable} ;;
+    *) printf 'Invalid HCCL inter-HCCS value: %s\n' "${hccl_inter_hccs_disable}" >&2; exit 2 ;;
+esac
+if [[ -n "${rank_table_file}" ]]; then
+    [[ -f "${rank_table_file}" ]] || { echo "Rank table not found: ${rank_table_file}" >&2; exit 2; }
+    export RANK_TABLE_FILE=${rank_table_file}
+else
+    unset RANK_TABLE_FILE
+fi
+if [[ -n "${udma_rootinfo_path}" ]]; then
+    [[ -f "${udma_rootinfo_path}" ]] || {
+        echo "UDMA RootInfo not found: ${udma_rootinfo_path}" >&2
+        exit 2
+    }
+    export TILEXR_UDMA_ROOTINFO_PATH=${udma_rootinfo_path}
+else
+    unset TILEXR_UDMA_ROOTINFO_PATH
+fi
 
 case "${backend}" in tilexr|native) ;; *) printf 'Invalid backend: %s\n' "${backend}" >&2; exit 2 ;; esac
 if [[ -z "${tilexr_home}" || -z "${run_tag}" || -z "${node_rank}" ]]; then
@@ -122,11 +157,6 @@ if (( node_count < 1 || node_rank >= node_count || devices_per_node < 1 || \
     echo "invalid distributed launcher dimensions" >&2
     exit 2
 fi
-if [[ "${stage_barrier}" -eq 1 && "${backend}" != tilexr ]]; then
-    echo "stage barriers require the TileXR backend" >&2
-    exit 2
-fi
-
 for path in "${cann_env}" "${conda_sh}" "${native_env}"; do
     [[ -f "${path}" ]] || { printf 'Required file not found: %s\n' "${path}" >&2; exit 1; }
 done
@@ -156,6 +186,8 @@ trap 'exit 130' INT
 trap 'exit 143' TERM HUP
 exec > >(tee "${output}/controller.log") 2>&1
 
+set +u
+# Vendor and conda environment scripts commonly append optional variables.
 # shellcheck disable=SC1090
 source "${cann_env}"
 # shellcheck disable=SC1090
@@ -163,10 +195,13 @@ source "${conda_sh}"
 conda activate "${conda_env}"
 # shellcheck disable=SC1090
 source "${native_env}"
+set -u
 
+idle_probe=${tilexr_home}/tools/moonep/mindspeed/probe_idle.sh
+[[ -f "${idle_probe}" ]] || { echo "Idle probe not found: ${idle_probe}" >&2; exit 1; }
 for gate in 1 2; do
-    npu-smi info >"${output}/npu_gate_${gate}.log"
-    idle=$(grep -c 'No running processes found in NPU' "${output}/npu_gate_${gate}.log" || true)
+    idle=$(bash "${idle_probe}" --devices "${devices_per_node}" \
+        --log "${output}/npu_gate_${gate}.log")
     if [[ "${idle}" -ne "${devices_per_node}" ]]; then
         printf 'exit_code=90\nreason=npu_busy\ngate=%s\nidle=%s\n' "${gate}" "${idle}" \
             | tee "${output}/result.txt"
@@ -184,6 +219,10 @@ export LD_LIBRARY_PATH="${shmem_backend}:${LD_LIBRARY_PATH:-}"
 [[ -f /usr/lib64/libstdc++.so.6 ]] && export LD_PRELOAD=/usr/lib64/libstdc++.so.6
 
 interface=${MODEL_RUNNER_SOCKET_IFNAME:-}
+if [[ -z "${interface}" && "${node_count}" -gt 1 ]] && \
+    ip -o -4 addr show dev data0.3001 2>/dev/null | grep -q .; then
+    interface=data0.3001
+fi
 if [[ -z "${interface}" ]]; then
     interface=$(ip route get "${master_addr}" 2>/dev/null | awk '{for (i=1; i<=NF; ++i) if ($i == "dev") {print $(i+1); exit}}')
 fi
@@ -215,13 +254,21 @@ unset TILEXR_MOONEP_DEBUG_SYNC_COMBINE TILEXR_MOONEP_DEBUG_SYNC_DISPATCH_STATUS
 unset TILEXR_MOONEP_DEBUG_PREFETCH_UDMA TILEXR_MOONEP_DUMP_DFX_ON_ERROR
 unset TILEXR_MOONEP_FLAG_DUMP_DIR TILEXR_MOONEP_FLAG_DUMP_MODE
 unset TILEXR_MINDSPEED_TRACE TILEXR_MINDSPEED_PLAN_DUMP_DIR
+unset MOONEP_MINDSPEED_STAGE_BARRIER TILEXR_MINDSPEED_STAGE_BARRIER
 unset TILEXR_MINDSPEED_FORCE_DUMMY_UDMA ASCEND_LAUNCH_BLOCKING
 unset PROFILING_MODE PROFILING_OPTIONS ASCEND_MOONEP_DISPATCH_ENABLE_DFX
 unset ASCEND_MOONEP_DISPATCH_ENABLE_TRACE ASCEND_MOONEP_DISPATCH_TRACE
+unset TILEXR_MINDSPEED_FINITE_CHECK
 
 world_size=$((node_count * devices_per_node))
 global_batch_size=${world_size}
+ep_size=${world_size}
+base_expert_count=32
+expert_count=$((((base_expert_count + ep_size - 1) / ep_size) * ep_size))
 backend_args=()
+install -m 0644 "${tilexr_home}/tools/moonep/mindspeed/mindspeed_stage_barrier.py" \
+    "${mindspeed_home}/mindspeed/core/transformer/moe/mindspeed_stage_barrier.py"
+export MOONEP_MINDSPEED_STAGE_BARRIER=${stage_barrier}
 if [[ "${backend}" == tilexr ]]; then
     MINDSPEED_HOME=${mindspeed_home} TILEXR_HOME=${tilexr_home} \
         TILEXR_INSTALL_PREFIX=${install_prefix} \
@@ -234,17 +281,21 @@ if [[ "${backend}" == tilexr ]]; then
     export TILEXR_MOONEP_DISPATCH_PEER_MODE=group
     export TILEXR_MOONEP_DISPATCH_GROUP_WIDTH=16
     export TILEXR_MOONEP_COMBINE_VERSION=2
-    export TILEXR_MINDSPEED_STAGE_BARRIER=${stage_barrier}
+    export TILEXR_MOONEP_UDMA_ARENA_RESERVE_BYTES=$((192 * 1024 * 1024))
     unset TILEXR_MOONEP_DISPATCH_TRANSPORT
     export TILEXR_COMM_ID="${master_addr}:$((master_port + 10000))"
-    ep_size=${world_size}
     backend_args+=(
         --moonep-token-padding 1
         --moonep-backend-factory
         mindspeed.core.transformer.moe.tilexr_mindspeed_adapter:create_tilexr_moonep_backend
     )
 else
-    ep_size=${devices_per_node}
+    if [[ "${stage_barrier}" -eq 1 ]]; then
+        backend_args+=(
+            --moonep-backend-factory
+            mindspeed.core.transformer.moe.mindspeed_stage_barrier:create_native_barrier_backend
+        )
+    fi
 fi
 
 profile_output=${output}/profiling
@@ -258,13 +309,28 @@ if [[ "${profile}" -eq 1 ]]; then
     )
 fi
 
+rank_table_sha256=disabled
+if [[ -n "${rank_table_file}" ]]; then
+    rank_table_sha256=$(sha256sum "${rank_table_file}" | awk '{print $1}')
+fi
+udma_rootinfo_sha256=disabled
+if [[ -n "${udma_rootinfo_path}" ]]; then
+    udma_rootinfo_sha256=$(sha256sum "${udma_rootinfo_path}" | awk '{print $1}')
+fi
+
 {
     printf 'backend=%s\nrun_tag=%s\nnode_rank=%s\nworld_size=%s\nrank_per_dev=1\n' \
         "${backend}" "${run_tag}" "${node_rank}" "${world_size}"
     printf 'ep_size=%s\nprofile=%s\nstage_barrier=%s\ninterface=%s\n' \
         "${ep_size}" "${profile}" "${stage_barrier}" "${interface}"
-    printf 'shape=4K/8P layers=4 hidden=7168 experts=32 token_padding=1 iterations=8\n'
-    printf 'debug=disabled flag_dump=disabled plan_dump=disabled\n'
+    printf 'rank_table_file=%s\nrank_table_sha256=%s\n' \
+        "${rank_table_file:-disabled}" "${rank_table_sha256}"
+    printf 'udma_rootinfo_path=%s\nudma_rootinfo_sha256=%s\n' \
+        "${udma_rootinfo_path:-disabled}" "${udma_rootinfo_sha256}"
+    printf 'shape=4K/8P layers=4 hidden=7168 experts=%s token_padding=1 iterations=8\n' \
+        "${expert_count}"
+    printf 'finite_check=%s flag_dump=disabled plan_dump=disabled\n' \
+        "${TILEXR_MINDSPEED_FINITE_CHECK:-disabled}"
     env | grep -E '^(TILEXR_|MOONEP_|ASCEND_MOONEP_|HCCL_|GLOO_SOCKET)' | sort
 } >"${output}/provenance.log"
 
@@ -326,7 +392,7 @@ python -m torch.distributed.launch \
     --qk-layernorm --mla-mm-split --mla-fa-without-pad \
     --moe-grouped-gemm --moe-token-dispatcher-type flex \
     --first-k-dense-replace 0 --moe-enable-moonep --moe-layer-freq 1 \
-    --moe-shared-expert-intermediate-size 2048 --num-experts 32 \
+    --moe-shared-expert-intermediate-size 2048 --num-experts "${expert_count}" \
     --moe-router-topk 8 --moe-ffn-hidden-size 2048 \
     --moe-router-load-balancing-type seq_aux_loss \
     --moe-router-num-groups 8 --moe-router-group-topk 4 \
@@ -361,14 +427,18 @@ finite_final_loss=$(grep -Ec \
     'iteration[[:space:]]+8/[[:space:]]*8.*lm loss:[[:space:]]*[0-9]' \
     "${output}/controller.log" || true)
 profile_done=$(find "${profile_output}" -type f -name analyse.done 2>/dev/null | wc -l || true)
-npu-smi info >"${output}/npu_after.log" || true
-post_idle=$(grep -c 'No running processes found in NPU' "${output}/npu_after.log" || true)
+post_idle=$(bash "${idle_probe}" --devices "${devices_per_node}" \
+    --log "${output}/npu_after.log")
 if [[ "${status}" -eq 0 && ( "${skipped}" -ne 0 || "${nan}" -ne 0 ) ]]; then
     status=92
 fi
 if [[ "${status}" -eq 0 && "${node_count}" -eq 1 && \
       ( "${nonfinite_grad}" -ne 0 || "${finite_final_loss}" -eq 0 ) ]]; then
     status=93
+fi
+if [[ "${status}" -eq 0 && "${profile}" -eq 1 && \
+      "${profile_done}" -ne "${devices_per_node}" ]]; then
+    status=94
 fi
 printf 'exit_code=%s\niterations=%s\nlast_iteration=%s\nskipped_nonzero=%s\nnan_nonzero=%s\nnonfinite_grad=%s\nfinite_final_loss=%s\nprofile_done=%s\npost_idle=%s\ncompleted=%s\n' \
     "${status}" "${iterations}" "${last_iteration}" "${skipped}" "${nan}" \

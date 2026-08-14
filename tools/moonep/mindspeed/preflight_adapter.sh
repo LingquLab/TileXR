@@ -7,6 +7,7 @@ tilexr_home=${TILEXR_HOME:-$(cd "${script_dir}/../../.." && pwd)}
 mindspeed_home=${MINDSPEED_HOME:?MINDSPEED_HOME must point to the MindSpeed checkout}
 adapter_dir=${mindspeed_home}/mindspeed/core/transformer/moe
 adapter=${adapter_dir}/tilexr_mindspeed_adapter.py
+stage_barrier=${adapter_dir}/mindspeed_stage_barrier.py
 install_prefix=${TILEXR_INSTALL_PREFIX:-${tilexr_home}/install}
 
 if [[ ! -d "${adapter_dir}" ]]; then
@@ -15,6 +16,7 @@ if [[ ! -d "${adapter_dir}" ]]; then
 fi
 
 install -m 0644 "${script_dir}/tilexr_mindspeed_adapter.py" "${adapter}"
+install -m 0644 "${script_dir}/mindspeed_stage_barrier.py" "${stage_barrier}"
 if grep -Eq 'from moonep import Buffer|aclshmem' "${adapter}"; then
     echo "forbidden SHMEM Buffer dependency in TileXR adapter" >&2
     exit 1
@@ -30,9 +32,11 @@ from types import SimpleNamespace
 import torch
 
 from mindspeed.core.transformer.moe import tilexr_mindspeed_adapter as adapter
+from mindspeed.core.transformer.moe import mindspeed_stage_barrier
 from mindspeed.core.transformer.moe.moonep_model_arena import MoonEPModelArenaLayout
 
 assert adapter.MindSpeedTileXRBuffer.__mro__[1].__module__ == "tilexr_moonep.compat"
+assert callable(mindspeed_stage_barrier.create_native_barrier_backend)
 assert "hidden_buffer" in inspect.signature(adapter.MindSpeedTileXRBuffer.dispatch).parameters
 assert "hidden_buffer" in inspect.signature(adapter.MindSpeedTileXRBuffer.combine).parameters
 assert adapter.MOONEP_NATIVE_NPU_CAPABILITY in (

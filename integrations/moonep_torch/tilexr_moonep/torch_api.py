@@ -124,6 +124,8 @@ class ProjectionBuffers:
         down,
         *,
         slot_fill_value: float = 0.0,
+        registration_backing=None,
+        registration_backing_factory=None,
         torch_module=None,
     ) -> "ProjectionBuffers":
         torch_module = torch_module or _torch()
@@ -165,20 +167,47 @@ class ProjectionBuffers:
             (cursor_bytes + _UDMA_REGISTRATION_ALIGNMENT - 1) //
             _UDMA_REGISTRATION_ALIGNMENT * _UDMA_REGISTRATION_ALIGNMENT
         )
-        allocation_elements = (
-            registered_bytes + _UDMA_REGISTRATION_ALIGNMENT - 1 + element_bytes - 1
-        ) // element_bytes
-        allocation = torch_module.empty(
-            (allocation_elements,), dtype=gate.dtype,
-            device=f"npu:{context.device_index}"
-        )
-        allocation_ptr = int(allocation.data_ptr())
-        offset_bytes = (-allocation_ptr) % _UDMA_REGISTRATION_ALIGNMENT
-        if offset_bytes % element_bytes:
-            raise RuntimeError("projection registration offset is not element-aligned")
-        backing = allocation.narrow(
-            0, offset_bytes // element_bytes, registered_bytes // element_bytes
-        )
+        if registration_backing is not None and registration_backing_factory is not None:
+            raise ValueError(
+                "registration_backing and registration_backing_factory are mutually exclusive"
+            )
+        if registration_backing_factory is not None:
+            registration_backing = registration_backing_factory(
+                registered_bytes, gate.dtype
+            )
+        if registration_backing is None:
+            allocation_elements = (
+                registered_bytes + _UDMA_REGISTRATION_ALIGNMENT - 1 + element_bytes - 1
+            ) // element_bytes
+            allocation = torch_module.empty(
+                (allocation_elements,), dtype=gate.dtype,
+                device=f"npu:{context.device_index}"
+            )
+            allocation_ptr = int(allocation.data_ptr())
+            offset_bytes = (-allocation_ptr) % _UDMA_REGISTRATION_ALIGNMENT
+            if offset_bytes % element_bytes:
+                raise RuntimeError("projection registration offset is not element-aligned")
+            backing = allocation.narrow(
+                0, offset_bytes // element_bytes, registered_bytes // element_bytes
+            )
+        else:
+            _validate_tensor(
+                torch_module,
+                registration_backing,
+                "registration_backing",
+                dtype=gate.dtype,
+                device_index=context.device_index,
+                allow_storage_offset=True,
+            )
+            if int(registration_backing.data_ptr()) % _UDMA_REGISTRATION_ALIGNMENT:
+                raise ValueError("registration_backing must be 2-MiB aligned")
+            if int(registration_backing.numel()) * element_bytes < registered_bytes:
+                raise ValueError(
+                    "registration_backing is smaller than the projection layout"
+                )
+            backing = registration_backing.narrow(
+                0, 0, registered_bytes // element_bytes
+            )
         if (int(backing.data_ptr()) % _UDMA_REGISTRATION_ALIGNMENT or
                 int(backing.numel()) * element_bytes != registered_bytes):
             raise RuntimeError("projection backing is not 2-MiB registration-aligned")
@@ -288,6 +317,7 @@ class TileXRMoonEPContext:
     _dispatch_workspace_ptr: int = field(init=False, default=0, repr=False)
     _dispatch_workspace_bytes: int = field(init=False, default=0, repr=False)
     _dispatch_workspace_alignment: int = field(init=False, default=0, repr=False)
+    _dispatch_registration_bytes: int = field(init=False, default=0, repr=False)
     _dispatch_workspace_handle: int | None = field(init=False, default=None, repr=False)
     _buffer_owner: Any = field(init=False, default=None, repr=False)
     _bound_stream_ptr: int | None = field(init=False, default=None, repr=False)
@@ -410,6 +440,7 @@ class TileXRMoonEPContext:
         self._dispatch_workspace_handle = None
         self._dispatch_workspace_ptr = 0
         self._dispatch_workspace_bytes = 0
+        self._dispatch_registration_bytes = 0
         self._dispatch_workspace_owner = None
         self.runtime.close()
         self._closed = True
@@ -454,8 +485,9 @@ class TileXRMoonEPContext:
                 "native Dispatch returned invalid workspace contract "
                 f"bytes={workspace_bytes} alignment={alignment}"
             )
+        registration_bytes = workspace_bytes
         raw = torch_module.empty(
-            (workspace_bytes + alignment - 1,),
+            (registration_bytes + alignment - 1,),
             dtype=torch_module.uint8,
             device=f"npu:{self.device_index}",
         )
@@ -464,19 +496,77 @@ class TileXRMoonEPContext:
         aligned_ptr = ((raw_ptr + alignment - 1) // alignment) * alignment
         if aligned_ptr + workspace_bytes > raw_ptr + int(raw.numel()):
             raise RuntimeError("aligned Dispatch workspace exceeds its raw allocation")
-        handle = self.runtime.register_dispatch_workspace(aligned_ptr, workspace_bytes)
+        handle = self.runtime.register_dispatch_workspace(aligned_ptr, registration_bytes)
         self._dispatch_workspace_owner = raw
         self._dispatch_workspace_ptr = aligned_ptr
         self._dispatch_workspace_bytes = workspace_bytes
         self._dispatch_workspace_alignment = alignment
+        self._dispatch_registration_bytes = registration_bytes
         self._dispatch_workspace_handle = handle
 
     def activate_dispatch_workspace(self) -> None:
         if self._dispatch_workspace_owner is None:
             raise RuntimeError("Dispatch workspace is not initialized")
         self._dispatch_workspace_handle = self.runtime.register_dispatch_workspace(
-            self._dispatch_workspace_ptr, self._dispatch_workspace_bytes
+            self._dispatch_workspace_ptr, self._dispatch_registration_bytes
         )
+
+    def promote_projection_arena(self, torch_module, dtype, required_bytes: int):
+        if required_bytes <= 0 or required_bytes % self._dispatch_workspace_alignment:
+            raise ValueError(
+                "projection arena size must be a positive multiple of the UDMA alignment"
+            )
+        reserve_text = os.environ.get("TILEXR_MOONEP_UDMA_ARENA_RESERVE_BYTES", "0")
+        try:
+            reserve_bytes = int(reserve_text, 0)
+        except ValueError as exc:
+            raise ValueError(
+                "TILEXR_MOONEP_UDMA_ARENA_RESERVE_BYTES must be an integer"
+            ) from exc
+        if reserve_bytes <= 0:
+            return None
+        if required_bytes > reserve_bytes:
+            raise RuntimeError(
+                "projection backing exceeds the configured UDMA arena reserve: "
+                f"required={required_bytes} reserve={reserve_bytes}"
+            )
+        if self._dispatch_registration_bytes == self._dispatch_workspace_bytes:
+            registration_bytes = self._dispatch_workspace_bytes + required_bytes
+            alignment = self._dispatch_workspace_alignment
+            raw = torch_module.empty(
+                (registration_bytes + alignment - 1,),
+                dtype=torch_module.uint8,
+                device=f"npu:{self.device_index}",
+            )
+            raw_ptr = int(raw.data_ptr())
+            aligned_ptr = ((raw_ptr + alignment - 1) // alignment) * alignment
+            old_offset = self._dispatch_workspace_ptr - int(
+                self._dispatch_workspace_owner.data_ptr()
+            )
+            new_offset = aligned_ptr - raw_ptr
+            raw.narrow(0, new_offset, self._dispatch_workspace_bytes).copy_(
+                self._dispatch_workspace_owner.narrow(
+                    0, old_offset, self._dispatch_workspace_bytes
+                )
+            )
+            torch_module.npu.synchronize(device=self.device_index)
+            handle = self.runtime.register_dispatch_workspace(
+                aligned_ptr, registration_bytes
+            )
+            self._dispatch_workspace_owner = raw
+            self._dispatch_workspace_ptr = aligned_ptr
+            self._dispatch_registration_bytes = registration_bytes
+            self._dispatch_workspace_handle = handle
+        available = self._dispatch_registration_bytes - self._dispatch_workspace_bytes
+        if required_bytes > available:
+            raise RuntimeError("projection arena was already promoted with a smaller layout")
+        raw_offset = self._dispatch_workspace_ptr - int(
+            self._dispatch_workspace_owner.data_ptr()
+        )
+        byte_view = self._dispatch_workspace_owner.narrow(
+            0, raw_offset + self._dispatch_workspace_bytes, required_bytes
+        )
+        return byte_view.view(dtype)
 
     @property
     def dispatch_workspace(self) -> tuple[int, int]:

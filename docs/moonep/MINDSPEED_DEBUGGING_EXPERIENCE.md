@@ -189,9 +189,25 @@ reset 等单一变量。一次同时修改 Kernel、Host、timeout 和路由，�
 - 不要用 toy shape 证明生产规模的 UB/SQ 容量安全。
 - 不要依赖已消费 SQE 的内容推导 CQ completion。
 - 不要在调试运行和性能运行之间复用未审计的环境变量。
+- 多机 HCCL rank table 与 TileXR UDMA RootInfo 是两种不同配置：前者描述全局
+  rank/topology，后者描述每台主机的本地 UDMA EID/port。不能用一个文件替代另一个；
+  应分别保存路径、哈希和 parser/init 证据。
+- 多机 launcher 全部退出 0 只证明进程完成，不证明模型数值正确。至少同时门禁完整迭代数、
+  最终有限 loss、全程有限 gradient norm、skip/NaN 计数、profiler artifact 数和退出后 idle。
+- 每次实机 A/B 必须同时保存源码 commit/diff 与实际加载 `.so` 路径和哈希。源码同步成功
+  不代表远端安装树已重编译；如果重新构建后行为变化而代码修复尚未被单变量证明，应明确
+  记录为 binary-provenance 问题，不能把诊断插桩本身误报成根因修复。
 - 不要把小 Tensor view 的逻辑字节数等同于 HCCP MR 范围；扩大 backing storage 时保持逻辑 shape 不变，否则会污染算子工作量和性能数据。
 - 不要因某次补丁通过完整模型就跳过最小 reproducer；最小 reproducer 才能证明因果。
 - 不要删除被推翻的假设记录。保留否定证据可以防止后续重复猜测。
+- 多阶段共享普通 UDMA 注册时，不能在热路径中按 stage 反复切换单一 active MR；不同
+  rank 的 stage 到达顺序可能不同，使无标签注册 collective 串轮。可预测的工作区应合并
+  到一个持久注册 arena，算子继续使用各自逻辑子区间；子区间激活必须命中已有 MR，不能
+  再发起注册 collective。扩大 arena 后仍要分别验证初始化内存峰值和至少两轮模型数值。
+- `npu-smi info` 在 950 上可能显示每卡无进程，但 HCCL Test 或其他加速器工作负载仍在
+  使用设备。多机 idle gate 必须同时检查设备节点 owner 和已知加速器进程；发现外部作业
+  只判 busy，不终止。连续模型启动后的 `EI0007/halSqCqAllocate` 表示驱动 stream/SQ-CQ
+  资源尚未回收，应等待并用最小 stream 探针确认恢复，不能改算子代码规避。
 
 ## Combine V2 共享 scratch 的 completion 约束
 

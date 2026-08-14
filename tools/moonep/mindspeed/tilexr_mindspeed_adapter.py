@@ -10,6 +10,7 @@ from .moonep_backend import (
     MOONEP_NATIVE_NPU_CAPABILITY,
     MoonEPBufferFlexBackend,
 )
+from .mindspeed_stage_barrier import optional_stage_barrier
 
 
 _UDMA_COMPAT_REGISTRATION_BYTES = 2 * 1024 * 1024
@@ -64,6 +65,7 @@ class MindSpeedTileXRBuffer(TileXRBuffer):
         self._tilexr_remote_prefetches = 0
         self._plan_owner_token = object()
         self._dispatch_generation = 0
+        self._finite_check_sequence = 0
         self._ctx = self._require_ctx()
         if os.environ.get("TILEXR_MINDSPEED_TRACE", "0") == "1":
             print(
@@ -143,8 +145,33 @@ class MindSpeedTileXRBuffer(TileXRBuffer):
             path,
         )
 
+    def _require_finite(self, stage, plan=None, **tensors):
+        if os.environ.get("TILEXR_MINDSPEED_FINITE_CHECK", "0") != "1":
+            return
+        self._finite_check_sequence += 1
+        epoch = "none" if plan is None else str(plan._require_native().epoch)
+        for name, tensor in tensors.items():
+            if tensor is None:
+                continue
+            checksum = tensor.sum(dtype=self._torch.float32)
+            if bool(self._torch.isfinite(checksum).item()):
+                continue
+            print(
+                "TILEXR_MINDSPEED_FIRST_NONFINITE "
+                f"rank={self._context.planner_group_rank} "
+                f"sequence={self._finite_check_sequence} stage={stage} "
+                f"epoch={epoch} tensor={name} checksum={float(checksum.item())} "
+                f"shape={tuple(tensor.shape)} dtype={tensor.dtype}",
+                flush=True,
+            )
+            raise RuntimeError(
+                f"TileXR MindSpeed detected a non-finite checksum at {stage}.{name}"
+            )
+
     def dispatch(self, *args, hidden_buffer=None, **kwargs):
         self._optional_stage_barrier()
+        hidden_input = args[0] if args else kwargs.get("hidden_sh")
+        self._require_finite("dispatch.input", kwargs.get("plan"), hidden=hidden_input)
         async_finish = bool(kwargs.pop("async_finish", False))
         zero_copy = bool(kwargs.pop("zero_copy", False))
         result = super().dispatch(
@@ -154,6 +181,9 @@ class MindSpeedTileXRBuffer(TileXRBuffer):
             **kwargs,
         )
         hidden, route_weights, cu_seqlens, plan = result
+        self._require_finite(
+            "dispatch.output", plan, hidden=hidden, route_weights=route_weights
+        )
         if os.environ.get("TILEXR_MINDSPEED_TRACE", "0") == "1":
             native_plan = plan._require_native()
             print(
@@ -212,6 +242,18 @@ class MindSpeedTileXRBuffer(TileXRBuffer):
 
     def combine(self, *args, hidden_buffer=None, **kwargs):
         self._optional_stage_barrier()
+        plan = kwargs.get("plan") if kwargs.get("plan") is not None else (
+            args[0] if args else None
+        )
+        hidden_input = kwargs.get("hidden_nvsh")
+        route_input = kwargs.get("route_weights_nvs")
+        if hidden_input is None and len(args) > 1:
+            hidden_input = args[1]
+        if route_input is None and len(args) > 2:
+            route_input = args[2]
+        self._require_finite(
+            "combine.input", plan, hidden=hidden_input, route_weights=route_input
+        )
         zero_copy = bool(kwargs.pop("zero_copy", False))
         if hidden_buffer is not None:
             self._validate_boundary(hidden_buffer)
@@ -240,6 +282,12 @@ class MindSpeedTileXRBuffer(TileXRBuffer):
                 )
         try:
             result = super().combine(*args, zero_copy=False, **kwargs)
+            self._require_finite(
+                "combine.output",
+                plan,
+                hidden=result[0],
+                route_weights=result[1],
+            )
             if os.environ.get("TILEXR_MINDSPEED_TRACE", "0") == "1":
                 try:
                     self._native_buffer.synchronize()
@@ -277,6 +325,11 @@ class MindSpeedTileXRBuffer(TileXRBuffer):
                 local_fc1,
                 dummy,
                 local_fc2,
+                registration_backing_factory=lambda required_bytes, dtype: (
+                    self._context.promote_projection_arena(
+                        self._torch, dtype, required_bytes
+                    )
+                ),
                 torch_module=self._torch,
             )
             self._native_buffer.register_projection_buffers(projections)
@@ -303,6 +356,9 @@ class MindSpeedTileXRBuffer(TileXRBuffer):
         del local_slots, source_vas
         full_fc1, full_fc2 = full_weights
         local_fc1, local_fc2 = local_experts
+        self._require_finite(
+            "prefetch.input", plan, local_fc1=local_fc1, local_fc2=local_fc2
+        )
         projections = self._ensure_packed_projections(local_fc1, local_fc2)
         native_plan = plan._require_native()
         trace = os.environ.get("TILEXR_MINDSPEED_TRACE", "0") == "1"
@@ -344,6 +400,9 @@ class MindSpeedTileXRBuffer(TileXRBuffer):
             full_fc2[self.E + slot].copy_(projections.down[local + slot])
             if expert // local != rank:
                 active_remote += 1
+        self._require_finite(
+            "prefetch.output", plan, full_fc1=full_fc1, full_fc2=full_fc2
+        )
         self._tilexr_remote_prefetches += active_remote
         if os.environ.get("TILEXR_MINDSPEED_TRACE", "0") == "1":
             print(
@@ -354,14 +413,7 @@ class MindSpeedTileXRBuffer(TileXRBuffer):
         return self._record_event() if async_finish else None
 
     def _optional_stage_barrier(self):
-        if os.environ.get("TILEXR_MINDSPEED_STAGE_BARRIER", "0") != "1":
-            return
-        distributed = self._torch.distributed
-        if not distributed.is_available() or not distributed.is_initialized():
-            raise RuntimeError(
-                "TileXR stage barrier requires an initialized process group"
-            )
-        distributed.barrier()
+        optional_stage_barrier(self._torch)
 
     def _ensure_reduce_dummy(self, full_fc1, reduce_fc1):
         dummy_width = 16
@@ -407,6 +459,14 @@ class MindSpeedTileXRBuffer(TileXRBuffer):
         full_fc1, full_fc2 = full_grads
         reduce_fc1, reduce_fc2 = reduce_buffers
         local_fc1, local_fc2 = local_grads
+        self._require_finite(
+            "reduce_grad.input",
+            plan,
+            full_fc1=full_fc1,
+            full_fc2=full_fc2,
+            reduce_fc1=reduce_fc1,
+            reduce_fc2=reduce_fc2,
+        )
         dummy, dummy_reduce = self._ensure_reduce_dummy(full_fc1, reduce_fc1)
         trace = os.environ.get("TILEXR_MINDSPEED_TRACE", "0") == "1"
         native_plan = plan._require_native()
@@ -445,6 +505,14 @@ class MindSpeedTileXRBuffer(TileXRBuffer):
         begin = self._context.planner_group_rank * local
         local_fc1.copy_(full_fc1.narrow(0, begin, local))
         local_fc2.copy_(full_fc2.narrow(0, begin, local))
+        self._require_finite(
+            "reduce_grad.output",
+            plan,
+            full_fc1=full_fc1,
+            full_fc2=full_fc2,
+            local_fc1=local_fc1,
+            local_fc2=local_fc2,
+        )
         if os.environ.get("TILEXR_MINDSPEED_TRACE", "0") == "1":
             print(
                 f"[TileXR MindSpeed rank {self._context.planner_group_rank}] "

@@ -592,7 +592,14 @@ class TileXRMoonEPRuntime:
             return None
         if pointer <= 0 or size <= 0:
             raise ValueError("UDMA registration requires a valid pointer and positive size")
-        if self._active_udma_pointer == pointer and self._active_udma_bytes == size:
+        active_end = self._active_udma_pointer + self._active_udma_bytes
+        requested_end = pointer + size
+        if (
+            self._active_udma_pointer > 0
+            and pointer >= self._active_udma_pointer
+            and requested_end >= pointer
+            and requested_end <= active_end
+        ):
             self._active_udma_owner = owner
             return self._active_udma_handle
         handle = ctypes.c_uint32()
