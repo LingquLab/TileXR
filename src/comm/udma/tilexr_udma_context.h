@@ -15,6 +15,7 @@
 #include "tilexr_api.h"
 #include "tilexr_types.h"
 #include "tilexr_udma_reg.h"
+#include "tilexr_udma_fullmesh.h"
 #include "udma/tilexr_udma_config.h"
 
 namespace TileXR {
@@ -25,8 +26,11 @@ class TileXRUDMATransport;
 struct TileXRUDMACommArgsState {
     bool available = false;
     bool sharedQp = false;
+    bool fullmeshAvailable = false;
     GM_ADDR infoDev = nullptr;
     GM_ADDR registryDev = nullptr;
+    GM_ADDR fullmeshViewDev = nullptr;
+    uint64_t registrationGeneration = 0U;
 };
 
 using TileXRUDMACommArgsUpdateFn = int (*)(const TileXRUDMACommArgsState& state, void* userData);
@@ -66,6 +70,7 @@ public:
     GM_ADDR GetRegistryDev() const;
     const TileXRUDMARegistry* GetRegistryHost() const;
     uint32_t GetQpCount() const;
+    int QueryFullmesh(TileXRUDMAFullmeshHostView* view) const;
 
 private:
     struct ProfileRecord;
@@ -81,10 +86,13 @@ private:
     int LoadAndAgreeQpConfig(UDMAQpConfig& config) const;
     int AgreeStatus(int localStatus) const;
     int FreeDeviceRegistry(GM_ADDR& registryDev) const;
+    int FreeDeviceFullmeshView(GM_ADDR& viewDev) const;
     int CleanupRetiredRegistries();
+    int CleanupRetiredFullmeshViews();
     int CleanupAllRegistries();
     int CleanupAllProfiles();
     void RetainRegistry(GM_ADDR& registryDev);
+    void RetainFullmeshView(GM_ADDR& viewDev);
     void EnterCleanupPending(const char* reason);
     TileXRUDMAProfileHandle NextProfileHandle() const;
 
@@ -93,9 +101,13 @@ private:
     GM_ADDR udmaInfoDev_ = nullptr;
     GM_ADDR udmaRegistryDev_ = nullptr;
     std::vector<GM_ADDR> retiredRegistryDevs_;
+    GM_ADDR fullmeshViewDev_ = nullptr;
+    std::vector<GM_ADDR> retiredFullmeshViewDevs_;
     GM_ADDR registeredPtr_ = nullptr;
     size_t registeredBytes_ = 0;
     TileXRUDMARegistry registry_ {};
+    TileXRUDMAFullmeshHostView fullmeshView_ {};
+    uint64_t registrationGeneration_ = 0U;
     std::map<TileXRUDMAProfileHandle, std::unique_ptr<ProfileRecord>> profiles_;
     TileXRUDMAProfileHandle nextProfileHandle_ = 1;
     std::unique_ptr<TileXRUDMATransport> transport_;

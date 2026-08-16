@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-readonly REFRESH_MS=5000
-readonly PROBE_TIMEOUT=4.5
+readonly REFRESH_MS="${TILEXR_NPU_WATCH_REFRESH_MS:-5000}"
+readonly PROBE_TIMEOUT="${TILEXR_NPU_WATCH_PROBE_TIMEOUT:-4.5}"
 readonly HOSTS_PER_CABINET=8
 readonly NPUS_PER_CABINET=64
 readonly SSH_USER="${TILEXR_NPU_WATCH_SSH_USER:-root}"
@@ -82,6 +82,8 @@ for command_name in ssh timeout npu-smi; do
     command -v "${command_name}" >/dev/null 2>&1 ||
         die "required command not found: ${command_name}"
 done
+[[ ${REFRESH_MS} =~ ^[1-9][0-9]*$ ]] || die "refresh interval must be positive milliseconds"
+[[ ${PROBE_TIMEOUT} =~ ^[0-9]+([.][0-9]+)?$ ]] || die "probe timeout must be positive seconds"
 load_hosts
 
 runtime_dir=$(mktemp -d "${TMPDIR:-/tmp}/tilexr-npu-watch.XXXXXX") || exit 1

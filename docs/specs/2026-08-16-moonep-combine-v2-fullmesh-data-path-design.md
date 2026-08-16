@@ -3,9 +3,9 @@
 ## 状态
 
 - 日期：2026-08-16
-- 状态：设计已确认，尚未实现
+- 状态：实现完成，编译与 CPU/source 验证待最终重跑，Ascend950 硬件待验证
 - 范围：通信 runtime、Combine V2 Host/Kernel、诊断与验证
-- 本文不包含代码修改或性能结论。
+- 本文不包含性能结论；硬件门禁未执行前不得声明 Fullmesh 数据面可用。
 
 本文补充现有 Combine V2 ring、full-grant 和 full-sync 设计。若本文与
 `2026-08-14-moonep-combine-v2-full-sync-design.md` 中“full-sync WQE 不产生 CQ”
@@ -404,17 +404,23 @@ PrefetchWeight、ReduceGrad 的 active QP map 和 32-binding profile ABI不变�
 服务器部署使用 mutagen `one-way-safe` 同步；测试通过脚本经 SSH 执行，并保存源码、二进制、
 RootInfo、CANN/驱动、rank/device 映射、QP/EID trace 和完整日志 provenance。
 
-## 15. 完成标准
+## 15. 完成标准与验证边界
 
-实现只有同时满足以下条件才可接受：
+代码实现和非硬件验证必须满足：
 
 - 现有 32 shared CLOS QP 的 API、编号和其他算子行为不变；
-- 每卡建立 7 个有效 Fullmesh direct QP，Self slot 不建立；
+- 逻辑布局保留 8 个 Fullmesh slot，每卡创建 `localRankSize - 1` 个 direct QP；标准
+  8 卡服务器目标为 7 个，Self slot 不建立；
 - 同服务器 payload/done 只走 Fullmesh，跨服务器 payload/done 只走 CLOS；
 - Fullmesh CQ 成功前不存在 grant publication；
 - 所有远端 grant 走 CLOS，且 grant-only CQ 无遗留；
 - Fullmesh 不可用或未注册时 Combine Host 明确失败，不发生 CLOS fallback；
 - full-sync、data 和 deferred grant 各自完成 SQ/CQ 回收；
+
+以下项目属于后续 Ascend950 硬件 release gate，本次仅 review、CPU/source 测试和编译，
+不声明已经满足：
+
+- 标准 8 卡服务器实际建立并互连每卡 7 个 Fullmesh direct QP，Self slot 不建立；
 - 8P、16P 和至少一个 32P 以上多机规模 exact correctness 通过；
 - 连续多轮后所有访问过的队列 `head == tail`，无 stale done/grant；
 - 性能结论只基于实际 Ascend950 Fullmesh/CLOS 硬件数据。

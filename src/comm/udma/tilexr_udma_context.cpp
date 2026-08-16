@@ -65,6 +65,7 @@ int TileXRUDMAContext::Init(const TileXRUDMAContextOptions& options)
     transportOptions.localRankSize = options_.localRankSize;
     transportOptions.devId = options_.devId;
     transportOptions.nonPinRegistration = options_.nonPinRegistration;
+    transportOptions.enableFullmeshDomain = options_.sharedQpDomain;
     transportOptions.exchange = options_.exchange;
     transportOptions.qpConfig = qpConfig;
     int ret = transport_->Init(transportOptions);
@@ -107,15 +108,24 @@ void TileXRUDMAContext::Shutdown()
         memoryCleanupRet = transport_->CleanupAllMemory();
     }
     const int registryCleanupRet = CleanupAllRegistries();
+    const int fullmeshViewCleanupRet = FreeDeviceFullmeshView(fullmeshViewDev_);
+    const int retiredFullmeshCleanupRet = CleanupRetiredFullmeshViews();
     if (profileCleanupRet != TILEXR_SUCCESS || memoryCleanupRet != TILEXR_SUCCESS ||
         registryCleanupRet != TILEXR_SUCCESS ||
+        fullmeshViewCleanupRet != TILEXR_SUCCESS ||
+        retiredFullmeshCleanupRet != TILEXR_SUCCESS ||
         (transport_ != nullptr && transport_->HasMemoryCleanupPending()) ||
         (transport_ != nullptr && transport_->HasProfileCleanupPending()) ||
-        udmaRegistryDev_ != nullptr || !retiredRegistryDevs_.empty() || !profiles_.empty()) {
+        udmaRegistryDev_ != nullptr || !retiredRegistryDevs_.empty() ||
+        fullmeshViewDev_ != nullptr || !retiredFullmeshViewDevs_.empty() ||
+        !profiles_.empty()) {
         TILEXR_LOG(ERROR) << "TileXR UDMA shutdown retains memory cleanup state"
                           << ", profile ret " << profileCleanupRet
                           << ", transport ret " << memoryCleanupRet
                           << ", registry ret " << registryCleanupRet
+                          << ", Fullmesh view ret " << fullmeshViewCleanupRet
+                          << ", retired Fullmesh view ret "
+                          << retiredFullmeshCleanupRet
                           << ", registry ptr " << reinterpret_cast<uintptr_t>(udmaRegistryDev_)
                           << ", retired registries " << retiredRegistryDevs_.size();
     }
@@ -126,10 +136,14 @@ void TileXRUDMAContext::Shutdown()
     }
 
     retiredRegistryDevs_.clear();
+    retiredFullmeshViewDevs_.clear();
     profiles_.clear();
     nextProfileHandle_ = 1;
     udmaRegistryDev_ = nullptr;
+    fullmeshViewDev_ = nullptr;
     registry_ = TileXRUDMARegistry {};
+    fullmeshView_ = TileXRUDMAFullmeshHostView {};
+    registrationGeneration_ = 0U;
     registeredPtr_ = nullptr;
     registeredBytes_ = 0;
     udmaInfoDev_ = nullptr;
@@ -149,6 +163,13 @@ TileXRUDMACommArgsState TileXRUDMAContext::GetCommArgsState() const
     state.sharedQp = state.available && transport_->UsesSharedQps();
     state.infoDev = state.available ? udmaInfoDev_ : nullptr;
     state.registryDev = state.available && lifecycle_ == Lifecycle::MemoryReady ? udmaRegistryDev_ : nullptr;
+    state.fullmeshAvailable = state.available &&
+        lifecycle_ == Lifecycle::MemoryReady &&
+        fullmeshViewDev_ != nullptr && fullmeshView_.registrationReady != 0U;
+    state.fullmeshViewDev = state.fullmeshAvailable ? fullmeshViewDev_ : nullptr;
+    state.registrationGeneration = state.available &&
+            lifecycle_ == Lifecycle::MemoryReady ?
+        registrationGeneration_ : 0U;
     return state;
 }
 
@@ -199,6 +220,34 @@ int TileXRUDMAContext::RegisterMemory(GM_ADDR localPtr, size_t bytes, TileXRUDMA
             EnterCleanupPending("candidate rollback failed after region exchange");
         }
         return ret;
+    }
+
+    const uint64_t candidateGeneration =
+        registrationGeneration_ == std::numeric_limits<uint64_t>::max() ?
+        1U : registrationGeneration_ + 1U;
+    std::vector<uint64_t> allGenerations(options_.rankSize);
+    ret = options_.exchange->AllGather(
+        &candidateGeneration, 1, allGenerations.data());
+    if (ret != TILEXR_SUCCESS) {
+        const int cleanupRet = transport_->AbortPreparedMemory();
+        if (cleanupRet != TILEXR_SUCCESS ||
+            transport_->HasMemoryCleanupPending()) {
+            EnterCleanupPending(
+                "candidate rollback failed after generation exchange");
+        }
+        return ret;
+    }
+    if (std::any_of(allGenerations.begin(), allGenerations.end(),
+            [candidateGeneration](uint64_t generation) {
+                return generation != candidateGeneration;
+            })) {
+        const int cleanupRet = transport_->AbortPreparedMemory();
+        if (cleanupRet != TILEXR_SUCCESS ||
+            transport_->HasMemoryCleanupPending()) {
+            EnterCleanupPending(
+                "candidate rollback failed after generation mismatch");
+        }
+        return TILEXR_ERROR_INTERNAL;
     }
 
     TileXRUDMARegistry nextRegistry {};
@@ -255,11 +304,93 @@ int TileXRUDMAContext::RegisterMemory(GM_ADDR localPtr, size_t bytes, TileXRUDMA
         return agreedCandidateStatus;
     }
 
+    GM_ADDR nextFullmeshViewDev = nullptr;
+    TileXRUDMAFullmeshHostView nextFullmeshView {};
+    bool publishFullmesh = transport_->PreparedFullmeshReady() &&
+        transport_->HasFullmeshDomain();
+    int fullmeshCandidateStatus = TILEXR_SUCCESS;
+    if (publishFullmesh) {
+        const uint32_t localRank = static_cast<uint32_t>(
+            options_.rank % options_.localRankSize);
+        const uint32_t validPeerMask =
+            transport_->GetFullmeshValidPeerMask();
+        TileXRUDMAFullmeshDeviceView deviceView {};
+        deviceView.connectedCount = static_cast<uint32_t>(
+            __builtin_popcount(validPeerMask));
+        deviceView.localRank = localRank;
+        deviceView.validPeerMask = validPeerMask;
+        deviceView.registrationReady = 1U;
+        deviceView.registrationGeneration = candidateGeneration;
+        deviceView.infoPtr = reinterpret_cast<uint64_t>(
+            transport_->GetPreparedFullmeshInfoDev());
+        if (deviceView.infoPtr == 0U || options_.localRankSize <= 1 ||
+            validPeerMask != UDMAFullmeshExpectedPeerMask(localRank,
+                static_cast<uint32_t>(options_.localRankSize)) ||
+            deviceView.connectedCount + 1U !=
+                static_cast<uint32_t>(options_.localRankSize)) {
+            fullmeshCandidateStatus = TILEXR_ERROR_NOT_INITIALIZED;
+        }
+        if (fullmeshCandidateStatus == TILEXR_SUCCESS) {
+            const aclError allocRet = aclrtMalloc(
+                reinterpret_cast<void**>(&nextFullmeshViewDev),
+                sizeof(deviceView), ACL_MEM_MALLOC_HUGE_FIRST);
+            if (allocRet != ACL_SUCCESS) {
+                fullmeshCandidateStatus = TILEXR_ERROR_INTERNAL;
+            }
+        }
+        if (fullmeshCandidateStatus == TILEXR_SUCCESS) {
+            const aclError copyRet = aclrtMemcpy(nextFullmeshViewDev,
+                sizeof(deviceView), &deviceView, sizeof(deviceView),
+                ACL_MEMCPY_HOST_TO_DEVICE);
+            if (copyRet != ACL_SUCCESS) {
+                fullmeshCandidateStatus = TILEXR_ERROR_INTERNAL;
+            }
+        }
+        if (fullmeshCandidateStatus == TILEXR_SUCCESS) {
+            nextFullmeshView.version = TILEXR_UDMA_FULLMESH_VERSION;
+            nextFullmeshView.slotCount = TILEXR_UDMA_FULLMESH_SLOT_COUNT;
+            nextFullmeshView.connectedCount = deviceView.connectedCount;
+            nextFullmeshView.localRank = localRank;
+            nextFullmeshView.validPeerMask = validPeerMask;
+            nextFullmeshView.registrationReady = 1U;
+            nextFullmeshView.registrationGeneration = candidateGeneration;
+            nextFullmeshView.infoDev = reinterpret_cast<GM_ADDR>(
+                deviceView.infoPtr);
+            nextFullmeshView.viewDev = nextFullmeshViewDev;
+        }
+    }
+    const int agreedFullmeshStatus = AgreeStatus(fullmeshCandidateStatus);
+    if (agreedFullmeshStatus != TILEXR_SUCCESS) {
+        publishFullmesh = false;
+        nextFullmeshView = TileXRUDMAFullmeshHostView {};
+        const int viewCleanupRet = FreeDeviceFullmeshView(
+            nextFullmeshViewDev);
+        if (viewCleanupRet != TILEXR_SUCCESS) {
+            RetainFullmeshView(nextFullmeshViewDev);
+            const int cleanupRet = transport_->AbortPreparedMemory();
+            const int registryRet = FreeDeviceRegistry(nextRegistryDev);
+            if (registryRet != TILEXR_SUCCESS) {
+                RetainRegistry(nextRegistryDev);
+            }
+            (void)cleanupRet;
+            EnterCleanupPending(
+                "Fullmesh candidate view cleanup did not complete");
+            return viewCleanupRet;
+        }
+        TILEXR_LOG(WARN) << "TileXR Fullmesh view unavailable for registration generation "
+                         << candidateGeneration << ": "
+                         << agreedFullmeshStatus;
+    }
+
     TileXRUDMACommArgsState nextState {};
     nextState.available = true;
     nextState.sharedQp = transport_->UsesSharedQps();
     nextState.infoDev = transport_->GetPreparedUDMAInfoDev();
     nextState.registryDev = nextRegistryDev;
+    nextState.fullmeshAvailable = publishFullmesh;
+    nextState.fullmeshViewDev = publishFullmesh ?
+        nextFullmeshViewDev : nullptr;
+    nextState.registrationGeneration = candidateGeneration;
     const int localPublishStatus = nextState.infoDev == nullptr
         ? TILEXR_ERROR_NOT_INITIALIZED : ApplyCommArgsState(nextState);
     const int publishStatus = AgreeStatus(localPublishStatus);
@@ -280,9 +411,19 @@ int TileXRUDMAContext::RegisterMemory(GM_ADDR localPtr, size_t bytes, TileXRUDMA
         if (cleanupRet == TILEXR_SUCCESS && registryRet != TILEXR_SUCCESS) {
             cleanupRet = registryRet;
         }
+        const int fullmeshViewRet = FreeDeviceFullmeshView(
+            nextFullmeshViewDev);
+        if (fullmeshViewRet != TILEXR_SUCCESS) {
+            RetainFullmeshView(nextFullmeshViewDev);
+        }
+        if (cleanupRet == TILEXR_SUCCESS &&
+            fullmeshViewRet != TILEXR_SUCCESS) {
+            cleanupRet = fullmeshViewRet;
+        }
         const int agreedCleanupStatus = AgreeStatus(cleanupRet);
         if (agreedCleanupStatus != TILEXR_SUCCESS || transport_->HasMemoryCleanupPending() ||
-            !retiredRegistryDevs_.empty()) {
+            !retiredRegistryDevs_.empty() ||
+            !retiredFullmeshViewDevs_.empty()) {
             EnterCleanupPending("candidate rollback failed after comm args restoration");
         }
         return publishStatus;
@@ -293,6 +434,7 @@ int TileXRUDMAContext::RegisterMemory(GM_ADDR localPtr, size_t bytes, TileXRUDMA
     const int commitStatus = AgreeStatus(localCommitStatus);
     if (commitStatus != TILEXR_SUCCESS) {
         RetainRegistry(nextRegistryDev);
+        RetainFullmeshView(nextFullmeshViewDev);
         EnterCleanupPending("candidate publication could not commit transport ownership");
         return commitStatus;
     }
@@ -301,8 +443,16 @@ int TileXRUDMAContext::RegisterMemory(GM_ADDR localPtr, size_t bytes, TileXRUDMA
     udmaRegistryDev_ = nextRegistryDev;
     nextRegistryDev = nullptr;
     RetainRegistry(previousRegistryDev);
+    GM_ADDR previousFullmeshViewDev = fullmeshViewDev_;
+    fullmeshViewDev_ = nextFullmeshViewDev;
+    nextFullmeshViewDev = nullptr;
+    RetainFullmeshView(previousFullmeshViewDev);
     udmaInfoDev_ = nextInfoDev;
     registry_ = nextRegistry;
+    fullmeshView_ = publishFullmesh ? nextFullmeshView :
+        TileXRUDMAFullmeshHostView {};
+    fullmeshView_.viewDev = fullmeshViewDev_;
+    registrationGeneration_ = candidateGeneration;
     registeredPtr_ = localPtr;
     registeredBytes_ = bytes;
     lifecycle_ = Lifecycle::MemoryReady;
@@ -313,9 +463,15 @@ int TileXRUDMAContext::RegisterMemory(GM_ADDR localPtr, size_t bytes, TileXRUDMA
     if (cleanupRet == TILEXR_SUCCESS && registryCleanupRet != TILEXR_SUCCESS) {
         cleanupRet = registryCleanupRet;
     }
+    const int fullmeshCleanupRet = CleanupRetiredFullmeshViews();
+    if (cleanupRet == TILEXR_SUCCESS &&
+        fullmeshCleanupRet != TILEXR_SUCCESS) {
+        cleanupRet = fullmeshCleanupRet;
+    }
     const int agreedCleanupStatus = AgreeStatus(cleanupRet);
     if (agreedCleanupStatus != TILEXR_SUCCESS || transport_->HasMemoryCleanupPending() ||
-        !retiredRegistryDevs_.empty()) {
+        !retiredRegistryDevs_.empty() ||
+        !retiredFullmeshViewDevs_.empty()) {
         EnterCleanupPending("replaced registration cleanup did not complete on every rank");
         return agreedCleanupStatus == TILEXR_SUCCESS ? TILEXR_ERROR_INTERNAL : agreedCleanupStatus;
     }
@@ -351,8 +507,18 @@ int TileXRUDMAContext::UnregisterMemory(TileXRUDMAMemHandle handle)
     if (ret == TILEXR_SUCCESS && registryRet != TILEXR_SUCCESS) {
         ret = registryRet;
     }
+    const int fullmeshViewRet = FreeDeviceFullmeshView(fullmeshViewDev_);
+    if (ret == TILEXR_SUCCESS && fullmeshViewRet != TILEXR_SUCCESS) {
+        ret = fullmeshViewRet;
+    }
+    const int retiredFullmeshViewRet = CleanupRetiredFullmeshViews();
+    if (ret == TILEXR_SUCCESS &&
+        retiredFullmeshViewRet != TILEXR_SUCCESS) {
+        ret = retiredFullmeshViewRet;
+    }
     if (ret == TILEXR_SUCCESS && (transport_->HasMemoryCleanupPending() ||
-        udmaRegistryDev_ != nullptr || !retiredRegistryDevs_.empty())) {
+        udmaRegistryDev_ != nullptr || !retiredRegistryDevs_.empty() ||
+        fullmeshViewDev_ != nullptr || !retiredFullmeshViewDevs_.empty())) {
         ret = TILEXR_ERROR_INTERNAL;
     }
     if (ret != TILEXR_SUCCESS) {
@@ -363,6 +529,7 @@ int TileXRUDMAContext::UnregisterMemory(TileXRUDMAMemHandle handle)
     registeredPtr_ = nullptr;
     registeredBytes_ = 0;
     registry_ = TileXRUDMARegistry {};
+    fullmeshView_ = TileXRUDMAFullmeshHostView {};
     lifecycle_ = Lifecycle::TransportReady;
     return TILEXR_SUCCESS;
 }
@@ -593,6 +760,25 @@ uint32_t TileXRUDMAContext::GetQpCount() const
     return IsAvailable() ? transport_->GetQpCount() : 0U;
 }
 
+int TileXRUDMAContext::QueryFullmesh(
+    TileXRUDMAFullmeshHostView* view) const
+{
+    if (view == nullptr) {
+        return TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    *view = TileXRUDMAFullmeshHostView {};
+    if (!IsAvailable() || lifecycle_ != Lifecycle::MemoryReady ||
+        transport_ == nullptr || !transport_->HasFullmeshDomain() ||
+        !UDMAFullmeshHostViewValid(fullmeshView_,
+            static_cast<uint32_t>(options_.rank % options_.localRankSize),
+            static_cast<uint32_t>(options_.localRankSize),
+            registrationGeneration_)) {
+        return TILEXR_ERROR_NOT_SUPPORT;
+    }
+    *view = fullmeshView_;
+    return TILEXR_SUCCESS;
+}
+
 int TileXRUDMAContext::ApplyCommArgsState(const TileXRUDMACommArgsState& state) const
 {
     if (options_.updateCommArgs == nullptr) {
@@ -685,6 +871,22 @@ int TileXRUDMAContext::FreeDeviceRegistry(GM_ADDR& registryDev) const
     return TILEXR_SUCCESS;
 }
 
+int TileXRUDMAContext::FreeDeviceFullmeshView(GM_ADDR& viewDev) const
+{
+    if (viewDev == nullptr) {
+        return TILEXR_SUCCESS;
+    }
+    const aclError ret = aclrtFree(viewDev);
+    if (ret != ACL_SUCCESS) {
+        TILEXR_LOG(ERROR) << "Free UDMA Fullmesh view failed: " << ret
+                          << ", ptr "
+                          << reinterpret_cast<uintptr_t>(viewDev);
+        return TILEXR_ERROR_INTERNAL;
+    }
+    viewDev = nullptr;
+    return TILEXR_SUCCESS;
+}
+
 int TileXRUDMAContext::CleanupRetiredRegistries()
 {
     int firstError = TILEXR_SUCCESS;
@@ -695,6 +897,24 @@ int TileXRUDMAContext::CleanupRetiredRegistries()
         }
         if (*it == nullptr) {
             it = retiredRegistryDevs_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    return firstError;
+}
+
+int TileXRUDMAContext::CleanupRetiredFullmeshViews()
+{
+    int firstError = TILEXR_SUCCESS;
+    for (auto it = retiredFullmeshViewDevs_.begin();
+        it != retiredFullmeshViewDevs_.end();) {
+        const int ret = FreeDeviceFullmeshView(*it);
+        if (firstError == TILEXR_SUCCESS && ret != TILEXR_SUCCESS) {
+            firstError = ret;
+        }
+        if (*it == nullptr) {
+            it = retiredFullmeshViewDevs_.erase(it);
         } else {
             ++it;
         }
@@ -764,6 +984,19 @@ void TileXRUDMAContext::RetainRegistry(GM_ADDR& registryDev)
         retiredRegistryDevs_.push_back(registryDev);
     }
     registryDev = nullptr;
+}
+
+void TileXRUDMAContext::RetainFullmeshView(GM_ADDR& viewDev)
+{
+    if (viewDev == nullptr) {
+        return;
+    }
+    if (std::find(retiredFullmeshViewDevs_.begin(),
+            retiredFullmeshViewDevs_.end(), viewDev) ==
+        retiredFullmeshViewDevs_.end()) {
+        retiredFullmeshViewDevs_.push_back(viewDev);
+    }
+    viewDev = nullptr;
 }
 
 void TileXRUDMAContext::EnterCleanupPending(const char* reason)

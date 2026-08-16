@@ -30,14 +30,32 @@ bash "${REMOTE_ROOT}/source/tools/moonep/run_combine_v2_perf_multihost.sh" \
   --bs 8192 --warmup 0 --iterations 80 \
   --experts 256 --hidden-size 3584 \
   --comm-domain 141 --comm-id "${PRIMARY_HOST}:10067" \
-  --wait-seconds 120 --retry-seconds 15 --timeout 600 \
+  --timeout 600 \
   --log-file "${LOG_FILE}" \
   --profile
 ```
 
 profiling 会扰动耗时，只用于阶段归因；宏观性能以关闭 profiling 的测试为准。
-正确性失败不应阻止 `COMBINE_V2_SAMPLE`、`COMBINE_V2_PROFILE` 和 rank 性能记录
-输出。
+计时阶段连续提交全部轮次，轮次之间不执行 Host barrier、同步或 profile D2H。
+全部轮次结束后只拷回最后一轮 profile。正确性失败不应阻止最后一轮
+`COMBINE_V2_SAMPLE`、`COMBINE_V2_PROFILE` 和 rank 性能记录输出。
+
+Profile v5 在原有 26 个累计阶段时间点和 8 个 metric 之外，使用 record 的诊断槽记录
+Fullmesh 路由与五个绝对 cycle 边界：
+
+```text
+FM_WQE_BUILD_END
+< FM_SUBMIT_END
+< FM_CQ_SUCCESS
+< CLOS_GRANT_SUBMIT
+< CLOS_GRANT_CQ_SUCCESS
+```
+
+`COMBINE_V2_PROFILE` 同步输出 `transport`、`fm_step`、`fm_peer`、
+`fm_successor`、`fm_logical_qp` 和上述五个边界。非 Fullmesh Core 的 route 为 `-1`、
+边界为 `0`。当 successor 是本卡时，`CLOS_GRANT_CQ_SUCCESS` 表示两个本地 grant 已发布
+并完成 cache clean；此时没有 CLOS WQE/CQE。trace event 的 `grant_transport=local` 用于
+区分该语义。
 
 ## 2. 生成三个 JSON
 
@@ -69,7 +87,9 @@ reduce 测试把 `--prefix` 改为 `combine_v2_reduce`，并传
 
 ## 3. 选卡与轨道口径
 
-- 选卡只看最后一轮，即 `iteration=79` 的 ACL Event 耗时。
+- 选卡只看最后一轮，即 `iteration=79` 的 kernel profile 耗时。
+- 每张卡的选卡耗时取 16 个 active Core 中最大的 `t25 - t0`，即最慢 Core 的完整
+  kernel 时长；日志标记为 `timing_source=kernel_profile`。
 - fastest 是最小耗时 rank，slowest 是最大耗时 rank。
 - P50 是 128 个 rank 按耗时升序排列后的第 64 张卡，不是耗时数值的插值中位数。
 - 相同耗时按 rank 编号排序，保证结果可重复。
@@ -82,8 +102,8 @@ reduce 测试把 `--prefix` 改为 `combine_v2_reduce`，并传
 
 ## 4. 导出前检查
 
-128P、80 轮的日志应包含 10240 条 `COMBINE_V2_SAMPLE`、128 条
-`COMBINE_V2_RANK_PERF`，以及最后一轮每个 rank 的 16 条
+128P、80 轮的 profiling 日志应包含 128 条最后一轮 `COMBINE_V2_SAMPLE`、128 条
+`COMBINE_V2_RANK_PERF`，以及 `128 * 16 = 2048` 条最后一轮
 `COMBINE_V2_PROFILE`。导出工具还要求存在与 `BS/K/H/ExpNum/reduce` 一致的
 `COMBINE_V2_PERF` provenance 记录；参数不一致、时间戳非正、时间戳非单调或所选
 rank 缺少任一 active Core 时会拒绝生成 JSON。
@@ -91,3 +111,15 @@ rank 缺少任一 active Core 时会拒绝生成 JSON。
 生成后终端应恰好输出三条 `COMBINE_V2_EDGE_TRACE`，并分别标记
 `role=fastest`、`role=p50` 和 `role=slowest`。这三个 JSON 是 profiling 分析产物；
 等效算法带宽仍直接从关闭 profiling 的 `COMBINE_V2_PERF` 输出读取。
+
+## 5. Fullmesh 实现约束
+
+- 普通 workspace registration 同时发布 CLOS registry 与 Fullmesh generation；profile
+  registration 仍只绑定 32 个 CLOS QP，不能扩展或替换普通 Fullmesh 注册。
+- 一个 direct route 必须匹配唯一单端口 topology edge 和唯一 local EID。歧义 route
+  会导致对端 slot/import 关系不可证明，必须在 capability 发布前失败。
+- 2P-8P 的数据 step 可能全部走 Fullmesh，因此 full-sync 必须自行产生并消费 CLOS CQ；
+  不得依赖后续数据 CQ 回收 full-sync SQ。
+
+以上约束由 source/compile 测试覆盖，但不能替代 Ascend950 上对实际 EID、CQ 状态、数据
+正确性和时序的验证。

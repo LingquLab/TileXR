@@ -13,14 +13,10 @@ EXPERTS=64
 HIDDEN_SIZE=3584
 COMM_DOMAIN=141
 COMM_ID=""
-WAIT_SECONDS=120
-RETRY_SECONDS=15
 TIMEOUT_SECONDS=600
 LOG_FILE=""
-SKIP_ITERATION_BARRIERS=0
 PROFILE=0
 REDUCE_HIDDEN=0
-SKIP_NPU_PREFLIGHT=0
 
 usage() {
     cat <<'EOF'
@@ -37,15 +33,12 @@ Options:
   --comm-id IP:PORT      Bootstrap address (default: first host:10067)
   --cann-path PATH       CANN root
   --ssh-user USER        SSH user for rank launch (default: current user)
-  --wait-seconds N       Maximum NPU wait (default: 120)
-  --retry-seconds N      NPU retry interval (default: 15)
   --timeout N            Per-rank timeout (default: 600)
   --log-file PATH        Controller log path on the primary host
   --skip-iteration-barriers
-                         Skip host barriers between warmup/timed launches
+                         Deprecated no-op; launches are always continuous
   --profile              Capture per-AIV kernel cycle timestamps
   --reduce-hidden        Include BF16 TopK hidden reduction in the kernel
-  --skip-npu-preflight   Skip npu-smi process checks after manual validation
   --help                 Show this help
 EOF
 }
@@ -64,14 +57,11 @@ while [[ $# -gt 0 ]]; do
         --comm-id) COMM_ID="$2"; shift 2 ;;
         --cann-path) CANN_PATH="$2"; shift 2 ;;
         --ssh-user) SSH_USER="$2"; shift 2 ;;
-        --wait-seconds) WAIT_SECONDS="$2"; shift 2 ;;
-        --retry-seconds) RETRY_SECONDS="$2"; shift 2 ;;
         --timeout) TIMEOUT_SECONDS="$2"; shift 2 ;;
         --log-file) LOG_FILE="$2"; shift 2 ;;
-        --skip-iteration-barriers) SKIP_ITERATION_BARRIERS=1; shift ;;
+        --skip-iteration-barriers) shift ;;
         --profile) PROFILE=1; shift ;;
         --reduce-hidden) REDUCE_HIDDEN=1; shift ;;
-        --skip-npu-preflight) SKIP_NPU_PREFLIGHT=1; shift ;;
         --help|-h) usage; exit 0 ;;
         *) echo "unknown argument: $1" >&2; usage >&2; exit 2 ;;
     esac
@@ -85,14 +75,14 @@ if [[ -n "${BS}" && -n "${BS_LIST}" ]]; then
     echo "--bs and --bs-list are mutually exclusive" >&2
     exit 2
 fi
-if [[ ! "${WARMUP}" =~ ^[0-9]+$ || ! "${WAIT_SECONDS}" =~ ^[0-9]+$ ]]; then
-    echo "--warmup and --wait-seconds must be non-negative integers" >&2
+if [[ ! "${WARMUP}" =~ ^[0-9]+$ ]]; then
+    echo "--warmup must be a non-negative integer" >&2
     exit 2
 fi
 for value in "${ITERATIONS}" "${EXPERTS}" "${HIDDEN_SIZE}" "${COMM_DOMAIN}" \
-    "${RETRY_SECONDS}" "${TIMEOUT_SECONDS}"; do
+    "${TIMEOUT_SECONDS}"; do
     if [[ ! "${value}" =~ ^[1-9][0-9]*$ ]]; then
-        echo "iterations, domains, retry intervals, and timeouts must be positive integers" >&2
+        echo "iterations, domains, and timeouts must be positive integers" >&2
         exit 2
     fi
 done
@@ -195,8 +185,7 @@ if [[ "${LOG_FILE}" != /* || "${LOG_FILE}" == *"'"* ]]; then
 fi
 mkdir -p "$(dirname "${LOG_FILE}")"
 rank_log_dir="${LOG_FILE}.ranks"
-preflight_log_dir="${LOG_FILE}.npu_preflight"
-mkdir -p "${rank_log_dir}" "${preflight_log_dir}"
+mkdir -p "${rank_log_dir}"
 
 ssh_options=(-o BatchMode=yes -o ConnectTimeout=10)
 for host in "${hosts[@]}"; do
@@ -212,56 +201,6 @@ if ssh "${ssh_options[@]}" "${SSH_USER}@${hosts[0]}" \
     exit 1
 fi
 
-snapshot_processes() {
-    awk -F'|' '
-        /Process id[[:space:]]*\|[[:space:]]*Process name/ { in_process_table = 1; next }
-        in_process_table && $2 ~ /^[[:space:]]*[0-9]+[[:space:]]*$/ {
-            pid = $3; name = $4
-            gsub(/^[[:space:]]+|[[:space:]]+$/, "", pid)
-            gsub(/^[[:space:]]+|[[:space:]]+$/, "", name)
-            print pid "|" name
-        }
-    ' "$1"
-}
-
-if (( SKIP_NPU_PREFLIGHT )); then
-    echo "NPU preflight skipped after manual validation on: ${hosts[*]}" | tee -a "${LOG_FILE}"
-else
-    deadline=$((SECONDS + WAIT_SECONDS))
-    attempt=0
-    while true; do
-        attempt=$((attempt + 1))
-        attempt_dir="${preflight_log_dir}/attempt_$(printf '%02d' "${attempt}")"
-        mkdir -p "${attempt_dir}"
-        blocked=()
-        for host in "${hosts[@]}"; do
-            snapshot="${attempt_dir}/${host}.log"
-            if ! ssh "${ssh_options[@]}" "${SSH_USER}@${host}" npu-smi info \
-                >"${snapshot}" 2>&1; then
-                echo "npu-smi failed on ${host}; see ${snapshot}" >&2
-                exit 2
-            fi
-            while IFS='|' read -r pid name; do
-                [[ -z "${pid}" ]] && continue
-                if [[ "${name}" != tilexr_* ]]; then
-                    blocked+=("${host}:${pid}:${name}")
-                fi
-            done < <(snapshot_processes "${snapshot}")
-        done
-        if [[ ${#blocked[@]} -eq 0 ]]; then
-            echo "NPU preflight passed on: ${hosts[*]}" | tee -a "${LOG_FILE}"
-            break
-        fi
-        echo "NPU preflight blocked by: ${blocked[*]}" | tee -a "${LOG_FILE}" >&2
-        if (( SECONDS >= deadline )); then
-            echo "NPU preflight timed out after ${WAIT_SECONDS}s; no workload was started" | \
-                tee -a "${LOG_FILE}" >&2
-            exit 75
-        fi
-        sleep "${RETRY_SECONDS}"
-    done
-fi
-
 benchmark_args=(
     --warmup "${WARMUP}"
     --iterations "${ITERATIONS}"
@@ -273,9 +212,6 @@ if [[ -n "${BS}" ]]; then
     benchmark_args+=(--bs "${BS}")
 elif [[ -n "${BS_LIST}" ]]; then
     benchmark_args+=(--bs-list "${BS_LIST}")
-fi
-if (( SKIP_ITERATION_BARRIERS )); then
-    benchmark_args+=(--skip-iteration-barriers)
 fi
 if (( PROFILE )); then
     benchmark_args+=(--profile)
@@ -479,44 +415,28 @@ rank_averages_file="${rank_log_dir}/rank_averages.tsv"
 rm -f "${rank_averages_file}"
 if ! awk -v ranks="${ranks}" -v iterations="${ITERATIONS}" \
     -v output="${rank_averages_file}" '
-    $1 == "COMBINE_V2_SAMPLE" {
-        bs = iteration = rank = elapsed = ""
+    $1 == "COMBINE_V2_RANK_PERF" {
+        bs = rank = logged_iterations = average = correctness = ""
         for (field = 2; field <= NF; ++field) {
             split($field, item, "=")
             if (item[1] == "bs") bs = item[2]
-            else if (item[1] == "iteration") iteration = item[2]
             else if (item[1] == "rank") rank = item[2]
-            else if (item[1] == "elapsed_ms") elapsed = item[2]
+            else if (item[1] == "iterations") logged_iterations = item[2]
+            else if (item[1] == "avg_ms") average = item[2]
+            else if (item[1] == "correctness") correctness = item[2]
         }
-        sample_key = bs SUBSEP iteration SUBSEP rank
         rank_key = bs SUBSEP rank
-        if (bs == "" || iteration == "" || rank == "" || elapsed == "" ||
-            iteration !~ /^[0-9]+$/ || rank !~ /^[0-9]+$/ ||
-            iteration + 0 < 0 || iteration + 0 >= iterations ||
-            rank + 0 < 0 || rank + 0 >= ranks || sample_seen[sample_key]++) {
+        if (bs == "" || rank !~ /^[0-9]+$/ || average == "" ||
+            rank + 0 < 0 || rank + 0 >= ranks ||
+            (logged_iterations != "" && logged_iterations + 0 != iterations) ||
+            (correctness != "passed" && correctness != "self_only_failed" &&
+                correctness != "failed") || rank_result[rank_key]++) {
             invalid = 1
             next
         }
         batches[bs] = 1
-        sample_count[rank_key]++
-        sample_total[rank_key] += elapsed + 0
-    }
-    $1 == "COMBINE_V2_RANK_PERF" {
-        bs = rank = correctness = ""
-        for (field = 2; field <= NF; ++field) {
-            split($field, item, "=")
-            if (item[1] == "bs") bs = item[2]
-            else if (item[1] == "rank") rank = item[2]
-            else if (item[1] == "correctness") correctness = item[2]
-        }
-        rank_key = bs SUBSEP rank
-        if (correctness == "passed" || correctness == "self_only_failed" ||
-            correctness == "failed") {
-            rank_result[rank_key]++
-            rank_correctness[rank_key] = correctness
-        } else {
-            invalid = 1
-        }
+        rank_average[rank_key] = average + 0
+        rank_correctness[rank_key] = correctness
     }
     END {
         batch_count = 0
@@ -524,11 +444,10 @@ if ! awk -v ranks="${ranks}" -v iterations="${ITERATIONS}" \
             batch_count++
             for (rank = 0; rank < ranks; ++rank) {
                 rank_key = bs SUBSEP rank
-                if (rank_result[rank_key] != 1 ||
-                    sample_count[rank_key] != iterations) {
+                if (rank_result[rank_key] != 1) {
                     invalid = 1
                 } else {
-                    print bs, rank, sample_total[rank_key] / iterations, \
+                    print bs, rank, rank_average[rank_key], \
                         rank_correctness[rank_key] >> output
                 }
             }
@@ -536,7 +455,7 @@ if ! awk -v ranks="${ranks}" -v iterations="${ITERATIONS}" \
         if (batch_count == 0 || invalid) exit 1
     }
 ' "${rank_logs[@]}"; then
-    echo "rank logs do not contain one result and one sample per iteration for every rank" | \
+    echo "rank logs do not contain one valid rank performance result per rank" | \
         tee -a "${LOG_FILE}" >&2
     exit 1
 fi

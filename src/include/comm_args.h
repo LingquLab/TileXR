@@ -98,6 +98,7 @@ struct ExtraFlag {
     static constexpr uint32_t UDMA = 1 << 10;
     static constexpr uint32_t SDMA = 1 << 11;
     static constexpr uint32_t UDMA_SHARED_QP = 1 << 12;
+    static constexpr uint32_t UDMA_FULLMESH = 1 << 13;
     static constexpr uint32_t ATOMIC_ENABLE = 1 << 15;  // 表示在910A5算子中启用atomic实现
     static constexpr uint32_t IS_GREATER_THAN_40_AIV = 1 << 16;
     static constexpr uint32_t PERF_CYCLE_A5 = 1 << 17;
@@ -123,6 +124,8 @@ struct CommArgs {
     GM_ADDR udmaInfoPtr = nullptr;  // device-side TileXR::UDMAInfo*; nullptr 表示 UDMA 不可用
     GM_ADDR udmaRegistryPtr = nullptr;  // device-side TileXRUDMARegistry* for user-registered UDMA memory
     GM_ADDR sdmaWorkspacePtr = nullptr;  // device-side SDMA workspace; nullptr 表示 SDMA 不可用
+    GM_ADDR udmaFullmeshPtr = nullptr;  // device-side TileXRUDMAFullmeshDeviceView*
+    uint64_t udmaRegistrationGeneration = 0U;
 };
 
 struct LcclDumpBlockInfo {

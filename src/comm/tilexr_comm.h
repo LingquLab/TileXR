@@ -16,6 +16,7 @@
 #include <string>
 #include "../include/tilexr_sdma_types.h"
 #include "../include/tilexr_udma_reg.h"
+#include "../include/tilexr_udma_fullmesh.h"
 #include "../include/tilexr_types.h"
 #include "../include/tilexr_api.h"
 #include "../include/comm_args.h"
@@ -51,6 +52,7 @@ public:
     int UnregisterUDMAProfile(TileXRUDMAProfileHandle handle);
     int QueryUDMAProfile(TileXRUDMAProfileHandle handle, TileXRUDMAProfileView *view) const;
     int GetUDMAQpCount(uint32_t *qpCount) const;
+    int QueryUDMAFullmesh(TileXRUDMAFullmeshHostView *view) const;
     GM_ADDR GetUDMARegistryPtr() const;
     const TileXRUDMARegistry* GetUDMARegistryHost() const;
     bool IsSDMAAvailable() const;

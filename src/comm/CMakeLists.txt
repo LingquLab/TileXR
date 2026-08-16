@@ -178,6 +178,7 @@ install(FILES
         ${CMAKE_CURRENT_SOURCE_DIR}/../include/tilexr_data_as_flag.h
         ${CMAKE_CURRENT_SOURCE_DIR}/../include/tilexr_perf_trace.h
         ${CMAKE_CURRENT_SOURCE_DIR}/../include/tilexr_udma.h
+        ${CMAKE_CURRENT_SOURCE_DIR}/../include/tilexr_udma_fullmesh.h
         ${CMAKE_CURRENT_SOURCE_DIR}/../include/tilexr_udma_reg.h
         ${CMAKE_CURRENT_SOURCE_DIR}/../include/tilexr_udma_types.h
         ${CMAKE_CURRENT_SOURCE_DIR}/../include/tilexr_sdma_types.h

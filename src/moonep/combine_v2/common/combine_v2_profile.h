@@ -5,8 +5,15 @@
 
 namespace TileXRMoonEp {
 
+#if defined(__CCE__) && defined(__CCE_IS_AICORE__)
+#define TILEXR_MOONEP_COMBINE_V2_PROFILE_INLINE \
+    __attribute__((always_inline)) inline __aicore__
+#else
+#define TILEXR_MOONEP_COMBINE_V2_PROFILE_INLINE inline constexpr
+#endif
+
 constexpr uint32_t kMoonEpCombineV2ProfileMarker = 0x54584750U; // TXGP
-constexpr uint16_t kMoonEpCombineV2ProfileVersion = 4U;
+constexpr uint16_t kMoonEpCombineV2ProfileVersion = 5U;
 constexpr uint32_t kMoonEpCombineV2ProfileCyclesPerUs = 1000U;
 constexpr uint32_t kMoonEpCombineV2ProfileTimePointCapacity = 40U;
 constexpr uint32_t kMoonEpCombineV2ProfileStepCount = 8U;
@@ -58,7 +65,54 @@ enum MoonEpCombineV2ProfileDiagnosticIndex : uint32_t {
     MOONEP_COMBINE_V2_DIAG_CQ_STATUS,
     MOONEP_COMBINE_V2_DIAG_EXPECTED,
     MOONEP_COMBINE_V2_DIAG_OBSERVED,
+    MOONEP_COMBINE_V2_DIAG_FULLMESH_WQE_BUILD_END,
+    MOONEP_COMBINE_V2_DIAG_FULLMESH_SUBMIT_END,
+    MOONEP_COMBINE_V2_DIAG_FULLMESH_CQ_SUCCESS,
+    MOONEP_COMBINE_V2_DIAG_FULLMESH_GRANT_SUBMIT,
+    MOONEP_COMBINE_V2_DIAG_FULLMESH_GRANT_CQ_SUCCESS,
 };
+
+enum MoonEpCombineV2ProfileTransport : uint32_t {
+    MOONEP_COMBINE_V2_PROFILE_TRANSPORT_NONE = 0U,
+    MOONEP_COMBINE_V2_PROFILE_TRANSPORT_CLOS = 1U,
+    MOONEP_COMBINE_V2_PROFILE_TRANSPORT_FULLMESH = 2U,
+};
+
+constexpr uint32_t kMoonEpCombineV2ProfileRouteValid = 1U << 31U;
+constexpr uint32_t kMoonEpCombineV2ProfileTransportShift = 0U;
+constexpr uint32_t kMoonEpCombineV2ProfileTransportMask = 0x3U;
+constexpr uint32_t kMoonEpCombineV2ProfileStepShift = 2U;
+constexpr uint32_t kMoonEpCombineV2ProfileStepMask = 0xFU;
+constexpr uint32_t kMoonEpCombineV2ProfilePeerShift = 6U;
+constexpr uint32_t kMoonEpCombineV2ProfilePeerMask = 0xFFU;
+constexpr uint32_t kMoonEpCombineV2ProfileSuccessorShift = 14U;
+constexpr uint32_t kMoonEpCombineV2ProfileSuccessorMask = 0xFFU;
+constexpr uint32_t kMoonEpCombineV2ProfileQpShift = 22U;
+constexpr uint32_t kMoonEpCombineV2ProfileQpMask = 0x3FU;
+
+TILEXR_MOONEP_COMBINE_V2_PROFILE_INLINE uint32_t
+MoonEpCombineV2PackFullmeshProfileRoute(
+    uint32_t step, uint32_t peer, uint32_t successor, uint32_t qp)
+{
+    return kMoonEpCombineV2ProfileRouteValid |
+        (MOONEP_COMBINE_V2_PROFILE_TRANSPORT_FULLMESH <<
+            kMoonEpCombineV2ProfileTransportShift) |
+        ((step & kMoonEpCombineV2ProfileStepMask) <<
+            kMoonEpCombineV2ProfileStepShift) |
+        ((peer & kMoonEpCombineV2ProfilePeerMask) <<
+            kMoonEpCombineV2ProfilePeerShift) |
+        ((successor & kMoonEpCombineV2ProfileSuccessorMask) <<
+            kMoonEpCombineV2ProfileSuccessorShift) |
+        ((qp & kMoonEpCombineV2ProfileQpMask) <<
+            kMoonEpCombineV2ProfileQpShift);
+}
+
+TILEXR_MOONEP_COMBINE_V2_PROFILE_INLINE uint32_t
+MoonEpCombineV2ProfileRouteField(
+    uint32_t route, uint32_t shift, uint32_t mask)
+{
+    return (route >> shift) & mask;
+}
 
 struct alignas(64) MoonEpCombineV2ProfileRecord {
     uint32_t marker;
@@ -79,6 +133,9 @@ static_assert(kMoonEpCombineV2ProfileTimePointCount == 26U,
 static_assert(MOONEP_COMBINE_V2_DIAG_OBSERVED <
         kMoonEpCombineV2ProfileTimePointCapacity,
     "Combine V2 diagnostics exceed the profile record");
+static_assert(MOONEP_COMBINE_V2_DIAG_FULLMESH_GRANT_CQ_SUCCESS <
+        kMoonEpCombineV2ProfileTimePointCapacity,
+    "Combine V2 Fullmesh diagnostics exceed the profile record");
 static_assert(MOONEP_COMBINE_V2_METRIC_REMOTE_SUBMIT + 1U ==
         kMoonEpCombineV2ProfileMetricCount,
     "Combine V2 profile metric count mismatch");
@@ -86,5 +143,7 @@ static_assert(sizeof(MoonEpCombineV2ProfileRecord) == 448U,
     "Combine V2 profile record ABI changed");
 
 } // namespace TileXRMoonEp
+
+#undef TILEXR_MOONEP_COMBINE_V2_PROFILE_INLINE
 
 #endif // TILEXR_MOONEP_COMBINE_V2_PROFILE_H

@@ -182,6 +182,9 @@ int TileXRComm::ApplyUDMACommArgsState(const TileXRUDMACommArgsState &state)
     const uint32_t oldExtraFlag = commArgs_.extraFlag;
     const GM_ADDR oldInfoPtr = commArgs_.udmaInfoPtr;
     const GM_ADDR oldRegistryPtr = commArgs_.udmaRegistryPtr;
+    const GM_ADDR oldFullmeshPtr = commArgs_.udmaFullmeshPtr;
+    const uint64_t oldRegistrationGeneration =
+        commArgs_.udmaRegistrationGeneration;
 
     if (state.available && state.infoDev != nullptr) {
         commArgs_.extraFlag |= ExtraFlag::UDMA;
@@ -192,10 +195,22 @@ int TileXRComm::ApplyUDMACommArgsState(const TileXRUDMACommArgsState &state)
         }
         commArgs_.udmaInfoPtr = state.infoDev;
         commArgs_.udmaRegistryPtr = state.registryDev;
+        commArgs_.udmaRegistrationGeneration =
+            state.registrationGeneration;
+        if (state.fullmeshAvailable && state.fullmeshViewDev != nullptr) {
+            commArgs_.extraFlag |= ExtraFlag::UDMA_FULLMESH;
+            commArgs_.udmaFullmeshPtr = state.fullmeshViewDev;
+        } else {
+            commArgs_.extraFlag &= ~ExtraFlag::UDMA_FULLMESH;
+            commArgs_.udmaFullmeshPtr = nullptr;
+        }
     } else {
-        commArgs_.extraFlag &= ~(ExtraFlag::UDMA | ExtraFlag::UDMA_SHARED_QP);
+        commArgs_.extraFlag &= ~(ExtraFlag::UDMA |
+            ExtraFlag::UDMA_SHARED_QP | ExtraFlag::UDMA_FULLMESH);
         commArgs_.udmaInfoPtr = nullptr;
         commArgs_.udmaRegistryPtr = nullptr;
+        commArgs_.udmaFullmeshPtr = nullptr;
+        commArgs_.udmaRegistrationGeneration = 0U;
     }
 
     if (commArgsPtr_ == nullptr) {
@@ -207,6 +222,8 @@ int TileXRComm::ApplyUDMACommArgsState(const TileXRUDMACommArgsState &state)
         commArgs_.extraFlag = oldExtraFlag;
         commArgs_.udmaInfoPtr = oldInfoPtr;
         commArgs_.udmaRegistryPtr = oldRegistryPtr;
+        commArgs_.udmaFullmeshPtr = oldFullmeshPtr;
+        commArgs_.udmaRegistrationGeneration = oldRegistrationGeneration;
         TILEXR_LOG(ERROR) << "TileXR UDMA update comm args failed: " << ret;
         return ret;
     }
@@ -433,6 +450,19 @@ int TileXRComm::GetUDMAQpCount(uint32_t *qpCount) const
     }
     *qpCount = udmaContext_->GetQpCount();
     return *qpCount == 0 ? TILEXR_ERROR_NOT_SUPPORT : TILEXR_SUCCESS;
+}
+
+int TileXRComm::QueryUDMAFullmesh(
+    TileXRUDMAFullmeshHostView *view) const
+{
+    if (view == nullptr) {
+        return TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    *view = TileXRUDMAFullmeshHostView {};
+    if (udmaContext_ == nullptr || !udmaContext_->IsAvailable()) {
+        return TILEXR_ERROR_NOT_SUPPORT;
+    }
+    return udmaContext_->QueryFullmesh(view);
 }
 
 GM_ADDR TileXRComm::GetUDMARegistryPtr() const

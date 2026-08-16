@@ -14,6 +14,7 @@ int failures = 0;
 int hostReturn = TileXR::TILEXR_SUCCESS;
 int registryReturn = TileXR::TILEXR_SUCCESS;
 int qpReturn = TileXR::TILEXR_SUCCESS;
+int fullmeshReturn = TileXR::TILEXR_SUCCESS;
 int devReturn = TileXR::TILEXR_SUCCESS;
 int magicReturn = TileXR::TILEXR_SUCCESS;
 int launchReturn = TILEXR_MOONEP_SUCCESS;
@@ -22,17 +23,15 @@ int aclInfoReturn = ACL_SUCCESS;
 uint32_t qpCount = TileXRMoonEp::kMoonEpCombineV2QpCount;
 int64_t vectorCoreCount = TileXRMoonEp::kMoonEpCombineV2CoreCount;
 int64_t nextMagic = 17;
+uint32_t magicCallCount = 0U;
 TileXR::CommArgs commArgs {};
 TileXR::TileXRUDMARegistry registry {};
+TileXR::TileXRUDMAFullmeshHostView fullmeshView {};
 GM_ADDR devArgs = reinterpret_cast<GM_ADDR>(uintptr_t {0x9000});
 TileXRMoonEp::CombineV2Params launchedParams {};
 TileXRMoonEp::CombineV2LaunchContext launchedContext {};
 bool launchedReduceHidden[2] = {};
-bool launchedFullSync[2] = {};
 size_t launchCount = 0;
-
-constexpr const char *kFullSyncEnv =
-    "TILEXR_MOONEP_COMBINE_V2_FULL_SYNC";
 
 struct MemcpyRecord {
     void *dst = nullptr;
@@ -92,6 +91,20 @@ void ConfigureRankSize(int rankSize, int rank = 0)
     commArgs.rankSize = rankSize;
     commArgs.localRankSize = rankSize <= 8 ? rankSize : 8;
     commArgs.localRank = rank % commArgs.localRankSize;
+    fullmeshView = TileXR::TileXRUDMAFullmeshHostView {};
+    fullmeshView.slotCount = TileXR::TILEXR_UDMA_FULLMESH_SLOT_COUNT;
+    fullmeshView.connectedCount =
+        static_cast<uint32_t>(commArgs.localRankSize - 1);
+    fullmeshView.localRank = static_cast<uint32_t>(commArgs.localRank);
+    fullmeshView.validPeerMask = TileXR::UDMAFullmeshExpectedPeerMask(
+        fullmeshView.localRank,
+        static_cast<uint32_t>(commArgs.localRankSize));
+    fullmeshView.registrationReady = 1U;
+    fullmeshView.registrationGeneration =
+        commArgs.udmaRegistrationGeneration;
+    fullmeshView.infoDev = reinterpret_cast<GM_ADDR>(
+        uintptr_t {0x510000000ULL});
+    fullmeshView.viewDev = commArgs.udmaFullmeshPtr;
 
     registry = TileXR::TileXRUDMARegistry {};
     registry.rankSize = rankSize;
@@ -106,21 +119,21 @@ void ConfigureRankSize(int rankSize, int rank = 0)
 
 void Reset()
 {
-    unsetenv(kFullSyncEnv);
-    hostReturn = registryReturn = qpReturn = devReturn = magicReturn =
+    hostReturn = registryReturn = qpReturn = fullmeshReturn =
+        devReturn = magicReturn =
         TileXR::TILEXR_SUCCESS;
     launchReturn = TILEXR_MOONEP_SUCCESS;
     aclDeviceReturn = aclInfoReturn = ACL_SUCCESS;
     qpCount = TileXRMoonEp::kMoonEpCombineV2QpCount;
     vectorCoreCount = TileXRMoonEp::kMoonEpCombineV2CoreCount;
     nextMagic = 17;
+    magicCallCount = 0U;
     devArgs = reinterpret_cast<GM_ADDR>(uintptr_t {0x9000});
     launchedParams = TileXRMoonEp::CombineV2Params {};
     launchedContext = TileXRMoonEp::CombineV2LaunchContext {};
     launchCount = 0;
     for (size_t index = 0; index < 2U; ++index) {
         launchedReduceHidden[index] = false;
-        launchedFullSync[index] = false;
     }
     memcpyCount = 0;
     for (MemcpyRecord &record : memcpyRecords) {
@@ -128,9 +141,14 @@ void Reset()
     }
 
     commArgs = TileXR::CommArgs {};
-    commArgs.extraFlag = TileXR::ExtraFlag::UDMA | TileXR::ExtraFlag::UDMA_SHARED_QP;
+    commArgs.extraFlag = TileXR::ExtraFlag::UDMA |
+        TileXR::ExtraFlag::UDMA_SHARED_QP |
+        TileXR::ExtraFlag::UDMA_FULLMESH;
     commArgs.udmaInfoPtr = reinterpret_cast<GM_ADDR>(uintptr_t {0x500000000ULL});
     commArgs.udmaRegistryPtr = reinterpret_cast<GM_ADDR>(uintptr_t {0x600000000ULL});
+    commArgs.udmaFullmeshPtr = reinterpret_cast<GM_ADDR>(
+        uintptr_t {0x610000000ULL});
+    commArgs.udmaRegistrationGeneration = 9U;
     ConfigureRankSize(TileXRMoonEp::kMoonEpCombineV2RankCount);
 }
 
@@ -155,64 +173,10 @@ void TestValidLaunch()
         launchedParams.aivCoreNum == params.aivCoreNum,
         "launch parameters mismatch");
     Check(launchedContext.hostArgs == &commArgs &&
-        launchedContext.devArgs == devArgs && launchedContext.magic == nextMagic &&
-        launchedContext.fullSync,
+        launchedContext.devArgs == devArgs && launchedContext.magic == nextMagic,
         "launch context mismatch");
     Check(*params.activeOutputOffset == launchedContext.layout.scratchOffset[1],
         "active output epoch mismatch");
-}
-
-void TestFullSyncEnvironment()
-{
-    Reset();
-    CheckStatus(TileXRMoonEp::TileXRMoonEpRunCombineV2(ValidParams()),
-        TILEXR_MOONEP_SUCCESS, "unset full-sync environment");
-    Check(launchedContext.fullSync,
-        "unset full-sync environment must default to enabled");
-
-    Reset();
-    setenv(kFullSyncEnv, "0", 1);
-    CheckStatus(TileXRMoonEp::TileXRMoonEpRunCombineV2(ValidParams()),
-        TILEXR_MOONEP_SUCCESS, "disabled full-sync environment");
-    Check(!launchedContext.fullSync,
-        "zero full-sync environment did not disable synchronization");
-
-    Reset();
-    setenv(kFullSyncEnv, "invalid", 1);
-    CheckStatus(TileXRMoonEp::TileXRMoonEpRunCombineV2(ValidParams()),
-        TILEXR_MOONEP_ERROR_INVALID_ARGUMENT,
-        "invalid full-sync environment");
-    Check(launchCount == 0U,
-        "invalid full-sync environment reached kernel launch");
-
-    Reset();
-    TileXRMoonEp::CombineV2Params params = ValidParams();
-    params.reduceHidden = false;
-    CheckStatus(TileXRMoonEp::TileXRMoonEpRunCombineV2(params),
-        TILEXR_MOONEP_SUCCESS,
-        "unset non-reduce full-sync environment");
-    Check(launchedContext.fullSync,
-        "non-reduce launch did not enable full synchronization by default");
-
-    Reset();
-    setenv(kFullSyncEnv, "0", 1);
-    params = ValidParams();
-    params.reduceHidden = false;
-    CheckStatus(TileXRMoonEp::TileXRMoonEpRunCombineV2(params),
-        TILEXR_MOONEP_SUCCESS,
-        "disabled non-reduce full-sync environment");
-    Check(!launchedContext.fullSync,
-        "non-reduce launch ignored disabled full synchronization");
-
-    Reset();
-    setenv(kFullSyncEnv, "invalid", 1);
-    params = ValidParams();
-    params.reduceHidden = false;
-    CheckStatus(TileXRMoonEp::TileXRMoonEpRunCombineV2(params),
-        TILEXR_MOONEP_ERROR_INVALID_ARGUMENT,
-        "invalid non-reduce full-sync environment");
-    Check(launchCount == 0U,
-        "invalid non-reduce full-sync environment reached kernel launch");
 }
 
 void TestValidation()
@@ -228,6 +192,65 @@ void TestValidation()
     qpCount = 8;
     CheckStatus(TileXRMoonEp::TileXRMoonEpRunCombineV2(params),
         TILEXR_MOONEP_ERROR_NOT_SUPPORTED, "32 QPs required");
+
+    Reset();
+    commArgs.extraFlag &= ~TileXR::ExtraFlag::UDMA_FULLMESH;
+    CheckStatus(TileXRMoonEp::TileXRMoonEpRunCombineV2(params),
+        TILEXR_MOONEP_ERROR_NOT_SUPPORTED,
+        "Fullmesh capability required");
+    Check(magicCallCount == 0U,
+        "missing Fullmesh consumed a magic");
+
+    Reset();
+    commArgs.udmaFullmeshPtr = nullptr;
+    CheckStatus(TileXRMoonEp::TileXRMoonEpRunCombineV2(params),
+        TILEXR_MOONEP_ERROR_NOT_SUPPORTED,
+        "Fullmesh device view required");
+    Check(magicCallCount == 0U,
+        "null Fullmesh view consumed a magic");
+
+    Reset();
+    fullmeshReturn = TileXR::TILEXR_ERROR_NOT_SUPPORT;
+    CheckStatus(TileXRMoonEp::TileXRMoonEpRunCombineV2(params),
+        TILEXR_MOONEP_ERROR_NOT_SUPPORTED,
+        "Fullmesh query failure must reject launch");
+
+    Reset();
+    fullmeshView.version = TileXR::TILEXR_UDMA_FULLMESH_VERSION + 1U;
+    CheckStatus(TileXRMoonEp::TileXRMoonEpRunCombineV2(params),
+        TILEXR_MOONEP_ERROR_NOT_SUPPORTED,
+        "Fullmesh version mismatch must reject launch");
+
+    Reset();
+    fullmeshView.connectedCount -= 1U;
+    CheckStatus(TileXRMoonEp::TileXRMoonEpRunCombineV2(params),
+        TILEXR_MOONEP_ERROR_NOT_SUPPORTED,
+        "incomplete Fullmesh connection count must reject launch");
+
+    Reset();
+    fullmeshView.validPeerMask ^= 1U << 1U;
+    CheckStatus(TileXRMoonEp::TileXRMoonEpRunCombineV2(params),
+        TILEXR_MOONEP_ERROR_NOT_SUPPORTED,
+        "incomplete Fullmesh peer mask must reject launch");
+
+    Reset();
+    fullmeshView.registrationReady = 0U;
+    CheckStatus(TileXRMoonEp::TileXRMoonEpRunCombineV2(params),
+        TILEXR_MOONEP_ERROR_NOT_SUPPORTED,
+        "unregistered Fullmesh generation must reject launch");
+
+    Reset();
+    fullmeshView.registrationGeneration += 1U;
+    CheckStatus(TileXRMoonEp::TileXRMoonEpRunCombineV2(params),
+        TILEXR_MOONEP_ERROR_NOT_SUPPORTED,
+        "Fullmesh generation mismatch must reject launch");
+
+    Reset();
+    fullmeshView.viewDev = reinterpret_cast<GM_ADDR>(
+        uintptr_t {0x620000000ULL});
+    CheckStatus(TileXRMoonEp::TileXRMoonEpRunCombineV2(params),
+        TILEXR_MOONEP_ERROR_NOT_SUPPORTED,
+        "Fullmesh publication pointer mismatch must reject launch");
 
     Reset();
     ConfigureRankSize(12);
@@ -329,6 +352,16 @@ extern "C" int TileXRUDMAGetQpCount(TileXRCommPtr, uint32_t *result)
     return qpReturn;
 }
 
+extern "C" int TileXRUDMAFullmeshQuery(TileXRCommPtr,
+    TileXR::TileXRUDMAFullmeshHostView *result)
+{
+    if (result != nullptr) {
+        *result = fullmeshReturn == TileXR::TILEXR_SUCCESS ?
+            fullmeshView : TileXR::TileXRUDMAFullmeshHostView {};
+    }
+    return fullmeshReturn;
+}
+
 extern "C" int TileXRGetCommArgsDev(TileXRCommPtr, GM_ADDR &args)
 {
     args = devReturn == TileXR::TILEXR_SUCCESS ? devArgs : nullptr;
@@ -337,6 +370,7 @@ extern "C" int TileXRGetCommArgsDev(TileXRCommPtr, GM_ADDR &args)
 
 extern "C" int TileXRCommNextMagic(TileXRCommPtr, int64_t *magic)
 {
+    ++magicCallCount;
     if (magicReturn == TileXR::TILEXR_SUCCESS && magic != nullptr) {
         *magic = nextMagic;
     }
@@ -395,9 +429,8 @@ void TestStageUsesDedicatedHiddenOutput()
     Check(hiddenLayout.outputOffset >= weightLayout.totalBytes,
         "hidden output can be overwritten by the weight workspace");
     Check(launchCount == 2U && launchedReduceHidden[0] &&
-        launchedFullSync[0] && !launchedReduceHidden[1] &&
-        launchedFullSync[1],
-        "V2 stage did not apply full synchronization to every launch");
+        !launchedReduceHidden[1],
+        "V2 stage launch modes mismatch");
 }
 
 extern "C" aclError aclrtMemcpyAsync(
@@ -420,7 +453,6 @@ int TileXRMoonEpLaunchCombineV2Kernel(
     launchedContext = context;
     if (launchCount < 2U) {
         launchedReduceHidden[launchCount] = params.reduceHidden;
-        launchedFullSync[launchCount] = context.fullSync;
     }
     ++launchCount;
     if (launchReturn == TILEXR_MOONEP_SUCCESS) {
@@ -434,7 +466,6 @@ int TileXRMoonEpLaunchCombineV2Kernel(
 int main()
 {
     TestValidLaunch();
-    TestFullSyncEnvironment();
     TestValidation();
     TestStageUsesDedicatedHiddenOutput();
     TestRankAndCoreGeneralization();

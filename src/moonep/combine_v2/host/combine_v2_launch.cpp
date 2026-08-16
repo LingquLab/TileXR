@@ -41,11 +41,10 @@ struct CombineV2KernelArgs {
     int64_t nvS;
     uint64_t rowBytes;
     uint64_t reduceHidden;
-    uint64_t fullSync;
     int64_t magic;
 };
 
-static_assert(sizeof(CombineV2KernelArgs) == 22U * sizeof(uint64_t),
+static_assert(sizeof(CombineV2KernelArgs) == 21U * sizeof(uint64_t),
     "Combine V2 kernel argument ABI changed");
 
 int ConfigureCombineV2SimtMemory(rtTaskCfgInfo_t &cfgInfo)
@@ -95,7 +94,6 @@ int TileXRMoonEpLaunchCombineV2Kernel(
         params.nvS,
         context.layout.rowBytes,
         params.reduceHidden ? 1U : 0U,
-        context.fullSync ? 1U : 0U,
         context.magic
     };
     rtTaskCfgInfo_t cfgInfo {};

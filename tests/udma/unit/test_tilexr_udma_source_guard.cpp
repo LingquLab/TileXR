@@ -243,6 +243,32 @@ void TestUDMAUnregisterIsLocalAfterPublication()
     CheckNotContains(path, body, "RefreshUDMAInfo(");
 }
 
+void TestUDMARegistrationGenerationSurvivesUnregister()
+{
+    const std::string path = "src/comm/udma/tilexr_udma_context.cpp";
+    const auto text = ReadFile(path);
+    const auto unregisterPos = text.find(
+        "int TileXRUDMAContext::UnregisterMemory");
+    const auto profileRegisterPos = text.find(
+        "int TileXRUDMAContext::RegisterProfile", unregisterPos);
+    const auto shutdownPos = text.find("void TileXRUDMAContext::Shutdown()");
+    const auto registerPos = text.find(
+        "int TileXRUDMAContext::RegisterMemory", shutdownPos);
+    if (unregisterPos == std::string::npos ||
+        profileRegisterPos == std::string::npos ||
+        shutdownPos == std::string::npos || registerPos == std::string::npos) {
+        std::cerr << "failed to locate UDMA generation lifecycle" << std::endl;
+        ++g_failures;
+        return;
+    }
+    const auto unregisterBody = text.substr(
+        unregisterPos, profileRegisterPos - unregisterPos);
+    CheckNotContains(path, unregisterBody, "registrationGeneration_ = 0U;");
+    const auto shutdownBody = text.substr(
+        shutdownPos, registerPos - shutdownPos);
+    CheckContains(path, shutdownBody, "registrationGeneration_ = 0U;");
+}
+
 void TestUDMAFailedDeviceFreeRetainsPointer()
 {
     const std::string transportPath = "src/comm/udma/tilexr_udma_transport.cpp";
@@ -383,6 +409,117 @@ void TestUDMAMultiQpHostTransportContract()
                   "__attribute__((always_inline)) inline __aicore__ uint32_t UDMAPostSend");
 }
 
+void TestUDMAFullmeshDomainContract()
+{
+    const std::string fullmeshPath = "src/include/tilexr_udma_fullmesh.h";
+    const auto fullmesh = ReadFile(fullmeshPath);
+    CheckContains(fullmeshPath, fullmesh,
+                  "TILEXR_UDMA_FULLMESH_SLOT_COUNT = 8U");
+    CheckContains(fullmeshPath, fullmesh,
+                  "return activeMask & ~(1U << localRank);");
+    CheckContains(fullmeshPath, fullmesh,
+                  "view.registrationGeneration == registrationGeneration");
+
+    const std::string transportPath = "src/comm/udma/tilexr_udma_transport.cpp";
+    const auto transport = ReadFile(transportPath);
+    CheckContains(transportPath, transport,
+                  "fullmeshQpStates_.resize(options_.rankSize);");
+    CheckContains(transportPath, transport,
+                  "peer == options_.rank ||");
+    CheckContains(transportPath, transport,
+                  "state.qpIdx = static_cast<uint32_t>(");
+    CheckContains(transportPath, transport,
+                  "peer % options_.localRankSize);");
+    CheckContains(transportPath, transport,
+                  "const uint32_t remoteSlot = static_cast<uint32_t>(");
+    CheckContains(transportPath, transport,
+                  "TILEXR_UDMA_FULLMESH_SLOT_COUNT + remoteSlot");
+    CheckContains(transportPath, transport,
+                  "FullmeshEntryIndex(peer, slot)");
+    CheckContains(transportPath, transport,
+                  "mem(entryCount)");
+    CheckContains(transportPath, transport,
+                  "PrepareRegistration(desc, preparedProfile_, false)");
+    CheckContains(transportPath, transport,
+                  "return IsAvailable() ? qpCount_ : 0U;");
+    CheckContains(transportPath, transport,
+                  "matchingEdges != 1U || !directEdge");
+    CheckContains(transportPath, transport,
+                  "portCounts->second.at(localEid) != 1U");
+    CheckContains(transportPath, transport,
+                  "!usedLocalEids.emplace(localEid, true).second");
+
+    const auto registerPos = transport.find(
+        "int TileXRUDMATransport::RegisterMemoryOnContexts");
+    const auto importPos = transport.find(
+        "int TileXRUDMATransport::ExchangeAndImportMemory", registerPos);
+    if (registerPos == std::string::npos || importPos == std::string::npos) {
+        std::cerr << "failed to locate UDMA registration EID selection" << std::endl;
+        ++g_failures;
+    } else {
+        const auto body = transport.substr(registerPos, importPos - registerPos);
+        CheckContains(transportPath, body,
+                      "if (includeFullmesh && fullmeshAvailable_)");
+        CheckContains(transportPath, body, "fullmeshLocalRouteByPeer_");
+        CheckNotContains(transportPath, body,
+                         "for (const auto& ctxEntry : ctxHandleByEid_)");
+    }
+
+    const std::string contextPath = "src/comm/udma/tilexr_udma_context.cpp";
+    const auto context = ReadFile(contextPath);
+    const auto contextRegisterPos = context.find(
+        "int TileXRUDMAContext::RegisterMemory");
+    const auto contextUnregisterPos = context.find(
+        "int TileXRUDMAContext::UnregisterMemory", contextRegisterPos);
+    if (contextRegisterPos == std::string::npos ||
+        contextUnregisterPos == std::string::npos) {
+        std::cerr << "failed to locate Fullmesh registration transaction" << std::endl;
+        ++g_failures;
+    } else {
+        const auto body = context.substr(contextRegisterPos,
+            contextUnregisterPos - contextRegisterPos);
+        const auto generationPos = body.find("candidateGeneration");
+        const auto fullmeshViewPos = body.find("nextFullmeshViewDev");
+        const auto publishPos = body.find("ApplyCommArgsState(nextState)");
+        const auto commitPos = body.find("transport_->CommitPreparedMemory()");
+        if (generationPos == std::string::npos ||
+            fullmeshViewPos == std::string::npos ||
+            publishPos == std::string::npos || commitPos == std::string::npos ||
+            !(generationPos < fullmeshViewPos && fullmeshViewPos < publishPos &&
+                publishPos < commitPos)) {
+            std::cerr << "CLOS registry and Fullmesh view are not one publication transaction"
+                      << std::endl;
+            ++g_failures;
+        }
+        CheckContains(contextPath, body,
+                      "nextState.registrationGeneration = candidateGeneration;");
+        CheckContains(contextPath, body,
+                      "nextState.fullmeshViewDev = publishFullmesh ?");
+    }
+
+    const auto profilePos = transport.find(
+        "int TileXRUDMATransport::PrepareProfile");
+    const auto profileInfoPos = transport.find(
+        "GM_ADDR TileXRUDMATransport::GetPreparedProfileInfoDev", profilePos);
+    if (profilePos == std::string::npos || profileInfoPos == std::string::npos) {
+        std::cerr << "failed to locate profile registration isolation" << std::endl;
+        ++g_failures;
+    } else {
+        const auto body = transport.substr(profilePos, profileInfoPos - profilePos);
+        CheckContains(transportPath, body,
+                      "PrepareRegistration(desc, preparedProfile_, false)");
+    }
+
+    const std::string commPath = "src/comm/tilexr_comm.cpp";
+    const auto comm = ReadFile(commPath);
+    CheckContains(commPath, comm, "ExtraFlag::UDMA_FULLMESH");
+    CheckContains(commPath, comm, "commArgs_.udmaRegistrationGeneration");
+
+    const std::string cmakePath = "src/comm/CMakeLists.txt";
+    CheckContains(cmakePath, ReadFile(cmakePath),
+                  "tilexr_udma_fullmesh.h");
+}
+
 void TestUDMADevicePostingContract()
 {
     const std::string devicePath = "src/include/tilexr_udma.h";
@@ -433,7 +570,7 @@ void TestUDMADevicePostingContract()
     const std::string transportPath = "src/comm/udma/tilexr_udma_transport.cpp";
     const auto transport = ReadFile(transportPath);
     const std::string inOrderQp = "qpAttr.ub.jfsFlag.value = 2;";
-    if (CountOccurrences(transport, inOrderQp) != 3U) {
+    if (CountOccurrences(transport, inOrderQp) != 4U) {
         std::cerr << "all UDMA QP creation paths must disable out-of-order completion"
                   << std::endl;
         ++g_failures;
@@ -608,8 +745,10 @@ int main()
     TestUDMAMemoryCleanupIsRetryable();
     TestUDMARegistrationIsTransactional();
     TestUDMAUnregisterIsLocalAfterPublication();
+    TestUDMARegistrationGenerationSurvivesUnregister();
     TestUDMAFailedDeviceFreeRetainsPointer();
     TestUDMAMultiQpHostTransportContract();
+    TestUDMAFullmeshDomainContract();
     TestUDMADevicePostingContract();
     if (g_failures != 0) {
         std::cerr << g_failures << " UDMA source guard checks failed" << std::endl;

@@ -8,7 +8,6 @@
 #include <iomanip>
 #include <iostream>
 #include <limits>
-#include <numeric>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -65,7 +64,6 @@ struct Options {
     int rank = -1;
     int worldSize = 0;
     int device = -1;
-    bool skipIterationBarriers = false;
     bool profile = false;
     bool reduceHidden = false;
 };
@@ -77,6 +75,16 @@ struct ProfileSample {
         TileXRMoonEp::kMoonEpCombineV2ProfileTimePointCount> timePoint {};
     std::array<uint64_t,
         TileXRMoonEp::kMoonEpCombineV2ProfileMetricCount> metric {};
+    bool fullmesh = false;
+    uint32_t fullmeshStep = 0U;
+    uint32_t fullmeshPeer = 0U;
+    uint32_t fullmeshSuccessor = 0U;
+    uint32_t fullmeshLogicalQp = 0U;
+    int64_t fullmeshWqeBuildEnd = 0;
+    int64_t fullmeshSubmitEnd = 0;
+    int64_t fullmeshCqSuccess = 0;
+    int64_t closGrantSubmit = 0;
+    int64_t closGrantCqSuccess = 0;
 };
 
 enum class OutputCheckResult {
@@ -118,7 +126,7 @@ void Usage(std::ostream &out, const char *program)
         << "  --world-size N         Global rank count (required)\n"
         << "  --device N             Local device id (default: rank modulo 8)\n"
         << "  --skip-iteration-barriers\n"
-        << "                         Skip host barriers between warmup/timed launches\n"
+        << "                         Deprecated no-op; launches are always continuous\n"
         << "  --profile              Capture per-AIV kernel cycle timestamps\n"
         << "  --reduce-hidden        Include BF16 TopK hidden reduction in the kernel\n"
         << "  --help                 Show this help\n";
@@ -183,7 +191,6 @@ bool ParseOptions(int argc, char **argv, Options *options, bool *showHelp,
             return true;
         }
         if (argument == "--skip-iteration-barriers") {
-            options->skipIterationBarriers = true;
             continue;
         }
         if (argument == "--profile") {
@@ -619,8 +626,7 @@ void CaptureProfileSamples(int rank, int world, int iteration,
             record.timePointCount !=
                 TileXRMoonEp::kMoonEpCombineV2ProfileTimePointCount ||
             record.metricCount !=
-                TileXRMoonEp::kMoonEpCombineV2ProfileMetricCount ||
-            record.reserved != 0U) {
+                TileXRMoonEp::kMoonEpCombineV2ProfileMetricCount) {
             Abort(rank, "profile record validation", 1);
         }
         ProfileSample sample;
@@ -641,8 +647,108 @@ void CaptureProfileSamples(int rank, int world, int iteration,
             ++metric) {
             sample.metric[metric] = record.metric[metric];
         }
+        sample.fullmeshWqeBuildEnd = record.timePoint[TileXRMoonEp::
+            MOONEP_COMBINE_V2_DIAG_FULLMESH_WQE_BUILD_END];
+        sample.fullmeshSubmitEnd = record.timePoint[TileXRMoonEp::
+            MOONEP_COMBINE_V2_DIAG_FULLMESH_SUBMIT_END];
+        sample.fullmeshCqSuccess = record.timePoint[TileXRMoonEp::
+            MOONEP_COMBINE_V2_DIAG_FULLMESH_CQ_SUCCESS];
+        sample.closGrantSubmit = record.timePoint[TileXRMoonEp::
+            MOONEP_COMBINE_V2_DIAG_FULLMESH_GRANT_SUBMIT];
+        sample.closGrantCqSuccess = record.timePoint[TileXRMoonEp::
+            MOONEP_COMBINE_V2_DIAG_FULLMESH_GRANT_CQ_SUCCESS];
+        const bool routeValid =
+            (record.reserved &
+                TileXRMoonEp::kMoonEpCombineV2ProfileRouteValid) != 0U;
+        if (!routeValid) {
+            if (record.reserved != 0U || sample.fullmeshWqeBuildEnd != 0 ||
+                sample.fullmeshSubmitEnd != 0 ||
+                sample.fullmeshCqSuccess != 0 ||
+                sample.closGrantSubmit != 0 ||
+                sample.closGrantCqSuccess != 0) {
+                Abort(rank, "non-Fullmesh profile validation", 1);
+            }
+        } else {
+            sample.fullmesh = true;
+            const uint32_t transport =
+                TileXRMoonEp::MoonEpCombineV2ProfileRouteField(
+                    record.reserved,
+                    TileXRMoonEp::kMoonEpCombineV2ProfileTransportShift,
+                    TileXRMoonEp::kMoonEpCombineV2ProfileTransportMask);
+            sample.fullmeshStep =
+                TileXRMoonEp::MoonEpCombineV2ProfileRouteField(
+                    record.reserved,
+                    TileXRMoonEp::kMoonEpCombineV2ProfileStepShift,
+                    TileXRMoonEp::kMoonEpCombineV2ProfileStepMask);
+            sample.fullmeshPeer =
+                TileXRMoonEp::MoonEpCombineV2ProfileRouteField(
+                    record.reserved,
+                    TileXRMoonEp::kMoonEpCombineV2ProfilePeerShift,
+                    TileXRMoonEp::kMoonEpCombineV2ProfilePeerMask);
+            sample.fullmeshSuccessor =
+                TileXRMoonEp::MoonEpCombineV2ProfileRouteField(
+                    record.reserved,
+                    TileXRMoonEp::kMoonEpCombineV2ProfileSuccessorShift,
+                    TileXRMoonEp::kMoonEpCombineV2ProfileSuccessorMask);
+            sample.fullmeshLogicalQp =
+                TileXRMoonEp::MoonEpCombineV2ProfileRouteField(
+                    record.reserved,
+                    TileXRMoonEp::kMoonEpCombineV2ProfileQpShift,
+                    TileXRMoonEp::kMoonEpCombineV2ProfileQpMask);
+            const uint32_t localRankSize =
+                TileXRMoonEp::MoonEpCombineV2LocalRankSize(
+                    static_cast<uint32_t>(world));
+            const uint32_t expectedRoute =
+                TileXRMoonEp::MoonEpCombineV2PackFullmeshProfileRoute(
+                    sample.fullmeshStep, sample.fullmeshPeer,
+                    sample.fullmeshSuccessor, sample.fullmeshLogicalQp);
+            if (transport != TileXRMoonEp::
+                    MOONEP_COMBINE_V2_PROFILE_TRANSPORT_FULLMESH ||
+                record.reserved != expectedRoute ||
+                sample.fullmeshStep >=
+                    TileXRMoonEp::MoonEpCombineV2StepCount(
+                        static_cast<uint32_t>(world)) ||
+                sample.fullmeshPeer >= static_cast<uint32_t>(world) ||
+                sample.fullmeshSuccessor >= static_cast<uint32_t>(world) ||
+                sample.fullmeshPeer == static_cast<uint32_t>(rank) ||
+                !TileXRMoonEp::MoonEpCombineV2SameServer(
+                    static_cast<uint32_t>(rank), sample.fullmeshPeer,
+                    localRankSize) ||
+                sample.fullmeshLogicalQp !=
+                    TileXRMoonEp::MoonEpCombineV2FullmeshLogicalQp(
+                        sample.fullmeshPeer, localRankSize) ||
+                sample.fullmeshWqeBuildEnd <= 0 ||
+                sample.fullmeshWqeBuildEnd >= sample.fullmeshSubmitEnd ||
+                sample.fullmeshSubmitEnd >= sample.fullmeshCqSuccess ||
+                sample.fullmeshCqSuccess >= sample.closGrantSubmit ||
+                sample.closGrantSubmit >= sample.closGrantCqSuccess) {
+                Abort(rank, "Fullmesh profile validation", 1);
+            }
+        }
         samples->push_back(sample);
     }
+}
+
+float ProfileKernelElapsedMs(int rank,
+    const std::vector<ProfileSample> &samples)
+{
+    if (samples.empty()) {
+        Abort(rank, "final profile sample", 1);
+    }
+    int64_t maxCycles = 0;
+    for (const ProfileSample &sample : samples) {
+        const int64_t cycles = sample.timePoint[
+            TileXRMoonEp::MOONEP_COMBINE_V2_TIME_FINAL_END] -
+            sample.timePoint[
+                TileXRMoonEp::MOONEP_COMBINE_V2_TIME_INIT_BEGIN];
+        maxCycles = std::max(maxCycles, cycles);
+    }
+    if (maxCycles <= 0) {
+        Abort(rank, "final profile duration", 1);
+    }
+    return static_cast<float>(maxCycles) /
+        static_cast<float>(
+            TileXRMoonEp::kMoonEpCombineV2ProfileCyclesPerUs * 1000U);
 }
 
 } // namespace
@@ -823,51 +929,49 @@ int main(int argc, char **argv)
         for (int iteration = 0; iteration < options.warmup; ++iteration) {
             LaunchCombine(rank, workspace, dst, comm, bs, options.hiddenSize, stream,
                 options.reduceHidden, caseLayout.outputOffset, &activeOutputOffset);
+        }
+        if (options.warmup > 0) {
             CheckAcl(rank, "warmup stream synchronization",
                 aclrtSynchronizeStream(stream));
-            if (!options.skipIterationBarriers &&
-                !BarrierAll(rank, world, "warmup iteration")) {
-                Abort(rank, "warmup barrier", 1);
-            }
+        }
+        if (!BarrierAll(rank, world, "timed batch start")) {
+            Abort(rank, "timed batch start barrier", 1);
         }
 
-        std::vector<float> rankSamples;
-        rankSamples.reserve(static_cast<std::size_t>(options.iterations));
         std::vector<ProfileSample> profileSamples;
         if (options.profile) {
-            profileSamples.reserve(static_cast<std::size_t>(options.iterations) *
+            profileSamples.reserve(
                 TileXRMoonEp::MoonEpCombineV2ActiveCoreCount(
                     static_cast<uint32_t>(world)));
         }
+        CheckAcl(rank, "aclrtRecordEvent batch start",
+            aclrtRecordEvent(startEvent, stream));
         for (int iteration = 0; iteration < options.iterations; ++iteration) {
-            CheckAcl(rank, "aclrtRecordEvent start",
-                aclrtRecordEvent(startEvent, stream));
             LaunchCombine(rank, workspace, dst, comm, bs, options.hiddenSize, stream,
                 options.reduceHidden, caseLayout.outputOffset, &activeOutputOffset);
-            CheckAcl(rank, "aclrtRecordEvent stop",
-                aclrtRecordEvent(stopEvent, stream));
-            CheckAcl(rank, "aclrtSynchronizeEvent stop",
-                aclrtSynchronizeEvent(stopEvent));
-            float elapsedMs = 0.0F;
-            CheckAcl(rank, "aclrtEventElapsedTime",
-                aclrtEventElapsedTime(&elapsedMs, startEvent, stopEvent));
-            rankSamples.push_back(elapsedMs);
-            if (options.profile) {
-                CaptureProfileSamples(rank, world, iteration, workspace,
-                    profileOffset, &profileSamples);
-            }
-            if (!options.skipIterationBarriers &&
-                !BarrierAll(rank, world, "timed iteration")) {
-                Abort(rank, "timed iteration barrier", 1);
-            }
         }
+        CheckAcl(rank, "aclrtRecordEvent batch stop",
+            aclrtRecordEvent(stopEvent, stream));
+        CheckAcl(rank, "aclrtSynchronizeEvent batch stop",
+            aclrtSynchronizeEvent(stopEvent));
+        float batchElapsedMs = 0.0F;
+        CheckAcl(rank, "aclrtEventElapsedTime batch",
+            aclrtEventElapsedTime(&batchElapsedMs, startEvent, stopEvent));
+        const float averageMs = batchElapsedMs /
+            static_cast<float>(options.iterations);
 
-        for (int iteration = 0; iteration < options.iterations; ++iteration) {
+        if (options.profile) {
+            const int finalIteration = options.iterations - 1;
+            CaptureProfileSamples(rank, world, finalIteration, workspace,
+                profileOffset, &profileSamples);
+            const float finalProfileElapsedMs =
+                ProfileKernelElapsedMs(rank, profileSamples);
             std::cout << std::fixed << std::setprecision(6)
                       << "COMBINE_V2_SAMPLE bs=" << bs
-                      << " iteration=" << iteration
+                      << " iteration=" << finalIteration
                       << " rank=" << rank
-                      << " elapsed_ms=" << rankSamples[static_cast<std::size_t>(iteration)]
+                      << " elapsed_ms=" << finalProfileElapsedMs
+                      << " timing_source=kernel_profile"
                       << std::endl;
         }
         for (const ProfileSample &sample : profileSamples) {
@@ -875,8 +979,26 @@ int main(int argc, char **argv)
                       << " iteration=" << sample.iteration
                       << " rank=" << rank
                       << " core=" << sample.core
+                      << " profile_version="
+                      << TileXRMoonEp::kMoonEpCombineV2ProfileVersion
                       << " cycles_per_us="
-                      << TileXRMoonEp::kMoonEpCombineV2ProfileCyclesPerUs;
+                      << TileXRMoonEp::kMoonEpCombineV2ProfileCyclesPerUs
+                      << " transport="
+                      << (sample.fullmesh ? "fullmesh" : "none")
+                      << " fm_step=" << (sample.fullmesh ?
+                          static_cast<int64_t>(sample.fullmeshStep) : -1)
+                      << " fm_peer=" << (sample.fullmesh ?
+                          static_cast<int64_t>(sample.fullmeshPeer) : -1)
+                      << " fm_successor=" << (sample.fullmesh ?
+                          static_cast<int64_t>(sample.fullmeshSuccessor) : -1)
+                      << " fm_logical_qp=" << (sample.fullmesh ?
+                          static_cast<int64_t>(sample.fullmeshLogicalQp) : -1)
+                      << " fm_wqe_build_end=" << sample.fullmeshWqeBuildEnd
+                      << " fm_submit_end=" << sample.fullmeshSubmitEnd
+                      << " fm_cq_success=" << sample.fullmeshCqSuccess
+                      << " clos_grant_submit=" << sample.closGrantSubmit
+                      << " clos_grant_cq_success="
+                      << sample.closGrantCqSuccess;
             for (uint32_t point = 0U;
                 point < TileXRMoonEp::kMoonEpCombineV2ProfileTimePointCount;
                 ++point) {
@@ -892,12 +1014,13 @@ int main(int argc, char **argv)
             }
             std::cout << std::endl;
         }
-        const float total = std::accumulate(rankSamples.begin(),
-            rankSamples.end(), 0.0F);
         std::cout << std::fixed << std::setprecision(6)
                   << "COMBINE_V2_RANK_PERF bs=" << bs
                   << " rank=" << rank
-                  << " avg_ms=" << total / static_cast<float>(rankSamples.size())
+                  << " iterations=" << options.iterations
+                  << " total_ms=" << batchElapsedMs
+                  << " avg_ms=" << averageMs
+                  << " timing_source=batch_acl_event"
                   << " reduce=" << (options.reduceHidden ? "enabled" : "disabled")
                   << " correctness=" << OutputCheckName(outputResult)
                   << std::endl;

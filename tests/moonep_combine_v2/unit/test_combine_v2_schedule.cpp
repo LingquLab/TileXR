@@ -5,6 +5,7 @@
 
 #include "combine_v2_schedule.h"
 #include "combine_v2_wqe_batch.h"
+#include "tilexr_udma_fullmesh.h"
 
 namespace {
 
@@ -656,6 +657,61 @@ void TestFullSyncScheduleContract()
         "full-sync epoch sequence is not ping-pong");
 }
 
+void TestFullmeshRouting()
+{
+    using namespace TileXRMoonEp;
+    const uint32_t rankSizes[] = {2U, 8U, 16U, 32U, 64U, 128U};
+    for (uint32_t rankSize : rankSizes) {
+        const uint32_t localRankSize = MoonEpCombineV2LocalRankSize(rankSize);
+        for (uint32_t rank = 0U; rank < rankSize; ++rank) {
+            const uint32_t localRank = rank % localRankSize;
+            uint32_t peerMask = 0U;
+            uint32_t localRemoteCount = 0U;
+            for (uint32_t peer = 0U; peer < rankSize; ++peer) {
+                const bool sameServer = rank / localRankSize ==
+                    peer / localRankSize;
+                Check(MoonEpCombineV2SameServer(
+                        rank, peer, localRankSize) == sameServer,
+                    "same-server classification mismatch");
+                Check(MoonEpCombineV2LocalSlot(peer, localRankSize) ==
+                        peer % localRankSize,
+                    "Fullmesh local slot mismatch");
+                Check(MoonEpCombineV2FullmeshLogicalQp(
+                        peer, localRankSize) ==
+                        kMoonEpCombineV2FullmeshLogicalQpBase +
+                            peer % localRankSize,
+                    "Fullmesh logical QP mismatch");
+                const uint32_t expectedDone = peer == rank ? 0U :
+                    (sameServer ? 1U : 2U);
+                Check(MoonEpCombineV2ExpectedDoneCount(
+                        peer, rank, localRankSize) == expectedDone,
+                    "locality-aware done count mismatch");
+                for (uint32_t lane = 0U;
+                    lane < kMoonEpCombineV2LaneCount; ++lane) {
+                    Check(MoonEpCombineV2DoneLaneRequired(
+                            peer, rank, lane, localRankSize) ==
+                            (lane < expectedDone),
+                        "locality-aware done lane mismatch");
+                }
+                if (sameServer && peer != rank) {
+                    peerMask |= 1U << (peer % localRankSize);
+                    ++localRemoteCount;
+                }
+            }
+            Check(localRemoteCount == localRankSize - 1U,
+                "Fullmesh peer count mismatch");
+            Check(peerMask == TileXR::UDMAFullmeshExpectedPeerMask(
+                    localRank, localRankSize),
+                "Fullmesh peer mask mismatch");
+        }
+    }
+    Check(!MoonEpCombineV2SameServer(0U, 1U, 0U),
+        "zero local-rank size accepted");
+    Check(MoonEpCombineV2LocalSlot(1U, 9U) ==
+            kMoonEpCombineV2InvalidPeer,
+        "oversized Fullmesh domain accepted");
+}
+
 } // namespace
 
 int main()
@@ -668,5 +724,6 @@ int main()
     TestWqeBatchHelpers();
     TestVectorSelectionReferenceModel();
     TestFullSyncScheduleContract();
+    TestFullmeshRouting();
     return failures == 0 ? 0 : 1;
 }

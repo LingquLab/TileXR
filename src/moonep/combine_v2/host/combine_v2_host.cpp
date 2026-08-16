@@ -1,9 +1,5 @@
 ﻿#include "combine_v2_host.h"
 
-#include <cstdlib>
-#include <iostream>
-#include <string>
-
 #include "acl/acl_rt.h"
 #include "combine_v2_launch.h"
 #include "tilexr_types.h"
@@ -11,35 +7,6 @@
 
 namespace TileXRMoonEp {
 namespace {
-
-constexpr const char *kCombineV2FullSyncEnv =
-    "TILEXR_MOONEP_COMBINE_V2_FULL_SYNC";
-
-int ResolveCombineV2FullSync(bool *enabled)
-{
-    if (enabled == nullptr) {
-        return TILEXR_MOONEP_ERROR_INVALID_ARGUMENT;
-    }
-    const char *value = std::getenv(kCombineV2FullSyncEnv);
-    if (value == nullptr || value[0] == '\0') {
-        *enabled = true;
-        return TILEXR_MOONEP_SUCCESS;
-    }
-    const std::string text(value);
-    if (text == "1" || text == "true" || text == "TRUE" ||
-        text == "on" || text == "ON") {
-        *enabled = true;
-        return TILEXR_MOONEP_SUCCESS;
-    }
-    if (text == "0" || text == "false" || text == "FALSE" ||
-        text == "off" || text == "OFF") {
-        *enabled = false;
-        return TILEXR_MOONEP_SUCCESS;
-    }
-    std::cerr << kCombineV2FullSyncEnv << " has invalid value '" << text
-              << "'" << std::endl;
-    return TILEXR_MOONEP_ERROR_INVALID_ARGUMENT;
-}
 
 bool CombineV2RankSizeSupported(int rankSize)
 {
@@ -91,6 +58,27 @@ int ValidateRegisteredWorkspace(const CombineV2Params &params,
     return TILEXR_MOONEP_SUCCESS;
 }
 
+int ValidateFullmeshCapability(const CombineV2Params &params,
+    const TileXR::CommArgs &commArgs)
+{
+    if ((commArgs.extraFlag & TileXR::ExtraFlag::UDMA_FULLMESH) == 0U ||
+        commArgs.udmaFullmeshPtr == nullptr ||
+        commArgs.udmaRegistrationGeneration == 0U) {
+        return TILEXR_MOONEP_ERROR_NOT_SUPPORTED;
+    }
+    TileXR::TileXRUDMAFullmeshHostView view {};
+    const int ret = TileXRUDMAFullmeshQuery(params.comm, &view);
+    if (ret != TileXR::TILEXR_SUCCESS ||
+        !TileXR::UDMAFullmeshHostViewValid(view,
+            static_cast<uint32_t>(commArgs.localRank),
+            static_cast<uint32_t>(commArgs.localRankSize),
+            commArgs.udmaRegistrationGeneration) ||
+        view.viewDev != commArgs.udmaFullmeshPtr) {
+        return TILEXR_MOONEP_ERROR_NOT_SUPPORTED;
+    }
+    return TILEXR_MOONEP_SUCCESS;
+}
+
 } // namespace
 
 int TileXRMoonEpPrepareCombineV2Launch(
@@ -112,13 +100,6 @@ int TileXRMoonEpPrepareCombineV2Launch(
     if (ret != TILEXR_MOONEP_SUCCESS) {
         return ret;
     }
-    bool fullSyncEnabled = false;
-    ret = ResolveCombineV2FullSync(&fullSyncEnabled);
-    if (ret != TILEXR_MOONEP_SUCCESS) {
-        *context = CombineV2LaunchContext {};
-        return ret;
-    }
-    context->fullSync = fullSyncEnabled;
     ret = TileXRGetCommArgsHost(params.comm, context->hostArgs);
     if (ret != TileXR::TILEXR_SUCCESS || context->hostArgs == nullptr) {
         *context = CombineV2LaunchContext {};
@@ -152,6 +133,11 @@ int TileXRMoonEpPrepareCombineV2Launch(
         *context = CombineV2LaunchContext {};
         return ret == TileXR::TILEXR_SUCCESS ?
             TILEXR_MOONEP_ERROR_NOT_SUPPORTED : ret;
+    }
+    ret = ValidateFullmeshCapability(params, commArgs);
+    if (ret != TILEXR_MOONEP_SUCCESS) {
+        *context = CombineV2LaunchContext {};
+        return ret;
     }
     ret = ValidateRegisteredWorkspace(params, *context);
     if (ret != TILEXR_MOONEP_SUCCESS) {

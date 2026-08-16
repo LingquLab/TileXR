@@ -1,39 +1,39 @@
 # MoonEP Combine V2 发送前全同步设计
 
-状态：设计已固化并实现；2026-08-15 已将开关与 Reduce 解耦，仅完成静态审查，尚未编译或运行测试
+状态：设计已固化并实现；2026-08-16 改为 Kernel 内部编译期开关且默认关闭，仅完成静态审查，尚未编译或运行测试
 
 日期：2026-08-14
 
 ## 1. 目标
 
-为 MoonEP Combine V2 增加一个默认开启的发送前全同步模式，用于分析和缓解性能测试中
-明显的快慢卡差异。
+为 MoonEP Combine V2 提供一个默认关闭的发送前全同步模式，用于分析性能测试中明显的
+快慢卡差异。该模式只能通过 Kernel 内部编译期常量控制。
 
 开启后，每次 Combine V2 Kernel 在正常数据发送前执行以下协议：
 
 1. 每个 active 发送核通过本核的 6 口 QP，向本核 schedule 负责的全部远端 peer
    各发送一个 32 Byte 同步信号；self 不发送、不写本地同步槽。
 2. 每核的全部同步 WQE 作为一个 batch 构造并发布；每核只更新一次 SQ head、只敲一次
-   doorbell，不请求 CQE。
-3. 每个发送核等待本核负责的全部远端 source 信号到达；self 不等待、不校验。
+   doorbell，仅 batch 最后一个 WQE 请求 ordered completion。
+3. 每个发送核先等待本地 CQ 确认该 batch 完成，再等待本核负责的全部远端 source 信号
+   到达；self 不等待、不校验。
 4. 完成一次仅包含 active 发送核的核间同步。
 5. 所有 active 核进入现有正常发送阶段。
 
-该模式由每次 Combine V2 launch 独立决定，与该 launch 是否执行 Reduce 无关。
-`TileXRMoonEpCombineStageV2()` 的 hidden 和可选 route-weight launch，以及直接调用的
-non-reduce Combine V2 launch，均读取并遵循同一个环境开关。
+该模式由当前 AICore binary 的 Kernel 内部编译期开关决定，与 launch 是否执行 Reduce
+无关。同一个 binary 中的全部 Combine V2 launch 使用同一配置。
 
 ## 2. 已确认决策
 
 | 项目 | 决策 |
 | --- | --- |
-| 开关 | Host 环境变量 `TILEXR_MOONEP_COMBINE_V2_FULL_SYNC` |
-| 默认行为 | 未设置或空串时开启；显式 `0/false/off` 时关闭 |
+| 开关 | Kernel 内部编译期常量 `kEnableFullSync` |
+| 默认行为 | `false`，不执行发送前全同步 |
 | QP | 每核只使用其 6 口 QP，即 `MoonEpCombineV2Qp(core, MOONEP_COMBINE_V2_SIX_PORT) == core` |
 | 提交 | 每核一个 WQE batch、一次 SQ head 更新、一次 doorbell |
-| CQ | 同步 WQE 不请求 CQE，不单独 poll CQ |
+| CQ | 仅 batch 最后一个 WQE 请求 ordered completion；发送核在等待远端信号前 poll CQ |
 | self peer | 不发 WQE、不写 receive/source 信号槽、不等待、不校验 |
-| 生效 launch | 所有 Combine V2 launch，与 `reduceHidden` 独立 |
+| 生效 launch | 常量为 `true` 时作用于所有 Combine V2 launch，与 `reduceHidden` 独立 |
 | WQE 构造 | 新增独立 SIMT VF 函数，WQE 全部在 UB 构造 |
 | 轮次隔离 | receive、source 和核间 barrier 槽均按两个 epoch 乒乓 |
 
@@ -42,54 +42,34 @@ non-reduce Combine V2 launch，均读取并遵循同一个环境开关。
 - 不改变 Combine V2 的数据路由、payload WQE、grant/done 协议和 Reduce 语义。
 - 不改变 `TileXRMoonEpCombineV2()`、`TileXRMoonEpCombineStageV2()` 或
   `tools/moonep/test_npu_e2e.py` 的公共调用契约。
-- 不为同步 WQE 增加 CQ、notify 或单独的完成队列回收流程。
+- 不为每个同步 WQE 分别请求 CQE；每个非空 batch 只产生一次 ordered completion。
 - 不用 topology 推导额外 peer；peer 集合严格复用 Combine V2 runtime schedule。
 - 不改变 Reduce 的启用条件；full-sync 和 Reduce 是两个独立阶段。
 
-## 4. 开关和 Host 传递
+## 4. Kernel 内部开关与 ABI
 
-### 4.1 环境变量
+### 4.1 编译期配置
 
-Host 在每次 Combine V2 launch 准备阶段读取：
+Kernel 实现内部定义：
 
-```text
-TILEXR_MOONEP_COMBINE_V2_FULL_SYNC
+```cpp
+constexpr bool kEnableFullSync = false;
 ```
 
-解析规则：
+Host 不读取环境变量，也不向 Kernel 传递 full-sync 参数。需要开启时，将该常量改为
+`true` 并重新构建、嵌入和部署 AICore binary。`reduceHidden` 继续只控制 Reduce 阶段，
+不参与 full-sync 配置。
 
-- 未设置、空串：开启；
-- `0`、`false`、`FALSE`、`off`、`OFF`：关闭；
-- `1`、`true`、`TRUE`、`on`、`ON`：开启；
-- 其他值：打印明确错误并返回 `TILEXR_MOONEP_ERROR_INVALID_ARGUMENT`，避免性能运行
-  因拼写错误静默落回关闭状态。
-
-最终 Kernel 参数为：
-
-```text
-fullSync = envEnabled
-```
-
-因此 `TileXRMoonEpCombineStageV2()` 中：
-
-- hidden 参数设置 `reduceHidden=true`，full-sync 由环境开关决定；
-- route-weight 参数复用时设置 `reduceHidden=false`，full-sync 仍由同一环境开关决定；
-- 直接 non-reduce launch 同样可以通过开关对比 full-sync off/on。
-
-当 StageV2 同时处理 hidden 和 route weight 且开关开启时，两次独立 Kernel launch 各执行
-一次 full-sync。这是按 launch 控制的明确语义；若性能测试只需要一次 no-reduce 数据面，
-应直接运行单次 non-reduce Combine V2，而不是用含两个 launch 的 StageV2 总耗时替代。
-
-所有 rank 必须使用相同的开关值。当前 Host API 没有跨 rank 环境一致性检查；若部分 rank
-开启而部分 rank 关闭，开启方将按 full-sync 超时退出，但已进入正常阶段的关闭方仍可能
-阻塞在既有 grant/done 协议。启动脚本必须统一导出该变量。
+当 StageV2 同时处理 hidden 和 route weight 且常量为 `true` 时，两次独立 Kernel launch
+各执行一次 full-sync。若性能测试只需要一次 no-reduce 数据面，应直接运行单次 no-reduce
+Combine V2，而不是用含两个 launch 的 StageV2 总耗时替代。
 
 ### 4.2 ABI 边界
 
 - 公共 C API 和 MoonEP plan/tensor ABI 不变。
-- `CombineV2Params` 或 `CombineV2LaunchContext` 增加内部布尔状态。
-- Host 与嵌入式 AICore binary 同步增加一个 64-bit Kernel 参数 `fullSync`。
-- `CombineV2KernelArgs` 大小断言和 Kernel 声明同步更新。
+- `CombineV2LaunchContext` 不保存 full-sync 布尔状态。
+- Host Kernel args 和 AICore Kernel 入口均不包含 full-sync 参数。
+- 删除该 64-bit 参数后，`CombineV2KernelArgs` 固定为 21 个 64-bit 槽。
 
 ## 5. Peer 与 core 映射
 
@@ -214,7 +194,7 @@ SIMT task 一一对应压缩后的远端 peer，并在 UB 中完整清零和构�
 
 ```text
 opcode       = WRITE
-flag         = 0
+flag         = terminal task ? ORDERED_COMPLETION : 0
 nf           = 0
 inlineMsgLen = 0
 sgeNum       = 1
@@ -250,27 +230,23 @@ owner        = derived from absoluteHead + task
 4. 等待对应 `MTE3_S`，证明全部 WQE 已写入 SQ；
 5. `head += batchCount`；
 6. 用 `st_dev` 更新一次 `headAddr`；
-7. 用 `st_dev` 向 `dbAddr` 写一次新 head，完成唯一一次 doorbell。
+7. completion 账本递增一次，并用 `st_dev` 更新一次 `wqeCntAddr`；
+8. 用 `st_dev` 向 `dbAddr` 写一次新 head，完成唯一一次 doorbell；
+9. poll CQ，直到 terminal ordered completion 覆盖整个 batch，并校验 SQ 已回收为空。
 
 `batchCount == 0` 的 self-only 核不更新 head、不敲 doorbell。
 
 ### 7.4 CQ 与账本
 
-同步 WQE `flag=0`，因此：
+同步 batch 只在最后一个 WQE 设置 ordered-completion flag，因此每个非空 batch：
 
-- 不增加 `completionCount`；
-- 不写 `wqeCntAddr`；
-- 不推进 `cqTarget`；
-- 不调用 `PollCqOnce()`；
-- 仅推进本地 lane state 和设备 `headAddr`。
+- `completionCount` 和 `wqeCntAddr` 只增加一次；
+- `cqTarget` 推进一个 completion；
+- doorbell 后调用 `PollCqOnce()`，直到 CQ 到达目标；
+- CQ 成功后要求 `tail == submittedHead` 且 `head == tail`，再进入远端信号等待。
 
-正常发送阶段继承更新后的 absolute head。该 QP 后续已有的 ordered-completion WQE
-生成 CQE 时，其完成 SQ tail 覆盖此前的同步 WQE，从而一并回收 SQ 空间。不能在全同步
-与正常发送之间重新从 GM 读取旧 head 或重置 lane state。
-
-对于有同步 WQE 的 core，schedule 后续必然还包含同一 6 口 QP 的远端正常发送和
-ordered-completion 控制 WQE。self-only core 没有同步 WQE，因此不存在无人回收的同步
-SQE。
+这样 full-sync 自己完成 SQ/CQ 回收，不依赖后续正常发送 WQE。`batchCount == 0` 的
+self-only 核不发布 WQE，也不等待 CQ。
 
 ## 8. 等待和核间同步
 
@@ -314,10 +290,11 @@ Kernel 主路径调整为：
 Init / InitLaneStates
 -> InitBuffers（只分配，不预填正常 WQE）
 -> 既有配置、poison 和 destination 检查
--> if fullSync:
+-> if kEnableFullSync:
        BuildFullSyncWqesVf
        if WQE count > 0: PrepareFullSyncSignal
-       PublishFullSyncBatch（6 口 QP，一次 DB，无 CQ）
+       PublishFullSyncBatch（6 口 QP，一次 DB，一个 terminal completion）
+       WaitFullSyncCq
        WaitFullSyncSources（跳过 self）
        FullSyncActiveCoreBarrier
 -> PrefillOperatorWqes
@@ -326,7 +303,7 @@ Init / InitLaneStates
 -> ReduceHidden
 ```
 
-关闭开关时除 `fullSync` 分支判断外，执行顺序和数据面行为保持不变。
+默认关闭时除 `kEnableFullSync` 分支判断外，执行顺序和数据面行为保持不变。
 
 ## 10. 失败处理
 
@@ -350,13 +327,12 @@ MOONEP_COMBINE_V2_FULL_SYNC_BARRIER_TIMEOUT
 记录至少包含 source/peer、core、expected magic 和 observed magic；失败核不得进入正常
 发送。其他 rank 若因该失败收不到信号，也会在有界时间内退出，而不是永久挂起。
 
-实现中 lane/WQ/SQ/CQ context 及空闲 head/tail 检查采用
-`kEnableSafetyChecks || fullSync` 条件；因此即使 trusted benchmark 关闭通用安全检查，
-默认开启的 full-sync 仍保留其发布前置条件。初始化失败的 core 不进入同步发布，其他
+full-sync 协议代码保留 lane/WQ/SQ/CQ context、空闲 head/tail 和超时检查。常量为
+`false` 时整个同步分支不执行；改为 `true` 后，初始化失败的 core 不进入同步发布，其他
 参与方由 full-sync timeout 有界退出。
 
-由于同步 WQE明确不产生 CQ，远端写错误无法通过 CQ status 直接报告；信号等待超时是该
-阶段的数据面失败观测边界。这是不开 CQ 的已接受代价。
+terminal ordered completion 提供本地提交完成和 CQ status 观测；远端仍需依赖完整信号
+匹配确认目标槽已可见。CQ 错误、CQ 超时和远端信号超时分别保留各自失败边界。
 
 ## 11. Profiling 与性能判定
 
@@ -369,11 +345,11 @@ FULL_SYNC_RECEIVE_END
 FULL_SYNC_CORE_BARRIER_END
 ```
 
-新增时间点后有效数量从 22 增至 26，后续 8 个诊断槽要求容量至少为 34。因此
-time-point capacity 从 32 增至 40，profile version 从 3 增至 4，record 从 384 Byte
-增至 448 Byte；Host layout、Kernel writer、hardware probe 和 trace parser 必须共同使用
-结构常量。关闭 full-sync 时连续记录这四个时间点，使阶段表现为近零时长，同时保留正值、
-单调的累计时间戳。
+新增时间点后有效数量从 22 增至 26，time-point capacity 从 32 增至 40，record 从
+384 Byte 增至 448 Byte。当前 profile ABI 后续又加入 Fullmesh 诊断字段，版本为 5；Host
+layout、Kernel writer、hardware probe 和 trace parser 必须共同使用结构常量。关闭
+full-sync 时连续记录这四个时间点，使阶段表现为近零时长，同时保留正值、单调的累计
+时间戳。
 
 性能结论至少同时报告：
 
@@ -389,9 +365,9 @@ time-point capacity 从 32 增至 40，profile version 从 3 增至 4，record �
 
 ### 12.1 Host/unit
 
-- 环境变量开、关、未设置和非法值解析；
-- `reduceHidden=true/false` 下 full-sync 均能独立开启和关闭；
-- 公共 ABI 静态断言保持不变，内部 Kernel args 大小同步变化；
+- Kernel 内部常量存在且默认值为 `false`；
+- Host context、Kernel args、Kernel 入口和 `Init()` 均不包含 full-sync 布尔参数；
+- `CombineV2KernelArgs` 大小与 21 个参数的 Kernel 声明一致；
 - workspace 新区域 offset、大小、64 Byte 隔离、checked overflow 和 2 MiB 总对齐；
 - 2/8/16/32/64/128P 下每核 remote peer 数不超过 8；
 - 每 rank 总发送和总等待数均为 `rankSize - 1`；
@@ -405,7 +381,7 @@ time-point capacity 从 32 增至 40，profile version 从 3 增至 4，record �
 - WQE 在 UB 完整构造，通过 MTE3 发布；
 - MTE3 完成后才执行 `st_dev`；
 - 只有 6 口 QP；
-- 同步路径没有 completion flag、`wqeCntAddr` 更新或 CQ poll；
+- 仅 terminal WQE 设置 completion flag，每个 batch 只更新一次 `wqeCntAddr` 并 poll 一次 CQ；
 - 每核同步路径只有一个 DB store；
 - CANN 9.1、Ascend950/910A5 target compile 通过。
 
@@ -417,13 +393,13 @@ TileXR 归因。
 
 在 A5/Ascend950 上按以下顺序验证：
 
-1. 2P 和 8P 小 shape，开关关闭/开启均 exact comparison；
+1. 分别构建常量为 `false/true` 的 binary，在 2P 和 8P 小 shape 做 exact comparison；
 2. 连续至少三轮 hidden Combine，覆盖 epoch0 -> epoch1 -> epoch0；
 3. 检查 self 对应槽不被本 rank 写入且不参与等待；
-4. 检查同步前后 CQ tail 不因 full-sync 增加，正常发送 CQ 完成后 SQ tail 覆盖同步 head；
+4. 检查每个非空同步 batch 恰好产生一次 CQ completion，且进入远端等待前 SQ 已回收为空；
 5. 16P 和目标多机规模，验证每核单 batch/单 DB 以及全 source 覆盖；
 6. 生产 shape `BS=8192, topK=16, H=3584` 正确性；
-7. 关闭 profiling/DFX 后分别运行 full-sync off/on 性能测试，比较 rank 离散度和总耗时。
+7. 关闭 profiling/DFX 后分别运行两种 binary，比较 rank 离散度和总耗时。
 
 远端验证脚本通过 mutagen `one-way-safe` 同步到服务器，再由 SSH 执行。NPU 占用检查遵循
 项目 `AGENTS.md`：其他 TileXR 任务可共享；Python 或通信测试进程占用时每 15 秒重试，
@@ -431,35 +407,36 @@ TileXR 归因。
 
 ## 13. 风险与约束
 
-- 同步 WQE 无 CQ，错误只能由远端信号超时暴露；这是本设计最主要的诊断限制。
-- 同步 WQE占用现有 6 口 SQ，必须让后续正常 CQ completion 覆盖其 absolute head，任何
-  lane state 重置都会造成 SQ 账本泄漏。
-- 所有 rank 的环境变量必须一致；混用配置可能让开启方在 full-sync 超时，而关闭方进入
-  正常协议后继续等待 grant/done，不能把该误配置视为可靠的全局错误收敛机制。
-- StageV2 同时包含 hidden 和 route-weight 时，开关开启会产生两次全同步，性能口径必须明确
-  是单 launch 还是完整 StageV2。
+- 同步 batch 的 terminal CQ 只能证明本地 ordered completion 成功；远端仍必须通过完整
+  magic-tagged 信号确认可见性，不能用 CQ 代替远端等待。
+- 同步 WQE占用现有 6 口 SQ；进入正常发送前必须完成 terminal CQ 并验证 SQ 为空，避免
+  full-sync 账本泄漏到后续数据面。
+- 所有 rank 必须部署同一配置的 AICore binary；混用开启和关闭版本可能让开启方在
+  full-sync 超时，而关闭方进入正常协议后继续等待 grant/done。
+- StageV2 同时包含 hidden 和 route-weight 时，常量为 `true` 会产生两次全同步，性能
+  口径必须明确是单 launch 还是完整 StageV2。
 - 该协议证明所有 rank 已到达当前 Combine V2 launch 的 send 前边界，但不保证各 rank
   在完全相同 cycle 开始发送。它是分布式 barrier 语义，不是时钟级 simultaneous launch。
-- Host/unit/simulator 不能证明无 CQ UDMA 写和 doorbell 时序；最终结论必须限定在实际
+- Host/unit/simulator 不能证明 UDMA ordered completion、远端可见性和 doorbell 时序；最终结论必须限定在实际
   验证的 A5/Ascend950 硬件、rank 数和拓扑。
 
 ## 14. 完成标准
 
 实现只有同时满足以下条件才可标记完成：
 
-- 开关默认开启且公共 API/调用契约不变；
+- Kernel 内部开关默认关闭，Host 和公共 API 不暴露控制参数；
 - launch-independent、6 口 QP、跳过 self、32 Byte、双 epoch 均有 unit evidence；
-- WQE 全 UB 构造、MTE3 发布、一次 DB、无 CQ 的 source/compile guard 通过；
+- WQE 全 UB 构造、MTE3 发布、一次 DB、terminal CQ 的 source/compile guard 通过；
 - 至少三轮硬件正确性覆盖 epoch 复用；
 - 正常发送完成后 SQ/CQ 账本无泄漏；
 - full-sync off/on 的目标规模性能数据完整，并分别报告同步成本与快慢卡差异。
 
 ## 15. 当前实现与验证边界
 
-当前代码已实现 Host 开关解析和 launch-independent 传递、双 epoch workspace、独立 SIMT WQE
-构造、6 口 QP 单 batch/单 head/单 DB 发布、无 CQ 账本、远端 source 等待、active-core
-软件 barrier，以及 profile/trace 解析。静态契约覆盖默认开关、self 排除、peer/source
-覆盖、ping-pong 索引和 WQE 发布约束。
+当前代码已实现默认关闭的 Kernel 内部编译期开关、双 epoch workspace、独立 SIMT WQE
+构造、6 口 QP 发布、远端 source 等待、active-core 软件 barrier，以及 profile/trace
+解析。静态契约覆盖外部参数移除、默认关闭、self 排除、peer/source 覆盖、ping-pong
+索引和 WQE 发布约束。
 
 本次按任务要求未执行构建、单元测试、Python trace 测试、模拟器或 A5/Ascend950 硬件
 验证。因此第 12 节中的 compile、测试、SQ/CQ 回收、三轮 epoch 复用和性能数据仍是后续

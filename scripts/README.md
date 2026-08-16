@@ -140,6 +140,20 @@ cabinet number, CPU label, and host IP. Set `TILEXR_512P_HOST_FILE` to load an u
 map without changing the watcher. As with the focused watcher, failed probes are
 shown as `?` and are not counted as idle.
 
+### `watch_cab0_2_npus.sh`
+**Purpose**: Monitor cabinets 0 and 2 from cabinet 0 CPU1 (`141.61.53.150`),
+refreshing every two seconds and reporting `freeNum` for each 64-NPU cabinet.
+
+**Usage**:
+```bash
+bash scripts/watch_cab0_2_npus.sh
+bash scripts/watch_cab0_2_npus.sh --once
+```
+
+The dedicated `hosts_cab0_2.txt` map preserves CPU1-to-CPU8 order for both cabinets.
+This wrapper uses the same process-only probe as the full environment watcher, with a
+shorter 1.8-second probe deadline to preserve the two-second refresh period.
+
 ### `watch_a10_64p_npus.sh`
 **Purpose**: Monitor every server in the bundled `hosts_a10_64p.txt` map,
 refreshing every five seconds and reporting `freeNum` per host and for the complete

@@ -13,6 +13,7 @@
 #include <cstddef>
 #include <string>
 #include "comm_args.h"
+#include "tilexr_udma_fullmesh.h"
 #include "tilexr_udma_reg.h"
 #ifdef __cplusplus
 extern "C" {
@@ -56,6 +57,9 @@ int TileXRUDMAProfileQuery(TileXRCommPtr comm, TileXRUDMAProfileHandle handle,
     TileXR::TileXRUDMAProfileView *view);
 
 int TileXRUDMAGetQpCount(TileXRCommPtr comm, uint32_t *qpCount);
+
+int TileXRUDMAFullmeshQuery(TileXRCommPtr comm,
+    TileXR::TileXRUDMAFullmeshHostView *view);
 
 int TileXRGetUDMARegistryDev(TileXRCommPtr comm, GM_ADDR &registryPtr);
 

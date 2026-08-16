@@ -149,8 +149,12 @@ struct TileXRUDMATransport::RegistrationState {
     std::vector<RegisteredRegionState> regions;
     std::vector<TileXRUDMAProfileQpBinding> qpBindings;
     std::vector<UDMAMemInfo> memoryImage;
+    std::vector<UDMAMemInfo> fullmeshMemoryImage;
     GM_ADDR infoDev = nullptr;
+    GM_ADDR fullmeshInfoDev = nullptr;
     uint32_t infoSize = 0;
+    uint32_t fullmeshInfoSize = 0;
+    bool fullmeshReady = false;
     bool cleanupPending = false;
 };
 
@@ -245,8 +249,181 @@ int TileXRUDMATransport::Init(const TileXRUDMATransportOptions& options)
         return ret;
     }
 
+    if (options_.enableFullmeshDomain) {
+        const int fullmeshRet = InitFullmeshDomain();
+        if (fullmeshRet != TILEXR_SUCCESS) {
+            TILEXR_LOG(WARN) << "TileXR UDMA Fullmesh domain unavailable: "
+                             << fullmeshRet;
+        }
+    }
+
     available_ = true;
     return TILEXR_SUCCESS;
+}
+
+int TileXRUDMATransport::InitFullmeshDomain()
+{
+    fullmeshAvailable_ = false;
+    fullmeshValidPeerMask_ = 0U;
+    if (options_.localRankSize <= 1 ||
+        options_.localRankSize >
+            static_cast<int>(TILEXR_UDMA_FULLMESH_SLOT_COUNT) ||
+        options_.rankSize % options_.localRankSize != 0) {
+        return TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+
+    int ret = BuildFullmeshRoutes();
+    if (ret == TILEXR_SUCCESS) {
+        ret = AgreeInitStatus(CreateContexts());
+    }
+    if (ret == TILEXR_SUCCESS) {
+        ret = AgreeInitStatus(CreateFullmeshQueues());
+    }
+    if (ret == TILEXR_SUCCESS) {
+        ret = AgreeInitStatus(ImportFullmeshQueues());
+    }
+    if (ret == TILEXR_SUCCESS) {
+        ret = AgreeInitStatus(RefreshFullmeshInfo());
+    }
+    if (ret != TILEXR_SUCCESS) {
+        (void)CleanupFullmeshQueues();
+        (void)FreeDeviceInfo(baseFullmeshInfoDev_);
+        fullmeshInfoDev_ = nullptr;
+        fullmeshInfoSize_ = 0U;
+        fullmeshLocalRouteByPeer_.clear();
+        fullmeshRemoteRouteByPeer_.clear();
+        fullmeshValidPeerMask_ = 0U;
+        return ret;
+    }
+    fullmeshAvailable_ = true;
+    return TILEXR_SUCCESS;
+}
+
+int TileXRUDMATransport::BuildFullmeshRoutes()
+{
+    UDMARootInfo rootInfo {};
+    std::vector<UDMATopologyEdge> topoEdges;
+    std::string error;
+    uint32_t localId = 0U;
+    int localStatus = LoadUDMARootInfo(rootInfo, &error) &&
+        ResolveUDMALocalId(rootInfo,
+            static_cast<uint32_t>(options_.devId), localId) &&
+        LoadUDMATopologyFromPath(rootInfo.topoPath, topoEdges, &error)
+        ? TILEXR_SUCCESS : TILEXR_ERROR_NOT_FOUND;
+    const auto localEids = rootInfo.eidByLocalId.find(localId);
+    if (localStatus == TILEXR_SUCCESS &&
+        localEids == rootInfo.eidByLocalId.end()) {
+        localStatus = TILEXR_ERROR_NOT_FOUND;
+    }
+    if (localStatus == TILEXR_SUCCESS) {
+        localEidByEid_.insert(
+            localEids->second.begin(), localEids->second.end());
+        eidCount_ = std::max(eidCount_, rootInfo.eidCount);
+    }
+    int ret = AgreeInitStatus(localStatus);
+    if (ret != TILEXR_SUCCESS) {
+        TILEXR_LOG(ERROR) << "TileXR Fullmesh RootInfo unavailable: " << error;
+        return ret;
+    }
+
+    std::vector<uint32_t> allLocalIds(options_.rankSize);
+    ret = options_.exchange->AllGather(
+        &localId, 1, allLocalIds.data());
+    if (ret != TILEXR_SUCCESS) {
+        return ret;
+    }
+
+    fullmeshLocalRouteByPeer_.assign(options_.rankSize, UINT32_MAX);
+    fullmeshRemoteRouteByPeer_.assign(options_.rankSize, UINT32_MAX);
+    const int localNode = options_.rank / options_.localRankSize;
+    std::map<uint32_t, bool> usedLocalEids;
+    localStatus = TILEXR_SUCCESS;
+    for (int peer = 0; peer < options_.rankSize; ++peer) {
+        if (peer == options_.rank ||
+            peer / options_.localRankSize != localNode) {
+            continue;
+        }
+        uint32_t matchingEdges = 0U;
+        bool directEdge = false;
+        for (const auto& edge : topoEdges) {
+            const bool forward = edge.localA == localId &&
+                edge.localB == allLocalIds[peer];
+            const bool reverse = edge.localB == localId &&
+                edge.localA == allLocalIds[peer];
+            if (!forward && !reverse) {
+                continue;
+            }
+            ++matchingEdges;
+            directEdge = edge.localAPorts.size() == 1U &&
+                edge.localBPorts.size() == 1U;
+        }
+        uint32_t localEid = UINT32_MAX;
+        const auto portCounts =
+            rootInfo.portCountByEidByLocalId.find(localId);
+        if (matchingEdges != 1U || !directEdge ||
+            !ResolveUDMATopologyEid(rootInfo, topoEdges, localId,
+                allLocalIds[peer], localEid) ||
+            localEidByEid_.count(localEid) == 0U ||
+            localEid >= eidCount_ ||
+            portCounts == rootInfo.portCountByEidByLocalId.end() ||
+            portCounts->second.count(localEid) == 0U ||
+            portCounts->second.at(localEid) != 1U ||
+            !usedLocalEids.emplace(localEid, true).second) {
+            TILEXR_LOG(ERROR) << "TileXR Fullmesh route unavailable for peer "
+                              << peer;
+            localStatus = TILEXR_ERROR_NOT_FOUND;
+            break;
+        }
+        fullmeshLocalRouteByPeer_[peer] = localEid;
+    }
+    ret = AgreeInitStatus(localStatus);
+    if (ret != TILEXR_SUCCESS) {
+        return ret;
+    }
+
+    std::vector<uint32_t> allRoutes(
+        static_cast<size_t>(options_.rankSize) * options_.rankSize,
+        UINT32_MAX);
+    ret = options_.exchange->AllGather(fullmeshLocalRouteByPeer_.data(),
+        fullmeshLocalRouteByPeer_.size(), allRoutes.data());
+    if (ret != TILEXR_SUCCESS) {
+        return ret;
+    }
+
+    uint32_t validMask = 0U;
+    localStatus = TILEXR_SUCCESS;
+    for (int peer = 0; peer < options_.rankSize; ++peer) {
+        if (peer == options_.rank ||
+            peer / options_.localRankSize != localNode) {
+            continue;
+        }
+        const uint32_t remoteEid = allRoutes[
+            static_cast<size_t>(peer) * options_.rankSize + options_.rank];
+        const auto remotePortCounts = rootInfo.portCountByEidByLocalId.find(
+            allLocalIds[peer]);
+        if (remoteEid == UINT32_MAX || remoteEid >= eidCount_ ||
+            remotePortCounts == rootInfo.portCountByEidByLocalId.end() ||
+            remotePortCounts->second.count(remoteEid) == 0U ||
+            remotePortCounts->second.at(remoteEid) != 1U) {
+            localStatus = TILEXR_ERROR_NOT_FOUND;
+            break;
+        }
+        fullmeshRemoteRouteByPeer_[peer] = remoteEid;
+        validMask |= 1U << static_cast<uint32_t>(
+            peer % options_.localRankSize);
+    }
+    const uint32_t localRank = static_cast<uint32_t>(
+        options_.rank % options_.localRankSize);
+    if (localStatus == TILEXR_SUCCESS &&
+        validMask != UDMAFullmeshExpectedPeerMask(
+            localRank, static_cast<uint32_t>(options_.localRankSize))) {
+        localStatus = TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    ret = AgreeInitStatus(localStatus);
+    if (ret == TILEXR_SUCCESS) {
+        fullmeshValidPeerMask_ = validMask;
+    }
+    return ret;
 }
 
 int TileXRUDMATransport::AgreeInitStatus(int localStatus) const
@@ -606,6 +783,11 @@ int TileXRUDMATransport::CreateContexts()
             requiredEids[route.second] = true;
         }
     }
+    for (uint32_t eidIndex : fullmeshLocalRouteByPeer_) {
+        if (eidIndex != UINT32_MAX) {
+            requiredEids[eidIndex] = true;
+        }
+    }
     for (const auto& required : requiredEids) {
         const uint32_t eidIndex = required.first;
         if (ctxHandleByEid_.count(eidIndex) != 0) {
@@ -880,6 +1062,123 @@ int TileXRUDMATransport::CreateExplicitQueues()
     return TILEXR_SUCCESS;
 }
 
+int TileXRUDMATransport::CreateFullmeshQueues()
+{
+    fullmeshQpStates_.clear();
+    fullmeshQpStates_.resize(options_.rankSize);
+    const int localNode = options_.rank / options_.localRankSize;
+    for (int peer = 0; peer < options_.rankSize; ++peer) {
+        if (peer == options_.rank ||
+            peer / options_.localRankSize != localNode) {
+            continue;
+        }
+        fullmeshQpStates_[peer].reset(
+            new (std::nothrow) PerPeerQpState());
+        if (fullmeshQpStates_[peer] == nullptr) {
+            return TILEXR_ERROR_INTERNAL;
+        }
+        auto& state = *fullmeshQpStates_[peer];
+        state.peer = peer;
+        state.qpIdx = static_cast<uint32_t>(
+            peer % options_.localRankSize);
+        state.localEid = fullmeshLocalRouteByPeer_[peer];
+        state.remoteEid = fullmeshRemoteRouteByPeer_[peer];
+        const auto ctxIt = ctxHandleByEid_.find(state.localEid);
+        const auto tokenIt = tokenHandleByEid_.find(state.localEid);
+        if (ctxIt == ctxHandleByEid_.end() ||
+            tokenIt == tokenHandleByEid_.end()) {
+            return TILEXR_ERROR_NOT_FOUND;
+        }
+        state.ctxHandle = ctxIt->second;
+        state.tokenHandle = tokenIt->second;
+
+        ChanInfoT chanInfo {};
+        chanInfo.in.dataPlaneFlag.bs.poolCqCstm = 1;
+        int ret = loader_.RaCtxChanCreate(
+            state.ctxHandle, &chanInfo, &state.chanHandle);
+        if (ret != 0 || state.chanHandle == nullptr) {
+            TILEXR_LOG(ERROR) << "TileXR Fullmesh channel creation failed for peer "
+                              << peer << ", slot " << state.qpIdx
+                              << ", ret " << ret;
+            return TILEXR_ERROR_INTERNAL;
+        }
+
+        state.cqInfo.in.chanHandle = state.chanHandle;
+        state.cqInfo.in.depth = TILEXR_UDMA_CQ_DEPTH;
+        state.cqInfo.in.ub.mode = JFC_MODE_USER_CTL_NORMAL;
+        ret = loader_.RaCtxCqCreate(
+            state.ctxHandle, &state.cqInfo, &state.cqHandle);
+        if (ret != 0 || state.cqHandle == nullptr) {
+            TILEXR_LOG(ERROR) << "TileXR Fullmesh CQ creation failed for peer "
+                              << peer << ", slot " << state.qpIdx
+                              << ", ret " << ret;
+            return TILEXR_ERROR_INTERNAL;
+        }
+        state.localCq.cqn = 0U;
+        state.localCq.bufAddr = state.cqInfo.out.bufAddr;
+        state.localCq.baseBkShift = Log2Uint64(state.cqInfo.out.cqeSize);
+        state.localCq.depth = state.cqInfo.in.depth;
+        if (AllocDeviceScalar(&state.cqPiAddr, sizeof(uint32_t)) !=
+                TILEXR_SUCCESS ||
+            AllocDeviceScalar(&state.cqCiAddr, sizeof(uint32_t)) !=
+                TILEXR_SUCCESS) {
+            return TILEXR_ERROR_INTERNAL;
+        }
+        state.localCq.headAddr = reinterpret_cast<uintptr_t>(state.cqPiAddr);
+        state.localCq.tailAddr = reinterpret_cast<uintptr_t>(state.cqCiAddr);
+        state.localCq.dbMode = UDMADBMode::SW_DB;
+        state.localCq.dbAddr = state.cqInfo.out.swdbAddr;
+
+        QpCreateAttr qpAttr {};
+        qpAttr.scqHandle = state.cqHandle;
+        qpAttr.rcqHandle = state.cqHandle;
+        qpAttr.srqHandle = state.cqHandle;
+        qpAttr.sqDepth = TILEXR_UDMA_SQ_DEPTH;
+        qpAttr.rqDepth = TILEXR_UDMA_RQ_DEPTH_DEFAULT;
+        qpAttr.transportMode = CONN_RM;
+        qpAttr.ub.mode = JETTY_MODE_USER_CTL_NORMAL;
+        qpAttr.ub.flag.value = 1;
+        qpAttr.ub.jfsFlag.value = 2;
+        qpAttr.ub.tokenValue = TILEXR_UDMA_TOKEN_VALUE;
+        qpAttr.ub.rnrRetry = 7;
+        qpAttr.ub.extMode.piType = 0;
+        qpAttr.ub.extMode.cstmFlag.bs.sqCstm = 0;
+        qpAttr.ub.extMode.sqebbNum = TILEXR_UDMA_SQ_DEPTH;
+        qpAttr.ub.tokenIdHandle = state.tokenHandle;
+        ret = loader_.RaCtxQpCreate(
+            state.ctxHandle, &qpAttr, &state.qpInfo, &state.qpHandle);
+        if (ret != 0 || state.qpHandle == nullptr) {
+            TILEXR_LOG(ERROR) << "TileXR Fullmesh QP creation failed for peer "
+                              << peer << ", slot " << state.qpIdx
+                              << ", ret " << ret;
+            return TILEXR_ERROR_INTERNAL;
+        }
+        state.localWq.wqn = 0U;
+        state.localWq.bufAddr = state.qpInfo.ub.sqBuffVa;
+        state.localWq.baseBkShift = Log2Uint64(state.qpInfo.ub.wqebbSize);
+        state.localWq.depth = TILEXR_UDMA_SQ_BB_COUNT;
+        if (AllocDeviceScalar(&state.sqPiAddr, sizeof(uint32_t)) !=
+                TILEXR_SUCCESS ||
+            AllocDeviceScalar(&state.sqCiAddr, sizeof(uint32_t)) !=
+                TILEXR_SUCCESS ||
+            AllocDeviceScalar(&state.wqeCntAddr, sizeof(uint32_t)) !=
+                TILEXR_SUCCESS ||
+            AllocDeviceScalar(&state.amoAddr, sizeof(uint64_t)) !=
+                TILEXR_SUCCESS) {
+            return TILEXR_ERROR_INTERNAL;
+        }
+        state.localWq.headAddr = reinterpret_cast<uintptr_t>(state.sqPiAddr);
+        state.localWq.tailAddr = reinterpret_cast<uintptr_t>(state.sqCiAddr);
+        state.localWq.dbMode = UDMADBMode::SW_DB;
+        state.localWq.dbAddr = state.qpInfo.ub.dbAddr;
+        state.localWq.wqeCntAddr =
+            reinterpret_cast<uintptr_t>(state.wqeCntAddr);
+        state.localWq.amoAddr = reinterpret_cast<uintptr_t>(state.amoAddr);
+    }
+    return fullmeshValidPeerMask_ == 0U ?
+        TILEXR_ERROR_NOT_FOUND : TILEXR_SUCCESS;
+}
+
 int TileXRUDMATransport::CreateSharedQueues()
 {
     sharedQpStates_.clear();
@@ -1105,6 +1404,76 @@ int TileXRUDMATransport::ImportExplicitQueues()
     return TILEXR_SUCCESS;
 }
 
+int TileXRUDMATransport::ImportFullmeshQueues()
+{
+    std::vector<QpImportInfoT> localImports(
+        TILEXR_UDMA_FULLMESH_SLOT_COUNT);
+    std::vector<QpKeyT> localKeys(TILEXR_UDMA_FULLMESH_SLOT_COUNT);
+    const int localNode = options_.rank / options_.localRankSize;
+    for (int peer = 0; peer < options_.rankSize; ++peer) {
+        if (peer == options_.rank ||
+            peer / options_.localRankSize != localNode) {
+            continue;
+        }
+        const auto* state = GetFullmeshQpState(peer);
+        if (state == nullptr || state->qpHandle == nullptr ||
+            state->qpIdx >= TILEXR_UDMA_FULLMESH_SLOT_COUNT) {
+            return TILEXR_ERROR_NOT_INITIALIZED;
+        }
+        QpImportInfoT& importInfo = localImports[state->qpIdx];
+        importInfo.in.ub.mode = JETTY_IMPORT_MODE_NORMAL;
+        importInfo.in.ub.tokenValue = TILEXR_UDMA_TOKEN_VALUE;
+        importInfo.in.ub.policy = JETTY_GRP_POLICY_RR;
+        importInfo.in.ub.type = TARGET_TYPE_JETTY;
+        importInfo.in.ub.flag.bs.tokenPolicy = TOKEN_POLICY_PLAIN_TEXT;
+        importInfo.in.ub.tpType = 1;
+        localKeys[state->qpIdx] = state->qpInfo.key;
+    }
+
+    const size_t allEntryCount = static_cast<size_t>(options_.rankSize) *
+        TILEXR_UDMA_FULLMESH_SLOT_COUNT;
+    std::vector<QpImportInfoT> allImports(allEntryCount);
+    int ret = options_.exchange->AllGather(localImports.data(),
+        localImports.size(), allImports.data());
+    if (ret != TILEXR_SUCCESS) {
+        return ret;
+    }
+    std::vector<QpKeyT> allKeys(allEntryCount);
+    ret = options_.exchange->AllGather(localKeys.data(),
+        localKeys.size(), allKeys.data());
+    if (ret != TILEXR_SUCCESS) {
+        return ret;
+    }
+
+    const uint32_t remoteSlot = static_cast<uint32_t>(
+        options_.rank % options_.localRankSize);
+    for (int peer = 0; peer < options_.rankSize; ++peer) {
+        if (peer == options_.rank ||
+            peer / options_.localRankSize != localNode) {
+            continue;
+        }
+        auto* state = GetFullmeshQpState(peer);
+        if (state == nullptr || state->ctxHandle == nullptr) {
+            return TILEXR_ERROR_NOT_INITIALIZED;
+        }
+        const size_t remoteIndex = static_cast<size_t>(peer) *
+            TILEXR_UDMA_FULLMESH_SLOT_COUNT + remoteSlot;
+        QpImportInfoT importInfo = allImports[remoteIndex];
+        importInfo.in.key = allKeys[remoteIndex];
+        ret = loader_.RaCtxQpImport(
+            state->ctxHandle, &importInfo, &state->remoteQpHandle);
+        if (ret != 0 || state->remoteQpHandle == nullptr) {
+            TILEXR_LOG(ERROR) << "TileXR Fullmesh QP import failed for peer "
+                              << peer << ", local slot " << state->qpIdx
+                              << ", remote slot " << remoteSlot
+                              << ", ret " << ret;
+            return TILEXR_ERROR_INTERNAL;
+        }
+        state->tpn = importInfo.out.ub.tpn;
+    }
+    return TILEXR_SUCCESS;
+}
+
 int TileXRUDMATransport::ImportSharedQueues()
 {
     std::vector<QpImportInfoT> localImports(qpCount_);
@@ -1181,6 +1550,13 @@ size_t TileXRUDMATransport::RouteIndex(int peer, uint32_t qpIdx) const
     return static_cast<size_t>(peer) * qpCount_ + qpIdx;
 }
 
+size_t TileXRUDMATransport::FullmeshEntryIndex(
+    int peer, uint32_t slot) const
+{
+    return static_cast<size_t>(peer) *
+        TILEXR_UDMA_FULLMESH_SLOT_COUNT + slot;
+}
+
 const TileXRUDMATransport::PerPeerQpState* TileXRUDMATransport::GetPeerQpState(
     int peer, uint32_t qpIdx) const
 {
@@ -1196,6 +1572,24 @@ TileXRUDMATransport::PerPeerQpState* TileXRUDMATransport::GetPeerQpState(
 {
     return const_cast<PerPeerQpState*>(
         static_cast<const TileXRUDMATransport*>(this)->GetPeerQpState(peer, qpIdx));
+}
+
+const TileXRUDMATransport::PerPeerQpState*
+TileXRUDMATransport::GetFullmeshQpState(int peer) const
+{
+    if (peer < 0 || peer >= options_.rankSize ||
+        static_cast<size_t>(peer) >= fullmeshQpStates_.size()) {
+        return nullptr;
+    }
+    return fullmeshQpStates_[peer].get();
+}
+
+TileXRUDMATransport::PerPeerQpState*
+TileXRUDMATransport::GetFullmeshQpState(int peer)
+{
+    return const_cast<PerPeerQpState*>(
+        static_cast<const TileXRUDMATransport*>(this)->
+            GetFullmeshQpState(peer));
 }
 
 const TileXRUDMATransport::PerPeerQpState* TileXRUDMATransport::GetFallbackQpState(
@@ -1310,6 +1704,101 @@ int TileXRUDMATransport::RefreshUDMAInfo()
     }
     udmaInfoDev_ = baseUDMAInfoDev_;
     return TILEXR_SUCCESS;
+}
+
+int TileXRUDMATransport::RefreshFullmeshInfo()
+{
+    const size_t entryCount = static_cast<size_t>(options_.rankSize) *
+        TILEXR_UDMA_FULLMESH_SLOT_COUNT;
+    if (eidTableDev_ == nullptr || fullmeshQpStates_.empty()) {
+        return TILEXR_ERROR_NOT_INITIALIZED;
+    }
+    std::vector<UDMAWQCtx> sq;
+    std::vector<UDMAWQCtx> rq;
+    std::vector<UDMACQCtx> scq;
+    std::vector<UDMACQCtx> rcq;
+    std::vector<UDMAMemInfo> mem(entryCount);
+    int ret = BuildFullmeshQueueImages(sq, rq, scq, rcq, mem);
+    if (ret != TILEXR_SUCCESS) {
+        return ret;
+    }
+
+    if (baseFullmeshInfoDev_ == nullptr) {
+        const size_t oneEntrySize = 2U * sizeof(UDMAWQCtx) +
+            2U * sizeof(UDMACQCtx) + sizeof(UDMAMemInfo);
+        if (entryCount >
+            (UINT32_MAX - sizeof(UDMAInfo)) / oneEntrySize) {
+            return TILEXR_ERROR_PARA_CHECK_FAIL;
+        }
+        fullmeshInfoSize_ = static_cast<uint32_t>(
+            sizeof(UDMAInfo) + oneEntrySize * entryCount);
+        ret = aclrtMalloc(reinterpret_cast<void**>(&baseFullmeshInfoDev_),
+            fullmeshInfoSize_, ACL_MEM_MALLOC_HUGE_FIRST);
+        if (ret != ACL_SUCCESS) {
+            return TILEXR_ERROR_INTERNAL;
+        }
+    }
+
+    UDMAInfo info {};
+    std::vector<uint8_t> image;
+    ret = BuildUDMAInfoImage(
+        reinterpret_cast<uintptr_t>(baseFullmeshInfoDev_),
+        TILEXR_UDMA_FULLMESH_SLOT_COUNT,
+        sq, rq, scq, rcq, mem, info, image);
+    if (ret != TILEXR_UDMA_LAYOUT_SUCCESS) {
+        return TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    ret = aclrtMemcpy(baseFullmeshInfoDev_, fullmeshInfoSize_,
+        image.data(), image.size(), ACL_MEMCPY_HOST_TO_DEVICE);
+    if (ret != ACL_SUCCESS) {
+        return TILEXR_ERROR_INTERNAL;
+    }
+    fullmeshInfoDev_ = baseFullmeshInfoDev_;
+    return TILEXR_SUCCESS;
+}
+
+int TileXRUDMATransport::BuildFullmeshQueueImages(
+    std::vector<UDMAWQCtx>& sq, std::vector<UDMAWQCtx>& rq,
+    std::vector<UDMACQCtx>& scq, std::vector<UDMACQCtx>& rcq,
+    std::vector<UDMAMemInfo>& mem) const
+{
+    const size_t entryCount = static_cast<size_t>(options_.rankSize) *
+        TILEXR_UDMA_FULLMESH_SLOT_COUNT;
+    if (eidTableDev_ == nullptr || mem.size() != entryCount) {
+        return TILEXR_ERROR_INTERNAL;
+    }
+    sq.assign(entryCount, UDMAWQCtx {});
+    rq.assign(entryCount, UDMAWQCtx {});
+    scq.assign(entryCount, UDMACQCtx {});
+    rcq.assign(entryCount, UDMACQCtx {});
+
+    const int localNode = options_.rank / options_.localRankSize;
+    uint32_t populatedMask = 0U;
+    for (int peer = 0; peer < options_.rankSize; ++peer) {
+        if (peer == options_.rank ||
+            peer / options_.localRankSize != localNode) {
+            continue;
+        }
+        const PerPeerQpState* state = GetFullmeshQpState(peer);
+        const uint32_t slot = static_cast<uint32_t>(
+            peer % options_.localRankSize);
+        if (state == nullptr || state->qpIdx != slot ||
+            state->remoteEid >= eidCount_) {
+            return TILEXR_ERROR_NOT_INITIALIZED;
+        }
+        const size_t index = FullmeshEntryIndex(peer, slot);
+        sq[index] = state->localWq;
+        rq[index] = state->localWq;
+        scq[index] = state->localCq;
+        rcq[index] = state->localCq;
+        mem[index].eidAddr = reinterpret_cast<uint64_t>(
+            eidTableDev_ +
+            (static_cast<size_t>(peer) * eidCount_ + state->remoteEid) *
+                sizeof(HccpEid));
+        populatedMask |= 1U << slot;
+    }
+    return populatedMask == fullmeshValidPeerMask_ ?
+        TILEXR_SUCCESS : TILEXR_ERROR_NOT_INITIALIZED;
 }
 
 int TileXRUDMATransport::BuildQueueImages(
@@ -1485,13 +1974,40 @@ int TileXRUDMATransport::BuildRegistrationUDMAInfo(RegistrationState& registrati
     return TILEXR_SUCCESS;
 }
 
-int TileXRUDMATransport::RegisterMemoryOnContexts(RegistrationState& registration)
+int TileXRUDMATransport::RegisterMemoryOnContexts(
+    RegistrationState& registration, bool includeFullmesh)
 {
+    std::map<uint32_t, bool> requiredEids;
+    if (explicitConfig_) {
+        for (uint32_t eidIndex : localRouteByPeerQp_) {
+            if (eidIndex != UINT32_MAX) {
+                requiredEids[eidIndex] = true;
+            }
+        }
+    } else {
+        for (const auto& route : peerLocalEid_) {
+            requiredEids[route.second] = true;
+        }
+    }
+    if (includeFullmesh && fullmeshAvailable_) {
+        for (uint32_t eidIndex : fullmeshLocalRouteByPeer_) {
+            if (eidIndex != UINT32_MAX) {
+                requiredEids[eidIndex] = true;
+            }
+        }
+    }
+
     for (size_t regionIndex = 0; regionIndex < registration.regions.size(); ++regionIndex) {
         auto& region = registration.regions[regionIndex];
-        for (const auto& ctxEntry : ctxHandleByEid_) {
-            const uint32_t eidIndex = ctxEntry.first;
-            void* tokenHandle = tokenHandleByEid_[eidIndex];
+        for (const auto& required : requiredEids) {
+            const uint32_t eidIndex = required.first;
+            const auto ctxIt = ctxHandleByEid_.find(eidIndex);
+            const auto tokenIt = tokenHandleByEid_.find(eidIndex);
+            if (ctxIt == ctxHandleByEid_.end() || ctxIt->second == nullptr ||
+                tokenIt == tokenHandleByEid_.end() || tokenIt->second == nullptr) {
+                return TILEXR_ERROR_NOT_INITIALIZED;
+            }
+            void* tokenHandle = tokenIt->second;
             MrRegInfoT mrInfo {};
             mrInfo.in.mem.addr = reinterpret_cast<uint64_t>(region.localPtr);
             mrInfo.in.mem.size = region.bytes;
@@ -1504,7 +2020,8 @@ int TileXRUDMATransport::RegisterMemoryOnContexts(RegistrationState& registratio
             mrInfo.in.ub.flags.bs.tokenIdValid = 1;
             mrInfo.in.ub.flags.bs.tokenPolicy = MEM_SEG_TOKEN_PLAIN_TEXT;
             void* lmemHandle = nullptr;
-            int ret = loader_.RaCtxLmemRegister(ctxEntry.second, &mrInfo, &lmemHandle);
+            int ret = loader_.RaCtxLmemRegister(
+                ctxIt->second, &mrInfo, &lmemHandle);
             if (ret != 0 || lmemHandle == nullptr) {
                 constexpr uintptr_t twoMiB = UINT64_C(2) << 20;
                 TILEXR_LOG(ERROR) << "RaCtxLmemRegister failed for region " << regionIndex
@@ -1693,6 +2210,184 @@ int TileXRUDMATransport::ExchangeAndImportMemory(RegistrationState& registration
     return TILEXR_SUCCESS;
 }
 
+int TileXRUDMATransport::PrepareFullmeshRegistration(
+    RegistrationState& registration)
+{
+    if (!fullmeshAvailable_ || registration.regions.size() != 1U) {
+        return TILEXR_ERROR_NOT_SUPPORT;
+    }
+    auto& region = registration.regions[0];
+    if (region.localRegistrations.empty()) {
+        return TILEXR_ERROR_NOT_INITIALIZED;
+    }
+
+    struct ExchangedMrInfo {
+        uint32_t eidIndex;
+        uint32_t valid;
+        RegMemResultInfo mr;
+    };
+    const uint32_t localCount = static_cast<uint32_t>(
+        region.localRegistrations.size());
+    std::vector<uint32_t> allCounts(options_.rankSize);
+    int ret = options_.exchange->AllGather(
+        &localCount, 1, allCounts.data());
+    if (ret != TILEXR_SUCCESS) {
+        return ret;
+    }
+    const uint32_t maxCount =
+        *std::max_element(allCounts.begin(), allCounts.end());
+    if (maxCount == 0U) {
+        return TILEXR_ERROR_INTERNAL;
+    }
+    std::vector<ExchangedMrInfo> local(maxCount);
+    uint32_t index = 0U;
+    for (const auto& entry : region.localRegistrations) {
+        local[index].eidIndex = entry.first;
+        local[index].valid = 1U;
+        local[index].mr = entry.second;
+        ++index;
+    }
+    std::vector<ExchangedMrInfo> all(
+        static_cast<size_t>(options_.rankSize) * maxCount);
+    ret = options_.exchange->AllGather(
+        local.data(), local.size(), all.data());
+    if (ret != TILEXR_SUCCESS) {
+        return ret;
+    }
+
+    registration.fullmeshMemoryImage.assign(
+        static_cast<size_t>(options_.rankSize) *
+            TILEXR_UDMA_FULLMESH_SLOT_COUNT,
+        UDMAMemInfo {});
+    const int localNode = options_.rank / options_.localRankSize;
+    for (int peer = 0; peer < options_.rankSize; ++peer) {
+        if (peer == options_.rank ||
+            peer / options_.localRankSize != localNode) {
+            continue;
+        }
+        const uint32_t localEid = fullmeshLocalRouteByPeer_[peer];
+        const uint32_t remoteEid = fullmeshRemoteRouteByPeer_[peer];
+        const ExchangedMrInfo* remote = nullptr;
+        for (uint32_t remoteIndex = 0U;
+            remoteIndex < allCounts[peer]; ++remoteIndex) {
+            const auto& candidate = all[
+                static_cast<size_t>(peer) * maxCount + remoteIndex];
+            if (candidate.valid != 0U &&
+                candidate.eidIndex == remoteEid) {
+                remote = &candidate;
+                break;
+            }
+        }
+        if (remote == nullptr) {
+            return TILEXR_ERROR_NOT_INITIALIZED;
+        }
+        const auto ctxIt = ctxHandleByEid_.find(localEid);
+        if (ctxIt == ctxHandleByEid_.end()) {
+            return TILEXR_ERROR_NOT_INITIALIZED;
+        }
+        const auto importKey = std::make_tuple(peer, localEid, remoteEid);
+        if (region.remoteMemHandles.count(importKey) == 0U) {
+            MrImportInfoT importInfo {};
+            importInfo.in.key = remote->mr.key;
+            importInfo.in.ub.tokenValue = remote->mr.tokenValue;
+            importInfo.in.ub.flags.bs.cacheable = remote->mr.cacheable;
+            importInfo.in.ub.flags.bs.access = remote->mr.access;
+            void* remoteHandle = nullptr;
+            ret = loader_.RaCtxRmemImport(
+                ctxIt->second, &importInfo, &remoteHandle);
+            if (ret != 0 || remoteHandle == nullptr) {
+                TILEXR_LOG(ERROR) << "TileXR Fullmesh remote memory import failed for peer "
+                                  << peer << ", local eid " << localEid
+                                  << ", remote eid " << remoteEid
+                                  << ", ret " << ret;
+                return TILEXR_ERROR_INTERNAL;
+            }
+            region.remoteMemHandles[importKey] = remoteHandle;
+        }
+        const PerPeerQpState* state = GetFullmeshQpState(peer);
+        if (state == nullptr || state->remoteQpHandle == nullptr) {
+            return TILEXR_ERROR_NOT_INITIALIZED;
+        }
+        const uint32_t slot = static_cast<uint32_t>(
+            peer % options_.localRankSize);
+        UDMAMemInfo& mem = registration.fullmeshMemoryImage[
+            FullmeshEntryIndex(peer, slot)];
+        mem = BuildMemInfo(remote->mr);
+        mem.tpn = state->tpn;
+        mem.eidAddr = reinterpret_cast<uint64_t>(eidTableDev_ +
+            (static_cast<size_t>(peer) * eidCount_ + remoteEid) *
+                sizeof(HccpEid));
+    }
+    return TILEXR_SUCCESS;
+}
+
+int TileXRUDMATransport::BuildFullmeshRegistrationUDMAInfo(
+    RegistrationState& registration)
+{
+    const size_t entryCount = static_cast<size_t>(options_.rankSize) *
+        TILEXR_UDMA_FULLMESH_SLOT_COUNT;
+    if (!fullmeshAvailable_ || registration.regions.size() != 1U ||
+        registration.fullmeshMemoryImage.size() != entryCount) {
+        return TILEXR_ERROR_NOT_INITIALIZED;
+    }
+    std::vector<UDMAWQCtx> sq;
+    std::vector<UDMAWQCtx> rq;
+    std::vector<UDMACQCtx> scq;
+    std::vector<UDMACQCtx> rcq;
+    int ret = BuildFullmeshQueueImages(sq, rq, scq, rcq,
+        registration.fullmeshMemoryImage);
+    if (ret != TILEXR_SUCCESS) {
+        return ret;
+    }
+
+    const auto& region = registration.regions[0];
+    const int localNode = options_.rank / options_.localRankSize;
+    for (int peer = 0; peer < options_.rankSize; ++peer) {
+        if (peer == options_.rank ||
+            peer / options_.localRankSize != localNode) {
+            continue;
+        }
+        const uint32_t localEid = fullmeshLocalRouteByPeer_[peer];
+        const auto registrationIt =
+            region.localRegistrations.find(localEid);
+        if (registrationIt == region.localRegistrations.end()) {
+            return TILEXR_ERROR_NOT_INITIALIZED;
+        }
+        const uint32_t slot = static_cast<uint32_t>(
+            peer % options_.localRankSize);
+        const size_t entry = FullmeshEntryIndex(peer, slot);
+        sq[entry].localTokenId = registrationIt->second.tokenId;
+        rq[entry].localTokenId = registrationIt->second.tokenId;
+    }
+
+    registration.fullmeshInfoSize = fullmeshInfoSize_;
+    ret = aclrtMalloc(
+        reinterpret_cast<void**>(&registration.fullmeshInfoDev),
+        registration.fullmeshInfoSize, ACL_MEM_MALLOC_HUGE_FIRST);
+    if (ret != ACL_SUCCESS) {
+        return TILEXR_ERROR_INTERNAL;
+    }
+    UDMAInfo info {};
+    std::vector<uint8_t> image;
+    ret = BuildUDMAInfoImage(
+        reinterpret_cast<uintptr_t>(registration.fullmeshInfoDev),
+        TILEXR_UDMA_FULLMESH_SLOT_COUNT,
+        sq, rq, scq, rcq, registration.fullmeshMemoryImage, info, image);
+    if (ret != TILEXR_UDMA_LAYOUT_SUCCESS) {
+        (void)FreeDeviceInfo(registration.fullmeshInfoDev);
+        return TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    ret = aclrtMemcpy(registration.fullmeshInfoDev,
+        registration.fullmeshInfoSize, image.data(), image.size(),
+        ACL_MEMCPY_HOST_TO_DEVICE);
+    if (ret != ACL_SUCCESS) {
+        (void)FreeDeviceInfo(registration.fullmeshInfoDev);
+        return TILEXR_ERROR_INTERNAL;
+    }
+    registration.fullmeshReady = true;
+    return TILEXR_SUCCESS;
+}
+
 int TileXRUDMATransport::AgreeRegistrationStatus(int localStatus) const
 {
     if (options_.exchange == nullptr || options_.rankSize <= 0) {
@@ -1713,7 +2408,7 @@ int TileXRUDMATransport::AgreeRegistrationStatus(int localStatus) const
 }
 
 int TileXRUDMATransport::PrepareRegistration(const TileXRUDMAProfileDesc& desc,
-    std::unique_ptr<RegistrationState>& registration)
+    std::unique_ptr<RegistrationState>& registration, bool prepareFullmesh)
 {
     if (!available_ || !UDMAProfileDescValid(&desc, qpCount_) || registration != nullptr) {
         return TILEXR_ERROR_PARA_CHECK_FAIL;
@@ -1731,7 +2426,8 @@ int TileXRUDMATransport::PrepareRegistration(const TileXRUDMAProfileDesc& desc,
         }
         registration->qpBindings.assign(desc.qpBindings,
             desc.qpBindings + desc.qpBindingCount);
-        localStatus = RegisterMemoryOnContexts(*registration);
+        localStatus = RegisterMemoryOnContexts(
+            *registration, prepareFullmesh);
     }
     int agreedStatus = AgreeRegistrationStatus(localStatus);
     if (agreedStatus != TILEXR_SUCCESS) {
@@ -1752,6 +2448,26 @@ int TileXRUDMATransport::PrepareRegistration(const TileXRUDMAProfileDesc& desc,
         const int cleanupRet = CleanupRegistrationPtr(registration);
         return cleanupRet == TILEXR_SUCCESS ? agreedStatus : cleanupRet;
     }
+
+    if (!prepareFullmesh || !fullmeshAvailable_) {
+        return TILEXR_SUCCESS;
+    }
+
+    localStatus = PrepareFullmeshRegistration(*registration);
+    agreedStatus = AgreeRegistrationStatus(localStatus);
+    if (agreedStatus == TILEXR_SUCCESS) {
+        localStatus = BuildFullmeshRegistrationUDMAInfo(*registration);
+        agreedStatus = AgreeRegistrationStatus(localStatus);
+    }
+    if (agreedStatus != TILEXR_SUCCESS) {
+        const int freeRet = FreeDeviceInfo(registration->fullmeshInfoDev);
+        registration->fullmeshMemoryImage.clear();
+        registration->fullmeshInfoSize = 0U;
+        registration->fullmeshReady = false;
+        TILEXR_LOG(WARN) << "TileXR Fullmesh registration unavailable for this generation: "
+                         << agreedStatus;
+        return freeRet == TILEXR_SUCCESS ? TILEXR_SUCCESS : freeRet;
+    }
     return TILEXR_SUCCESS;
 }
 
@@ -1769,12 +2485,26 @@ int TileXRUDMATransport::PrepareMemory(GM_ADDR localPtr, size_t bytes)
     desc.qpBindingCount = qpCount_;
     desc.regions[0].base = localPtr;
     desc.regions[0].bytes = bytes;
-    return PrepareRegistration(desc, preparedRegistration_);
+    return PrepareRegistration(desc, preparedRegistration_, true);
 }
 
 GM_ADDR TileXRUDMATransport::GetPreparedUDMAInfoDev() const
 {
     return preparedRegistration_ == nullptr ? nullptr : preparedRegistration_->infoDev;
+}
+
+GM_ADDR TileXRUDMATransport::GetPreparedFullmeshInfoDev() const
+{
+    return preparedRegistration_ == nullptr ||
+            !preparedRegistration_->fullmeshReady ?
+        nullptr : preparedRegistration_->fullmeshInfoDev;
+}
+
+bool TileXRUDMATransport::PreparedFullmeshReady() const
+{
+    return preparedRegistration_ != nullptr &&
+        preparedRegistration_->fullmeshReady &&
+        preparedRegistration_->fullmeshInfoDev != nullptr;
 }
 
 int TileXRUDMATransport::CommitPreparedMemory()
@@ -1787,6 +2517,8 @@ int TileXRUDMATransport::CommitPreparedMemory()
     }
     activeRegistration_ = std::move(preparedRegistration_);
     udmaInfoDev_ = activeRegistration_->infoDev;
+    fullmeshInfoDev_ = activeRegistration_->fullmeshReady ?
+        activeRegistration_->fullmeshInfoDev : baseFullmeshInfoDev_;
     return TILEXR_SUCCESS;
 }
 
@@ -1801,7 +2533,7 @@ int TileXRUDMATransport::PrepareProfile(const TileXRUDMAProfileDesc& desc)
         TILEXR_LOG(ERROR) << "TileXR UDMA cannot prepare a profile while profile cleanup is pending";
         return TILEXR_ERROR_INTERNAL;
     }
-    return PrepareRegistration(desc, preparedProfile_);
+    return PrepareRegistration(desc, preparedProfile_, false);
 }
 
 GM_ADDR TileXRUDMATransport::GetPreparedProfileInfoDev() const
@@ -1924,17 +2656,25 @@ int TileXRUDMATransport::CleanupRegistration(RegistrationState& registration)
     if (firstError == TILEXR_SUCCESS && infoRet != TILEXR_SUCCESS) {
         firstError = infoRet;
     }
+    const int fullmeshInfoRet = FreeDeviceInfo(registration.fullmeshInfoDev);
+    if (firstError == TILEXR_SUCCESS && fullmeshInfoRet != TILEXR_SUCCESS) {
+        firstError = fullmeshInfoRet;
+    }
     const bool resourcesClean = std::all_of(registration.regions.begin(), registration.regions.end(),
         [](const RegisteredRegionState& region) {
             return region.remoteMemHandles.empty() && region.localRegistrations.empty();
         });
-    if (resourcesClean && registration.infoDev == nullptr) {
+    if (resourcesClean && registration.infoDev == nullptr &&
+        registration.fullmeshInfoDev == nullptr) {
         for (auto& region : registration.regions) {
             region.localMemInfoByEid.clear();
         }
         registration.regions.clear();
         registration.qpBindings.clear();
         registration.memoryImage.clear();
+        registration.fullmeshMemoryImage.clear();
+        registration.fullmeshInfoSize = 0U;
+        registration.fullmeshReady = false;
         registration.cleanupPending = false;
     }
     return firstError;
@@ -1947,7 +2687,8 @@ int TileXRUDMATransport::CleanupRegistrationPtr(std::unique_ptr<RegistrationStat
     }
     const int ret = CleanupRegistration(*registration);
     if (ret == TILEXR_SUCCESS && registration->regions.empty() &&
-        registration->infoDev == nullptr) {
+        registration->infoDev == nullptr &&
+        registration->fullmeshInfoDev == nullptr) {
         registration.reset();
     }
     return ret;
@@ -1961,7 +2702,8 @@ int TileXRUDMATransport::CleanupRetiredMemory()
         if (firstError == TILEXR_SUCCESS && ret != TILEXR_SUCCESS) {
             firstError = ret;
         }
-        if (ret == TILEXR_SUCCESS && (*it)->regions.empty() && (*it)->infoDev == nullptr) {
+        if (ret == TILEXR_SUCCESS && (*it)->regions.empty() &&
+            (*it)->infoDev == nullptr && (*it)->fullmeshInfoDev == nullptr) {
             it = retiredRegistrations_.erase(it);
         } else {
             ++it;
@@ -1973,6 +2715,7 @@ int TileXRUDMATransport::CleanupRetiredMemory()
 int TileXRUDMATransport::CleanupAllMemory()
 {
     udmaInfoDev_ = baseUDMAInfoDev_;
+    fullmeshInfoDev_ = baseFullmeshInfoDev_;
     int firstError = CleanupRegistrationPtr(preparedRegistration_);
     const int activeRet = CleanupRegistrationPtr(activeRegistration_);
     if (firstError == TILEXR_SUCCESS && activeRet != TILEXR_SUCCESS) {
@@ -2218,6 +2961,72 @@ int TileXRUDMATransport::CleanupQueues()
     return firstError;
 }
 
+int TileXRUDMATransport::CleanupFullmeshQueues()
+{
+    int firstError = TILEXR_SUCCESS;
+    for (auto& statePtr : fullmeshQpStates_) {
+        if (statePtr == nullptr) {
+            continue;
+        }
+        auto& state = *statePtr;
+        if (state.remoteQpHandle != nullptr && state.ctxHandle != nullptr) {
+            const int ret = loader_.RaCtxQpUnimport(
+                state.ctxHandle, state.remoteQpHandle);
+            if (ret == 0) {
+                state.remoteQpHandle = nullptr;
+            } else if (firstError == TILEXR_SUCCESS) {
+                firstError = TILEXR_ERROR_INTERNAL;
+            }
+        }
+        if (state.remoteQpHandle == nullptr && state.qpHandle != nullptr) {
+            const int ret = loader_.RaCtxQpDestroy(state.qpHandle);
+            if (ret == 0) {
+                state.qpHandle = nullptr;
+            } else if (firstError == TILEXR_SUCCESS) {
+                firstError = TILEXR_ERROR_INTERNAL;
+            }
+        }
+        if (state.remoteQpHandle == nullptr && state.qpHandle == nullptr &&
+            state.cqHandle != nullptr && state.ctxHandle != nullptr) {
+            const int ret = loader_.RaCtxCqDestroy(
+                state.ctxHandle, state.cqHandle);
+            if (ret == 0) {
+                state.cqHandle = nullptr;
+            } else if (firstError == TILEXR_SUCCESS) {
+                firstError = TILEXR_ERROR_INTERNAL;
+            }
+        }
+        if (state.remoteQpHandle == nullptr && state.qpHandle == nullptr &&
+            state.cqHandle == nullptr && state.chanHandle != nullptr &&
+            state.ctxHandle != nullptr) {
+            const int ret = loader_.RaCtxChanDestroy(
+                state.ctxHandle, state.chanHandle);
+            if (ret == 0) {
+                state.chanHandle = nullptr;
+            } else if (firstError == TILEXR_SUCCESS) {
+                firstError = TILEXR_ERROR_INTERNAL;
+            }
+        }
+        if (state.remoteQpHandle == nullptr && state.qpHandle == nullptr &&
+            state.cqHandle == nullptr && state.chanHandle == nullptr) {
+            FreeDeviceScalar(state.cqPiAddr);
+            FreeDeviceScalar(state.cqCiAddr);
+            FreeDeviceScalar(state.sqPiAddr);
+            FreeDeviceScalar(state.sqCiAddr);
+            FreeDeviceScalar(state.wqeCntAddr);
+            FreeDeviceScalar(state.amoAddr);
+            statePtr.reset();
+        }
+    }
+    if (std::all_of(fullmeshQpStates_.begin(), fullmeshQpStates_.end(),
+            [](const std::unique_ptr<PerPeerQpState>& state) {
+                return state == nullptr;
+            })) {
+        fullmeshQpStates_.clear();
+    }
+    return firstError;
+}
+
 void TileXRUDMATransport::CleanupContexts()
 {
     for (const auto& tokenEntry : tokenHandleByEid_) {
@@ -2256,6 +3065,7 @@ void TileXRUDMATransport::Shutdown()
 {
     available_ = false;
     udmaInfoDev_ = baseUDMAInfoDev_;
+    fullmeshInfoDev_ = baseFullmeshInfoDev_;
     const int cleanupRet = CleanupAllMemory();
     if (cleanupRet != TILEXR_SUCCESS) {
         TILEXR_LOG(ERROR) << "TileXR UDMA shutdown left registered memory cleanup pending: " << cleanupRet;
@@ -2269,6 +3079,16 @@ void TileXRUDMATransport::Shutdown()
     if (profileCleanupRet != TILEXR_SUCCESS || HasProfileCleanupPending()) {
         TILEXR_LOG(ERROR) << "TileXR UDMA shutdown retains persistent profile resources: "
                           << profileCleanupRet;
+    }
+    int fullmeshQueueCleanupRet = CleanupFullmeshQueues();
+    if (fullmeshQueueCleanupRet != TILEXR_SUCCESS) {
+        TILEXR_LOG(ERROR) << "TileXR Fullmesh queue cleanup will be retried: "
+                          << fullmeshQueueCleanupRet;
+        fullmeshQueueCleanupRet = CleanupFullmeshQueues();
+    }
+    if (fullmeshQueueCleanupRet != TILEXR_SUCCESS) {
+        TILEXR_LOG(ERROR) << "TileXR UDMA shutdown retains unreleased Fullmesh queue handles: "
+                          << fullmeshQueueCleanupRet;
     }
     int queueCleanupRet = CleanupQueues();
     if (queueCleanupRet != TILEXR_SUCCESS) {
@@ -2285,12 +3105,18 @@ void TileXRUDMATransport::Shutdown()
     if (baseInfoRet != TILEXR_SUCCESS) {
         TILEXR_LOG(ERROR) << "TileXR UDMA shutdown retained base info allocation";
     }
+    const int baseFullmeshInfoRet = FreeDeviceInfo(baseFullmeshInfoDev_);
+    if (baseFullmeshInfoRet != TILEXR_SUCCESS) {
+        TILEXR_LOG(ERROR) << "TileXR UDMA shutdown retained base Fullmesh info allocation";
+    }
     const int eidTableRet = FreeDeviceInfo(eidTableDev_);
     if (eidTableRet != TILEXR_SUCCESS) {
         TILEXR_LOG(ERROR) << "TileXR UDMA shutdown retained EID table allocation";
     }
     udmaInfoDev_ = nullptr;
+    fullmeshInfoDev_ = nullptr;
     udmaInfoSize_ = 0;
+    fullmeshInfoSize_ = 0U;
     localEidByEid_.clear();
     peerLocalEid_.clear();
     peerRemoteEid_.clear();
@@ -2298,8 +3124,13 @@ void TileXRUDMATransport::Shutdown()
     remoteRouteByPeerQp_.clear();
     peerQpStates_.clear();
     sharedQpStates_.clear();
+    fullmeshQpStates_.clear();
+    fullmeshLocalRouteByPeer_.clear();
+    fullmeshRemoteRouteByPeer_.clear();
     explicitConfig_ = false;
     sharedQp_ = false;
+    fullmeshAvailable_ = false;
+    fullmeshValidPeerMask_ = 0U;
     qpCount_ = 1;
     loader_.Unload();
 }
@@ -2317,6 +3148,16 @@ GM_ADDR TileXRUDMATransport::GetUDMAInfoDev() const
 GM_ADDR TileXRUDMATransport::GetBaseUDMAInfoDev() const
 {
     return baseUDMAInfoDev_;
+}
+
+GM_ADDR TileXRUDMATransport::GetFullmeshInfoDev() const
+{
+    return fullmeshInfoDev_;
+}
+
+GM_ADDR TileXRUDMATransport::GetBaseFullmeshInfoDev() const
+{
+    return baseFullmeshInfoDev_;
 }
 
 GM_ADDR TileXRUDMATransport::GetRegisteredMemoryPtr() const
@@ -2356,7 +3197,10 @@ bool TileXRUDMATransport::HasMemoryCleanupPending() const
     if (preparedRegistration_ != nullptr || !retiredRegistrations_.empty()) {
         return true;
     }
-    return activeRegistration_ != nullptr && udmaInfoDev_ != activeRegistration_->infoDev;
+    return activeRegistration_ != nullptr &&
+        (udmaInfoDev_ != activeRegistration_->infoDev ||
+        (activeRegistration_->fullmeshReady &&
+            fullmeshInfoDev_ != activeRegistration_->fullmeshInfoDev));
 }
 
 uint32_t TileXRUDMATransport::GetQpCount() const
@@ -2367,6 +3211,18 @@ uint32_t TileXRUDMATransport::GetQpCount() const
 bool TileXRUDMATransport::UsesSharedQps() const
 {
     return IsAvailable() && sharedQp_;
+}
+
+bool TileXRUDMATransport::HasFullmeshDomain() const
+{
+    return IsAvailable() && fullmeshAvailable_ &&
+        baseFullmeshInfoDev_ != nullptr &&
+        fullmeshValidPeerMask_ != 0U;
+}
+
+uint32_t TileXRUDMATransport::GetFullmeshValidPeerMask() const
+{
+    return HasFullmeshDomain() ? fullmeshValidPeerMask_ : 0U;
 }
 
 } // namespace TileXR

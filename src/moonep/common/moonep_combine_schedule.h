@@ -23,6 +23,9 @@ constexpr uint32_t kMoonEpCombineV2GrantStepCount =
 constexpr uint32_t kMoonEpCombineV2CoreCount = 16U;
 constexpr uint32_t kMoonEpCombineV2LaneCount = 2U;
 constexpr uint32_t kMoonEpCombineV2QpCount = 32U;
+constexpr uint32_t kMoonEpCombineV2FullmeshSlotCount = 8U;
+constexpr uint32_t kMoonEpCombineV2FullmeshLogicalQpBase =
+    kMoonEpCombineV2QpCount;
 constexpr uint32_t kMoonEpCombineV2MaxSourcesPerCore =
     kMoonEpCombineV2RankCount / kMoonEpCombineV2CoreCount;
 constexpr uint32_t kMoonEpCombineV2EpochCount = 2U;
@@ -54,6 +57,7 @@ constexpr uint64_t kMoonEpCombineV2MaxMagic =
 enum MoonEpCombineV2Lane : uint32_t {
     MOONEP_COMBINE_V2_SIX_PORT = 0U,
     MOONEP_COMBINE_V2_TWO_PORT = 1U,
+    MOONEP_COMBINE_V2_FULLMESH = 2U,
 };
 
 enum MoonEpCombineV2ScheduleMode : uint32_t {
@@ -196,6 +200,49 @@ MoonEpCombineV2Qp(uint32_t core, uint32_t lane)
 {
     return lane == MOONEP_COMBINE_V2_SIX_PORT ? core :
         kMoonEpCombineV2CoreCount + core;
+}
+
+TILEXR_MOONEP_COMBINE_V2_INLINE bool
+MoonEpCombineV2SameServer(
+    uint32_t lhs, uint32_t rhs, uint32_t localRankSize)
+{
+    return localRankSize > 0U &&
+        localRankSize <= kMoonEpCombineV2FullmeshSlotCount &&
+        lhs / localRankSize == rhs / localRankSize;
+}
+
+TILEXR_MOONEP_COMBINE_V2_INLINE uint32_t
+MoonEpCombineV2LocalSlot(uint32_t rank, uint32_t localRankSize)
+{
+    return localRankSize == 0U ||
+            localRankSize > kMoonEpCombineV2FullmeshSlotCount ?
+        kMoonEpCombineV2InvalidPeer : rank % localRankSize;
+}
+
+TILEXR_MOONEP_COMBINE_V2_INLINE uint32_t
+MoonEpCombineV2FullmeshLogicalQp(uint32_t peer, uint32_t localRankSize)
+{
+    const uint32_t slot = MoonEpCombineV2LocalSlot(peer, localRankSize);
+    return slot == kMoonEpCombineV2InvalidPeer ? slot :
+        kMoonEpCombineV2FullmeshLogicalQpBase + slot;
+}
+
+TILEXR_MOONEP_COMBINE_V2_INLINE uint32_t
+MoonEpCombineV2ExpectedDoneCount(
+    uint32_t source, uint32_t destination, uint32_t localRankSize)
+{
+    return source == destination ? 0U :
+        (MoonEpCombineV2SameServer(source, destination, localRankSize) ?
+            1U : kMoonEpCombineV2LaneCount);
+}
+
+TILEXR_MOONEP_COMBINE_V2_INLINE bool
+MoonEpCombineV2DoneLaneRequired(uint32_t source, uint32_t destination,
+    uint32_t lane, uint32_t localRankSize)
+{
+    const uint32_t doneCount = MoonEpCombineV2ExpectedDoneCount(
+        source, destination, localRankSize);
+    return lane < doneCount;
 }
 
 TILEXR_MOONEP_COMBINE_V2_INLINE uint32_t

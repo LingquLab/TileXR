@@ -17,6 +17,7 @@
 #include "tilexr_api.h"
 #include "tilexr_types.h"
 #include "tilexr_udma_types.h"
+#include "tilexr_udma_fullmesh.h"
 #include "udma/tilexr_hccp_defs.h"
 #include "udma/tilexr_hccp_loader.h"
 #include "udma/tilexr_udma_config.h"
@@ -32,6 +33,7 @@ struct TileXRUDMATransportOptions {
     int localRankSize = 0;
     int devId = 0;
     bool nonPinRegistration = false;
+    bool enableFullmeshDomain = false;
     TileXRSockExchange* exchange = nullptr;
     UDMAQpConfig qpConfig;
 };
@@ -46,6 +48,8 @@ public:
     int Init(const TileXRUDMATransportOptions& options);
     int PrepareMemory(GM_ADDR localPtr, size_t bytes);
     GM_ADDR GetPreparedUDMAInfoDev() const;
+    GM_ADDR GetPreparedFullmeshInfoDev() const;
+    bool PreparedFullmeshReady() const;
     int CommitPreparedMemory();
     int AbortPreparedMemory();
     int CleanupRetiredMemory();
@@ -64,11 +68,15 @@ public:
     bool IsAvailable() const;
     GM_ADDR GetUDMAInfoDev() const;
     GM_ADDR GetBaseUDMAInfoDev() const;
+    GM_ADDR GetFullmeshInfoDev() const;
+    GM_ADDR GetBaseFullmeshInfoDev() const;
     GM_ADDR GetRegisteredMemoryPtr() const;
     size_t GetRegisteredMemoryBytes() const;
     bool HasMemoryCleanupPending() const;
     uint32_t GetQpCount() const;
     bool UsesSharedQps() const;
+    bool HasFullmeshDomain() const;
+    uint32_t GetFullmeshValidPeerMask() const;
 
 private:
     struct PerEidState;
@@ -84,24 +92,38 @@ private:
     int BuildRoutes();
     int BuildLegacyRoutes(const std::vector<DevEidInfo>& devEids);
     int BuildExplicitRoutes(const std::vector<DevEidInfo>& devEids);
+    int InitFullmeshDomain();
+    int BuildFullmeshRoutes();
     int CreateContexts();
     int CreateQueues();
     int CreateLegacyQueues();
     int CreateExplicitQueues();
     int CreateSharedQueues();
+    int CreateFullmeshQueues();
     int ImportQueues();
     int ImportLegacyQueues();
     int ImportExplicitQueues();
     int ImportSharedQueues();
+    int ImportFullmeshQueues();
     int RefreshUDMAInfo();
+    int RefreshFullmeshInfo();
     int BuildQueueImages(std::vector<UDMAWQCtx>& sq, std::vector<UDMAWQCtx>& rq,
         std::vector<UDMACQCtx>& scq, std::vector<UDMACQCtx>& rcq,
         std::vector<UDMAMemInfo>& mem) const;
     int BuildRegistrationUDMAInfo(RegistrationState& registration);
-    int RegisterMemoryOnContexts(RegistrationState& registration);
+    int PrepareFullmeshRegistration(RegistrationState& registration);
+    int BuildFullmeshRegistrationUDMAInfo(
+        RegistrationState& registration);
+    int BuildFullmeshQueueImages(std::vector<UDMAWQCtx>& sq,
+        std::vector<UDMAWQCtx>& rq, std::vector<UDMACQCtx>& scq,
+        std::vector<UDMACQCtx>& rcq,
+        std::vector<UDMAMemInfo>& mem) const;
+    int RegisterMemoryOnContexts(
+        RegistrationState& registration, bool includeFullmesh);
     int ExchangeAndImportMemory(RegistrationState& registration);
     int PrepareRegistration(const TileXRUDMAProfileDesc& desc,
-        std::unique_ptr<RegistrationState>& registration);
+        std::unique_ptr<RegistrationState>& registration,
+        bool prepareFullmesh);
     int AgreeRegistrationStatus(int localStatus) const;
     int CleanupLocalRegistrations(std::map<uint32_t, RegMemResultInfo>& byEid);
     int CleanupRemoteImports(RegistrationState& registration);
@@ -111,6 +133,7 @@ private:
     int AllocDeviceScalar(void** ptr, size_t bytes) const;
     void FreeDeviceScalar(void*& ptr) const;
     int CleanupQueues();
+    int CleanupFullmeshQueues();
     void CleanupContexts();
     uint32_t FallbackLocalEid() const;
     const PerPeerQpState* GetPeerQpState(int peer, uint32_t qpIdx) const;
@@ -118,7 +141,10 @@ private:
     const PerPeerQpState* GetFallbackQpState(uint32_t qpIdx) const;
     const SharedQpState* GetSharedQpState(uint32_t qpIdx) const;
     SharedQpState* GetSharedQpState(uint32_t qpIdx);
+    const PerPeerQpState* GetFullmeshQpState(int peer) const;
+    PerPeerQpState* GetFullmeshQpState(int peer);
     size_t RouteIndex(int peer, uint32_t qpIdx) const;
+    size_t FullmeshEntryIndex(int peer, uint32_t slot) const;
 
     TileXRHccpLoader loader_;
     TileXRUDMATransportOptions options_ {};
@@ -137,8 +163,11 @@ private:
     std::map<uint32_t, PerEidState> states_;
     std::vector<std::unique_ptr<PerPeerQpState>> peerQpStates_;
     std::vector<std::unique_ptr<SharedQpState>> sharedQpStates_;
+    std::vector<std::unique_ptr<PerPeerQpState>> fullmeshQpStates_;
     std::vector<uint32_t> localRouteByPeerQp_;
     std::vector<uint32_t> remoteRouteByPeerQp_;
+    std::vector<uint32_t> fullmeshLocalRouteByPeer_;
+    std::vector<uint32_t> fullmeshRemoteRouteByPeer_;
     std::map<uint32_t, HccpEid> localEidByEid_;
     std::unique_ptr<RegistrationState> activeRegistration_;
     std::unique_ptr<RegistrationState> preparedRegistration_;
@@ -147,11 +176,16 @@ private:
     std::map<TileXRUDMAProfileHandle, std::unique_ptr<RegistrationState>> profiles_;
     GM_ADDR udmaInfoDev_ = nullptr;
     GM_ADDR baseUDMAInfoDev_ = nullptr;
+    GM_ADDR fullmeshInfoDev_ = nullptr;
+    GM_ADDR baseFullmeshInfoDev_ = nullptr;
     GM_ADDR eidTableDev_ = nullptr;
     uint32_t udmaInfoSize_ = 0;
+    uint32_t fullmeshInfoSize_ = 0;
     uint32_t qpCount_ = 1;
     bool explicitConfig_ = false;
     bool sharedQp_ = false;
+    bool fullmeshAvailable_ = false;
+    uint32_t fullmeshValidPeerMask_ = 0U;
 };
 
 } // namespace TileXR

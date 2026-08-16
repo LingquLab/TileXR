@@ -240,6 +240,20 @@ int TileXRUDMAGetQpCount(TileXRCommPtr comm, uint32_t *qpCount)
     return c->GetUDMAQpCount(qpCount);
 }
 
+int TileXRUDMAFullmeshQuery(TileXRCommPtr comm,
+    TileXR::TileXRUDMAFullmeshHostView *view)
+{
+    if (view != nullptr) {
+        *view = TileXR::TileXRUDMAFullmeshHostView {};
+    }
+    if (comm == nullptr || view == nullptr) {
+        TILEXR_LOG(ERROR) << "TileXRUDMAFullmeshQuery invalid input";
+        return TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    auto* c = static_cast<TileXRComm *>(comm);
+    return c->QueryUDMAFullmesh(view);
+}
+
 int TileXRGetUDMARegistryDev(TileXRCommPtr comm, GM_ADDR &registryPtr)
 {
     if (comm == nullptr) {

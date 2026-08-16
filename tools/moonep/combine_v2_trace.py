@@ -25,6 +25,27 @@ METRIC_NAMES = (
     "remote_wqe_build_us",
     "remote_submit_us",
 )
+FULLMESH_TIME_FIELDS = (
+    "fm_wqe_build_end",
+    "fm_submit_end",
+    "fm_cq_success",
+    "clos_grant_submit",
+    "clos_grant_cq_success",
+)
+FULLMESH_EVENT_NAMES = (
+    "fullmesh_wqe_build_end",
+    "fullmesh_submit_end",
+    "fullmesh_cq_success",
+    "clos_grant_submit",
+    "clos_grant_cq_success",
+)
+FULLMESH_ROUTE_FIELDS = (
+    "transport",
+    "fm_step",
+    "fm_peer",
+    "fm_successor",
+    "fm_logical_qp",
+)
 
 
 def parse_fields(line):
@@ -51,11 +72,20 @@ def parse_log(paths, batch_size):
                         continue
                     key = (int(fields["iteration"]), int(fields["rank"]))
                     value = float(fields["elapsed_ms"])
-                    if key in samples and samples[key] != value:
+                    timing_source = fields.get("timing_source", "acl_event")
+                    if timing_source not in ("acl_event", "kernel_profile"):
+                        raise ValueError(
+                            "unsupported timing_source {} at {}:{}".format(
+                                timing_source, path, line_number))
+                    sample = {
+                        "elapsed_ms": value,
+                        "timing_source": timing_source,
+                    }
+                    if key in samples and samples[key] != sample:
                         raise ValueError(
                             "conflicting sample {} at {}:{}".format(
                                 key, path, line_number))
-                    samples[key] = value
+                    samples[key] = sample
                 elif line.startswith(PROFILE_PREFIX):
                     fields = parse_fields(line)
                     if int(fields.get("bs", -1)) != batch_size:
@@ -71,10 +101,33 @@ def parse_log(paths, batch_size):
                     metrics = {
                         name: float(fields[name]) for name in METRIC_NAMES
                     }
+                    fullmesh = None
+                    fullmesh_fields = FULLMESH_ROUTE_FIELDS + \
+                        FULLMESH_TIME_FIELDS
+                    if any(name in fields for name in fullmesh_fields):
+                        missing = [name for name in fullmesh_fields
+                                   if name not in fields]
+                        if missing:
+                            raise ValueError(
+                                "incomplete Fullmesh profile fields {} at {}:{}".
+                                format(missing, path, line_number))
+                        fullmesh = {
+                            "profile_version": int(
+                                fields.get("profile_version", 0)),
+                            "transport": fields["transport"],
+                            "step": int(fields["fm_step"]),
+                            "peer": int(fields["fm_peer"]),
+                            "successor": int(fields["fm_successor"]),
+                            "logical_qp": int(fields["fm_logical_qp"]),
+                            "time_points": tuple(
+                                int(fields[name])
+                                for name in FULLMESH_TIME_FIELDS),
+                        }
                     record = {
                         "cycles_per_us": cycles_per_us,
                         "points": points,
                         "metrics": metrics,
+                        "fullmesh": fullmesh,
                     }
                     if key in profiles and profiles[key] != record:
                         raise ValueError(
@@ -137,7 +190,7 @@ def select_ranks(samples, iteration, world_size):
         key = (iteration, rank)
         if key not in samples:
             raise ValueError("missing final-iteration sample for rank {}".format(rank))
-        elapsed.append((samples[key], rank))
+        elapsed.append((samples[key]["elapsed_ms"], rank))
     elapsed.sort(key=lambda item: (item[0], item[1]))
     selected = (
         ("fastest", elapsed[0]),
@@ -205,9 +258,92 @@ def metadata_event(name, pid, args, tid=0):
     }
 
 
+def validate_fullmesh_profile(record, rank, core, world_size):
+    fullmesh = record["fullmesh"]
+    if fullmesh is None:
+        return
+    transport = fullmesh["transport"]
+    route = (
+        fullmesh["step"],
+        fullmesh["peer"],
+        fullmesh["successor"],
+        fullmesh["logical_qp"],
+    )
+    time_points = fullmesh["time_points"]
+    if transport == "none":
+        if route != (-1, -1, -1, -1) or any(time_points):
+            raise ValueError(
+                "rank {} core {} has nonzero non-Fullmesh diagnostics".
+                format(rank, core))
+        return
+    if transport != "fullmesh" or fullmesh["profile_version"] < 5:
+        raise ValueError(
+            "rank {} core {} has unsupported Fullmesh profile schema".
+            format(rank, core))
+    local_rank_size = min(world_size, 8)
+    if not 0 <= fullmesh["step"] < schedule_step_count(world_size) or \
+            not 0 <= fullmesh["peer"] < world_size or \
+            not 0 <= fullmesh["successor"] < world_size or \
+            fullmesh["peer"] == rank or \
+            rank // local_rank_size != fullmesh["peer"] // local_rank_size or \
+            fullmesh["logical_qp"] != \
+            32 + fullmesh["peer"] % local_rank_size:
+        raise ValueError(
+            "rank {} core {} has invalid Fullmesh route {}".
+            format(rank, core, route))
+    if any(point <= 0 for point in time_points) or any(
+            time_points[index] >= time_points[index + 1]
+            for index in range(len(time_points) - 1)):
+        raise ValueError(
+            "rank {} core {} has invalid Fullmesh event order".
+            format(rank, core))
+
+
+def append_fullmesh_events(events, record, rank, core, iteration,
+                           origin, divisor, pid, tid):
+    fullmesh = record["fullmesh"]
+    if fullmesh is None or fullmesh["transport"] != "fullmesh":
+        return
+    args = {
+        "iteration": iteration,
+        "rank": rank,
+        "core": core,
+        "data_transport": "fullmesh",
+        "grant_transport": (
+            "local" if fullmesh["successor"] == rank else "clos"),
+        "step": fullmesh["step"],
+        "peer": fullmesh["peer"],
+        "successor": fullmesh["successor"],
+        "logical_qp": fullmesh["logical_qp"],
+    }
+    for index, (name, point) in enumerate(zip(
+            FULLMESH_EVENT_NAMES, fullmesh["time_points"])):
+        event_args = dict(args)
+        if name == "clos_grant_cq_success" and \
+                fullmesh["successor"] == rank:
+            event_args["completion"] = "local_publication"
+        events.append({
+            "name": name,
+            "cat": "fullmesh" if index < 3 else "grant",
+            "ph": "i",
+            "s": "t",
+            "pid": pid,
+            "tid": tid,
+            "ts": round((point - origin) / divisor, 6),
+            "args": event_args,
+        })
+
+
 def build_trace(samples, profiles, correctness, perf_record, batch_size,
                 world_size, iteration, topk, hidden_size, experts, reduce_mode):
     elapsed_order, selected = select_ranks(samples, iteration, world_size)
+    timing_sources = {
+        samples[(iteration, rank)]["timing_source"]
+        for rank in range(world_size)
+    }
+    if len(timing_sources) != 1:
+        raise ValueError("final-iteration samples use mixed timing sources")
+    timing_source = next(iter(timing_sources))
     for rank in range(world_size):
         if rank not in correctness:
             raise ValueError("rank {} correctness is missing".format(rank))
@@ -258,6 +394,7 @@ def build_trace(samples, profiles, correctness, perf_record, batch_size,
             "role": role,
             "rank": rank,
             "elapsed_ms": elapsed_ms,
+            "timing_source": timing_source,
             "correctness": correctness[rank],
             "sorted_position": next(
                 index + 1 for index, item in enumerate(elapsed_order)
@@ -270,6 +407,7 @@ def build_trace(samples, profiles, correctness, perf_record, batch_size,
         })
         for core in sorted(rank_records):
             record = rank_records[core]
+            validate_fullmesh_profile(record, rank, core, world_size)
             points = record["points"]
             if any(point <= 0 for point in points):
                 raise ValueError(
@@ -292,10 +430,14 @@ def build_trace(samples, profiles, correctness, perf_record, batch_size,
                 "rank": rank,
                 "core": core,
                 "iteration": iteration,
-                "acl_event_elapsed_ms": elapsed_ms,
+                "selection_elapsed_ms": elapsed_ms,
+                "timing_source": timing_source,
                 "correctness": correctness[rank],
                 "reduce": reduce_mode,
             }
+            total_args[
+                "acl_event_elapsed_ms" if timing_source == "acl_event" else
+                "kernel_profile_elapsed_ms"] = elapsed_ms
             total_args.update(record["metrics"])
             events.append(complete_event(
                 "combine_v2_reduce" if reduce_mode == "enabled" else
@@ -308,6 +450,9 @@ def build_trace(samples, profiles, correctness, perf_record, batch_size,
                     (points[begin] - rank_origin) / divisor,
                     (points[end] - rank_origin) / divisor,
                     {"rank": rank, "core": core, "iteration": iteration}))
+            append_fullmesh_events(
+                events, record, rank, core, iteration, rank_origin,
+                divisor, pid, tid)
 
     sorted_rows = [
         {"sorted_position": index + 1, "rank": rank, "elapsed_ms": elapsed}
@@ -325,6 +470,7 @@ def build_trace(samples, profiles, correctness, perf_record, batch_size,
             "schedule_steps": schedule_step_count(world_size),
         },
         "iteration": iteration,
+        "timing_source": timing_source,
         "reduce": reduce_mode,
         "correctness": perf_record["correctness"],
         "rank_correctness": [
@@ -332,8 +478,10 @@ def build_trace(samples, profiles, correctness, perf_record, batch_size,
             for rank in range(world_size)
         ],
         "selection_method": (
-            "ascending final-iteration ACL Event elapsed time; fastest=min; "
-            "p50=nearest-rank ceil(0.5*N); slowest=max; ties by rank"),
+            "ascending final-iteration {} elapsed time; fastest=min; "
+            "p50=nearest-rank ceil(0.5*N); slowest=max; ties by rank".format(
+                "ACL Event" if timing_source == "acl_event" else
+                "slowest-core kernel profile")),
         "clock_alignment": (
             "each selected NPU rank is normalized independently to its earliest "
             "AIV core t0; cross-NPU absolute cycle offsets are not compared"),
@@ -392,16 +540,19 @@ def build_edge_trace(role, elapsed_ms, rank, samples, profiles, correctness,
     if len(divisors) != 1 or next(iter(divisors)) <= 0:
         raise ValueError("rank {} has inconsistent cycle divisors".format(rank))
     divisor = next(iter(divisors))
+    timing_source = samples[(iteration, rank)]["timing_source"]
+    timing_label = "ACL" if timing_source == "acl_event" else "PROFILE"
     origin = min(record["points"][0] for record in rank_records.values())
     events = [
         metadata_event("process_name", rank, {
-            "name": "rank {} | {} | ACL {:.6f} ms | {} device {}".format(
-                rank, role, elapsed_ms, host, rank % 8),
+            "name": "rank {} | {} | {} {:.6f} ms | {} device {}".format(
+                rank, role, timing_label, elapsed_ms, host, rank % 8),
         }),
         metadata_event("process_sort_index", rank, {"sort_index": 0}),
     ]
     for core in sorted(rank_records):
         record = rank_records[core]
+        validate_fullmesh_profile(record, rank, core, world_size)
         points = record["points"]
         if any(point <= 0 for point in points) or any(
                 points[index] > points[index + 1]
@@ -437,19 +588,23 @@ def build_edge_trace(role, elapsed_ms, rank, samples, profiles, correctness,
             "tid": core,
             "args": record["metrics"],
         })
-    return {
+        append_fullmesh_events(
+            events, record, rank, core, iteration, origin,
+            divisor, rank, core)
+    edge_trace = {
         "traceEvents": events,
         "displayTimeUnit": "ms",
         "metadata": {
             "format": "Chrome Trace Event Format",
             "selection": role,
-            "selection_rule": "{} rank by iteration-{} elapsed_ms".format(
-                role, iteration),
+            "selection_rule": "{} rank by iteration-{} {} elapsed_ms".format(
+                role, iteration, timing_source),
             "iteration": iteration,
             "rank": rank,
             "host": host,
             "device": rank % 8,
-            "acl_event_elapsed_ms": elapsed_ms,
+            "selection_elapsed_ms": elapsed_ms,
+            "timing_source": timing_source,
             "bs": batch_size,
             "k": topk,
             "h": hidden_size,
@@ -461,6 +616,10 @@ def build_edge_trace(role, elapsed_ms, rank, samples, profiles, correctness,
             "correctness": correctness[rank],
         },
     }
+    edge_trace["metadata"][
+        "acl_event_elapsed_ms" if timing_source == "acl_event" else
+        "kernel_profile_elapsed_ms"] = elapsed_ms
+    return edge_trace
 
 
 def write_edge_traces(output_dir, prefix, host, samples, profiles,
@@ -490,6 +649,7 @@ def write_summary(path, trace):
         "schema": "tilexr_moonep_combine_v2_trace_summary.v1",
         "shape": data["shape"],
         "iteration": data["iteration"],
+        "timing_source": data["timing_source"],
         "reduce": data["reduce"],
         "correctness": data["correctness"],
         "rank_correctness": data["rank_correctness"],

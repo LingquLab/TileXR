@@ -15,8 +15,10 @@ warmup=0, iterations=80, reduce=disabled
 
 `K=16` 和 `BF16` 由 benchmark 固定。省略 `--reduce-hidden` 即测试 no-reduce。
 
-性能口径是先对每个 rank 的 80 轮耗时求均值，再取 128 个 rank 均值中的最大值
-作为整组延迟 `max_ms`。单 rank 等效算法数据量和带宽为：
+性能口径是在一次 rank 对齐后连续提交 80 轮，用整批 ACL Event 耗时除以 80 得到
+每个 rank 的 `avg_ms`，再取 128 个 rank 平均耗时中的最大值作为整组延迟
+`max_ms`。计时轮次之间没有 barrier、同步、D2H、profiling 解析或日志输出。单 rank
+等效算法数据量和带宽为：
 
 ```text
 bytes = BS * K * H * sizeof(BF16)
@@ -136,14 +138,17 @@ bash "${REMOTE_ROOT}/source/scripts/watch_cab15_9_4_7_npus.sh" --once
 每柜显示 8 台服务器、每台 8 个字符：`0` 为空闲，`1` 为有进程，`?` 为探测
 失败。`Alarm` 状态本身不表示卡不可用。
 
-watcher 只判断是否有进程，不能区分进程类型。选择候选柜后，以 `npu-smi info`
-进程表或 launcher 预检作最终判定：
+watcher 只判断是否有进程，不能区分进程类型。选择候选柜后，以外部
+`npu-smi info` 进程表作最终判定：
 
 - 无 NPU 进程：可测试。
 - 只有 `tilexr_*` 进程：允许共用，可直接测试。
 - `python` 或其他通信测试进程：不可共用，每 15 秒复查。
 - `?`、SSH 失败或 `npu-smi` 失败：不可判定为空闲。
 - 等待 120 秒仍未满足条件：停止本轮，不启动 rank，等待下次唤起。
+
+launcher 不重复执行 NPU 进程预检，也不负责等待环境空闲。调用方必须在启动前通过
+watcher 或等价的外部检查确认环境可用。
 
 共享环境禁止 `pkill`，也不要清理其他任务的 PID、端口、日志或 Mutagen 会话。
 
@@ -167,15 +172,12 @@ bash "${REMOTE_ROOT}/source/tools/moonep/run_combine_v2_perf_multihost.sh" \
   --hidden-size 3584 \
   --comm-domain 141 \
   --comm-id "${PRIMARY_HOST}:10067" \
-  --wait-seconds 120 \
-  --retry-seconds 15 \
   --timeout 600 \
   --log-file "${LOG_FILE}"
 ```
 
 并发任务必须使用不同的 bootstrap 端口；launcher 还会使用由该端口推导出的
-barrier 端口。不要添加 `--skip-npu-preflight`，除非本轮刚刚人工检查过 hostfile
-中的全部节点。
+barrier 端口。
 
 128P launcher 会为每台节点预建一条 SSH ControlMaster，并让本机 8 个 rank 复用；
 不要移除此逻辑，否则并发建连可能触发共享节点的 `MaxStartups`，表现为固定 rank
@@ -192,26 +194,27 @@ COMBINE_V2_PERF ... max_ms=<slowest-rank-mean> max_alg_bw_GBps=<bandwidth> ...
 128P、80 轮、单 BS 的完整数据必须包含：
 
 ```text
-COMBINE_V2_SAMPLE:    128 * 80 = 10240 条
 COMBINE_V2_RANK_PERF: 128 条
 ```
+
+关闭 profiling 时不输出 `COMBINE_V2_SAMPLE`。开启 profiling 时每个 rank 只为最后
+一轮输出一条 `timing_source=kernel_profile` 的 sample，供最快/P50/最慢卡选择使用。
 
 快速计数：
 
 ```bash
 awk '
-  /^COMBINE_V2_SAMPLE / { samples++ }
   /^COMBINE_V2_RANK_PERF / { ranks++ }
-  END { print "samples=" samples + 0, "rank_perf=" ranks + 0 }
+  END { print "rank_perf=" ranks + 0 }
 ' "${LOG_FILE}.ranks"/rank_*.log
 ```
 
 正确性状态与性能采集相互独立。临时优化版本即使输出 `self_only_failed` 或
-`failed`，只要上述记录完整，性能数据仍有效并应输出；报告中保留实际
+`failed`，只要 rank 性能记录完整，性能数据仍有效并应输出；报告中保留实际
 `correctness` 状态即可。
 
-旧测试产物如果出现 `barrier failed after all benchmark cases`，但已有
-`10240/10240` 样本和 `128/128` rank 汇总，则本轮性能数据完整。原因是复用同一
+旧测试产物如果出现 `barrier failed after all benchmark cases`，但已有完整的逐轮
+样本和 `128/128` rank 汇总，则本轮性能数据完整。原因是复用同一
 端口时，旧 listener 在逐个 release 之后才关闭，快 rank 可能误连上一轮；当前
 实现会先关闭本轮 listener，再 release 全部客户端。需要从旧 rank 日志重新聚合
 时使用：
@@ -222,6 +225,7 @@ awk -v expected_ranks=128 -v expected_iterations=80 -v bs=8192 \
   "${LOG_FILE}.ranks"/rank_*.log
 ```
 
-零样本时不报告性能：SSH `status 255` 表示 rank 启动失败；`TsdProcessOpen failed:
-31` 或 `UDMA init failed: -4` 表示资源尚未释放。两种情况都等待环境恢复后再试，
-不终止共享任务。
+新格式中零条逐轮 sample 是正常现象，必须以 128 条 `COMBINE_V2_RANK_PERF` 判断
+数据是否完整。SSH `status 255` 表示 rank 启动失败；`TsdProcessOpen failed: 31`
+或 `UDMA init failed: -4` 表示资源尚未释放。两种情况都等待环境恢复后再试，不终止
+共享任务。

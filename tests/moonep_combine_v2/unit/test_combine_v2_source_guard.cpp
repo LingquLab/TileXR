@@ -101,12 +101,16 @@ int main()
         "/src/moonep/combine_v2/common/combine_v2_profile.h");
     const std::string hardwareProbe = Read(root +
         "/tests/moonep_combine_v2/demo/tilexr_moonep_combine_v2_hardware_probe.cpp");
+    const std::string traceTool = Read(root +
+        "/tools/moonep/combine_v2_trace.py");
     const std::string clusterLauncher = Read(root +
         "/tools/moonep/run_combine_v2_perf_cluster.sh");
     const std::string multihostLauncher = Read(root +
         "/tools/moonep/run_combine_v2_perf_multihost.sh");
     const std::string host = Read(root +
         "/src/moonep/combine_v2/host/combine_v2_host.cpp");
+    const std::string hostHeader = Read(root +
+        "/src/moonep/combine_v2/host/combine_v2_host.h");
     const std::string launch = Read(root +
         "/src/moonep/combine_v2/host/combine_v2_launch.cpp");
     const std::string publicHeader = Read(root +
@@ -115,9 +119,15 @@ int main()
         "/src/moonep/common/moonep_kernel_registration.h");
     const std::string peerPrefill = Section(kernelImpl,
         "inline void MoonEpCombineV2PrefillPeerWqesVf(",
+        "inline void MoonEpCombineV2PrefillFullmeshWqesVf(");
+    const std::string fullmeshPrefill = Section(kernelImpl,
+        "inline void MoonEpCombineV2PrefillFullmeshWqesVf(",
         "inline void MoonEpCombineV2BuildPayloadWqesVf(");
     const std::string directBuilder = Section(kernelImpl,
         "inline void MoonEpCombineV2BuildPayloadWqesVf(",
+        "inline void MoonEpCombineV2BuildFullmeshPayloadWqesVf(");
+    const std::string fullmeshBuilder = Section(kernelImpl,
+        "inline void MoonEpCombineV2BuildFullmeshPayloadWqesVf(",
         "inline void MoonEpCombineV2BuildFullSyncWqesVf(");
     const std::string fullSyncBuilder = Section(kernelImpl,
         "inline void MoonEpCombineV2BuildFullSyncWqesVf(",
@@ -128,6 +138,15 @@ int main()
     const std::string submitPair = Section(kernelImpl,
         "__aicore__ inline bool MoonEpCombineV2::SubmitPair(",
         "__aicore__ inline bool MoonEpCombineV2::SendRemoteStep(");
+    const std::string fullmeshSubmit = Section(kernelImpl,
+        "__aicore__ inline bool MoonEpCombineV2::SubmitFullmeshBatch(",
+        "__aicore__ inline bool MoonEpCombineV2::SendFullmeshStep(");
+    const std::string fullmeshSend = Section(kernelImpl,
+        "__aicore__ inline bool MoonEpCombineV2::SendFullmeshStep(",
+        "__aicore__ inline void MoonEpCombineV2::CopySelfRowsIn(");
+    const std::string fullmeshWait = Section(kernelImpl,
+        "__aicore__ inline bool MoonEpCombineV2::WaitFullmeshCq(",
+        "__aicore__ inline bool MoonEpCombineV2::WaitStepGrant(");
     const std::string selfStep = Section(kernelImpl,
         "__aicore__ inline bool MoonEpCombineV2::SendSelfStep(",
         "__aicore__ inline bool MoonEpCombineV2::WaitInboundDone(");
@@ -145,9 +164,15 @@ int main()
         "} // namespace");
     const std::string fullSyncPublisher = Section(kernelImpl,
         "__aicore__ inline bool MoonEpCombineV2::PublishFullSyncBatch(",
+        "__aicore__ inline bool MoonEpCombineV2::WaitFullSyncCq(");
+    const std::string fullSyncWait = Section(kernelImpl,
+        "__aicore__ inline bool MoonEpCombineV2::WaitFullSyncCq(",
         "__aicore__ inline bool MoonEpCombineV2::FullSyncSignalMatches(");
     const std::string barrierServer = Section(hardwareProbe,
         "bool BarrierServer(", "bool BarrierClient(");
+    const std::string timedBatch = Section(hardwareProbe,
+        "CheckAcl(rank, \"aclrtRecordEvent batch start\"",
+        "if (options.profile) {");
 
     bool ok = true;
     ok &= Require(rootCmake, "add_subdirectory(tests/moonep_combine_v2)",
@@ -158,6 +183,25 @@ int main()
         "Combine V2 is not linked into the MoonEP aggregate library");
     ok &= Reject(v1Cmake, "combine_v2",
         "Combine V1 build definition contains V2 changes");
+
+    ok &= Require(timedBatch, "for (int iteration = 0; iteration < options.iterations; ++iteration)",
+        "Combine V2 timed batch does not contain the iteration loop");
+    ok &= Require(timedBatch, "LaunchCombine(",
+        "Combine V2 timed batch does not launch the operator");
+    ok &= Require(timedBatch, "aclrtRecordEvent(stopEvent, stream)",
+        "Combine V2 timed batch does not record one batch stop event");
+    ok &= Require(timedBatch, "aclrtSynchronizeEvent(stopEvent)",
+        "Combine V2 timed batch does not synchronize after all launches");
+    ok &= Reject(timedBatch, "BarrierAll(",
+        "Combine V2 timed batch still contains a rank barrier");
+    ok &= Reject(timedBatch, "CaptureProfileSamples(",
+        "Combine V2 timed batch still copies profiles between launches");
+    ok &= Reject(timedBatch, "COMBINE_V2_SAMPLE",
+        "Combine V2 timed batch still logs between launches");
+    ok &= Require(multihostLauncher, "rank_average[rank_key]",
+        "Combine V2 launcher does not aggregate rank batch averages");
+    ok &= Reject(multihostLauncher, "sample_count[rank_key] != iterations",
+        "Combine V2 launcher still requires per-iteration samples");
 
     ok &= Require(v2Cmake, "add_library(tilexr-moonep-combine-v2 SHARED",
         "Combine V2 does not own a standalone shared library");
@@ -225,6 +269,12 @@ int main()
         "Simt::VF_CALL<MoonEpCombineV2BuildPayloadWqesVf>",
         "Combine V2 implementation does not use its SIMT WQE builder");
     ok &= Require(kernelImpl,
+        "Simt::VF_CALL<MoonEpCombineV2PrefillFullmeshWqesVf>",
+        "Combine V2 implementation does not prefill Fullmesh WQEs");
+    ok &= Require(kernelImpl,
+        "Simt::VF_CALL<MoonEpCombineV2BuildFullmeshPayloadWqesVf>",
+        "Combine V2 implementation does not use its Fullmesh SIMT builder");
+    ok &= Require(kernelImpl,
         "Simt::VF_CALL<MoonEpCombineV2BuildFullSyncWqesVf>",
         "Combine V2 full-sync path does not use a dedicated SIMT builder");
     ok &= Require(kernelImpl,
@@ -234,8 +284,8 @@ int main()
         "Combine V2 full-sync WQE builder is not a SIMT VF");
     ok &= Require(fullSyncBuilder, "words[word] = 0U;",
         "Combine V2 full-sync builder does not clear the complete WQE");
-    ok &= Require(fullSyncBuilder, "sqe->flag = 0U;",
-        "Combine V2 full-sync WQE unexpectedly requests a CQE");
+    ok &= Require(fullSyncBuilder, "task + 1U == context->count",
+        "Combine V2 full-sync completion is not limited to the terminal WQE");
     ok &= Require(fullSyncBuilder,
         "sge->len = TileXRMoonEp::kMoonEpCombineV2FullSyncSignalBytes;",
         "Combine V2 full-sync WQE does not send the 32-byte signal");
@@ -413,7 +463,13 @@ int main()
         "Combine V2 implementation does not ring device doorbells");
     ok &= Require(kernelImpl, "rank_, 0U, core_, rankSize_",
         "Combine V2 implementation does not use the runtime Ring schedule");
-    if (CountOccurrences(kernelImpl, "kCombineV2ScheduleMode") != 10U) {
+    const std::size_t scheduleCallCount =
+        CountOccurrences(kernelImpl, "MoonEpCombineV2Peer(") +
+        CountOccurrences(kernelImpl, "MoonEpCombineV2Successor(") +
+        CountOccurrences(kernelImpl, "MoonEpCombineV2ReceiveStep(") +
+        CountOccurrences(kernelImpl, "MoonEpCombineV2SenderCore(");
+    if (CountOccurrences(kernelImpl, "kCombineV2ScheduleMode") !=
+        scheduleCallCount + 1U) {
         std::cerr << "Combine V2 schedule mode is not passed to every "
                      "active schedule call\n";
         ok = false;
@@ -436,16 +492,21 @@ int main()
                      "and ring one doorbell\n";
         ok = false;
     }
-    ok &= Reject(fullSyncPublisher, "wqeCntAddr",
-        "Combine V2 full-sync publisher updates the CQ WQE count");
-    ok &= Reject(fullSyncPublisher, "completionCount",
-        "Combine V2 full-sync publisher changes completion accounting");
-    ok &= Reject(fullSyncPublisher, "cqTarget",
-        "Combine V2 full-sync publisher changes the CQ target");
-    ok &= Reject(fullSyncPublisher, "PollCqOnce",
-        "Combine V2 full-sync publisher polls CQ");
-    ok &= Require(kernelImpl, "kEnableSafetyChecks || fullSync_",
-        "Combine V2 full-sync path does not force SQ/WQ validation");
+    ok &= Require(fullSyncBuilder,
+        "TILEXR_UDMA_SQE_FLAG_ORDERED_COMPLETION",
+        "Combine V2 full-sync terminal WQE does not request completion");
+    ok &= Require(fullSyncPublisher, "state.completionCount",
+        "Combine V2 full-sync publisher omits completion accounting");
+    ok &= Require(fullSyncPublisher, "state.sq->wqeCntAddr",
+        "Combine V2 full-sync publisher omits the device completion count");
+    ok &= Require(fullSyncPublisher, "state.cqTarget",
+        "Combine V2 full-sync publisher omits the CQ target");
+    ok &= Require(fullSyncWait, "PollCqOnce(state)",
+        "Combine V2 full-sync path does not consume its CQ");
+    ok &= Require(fullSyncWait, "state.head != state.tail",
+        "Combine V2 full-sync path does not require an empty SQ");
+    ok &= Require(kernelImpl, "if (!laneStatesReady)",
+        "Combine V2 required SQ/WQ validation is benchmark-optional");
     ok &= Require(process, "if (fullSyncWqeCount != 0U)",
         "Combine V2 full-sync path writes a source signal for self-only core");
     ok &= RequireBefore(process, "BuildFullSyncWqes(&fullSyncWqeCount)",
@@ -454,20 +515,84 @@ int main()
     ok &= RequireBefore(process, "PrepareFullSyncSignal()",
         "PublishFullSyncBatch(fullSyncWqeCount)",
         "Combine V2 full-sync source is prepared after SQ publication");
-    ok &= Require(host, "value == nullptr || value[0] == '\\0'",
-        "Combine V2 full-sync environment does not define its default");
-    ok &= Require(host, "*enabled = true;",
-        "Combine V2 full-sync environment is not enabled by default");
-    ok &= Require(host,
-        "context->fullSync = fullSyncEnabled;",
-        "Combine V2 full synchronization is not launch-independent");
-    ok &= Reject(host,
-        "params.reduceHidden && fullSyncEnabled",
-        "Combine V2 Host still binds full synchronization to reduction");
-    ok &= Require(kernelImpl, "fullSync_ = fullSync;",
-        "Combine V2 Kernel does not preserve the independent full-sync flag");
-    ok &= Reject(kernelImpl, "fullSync && reduceHidden",
-        "Combine V2 Kernel still binds full synchronization to reduction");
+    ok &= RequireBefore(process, "PublishFullSyncBatch(fullSyncWqeCount)",
+        "WaitFullSyncCq()",
+        "Combine V2 full-sync path does not wait for its submitted CQ");
+    ok &= RequireBefore(process, "WaitFullSyncCq()",
+        "WaitFullSyncSources()",
+        "Combine V2 full-sync signals are consumed before local CQ success");
+
+    ok &= Require(fullmeshPrefill, "sqe->flag = 0U;",
+        "Combine V2 Fullmesh payload template unexpectedly completes each WQE");
+    ok &= Require(fullmeshBuilder, "context->head[0] + task",
+        "Combine V2 Fullmesh builder does not use the direct SQ head");
+    ok &= Require(fullmeshSubmit, "AppendControlWqe(issue, count, fullmeshLane_, fullmeshInfo_",
+        "Combine V2 Fullmesh path does not append done on the direct QP");
+    ok &= RequireBefore(fullmeshSubmit,
+        "AppendControlWqe(issue, count, fullmeshLane_, fullmeshInfo_",
+        "MOONEP_COMBINE_V2_DIAG_FULLMESH_WQE_BUILD_END",
+        "Combine V2 profiles Fullmesh WQE build before appending done");
+    ok &= Require(fullmeshSubmit,
+        "MOONEP_COMBINE_V2_SIX_PORT",
+        "Combine V2 Fullmesh done does not reuse lane zero");
+    ok &= Require(fullmeshSubmit,
+        "TILEXR_UDMA_SQE_FLAG_ORDERED_COMPLETION",
+        "Combine V2 Fullmesh done does not request ordered completion");
+    ok &= RequireBefore(fullmeshSubmit, "SyncFunc<HardEvent::S_MTE3>();",
+        "CopyIssueToSq(issue, fullmeshLane_, count)",
+        "Combine V2 Fullmesh WQEs lack scalar-to-MTE3 ordering");
+    ok &= RequireBefore(fullmeshSubmit,
+        "CopyIssueToSq(issue, fullmeshLane_, count)",
+        "SyncFunc<HardEvent::MTE3_S>();",
+        "Combine V2 Fullmesh SQ publication is not completed before doorbells");
+    ok &= RequireBefore(fullmeshSubmit, "SyncFunc<HardEvent::MTE3_S>();",
+        "st_dev(fullmeshLane_.head",
+        "Combine V2 Fullmesh doorbell precedes MTE3 completion");
+    ok &= Require(fullmeshSend, "selectedCount == 0U && lastChunk",
+        "Combine V2 Fullmesh path skips done for empty payload");
+    ok &= Require(fullmeshWait, "PollCqOnce(fullmeshLane_)",
+        "Combine V2 Fullmesh path does not consume CQ");
+    ok &= Reject(fullmeshWait, "kEnableSafetyChecks",
+        "Combine V2 Fullmesh CQ validation is benchmark-optional");
+    ok &= RequireBefore(process, "WaitFullmeshCq(step, peer)",
+        "SubmitSelfGrant(step)",
+        "Combine V2 publishes grant before Fullmesh CQ success");
+    ok &= RequireBefore(process,
+        "MOONEP_COMBINE_V2_DIAG_FULLMESH_CQ_SUCCESS",
+        "SubmitSelfGrant(step)",
+        "Combine V2 profiles Fullmesh CQ success after grant publication");
+    ok &= RequireBefore(process,
+        "MOONEP_COMBINE_V2_DIAG_FULLMESH_GRANT_SUBMIT",
+        "WaitStepCqs(step)",
+        "Combine V2 profiles deferred grant submit after its CQ wait");
+    ok &= RequireBefore(process, "WaitStepCqs(step)",
+        "MOONEP_COMBINE_V2_DIAG_FULLMESH_GRANT_CQ_SUCCESS",
+        "Combine V2 profiles deferred grant CQ success before CQ wait");
+    ok &= Require(host, "UDMA_FULLMESH",
+        "Combine V2 Host does not require Fullmesh capability");
+    ok &= Require(host, "TileXRUDMAFullmeshQuery",
+        "Combine V2 Host does not validate the Fullmesh generation");
+    ok &= Require(kernelImpl, "constexpr bool kEnableFullSync = false;",
+        "Combine V2 Kernel full synchronization is not disabled by default");
+    ok &= Require(process, "if (kEnableFullSync)",
+        "Combine V2 Process does not use the Kernel-local full-sync switch");
+    ok &= Reject(host, "TILEXR_MOONEP_COMBINE_V2_FULL_SYNC",
+        "Combine V2 Host still exposes the full-sync environment switch");
+    ok &= Reject(hostHeader, "bool fullSync",
+        "Combine V2 launch context still stores the full-sync flag");
+    ok &= Reject(launch, "uint64_t fullSync;",
+        "Combine V2 launch ABI still carries the full-sync flag");
+    ok &= Reject(launch, "context.fullSync",
+        "Combine V2 launch context still carries the full-sync flag");
+    ok &= Reject(kernelEntry, "uint64_t fullSync,",
+        "Combine V2 Kernel entry still accepts the full-sync flag");
+    ok &= Reject(kernelImpl, "bool fullSync,",
+        "Combine V2 Kernel Init still accepts the full-sync flag");
+    ok &= Reject(kernelImpl, "fullSync_",
+        "Combine V2 Kernel still stores a runtime full-sync flag");
+    ok &= Require(launch,
+        "static_assert(sizeof(CombineV2KernelArgs) == 21U * sizeof(uint64_t)",
+        "Combine V2 launch ABI does not contain exactly 21 64-bit slots");
     ok &= Require(kernelImpl,
         "TileXRMoonEp::MOONEP_COMBINE_V2_SINGLE_RING;",
         "Combine V2 default schedule is not the existing single ring");
@@ -521,15 +646,34 @@ int main()
         "kMoonEpCombineV2ProfileMetricCount = 8U",
         "Combine V2 profile metric ABI is missing");
     ok &= Require(profileHeader,
-        "kMoonEpCombineV2ProfileVersion = 4U",
-        "Combine V2 full-sync profile version is missing");
+        "kMoonEpCombineV2ProfileVersion = 5U",
+        "Combine V2 Fullmesh profile version is missing");
     ok &= Require(profileHeader,
         "MOONEP_COMBINE_V2_TIME_STEP0_READY_END",
         "Combine V2 profile does not expose post-grant readiness");
+    ok &= Require(profileHeader,
+        "MOONEP_COMBINE_V2_DIAG_FULLMESH_WQE_BUILD_END",
+        "Combine V2 profile does not expose Fullmesh WQE build completion");
+    ok &= Require(profileHeader,
+        "MOONEP_COMBINE_V2_DIAG_FULLMESH_GRANT_CQ_SUCCESS",
+        "Combine V2 profile does not expose deferred grant CQ completion");
+    ok &= Require(profileHeader,
+        "MoonEpCombineV2PackFullmeshProfileRoute",
+        "Combine V2 profile does not encode its Fullmesh route");
     ok &= Require(hardwareProbe, "self_copy_us",
         "Combine V2 probe does not print self-copy profiling");
     ok &= Require(hardwareProbe, "remote_submit_us",
         "Combine V2 probe does not print remote-submit profiling");
+    ok &= Require(hardwareProbe, "transport=",
+        "Combine V2 probe does not print the profile transport");
+    ok &= Require(hardwareProbe, "fm_logical_qp=",
+        "Combine V2 probe does not print the Fullmesh logical QP");
+    ok &= Require(hardwareProbe, "clos_grant_cq_success=",
+        "Combine V2 probe does not print deferred grant completion");
+    ok &= Require(traceTool, "append_fullmesh_events",
+        "Combine V2 trace decoder does not emit Fullmesh boundary events");
+    ok &= Require(traceTool, "invalid Fullmesh event order",
+        "Combine V2 trace decoder does not validate Fullmesh ordering");
     ok &= Require(barrierServer,
         "close(listenFd);\n    const uint8_t release",
         "Combine V2 barrier releases clients before retiring its listener");
