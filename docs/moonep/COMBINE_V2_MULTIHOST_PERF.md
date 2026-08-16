@@ -40,6 +40,25 @@ BS8192、K16、H3584、Exp256、BF16、no-reduce、20 次 warmup + 80 次迭代�
 `combine_v2_128p_noprofile_20260816_231819.log`。该结果不覆盖 32P/64P、Reduce 或 R2 之后
 的 Server-Pair/64-Grant 行为。
 
+### R2 停用 32P+ Legacy Grant
+
+R2 在 32P/64P/128P 停止发布和等待 Legacy Ring Grant，2P-16P 保留旧路径。每个 round
+的数据 CQ drain 后仍执行 global barrier，Done ordering、Ring peer 和公共 ABI 不变。
+
+global barrier 的稳定 `boundaryId` 和两槽 ping-pong `generation` 必须解耦。R1-R3 为后续
+phase barrier 预留编号，但尚不执行该 barrier；128P 的 boundary 因而从 4 直接跳到 6。
+若使用 `boundaryId % 2`，这两个连续执行的 barrier 会复用同一个槽，较快 rank 可用
+boundary 6 覆盖较慢 rank 尚未读取的 boundary 4 signal。停用 Legacy Grant 后该竞态表现为
+一柜已等待 boundary 6、另一柜仍等待 boundary 4，最终约 10 秒超时。正确做法是按实际
+执行序号选择 generation：leading 为 0，R1-R3 的 round `s` 使用 `s + 1`；signal guard
+仍校验完整 `boundaryId`，用于拒绝陈旧或被覆盖的信号。
+
+2026-08-17 在 CANN 9.1、Ascend950、0/2 柜 128P 上验证 R2：最小 BS128、1 次迭代、
+no-reduce 用例由超时恢复为 `correctness=passed`；随后 BS8192、20 次 warmup + 80 次迭代
+的 128/128 rank 均通过，平均 `4.466763 ms`，最大 `4.480840 ms`。完整日志为
+`combine_v2_128p_noprofile_20260817_002247.log`。该证据覆盖 128P Ring、barrier-only、
+no-reduce 路径，不覆盖 32P/64P、Reduce 或 Server-Pair/64-Grant。
+
 ## 1. 基准口径
 
 常用 128P case：

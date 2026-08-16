@@ -171,6 +171,12 @@ MoonEpCombineV2ActiveCoreCount(uint32_t rankSize)
         kMoonEpCombineV2CoreCount;
 }
 
+TILEXR_MOONEP_COMBINE_V2_INLINE bool
+MoonEpCombineV2LegacyGrantEnabled(uint32_t rankSize)
+{
+    return MoonEpCombineV2RankSizeSupported(rankSize) && rankSize <= 16U;
+}
+
 TILEXR_MOONEP_COMBINE_V2_INLINE uint32_t
 MoonEpCombineV2StepCount(uint32_t rankSize)
 {
@@ -632,9 +638,9 @@ MoonEpCombineV2RoundBoundary(uint32_t round, uint32_t rankSize)
 }
 
 TILEXR_MOONEP_COMBINE_V2_INLINE uint32_t
-MoonEpCombineV2FullSyncGeneration(uint32_t boundaryId)
+MoonEpCombineV2FullSyncGeneration(uint32_t executionOrdinal)
 {
-    return boundaryId % kMoonEpCombineV2FullSyncGenerationSlotCount;
+    return executionOrdinal % kMoonEpCombineV2FullSyncGenerationSlotCount;
 }
 
 TILEXR_MOONEP_COMBINE_V2_INLINE uint64_t

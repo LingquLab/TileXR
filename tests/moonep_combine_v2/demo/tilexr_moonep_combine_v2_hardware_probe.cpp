@@ -598,6 +598,54 @@ OutputCheckResult CheckOutput(int rank, int world, int64_t bs,
         OutputCheckResult::Passed;
 }
 
+void ReportFirstKernelFailure(int rank, const void *workspace,
+    const TileXRMoonEp::CombineV2Layout &layout)
+{
+    const std::size_t recordCount = static_cast<std::size_t>(
+        layout.failureBytes /
+        sizeof(TileXRMoonEp::MoonEpCombineV2FailureRecord));
+    std::vector<TileXRMoonEp::MoonEpCombineV2FailureRecord> records(
+        recordCount);
+    const void *failureDevice = static_cast<const uint8_t *>(workspace) +
+        layout.failureOffset;
+    CheckAcl(rank, "failure record D2H copy", aclrtMemcpy(records.data(),
+        layout.failureBytes, failureDevice, layout.failureBytes,
+        ACL_MEMCPY_DEVICE_TO_HOST));
+    const TileXRMoonEp::MoonEpCombineV2FailureRecord *selected = nullptr;
+    for (const auto &record : records) {
+        if ((record.marker & ~1U) !=
+                TileXRMoonEp::kMoonEpCombineV2FailureMarker ||
+            record.status == TileXRMoonEp::MOONEP_COMBINE_V2_SUCCESS) {
+            continue;
+        }
+        if (selected == nullptr ||
+            (selected->status ==
+                    TileXRMoonEp::MOONEP_COMBINE_V2_COLLECTIVE_STATUS_ERROR &&
+                record.status !=
+                    TileXRMoonEp::MOONEP_COMBINE_V2_COLLECTIVE_STATUS_ERROR)) {
+            selected = &record;
+        }
+    }
+    if (selected != nullptr) {
+        std::cerr << "COMBINE_V2_FAILURE"
+                  << " rank=" << rank
+                  << " status=" << selected->status
+                  << " source_rank=" << selected->rank
+                  << " core=" << selected->core
+                  << " step=" << selected->step
+                  << " peer=" << selected->peer
+                  << " lane=" << selected->lane
+                  << " qp=" << selected->qp
+                  << " cq_status=" << selected->cqStatus
+                  << " expected=" << selected->expected
+                  << " observed=" << selected->observed
+                  << std::endl;
+        return;
+    }
+    std::cerr << "COMBINE_V2_FAILURE rank=" << rank
+              << " status=unavailable" << std::endl;
+}
+
 void CaptureProfileSamples(int rank, int world, int iteration,
     const void *workspace, uint64_t profileOffset,
     std::vector<ProfileSample> *samples)
@@ -922,6 +970,9 @@ int main(int argc, char **argv)
         const OutputCheckResult outputResult = CheckOutput(
             rank, world, bs, options.hiddenSize, workspace,
             activeOutputOffset, options.reduceHidden);
+        if (outputResult != OutputCheckResult::Passed) {
+            ReportFirstKernelFailure(rank, workspace, caseLayout);
+        }
         if (!BarrierAll(rank, world, "correctness validation")) {
             Abort(rank, "correctness validation barrier", 1);
         }

@@ -561,7 +561,8 @@ private:
     __aicore__ inline bool EndCollectiveStage(
         uint32_t stageId, bool localSucceeded);
     __aicore__ inline bool RunGlobalBarrier(uint32_t boundaryId,
-        uint32_t timeoutStatus, bool localSucceeded = true);
+        uint32_t executionOrdinal, uint32_t timeoutStatus,
+        bool localSucceeded = true);
     __aicore__ inline void InitReduceBuffers(uint32_t inputBufferNum,
         uint32_t inputSlotBytes, uint32_t floatRowBytes,
         uint32_t outputSlotBytes);
@@ -1630,48 +1631,56 @@ __aicore__ inline bool MoonEpCombineV2::SubmitPair(
         allIssue[kSixPortIssueBytes]
     };
     if (finalBatch) {
-        const uint32_t successor =
+        const bool legacyGrantEnabled =
+            TileXRMoonEp::MoonEpCombineV2LegacyGrantEnabled(rankSize_);
+        const uint32_t successor = legacyGrantEnabled ?
             TileXRMoonEp::MoonEpCombineV2Successor(
-                rank_, step, core_, rankSize_, kCombineV2ScheduleMode);
+                rank_, step, core_, rankSize_, kCombineV2ScheduleMode) :
+            TileXRMoonEp::kMoonEpCombineV2InvalidPeer;
         for (uint32_t lane = 0U; lane < 2U; ++lane) {
             LocalTensor<uint8_t> issue = laneIssue[lane];
             __gm__ uint64_t *doneSource = reinterpret_cast<__gm__ uint64_t *>(
                 controlSourceBase_ + static_cast<uint64_t>(lane) *
                     TileXRMoonEp::kMoonEpCombineV2TokenStrideBytes);
-            if (successor == rank_) {
-                PublishLocalGrant(step, lane);
-            } else {
-                const uint64_t grantIndex =
-                    TileXRMoonEp::MoonEpCombineV2GrantIndex(
-                        epoch_, core_, lane, step);
-                __gm__ uint64_t *grantSource = reinterpret_cast<__gm__ uint64_t *>(
-                    grantBase_ + grantIndex *
-                        TileXRMoonEp::kMoonEpCombineV2GrantSlotBytes +
-                        TileXRMoonEp::kMoonEpCombineV2GrantSourceOffsetBytes);
-                *grantSource = TileXRMoonEp::MoonEpCombineV2GrantToken(
-                    magic_, step, stepCount_);
-                TileXR::UDMACleanCacheLines(
-                    reinterpret_cast<__gm__ uint8_t *>(grantSource),
-                    TileXRMoonEp::kMoonEpCombineV2TokenStrideBytes);
-                const bool grantAppended = AppendControlWqe(
-                    issue, count[lane], lane_[lane],
-                    TileXR::GetUDMAInfo(args_), successor,
-                    grantOffset_ + grantIndex *
-                        TileXRMoonEp::kMoonEpCombineV2GrantSlotBytes +
-                        TileXRMoonEp::kMoonEpCombineV2GrantReceiveOffsetBytes,
-                    grantSource,
-                    TileXR::TILEXR_UDMA_SQE_FLAG_STRONG_ORDER);
-                if (!grantAppended) {
-                    SetFailure(
-                        TileXRMoonEp::MOONEP_COMBINE_V2_INVALID_CONFIG,
-                        step, successor, lane);
-                    EndProfileMetric(
-                        TileXRMoonEp::MOONEP_COMBINE_V2_METRIC_REMOTE_SUBMIT,
-                        submitStart);
-                    return false;
+            if (legacyGrantEnabled) {
+                if (successor == rank_) {
+                    PublishLocalGrant(step, lane);
+                } else {
+                    const uint64_t grantIndex =
+                        TileXRMoonEp::MoonEpCombineV2GrantIndex(
+                            epoch_, core_, lane, step);
+                    __gm__ uint64_t *grantSource =
+                        reinterpret_cast<__gm__ uint64_t *>(
+                            grantBase_ + grantIndex *
+                                TileXRMoonEp::kMoonEpCombineV2GrantSlotBytes +
+                                TileXRMoonEp::
+                                    kMoonEpCombineV2GrantSourceOffsetBytes);
+                    *grantSource = TileXRMoonEp::MoonEpCombineV2GrantToken(
+                        magic_, step, stepCount_);
+                    TileXR::UDMACleanCacheLines(
+                        reinterpret_cast<__gm__ uint8_t *>(grantSource),
+                        TileXRMoonEp::kMoonEpCombineV2TokenStrideBytes);
+                    const bool grantAppended = AppendControlWqe(
+                        issue, count[lane], lane_[lane],
+                        TileXR::GetUDMAInfo(args_), successor,
+                        grantOffset_ + grantIndex *
+                            TileXRMoonEp::kMoonEpCombineV2GrantSlotBytes +
+                            TileXRMoonEp::
+                                kMoonEpCombineV2GrantReceiveOffsetBytes,
+                        grantSource,
+                        TileXR::TILEXR_UDMA_SQE_FLAG_STRONG_ORDER);
+                    if (!grantAppended) {
+                        SetFailure(
+                            TileXRMoonEp::MOONEP_COMBINE_V2_INVALID_CONFIG,
+                            step, successor, lane);
+                        EndProfileMetric(TileXRMoonEp::
+                            MOONEP_COMBINE_V2_METRIC_REMOTE_SUBMIT,
+                            submitStart);
+                        return false;
+                    }
+                    (void)grantAppended;
+                    ++count[lane];
                 }
-                (void)grantAppended;
-                ++count[lane];
             }
             *doneSource = TileXRMoonEp::MoonEpCombineV2Token(magic_, step);
             TileXR::UDMACleanCacheLines(
@@ -2148,6 +2157,9 @@ __aicore__ inline bool MoonEpCombineV2::CopySelfSelectedIndices(
 
 __aicore__ inline bool MoonEpCombineV2::SubmitSelfGrant(uint32_t step)
 {
+    if (!TileXRMoonEp::MoonEpCombineV2LegacyGrantEnabled(rankSize_)) {
+        return true;
+    }
     const uint32_t successor = TileXRMoonEp::MoonEpCombineV2Successor(
         rank_, step, core_, rankSize_, kCombineV2ScheduleMode);
     if (successor == rank_) {
@@ -2255,7 +2267,8 @@ __aicore__ inline bool MoonEpCombineV2::SendSelfStep(
         (void)copied;
     }
     PublishSelfDone(step);
-    return SubmitSelfGrant(step);
+    return TileXRMoonEp::MoonEpCombineV2LegacyGrantEnabled(rankSize_) ?
+        SubmitSelfGrant(step) : true;
 }
 
 __aicore__ inline bool MoonEpCombineV2::WaitInboundDone()
@@ -2689,14 +2702,16 @@ __aicore__ inline bool MoonEpCombineV2::EndCollectiveStage(
 }
 
 __aicore__ inline bool MoonEpCombineV2::RunGlobalBarrier(
-    uint32_t boundaryId, uint32_t timeoutStatus, bool localSucceeded)
+    uint32_t boundaryId, uint32_t executionOrdinal, uint32_t timeoutStatus,
+    bool localSucceeded)
 {
     const bool stageReady = BeginCollectiveStage(boundaryId);
     bool workerSucceeded = localSucceeded && stageReady;
     fullSyncStartCycles_ = static_cast<uint64_t>(GetSystemCycle());
     if (activeWorker_ && workerSucceeded) {
         const uint32_t generation =
-            TileXRMoonEp::MoonEpCombineV2FullSyncGeneration(boundaryId);
+            TileXRMoonEp::MoonEpCombineV2FullSyncGeneration(
+                executionOrdinal);
         uint32_t count = 0U;
         workerSucceeded = BuildFullSyncWqes(generation, &count);
         if (!workerSucceeded) {
@@ -3043,7 +3058,7 @@ __aicore__ inline void MoonEpCombineV2::Process()
     if (kEnableFullSync) {
         RecordProfilePoint(
             TileXRMoonEp::MOONEP_COMBINE_V2_TIME_FULL_SYNC_BEGIN);
-        succeeded = RunGlobalBarrier(0U,
+        succeeded = RunGlobalBarrier(0U, 0U,
             TileXRMoonEp::MOONEP_COMBINE_V2_FULL_SYNC_TIMEOUT, succeeded);
         RecordProfilePoint(
             TileXRMoonEp::MOONEP_COMBINE_V2_TIME_FULL_SYNC_SUBMIT_END);
@@ -3068,6 +3083,8 @@ __aicore__ inline void MoonEpCombineV2::Process()
     if (activeWorker_) {
         PrefillOperatorWqes();
     }
+    const bool legacyGrantEnabled =
+        TileXRMoonEp::MoonEpCombineV2LegacyGrantEnabled(rankSize_);
     for (uint32_t step = 0U; step < stepCount_; ++step) {
         localSucceeded = succeeded;
         bool fullmeshStep = false;
@@ -3098,9 +3115,11 @@ __aicore__ inline void MoonEpCombineV2::Process()
                 if (localSucceeded) {
                     RecordProfilePoint(TileXRMoonEp::
                         MOONEP_COMBINE_V2_DIAG_FULLMESH_CQ_SUCCESS);
+                }
+                if (localSucceeded && legacyGrantEnabled) {
                     localSucceeded = SubmitSelfGrant(step);
                 }
-                if (localSucceeded) {
+                if (localSucceeded && legacyGrantEnabled) {
                     RecordProfilePoint(TileXRMoonEp::
                         MOONEP_COMBINE_V2_DIAG_FULLMESH_GRANT_SUBMIT);
                 }
@@ -3114,16 +3133,17 @@ __aicore__ inline void MoonEpCombineV2::Process()
         if (activeWorker_ && localSucceeded) {
             localSucceeded = WaitStepCqs(step);
         }
-        if (activeWorker_ && localSucceeded && fullmeshStep) {
+        if (activeWorker_ && localSucceeded && fullmeshStep &&
+            legacyGrantEnabled) {
             RecordProfilePoint(TileXRMoonEp::
                 MOONEP_COMBINE_V2_DIAG_FULLMESH_GRANT_CQ_SUCCESS);
         }
-        if (activeWorker_ && localSucceeded) {
+        if (activeWorker_ && localSucceeded && legacyGrantEnabled) {
             localSucceeded = WaitStepGrant(step);
         }
         const uint32_t boundaryId =
             TileXRMoonEp::MoonEpCombineV2RoundBoundary(step, rankSize_);
-        succeeded = RunGlobalBarrier(boundaryId,
+        succeeded = RunGlobalBarrier(boundaryId, step + 1U,
             TileXRMoonEp::MOONEP_COMBINE_V2_STEP_BARRIER_TIMEOUT,
             localSucceeded);
         RecordProfilePoint(

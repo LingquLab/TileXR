@@ -365,6 +365,9 @@ int main()
         "Combine V2 Self step does not reuse vector selection");
     ok &= Require(selfStep, "CopySelfSelectedIndices(selectedCount,",
         "Combine V2 Self step does not consume compacted indices");
+    ok &= Require(selfStep,
+        "MoonEpCombineV2LegacyGrantEnabled(rankSize_)",
+        "Combine V2 Self step does not gate Legacy Grant by rank size");
     ok &= Require(selfStep, "SubmitSelfGrant(step)",
         "Combine V2 Self step does not publish its step grant");
     ok &= Require(selfStep, "PublishSelfDone(step)",
@@ -372,6 +375,9 @@ int main()
     ok &= RequireBefore(selfStep, "PublishSelfDone(step)",
         "SubmitSelfGrant(step)",
         "Combine V2 Self completion is not published before its grant");
+    ok &= Require(selfGrant,
+        "if (!TileXRMoonEp::MoonEpCombineV2LegacyGrantEnabled(rankSize_))",
+        "Combine V2 Self grant does not reject 32P+ publication");
     ok &= Require(selfGrant,
         "TileXR::TILEXR_UDMA_SQE_FLAG_ORDERED_COMPLETION",
         "Combine V2 Self grant does not request ordered completion");
@@ -438,7 +444,13 @@ int main()
         "Combine V2 rings a doorbell before SQ MTE3 completion");
     ok &= Require(submitPair,
         "*grantSource = TileXRMoonEp::MoonEpCombineV2GrantToken(",
-        "Combine V2 remote path does not publish every step grant");
+        "Combine V2 remote path does not preserve Legacy Grant");
+    ok &= RequireBefore(submitPair, "if (legacyGrantEnabled)",
+        "*grantSource = TileXRMoonEp::MoonEpCombineV2GrantToken(",
+        "Combine V2 remote path publishes Legacy Grant for 32P+");
+    ok &= RequireBefore(submitPair, "if (legacyGrantEnabled)",
+        "++count[lane]",
+        "Combine V2 final batch counts a disabled Legacy Grant");
     ok &= Reject(submitPair, "step + 1U < stepCount_",
         "Combine V2 remote path still suppresses the terminal grant");
     ok &= Reject(kernelImpl, "WaitAdmission",
@@ -451,6 +463,9 @@ int main()
     ok &= RequireBefore(process, "WaitStepCqs(step)",
         "WaitStepGrant(step)",
         "Combine V2 step loop does not wait CQ before grant");
+    ok &= Require(process,
+        "activeWorker_ && localSucceeded && legacyGrantEnabled",
+        "Combine V2 Process does not disable 32P+ Legacy Grant wait");
     ok &= RequireBefore(process, "WaitStepGrant(step)",
         "WaitInboundDone()",
         "Combine V2 final grant wait does not precede finalization");
@@ -522,6 +537,11 @@ int main()
         "Combine V2 required SQ/WQ validation is benchmark-optional");
     ok &= Require(globalBarrier, "if (workerSucceeded && count != 0U)",
         "Combine V2 full-sync path writes a source signal for self-only core");
+    ok &= Require(globalBarrier,
+        "MoonEpCombineV2FullSyncGeneration(\n                executionOrdinal)",
+        "Combine V2 full-sync generation does not use execution order");
+    ok &= Require(process, "RunGlobalBarrier(boundaryId, step + 1U,",
+        "Combine V2 round barriers reuse generation across the reserved phase boundary");
     ok &= RequireBefore(globalBarrier,
         "BuildFullSyncWqes(generation, &count)",
         "PrepareFullSyncSignal(boundaryId, generation)",

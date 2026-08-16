@@ -343,6 +343,18 @@ void TestFullGrantRounds()
         "terminal grant token did not wrap to step zero");
     Check(MoonEpCombineV2ControlWqesPerLane(7U, 8U, true) == 2U,
         "final data step does not reserve grant plus done controls");
+    Check(MoonEpCombineV2LegacyGrantEnabled(2U),
+        "2P must preserve Legacy Grant");
+    Check(MoonEpCombineV2LegacyGrantEnabled(16U),
+        "16P must preserve Legacy Grant");
+    Check(!MoonEpCombineV2LegacyGrantEnabled(32U),
+        "32P must disable Legacy Grant");
+    Check(!MoonEpCombineV2LegacyGrantEnabled(64U),
+        "64P must disable Legacy Grant");
+    Check(!MoonEpCombineV2LegacyGrantEnabled(128U),
+        "128P must disable Legacy Grant");
+    Check(!MoonEpCombineV2LegacyGrantEnabled(1U),
+        "unsupported rank sizes must not enable Legacy Grant");
 
     const MoonEpCombineV2ScheduleMode modes[] = {
         MOONEP_COMBINE_V2_SINGLE_RING,
@@ -664,9 +676,14 @@ void TestFullSyncScheduleContract()
         MoonEpCombineV2RoundBoundary(1U, 32U) == 3U &&
         MoonEpCombineV2RoundBoundary(0U, 16U) == 1U,
         "boundary numbering does not reserve the phase slot");
-    Check(MoonEpCombineV2FullSyncGeneration(8U) == 0U &&
-        MoonEpCombineV2FullSyncGeneration(9U) == 1U,
-        "full-sync generation is not boundary modulo two");
+    Check(MoonEpCombineV2FullSyncGeneration(4U) == 0U &&
+        MoonEpCombineV2FullSyncGeneration(5U) == 1U,
+        "full-sync generation is not execution-ordinal modulo two");
+    Check(MoonEpCombineV2FullSyncGeneration(4U) !=
+            MoonEpCombineV2FullSyncGeneration(5U) &&
+        MoonEpCombineV2RoundBoundary(3U, 128U) == 4U &&
+        MoonEpCombineV2RoundBoundary(4U, 128U) == 6U,
+        "reserved phase boundary reuses a consecutive barrier generation");
     const uint64_t boundaryGuard = MoonEpCombineV2FullSyncGuard(
         17U, 6U, 23U, 7U, 128U);
     Check(boundaryGuard != MoonEpCombineV2FullSyncGuard(
