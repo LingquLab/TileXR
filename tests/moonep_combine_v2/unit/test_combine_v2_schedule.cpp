@@ -643,14 +643,39 @@ void TestFullSyncScheduleContract()
         }
     }
 
-    Check(MoonEpCombineV2FullSyncReceiveIndex(0U, 17U) == 17U &&
-        MoonEpCombineV2FullSyncReceiveIndex(1U, 17U) ==
-            kMoonEpCombineV2RankCount + 17U,
-        "full-sync receive ping-pong index mismatch");
-    Check(MoonEpCombineV2FullSyncCoreIndex(0U, 7U) == 7U &&
-        MoonEpCombineV2FullSyncCoreIndex(1U, 7U) ==
-            kMoonEpCombineV2CoreCount + 7U,
-        "full-sync core ping-pong index mismatch");
+    Check(MoonEpCombineV2FullSyncReceiveIndex(0U, 0U, 17U) == 17U &&
+        MoonEpCombineV2FullSyncReceiveIndex(0U, 1U, 17U) ==
+            kMoonEpCombineV2RankCount + 17U &&
+        MoonEpCombineV2FullSyncReceiveIndex(1U, 0U, 17U) ==
+            2U * kMoonEpCombineV2RankCount + 17U,
+        "full-sync receive epoch/generation index mismatch");
+    Check(MoonEpCombineV2FullSyncCoreIndex(0U, 0U, 7U) == 7U &&
+        MoonEpCombineV2FullSyncCoreIndex(0U, 1U, 7U) ==
+            kMoonEpCombineV2CoreCount + 7U &&
+        MoonEpCombineV2FullSyncCoreIndex(1U, 0U, 7U) ==
+            2U * kMoonEpCombineV2CoreCount + 7U,
+        "full-sync core epoch/generation index mismatch");
+    Check(MoonEpCombineV2RoundBoundary(0U, 128U) == 1U &&
+        MoonEpCombineV2RoundBoundary(3U, 128U) == 4U &&
+        MoonEpCombineV2RoundBoundary(4U, 128U) == 6U &&
+        MoonEpCombineV2RoundBoundary(7U, 128U) == 9U,
+        "128-rank boundary numbering mismatch");
+    Check(MoonEpCombineV2RoundBoundary(0U, 32U) == 1U &&
+        MoonEpCombineV2RoundBoundary(1U, 32U) == 3U &&
+        MoonEpCombineV2RoundBoundary(0U, 16U) == 1U,
+        "boundary numbering does not reserve the phase slot");
+    Check(MoonEpCombineV2FullSyncGeneration(8U) == 0U &&
+        MoonEpCombineV2FullSyncGeneration(9U) == 1U,
+        "full-sync generation is not boundary modulo two");
+    const uint64_t boundaryGuard = MoonEpCombineV2FullSyncGuard(
+        17U, 6U, 23U, 7U, 128U);
+    Check(boundaryGuard != MoonEpCombineV2FullSyncGuard(
+            17U, 4U, 23U, 7U, 128U),
+        "full-sync guard accepts a stale same-generation boundary");
+    Check(MoonEpCombineV2CollectiveStatusIndex(0U, 17U) == 1U &&
+        MoonEpCombineV2CollectiveStatusIndex(1U, 17U) ==
+            kMoonEpCombineV2CollectiveStatusSlotCount + 1U,
+        "collective status slot reuse mismatch");
     Check(MoonEpCombineV2Epoch(1U) == 1U &&
         MoonEpCombineV2Epoch(2U) == 0U &&
         MoonEpCombineV2Epoch(3U) == 1U,

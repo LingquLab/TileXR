@@ -147,6 +147,9 @@ int main()
     const std::string fullmeshWait = Section(kernelImpl,
         "__aicore__ inline bool MoonEpCombineV2::WaitFullmeshCq(",
         "__aicore__ inline bool MoonEpCombineV2::WaitStepGrant(");
+    const std::string stepCqWait = Section(kernelImpl,
+        "__aicore__ inline bool MoonEpCombineV2::WaitStepCqs(",
+        "__aicore__ inline bool MoonEpCombineV2::WaitFullmeshCq(");
     const std::string selfStep = Section(kernelImpl,
         "__aicore__ inline bool MoonEpCombineV2::SendSelfStep(",
         "__aicore__ inline bool MoonEpCombineV2::WaitInboundDone(");
@@ -168,6 +171,15 @@ int main()
     const std::string fullSyncWait = Section(kernelImpl,
         "__aicore__ inline bool MoonEpCombineV2::WaitFullSyncCq(",
         "__aicore__ inline bool MoonEpCombineV2::FullSyncSignalMatches(");
+    const std::string collectiveBegin = Section(kernelImpl,
+        "__aicore__ inline bool MoonEpCombineV2::BeginCollectiveStage(",
+        "__aicore__ inline bool MoonEpCombineV2::EndCollectiveStage(");
+    const std::string collectiveEnd = Section(kernelImpl,
+        "__aicore__ inline bool MoonEpCombineV2::EndCollectiveStage(",
+        "__aicore__ inline bool MoonEpCombineV2::RunGlobalBarrier(");
+    const std::string globalBarrier = Section(kernelImpl,
+        "__aicore__ inline bool MoonEpCombineV2::RunGlobalBarrier(",
+        "__aicore__ inline void MoonEpCombineV2::InitReduceBuffers(");
     const std::string barrierServer = Section(hardwareProbe,
         "bool BarrierServer(", "bool BarrierClient(");
     const std::string timedBatch = Section(hardwareProbe,
@@ -226,9 +238,8 @@ int main()
         "Combine V2 entry does not initialize the implementation");
     ok &= Require(kernelEntry, "op.Process();",
         "Combine V2 entry does not execute the implementation");
-    ok &= RequireBefore(kernelEntry,
-        "GetBlockIdx()) >= activeCoreCount", "AscendC::TPipe pipe;",
-        "Combine V2 inactive blocks do not exit before TPipe construction");
+    ok &= Reject(kernelEntry, "GetBlockIdx()) >= activeCoreCount",
+        "Combine V2 entry still lets inactive blocks skip whole-launch barriers");
     ok &= Reject(kernelEntry, "TileXR::UDMA",
         "Combine V2 entry contains algorithm implementation");
     ok &= Reject(kernelEntry, "InitBuffers",
@@ -505,22 +516,37 @@ int main()
         "Combine V2 full-sync path does not consume its CQ");
     ok &= Require(fullSyncWait, "state.head != state.tail",
         "Combine V2 full-sync path does not require an empty SQ");
+    ok &= Require(fullSyncWait, "state.cqTail != state.cqTarget",
+        "Combine V2 full-sync path does not validate the terminal CQ target");
     ok &= Require(kernelImpl, "if (!laneStatesReady)",
         "Combine V2 required SQ/WQ validation is benchmark-optional");
-    ok &= Require(process, "if (fullSyncWqeCount != 0U)",
+    ok &= Require(globalBarrier, "if (workerSucceeded && count != 0U)",
         "Combine V2 full-sync path writes a source signal for self-only core");
-    ok &= RequireBefore(process, "BuildFullSyncWqes(&fullSyncWqeCount)",
-        "PrepareFullSyncSignal()",
+    ok &= RequireBefore(globalBarrier,
+        "BuildFullSyncWqes(generation, &count)",
+        "PrepareFullSyncSignal(boundaryId, generation)",
         "Combine V2 full-sync source is prepared before peer compression");
-    ok &= RequireBefore(process, "PrepareFullSyncSignal()",
-        "PublishFullSyncBatch(fullSyncWqeCount)",
+    ok &= RequireBefore(globalBarrier,
+        "PrepareFullSyncSignal(boundaryId, generation)",
+        "PublishFullSyncBatch(count)",
         "Combine V2 full-sync source is prepared after SQ publication");
-    ok &= RequireBefore(process, "PublishFullSyncBatch(fullSyncWqeCount)",
+    ok &= RequireBefore(globalBarrier, "PublishFullSyncBatch(count)",
         "WaitFullSyncCq()",
         "Combine V2 full-sync path does not wait for its submitted CQ");
-    ok &= RequireBefore(process, "WaitFullSyncCq()",
-        "WaitFullSyncSources()",
+    ok &= RequireBefore(globalBarrier, "WaitFullSyncCq()",
+        "WaitFullSyncSources(",
         "Combine V2 full-sync signals are consumed before local CQ success");
+    ok &= Require(kernelImpl, "signal->boundaryId == boundaryId",
+        "Combine V2 full-sync signal does not reject stale boundaries");
+    ok &= Require(collectiveBegin, "AscendC::SyncAll<true>();",
+        "Combine V2 collective stage does not align all 16 blocks at entry");
+    ok &= Require(collectiveEnd, "AscendC::AtomicCas(&status->status",
+        "Combine V2 collective stage does not aggregate local failures");
+    if (CountOccurrences(collectiveEnd, "AscendC::SyncAll<true>();") != 2U) {
+        std::cerr << "Combine V2 collective stage must synchronize before and "
+                     "after reading aggregate status\n";
+        ok = false;
+    }
 
     ok &= Require(fullmeshPrefill, "sqe->flag = 0U;",
         "Combine V2 Fullmesh payload template unexpectedly completes each WQE");
@@ -568,12 +594,16 @@ int main()
     ok &= RequireBefore(process, "WaitStepCqs(step)",
         "MOONEP_COMBINE_V2_DIAG_FULLMESH_GRANT_CQ_SUCCESS",
         "Combine V2 profiles deferred grant CQ success before CQ wait");
+    ok &= Require(stepCqWait, "state.tail != state.submittedHead",
+        "Combine V2 CLOS CQ wait does not validate the submitted SQ head");
+    ok &= Require(stepCqWait, "state.head != state.tail",
+        "Combine V2 CLOS CQ wait leaves the deferred grant queue undrained");
     ok &= Require(host, "UDMA_FULLMESH",
         "Combine V2 Host does not require Fullmesh capability");
     ok &= Require(host, "TileXRUDMAFullmeshQuery",
         "Combine V2 Host does not validate the Fullmesh generation");
-    ok &= Require(kernelImpl, "constexpr bool kEnableFullSync = false;",
-        "Combine V2 Kernel full synchronization is not disabled by default");
+    ok &= Require(kernelImpl, "constexpr bool kEnableFullSync = true;",
+        "Combine V2 R1 global barriers are not enabled");
     ok &= Require(process, "if (kEnableFullSync)",
         "Combine V2 Process does not use the Kernel-local full-sync switch");
     ok &= Reject(host, "TILEXR_MOONEP_COMBINE_V2_FULL_SYNC",
@@ -594,8 +624,8 @@ int main()
         "static_assert(sizeof(CombineV2KernelArgs) == 21U * sizeof(uint64_t)",
         "Combine V2 launch ABI does not contain exactly 21 64-bit slots");
     ok &= Require(kernelImpl,
-        "TileXRMoonEp::MOONEP_COMBINE_V2_SINGLE_RING;",
-        "Combine V2 default schedule is not the existing single ring");
+        "TileXRMoonEp::MOONEP_COMBINE_V2_BIDIRECTIONAL_RING;",
+        "Combine V2 R1 default schedule is not the existing ring");
     ok &= Require(kernelImpl,
         "peer == TileXRMoonEp::kMoonEpCombineV2InvalidPeer",
         "Combine V2 invalid bidirectional peer does not use Self processing");
@@ -603,8 +633,8 @@ int main()
         "Combine V2 Self processing does not use the local rank");
     ok &= Require(kernelImpl, "step < stepCount_",
         "Combine V2 implementation does not use the runtime step count");
-    ok &= Require(kernelImpl, "core < activeCoreCount_",
-        "Combine V2 failure convergence does not use active cores");
+    ok &= Require(kernelImpl, "activeWorker_ = core_ < activeCoreCount_",
+        "Combine V2 does not separate fixed launch blocks from active workers");
     ok &= Require(kernelImpl, "encoded, slots_, rankSize_",
         "Combine V2 destination validation does not use runtime rank size");
     ok &= Require(inboundDone, "kMoonEpCombineV2RankCount",
@@ -613,8 +643,14 @@ int main()
         "Combine V2 detailed self-copy profiling is missing");
     ok &= Require(kernelImpl, "MOONEP_COMBINE_V2_METRIC_REMOTE_WQE_BUILD",
         "Combine V2 detailed remote WQE profiling is missing");
-    ok &= Reject(kernelImpl, "SyncAll<true>();",
-        "Combine V2 implementation still uses whole-launch barriers");
+    ok &= RequireBefore(process, "AscendC::SyncAll<true>();",
+        "if (!collectiveReady_)",
+        "Combine V2 can return before the initial whole-launch barrier");
+    ok &= Reject(process, "step < stepCount_ && succeeded",
+        "Combine V2 step loop can diverge before a whole-launch barrier");
+    ok &= RequireBefore(process, "WaitStepGrant(step)",
+        "RunGlobalBarrier(boundaryId",
+        "Combine V2 round barrier runs before Legacy Grant admission");
     ok &= Reject(kernelImpl, "extern \"C\" __global__",
         "Combine V2 implementation header contains the operator entry");
     ok &= Reject(kernelImpl, "<<<",
@@ -630,8 +666,12 @@ int main()
         "Combine V2 launch does not query the SIMT UB capacity");
     ok &= Require(launch, "cfgInfo.localMemorySize",
         "Combine V2 launch does not configure SIMT local memory");
-    ok &= Require(launch, "params.aivCoreNum",
-        "Combine V2 launch does not use the requested AIV count");
+    ok &= Require(launch, "kMoonEpCombineV2CoreCount, &args",
+        "Combine V2 Runtime launch is not fixed to 16 blocks");
+    ok &= Reject(launch, "params.aivCoreNum, &args",
+        "Combine V2 Runtime launch still forwards an arbitrary block count");
+    ok &= Require(host, "params.aivCoreNum != kMoonEpCombineV2CoreCount",
+        "Combine V2 Host does not reject 15- or 17-block requests");
     ok &= Require(launch, "kCombineV2KernelSignature",
         "Combine V2 launch signature is missing");
     ok &= Reject(launch, "<<<",
@@ -703,7 +743,8 @@ int main()
         "Combine V2 cluster launcher must not depend on PowerShell");
     ok &= Reject(Lower(multihostLauncher), "powershell",
         "Combine V2 multihost launcher must not depend on PowerShell");
-    ok &= Require(multihostLauncher, "correctness == \"failed\"",
+    ok &= Require(multihostLauncher,
+        "if ($4 == \"failed\") batch_correctness = \"failed\"",
         "Combine V2 launcher does not aggregate failed correctness results");
     ok &= Reject(multihostLauncher, "--allow-self-only-failure",
         "Combine V2 multihost launcher still gates incorrect performance runs");

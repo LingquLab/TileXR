@@ -12,16 +12,6 @@ tilexr_moonep_combine_v2_kernel(GM_ADDR commArgs,
     int64_t nvS, uint64_t rowBytes, uint64_t reduceHidden,
     int64_t magic)
 {
-    __gm__ TileXR::CommArgs *args =
-        reinterpret_cast<__gm__ TileXR::CommArgs *>(commArgs);
-    const uint32_t rankSize = args == nullptr || args->rankSize <= 0 ? 0U :
-        static_cast<uint32_t>(args->rankSize);
-    const uint32_t activeCoreCount =
-        TileXRMoonEp::MoonEpCombineV2RankSizeSupported(rankSize) ?
-        TileXRMoonEp::MoonEpCombineV2ActiveCoreCount(rankSize) : 0U;
-    if (static_cast<uint32_t>(GetBlockIdx()) >= activeCoreCount) {
-        return;
-    }
     AscendC::TPipe pipe;
     MoonEpCombineV2 op;
     op.Init(commArgs, registeredWorkspace, dstLocal, profileOffset,

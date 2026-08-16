@@ -4,6 +4,42 @@
 Chrome Trace JSON 导出见
 [COMBINE_V2_PROFILING_TRACE.md](COMBINE_V2_PROFILING_TRACE.md)。
 
+## 0. 0/2 柜固定快速流程
+
+当前 0/2 柜 128P 测试使用固定目录
+`/home/h00580772/tilexr_combine_v2_cab0_2_fast` 和 Mutagen 会话
+`tilexr-combine-v2-cab0-2-fast`。会话建立后，每次只依次执行以下四条命令：
+
+```bash
+mutagen sync flush tilexr-combine-v2-cab0-2-fast
+ssh root@141.61.53.150 'bash /home/h00580772/tilexr_combine_v2_cab0_2_fast/tools/moonep/cab0_2_128p/compile.sh'
+ssh root@141.61.53.150 'bash /home/h00580772/tilexr_combine_v2_cab0_2_fast/tools/moonep/cab0_2_128p/sync_runtime.sh'
+ssh root@141.61.53.150 'bash /home/h00580772/tilexr_combine_v2_cab0_2_fast/tools/moonep/cab0_2_128p/run.sh'
+```
+
+三个远端脚本只服务当前工程和 0/2 柜，固定使用 CPU1 `141.61.53.150`、CANN
+`/home/pkg/b131/cann-9.1.0`，并执行 128P、BS8192、K16、H3584、Exp256、BF16、
+warmup20、80 轮、no-reduce、关闭 profiling 的测试。环境空闲状态仍在执行四条命令前
+通过外部 watcher 判断，不在 launcher 内重复检测。
+
+### R1 固定 16 核和可重复 barrier
+
+R1 在保留 bidirectional Ring 和 Legacy Grant 的前提下，将 Runtime blockDim 固定为 16，
+并要求所有 16 个 block 以相同顺序进入 `AscendC::SyncAll<true>()`。2P-8P 的非工作核不能
+在 Kernel 入口提前返回，只跳过 peer、QP、payload、Done 和 Reduce 工作。`SyncAll` 只提供
+rendezvous，不提供状态归约；局部失败必须先写入 magic-tagged collective status，再由
+16 核同步读取并统一继续或退出。
+
+leading/round global barrier 使用两个 generation slot 循环复用。signal 除 generation 外还
+必须携带并校验完整 `boundaryId`，否则 boundary `n` 的陈旧信号可能被 `n+2` 误认。R1
+暂不启用 phase barrier，但预留其 boundary 编号，避免后续 R4 改变既有 round 编号。
+
+2026-08-16 在 CANN 9.1、Ascend950、0/2 柜 128P 上完成 target compile 和实机验证：
+BS8192、K16、H3584、Exp256、BF16、no-reduce、20 次 warmup + 80 次迭代，128/128 rank
+正确性通过；平均 `4.563616 ms`，最大 `4.573830 ms`。日志为
+`combine_v2_128p_noprofile_20260816_231819.log`。该结果不覆盖 32P/64P、Reduce 或 R2 之后
+的 Server-Pair/64-Grant 行为。
+
 ## 1. 基准口径
 
 常用 128P case：

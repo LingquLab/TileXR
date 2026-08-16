@@ -17,8 +17,8 @@ int TileXRMoonEpCombineGetWorkspaceSizeV2(
 // Supports rank sizes 2 through 8, 16, 32, 64, and 128. For 2 through 8
 // ranks, localRankSize must equal rankSize; larger configurations require
 // localRankSize == 8. The shared-QP communicator must expose exactly 32 QPs.
-// aivCoreNum is the Runtime launch block dimension and must be at least 16 and
-// no greater than the vector-core count reported by the current device.
+// aivCoreNum is retained for API compatibility and must equal 16. The current
+// device must report at least 16 vector cores.
 int TileXRMoonEpCombineV2(void *registeredWorkspace,
     const int32_t *dstLocal, TileXRCommPtr comm, int64_t bs, int64_t h,
     int64_t topK, int64_t nvS, uint32_t aivCoreNum,

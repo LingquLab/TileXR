@@ -106,7 +106,7 @@ int TileXRMoonEpLaunchCombineV2Kernel(
         TileXRMoonEpCombineV2KernelBinarySize,
         KernelSignature(kCombineV2KernelSignature),
         kCombineV2KernelName, "combine_v2",
-        params.aivCoreNum, &args, sizeof(args),
+        kMoonEpCombineV2CoreCount, &args, sizeof(args),
         static_cast<rtStream_t>(params.stream), &cfgInfo);
     if (ret == TILEXR_MOONEP_SUCCESS) {
         *params.activeOutputOffset = context.layout.scratchOffset[

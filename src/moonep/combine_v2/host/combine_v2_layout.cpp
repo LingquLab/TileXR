@@ -106,17 +106,19 @@ int TileXRMoonEpBuildCombineV2Layout(int64_t bs, int64_t h,
             kMoonEpCombineV2TokenStrideBytes, &failureBytes) ||
         !CheckedAdd(failureOffset, failureBytes, &fullSyncReceiveOffset) ||
         !CheckedMultiply(static_cast<uint64_t>(kMoonEpCombineV2EpochCount) *
+                kMoonEpCombineV2FullSyncGenerationSlotCount *
                 kMoonEpCombineV2RankCount,
             kMoonEpCombineV2FullSyncSlotBytes, &fullSyncReceiveBytes) ||
         !CheckedAdd(fullSyncReceiveOffset, fullSyncReceiveBytes,
             &fullSyncSourceOffset) ||
         !CheckedMultiply(static_cast<uint64_t>(kMoonEpCombineV2EpochCount) *
+                kMoonEpCombineV2FullSyncGenerationSlotCount *
                 kMoonEpCombineV2CoreCount,
             kMoonEpCombineV2FullSyncSlotBytes, &fullSyncSourceBytes) ||
         !CheckedAdd(fullSyncSourceOffset, fullSyncSourceBytes,
             &fullSyncBarrierOffset) ||
         !CheckedMultiply(static_cast<uint64_t>(kMoonEpCombineV2EpochCount) *
-                kMoonEpCombineV2CoreCount,
+                kMoonEpCombineV2CollectiveStatusSlotCount,
             kMoonEpCombineV2FullSyncSlotBytes, &fullSyncBarrierBytes) ||
         !CheckedAdd(fullSyncBarrierOffset, fullSyncBarrierBytes,
             &requiredBytes) ||

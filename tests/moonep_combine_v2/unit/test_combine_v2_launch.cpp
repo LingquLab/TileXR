@@ -70,7 +70,7 @@ TileXRMoonEp::CombineV2Params ValidParams(uint64_t *activeOutputOffset)
     params.h = 3584;
     params.topK = 16;
     params.nvS = 128;
-    params.aivCoreNum = 32;
+    params.aivCoreNum = TileXRMoonEp::kMoonEpCombineV2CoreCount;
     params.activeOutputOffset = activeOutputOffset;
     params.dtype = TILEXR_MOONEP_DTYPE_BFLOAT16;
     params.reduceHidden = true;
@@ -105,8 +105,8 @@ void TestConfiguresDynamicUb()
         TileXR::TILEXR_SUCCESS, "configured launch");
     Check(registrationCalls == 1 && launchCalls == 1,
         "configured launch did not reach Runtime");
-    Check(capturedBlockDim == params.aivCoreNum,
-        "configured launch did not use the requested block dimension");
+    Check(capturedBlockDim == TileXRMoonEp::kMoonEpCombineV2CoreCount,
+        "configured launch did not use the fixed 16-block dimension");
     Check(capturedCfg.schemMode == 1,
         "configured launch did not preserve batch scheduling mode");
     Check(capturedCfg.localMemorySize == static_cast<uint32_t>(kA5UbBytes),

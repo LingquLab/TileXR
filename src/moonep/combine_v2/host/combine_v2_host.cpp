@@ -22,6 +22,9 @@ int CombineV2ExpectedLocalRankSize(int rankSize)
 
 int ValidateAivCoreCount(uint32_t aivCoreNum)
 {
+    if (aivCoreNum != kMoonEpCombineV2CoreCount) {
+        return TILEXR_MOONEP_ERROR_INVALID_ARGUMENT;
+    }
     int32_t deviceId = 0;
     if (aclrtGetDevice(&deviceId) != ACL_SUCCESS) {
         return TILEXR_MOONEP_ERROR_INTERNAL;
@@ -30,7 +33,8 @@ int ValidateAivCoreCount(uint32_t aivCoreNum)
     if (aclrtGetDeviceInfo(static_cast<uint32_t>(deviceId),
             ACL_DEV_ATTR_VECTOR_CORE_NUM, &vectorCoreCount) != ACL_SUCCESS ||
         vectorCoreCount <= 0 ||
-        static_cast<uint64_t>(vectorCoreCount) < aivCoreNum) {
+        static_cast<uint64_t>(vectorCoreCount) <
+            kMoonEpCombineV2CoreCount) {
         return TILEXR_MOONEP_ERROR_NOT_SUPPORTED;
     }
     return TILEXR_MOONEP_SUCCESS;
@@ -91,7 +95,7 @@ int TileXRMoonEpPrepareCombineV2Launch(
     if (params.registeredWorkspace == nullptr || params.dstLocal == nullptr ||
         params.comm == nullptr || params.activeOutputOffset == nullptr ||
         params.stream == nullptr ||
-        params.aivCoreNum < kMoonEpCombineV2CoreCount) {
+        params.aivCoreNum != kMoonEpCombineV2CoreCount) {
         return TILEXR_MOONEP_ERROR_INVALID_ARGUMENT;
     }
 

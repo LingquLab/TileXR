@@ -59,7 +59,11 @@ constexpr uint32_t kPollInvalidState = UINT32_MAX - 1U;
 // Trusted-input benchmark mode compiles defensive validation and diagnostics
 // out of the transfer hot path.
 constexpr bool kEnableSafetyChecks = false;
-constexpr bool kEnableFullSync = false;
+constexpr bool kEnableFullSync = true;
+constexpr uint32_t kCollectiveInitStage = 15U;
+constexpr uint32_t kCollectiveValidationStage = 14U;
+constexpr uint32_t kCollectiveDoneStage = 13U;
+constexpr uint32_t kCollectiveReduceStage = 12U;
 constexpr TileXRMoonEp::MoonEpCombineV2ScheduleMode
     kCombineV2ScheduleMode =
         TileXRMoonEp::MOONEP_COMBINE_V2_BIDIRECTIONAL_RING;
@@ -477,6 +481,7 @@ private:
         uint32_t peer, uint32_t lane, uint32_t cqStatus = 0U,
         uint64_t expected = 0U, uint64_t observed = 0U,
         uint32_t qp = UINT32_MAX);
+    __aicore__ inline void PublishFailureRecord(uint32_t stageId);
     __aicore__ inline bool CheckPoison();
     __aicore__ inline bool ValidateDestinations();
     __aicore__ inline void LoadSelectionChunk(uint64_t chunkStart,
@@ -539,15 +544,24 @@ private:
     __aicore__ inline bool WaitInboundDone();
     __aicore__ inline bool ResolveFullSyncRemoteFields(uint32_t targetRank,
         uint64_t remoteOffset, __ubuf__ MoonEpCombineV2RemoteFields *fields);
-    __aicore__ inline void PrepareFullSyncSignal();
-    __aicore__ inline bool BuildFullSyncWqes(uint32_t *count);
+    __aicore__ inline void PrepareFullSyncSignal(
+        uint32_t boundaryId, uint32_t generation);
+    __aicore__ inline bool BuildFullSyncWqes(
+        uint32_t generation, uint32_t *count);
     __aicore__ inline bool PublishFullSyncBatch(uint32_t count);
     __aicore__ inline bool WaitFullSyncCq();
-    __aicore__ inline bool WaitFullSyncSources();
-    __aicore__ inline bool FullSyncActiveCoreBarrier();
+    __aicore__ inline bool WaitFullSyncSources(
+        uint32_t boundaryId, uint32_t generation,
+        uint32_t timeoutStatus);
     __aicore__ inline bool FullSyncSignalMatches(
         __gm__ TileXRMoonEp::MoonEpCombineV2FullSyncSignal *signal,
-        uint32_t sourceRank, uint32_t sourceCore, uint64_t *observedMagic);
+        uint32_t boundaryId, uint32_t sourceRank, uint32_t sourceCore,
+        uint64_t *observedMagic);
+    __aicore__ inline bool BeginCollectiveStage(uint32_t stageId);
+    __aicore__ inline bool EndCollectiveStage(
+        uint32_t stageId, bool localSucceeded);
+    __aicore__ inline bool RunGlobalBarrier(uint32_t boundaryId,
+        uint32_t timeoutStatus, bool localSucceeded = true);
     __aicore__ inline void InitReduceBuffers(uint32_t inputBufferNum,
         uint32_t inputSlotBytes, uint32_t floatRowBytes,
         uint32_t outputSlotBytes);
@@ -555,7 +569,6 @@ private:
         int64_t tokenBegin, uint64_t rowCount);
     __aicore__ inline bool ReduceHidden();
     __aicore__ inline uint64_t LoadToken(__gm__ uint64_t *token);
-    __aicore__ inline void PublishFailureAndConverge();
     __aicore__ inline void RecordProfilePoint(uint32_t index);
     __aicore__ inline uint64_t BeginProfileMetric();
     __aicore__ inline void EndProfileMetric(uint32_t index,
@@ -563,6 +576,8 @@ private:
     __aicore__ inline void WriteProfile();
 
     bool valid_{false};
+    bool collectiveReady_{false};
+    bool activeWorker_{false};
     TPipe *pipe_{nullptr};
     __gm__ TileXR::CommArgs *args_{nullptr};
     __gm__ TileXR::TileXRUDMARegistry *registry_{nullptr};
@@ -598,6 +613,7 @@ private:
     uint32_t rankSize_{0U};
     uint32_t core_{0U};
     uint32_t activeCoreCount_{0U};
+    uint32_t launchCoreCount_{0U};
     uint32_t stepCount_{0U};
     uint32_t sourcesPerCore_{0U};
     uint32_t issuedRows_{0U};
@@ -612,9 +628,7 @@ private:
     uint64_t failureExpected_{0U};
     uint64_t failureObserved_{0U};
     bool selectionBuffersUsed_{false};
-    bool allCoresSucceeded_{false};
     bool reduceHidden_{false};
-    uint32_t convergenceRound_{0U};
     MoonEpCombineV2LaneState lane_[
         TileXRMoonEp::kMoonEpCombineV2LaneCount] {};
     MoonEpCombineV2LaneState fullmeshLane_ {};
@@ -672,11 +686,29 @@ __aicore__ inline void MoonEpCombineV2::Init(
     args_ = reinterpret_cast<__gm__ TileXR::CommArgs *>(commArgsGM);
     workspace_ = reinterpret_cast<__gm__ uint8_t *>(registeredWorkspaceGM);
     dstGlobalAddr_ = reinterpret_cast<__gm__ int32_t *>(dstLocalGM);
+    core_ = static_cast<uint32_t>(GetBlockIdx());
+    launchCoreCount_ = static_cast<uint32_t>(GetBlockNum());
     operationStartCycles_ = static_cast<uint64_t>(GetSystemCycle());
-    if (pipe_ == nullptr || args_ == nullptr || workspace_ == nullptr ||
-        dstGlobalAddr_ == nullptr) {
+    collectiveReady_ = pipe_ != nullptr && args_ != nullptr &&
+        workspace_ != nullptr && dstGlobalAddr_ != nullptr &&
+        launchCoreCount_ == TileXRMoonEp::kMoonEpCombineV2CoreCount &&
+        core_ < launchCoreCount_;
+    if (!collectiveReady_) {
         return;
     }
+    profileOffset_ = profileOffset;
+    failureOffset_ = failureOffset;
+    failureBase_ = workspace_ + failureOffset;
+    fullSyncBarrierBase_ = workspace_ + fullSyncBarrierOffset;
+    magic_ = magic > 0 ? static_cast<uint64_t>(magic) : 0U;
+    epoch_ = TileXRMoonEp::MoonEpCombineV2Epoch(magic_);
+    rank_ = args_->rank >= 0 ? static_cast<uint32_t>(args_->rank) : 0U;
+    rankSize_ = args_->rankSize > 0 ?
+        static_cast<uint32_t>(args_->rankSize) : 0U;
+    activeCoreCount_ = TileXRMoonEp::MoonEpCombineV2RankSizeSupported(
+            rankSize_) ?
+        TileXRMoonEp::MoonEpCombineV2ActiveCoreCount(rankSize_) : 0U;
+    activeWorker_ = core_ < activeCoreCount_;
     __gm__ TileXR::UDMAInfo *closInfo = TileXR::GetUDMAInfo(args_);
     fullmeshView_ = reinterpret_cast<__gm__
         TileXR::TileXRUDMAFullmeshDeviceView *>(args_->udmaFullmeshPtr);
@@ -699,7 +731,6 @@ __aicore__ inline void MoonEpCombineV2::Init(
         rowBytes == 0U || rowBytes > UINT32_MAX ||
         (reduceHidden && rowBytes !=
             static_cast<uint64_t>(h) * sizeof(bfloat16_t)) ||
-        GetBlockNum() < TileXRMoonEp::kMoonEpCombineV2CoreCount ||
         closInfo->qpNum != TileXRMoonEp::kMoonEpCombineV2QpCount ||
         fullmeshView_->magic != TileXR::TILEXR_UDMA_FULLMESH_MAGIC ||
         fullmeshView_->version != TileXR::TILEXR_UDMA_FULLMESH_VERSION ||
@@ -724,18 +755,11 @@ __aicore__ inline void MoonEpCombineV2::Init(
         TileXRMoonEp::kMoonEpCombineV2FullmeshSlotCount) {
         return;
     }
-    magic_ = static_cast<uint64_t>(magic);
     if (!TileXRMoonEp::MoonEpCombineV2MagicValid(magic_)) {
         return;
     }
-    rank_ = static_cast<uint32_t>(args_->rank);
-    rankSize_ = static_cast<uint32_t>(args_->rankSize);
-    core_ = static_cast<uint32_t>(GetBlockIdx());
-    activeCoreCount_ =
-        TileXRMoonEp::MoonEpCombineV2ActiveCoreCount(rankSize_);
     stepCount_ = TileXRMoonEp::MoonEpCombineV2StepCount(rankSize_);
     sourcesPerCore_ = rankSize_ / activeCoreCount_;
-    epoch_ = TileXRMoonEp::MoonEpCombineV2Epoch(magic_);
     slots_ = static_cast<uint64_t>(nvS);
     rowBytes_ = rowBytes;
     bs_ = bs;
@@ -760,9 +784,8 @@ __aicore__ inline void MoonEpCombineV2::Init(
     failureBase_ = workspace_ + failureOffset;
     fullSyncReceiveBase_ = workspace_ + fullSyncReceiveOffset;
     fullSyncSourceBase_ = workspace_ + fullSyncSourceOffset;
-    fullSyncBarrierBase_ = workspace_ + fullSyncBarrierOffset;
     valid_ = true;
-    const bool laneStatesReady = InitLaneStates();
+    const bool laneStatesReady = !activeWorker_ || InitLaneStates();
     if (!laneStatesReady) {
         SetFailure(TileXRMoonEp::MOONEP_COMBINE_V2_INVALID_CONFIG,
             UINT32_MAX, UINT32_MAX, UINT32_MAX);
@@ -877,6 +900,35 @@ __aicore__ inline void MoonEpCombineV2::SetFailure(
     failureQp_ = qp;
     failureExpected_ = expected;
     failureObserved_ = observed;
+}
+
+__aicore__ inline void MoonEpCombineV2::PublishFailureRecord(uint32_t stageId)
+{
+    const uint64_t index = TileXRMoonEp::MoonEpCombineV2FailureIndex(
+        epoch_, core_);
+    __gm__ TileXRMoonEp::MoonEpCombineV2FailureRecord *record =
+        reinterpret_cast<__gm__
+            TileXRMoonEp::MoonEpCombineV2FailureRecord *>(failureBase_ +
+                index * TileXRMoonEp::kMoonEpCombineV2TokenStrideBytes);
+    record->magic = magic_;
+    record->status = failureStatus_;
+    record->rank = rank_;
+    record->core = core_;
+    record->step = failureStep_ == UINT32_MAX ? stageId : failureStep_;
+    record->peer = failurePeer_;
+    record->lane = failureLane_;
+    record->qp = failureQp_ != UINT32_MAX ? failureQp_ :
+        (failureLane_ < TileXRMoonEp::kMoonEpCombineV2LaneCount ?
+            TileXRMoonEp::MoonEpCombineV2Qp(core_, failureLane_) :
+            UINT32_MAX);
+    record->cqStatus = failureCqStatus_;
+    record->expected = failureExpected_;
+    record->observed = failureObserved_;
+    record->poison = 1U;
+    record->marker = TileXRMoonEp::kMoonEpCombineV2FailureMarker |
+        (epoch_ & 1U);
+    TileXR::UDMACleanCacheLines(reinterpret_cast<__gm__ uint8_t *>(record),
+        sizeof(*record));
 }
 
 __aicore__ inline bool MoonEpCombineV2::CheckPoison()
@@ -1278,6 +1330,17 @@ __aicore__ inline bool MoonEpCombineV2::WaitStepCqs(uint32_t step)
                     return false;
                 }
             }
+        }
+    }
+    for (uint32_t lane = 0U;
+        lane < TileXRMoonEp::kMoonEpCombineV2LaneCount; ++lane) {
+        MoonEpCombineV2LaneState &state = lane_[lane];
+        if (state.cqTail != state.cqTarget ||
+            state.tail != state.submittedHead || state.head != state.tail) {
+            SetFailure(TileXRMoonEp::MOONEP_COMBINE_V2_CQ_ERROR,
+                step, UINT32_MAX, lane, kPollInvalidState,
+                state.submittedHead, state.tail, state.qp);
+            return false;
         }
     }
     return true;
@@ -2310,10 +2373,11 @@ __aicore__ inline bool MoonEpCombineV2::ResolveFullSyncRemoteFields(
     return true;
 }
 
-__aicore__ inline void MoonEpCombineV2::PrepareFullSyncSignal()
+__aicore__ inline void MoonEpCombineV2::PrepareFullSyncSignal(
+    uint32_t boundaryId, uint32_t generation)
 {
     const uint64_t index = TileXRMoonEp::MoonEpCombineV2FullSyncCoreIndex(
-        epoch_, core_);
+        epoch_, generation, core_);
     __gm__ TileXRMoonEp::MoonEpCombineV2FullSyncSignal *signal =
         reinterpret_cast<__gm__
             TileXRMoonEp::MoonEpCombineV2FullSyncSignal *>(
@@ -2321,16 +2385,22 @@ __aicore__ inline void MoonEpCombineV2::PrepareFullSyncSignal()
                     TileXRMoonEp::kMoonEpCombineV2FullSyncSlotBytes);
     signal->magic = magic_;
     signal->marker = TileXRMoonEp::kMoonEpCombineV2FullSyncMarker;
+    signal->boundaryId = boundaryId;
     signal->sourceRank = rank_;
     signal->sourceCore = core_;
     signal->rankSize = rankSize_;
-    signal->guard = magic_ ^
-        static_cast<uint64_t>(TileXRMoonEp::kMoonEpCombineV2FullSyncMarker);
+    signal->reserved0 = 0U;
+    signal->guard = TileXRMoonEp::MoonEpCombineV2FullSyncGuard(
+        magic_, boundaryId, rank_, core_, rankSize_);
+    for (uint32_t index = 0U; index < 3U; ++index) {
+        signal->reserved[index] = 0U;
+    }
     TileXR::UDMACleanCacheLines(reinterpret_cast<__gm__ uint8_t *>(signal),
         TileXRMoonEp::kMoonEpCombineV2FullSyncSlotBytes);
 }
 
-__aicore__ inline bool MoonEpCombineV2::BuildFullSyncWqes(uint32_t *count)
+__aicore__ inline bool MoonEpCombineV2::BuildFullSyncWqes(
+    uint32_t generation, uint32_t *count)
 {
     if (count == nullptr) {
         return false;
@@ -2340,7 +2410,8 @@ __aicore__ inline bool MoonEpCombineV2::BuildFullSyncWqes(uint32_t *count)
         reinterpret_cast<__ubuf__ MoonEpCombineV2FullSyncBuildContext *>(
             dstSlotBuf_.Get<uint8_t>().GetPhyAddr());
     const uint64_t sourceIndex =
-        TileXRMoonEp::MoonEpCombineV2FullSyncCoreIndex(epoch_, core_);
+        TileXRMoonEp::MoonEpCombineV2FullSyncCoreIndex(
+            epoch_, generation, core_);
     context->localSignalAddr = reinterpret_cast<uint64_t>(
         fullSyncSourceBase_ + sourceIndex *
             TileXRMoonEp::kMoonEpCombineV2FullSyncSlotBytes);
@@ -2357,7 +2428,8 @@ __aicore__ inline bool MoonEpCombineV2::BuildFullSyncWqes(uint32_t *count)
             return false;
         }
         const uint64_t receiveIndex =
-            TileXRMoonEp::MoonEpCombineV2FullSyncReceiveIndex(epoch_, rank_);
+            TileXRMoonEp::MoonEpCombineV2FullSyncReceiveIndex(
+                epoch_, generation, rank_);
         const uint64_t remoteOffset = fullSyncReceiveOffset_ + receiveIndex *
             TileXRMoonEp::kMoonEpCombineV2FullSyncSlotBytes;
         if (!ResolveFullSyncRemoteFields(
@@ -2441,7 +2513,8 @@ __aicore__ inline bool MoonEpCombineV2::WaitFullSyncCq()
             return false;
         }
     }
-    if (state.tail != state.submittedHead || state.head != state.tail) {
+    if (state.cqTail != state.cqTarget ||
+        state.tail != state.submittedHead || state.head != state.tail) {
         SetFailure(TileXRMoonEp::MOONEP_COMBINE_V2_CQ_ERROR,
             UINT32_MAX, UINT32_MAX,
             TileXRMoonEp::MOONEP_COMBINE_V2_SIX_PORT,
@@ -2455,7 +2528,8 @@ __aicore__ inline bool MoonEpCombineV2::WaitFullSyncCq()
 
 __aicore__ inline bool MoonEpCombineV2::FullSyncSignalMatches(
     __gm__ TileXRMoonEp::MoonEpCombineV2FullSyncSignal *signal,
-    uint32_t sourceRank, uint32_t sourceCore, uint64_t *observedMagic)
+    uint32_t boundaryId, uint32_t sourceRank, uint32_t sourceCore,
+    uint64_t *observedMagic)
 {
     TileXR::UDMACleanCacheLines(reinterpret_cast<__gm__ uint8_t *>(signal),
         TileXRMoonEp::kMoonEpCombineV2FullSyncSlotBytes);
@@ -2464,13 +2538,15 @@ __aicore__ inline bool MoonEpCombineV2::FullSyncSignalMatches(
     }
     return signal->magic == magic_ &&
         signal->marker == TileXRMoonEp::kMoonEpCombineV2FullSyncMarker &&
+        signal->boundaryId == boundaryId &&
         signal->sourceRank == sourceRank &&
         signal->sourceCore == sourceCore && signal->rankSize == rankSize_ &&
-        signal->guard == (magic_ ^ static_cast<uint64_t>(
-            TileXRMoonEp::kMoonEpCombineV2FullSyncMarker));
+        signal->guard == TileXRMoonEp::MoonEpCombineV2FullSyncGuard(
+            magic_, boundaryId, sourceRank, sourceCore, rankSize_);
 }
 
-__aicore__ inline bool MoonEpCombineV2::WaitFullSyncSources()
+__aicore__ inline bool MoonEpCombineV2::WaitFullSyncSources(
+    uint32_t boundaryId, uint32_t generation, uint32_t timeoutStatus)
 {
     bool ready[TileXRMoonEp::kMoonEpCombineV2FullSyncMaxPeersPerCore] = {};
     uint64_t observed[
@@ -2501,7 +2577,7 @@ __aicore__ inline bool MoonEpCombineV2::WaitFullSyncSources()
             }
             const uint64_t index =
                 TileXRMoonEp::MoonEpCombineV2FullSyncReceiveIndex(
-                    epoch_, peer[peerIndex]);
+                    epoch_, generation, peer[peerIndex]);
             __gm__ TileXRMoonEp::MoonEpCombineV2FullSyncSignal *signal =
                 reinterpret_cast<__gm__
                     TileXRMoonEp::MoonEpCombineV2FullSyncSignal *>(
@@ -2509,7 +2585,7 @@ __aicore__ inline bool MoonEpCombineV2::WaitFullSyncSources()
                             TileXRMoonEp::kMoonEpCombineV2FullSyncSlotBytes);
             if (sourceCore[peerIndex] !=
                     TileXRMoonEp::kMoonEpCombineV2InvalidPeer &&
-                FullSyncSignalMatches(signal, peer[peerIndex],
+                FullSyncSignalMatches(signal, boundaryId, peer[peerIndex],
                     sourceCore[peerIndex], &observed[peerIndex])) {
                 ready[peerIndex] = true;
                 --remaining;
@@ -2522,10 +2598,12 @@ __aicore__ inline bool MoonEpCombineV2::WaitFullSyncSources()
                 if (ready[peerIndex]) {
                     continue;
                 }
-                SetFailure(TileXRMoonEp::MOONEP_COMBINE_V2_FULL_SYNC_TIMEOUT,
-                    UINT32_MAX, peer[peerIndex],
+                SetFailure(timeoutStatus, boundaryId, peer[peerIndex],
                     TileXRMoonEp::MOONEP_COMBINE_V2_SIX_PORT, 0U,
-                    magic_, observed[peerIndex]);
+                    TileXRMoonEp::MoonEpCombineV2FullSyncGuard(
+                        magic_, boundaryId, peer[peerIndex],
+                        sourceCore[peerIndex], rankSize_),
+                    observed[peerIndex]);
                 return false;
             }
         }
@@ -2533,67 +2611,115 @@ __aicore__ inline bool MoonEpCombineV2::WaitFullSyncSources()
     return true;
 }
 
-__aicore__ inline bool MoonEpCombineV2::FullSyncActiveCoreBarrier()
+__aicore__ inline bool MoonEpCombineV2::BeginCollectiveStage(
+    uint32_t stageId)
 {
-    const uint64_t index = TileXRMoonEp::MoonEpCombineV2FullSyncCoreIndex(
-        epoch_, core_);
-    __gm__ TileXRMoonEp::MoonEpCombineV2FullSyncSignal *local =
+    const uint64_t index = TileXRMoonEp::MoonEpCombineV2CollectiveStatusIndex(
+        epoch_, stageId);
+    __gm__ TileXRMoonEp::MoonEpCombineV2CollectiveStatus *status =
         reinterpret_cast<__gm__
-            TileXRMoonEp::MoonEpCombineV2FullSyncSignal *>(
+            TileXRMoonEp::MoonEpCombineV2CollectiveStatus *>(
                 fullSyncBarrierBase_ + index *
                     TileXRMoonEp::kMoonEpCombineV2FullSyncSlotBytes);
-    local->magic = magic_;
-    local->marker = TileXRMoonEp::kMoonEpCombineV2FullSyncMarker;
-    local->sourceRank = rank_;
-    local->sourceCore = core_;
-    local->rankSize = rankSize_;
-    local->guard = magic_ ^
-        static_cast<uint64_t>(TileXRMoonEp::kMoonEpCombineV2FullSyncMarker);
-    TileXR::UDMACleanCacheLines(reinterpret_cast<__gm__ uint8_t *>(local),
-        TileXRMoonEp::kMoonEpCombineV2FullSyncSlotBytes);
-
-    bool ready[TileXRMoonEp::kMoonEpCombineV2CoreCount] = {};
-    uint64_t observed[TileXRMoonEp::kMoonEpCombineV2CoreCount] = {};
-    ready[core_] = true;
-    uint32_t remaining = activeCoreCount_ - 1U;
-    uint32_t cursor = 0U;
-    while (remaining != 0U) {
-        for (uint32_t offset = 0U; offset < activeCoreCount_; ++offset) {
-            const uint32_t peerCore =
-                (cursor + offset) % activeCoreCount_;
-            if (ready[peerCore]) {
-                continue;
-            }
-            const uint64_t peerIndex =
-                TileXRMoonEp::MoonEpCombineV2FullSyncCoreIndex(
-                    epoch_, peerCore);
-            __gm__ TileXRMoonEp::MoonEpCombineV2FullSyncSignal *signal =
-                reinterpret_cast<__gm__
-                    TileXRMoonEp::MoonEpCombineV2FullSyncSignal *>(
-                        fullSyncBarrierBase_ + peerIndex *
-                            TileXRMoonEp::kMoonEpCombineV2FullSyncSlotBytes);
-            if (FullSyncSignalMatches(
-                    signal, rank_, peerCore, &observed[peerCore])) {
-                ready[peerCore] = true;
-                --remaining;
-            }
+    if (core_ == 0U) {
+        status->magic = magic_;
+        status->guard = TileXRMoonEp::MoonEpCombineV2CollectiveStatusGuard(
+            magic_, stageId);
+        status->marker = TileXRMoonEp::kMoonEpCombineV2CollectiveStatusMarker;
+        status->stageId = stageId;
+        status->status = TileXRMoonEp::MOONEP_COMBINE_V2_SUCCESS;
+        status->firstFailureCore = UINT32_MAX;
+        for (uint32_t reserved = 0U; reserved < 4U; ++reserved) {
+            status->reserved[reserved] = 0U;
         }
-        cursor = (cursor + 1U) % activeCoreCount_;
-        if (TimedOut(fullSyncStartCycles_)) {
-            for (uint32_t peerCore = 0U;
-                peerCore < activeCoreCount_; ++peerCore) {
-                if (ready[peerCore]) {
-                    continue;
-                }
-                SetFailure(
-                    TileXRMoonEp::MOONEP_COMBINE_V2_FULL_SYNC_BARRIER_TIMEOUT,
-                    UINT32_MAX, rank_, UINT32_MAX, peerCore, magic_,
-                    observed[peerCore]);
-                return false;
-            }
+        TileXR::UDMACleanCacheLines(
+            reinterpret_cast<__gm__ uint8_t *>(status),
+            TileXRMoonEp::kMoonEpCombineV2FullSyncSlotBytes);
+    }
+    AscendC::SyncAll<true>();
+    TileXR::UDMACleanCacheLines(reinterpret_cast<__gm__ uint8_t *>(status),
+        TileXRMoonEp::kMoonEpCombineV2FullSyncSlotBytes);
+    const bool ready = status->magic == magic_ &&
+        status->marker == TileXRMoonEp::kMoonEpCombineV2CollectiveStatusMarker &&
+        status->stageId == stageId &&
+        status->guard == TileXRMoonEp::MoonEpCombineV2CollectiveStatusGuard(
+            magic_, stageId);
+    if (!ready) {
+        SetFailure(TileXRMoonEp::MOONEP_COMBINE_V2_COLLECTIVE_STATUS_ERROR,
+            stageId, rank_, UINT32_MAX, 0U,
+            TileXRMoonEp::MoonEpCombineV2CollectiveStatusGuard(
+                magic_, stageId), status->guard);
+    }
+    return ready;
+}
+
+__aicore__ inline bool MoonEpCombineV2::EndCollectiveStage(
+    uint32_t stageId, bool localSucceeded)
+{
+    const uint64_t index = TileXRMoonEp::MoonEpCombineV2CollectiveStatusIndex(
+        epoch_, stageId);
+    __gm__ TileXRMoonEp::MoonEpCombineV2CollectiveStatus *status =
+        reinterpret_cast<__gm__
+            TileXRMoonEp::MoonEpCombineV2CollectiveStatus *>(
+                fullSyncBarrierBase_ + index *
+                    TileXRMoonEp::kMoonEpCombineV2FullSyncSlotBytes);
+    if (!localSucceeded) {
+        if (failureStatus_ == TileXRMoonEp::MOONEP_COMBINE_V2_SUCCESS) {
+            SetFailure(
+                TileXRMoonEp::MOONEP_COMBINE_V2_COLLECTIVE_STATUS_ERROR,
+                stageId, rank_, UINT32_MAX);
+        }
+        PublishFailureRecord(stageId);
+        (void)AscendC::AtomicCas(&status->firstFailureCore, UINT32_MAX, core_);
+        (void)AscendC::AtomicCas(&status->status,
+            static_cast<uint32_t>(TileXRMoonEp::MOONEP_COMBINE_V2_SUCCESS),
+            failureStatus_);
+    }
+    AscendC::SyncAll<true>();
+    TileXR::UDMACleanCacheLines(reinterpret_cast<__gm__ uint8_t *>(status),
+        TileXRMoonEp::kMoonEpCombineV2FullSyncSlotBytes);
+    const bool succeeded = status->magic == magic_ &&
+        status->marker == TileXRMoonEp::kMoonEpCombineV2CollectiveStatusMarker &&
+        status->stageId == stageId &&
+        status->guard == TileXRMoonEp::MoonEpCombineV2CollectiveStatusGuard(
+            magic_, stageId) &&
+        status->status == TileXRMoonEp::MOONEP_COMBINE_V2_SUCCESS;
+    AscendC::SyncAll<true>();
+    return succeeded;
+}
+
+__aicore__ inline bool MoonEpCombineV2::RunGlobalBarrier(
+    uint32_t boundaryId, uint32_t timeoutStatus, bool localSucceeded)
+{
+    const bool stageReady = BeginCollectiveStage(boundaryId);
+    bool workerSucceeded = localSucceeded && stageReady;
+    fullSyncStartCycles_ = static_cast<uint64_t>(GetSystemCycle());
+    if (activeWorker_ && workerSucceeded) {
+        const uint32_t generation =
+            TileXRMoonEp::MoonEpCombineV2FullSyncGeneration(boundaryId);
+        uint32_t count = 0U;
+        workerSucceeded = BuildFullSyncWqes(generation, &count);
+        if (!workerSucceeded) {
+            SetFailure(TileXRMoonEp::MOONEP_COMBINE_V2_INVALID_CONFIG,
+                boundaryId, UINT32_MAX,
+                TileXRMoonEp::MOONEP_COMBINE_V2_SIX_PORT);
+        }
+        if (workerSucceeded && count != 0U) {
+            PrepareFullSyncSignal(boundaryId, generation);
+        }
+        if (workerSucceeded) {
+            workerSucceeded = PublishFullSyncBatch(count);
+        }
+        if (workerSucceeded) {
+            workerSucceeded = WaitFullSyncCq();
+        }
+        if (workerSucceeded) {
+            workerSucceeded = WaitFullSyncSources(
+                boundaryId, generation, timeoutStatus);
         }
     }
-    return true;
+    return EndCollectiveStage(
+        boundaryId, !activeWorker_ || workerSucceeded);
 }
 
 __aicore__ inline void MoonEpCombineV2::InitReduceBuffers(
@@ -2752,76 +2878,6 @@ __aicore__ inline bool MoonEpCombineV2::ReduceHidden()
     return true;
 }
 
-__aicore__ inline void MoonEpCombineV2::PublishFailureAndConverge()
-{
-    const uint32_t convergenceMarker =
-        TileXRMoonEp::kMoonEpCombineV2FailureMarker |
-        ((convergenceRound_ + 1U) & 1U);
-    const uint64_t index = TileXRMoonEp::MoonEpCombineV2FailureIndex(
-        epoch_, core_);
-    __gm__ TileXRMoonEp::MoonEpCombineV2FailureRecord *record = reinterpret_cast<__gm__
-        TileXRMoonEp::MoonEpCombineV2FailureRecord *>(failureBase_ +
-            index * TileXRMoonEp::kMoonEpCombineV2TokenStrideBytes);
-    record->magic = magic_;
-    record->status = failureStatus_;
-    record->rank = rank_;
-    record->core = core_;
-    record->step = failureStep_;
-    record->peer = failurePeer_;
-    record->lane = failureLane_;
-    record->qp = failureQp_ != UINT32_MAX ? failureQp_ :
-        (failureLane_ < TileXRMoonEp::kMoonEpCombineV2LaneCount ?
-            TileXRMoonEp::MoonEpCombineV2Qp(core_, failureLane_) :
-            UINT32_MAX);
-    record->cqStatus = failureCqStatus_;
-    record->expected = failureExpected_;
-    record->observed = failureObserved_;
-    record->poison = failureStatus_ ==
-        TileXRMoonEp::MOONEP_COMBINE_V2_SUCCESS ? 0U : 1U;
-    record->marker = convergenceMarker;
-    TileXR::UDMACleanCacheLines(reinterpret_cast<__gm__ uint8_t *>(record),
-        sizeof(*record));
-
-    allCoresSucceeded_ = true;
-    bool ready[TileXRMoonEp::kMoonEpCombineV2CoreCount] = {};
-    uint32_t remaining = activeCoreCount_;
-    uint32_t cursor = 0U;
-    while (remaining != 0U) {
-        for (uint32_t offset = 0U; offset < activeCoreCount_; ++offset) {
-            const uint32_t core =
-                (cursor + offset) % activeCoreCount_;
-            if (ready[core]) {
-                continue;
-            }
-            const uint64_t peerIndex =
-                TileXRMoonEp::MoonEpCombineV2FailureIndex(epoch_, core);
-            __gm__ TileXRMoonEp::MoonEpCombineV2FailureRecord *peerRecord = reinterpret_cast<__gm__
-                TileXRMoonEp::MoonEpCombineV2FailureRecord *>(failureBase_ +
-                    peerIndex *
-                        TileXRMoonEp::kMoonEpCombineV2TokenStrideBytes);
-            TileXR::UDMACleanCacheLines(
-                reinterpret_cast<__gm__ uint8_t *>(peerRecord),
-                sizeof(*peerRecord));
-            if (peerRecord->marker != convergenceMarker ||
-                peerRecord->magic != magic_) {
-                continue;
-            }
-            ready[core] = true;
-            --remaining;
-            if (peerRecord->status !=
-                TileXRMoonEp::MOONEP_COMBINE_V2_SUCCESS) {
-                allCoresSucceeded_ = false;
-            }
-        }
-        cursor = (cursor + 1U) % activeCoreCount_;
-        if (TimedOut(operationStartCycles_)) {
-            allCoresSucceeded_ = false;
-            break;
-        }
-    }
-    ++convergenceRound_;
-}
-
 __aicore__ inline void MoonEpCombineV2::RecordProfilePoint(
     uint32_t index)
 {
@@ -2891,7 +2947,7 @@ __aicore__ inline void MoonEpCombineV2::WriteProfile()
         sizeof(TileXRMoonEp::MoonEpCombineV2ProfileRecord);
     record->rank = rank_;
     record->core = core_;
-    record->blockDim = activeCoreCount_;
+    record->blockDim = launchCoreCount_;
     record->timePointCount =
         TileXRMoonEp::kMoonEpCombineV2ProfileTimePointCount;
     record->metricCount = TileXRMoonEp::kMoonEpCombineV2ProfileMetricCount;
@@ -2943,61 +2999,59 @@ __aicore__ inline void MoonEpCombineV2::WriteProfile()
 
 __aicore__ inline void MoonEpCombineV2::Process()
 {
-    if (!valid_) {
-        WriteProfile();
+    AscendC::SyncAll<true>();
+    if (!collectiveReady_) {
         return;
     }
-    registry_ = TileXR::GetUDMARegistry(args_);
-    InitBuffers();
-    bool succeeded = true;
-    if (kEnableSafetyChecks) {
-        succeeded = failureStatus_ ==
-            TileXRMoonEp::MOONEP_COMBINE_V2_SUCCESS && CheckPoison();
-        if (succeeded) {
-            succeeded = ValidateDestinations();
+
+    bool stageReady = BeginCollectiveStage(kCollectiveInitStage);
+    bool localSucceeded = stageReady && valid_;
+    if (activeWorker_ && localSucceeded) {
+        registry_ = TileXR::GetUDMARegistry(args_);
+        localSucceeded = registry_ != nullptr;
+        if (localSucceeded) {
+            InitBuffers();
+        } else {
+            SetFailure(TileXRMoonEp::MOONEP_COMBINE_V2_INVALID_CONFIG,
+                UINT32_MAX, UINT32_MAX, UINT32_MAX);
         }
-        PublishFailureAndConverge();
-        succeeded = succeeded && allCoresSucceeded_;
     }
-    RecordProfilePoint(TileXRMoonEp::MOONEP_COMBINE_V2_TIME_PREPARE_END);
-    if (kEnableSafetyChecks && !succeeded) {
+    bool succeeded = EndCollectiveStage(kCollectiveInitStage,
+        !activeWorker_ || localSucceeded);
+    if (!succeeded) {
         WriteProfile();
         return;
     }
+
+    stageReady = BeginCollectiveStage(kCollectiveValidationStage);
+    localSucceeded = stageReady;
+    if (activeWorker_ && localSucceeded && kEnableSafetyChecks) {
+        localSucceeded = failureStatus_ ==
+            TileXRMoonEp::MOONEP_COMBINE_V2_SUCCESS && CheckPoison();
+        if (localSucceeded) {
+            localSucceeded = ValidateDestinations();
+        }
+    }
+    succeeded = EndCollectiveStage(kCollectiveValidationStage,
+        !activeWorker_ || localSucceeded);
+    RecordProfilePoint(TileXRMoonEp::MOONEP_COMBINE_V2_TIME_PREPARE_END);
+    if (!succeeded) {
+        WriteProfile();
+        return;
+    }
+
     if (kEnableFullSync) {
-        fullSyncStartCycles_ = static_cast<uint64_t>(GetSystemCycle());
         RecordProfilePoint(
             TileXRMoonEp::MOONEP_COMBINE_V2_TIME_FULL_SYNC_BEGIN);
-        uint32_t fullSyncWqeCount = 0U;
-        succeeded = BuildFullSyncWqes(&fullSyncWqeCount);
-        if (!succeeded) {
-            SetFailure(TileXRMoonEp::MOONEP_COMBINE_V2_INVALID_CONFIG,
-                UINT32_MAX, UINT32_MAX,
-                TileXRMoonEp::MOONEP_COMBINE_V2_SIX_PORT);
-        }
-        if (succeeded) {
-            if (fullSyncWqeCount != 0U) {
-                PrepareFullSyncSignal();
-            }
-            succeeded = PublishFullSyncBatch(fullSyncWqeCount);
-        }
+        succeeded = RunGlobalBarrier(0U,
+            TileXRMoonEp::MOONEP_COMBINE_V2_FULL_SYNC_TIMEOUT, succeeded);
         RecordProfilePoint(
             TileXRMoonEp::MOONEP_COMBINE_V2_TIME_FULL_SYNC_SUBMIT_END);
-        if (succeeded) {
-            succeeded = WaitFullSyncCq();
-        }
-        if (succeeded) {
-            succeeded = WaitFullSyncSources();
-        }
         RecordProfilePoint(
             TileXRMoonEp::MOONEP_COMBINE_V2_TIME_FULL_SYNC_RECEIVE_END);
-        if (succeeded) {
-            succeeded = FullSyncActiveCoreBarrier();
-        }
         RecordProfilePoint(
             TileXRMoonEp::MOONEP_COMBINE_V2_TIME_FULL_SYNC_BARRIER_END);
         if (!succeeded) {
-            PublishFailureAndConverge();
             WriteProfile();
             return;
         }
@@ -3011,76 +3065,98 @@ __aicore__ inline void MoonEpCombineV2::Process()
         RecordProfilePoint(
             TileXRMoonEp::MOONEP_COMBINE_V2_TIME_FULL_SYNC_BARRIER_END);
     }
-    PrefillOperatorWqes();
-    for (uint32_t step = 0U;
-        step < stepCount_ && succeeded;
-        ++step) {
-        const uint32_t peer = TileXRMoonEp::MoonEpCombineV2Peer(
-            rank_, step, core_, rankSize_, kCombineV2ScheduleMode);
-        const bool selfStep = peer == rank_ ||
-            peer == TileXRMoonEp::kMoonEpCombineV2InvalidPeer;
-        const bool fullmeshStep = !selfStep &&
-            TileXRMoonEp::MoonEpCombineV2SameServer(rank_, peer,
-                static_cast<uint32_t>(args_->localRankSize));
-        if (selfStep) {
-            succeeded = SendSelfStep(rank_, step);
-        } else if (fullmeshStep) {
-            const uint32_t successor =
-                TileXRMoonEp::MoonEpCombineV2Successor(
-                    rank_, step, core_, rankSize_, kCombineV2ScheduleMode);
-            fullmeshProfileRoute_ =
-                TileXRMoonEp::MoonEpCombineV2PackFullmeshProfileRoute(
-                    step, peer, successor,
-                    TileXRMoonEp::MoonEpCombineV2FullmeshLogicalQp(
-                        peer, static_cast<uint32_t>(args_->localRankSize)));
-            succeeded = SendFullmeshStep(peer, step);
-            if (succeeded) {
-                succeeded = WaitFullmeshCq(step, peer);
+    if (activeWorker_) {
+        PrefillOperatorWqes();
+    }
+    for (uint32_t step = 0U; step < stepCount_; ++step) {
+        localSucceeded = succeeded;
+        bool fullmeshStep = false;
+        if (activeWorker_ && localSucceeded) {
+            const uint32_t peer = TileXRMoonEp::MoonEpCombineV2Peer(
+                rank_, step, core_, rankSize_, kCombineV2ScheduleMode);
+            const bool selfStep = peer == rank_ ||
+                peer == TileXRMoonEp::kMoonEpCombineV2InvalidPeer;
+            fullmeshStep = !selfStep &&
+                TileXRMoonEp::MoonEpCombineV2SameServer(rank_, peer,
+                    static_cast<uint32_t>(args_->localRankSize));
+            if (selfStep) {
+                localSucceeded = SendSelfStep(rank_, step);
+            } else if (fullmeshStep) {
+                const uint32_t successor =
+                    TileXRMoonEp::MoonEpCombineV2Successor(
+                        rank_, step, core_, rankSize_, kCombineV2ScheduleMode);
+                fullmeshProfileRoute_ =
+                    TileXRMoonEp::MoonEpCombineV2PackFullmeshProfileRoute(
+                        step, peer, successor,
+                        TileXRMoonEp::MoonEpCombineV2FullmeshLogicalQp(
+                            peer, static_cast<uint32_t>(
+                                args_->localRankSize)));
+                localSucceeded = SendFullmeshStep(peer, step);
+                if (localSucceeded) {
+                    localSucceeded = WaitFullmeshCq(step, peer);
+                }
+                if (localSucceeded) {
+                    RecordProfilePoint(TileXRMoonEp::
+                        MOONEP_COMBINE_V2_DIAG_FULLMESH_CQ_SUCCESS);
+                    localSucceeded = SubmitSelfGrant(step);
+                }
+                if (localSucceeded) {
+                    RecordProfilePoint(TileXRMoonEp::
+                        MOONEP_COMBINE_V2_DIAG_FULLMESH_GRANT_SUBMIT);
+                }
+            } else {
+                localSucceeded = SendRemoteStep(peer, step);
             }
-            if (succeeded) {
-                RecordProfilePoint(TileXRMoonEp::
-                    MOONEP_COMBINE_V2_DIAG_FULLMESH_CQ_SUCCESS);
-                succeeded = SubmitSelfGrant(step);
-            }
-            if (succeeded) {
-                RecordProfilePoint(TileXRMoonEp::
-                    MOONEP_COMBINE_V2_DIAG_FULLMESH_GRANT_SUBMIT);
-            }
-        } else {
-            succeeded = SendRemoteStep(peer, step);
         }
         RecordProfilePoint(
             TileXRMoonEp::MOONEP_COMBINE_V2_TIME_STEP0_SEND_END +
             step * TileXRMoonEp::kMoonEpCombineV2ProfileStepPointStride);
-        if (succeeded) {
-            succeeded = WaitStepCqs(step);
+        if (activeWorker_ && localSucceeded) {
+            localSucceeded = WaitStepCqs(step);
         }
-        if (succeeded && fullmeshStep) {
+        if (activeWorker_ && localSucceeded && fullmeshStep) {
             RecordProfilePoint(TileXRMoonEp::
                 MOONEP_COMBINE_V2_DIAG_FULLMESH_GRANT_CQ_SUCCESS);
         }
-        if (succeeded) {
-            succeeded = WaitStepGrant(step);
+        if (activeWorker_ && localSucceeded) {
+            localSucceeded = WaitStepGrant(step);
         }
+        const uint32_t boundaryId =
+            TileXRMoonEp::MoonEpCombineV2RoundBoundary(step, rankSize_);
+        succeeded = RunGlobalBarrier(boundaryId,
+            TileXRMoonEp::MOONEP_COMBINE_V2_STEP_BARRIER_TIMEOUT,
+            localSucceeded);
         RecordProfilePoint(
             TileXRMoonEp::MOONEP_COMBINE_V2_TIME_STEP0_READY_END +
             step * TileXRMoonEp::kMoonEpCombineV2ProfileStepPointStride);
+        if (!succeeded) {
+            break;
+        }
     }
     if (succeeded) {
         RecordProfilePoint(
             TileXRMoonEp::MOONEP_COMBINE_V2_TIME_STEP_LOOP_END);
     }
-    if (succeeded) {
-        succeeded = WaitInboundDone();
-        RecordProfilePoint(
-            TileXRMoonEp::MOONEP_COMBINE_V2_TIME_INBOUND_DONE_END);
+    stageReady = BeginCollectiveStage(kCollectiveDoneStage);
+    localSucceeded = succeeded && stageReady;
+    if (activeWorker_ && localSucceeded) {
+        localSucceeded = WaitInboundDone();
     }
-    PublishFailureAndConverge();
-    succeeded = succeeded && allCoresSucceeded_;
-    if (succeeded && !ReduceHidden()) {
+    succeeded = EndCollectiveStage(kCollectiveDoneStage,
+        !activeWorker_ || localSucceeded);
+    RecordProfilePoint(
+        TileXRMoonEp::MOONEP_COMBINE_V2_TIME_INBOUND_DONE_END);
+
+    stageReady = BeginCollectiveStage(kCollectiveReduceStage);
+    localSucceeded = succeeded && stageReady;
+    if (activeWorker_ && localSucceeded && !ReduceHidden()) {
         SetFailure(TileXRMoonEp::MOONEP_COMBINE_V2_INVALID_CONFIG,
             UINT32_MAX, UINT32_MAX, UINT32_MAX);
+        localSucceeded = false;
     }
+    succeeded = EndCollectiveStage(kCollectiveReduceStage,
+        !activeWorker_ || localSucceeded);
+    (void)succeeded;
     RecordProfilePoint(TileXRMoonEp::MOONEP_COMBINE_V2_TIME_FINAL_END);
     WriteProfile();
 }

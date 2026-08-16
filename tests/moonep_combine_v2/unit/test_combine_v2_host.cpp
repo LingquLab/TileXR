@@ -317,14 +317,14 @@ void TestRankAndCoreGeneralization()
     params.aivCoreNum = TileXRMoonEp::kMoonEpCombineV2CoreCount - 1U;
     CheckStatus(TileXRMoonEp::TileXRMoonEpRunCombineV2(params),
         TILEXR_MOONEP_ERROR_INVALID_ARGUMENT,
-        "at least sixteen requested AIVs required");
+        "fifteen requested AIVs must be rejected");
 
     Reset();
     params = ValidParams();
     params.aivCoreNum = TileXRMoonEp::kMoonEpCombineV2CoreCount + 1U;
     CheckStatus(TileXRMoonEp::TileXRMoonEpRunCombineV2(params),
-        TILEXR_MOONEP_ERROR_NOT_SUPPORTED,
-        "requested AIV count must fit the device");
+        TILEXR_MOONEP_ERROR_INVALID_ARGUMENT,
+        "seventeen requested AIVs must be rejected");
 }
 
 } // namespace

@@ -61,17 +61,17 @@ void TestTargetLayout()
     Check(layout.failureBytes == 2048U, "failure bytes mismatch");
     Check(layout.fullSyncReceiveOffset == 2818878464ULL,
         "full-sync receive offset mismatch");
-    Check(layout.fullSyncReceiveBytes == 16384U,
+    Check(layout.fullSyncReceiveBytes == 32768U,
         "full-sync receive bytes mismatch");
-    Check(layout.fullSyncSourceOffset == 2818894848ULL,
+    Check(layout.fullSyncSourceOffset == 2818911232ULL,
         "full-sync source offset mismatch");
-    Check(layout.fullSyncSourceBytes == 2048U,
+    Check(layout.fullSyncSourceBytes == 4096U,
         "full-sync source bytes mismatch");
-    Check(layout.fullSyncBarrierOffset == 2818896896ULL,
+    Check(layout.fullSyncBarrierOffset == 2818915328ULL,
         "full-sync barrier offset mismatch");
     Check(layout.fullSyncBarrierBytes == 2048U,
         "full-sync barrier bytes mismatch");
-    Check(layout.outputOffset == 2818898944ULL,
+    Check(layout.outputOffset == 2818917376ULL,
         "target output offset mismatch");
     Check(layout.outputOffset ==
             layout.fullSyncBarrierOffset + layout.fullSyncBarrierBytes,
