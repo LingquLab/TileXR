@@ -285,6 +285,35 @@ if (( REDUCE_HIDDEN )); then
 fi
 job_id="combine_v2_${ranks}p_$(date +%Y%m%d_%H%M%S)_$$"
 remote_job_dir="$(cd "${INSTALL_DIR}/.." && pwd)/logs/.combine_v2_jobs/${job_id}"
+ssh_control_dir=$(mktemp -d "${TMPDIR:-/tmp}/tilexr-combine-v2-ssh.XXXXXX")
+rank_ssh_options=(
+    "${ssh_options[@]}"
+    -o ControlMaster=auto
+    -o ControlPersist=60
+    -o "ControlPath=${ssh_control_dir}/%C"
+)
+ssh_masters_active=0
+
+close_rank_ssh_masters() {
+    local host
+    if (( ssh_masters_active )); then
+        for host in "${hosts[@]}"; do
+            ssh "${rank_ssh_options[@]}" -O exit "${SSH_USER}@${host}" \
+                >/dev/null 2>&1 || true
+        done
+    fi
+    ssh_masters_active=0
+    rmdir "${ssh_control_dir}" 2>/dev/null || true
+}
+
+ssh_masters_active=1
+for host in "${hosts[@]}"; do
+    if ! ssh "${rank_ssh_options[@]}" -MNf "${SSH_USER}@${host}"; then
+        echo "failed to establish rank SSH control connection to ${host}" >&2
+        close_rank_ssh_masters
+        exit 1
+    fi
+done
 rank_hosts=()
 rank_devices=()
 rank_pidfiles=()
@@ -373,7 +402,7 @@ launch_rank() {
         "${job_id}" "${rank_pidfiles[${rank}]}" "${TIMEOUT_SECONDS}" \
         "${INSTALL_DIR}" "${CANN_PATH}" "${COMM_ID}" "${BARRIER_ID}" \
         "${rank}" "${ranks}" "${device}" "${benchmark_args[@]}")
-    exec ssh "${ssh_options[@]}" "${SSH_USER}@${host}" "${remote_command}"
+    exec ssh "${rank_ssh_options[@]}" "${SSH_USER}@${host}" "${remote_command}"
 }
 
 terminate_remote_tasks() {
@@ -384,7 +413,7 @@ terminate_remote_tasks() {
         pidfile="${rank_pidfiles[${rank}]}"
         cleanup_command=$(build_remote_command "${cleanup_script}" \
             "${pidfile}" "${job_id}")
-        ssh "${ssh_options[@]}" "${SSH_USER}@${host}" "${cleanup_command}" \
+        ssh "${rank_ssh_options[@]}" "${SSH_USER}@${host}" "${cleanup_command}" \
             >/dev/null 2>&1 &
     done
     wait || true
@@ -404,6 +433,7 @@ cleanup_controller() {
             wait "${pid}" 2>/dev/null || true
         done
     fi
+    close_rank_ssh_masters
     exit "${status}"
 }
 trap cleanup_controller EXIT
@@ -433,6 +463,7 @@ while (( completed < ranks )); do
     fi
 done
 run_active=0
+close_rank_ssh_masters
 
 rank_logs=()
 for ((rank = 0; rank < ranks; ++rank)); do

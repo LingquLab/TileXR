@@ -1,6 +1,6 @@
 # MoonEP Combine V2 发送前全同步设计
 
-状态：设计已固化并实现；仅完成静态审查，尚未编译或运行测试
+状态：设计已固化并实现；2026-08-15 已将开关与 Reduce 解耦，仅完成静态审查，尚未编译或运行测试
 
 日期：2026-08-14
 
@@ -9,7 +9,7 @@
 为 MoonEP Combine V2 增加一个默认开启的发送前全同步模式，用于分析和缓解性能测试中
 明显的快慢卡差异。
 
-开启后，hidden Combine Kernel 在正常数据发送前执行以下协议：
+开启后，每次 Combine V2 Kernel 在正常数据发送前执行以下协议：
 
 1. 每个 active 发送核通过本核的 6 口 QP，向本核 schedule 负责的全部远端 peer
    各发送一个 32 Byte 同步信号；self 不发送、不写本地同步槽。
@@ -19,8 +19,9 @@
 4. 完成一次仅包含 active 发送核的核间同步。
 5. 所有 active 核进入现有正常发送阶段。
 
-该模式只作用于 `TileXRMoonEpCombineStageV2()` 的 hidden launch。可选的 route-weight
-launch 以及直接调用的非 Reduce Combine V2 launch 不执行全同步。
+该模式由每次 Combine V2 launch 独立决定，与该 launch 是否执行 Reduce 无关。
+`TileXRMoonEpCombineStageV2()` 的 hidden 和可选 route-weight launch，以及直接调用的
+non-reduce Combine V2 launch，均读取并遵循同一个环境开关。
 
 ## 2. 已确认决策
 
@@ -32,7 +33,7 @@ launch 以及直接调用的非 Reduce Combine V2 launch 不执行全同步。
 | 提交 | 每核一个 WQE batch、一次 SQ head 更新、一次 doorbell |
 | CQ | 同步 WQE 不请求 CQE，不单独 poll CQ |
 | self peer | 不发 WQE、不写 receive/source 信号槽、不等待、不校验 |
-| 生效 launch | 仅 `reduceHidden == true` 的 hidden launch |
+| 生效 launch | 所有 Combine V2 launch，与 `reduceHidden` 独立 |
 | WQE 构造 | 新增独立 SIMT VF 函数，WQE 全部在 UB 构造 |
 | 轮次隔离 | receive、source 和核间 barrier 槽均按两个 epoch 乒乓 |
 
@@ -41,10 +42,9 @@ launch 以及直接调用的非 Reduce Combine V2 launch 不执行全同步。
 - 不改变 Combine V2 的数据路由、payload WQE、grant/done 协议和 Reduce 语义。
 - 不改变 `TileXRMoonEpCombineV2()`、`TileXRMoonEpCombineStageV2()` 或
   `tools/moonep/test_npu_e2e.py` 的公共调用契约。
-- 不给 route-weight launch 增加同步。
 - 不为同步 WQE 增加 CQ、notify 或单独的完成队列回收流程。
 - 不用 topology 推导额外 peer；peer 集合严格复用 Combine V2 runtime schedule。
-- 不改变 route-weight 和直接非 Reduce launch 的默认数据面；默认同步只作用于 hidden launch。
+- 不改变 Reduce 的启用条件；full-sync 和 Reduce 是两个独立阶段。
 
 ## 4. 开关和 Host 传递
 
@@ -67,13 +67,18 @@ TILEXR_MOONEP_COMBINE_V2_FULL_SYNC
 最终 Kernel 参数为：
 
 ```text
-fullSync = envEnabled && reduceHidden
+fullSync = envEnabled
 ```
 
 因此 `TileXRMoonEpCombineStageV2()` 中：
 
-- hidden 参数设置 `reduceHidden=true`，执行全同步；
-- route-weight 参数复用时设置 `reduceHidden=false`，不执行全同步。
+- hidden 参数设置 `reduceHidden=true`，full-sync 由环境开关决定；
+- route-weight 参数复用时设置 `reduceHidden=false`，full-sync 仍由同一环境开关决定；
+- 直接 non-reduce launch 同样可以通过开关对比 full-sync off/on。
+
+当 StageV2 同时处理 hidden 和 route weight 且开关开启时，两次独立 Kernel launch 各执行
+一次 full-sync。这是按 launch 控制的明确语义；若性能测试只需要一次 no-reduce 数据面，
+应直接运行单次 non-reduce Combine V2，而不是用含两个 launch 的 StageV2 总耗时替代。
 
 所有 rank 必须使用相同的开关值。当前 Host API 没有跨 rank 环境一致性检查；若部分 rank
 开启而部分 rank 关闭，开启方将按 full-sync 超时退出，但已进入正常阶段的关闭方仍可能
@@ -385,7 +390,7 @@ time-point capacity 从 32 增至 40，profile version 从 3 增至 4，record �
 ### 12.1 Host/unit
 
 - 环境变量开、关、未设置和非法值解析；
-- `reduceHidden=true/false` 的 hidden-only 传递；
+- `reduceHidden=true/false` 下 full-sync 均能独立开启和关闭；
 - 公共 ABI 静态断言保持不变，内部 Kernel args 大小同步变化；
 - workspace 新区域 offset、大小、64 Byte 隔离、checked overflow 和 2 MiB 总对齐；
 - 2/8/16/32/64/128P 下每核 remote peer 数不超过 8；
@@ -431,9 +436,10 @@ TileXR 归因。
   lane state 重置都会造成 SQ 账本泄漏。
 - 所有 rank 的环境变量必须一致；混用配置可能让开启方在 full-sync 超时，而关闭方进入
   正常协议后继续等待 grant/done，不能把该误配置视为可靠的全局错误收敛机制。
-- 开关只同步 hidden launch；不能据此推断 route-weight launch 的 rank 到达一致性。
-- 该协议证明所有 rank 已到达 hidden send 前边界，但不保证各 rank 在完全相同 cycle
-  开始发送。它是分布式 barrier 语义，不是时钟级 simultaneous launch。
+- StageV2 同时包含 hidden 和 route-weight 时，开关开启会产生两次全同步，性能口径必须明确
+  是单 launch 还是完整 StageV2。
+- 该协议证明所有 rank 已到达当前 Combine V2 launch 的 send 前边界，但不保证各 rank
+  在完全相同 cycle 开始发送。它是分布式 barrier 语义，不是时钟级 simultaneous launch。
 - Host/unit/simulator 不能证明无 CQ UDMA 写和 doorbell 时序；最终结论必须限定在实际
   验证的 A5/Ascend950 硬件、rank 数和拓扑。
 
@@ -442,7 +448,7 @@ TileXR 归因。
 实现只有同时满足以下条件才可标记完成：
 
 - 开关默认开启且公共 API/调用契约不变；
-- hidden-only、6 口 QP、跳过 self、32 Byte、双 epoch 均有 unit evidence；
+- launch-independent、6 口 QP、跳过 self、32 Byte、双 epoch 均有 unit evidence；
 - WQE 全 UB 构造、MTE3 发布、一次 DB、无 CQ 的 source/compile guard 通过；
 - 至少三轮硬件正确性覆盖 epoch 复用；
 - 正常发送完成后 SQ/CQ 账本无泄漏；
@@ -450,7 +456,7 @@ TileXR 归因。
 
 ## 15. 当前实现与验证边界
 
-当前代码已实现 Host 开关解析和 hidden-only 传递、双 epoch workspace、独立 SIMT WQE
+当前代码已实现 Host 开关解析和 launch-independent 传递、双 epoch workspace、独立 SIMT WQE
 构造、6 口 QP 单 batch/单 head/单 DB 发布、无 CQ 账本、远端 source 等待、active-core
 软件 barrier，以及 profile/trace 解析。静态契约覆盖默认开关、self 排除、peer/source
 覆盖、ping-pong 索引和 WQE 发布约束。

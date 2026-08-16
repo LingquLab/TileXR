@@ -146,6 +146,8 @@ int main()
     const std::string fullSyncPublisher = Section(kernelImpl,
         "__aicore__ inline bool MoonEpCombineV2::PublishFullSyncBatch(",
         "__aicore__ inline bool MoonEpCombineV2::FullSyncSignalMatches(");
+    const std::string barrierServer = Section(hardwareProbe,
+        "bool BarrierServer(", "bool BarrierClient(");
 
     bool ok = true;
     ok &= Require(rootCmake, "add_subdirectory(tests/moonep_combine_v2)",
@@ -456,11 +458,16 @@ int main()
         "Combine V2 full-sync environment does not define its default");
     ok &= Require(host, "*enabled = true;",
         "Combine V2 full-sync environment is not enabled by default");
-    ok &= Require(host, "if (params.reduceHidden)",
-        "Combine V2 full-sync environment is parsed outside hidden launch");
     ok &= Require(host,
-        "context->fullSync = params.reduceHidden && fullSyncEnabled;",
-        "Combine V2 full synchronization is not hidden-only");
+        "context->fullSync = fullSyncEnabled;",
+        "Combine V2 full synchronization is not launch-independent");
+    ok &= Reject(host,
+        "params.reduceHidden && fullSyncEnabled",
+        "Combine V2 Host still binds full synchronization to reduction");
+    ok &= Require(kernelImpl, "fullSync_ = fullSync;",
+        "Combine V2 Kernel does not preserve the independent full-sync flag");
+    ok &= Reject(kernelImpl, "fullSync && reduceHidden",
+        "Combine V2 Kernel still binds full synchronization to reduction");
     ok &= Require(kernelImpl,
         "TileXRMoonEp::MOONEP_COMBINE_V2_SINGLE_RING;",
         "Combine V2 default schedule is not the existing single ring");
@@ -523,6 +530,9 @@ int main()
         "Combine V2 probe does not print self-copy profiling");
     ok &= Require(hardwareProbe, "remote_submit_us",
         "Combine V2 probe does not print remote-submit profiling");
+    ok &= Require(barrierServer,
+        "close(listenFd);\n    const uint8_t release",
+        "Combine V2 barrier releases clients before retiring its listener");
     ok &= Require(hardwareProbe, "enum class OutputCheckResult",
         "Combine V2 probe does not classify correctness failures");
     ok &= Require(hardwareProbe, "if (sourceRank != rank)",

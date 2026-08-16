@@ -113,14 +113,12 @@ int TileXRMoonEpPrepareCombineV2Launch(
         return ret;
     }
     bool fullSyncEnabled = false;
-    if (params.reduceHidden) {
-        ret = ResolveCombineV2FullSync(&fullSyncEnabled);
-        if (ret != TILEXR_MOONEP_SUCCESS) {
-            *context = CombineV2LaunchContext {};
-            return ret;
-        }
+    ret = ResolveCombineV2FullSync(&fullSyncEnabled);
+    if (ret != TILEXR_MOONEP_SUCCESS) {
+        *context = CombineV2LaunchContext {};
+        return ret;
     }
-    context->fullSync = params.reduceHidden && fullSyncEnabled;
+    context->fullSync = fullSyncEnabled;
     ret = TileXRGetCommArgsHost(params.comm, context->hostArgs);
     if (ret != TileXR::TILEXR_SUCCESS || context->hostArgs == nullptr) {
         *context = CombineV2LaunchContext {};

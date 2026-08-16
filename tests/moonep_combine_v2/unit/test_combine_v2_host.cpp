@@ -181,19 +181,38 @@ void TestFullSyncEnvironment()
     setenv(kFullSyncEnv, "invalid", 1);
     CheckStatus(TileXRMoonEp::TileXRMoonEpRunCombineV2(ValidParams()),
         TILEXR_MOONEP_ERROR_INVALID_ARGUMENT,
-        "invalid hidden full-sync environment");
+        "invalid full-sync environment");
     Check(launchCount == 0U,
-        "invalid hidden full-sync environment reached kernel launch");
+        "invalid full-sync environment reached kernel launch");
 
     Reset();
-    setenv(kFullSyncEnv, "invalid", 1);
     TileXRMoonEp::CombineV2Params params = ValidParams();
     params.reduceHidden = false;
     CheckStatus(TileXRMoonEp::TileXRMoonEpRunCombineV2(params),
         TILEXR_MOONEP_SUCCESS,
-        "non-hidden launch must ignore full-sync environment");
+        "unset non-reduce full-sync environment");
+    Check(launchedContext.fullSync,
+        "non-reduce launch did not enable full synchronization by default");
+
+    Reset();
+    setenv(kFullSyncEnv, "0", 1);
+    params = ValidParams();
+    params.reduceHidden = false;
+    CheckStatus(TileXRMoonEp::TileXRMoonEpRunCombineV2(params),
+        TILEXR_MOONEP_SUCCESS,
+        "disabled non-reduce full-sync environment");
     Check(!launchedContext.fullSync,
-        "non-hidden launch enabled full synchronization");
+        "non-reduce launch ignored disabled full synchronization");
+
+    Reset();
+    setenv(kFullSyncEnv, "invalid", 1);
+    params = ValidParams();
+    params.reduceHidden = false;
+    CheckStatus(TileXRMoonEp::TileXRMoonEpRunCombineV2(params),
+        TILEXR_MOONEP_ERROR_INVALID_ARGUMENT,
+        "invalid non-reduce full-sync environment");
+    Check(launchCount == 0U,
+        "invalid non-reduce full-sync environment reached kernel launch");
 }
 
 void TestValidation()
@@ -377,8 +396,8 @@ void TestStageUsesDedicatedHiddenOutput()
         "hidden output can be overwritten by the weight workspace");
     Check(launchCount == 2U && launchedReduceHidden[0] &&
         launchedFullSync[0] && !launchedReduceHidden[1] &&
-        !launchedFullSync[1],
-        "V2 stage did not restrict full synchronization to hidden launch");
+        launchedFullSync[1],
+        "V2 stage did not apply full synchronization to every launch");
 }
 
 extern "C" aclError aclrtMemcpyAsync(

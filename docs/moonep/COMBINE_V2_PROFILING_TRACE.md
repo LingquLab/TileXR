@@ -1,0 +1,93 @@
+# MoonEP Combine V2 Profiling 与 Chrome Trace 导出
+
+本文只记录 profiling 模式的构建、采集和三个性能拆解 JSON 的生成。常规多机测试
+流程见 [COMBINE_V2_MULTIHOST_PERF.md](COMBINE_V2_MULTIHOST_PERF.md)。
+
+## 1. 开启 Profiling
+
+profiling 必须同时在编译和运行阶段开启。编译时添加 `--enable-profiling`：
+
+```bash
+bash "${REMOTE_ROOT}/source/tools/moonep/build_combine_v2_perf.sh" \
+  --source-dir "${REMOTE_ROOT}/source" \
+  --build-dir "${REMOTE_ROOT}/build" \
+  --install-dir "${REMOTE_ROOT}/install" \
+  --cann-path "${CANN_PATH}" \
+  --jobs 16 \
+  --enable-profiling
+```
+
+将 `install/` 平铺同步到 hostfile 中的全部节点后，按常规 launcher 命令运行，并
+添加 `--profile`。no-reduce 不添加 `--reduce-hidden`；reduce 测试同时添加
+`--reduce-hidden`。
+
+```bash
+bash "${REMOTE_ROOT}/source/tools/moonep/run_combine_v2_perf_multihost.sh" \
+  --hostfile "${REMOTE_ROOT}/hostfile" \
+  --install-dir "${REMOTE_ROOT}/install" \
+  --cann-path "${CANN_PATH}" \
+  --ssh-user root \
+  --bs 8192 --warmup 0 --iterations 80 \
+  --experts 256 --hidden-size 3584 \
+  --comm-domain 141 --comm-id "${PRIMARY_HOST}:10067" \
+  --wait-seconds 120 --retry-seconds 15 --timeout 600 \
+  --log-file "${LOG_FILE}" \
+  --profile
+```
+
+profiling 会扰动耗时，只用于阶段归因；宏观性能以关闭 profiling 的测试为准。
+正确性失败不应阻止 `COMBINE_V2_SAMPLE`、`COMBINE_V2_PROFILE` 和 rank 性能记录
+输出。
+
+## 2. 生成三个 JSON
+
+将包含全部 rank 输出的完整日志同步到本地后执行：
+
+```bash
+python3 tools/moonep/combine_v2_trace.py COMBINE_LOG \
+  --split-output-dir TRACE_DIR \
+  --prefix combine_v2_no_reduce \
+  --host HOST \
+  --iteration 79 \
+  --world-size 128 \
+  --bs 8192 \
+  --topk 16 \
+  --hidden-size 3584 \
+  --experts 256 \
+  --reduce disabled
+```
+
+reduce 测试把 `--prefix` 改为 `combine_v2_reduce`，并传
+`--reduce enabled`。不要传 `--output`；`--split-output-dir` 会直接生成三个彼此
+独立、可在 Chrome Tracing 中打开的文件：
+
+```text
+<prefix>_iteration79_fastest_rank<RANK>_edge_trace.json
+<prefix>_iteration79_p50_rank<RANK>_edge_trace.json
+<prefix>_iteration79_slowest_rank<RANK>_edge_trace.json
+```
+
+## 3. 选卡与轨道口径
+
+- 选卡只看最后一轮，即 `iteration=79` 的 ACL Event 耗时。
+- fastest 是最小耗时 rank，slowest 是最大耗时 rank。
+- P50 是 128 个 rank 按耗时升序排列后的第 64 张卡，不是耗时数值的插值中位数。
+- 相同耗时按 rank 编号排序，保证结果可重复。
+- 16P 及以上每个 JSON 必须包含 16 条 AIV Core 轨道；2-8P 使用与 rank 数相同的
+  Core 数。
+- 每个 JSON 只含一张选中卡，不要把 fastest、P50 和 slowest 合并成一个 trace。
+
+每张卡以该卡最早的 AIV `t0` 作为时间零点。不同 NPU 的系统 cycle 不保证同步，
+因此不能比较三个 JSON 的绝对起点。
+
+## 4. 导出前检查
+
+128P、80 轮的日志应包含 10240 条 `COMBINE_V2_SAMPLE`、128 条
+`COMBINE_V2_RANK_PERF`，以及最后一轮每个 rank 的 16 条
+`COMBINE_V2_PROFILE`。导出工具还要求存在与 `BS/K/H/ExpNum/reduce` 一致的
+`COMBINE_V2_PERF` provenance 记录；参数不一致、时间戳非正、时间戳非单调或所选
+rank 缺少任一 active Core 时会拒绝生成 JSON。
+
+生成后终端应恰好输出三条 `COMBINE_V2_EDGE_TRACE`，并分别标记
+`role=fastest`、`role=p50` 和 `role=slowest`。这三个 JSON 是 profiling 分析产物；
+等效算法带宽仍直接从关闭 profiling 的 `COMBINE_V2_PERF` 输出读取。

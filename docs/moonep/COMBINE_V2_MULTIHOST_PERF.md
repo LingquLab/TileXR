@@ -1,628 +1,227 @@
-# MoonEP Combine V2 多机通信性能测试指导
+# MoonEP Combine V2 多机性能测试流程
 
-本文说明如何在多台 Ascend 服务器上构建、同步和运行 MoonEP Combine V2
-单算子通信性能测试。流程不依赖 MPI，由主服务器按 hostfile 顺序通过 SSH
-并发拉起所有 rank。
+本文只记录可复用的部署、编译、空闲检测、测试和结果判定流程。profiling 构建与
+Chrome Trace JSON 导出见
+[COMBINE_V2_PROFILING_TRACE.md](COMBINE_V2_PROFILING_TRACE.md)。
 
-## 1. 当前测试范围
+## 1. 基准口径
 
-当前 benchmark 固定以下算子参数：
-
-| 参数 | 当前值 | 是否可免编译修改 |
-| --- | --- | --- |
-| `BS` | 默认 `128` | 是，使用 `--bs` 或 `--bs-list` |
-| `K` | `16` | 否，当前写在 benchmark C++ 中 |
-| `H` | 默认 `3584` | 是，使用 `--hidden-size` |
-| 专家总数 | 默认 `64` | 是，使用 `--experts` 或 `-Experts` |
-| dtype | `BF16` | 否，当前写在 benchmark C++ 中 |
-| 每台服务器 rank 数 | `1-8` | 是，由 hostfile 配置 |
-
-`--bs-list` 会在一次进程任务中覆盖多个 BS 点位。TileXR/UDMA 只初始化一次，
-workspace 按列表中的最大 BS 申请并注册一次，所有点位复用该 workspace。
-
-### 1.1 性能结果展示约束
-
-正式性能报告展示以下两组结果：
-
-- `avg_ms`：先对每个 rank 除去 warmup 后的全部计时 iteration 求平均，得到每卡
-  耗时，再对所有卡的耗时求算术平均。
-- `max_ms`：所有卡耗时中的最大值，即最慢卡在全部计时 iteration 上的平均耗时。
-- `avg_alg_bw_GBps`：完整逻辑通信数据量除以 `avg_ms`。
-- `max_alg_bw_GBps`：完整逻辑通信数据量除以 `max_ms`。
-
-不统计或展示单轮样本的 `p50/min/max`。这里的 `max_ms` 是每卡平均耗时中的最大值，
-不是 80 轮单次耗时的最大值。
-
-BF16 Combine V2 的单 rank 逻辑通信数据量和算法带宽统一按以下公式计算：
+常用 128P case：
 
 ```text
-data_bytes = BS * K * H * 2
-avg_alg_bw_GBps = data_bytes / avg_ms / 1e6
-max_alg_bw_GBps = data_bytes / max_ms / 1e6
+world_size=128, BS=8192, K=16, H=3584, ExpNum=256, BF16
+warmup=0, iterations=80, reduce=disabled
 ```
 
-同 rank、同服务器跨卡和跨服务器的数据均计入 `data_bytes`，不再分别统计卡内、
-跨卡或跨机比例。算法带宽使用单 rank 完整逻辑数据量，不额外乘 world size。
-`GB/s` 使用十进制单位 `1 GB = 10^9 bytes`。
+`K=16` 和 `BF16` 由 benchmark 固定。省略 `--reduce-hidden` 即测试 no-reduce。
 
-正确性检查与性能采集相互独立。输出不正确时，benchmark 仍继续完成 warmup、计时，
-并在启用 `--profile` 时输出全部 profiling 记录；`COMBINE_V2_RANK_PERF` 和
-`COMBINE_V2_PERF` 的 `correctness` 字段记录实际状态。只有算子启动、ACL Event、
-通信同步、profiling 读取或资源清理本身失败时，任务才中断且不声明完整性能结果。
-完整入口的 `--profile` 会自动启用 profiling 编译；使用 `--skip-build --profile` 时，
-则由调用者保证复用的产物已包含 profiling 埋点。
-
-## 2. 脚本职责
-
-| 文件 | 执行位置 | 职责 |
-| --- | --- | --- |
-| `tools/moonep/run_combine_v2_perf_cluster.sh` | 主服务器 | 完整入口：远端编译、平铺同步、启动测试 |
-| `tools/moonep/build_combine_v2_perf.sh` | 主服务器 | 编译 benchmark，整理 `bin/` 和 `lib64/`，检查 RPATH 和 MPI 依赖 |
-| `tools/moonep/sync_combine_v2_perf_runtime.sh` | 主服务器 | 主服务器直接 rsync 到 hostfile 中的每台服务器并校验 SHA-256 |
-| `tools/moonep/run_combine_v2_perf_multihost.sh` | 主服务器 | NPU 预检、rank 映射、SSH 拉起、日志校验和性能聚合 |
-| `tests/moonep_combine_v2/demo/tilexr_moonep_combine_v2_hardware_probe.cpp` | 编译产物 | 单 rank benchmark、TCP barrier、正确性检查和 ACL Event 计时 |
-
-同步是平铺模式：主服务器直接同步每个目标节点，不允许计算节点继续向其他
-节点分层转发。
-
-## 3. 远端目录
-
-建议在 `/home/h00580772` 下为任务建立独立根目录：
+性能口径是先对每个 rank 的 80 轮耗时求均值，再取 128 个 rank 均值中的最大值
+作为整组延迟 `max_ms`。单 rank 等效算法数据量和带宽为：
 
 ```text
-/home/h00580772/tilexr_combine_v2/
-|-- source/    # Mutagen 只同步到主服务器
-|-- build/     # 只在主服务器编译
-|-- install/   # 主服务器向全部测试节点平铺同步
-|-- logs/      # 控制日志、逐 rank 日志、NPU 快照
+bytes = BS * K * H * sizeof(BF16)
+      = 8192 * 16 * 3584 * 2
+      = 939,524,096 bytes
+
+alg_bw_GBps = 939.524096 / max_ms
+```
+
+## 2. 目录与 Hostfile
+
+每次测试使用独立目录，避免复用其他任务的源码、产物、日志和 PID 文件：
+
+```text
+REMOTE_ROOT/
+|-- source/
+|-- build/
+|-- install/
+|-- logs/
 `-- hostfile
 ```
 
-本文中的已验证 16P 环境使用：
-
-```text
-/home/h00580772/tilexr_combine_v2_16p_cdf2b01_20260811
-```
-
-## 4. 环境前提
-
-开始前确认：
-
-1. 本地已安装 `mutagen`、`scp` 和 `ssh`。
-2. 本地能够免密 SSH 登录主服务器，并可用 `scp` 上传临时 bash 入口到测试目录。
-3. 主服务器能够免密 SSH 登录 hostfile 中的每一台服务器。
-4. 所有服务器存在兼容的 CANN 和驱动；CANN 路径按第 4.2 节的环境规则选择，
-   不要求所有环境统一使用 B150。
-5. 主服务器和计算节点安装了 `bash`、`rsync`、`sha256sum`、`timeout`、
-   `ss` 和 `npu-smi`。
-6. 主服务器使用 Bash 4.3 或更高版本，以支持 `wait -n`。
-
-计算节点不需要安装 MPI。
-
-### 4.1 环境信息来源与名称解析
-
-测试节点必须从以下两份本地环境清单选择，二者是互相独立的环境：
-
-| 环境 | 权威信息来源 | 节点选择规则 |
-| --- | --- | --- |
-| 512P 环境 | `D:\3_codex\512P环境信息.txt` | 用户指定“`xx柜`”或“`xx柜 CPUy`”时，按该文件中的柜号和 CPU 编号解析 IP |
-| A10-64P 环境 | `D:\3_codex\A10-64P环境.txt` | 文件按行给出独立服务器 IP；该环境没有“柜号/CPU 编号”语义 |
-
-例如，`0号柜 CPU1` 必须从 512P 环境解析为 `141.61.53.150`。A10-64P
-环境中的 `141.61.49.226`、`141.61.49.223` 等服务器不属于任何 `xx柜`。
-不得根据 A10-64P 文件的行号或排列顺序推导柜号、CPU 编号，也不得把两个环境的
-节点混入同一个 hostfile，除非用户明确要求跨环境测试。
-
-柜号不保证连续。新增或调整测试规模时应重新读取对应源文件，不在脚本或文档中
-凭历史结果猜测 IP。
-
-### 4.2 CANN 版本选择约束
-
-CANN 版本约束按测试环境生效，不是全局约束：
-
-| 测试环境 | 编译与运行 CANN 约束 |
-| --- | --- |
-| 512P 环境 9 号柜、15 号柜 | 必须使用 `/home/pkg/910_B150/cann-9.1.0` 编译，并在 launcher 中通过 `--cann-path` 使用同一路径运行 |
-| A10-64P 环境，包括 `141.61.49.223` | 不要求使用 B150；使用目标服务器实际安装且与编译产物兼容的 CANN，例如 223 当前可使用 `/home/pkg/b131/cann-9.1.0` |
-| 其他 512P 柜号 | 不自动套用 9/15 号柜的 B150 约束；测试前检查目标柜的实际安装路径，并显式传入 `-CannPath` 或 `--cann-path` |
-
-不得因为某次任务要求 9/15 号柜使用 B150，就把该要求扩展到
-`141.61.49.223`、`141.61.49.226` 等 A10-64P 节点。反过来，也不得在 9/15
-号柜沿用 A10-64P 的 b131/b061 路径。主服务器编译时使用的 CANN 必须与
-hostfile 中运行节点可用的运行时和 ABI 匹配；若不匹配，应重新编译并重新平铺
-同步产物，不能直接复用旧 `install/`。
-
-## 5. Hostfile 与 rank 映射
-
-hostfile 每行格式为 `IP:slots`，空行和以 `#` 开头的行会被忽略：
-
-```text
-141.61.49.226:8
-141.61.49.223:8
-```
-
-规则如下：
-
-- 第一台服务器承担 rank 0、bootstrap、编译和任务控制。
-- hostfile 顺序决定 global rank 顺序，不根据 hostname 重新排序。
-- `global_rank = 前面节点的 slots 总和 + local_rank`。
-- `device = local_rank`。
-- 每个 host 只能出现一次，单机 slots 必须为 `1-8`。
-- world size 必须为 `2-8`、`16`、`32`、`64` 或 `128`；这是 Combine V2
-  调度支持的 rank 集合。
-- 专家总数必须能被 world size 整除。`ExpNum=256, world size=128` 表示每个
-  rank 对应 2 个专家。
-- 每个 BS 必须能被 world size 整除。
-
-每台服务器使用 8 个 rank 时，当前直接支持：
-
-| 节点数 | world size | 是否支持 |
-| --- | --- | --- |
-| 1 | 8P | 是 |
-| 2 | 16P | 是 |
-| 3 | 24P | 否，24 不能整除 64 |
-| 4 | 32P | 是 |
-| 8 | 64P | 是 |
-| 16 | 128P | 是 |
-
-扩容时只需要在 hostfile 中按期望 rank 顺序列出对应服务器。64P 使用 8 台，
-128P 使用 16 台；每台均为 8 个 rank：
+hostfile 每行是 `IP:slots`。128P 使用 16 台服务器，每台 8 个 rank；第一行是
+bootstrap 和任务控制节点：
 
 ```text
 PRIMARY_IP:8
-WORKER_1_IP:8
-WORKER_2_IP:8
-WORKER_3_IP:8
-WORKER_4_IP:8
-WORKER_5_IP:8
-WORKER_6_IP:8
-WORKER_7_IP:8
+WORKER_IP:8
+...
 ```
 
-## 6. 创建 Mutagen 会话
+hostfile 顺序决定 global rank；每台服务器的 `device` 等于 local rank `0-7`。
+编译和运行必须显式使用目标环境实际安装的同一套 CANN。
 
-每个主服务器和远端根目录使用独立会话，不要重定向已有的无关会话：
+## 3. 部署源码
+
+在本地 Git Bash 中创建任务专属 Mutagen 会话，只把源码单向同步到主节点：
 
 ```bash
+SESSION=tilexr-combine-v2-<task>
+PRIMARY_HOST=<primary-ip>
+REMOTE_ROOT=/home/h00580772/tilexr_combine_v2_<task>
+
 mutagen sync create \
-  --name tilexr-combine-v2-64p \
-  --mode one-way-replica \
+  --name "${SESSION}" \
+  --mode one-way-safe \
   --ignore-vcs \
-  --ignore build \
-  --ignore "build_*" \
-  --ignore install \
+  --ignore '/build*' \
+  --ignore '/install*' \
+  --ignore '/artifacts*' \
   --compression zstandard \
-  "D:\3_codex\TileXR-PR-DEBUG\TileXR" \
-  "root@PRIMARY_IP:/home/h00580772/tilexr_combine_v2/source"
+  'D:/3_codex/tileXR' \
+  "root@${PRIMARY_HOST}:${REMOTE_ROOT}/source"
+
+mutagen sync flush "${SESSION}"
 ```
 
-运行前由本地手动 flush 源码会话：
+忽略规则必须锚定仓库根目录；未锚定的 `build_*` 会误排除
+`tools/moonep/build_combine_v2_perf.sh`。
+
+不要改动或终止其他 Mutagen 会话。任务完成后只关闭本会话：
 
 ```bash
-mutagen sync flush tilexr-combine-v2-64p
+mutagen sync terminate "${SESSION}"
 ```
 
-源码只通过 Mutagen 同步到主服务器，不同步到计算节点。测试入口不再封装
-Mutagen；需要先确认会话目标是 `<ssh-user>@<primary-host>:<remote-root>/source`。
+## 4. 编译与运行时同步
 
-## 7. 完整流程
-
-### 7.1 16P 单 BS
-
-先在本地仓库根目录将服务器端入口上传到主服务器测试目录，再通过 SSH 在主服务器上执行：
+将命令写入任务专属 Bash 脚本，再通过 SSH 在主节点执行。先编译，不启动 NPU
+进程：
 
 ```bash
-scp tools/moonep/run_combine_v2_perf_cluster.sh \
-  root@141.61.49.226:/home/h00580772/tilexr_combine_v2_16p_cdf2b01_20260811/run_combine_v2_perf_cluster.sh
-
-ssh root@141.61.49.226 \
-  "bash /home/h00580772/tilexr_combine_v2_16p_cdf2b01_20260811/run_combine_v2_perf_cluster.sh \
-    --remote-root /home/h00580772/tilexr_combine_v2_16p_cdf2b01_20260811 \
-    --bs 128"
-```
-
-该命令依次执行：
-
-1. 在主服务器配置和增量编译 benchmark。
-2. 检查可执行文件没有 MPI 依赖和 build 目录 RPATH。
-3. 主服务器将 `install/` 直接同步到全部节点。
-4. 每台服务器校验相同的 SHA-256 manifest。
-5. 对全部服务器执行 NPU 占用预检。
-6. 主服务器通过 SSH 并发拉起所有 rank。
-7. 收集逐 rank 结果并输出全局聚合性能。
-
-### 7.2 多 BS 批量测试
-
-```bash
-scp tools/moonep/run_combine_v2_perf_cluster.sh \
-  root@PRIMARY_IP:/home/h00580772/tilexr_combine_v2/run_combine_v2_perf_cluster.sh
-
-ssh root@PRIMARY_IP \
-  "bash /home/h00580772/tilexr_combine_v2/run_combine_v2_perf_cluster.sh \
-    --remote-root /home/h00580772/tilexr_combine_v2 \
-    --bs-list 128,256,512,1024,8192 \
-    --experts 64 \
-    --warmup 20 \
-    --iterations 80"
-```
-
-`--bs` 与 `--bs-list` 互斥。没有指定时默认测试 `BS=128`。
-
-当 `PRIMARY_IP` 和 hostfile 属于 9 号柜或 15 号柜时，上述命令必须额外传入：
-
-```bash
---cann-path /home/pkg/910_B150/cann-9.1.0
-```
-
-在 `141.61.49.223` 等 A10-64P 节点上不要机械添加该参数，应按第 4.2 节使用
-该节点实际可用且与产物匹配的 CANN。
-
-### 7.3 常用 Bash 参数
-
-| 参数 | 默认值 | 说明 |
-| --- | --- | --- |
-| `--remote-root` | 必填 | 远端任务根目录 |
-| `--hostfile` | `<remote-root>/hostfile` | 远端 hostfile 绝对路径 |
-| `--source-dir` | `<remote-root>/source` | 远端源码目录 |
-| `--build-dir` | `<remote-root>/build` | 远端构建目录 |
-| `--install-dir` | `<remote-root>/install` | 远端运行产物目录 |
-| `--cann-path` | 当前 `ASCEND_HOME_PATH` 或 toolkit latest | CANN 根目录；9/15 号柜必须显式改为 `/home/pkg/910_B150/cann-9.1.0`，223 不强制 B150 |
-| `--bs` | `128` | 单个 BS 点位 |
-| `--bs-list` | 空 | 逗号分隔的多个 BS 点位 |
-| `--warmup` | `20` | 每个 BS 的预热次数 |
-| `--iterations` | `80` | 每个 BS 的计时次数，也称 loop 数 |
-| `--experts` | `64` | 专家总数，必须能被 world size 整除 |
-| `--hidden-size` | `3584` | 隐藏维度 H；日志和算法带宽均按该值计算 |
-| `--comm-domain` | `141` | Shared-QP 通信域 |
-| `--comm-port` | `10067` | rank 0 bootstrap 端口 |
-| `--wait-seconds` | `120` | NPU 最大等待时间 |
-| `--retry-seconds` | `15` | NPU 占用重试间隔 |
-| `--rank-timeout` | `600` | 每个 rank 的任务超时 |
-| `--build-jobs` | `nproc` | 编译并发度 |
-| `--log-file` | 自动生成 | 主服务器控制日志绝对路径 |
-
-## 8. 免编译快速测试
-
-如果只修改 BS、warmup、iterations 或通信端口，并且 `install/` 已经同步到
-hostfile 中的全部服务器，可以跳过 Mutagen、编译和产物同步，直接在主服务器
-执行 launcher：
-
-```bash
-bash /home/h00580772/tilexr_combine_v2_16p_cdf2b01_20260811/source/tools/moonep/run_combine_v2_perf_multihost.sh \
-  --hostfile /home/h00580772/tilexr_combine_v2_16p_cdf2b01_20260811/hostfile \
-  --install-dir /home/h00580772/tilexr_combine_v2_16p_cdf2b01_20260811/install \
-  --cann-path /home/pkg/b061/cann-9.1.T560 \
-  --ssh-user root \
-  --bs-list 128,256,512,8192 \
-  --experts 64 \
-  --warmup 20 \
-  --iterations 80 \
-  --comm-id 141.61.49.226:10067 \
-  --wait-seconds 120 \
-  --retry-seconds 15 \
-  --timeout 600
-```
-
-服务器端完整入口默认会执行一次增量 build；源码未变化时通常很快。若要严格跳过
-编译，可以向完整入口传入 `--skip-build`，或直接使用上述服务器端 launcher。
-
-上述免编译示例针对 A10-64P 的 226/223 环境，因此使用 b061。若目标是 9/15
-号柜，`--cann-path` 必须改为 `/home/pkg/910_B150/cann-9.1.0`，并确认现有
-`install/` 本身也是用该 B150 路径编译；否则不能跳过编译和产物同步。
-
-以下变化不能直接复用旧产物：
-
-- 修改 C++ benchmark、算子 Host、Kernel、CMake 或头文件。
-- 修改当前硬编码的 `H/K/dtype`。
-- 更换不兼容的 CANN、驱动、SoC 或 ABI。
-
-## 9. 手工分步执行
-
-需要排查某个阶段时，可以按以下顺序执行。
-
-### 9.1 本地同步源码
-
-```bash
-mutagen sync flush tilexr-combine-v2-16p-cdf2b01-226
-```
-
-源码只通过 Mutagen 同步到主服务器，不同步到计算节点。
-
-### 9.2 主服务器编译
-
-```bash
-bash ${REMOTE_ROOT}/source/tools/moonep/build_combine_v2_perf.sh \
-  --source-dir ${REMOTE_ROOT}/source \
-  --build-dir ${REMOTE_ROOT}/build \
-  --install-dir ${REMOTE_ROOT}/install \
-  --cann-path /home/pkg/b061/cann-9.1.T560 \
+bash "${REMOTE_ROOT}/source/tools/moonep/build_combine_v2_perf.sh" \
+  --source-dir "${REMOTE_ROOT}/source" \
+  --build-dir "${REMOTE_ROOT}/build" \
+  --install-dir "${REMOTE_ROOT}/install" \
+  --cann-path "${CANN_PATH}" \
   --jobs 16
 ```
 
-上例的 b061 路径适用于已有兼容环境，不是全局强制值。在 9/15 号柜执行时，必须
-将编译参数改为：
+确定本轮 hostfile 后，从主节点向所有计算节点平铺同步运行产物：
 
 ```bash
---cann-path /home/pkg/910_B150/cann-9.1.0
-```
-
-在 `141.61.49.223` 执行时不要求 B150，应传入该服务器实际可用且与运行产物
-匹配的路径，例如：
-
-```bash
---cann-path /home/pkg/b131/cann-9.1.0
-```
-
-构建成功后，运行产物位于：
-
-```text
-${REMOTE_ROOT}/install/bin/tilexr_moonep_combine_v2_perf
-${REMOTE_ROOT}/install/lib64/
-```
-
-### 9.3 主服务器平铺同步
-
-```bash
-bash ${REMOTE_ROOT}/source/tools/moonep/sync_combine_v2_perf_runtime.sh \
-  --hostfile ${REMOTE_ROOT}/hostfile \
-  --install-dir ${REMOTE_ROOT}/install \
+bash "${REMOTE_ROOT}/source/tools/moonep/sync_combine_v2_perf_runtime.sh" \
+  --hostfile "${REMOTE_ROOT}/hostfile" \
+  --install-dir "${REMOTE_ROOT}/install" \
   --ssh-user root
 ```
 
-成功标志是 hostfile 中每台服务器均输出：
+每台节点都应输出 `SHA256 verified`。源码不需要同步到 worker。
 
-```text
-<host>: SHA256 verified
-```
-
-### 9.4 主服务器启动测试
-
-使用第 8 节的 launcher 命令。launcher 不调用 `mpirun`，也不检查任何 MPI
-安装目录。
-
-## 10. 新增服务器或更换主服务器
-
-### 10.1 新增计算节点
-
-1. 在主服务器的 hostfile 中按期望 rank 顺序增加 `IP:slots`。
-2. 配置主服务器到新节点的免密 SSH。
-3. 确认新节点的 CANN、驱动和工具路径满足第 4 节要求。
-4. 重新运行平铺同步或服务器端完整入口。
-5. launcher 会自动把新节点加入 NPU 预检和 rank 映射。
-
-只增加节点且代码不变时不要求重新编译，但必须把当前 `install/` 同步到新节点。
-
-### 10.2 更换主服务器
-
-1. 创建指向新主服务器 `<RemoteRoot>/source` 的新 Mutagen 会话。
-2. 将 `-PrimaryHost` 改为 hostfile 第一项。
-3. 确认新主服务器存在 hostfile，并能免密 SSH 到全部节点。
-4. flush 新的 Mutagen 会话，并通过 `scp` 上传入口后用 `ssh` 运行服务器端完整入口。
-
-## 11. NPU 占用规则
-
-正式启动前，每轮都会对 hostfile 中所有服务器执行 `npu-smi info`，原始输出
-保存到：
-
-```text
-<log-file>.npu_preflight/attempt_NN/<host>.log
-```
-
-判定规则：
-
-- 没有 NPU 进程：允许启动。
-- 只有进程名以 `tilexr_` 开头：允许多任务共用 NPU。
-- Python 或其他通信测试进程：阻塞启动。
-- 阻塞后默认每 15 秒重新检查。
-- 120 秒仍未空闲：退出码为 `75`，不启动任何 rank。
-- SSH、`npu-smi` 或进程表解析失败：立即停止。
-- 不终止任何无关任务。
-
-每个 rank 使用本任务专属 PID 文件和 `job_id`。中断、失败或超时时只清理本次
-任务，不使用全局 `pkill`。
-
-## 12. 通信端口
-
-默认 bootstrap 地址为：
-
-```text
-TILEXR_COMM_ID=<hostfile 第一台服务器>:10067
-```
-
-TCP barrier 默认使用 bootstrap 端口加 97，即默认 `10164`。启动前会检查两个
-端口是否已监听；任一端口被占用都会停止任务。并发运行多个 TileXR 测试时，
-必须为每个任务设置不同的 `-CommPort` 或 `--comm-id`。
-
-## 13. 日志与结果口径
-
-默认日志位于主服务器 `<RemoteRoot>/logs/`。每次测试包含：
-
-```text
-<log-file>                         # 控制日志和全部 rank 输出
-<log-file>.ranks/rank_0000.log     # rank 0 原始日志
-<log-file>.ranks/rank_0001.log     # rank 1 原始日志
-<log-file>.ranks/rank_averages.tsv # 每个 rank 的计时样本平均值
-<log-file>.npu_preflight/          # 每轮 NPU 原始快照
-```
-
-rank 映射示例：
-
-```text
-RANK_MAP rank=8 host=141.61.49.223 local_rank=0 device=0
-```
-
-单 rank 样本：
-
-```text
-COMBINE_V2_SAMPLE bs=128 iteration=0 rank=8 elapsed_ms=0.412345
-```
-
-脚本最终聚合结果只包含正式指标：
-
-```text
-COMBINE_V2_PERF bs=128 k=16 h=3584 experts=64 dtype=bf16 ranks=16 iterations=80 avg_ms=0.410000 avg_alg_bw_GBps=35.805034 max_ms=0.450000 max_alg_bw_GBps=32.622364 correctness=passed
-```
-
-聚合方法：
-
-1. 每个 rank 使用 ACL Event 测量单次算子时间，warmup 不进入样本。
-2. 每个 rank 对自己的全部计时 iteration 求平均，得到本卡耗时。
-3. 对全部卡的耗时求算术平均得到 `avg_ms`，取最大值得到 `max_ms`。
-4. 用 `BS * K * H * dtype_bytes` 分别除以 `avg_ms` 和 `max_ms` 计算两项等效
-   算法带宽，所有路由数据统一计为通信数据量。
-5. 每个 BS 必须具备 `world size` 条 `COMBINE_V2_RANK_PERF` 通过记录，并且
-   每个 rank 必须具备完整的计时样本，否则脚本返回失败。
-
-正确性检查读取 `activeOutputOffset` 指向的当前 scratch epoch，验证 BF16 路由行
-来自预期 source rank。该地址表示 Combine V2 原始通信输出，不是 TopK reduce
-后的最终输出张量。
-
-## 14. 已验证结果
-
-### 14.1 512P 环境单机 8P
-
-2026-08-11 在 512P 环境 2 号柜第一台服务器完成单机 8P 验证。节点按
-`D:\3_codex\512P环境信息.txt` 解析为：
-
-```text
-CPU1 141.61.52.35
-```
-
-测试参数为 `BS=128, K=16, H=3584, experts=64, BF16, warmup=20,
-iterations=80`。结果按“每卡 80 轮平均，再对所有卡取平均值和最大值”的正式
-口径统计：
-
-| BS | `avg_ms` | `avg_alg_bw_GBps` | `max_ms` | `max_alg_bw_GBps` |
-| ---: | ---: | ---: | ---: | ---: |
-| 128 | 0.187879 | 78.135892 | 0.195413 | 75.123272 |
-
-8 个 rank 正确性全部通过，共包含 640 个计时样本。正式日志：
-
-```text
-/home/h00580772/tilexr_combine_v2_8p_cab2_cpu1_logs/combine_v2_8p_bs128_w20_i80_20260811.log
-```
-
-### 14.2 A10-64P 环境历史 16P 结果
-
-2026-08-11 在以下两台服务器上完成 16P、多 BS 验证：
-
-```text
-141.61.49.226:8
-141.61.49.223:8
-```
-
-该记录生成于默认次数调整之前，测试参数为
-`K=16, H=3584, experts=64, BF16, warmup=5, iterations=20`。当前正式测试
-默认值已经调整为 `warmup=20, iterations(loop)=80`。下表采用旧的“逐轮最慢
-rank 再求平均”口径，仅保留为历史记录，不能与 14.1 的当前正式口径直接比较。
-
-| BS | `avg_ms` | `alg_bw_GBps` |
-| ---: | ---: | ---: |
-| 128 | 0.532375 | 27.574668 |
-| 256 | 0.723498 | 40.580800 |
-| 512 | 0.882888 | 66.509292 |
-| 1024 | 2.202714 | 53.316278 |
-| 2048 | 3.892452 | 60.342690 |
-| 4096 | 7.777167 | 60.402721 |
-| 8192 | 15.758240 | 59.621131 |
-
-正式日志：
-
-```text
-/home/h00580772/tilexr_combine_v2_16p_cdf2b01_20260811/logs/combine_v2_16p_bs128_8192_batch_20260811.log
-```
-
-该结果包含 112 条 rank 正确性通过记录和 2240 条计时样本。测试基于当前工作树，
-其中 Combine V2 kernel 的 `kEnableSafetyChecks=false`。
-
-### 14.3 512P 环境 0/2 号柜 128P 结果
-
-2026-08-11 在 512P 环境 0 号柜和 2 号柜共 16 台服务器上完成 128P 单点测试，
-每台服务器使用 8 张卡。测试参数为
-`BS=8192, K=16, H=3584, experts=256, BF16, warmup=20, iterations=80`。
-
-单 rank 的完整逻辑通信数据量为：
-
-```text
-8192 * 16 * 3584 * 2 = 939,524,096 bytes
-```
-
-结果按“每卡 80 轮平均，再对 128 张卡取平均值和最大值”的正式口径统计：
-
-| BS | `avg_ms` | `avg_alg_bw_GBps` | `max_ms` | `max_alg_bw_GBps` |
-| ---: | ---: | ---: | ---: | ---: |
-| 8192 | 20.588683 | 45.633035 | 20.930525 | 44.887747 |
-
-128 个 rank 的正确性全部通过，共包含 10240 个计时样本；每个 rank 均具备完整的
-80 个计时样本。最慢卡为 rank 1，其 80 轮平均耗时为 `20.930525 ms`。
-
-全部性能测量和正确性检查完成后，最终 TCP barrier 有 36 个 rank 失败，因此
-launcher 返回码为 1，未输出正常的 `COMBINE_V2_PERF` 聚合行。上表由原始
-`COMBINE_V2_SAMPLE` 日志按第 13 节口径重新聚合，可用于本次性能结果；该异常仅
-表示测试结束阶段的 barrier/清理未正常完成，不表示计时样本或正确性检查失败。
-
-正式日志：
-
-```text
-/home/h00580772/tilexr_combine_v2_128p_cab0_2_logs/combine_v2_128p_bs8192_exp256_w20_i80_20260811.log
-```
-
-## 15. 常见失败
-
-| 现象 | 检查项 |
-| --- | --- |
-| `remote runtime validation failed` | 新节点的 install、CANN、`timeout` 或 `ss` 是否存在 |
-| `unsupported Combine V2 world size` | 调整 hostfile，使 rank 总数为 `2-8/16/32/64/128` |
-| `expert count ... must be divisible by world size` | 调整 `--experts` 或 hostfile rank 总数 |
-| `batch size ... must be divisible by world size` | 调整 BS 或 rank 总数 |
-| `bootstrap or barrier port is already listening` | 更换 `-CommPort` |
-| `NPU preflight timed out` | 查看 `.npu_preflight/`，等待非 TileXR 任务结束 |
-| `a rank launcher failed` | 查看 `.ranks/rank_NNNN.log` |
-| `rank logs do not contain...` | 检查缺失的 rank 正确性或 iteration 样本 |
-| SHA-256 校验失败 | 重新从主服务器执行平铺同步，不要直接在 worker 修改 install |
-
-## 16. 最后一轮 Chrome Trace 拆解
-
-使用 `--profile` 构建和运行后，可从完整控制日志生成最后一轮最快卡、P50 卡和
-最慢卡的 Chrome Trace JSON：
+节点缺少 `/etc/hccl_rootinfo.json` 时，在该节点生成并安装：
 
 ```bash
-python3 tools/moonep/combine_v2_trace.py COMBINE_LOG \
-  --output combine_v2_last_iteration_trace.json \
-  --bs 8192 --world-size 8 --topk 16 --hidden-size 3584 --experts 32
+tmp=$(mktemp /tmp/hccl_rootinfo.XXXXXX)
+mindcluster-tools rootinfo --output "${tmp}"
+install -m 0644 "${tmp}" /etc/hccl_rootinfo.json
+rm -f "${tmp}"
 ```
 
-带 hidden reduce 的 kernel-only 对比使用 launcher 的 `--reduce-hidden`，该路径直接把
-`reduceHidden=true` 传给 Combine V2 runner，避免把 Stage API 的输入和输出 D2D copy
-计入 ACL Event。对应 trace 必须传 `--reduce enabled`；要直接生成三个独立文件，使用：
+启动前用 `test -f /etc/hccl_rootinfo.json && test -s /etc/hccl_rootinfo.json`
+确认它是非空普通文件。若该路径被误建为空目录，C++ 文件读取会抛出
+`basic_filebuf::underflow ... Is a directory` 并使 rank abort；确认目录为空后删除并
+重新生成文件。
 
-hidden Combine 默认执行发送前全同步。环境变量
-`TILEXR_MOONEP_COMBINE_V2_FULL_SYNC` 未设置或为空时为开启；需要采集原路径 baseline 时，
-在所有 rank 上统一设置为 `0`、`false` 或 `off`。该变量不作用于 route-weight 或直接
-non-reduce launch；非法值只会拒绝 hidden launch，避免配置拼写错误静默改变性能口径。
+工具缺失时安装 `unofficial-ascend-tools==0.0.7rc2`。覆盖已有 rootinfo 前先保存
+原文件，避免破坏共享环境配置。
+
+## 5. 识别共享环境空闲状态
+
+在柜 8 CPU1 上可用维护脚本快速查看 15/9/4/7 号柜：
 
 ```bash
-python3 tools/moonep/combine_v2_trace.py COMBINE_LOG \
-  --split-output-dir TRACE_DIR --prefix combine_v2_reduce \
-  --host HOST --reduce enabled \
-  --bs 8192 --world-size 8 --topk 16 --hidden-size 3584 --experts 32
+bash "${REMOTE_ROOT}/source/scripts/watch_cab15_9_4_7_npus.sh" --once
 ```
 
-三个文件分别是最后一轮的 fastest、P50 和 slowest rank，格式与历史
-`*_edge_trace.json` 一致。profile v4 中 `t24 -> t25` 在 reduce 模式下标记为
-`Reduce hidden`，`t2 -> t6` 则拆分显示 full-sync enter、submit、receive 和 core barrier。
-算法带宽仍以 `BS * K * H * sizeof(BF16)` 作为等效算法字节数，便于与 no-reduce
-结果按同一宏观口径比较；它不是 reduce 读写流量的物理带宽。
+每柜显示 8 台服务器、每台 8 个字符：`0` 为空闲，`1` 为有进程，`?` 为探测
+失败。`Alarm` 状态本身不表示卡不可用。
 
-P50 使用 nearest-rank 定义：将最后一轮各 rank 的 ACL Event 耗时升序排列，选择
-第 `ceil(0.5 * rank_count)` 个 rank；8P 即第 4 张卡。相同耗时按 rank 编号排序，
-确保选择结果可重复。工具要求所选 rank 的全部 active AIV profile record 存在且时间戳
-单调，否则拒绝生成结果；2-8P 使用与 rank 数相同的 Core 数，16P 及以上使用 16 Core。
+watcher 只判断是否有进程，不能区分进程类型。选择候选柜后，以 `npu-smi info`
+进程表或 launcher 预检作最终判定：
 
-工具按 world size 的 runtime schedule step 数输出事件；例如 8P 只有 step0，
-不会把 profile record 中为兼容固定容量而补齐的未执行 step 输出为零时长事件。
-每个所选 rank 独立以该 NPU 最早的 AIV `t0` 为零点。这样可保留同一 NPU 内各 core
-的相对起点，但不假设不同 NPU 的系统 cycle 已同步，因此不能从 JSON 中各 rank 的
-横向绝对位置推导跨卡先后。`selection_*`、`self_copy` 和 `remote_*` 是 kernel 内累计
-计数，作为 `combine_v2_no_reduce` 事件参数展示，不应被解释为可顺序拼接的时间段。
-profile build 包含打点扰动，只用于归因；正式无打点性能仍需用非 profile 产物复测。
+- 无 NPU 进程：可测试。
+- 只有 `tilexr_*` 进程：允许共用，可直接测试。
+- `python` 或其他通信测试进程：不可共用，每 15 秒复查。
+- `?`、SSH 失败或 `npu-smi` 失败：不可判定为空闲。
+- 等待 120 秒仍未满足条件：停止本轮，不启动 rank，等待下次唤起。
+
+共享环境禁止 `pkill`，也不要清理其他任务的 PID、端口、日志或 Mutagen 会话。
+
+## 6. 启动 128P 测试
+
+环境可用后，在主节点执行 launcher。以下命令关闭 profiling、关闭 reduce，且不
+预热：
+
+```bash
+LOG_FILE="${REMOTE_ROOT}/logs/combine_v2_128p_$(date +%Y%m%d_%H%M%S).log"
+
+bash "${REMOTE_ROOT}/source/tools/moonep/run_combine_v2_perf_multihost.sh" \
+  --hostfile "${REMOTE_ROOT}/hostfile" \
+  --install-dir "${REMOTE_ROOT}/install" \
+  --cann-path "${CANN_PATH}" \
+  --ssh-user root \
+  --bs 8192 \
+  --warmup 0 \
+  --iterations 80 \
+  --experts 256 \
+  --hidden-size 3584 \
+  --comm-domain 141 \
+  --comm-id "${PRIMARY_HOST}:10067" \
+  --wait-seconds 120 \
+  --retry-seconds 15 \
+  --timeout 600 \
+  --log-file "${LOG_FILE}"
+```
+
+并发任务必须使用不同的 bootstrap 端口；launcher 还会使用由该端口推导出的
+barrier 端口。不要添加 `--skip-npu-preflight`，除非本轮刚刚人工检查过 hostfile
+中的全部节点。
+
+128P launcher 会为每台节点预建一条 SSH ControlMaster，并让本机 8 个 rank 复用；
+不要移除此逻辑，否则并发建连可能触发共享节点的 `MaxStartups`，表现为固定 rank
+以 SSH `status 255` 退出。
+
+## 7. 结果判定
+
+正常聚合行如下：
+
+```text
+COMBINE_V2_PERF ... max_ms=<slowest-rank-mean> max_alg_bw_GBps=<bandwidth> ...
+```
+
+128P、80 轮、单 BS 的完整数据必须包含：
+
+```text
+COMBINE_V2_SAMPLE:    128 * 80 = 10240 条
+COMBINE_V2_RANK_PERF: 128 条
+```
+
+快速计数：
+
+```bash
+awk '
+  /^COMBINE_V2_SAMPLE / { samples++ }
+  /^COMBINE_V2_RANK_PERF / { ranks++ }
+  END { print "samples=" samples + 0, "rank_perf=" ranks + 0 }
+' "${LOG_FILE}.ranks"/rank_*.log
+```
+
+正确性状态与性能采集相互独立。临时优化版本即使输出 `self_only_failed` 或
+`failed`，只要上述记录完整，性能数据仍有效并应输出；报告中保留实际
+`correctness` 状态即可。
+
+旧测试产物如果出现 `barrier failed after all benchmark cases`，但已有
+`10240/10240` 样本和 `128/128` rank 汇总，则本轮性能数据完整。原因是复用同一
+端口时，旧 listener 在逐个 release 之后才关闭，快 rank 可能误连上一轮；当前
+实现会先关闭本轮 listener，再 release 全部客户端。需要从旧 rank 日志重新聚合
+时使用：
+
+```bash
+awk -v expected_ranks=128 -v expected_iterations=80 -v bs=8192 \
+  -f "${REMOTE_ROOT}/source/tools/moonep/configs/aggregate_combine_v2_rank_samples.awk" \
+  "${LOG_FILE}.ranks"/rank_*.log
+```
+
+零样本时不报告性能：SSH `status 255` 表示 rank 启动失败；`TsdProcessOpen failed:
+31` 或 `UDMA init failed: -4` 表示资源尚未释放。两种情况都等待环境恢复后再试，
+不终止共享任务。

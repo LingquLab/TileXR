@@ -613,7 +613,7 @@ __aicore__ inline void MoonEpCombineV2::Init(
     h_ = h;
     topK_ = topK;
     reduceHidden_ = reduceHidden;
-    fullSync_ = fullSync && reduceHidden;
+    fullSync_ = fullSync;
     scratchOffset_ = epoch_ == 0U ? scratchEpoch0Offset :
         scratchEpoch1Offset;
     profileOffset_ = profileOffset;

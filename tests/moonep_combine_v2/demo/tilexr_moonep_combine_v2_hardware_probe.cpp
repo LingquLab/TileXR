@@ -432,6 +432,8 @@ bool BarrierServer(int world, const HostPort &endpoint, bool localSuccess)
         }
     }
 
+    // Retire this barrier generation before any client can enter the next one.
+    close(listenFd);
     const uint8_t release = exchangeOk && globalSuccess ? 1U : 0U;
     for (const int client : clients) {
         if (!SendAll(client, &release, sizeof(release))) {
@@ -439,7 +441,6 @@ bool BarrierServer(int world, const HostPort &endpoint, bool localSuccess)
         }
         close(client);
     }
-    close(listenFd);
     return exchangeOk && globalSuccess;
 }
 
