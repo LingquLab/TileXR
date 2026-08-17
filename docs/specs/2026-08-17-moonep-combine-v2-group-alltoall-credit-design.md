@@ -1,6 +1,6 @@
 # MoonEP Combine V2 128P Group All2All 单 Done/Credit 设计
 
-状态：设计已确认，待实现
+状态：设计已确认，协议骨架清理完成，状态机待实现
 
 日期：2026-08-17
 
@@ -245,6 +245,27 @@ Group 路径删除：
 - source guard 更新为检查隔离和已删除协议，不再要求被删函数存在；
 - Host/unit 中与原实现无关的既有测试不被清理阶段修改；
 - 完成 CANN 9.1 AICore target compile，若环境暂不可用则明确记录该验证缺口。
+
+### 9.4 清理结果与后续约束
+
+清理阶段已完成以下落地：
+
+- Group header 已进入独立 `TileXRGroup128` 命名空间，Kernel 入口同时 include 原实现与
+  Group 实现，并仅在 `rankSize == 128` 时选择 Group；
+- 已删除 Legacy Grant、Server-Grant、FullSync、phase barrier、旧全 source Done wait、
+  `SubmitPair()`、`SendRemoteStep()` 及旧 schedule `Process()`；
+- 保留 CLOS/Fullmesh WQE 构造与发布、CQ、Self、Reduce、失败记录、profiling 和卡内
+  collective helper；full-sync receive/source ABI 参数仅显式忽略，barrier workspace 继续
+  供卡内 collective status 使用；
+- Group `Process()` 在新状态机接入前显式汇报 `INVALID_CONFIG`，不写最终 Reduce 输出，
+  防止清理中间态被误认为可用的 128P 数据面；
+- source guard 改为约束命名空间隔离、128P 分流、底层保留能力和旧协议符号清零。
+
+后续实现 CLOS lane 初始化时，首个 peer 必须由新的 Group send mapping 提供。旧实现用
+`SERVER_PAIR_PARITY` schedule 推导首 peer；清理后 `InitLaneStates(firstPeer)` 已改为显式传参，
+不能用本 rank 或旧 schedule 代替，否则会校验错误的 SQ/CQ context。双实现同入口开发时，
+应先隔离 header 级常量、结构和 SIMT helper 的命名空间，再同时 include；只改类名不足以
+避免重定义。
 
 ## 10. 后续实现阶段
 
