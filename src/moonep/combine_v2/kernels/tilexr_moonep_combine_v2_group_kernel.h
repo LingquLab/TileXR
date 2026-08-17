@@ -2621,6 +2621,10 @@ __aicore__ inline void MoonEpCombineV2Group::Process()
                 if (localSucceeded) {
                     localSucceeded = WaitFullmeshCq(step, peer);
                 }
+                if (localSucceeded) {
+                    RecordProfilePoint(TileXRMoonEp::
+                        MOONEP_COMBINE_V2_DIAG_FULLMESH_CQ_SUCCESS);
+                }
             } else {
                 localSucceeded = SendClosStep(peer, step);
             }

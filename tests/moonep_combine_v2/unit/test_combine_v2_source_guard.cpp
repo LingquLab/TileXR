@@ -134,6 +134,8 @@ int main()
         "__aicore__ inline bool MoonEpCombineV2Group::BeginCollectiveStage(");
     const std::string stepLoop = Section(process,
         "for (uint32_t step", "stageReady = BeginCollectiveStage(");
+    const std::string fullmeshStep = Section(stepLoop,
+        "} else if (fullmeshStep) {", "} else {");
 
     bool ok = true;
     ok &= Require(rootCmake, "add_subdirectory(tests/moonep_combine_v2)",
@@ -309,6 +311,10 @@ int main()
         "Group process does not wait for one pre-step Credit");
     ok &= Require(process, "PublishNextCredit(step)",
         "Group process does not publish one next-step Credit");
+    ok &= RequireBefore(fullmeshStep,
+        "localSucceeded = WaitFullmeshCq(step, peer);",
+        "MOONEP_COMBINE_V2_DIAG_FULLMESH_CQ_SUCCESS",
+        "Group Fullmesh profile can report CQ success before final CQ wait");
     ok &= Require(process, "ReduceHidden()",
         "Group implementation dropped final reduction");
     ok &= Reject(stepLoop, "SyncAll<true>()",
