@@ -1,6 +1,6 @@
 # MoonEP Combine V2 128P Group All2All 单 Done/Credit 设计
 
-状态：设计已确认，协议骨架清理完成，状态机待实现
+状态：设计已确认，代码实现完成，待 CANN target compile 与 128P 实机验证
 
 日期：2026-08-17
 
@@ -323,3 +323,20 @@ Host、source guard、target compile 或非 128P 测试不能证明 128P UDMA �
 
 只有在设计确认、清理骨架完成、新状态机实现完成，并取得 128P 硬件 exact correctness
 证据后，才能把 Group 路径标记为功能完成。清理阶段只标记为“协议骨架完成”。
+
+## 14. 代码实现记录
+
+2026-08-17 已完成第一版代码实现：
+
+- schedule wrapper 增加 128P send/receive/group-inner 映射和穷举 Host oracle；
+- credit receive/source 按 `epoch x transition(1..7) x core` 复用原 Grant workspace，
+  两个区域合计 28672 Byte，不改变 Host layout 和 Kernel 参数 ABI；
+- CLOS 仅等待非空 payload lane 的末端 CQ，随后通过 six-port lane 独立发布一个 Done；
+- receiver 每 step 只读取一个 source Done，并只向下一 step 的 sender/core 发布一个 Credit；
+- step0 不等待 Credit，step6 发布 step7 Credit，step7 不发布后继 Credit；
+- step 热循环不包含 `SyncAll<true>()`，只保留循环外的卡内初始化、最终状态和 Reduce 收敛。
+
+实现中的可复用注意事项：预填充 WQE buffer 会跨批次复用，payload builder 必须在每次重建
+WQE 时显式恢复普通 `flag`。否则中间或末端批次设置的 ordered-completion 会残留到下一批，
+造成未计入 `wqeCnt` 的额外 CQ。当前 Host/source guard 只能验证映射、槽边界和源码顺序，
+不能替代 CANN 9.1 target compile 或 128P UDMA 数据面验证。

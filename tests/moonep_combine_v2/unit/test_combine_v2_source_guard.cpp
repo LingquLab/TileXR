@@ -50,6 +50,17 @@ bool RequireBefore(const std::string &text, const std::string &first,
     return true;
 }
 
+std::size_t Count(const std::string &text, const std::string &needle)
+{
+    std::size_t count = 0U;
+    std::size_t position = 0U;
+    while ((position = text.find(needle, position)) != std::string::npos) {
+        ++count;
+        position += needle.size();
+    }
+    return count;
+}
+
 std::string Section(const std::string &text, const std::string &begin,
     const std::string &end)
 {
@@ -91,6 +102,8 @@ int main()
         "/src/include/tilexr_moonep_combine_v2.h");
     const std::string registration = Read(root +
         "/src/moonep/common/moonep_kernel_registration.h");
+    const std::string schedule = Read(root +
+        "/src/moonep/common/moonep_combine_schedule.h");
 
     const std::string process = Section(groupKernel,
         "__aicore__ inline void MoonEpCombineV2Group::Process()",
@@ -104,6 +117,23 @@ int main()
     const std::string fullmeshSubmit = Section(groupKernel,
         "__aicore__ inline bool MoonEpCombineV2Group::SubmitFullmeshBatch(",
         "__aicore__ inline bool MoonEpCombineV2Group::SendFullmeshStep(");
+    const std::string closStep = Section(groupKernel,
+        "__aicore__ inline bool MoonEpCombineV2Group::SendClosStep(",
+        "__aicore__ inline bool MoonEpCombineV2Group::SubmitFullmeshBatch(");
+    const std::string singleDone = Section(groupKernel,
+        "__aicore__ inline bool MoonEpCombineV2Group::SubmitRemoteDone(",
+        "__aicore__ inline bool MoonEpCombineV2Group::SendClosStep(");
+    const std::string inboundDone = Section(groupKernel,
+        "__aicore__ inline bool MoonEpCombineV2Group::WaitSingleInboundDone(",
+        "__aicore__ inline void MoonEpCombineV2Group::InitializeCreditSignal(");
+    const std::string publishCredit = Section(groupKernel,
+        "__aicore__ inline bool MoonEpCombineV2Group::PublishNextCredit(",
+        "__aicore__ inline bool MoonEpCombineV2Group::WaitStepCredit(");
+    const std::string waitCredit = Section(groupKernel,
+        "__aicore__ inline bool MoonEpCombineV2Group::WaitStepCredit(",
+        "__aicore__ inline bool MoonEpCombineV2Group::BeginCollectiveStage(");
+    const std::string stepLoop = Section(process,
+        "for (uint32_t step", "stageReady = BeginCollectiveStage(");
 
     bool ok = true;
     ok &= Require(rootCmake, "add_subdirectory(tests/moonep_combine_v2)",
@@ -194,6 +224,43 @@ int main()
     ok &= RequireBefore(fullmeshSubmit, "SyncFunc<HardEvent::MTE3_S>();",
         "st_dev(fullmeshLane_.head",
         "Fullmesh path rings its doorbell before MTE3 completion");
+    ok &= Require(schedule, "MoonEpCombineV2GroupSendDstRank(",
+        "Group send mapping helper is missing");
+    ok &= Require(schedule, "MoonEpCombineV2GroupRecvSrcRank(",
+        "Group receive mapping helper is missing");
+    ok &= Require(schedule, "struct alignas(64) MoonEpCombineV2GroupCreditSignal",
+        "Group Credit signal is missing");
+    ok &= Require(schedule,
+        "kMoonEpCombineV2GroupCreditWorkspaceBytes <=\n"
+        "        kMoonEpCombineV2LegacyGrantWorkspaceBytes",
+        "Group Credit is not bounded by the existing Grant workspace");
+
+    ok &= RequireBefore(closStep, "WaitLaneCq(", "SubmitRemoteDone(peer, step)",
+        "CLOS Done can be published before payload CQ completion");
+    ok &= Require(singleDone, "SubmitClosControl(peer,",
+        "CLOS path does not publish a standalone Done");
+    ok &= Require(singleDone, "MOONEP_COMBINE_V2_SIX_PORT",
+        "CLOS Done is not fixed to the six-port lane");
+    ok &= Count(singleDone, "SubmitClosControl(") == 1U;
+    if (Count(singleDone, "SubmitClosControl(") != 1U) {
+        std::cerr << "CLOS path does not publish exactly one Done\n";
+    }
+    ok &= Count(inboundDone, "MoonEpCombineV2DoneIndex(") == 1U;
+    if (Count(inboundDone, "MoonEpCombineV2DoneIndex(") != 1U) {
+        std::cerr << "Group receiver does not read exactly one Done slot\n";
+    }
+    ok &= Require(inboundDone, "if (source == rank_)",
+        "Group Self path does not treat local copy as Done");
+    ok &= Require(publishCredit, "MoonEpCombineV2GroupRecvSrcRank(",
+        "Group Credit does not target the next step sender");
+    ok &= Require(publishCredit, "MoonEpCombineV2GroupInnerIndex(rank_)",
+        "Group Credit does not target the destination inner core");
+    ok &= Require(publishCredit, "SubmitClosControl(targetRank",
+        "Remote Group Credit is not published through CLOS");
+    ok &= Require(waitCredit, "signal->targetCore == core_",
+        "Group sender does not validate its single Credit target");
+    ok &= Require(waitCredit, "MOONEP_COMBINE_V2_CREDIT_TIMEOUT",
+        "Group Credit wait is not bounded");
 
     const char *retired[] = {
         "kEnableFullSync",
@@ -231,13 +298,21 @@ int main()
         "BeginCollectiveStage(kCollectiveValidationStage)",
         "Group scaffold dropped card-local validation convergence");
     ok &= Require(process, "BeginCollectiveStage(kCollectiveDoneStage)",
-        "Group scaffold does not converge its intentional failure");
-    ok &= Require(process, "MOONEP_COMBINE_V2_INVALID_CONFIG",
-        "Group scaffold can silently return incorrect 128P output");
-    ok &= Reject(process, "for (uint32_t step",
-        "Group scaffold retained the legacy step schedule");
-    ok &= Reject(process, "ReduceHidden()",
-        "Incomplete Group scaffold still writes reduced output");
+        "Group implementation dropped final card-local convergence");
+    ok &= Require(process, "for (uint32_t step",
+        "Group implementation does not execute the 8-step schedule");
+    ok &= Require(process, "MoonEpCombineV2GroupSendDstRank(",
+        "Group process does not use the send mapping");
+    ok &= Require(process, "MoonEpCombineV2GroupRecvSrcRank(",
+        "Group process does not use the receive mapping");
+    ok &= Require(process, "WaitStepCredit(step)",
+        "Group process does not wait for one pre-step Credit");
+    ok &= Require(process, "PublishNextCredit(step)",
+        "Group process does not publish one next-step Credit");
+    ok &= Require(process, "ReduceHidden()",
+        "Group implementation dropped final reduction");
+    ok &= Reject(stepLoop, "SyncAll<true>()",
+        "Group hot loop contains a cross-core barrier");
     ok &= Require(collectiveBegin, "AscendC::SyncAll<true>();",
         "Group card-local stage does not align all launch blocks");
     ok &= Require(collectiveEnd, "AscendC::AtomicCas(&status->status",

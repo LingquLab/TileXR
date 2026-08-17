@@ -172,6 +172,161 @@ void TestQpAndBatchContract()
         "wrapped CQ target must be reachable");
 }
 
+void TestGroupAllToAllSchedule()
+{
+    using namespace TileXRMoonEp;
+    Check(sizeof(MoonEpCombineV2GroupCreditSignal) == 64U,
+        "Group Credit signal is not one cache line");
+    Check(kMoonEpCombineV2GroupCreditWorkspaceBytes <=
+            kMoonEpCombineV2LegacyGrantWorkspaceBytes,
+        "Group Credit does not fit the existing Grant workspace");
+
+    std::array<uint32_t,
+        kMoonEpCombineV2RankCount *
+        kMoonEpCombineV2GroupCreditTransitionCount *
+        kMoonEpCombineV2CoreCount> creditWriters {};
+    for (uint32_t rank = 0U; rank < kMoonEpCombineV2RankCount; ++rank) {
+        std::array<bool, kMoonEpCombineV2RankCount> sendSeen {};
+        std::array<bool, kMoonEpCombineV2RankCount> receiveSeen {};
+        uint32_t selfStep = kMoonEpCombineV2InvalidPeer;
+        const uint32_t rankInner = MoonEpCombineV2GroupInnerIndex(rank);
+        Check(rankInner < kMoonEpCombineV2CoreCount,
+            "Group inner index out of range");
+        Check(MoonEpCombineV2GroupId(rank) < kMoonEpCombineV2StepCount,
+            "Group id out of range");
+        for (uint32_t step = 0U;
+            step < kMoonEpCombineV2StepCount; ++step) {
+            for (uint32_t core = 0U;
+                core < kMoonEpCombineV2CoreCount; ++core) {
+                const uint32_t destination =
+                    MoonEpCombineV2GroupSendDstRank(rank, step, core);
+                const uint32_t source =
+                    MoonEpCombineV2GroupRecvSrcRank(rank, step, core);
+                Check(destination < kMoonEpCombineV2RankCount,
+                    "Group send destination out of range");
+                Check(source < kMoonEpCombineV2RankCount,
+                    "Group receive source out of range");
+                Check(MoonEpCombineV2GroupInnerIndex(destination) == core,
+                    "Group send did not preserve destination inner index");
+                Check(MoonEpCombineV2GroupInnerIndex(source) == core,
+                    "Group receive did not preserve source inner index");
+                Check(MoonEpCombineV2GroupRecvSrcRank(
+                        destination, step, rankInner) == rank,
+                    "Group receive mapping did not invert send mapping");
+                Check(MoonEpCombineV2GroupSendDstRank(
+                        source, step, rankInner) == rank,
+                    "Group send mapping did not invert receive mapping");
+                Check(!sendSeen[destination],
+                    "Group send mapping repeated a destination");
+                Check(!receiveSeen[source],
+                    "Group receive mapping repeated a source");
+                sendSeen[destination] = true;
+                receiveSeen[source] = true;
+                if (destination == rank) {
+                    Check(core == rankInner,
+                        "Group Self route used the wrong core");
+                    selfStep = step;
+                }
+
+                if (step + 1U < kMoonEpCombineV2StepCount) {
+                    const uint32_t transitionStep = step + 1U;
+                    const uint32_t nextSender =
+                        MoonEpCombineV2GroupRecvSrcRank(
+                            rank, transitionStep, core);
+                    const uint32_t targetCore = rankInner;
+                    Check(MoonEpCombineV2GroupInnerIndex(nextSender) == core,
+                        "Credit writer does not select the sender inner index");
+                    Check(MoonEpCombineV2GroupSendDstRank(
+                            nextSender, transitionStep, targetCore) == rank,
+                        "Credit target does not send back to the writer rank");
+                    const uint64_t flat =
+                        (static_cast<uint64_t>(nextSender) *
+                            kMoonEpCombineV2GroupCreditTransitionCount +
+                            transitionStep - 1U) *
+                            kMoonEpCombineV2CoreCount + targetCore;
+                    ++creditWriters[flat];
+                }
+            }
+        }
+        for (uint32_t peer = 0U;
+            peer < kMoonEpCombineV2RankCount; ++peer) {
+            Check(sendSeen[peer],
+                "Group send schedule does not cover every rank");
+            Check(receiveSeen[peer],
+                "Group receive schedule does not cover every rank");
+        }
+        Check(selfStep == (((rank >> 2U) & 1U) == 0U ? 2U : 7U),
+            "Group Self step does not match the card-half contract");
+    }
+
+    for (uint32_t writers : creditWriters) {
+        Check(writers == 1U,
+            "Group Credit target does not have exactly one writer");
+    }
+    for (uint32_t step = 0U;
+        step < kMoonEpCombineV2StepCount; ++step) {
+        std::array<bool, kMoonEpCombineV2StepCount> destinationGroups {};
+        for (uint32_t sourceGroup = 0U;
+            sourceGroup < kMoonEpCombineV2StepCount; ++sourceGroup) {
+            const uint32_t source = MoonEpCombineV2GroupMakeRank(
+                sourceGroup >> 2U, sourceGroup & 1U,
+                (sourceGroup >> 1U) & 1U, 0U);
+            const uint32_t destination =
+                MoonEpCombineV2GroupSendDstRank(source, step, 0U);
+            const uint32_t destinationGroup =
+                MoonEpCombineV2GroupId(destination);
+            Check(!destinationGroups[destinationGroup],
+                "Group mapping is not bijective within a step");
+            destinationGroups[destinationGroup] = true;
+        }
+    }
+
+    Check(MoonEpCombineV2GroupRecvSrcRank(0U, 0U, 0U) == 8U,
+        "rank0/core0 step0 source changed");
+    Check(MoonEpCombineV2GroupRecvSrcRank(0U, 1U, 0U) == 76U,
+        "rank0/core0 step1 source changed");
+    Check(MoonEpCombineV2GroupCreditPublishedAfterStep(6U),
+        "step6 must publish the step7 Credit");
+    Check(!MoonEpCombineV2GroupCreditPublishedAfterStep(7U),
+        "step7 must not publish Credit");
+    Check(!MoonEpCombineV2GroupCreditRequiredBeforeStep(0U) &&
+            MoonEpCombineV2GroupCreditRequiredBeforeStep(7U),
+        "Group Credit admission boundary mismatch");
+    Check(MoonEpCombineV2GroupCreditReceiveOffset(0U, 0U, 0U) ==
+            UINT64_MAX &&
+            MoonEpCombineV2GroupCreditSourceOffset(0U, 8U, 0U) ==
+                UINT64_MAX,
+        "invalid Group Credit transition accessed a slot");
+    const uint64_t finalReceiveOffset = MoonEpCombineV2GroupCreditReceiveOffset(
+        1U, 7U, 15U);
+    const uint64_t finalSourceOffset = MoonEpCombineV2GroupCreditSourceOffset(
+        1U, 7U, 15U);
+    Check(finalReceiveOffset + kMoonEpCombineV2GroupCreditSignalBytes <=
+            kMoonEpCombineV2GroupCreditSourceOffsetBytes,
+        "Group Credit receive index exceeded its region");
+    Check(finalSourceOffset + kMoonEpCombineV2GroupCreditSignalBytes <=
+            kMoonEpCombineV2GroupCreditWorkspaceBytes,
+        "Group Credit source index exceeded its workspace");
+
+    MoonEpCombineV2GroupCreditSignal signal {};
+    signal.magic = 19U;
+    signal.marker = kMoonEpCombineV2GroupCreditMarker;
+    signal.transitionStep = 1U;
+    signal.sourceRank = 0U;
+    signal.sourceCore = 0U;
+    signal.targetRank = 76U;
+    signal.targetCore = 0U;
+    signal.guard = MoonEpCombineV2GroupCreditGuard(19U, 1U,
+        signal.sourceRank, signal.sourceCore,
+        signal.targetRank, signal.targetCore);
+    Check(MoonEpCombineV2GroupCreditMatches(signal, 19U, 1U,
+            0U, 0U, 76U, 0U),
+        "valid Group Credit signal rejected");
+    Check(!MoonEpCombineV2GroupCreditMatches(signal, 20U, 1U,
+            0U, 0U, 76U, 0U),
+        "stale Group Credit magic accepted");
+}
+
 void TestTokensAndShapes()
 {
     using namespace TileXRMoonEp;
@@ -1353,6 +1508,7 @@ void TestFullmeshRouting()
 int main()
 {
     TestSchedule();
+    TestGroupAllToAllSchedule();
     TestBidirectionalSchedule();
     TestServerPairSchedule();
     TestServerPairParitySchedule();
