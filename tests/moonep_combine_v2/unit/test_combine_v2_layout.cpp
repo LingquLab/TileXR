@@ -53,6 +53,13 @@ void TestTargetLayout()
         "scratch epoch 1 offset mismatch");
     Check(layout.doneBytes == 32768U, "done bytes mismatch");
     Check(layout.grantBytes == 262144U, "grant bytes mismatch");
+    Check(layout.grantBytes == kMoonEpCombineV2LegacyGrantWorkspaceBytes &&
+            layout.grantBytes >= kMoonEpCombineV2ServerGrantWorkspaceBytes,
+        "Grant union does not cover both protocols");
+    Check(kMoonEpCombineV2ServerGrantReceiveBytes == 65536U &&
+            kMoonEpCombineV2ServerGrantSourceBytes == 65536U &&
+            kMoonEpCombineV2ServerGrantWorkspaceBytes == 131072U,
+        "Server-Grant workspace layout mismatch");
     Check(layout.controlSourceOffset == 2818874368ULL,
         "control source offset mismatch");
     Check(layout.failureOffset == 2818876416ULL,

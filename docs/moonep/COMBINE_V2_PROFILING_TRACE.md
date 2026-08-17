@@ -57,12 +57,16 @@ FM_WQE_BUILD_END
 并完成 cache clean；此时没有 CLOS WQE/CQE。trace event 的 `grant_transport=local` 用于
 区分该语义。
 
+Server-Grant 调度不执行 Legacy/CLOS Grant，因此 `CLOS_GRANT_SUBMIT` 和
+`CLOS_GRANT_CQ_SUCCESS` 必须同时为 `0`。该模式仍要求前三个 Fullmesh 边界严格递增，
+trace 中省略两个不存在的 Grant 事件并标记 `grant_transport=none`。
+
 ## 2. 生成三个 JSON
 
 将包含全部 rank 输出的完整日志同步到本地后执行：
 
 ```bash
-python3 tools/moonep/combine_v2_trace.py COMBINE_LOG \
+python tools/moonep/combine_v2_trace.py COMBINE_LOG \
   --split-output-dir TRACE_DIR \
   --prefix combine_v2_no_reduce \
   --host HOST \

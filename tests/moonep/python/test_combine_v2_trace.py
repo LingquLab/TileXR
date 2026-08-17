@@ -24,7 +24,7 @@ METRICS = (
 
 def write_log(path, missing_profile=None, experts=32, correctness="passed",
               fullmesh_fields=True, invalid_fullmesh_order=False,
-              final_only=False):
+              final_only=False, legacy_grant=True):
     elapsed = (8.0, 1.0, 7.0, 2.0, 6.0, 3.0, 5.0, 4.0)
     lines = []
     for iteration in ((1,) if final_only else (0, 1)):
@@ -55,6 +55,8 @@ def write_log(path, missing_profile=None, experts=32, correctness="passed",
                         successor = rank if rank == 0 else (rank + 2) % 8
                         fullmesh_points = [base + value for value in
                                            (220, 230, 240, 250, 260)]
+                        if not legacy_grant:
+                            fullmesh_points[3:] = (0, 0)
                         if invalid_fullmesh_order:
                             fullmesh_points[2] = base + 245
                             fullmesh_points[3] = base + 240
@@ -311,6 +313,28 @@ class CombineV2TraceTest(unittest.TestCase):
             self.assertEqual(result.returncode, 2)
             self.assertIn("invalid Fullmesh event order", result.stderr)
             self.assertFalse(output_path.exists())
+
+    def test_accepts_fullmesh_profile_without_legacy_grant(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            log_path = root / "combine.log"
+            output_path = root / "trace.json"
+            write_log(log_path, legacy_grant=False)
+
+            result = self.run_tool(log_path, output_path)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            trace = json.loads(output_path.read_text(encoding="utf-8"))
+            fullmesh_events = [
+                event for event in trace["traceEvents"]
+                if event.get("cat") in ("fullmesh", "grant")
+            ]
+            self.assertEqual(len(fullmesh_events), 9)
+            self.assertFalse(any(
+                event.get("cat") == "grant" for event in fullmesh_events))
+            self.assertTrue(all(
+                event["args"]["grant_transport"] == "none"
+                for event in fullmesh_events))
 
 
 if __name__ == "__main__":

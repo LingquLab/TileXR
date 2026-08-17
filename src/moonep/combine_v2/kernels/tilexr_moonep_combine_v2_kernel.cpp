@@ -1,4 +1,4 @@
-#include "tilexr_moonep_combine_v2_kernel.h"
+#include "tilexr_moonep_combine_v2_group_kernel.h"
 
 extern "C" __global__ __aicore__ void
 tilexr_moonep_combine_v2_kernel(GM_ADDR commArgs,
@@ -13,7 +13,7 @@ tilexr_moonep_combine_v2_kernel(GM_ADDR commArgs,
     int64_t magic)
 {
     AscendC::TPipe pipe;
-    MoonEpCombineV2 op;
+    MoonEpCombineV2Group op;
     op.Init(commArgs, registeredWorkspace, dstLocal, profileOffset,
         scratchEpoch0Offset, scratchEpoch1Offset, doneOffset, grantOffset,
         controlSourceOffset, failureOffset, fullSyncReceiveOffset,

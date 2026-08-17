@@ -83,6 +83,12 @@ cmake --build build-moonep -j"$(nproc)"
 cmake --install build-moonep
 ```
 
+MoonEP custom-kernel commands must list the implementation header selected by
+the kernel entry in `DEPENDS`. Otherwise an implementation-header edit can
+leave a stale embedded kernel object during an incremental build. Source guards
+verify this wiring; only a target-toolchain kernel build validates Ascend C
+syntax and binary generation.
+
 Run the Host/source-only suite separately:
 
 ```bash

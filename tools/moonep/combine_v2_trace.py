@@ -291,9 +291,15 @@ def validate_fullmesh_profile(record, rank, core, world_size):
         raise ValueError(
             "rank {} core {} has invalid Fullmesh route {}".
             format(rank, core, route))
-    if any(point <= 0 for point in time_points) or any(
-            time_points[index] >= time_points[index + 1]
-            for index in range(len(time_points) - 1)):
+    fullmesh_points = time_points[:3]
+    grant_points = time_points[3:]
+    grant_absent = grant_points == (0, 0)
+    grant_valid = all(point > 0 for point in grant_points) and \
+        fullmesh_points[-1] < grant_points[0] < grant_points[1]
+    if any(point <= 0 for point in fullmesh_points) or any(
+            fullmesh_points[index] >= fullmesh_points[index + 1]
+            for index in range(len(fullmesh_points) - 1)) or \
+            (not grant_absent and not grant_valid):
         raise ValueError(
             "rank {} core {} has invalid Fullmesh event order".
             format(rank, core))
@@ -304,12 +310,14 @@ def append_fullmesh_events(events, record, rank, core, iteration,
     fullmesh = record["fullmesh"]
     if fullmesh is None or fullmesh["transport"] != "fullmesh":
         return
+    grant_absent = fullmesh["time_points"][3:] == (0, 0)
     args = {
         "iteration": iteration,
         "rank": rank,
         "core": core,
         "data_transport": "fullmesh",
         "grant_transport": (
+            "none" if grant_absent else
             "local" if fullmesh["successor"] == rank else "clos"),
         "step": fullmesh["step"],
         "peer": fullmesh["peer"],
@@ -318,6 +326,8 @@ def append_fullmesh_events(events, record, rank, core, iteration,
     }
     for index, (name, point) in enumerate(zip(
             FULLMESH_EVENT_NAMES, fullmesh["time_points"])):
+        if point == 0:
+            continue
         event_args = dict(args)
         if name == "clos_grant_cq_success" and \
                 fullmesh["successor"] == rank:

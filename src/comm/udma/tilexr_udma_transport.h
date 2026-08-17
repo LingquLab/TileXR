@@ -119,14 +119,16 @@ private:
         std::vector<UDMACQCtx>& rcq,
         std::vector<UDMAMemInfo>& mem) const;
     int RegisterMemoryOnContexts(
-        RegistrationState& registration, bool includeFullmesh);
+        RegistrationState& registration, bool fullmeshDomain);
     int ExchangeAndImportMemory(RegistrationState& registration);
     int PrepareRegistration(const TileXRUDMAProfileDesc& desc,
         std::unique_ptr<RegistrationState>& registration,
         bool prepareFullmesh);
     int AgreeRegistrationStatus(int localStatus) const;
     int CleanupLocalRegistrations(std::map<uint32_t, RegMemResultInfo>& byEid);
-    int CleanupRemoteImports(RegistrationState& registration);
+    int CleanupRemoteImports(
+        RegistrationState& registration, bool fullmeshDomain);
+    int CleanupFullmeshRegistration(RegistrationState& registration);
     int CleanupRegistration(RegistrationState& registration);
     int CleanupRegistrationPtr(std::unique_ptr<RegistrationState>& registration);
     int FreeDeviceInfo(GM_ADDR& infoDev) const;
@@ -134,6 +136,9 @@ private:
     void FreeDeviceScalar(void*& ptr) const;
     int CleanupQueues();
     int CleanupFullmeshQueues();
+    int RollbackAddedContexts(
+        const std::map<uint32_t, void*>& previousContexts,
+        const std::map<uint32_t, void*>& previousTokens);
     void CleanupContexts();
     uint32_t FallbackLocalEid() const;
     const PerPeerQpState* GetPeerQpState(int peer, uint32_t qpIdx) const;

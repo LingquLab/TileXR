@@ -437,6 +437,12 @@ void TestUDMAFullmeshDomainContract()
     CheckContains(transportPath, transport,
                   "FullmeshEntryIndex(peer, slot)");
     CheckContains(transportPath, transport,
+                  "fullmeshLocalRegistrations");
+    CheckContains(transportPath, transport,
+                  "fullmeshRemoteMemHandles");
+    CheckContains(transportPath, transport,
+                  "CleanupFullmeshRegistration(*registration)");
+    CheckContains(transportPath, transport,
                   "mem(entryCount)");
     CheckContains(transportPath, transport,
                   "PrepareRegistration(desc, preparedProfile_, false)");
@@ -448,6 +454,17 @@ void TestUDMAFullmeshDomainContract()
                   "portCounts->second.at(localEid) != 1U");
     CheckContains(transportPath, transport,
                   "!usedLocalEids.emplace(localEid, true).second");
+    CheckContains(transportPath, transport,
+                  "previousContexts = ctxHandleByEid_");
+    CheckContains(transportPath, transport,
+                  "previousTokens = tokenHandleByEid_");
+    CheckContains(transportPath, transport, "RollbackAddedContexts(");
+    CheckContains(transportPath, transport,
+                  "previousContexts, previousTokens)");
+    CheckContains(transportPath, transport,
+                  "previousTokens.count(eidIndex) != 0U");
+    CheckContains(transportPath, transport,
+                  "previousContexts.count(eidIndex) != 0U");
 
     const auto registerPos = transport.find(
         "int TileXRUDMATransport::RegisterMemoryOnContexts");
@@ -459,8 +476,10 @@ void TestUDMAFullmeshDomainContract()
     } else {
         const auto body = transport.substr(registerPos, importPos - registerPos);
         CheckContains(transportPath, body,
-                      "if (includeFullmesh && fullmeshAvailable_)");
+                      "if (fullmeshDomain)");
         CheckContains(transportPath, body, "fullmeshLocalRouteByPeer_");
+        CheckContains(transportPath, body,
+                      "region.fullmeshLocalRegistrations");
         CheckNotContains(transportPath, body,
                          "for (const auto& ctxEntry : ctxHandleByEid_)");
     }

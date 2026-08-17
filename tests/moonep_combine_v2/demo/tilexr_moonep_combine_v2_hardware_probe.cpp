@@ -750,6 +750,12 @@ void CaptureProfileSamples(int rank, int world, int iteration,
                 TileXRMoonEp::MoonEpCombineV2PackFullmeshProfileRoute(
                     sample.fullmeshStep, sample.fullmeshPeer,
                     sample.fullmeshSuccessor, sample.fullmeshLogicalQp);
+            const bool legacyGrantProfileAbsent =
+                sample.closGrantSubmit == 0 &&
+                sample.closGrantCqSuccess == 0;
+            const bool legacyGrantProfileValid =
+                sample.closGrantSubmit > sample.fullmeshCqSuccess &&
+                sample.closGrantCqSuccess > sample.closGrantSubmit;
             if (transport != TileXRMoonEp::
                     MOONEP_COMBINE_V2_PROFILE_TRANSPORT_FULLMESH ||
                 record.reserved != expectedRoute ||
@@ -768,8 +774,7 @@ void CaptureProfileSamples(int rank, int world, int iteration,
                 sample.fullmeshWqeBuildEnd <= 0 ||
                 sample.fullmeshWqeBuildEnd >= sample.fullmeshSubmitEnd ||
                 sample.fullmeshSubmitEnd >= sample.fullmeshCqSuccess ||
-                sample.fullmeshCqSuccess >= sample.closGrantSubmit ||
-                sample.closGrantSubmit >= sample.closGrantCqSuccess) {
+                (!legacyGrantProfileAbsent && !legacyGrantProfileValid)) {
                 Abort(rank, "Fullmesh profile validation", 1);
             }
         }

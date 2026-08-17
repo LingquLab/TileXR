@@ -59,6 +59,100 @@ no-reduce 用例由超时恢复为 `correctness=passed`；随后 BS8192、20 次
 `combine_v2_128p_noprofile_20260817_002247.log`。该证据覆盖 128P Ring、barrier-only、
 no-reduce 路径，不覆盖 32P/64P、Reduce 或 Server-Pair/64-Grant。
 
+### R3 same/cross Server-Pair
+
+R3 仅把 32P/64P/128P 的 peer 顺序切换为 same-half/cross-half Server-Pair，继续以 R2 的
+round barrier 作为 admission；不启用 phase barrier，也不发布或等待新 64-Grant。
+发送 peer、Done receive round 和 full-sync sender-core 必须从同一组 Server-Pair coordinate
+helper 正反推导。只验证发送覆盖不够：receive inverse 或 sender-core 任一处保留旧 Ring
+公式，都会分别表现为 Done 或 full-sync 超时。
+
+2026-08-17 在 CANN 9.1、Ascend950、0/2 柜 128P 上完成 R3 target compile、六个 Host/unit/
+source-guard 门禁及实机验证。BS8192、K16、H3584、Exp256、BF16、no-reduce、20 次 warmup
+和 80 次迭代的 128/128 rank 均通过，平均 `5.773789 ms`，最大 `5.782910 ms`。完整日志为
+`combine_v2_128p_noprofile_20260817_011147.log`。全源输出比较覆盖 Self、同 server Fullmesh
+和跨 server shared-QP 数据结果；本轮未采集 profile trace，也未覆盖 32P/64P、FP32
+route-weight 或 Reduce 路径，因此这些边界仍需在后续阶梯验证中单独证明。
+
+### R4 独立 phase barrier
+
+R4 保持 R3 same/cross Server-Pair、round barrier 和 barrier-only admission 不变，在 phase0
+最后一个 round barrier 之后额外执行 boundary `1 + R/32`。phase0 的最后 round barrier 与
+phase barrier 故意同时保留，用于单独证明 phase 边界。启用原先预留的 boundary 后，
+phase1 round 的 execution ordinal 必须整体加一；generation 只能从实际 ordinal 推导，
+不能因为 R4 中 boundary ID 恰好连续就重新把两者合并。
+
+2026-08-17 在 CANN 9.1、Ascend950、0/2 柜 128P 上完成 R4 target compile、六个 Host/unit/
+source-guard 门禁及实机验证。Host oracle 验证 boundary/ordinal `0..9`、相邻 generation
+交替和同 generation 的完整 boundary guard。BS8192、K16、H3584、Exp256、BF16、
+no-reduce、20 次 warmup 和 80 次迭代的 128/128 rank 均通过，平均 `5.842303 ms`，最大
+`5.850310 ms`。完整日志为 `combine_v2_128p_noprofile_20260817_012720.log`。该结果覆盖
+101 次连续 invocation 的 phase barrier、generation 和 epoch 复用；未覆盖 32P/64P、
+FP32 route-weight、Reduce 或 profile trace。
+
+### R9-Q 单接收源 Direct Grant 探针
+
+R8 的每轮 Server-Grant admission 要求每个 core 等待四张源卡，并通过三次
+`SyncAll<true>()` 将 16 个 core 的状态归约后再进入下一 round。该结构会把整卡推进速度
+绑定到最慢 core。R9-Q 为隔离接收侧规整同步成本，仅把每个目标 core 的等待集合缩为
+predecessor server 中相同 local-rank card/core 的一个 signal，并删除每 round 的 collective；
+leading/phase barrier、四目标 Grant 发布和 final closure 均保持不变。
+
+可复用的验证方法是先保持发送 WQE 数、数据路径和 phase 边界不变，只缩小接收等待集合
+并删除对应的卡内归约，以避免把接收侧同步收益和发送侧发布优化混在一次 A/B 中。控制流
+必须让失败 core 继续走完固定 phase 循环骨架并汇入 phase barrier，不能让单 core 提前进入
+下一组硬件 collective。
+
+2026-08-17 在 CANN 9.1、Ascend950、0/2 柜 128P 上完成 target compile、六个 Host/unit/
+source-guard 门禁和两轮实机验证。BS8192、K16、H3584、Exp256、BF16、no-reduce、20 次
+warmup 和 80 次迭代的两轮结果分别为 `max_ms=4.977630` 和 `4.981410`，两轮均为
+128/128 rank 正确性通过，且各有 128 条 rank 性能记录。两轮 `max_ms` 均值
+`4.979520 ms`，相对 R8 的 `5.231500 ms` 提升 `4.82%`。日志分别为
+`combine_v2_128p_noprofile_20260817_025341.log` 和
+`combine_v2_128p_noprofile_20260817_025607.log`。
+
+该结果证明卡内 Grant 规整同步有可测成本，但不足以解释全部差距。由于 R9-Q 仍让每个
+core 发布四个 Grant WQE，不能据此估算完整点对点 Grant 的最终上限；后续应把发送端
+单目标化作为独立变量，再验证 Grant 与 payload final batch 合并。当前证据不覆盖 32P/
+64P、Reduce、FP32 route-weight 或发送端单目标 Grant。
+
+### R10-Q 单目标 Grant Publisher 探针
+
+R10-Q 保持 R9-Q 的单 signal direct wait、每 round CQ drain、phase barrier 和 final closure，
+只把发送端从四目标广播缩为 direct wait 映射的唯一逆向目标。64P/128P 每个 core 每 round
+只提交一个 ordered-completion Grant WQE；32P 的 phase step 数为 1，direct target 是本
+rank，因此发布一个本地 receive signal，不提交远端 WQE。schedule oracle 必须单独覆盖
+这个 32P self-target 边界，不能统一假设 direct target 都是远端 rank。
+
+2026-08-17 在 CANN 9.1、Ascend950、0/2 柜 128P 上完成 target compile、六个 Host/unit/
+source-guard 门禁和两轮实机验证。BS8192、K16、H3584、Exp256、BF16、no-reduce、20 次
+warmup 和 80 次迭代的结果分别为 `max_ms=4.918600`、`4.921610`，两轮均为 128/128
+rank 正确性通过，且各有 128 条 rank 性能记录。两轮均值 `4.920105 ms`，相对 R9-Q
+`4.979520 ms` 提升 `1.19%`，相对 R8 `5.231500 ms` 提升 `5.95%`。日志分别为
+`combine_v2_128p_noprofile_20260817_031358.log` 和
+`combine_v2_128p_noprofile_20260817_031528.log`。
+
+单目标发布带来稳定但较小的约 `0.059 ms` 收益，说明发布端四个 WQE/CQ 有成本，但不是
+主要剩余瓶颈。后续应把 Grant 与 payload final batch 合并作为独立 A/B，避免同时删除
+closure 或改变 phase barrier。另一个验证陷阱是固定 `compile.sh` 只重建 perf target；
+直接运行 build 目录中的历史测试二进制会得到与当前源码无关的 source-guard 失败。每次
+必须先显式构建六个测试 target，再以其退出码作为 Host 门禁证据。当前证据不覆盖 32P/
+64P 实机、Reduce 或 FP32 route-weight。
+
+同日追加的第三轮关闭 profiling 复测为 `max_ms=4.925600`、128/128 正确性通过，日志为
+`combine_v2_128p_noprofile_20260817_032121.log`。隔离 profiling 构建的
+`max_ms=5.374750`，日志为
+`combine_v2_128p_profile_r10_single_target_20260817_0325.log`；该耗时包含埋点扰动，
+不能与关闭 profiling 的宏观性能直接比较。profile 完整性为 128 条 sample、128 条 rank
+perf 和 2048 条 core profile。
+
+最后一轮选出的 fastest rank8/core10、P50 rank87/core5、slowest rank59/core9 的 kernel
+时间分别为 `4.632520/4.783730/4.881838 ms`。关键 core 的 wait 加 inbound 占比分别为
+`89.36%/91.94%/90.29%`，8 个 send 合计均约 `292-295 us`。最大 wait 分别落在 step0、
+step0/step4 和 step3，热点不是固定 round。现有 trace 的 `Step N wait` 同时覆盖 data CQ、
+单目标 Grant 发布/CQ、direct Grant wait 和 phase barrier；未增加更细 profile point 前，
+不得把整个 wait 区间归因于 Grant。
+
 ## 1. 基准口径
 
 常用 128P case：

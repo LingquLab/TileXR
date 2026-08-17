@@ -63,7 +63,10 @@ int TileXRMoonEpBuildCombineV2Layout(int64_t bs, int64_t h,
     uint64_t doneOffset = 0;
     uint64_t doneBytes = 0;
     uint64_t grantOffset = 0;
-    uint64_t grantBytes = 0;
+    uint64_t grantBytes = kMoonEpCombineV2LegacyGrantWorkspaceBytes >
+            kMoonEpCombineV2ServerGrantWorkspaceBytes ?
+        kMoonEpCombineV2LegacyGrantWorkspaceBytes :
+        kMoonEpCombineV2ServerGrantWorkspaceBytes;
     uint64_t controlSourceOffset = 0;
     uint64_t controlSourceBytes = 0;
     uint64_t failureOffset = 0;
@@ -92,10 +95,6 @@ int TileXRMoonEpBuildCombineV2Layout(int64_t bs, int64_t h,
                 kMoonEpCombineV2RankCount * kMoonEpCombineV2LaneCount,
             kMoonEpCombineV2TokenStrideBytes, &doneBytes) ||
         !CheckedAdd(doneOffset, doneBytes, &grantOffset) ||
-        !CheckedMultiply(static_cast<uint64_t>(kMoonEpCombineV2EpochCount) *
-                kMoonEpCombineV2CoreCount * kMoonEpCombineV2LaneCount *
-                kMoonEpCombineV2GrantStepCount,
-            kMoonEpCombineV2GrantSlotBytes, &grantBytes) ||
         !CheckedAdd(grantOffset, grantBytes, &controlSourceOffset) ||
         !CheckedMultiply(static_cast<uint64_t>(kMoonEpCombineV2CoreCount) *
                 kMoonEpCombineV2LaneCount,

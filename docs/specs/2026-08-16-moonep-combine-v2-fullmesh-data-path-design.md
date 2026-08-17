@@ -103,9 +103,19 @@ Fullmesh capability 只有在所有 rank 完成以下步骤并进行 rank-wide �
 任一步失败时，清理全部临时 Fullmesh 资源并在所有 rank 清除 capability/pointer。
 现有 32 CLOS 子域可以继续存在，但 Combine V2 Host 必须拒绝启动。
 
+Fullmesh 初始化开始前必须记录已有 context/token 所有权。初始化失败时先回收本阶段创建的
+QP/CQ/channel，再只释放相对该快照新增的 token 和 context；已有 CLOS context/token 不得
+回滚。仍被未清队列引用或底层释放失败的句柄必须保留为可重试状态，不能从账本中丢失。
+
 普通 UDMA 注册的 CLOS 和 Fullmesh device view 必须按同一个注册 generation 原子发布。
 不得出现新 CLOS registry 搭配旧 Fullmesh mem info 的组合。Profile registration 继续只描述
 现有 32 CLOS QP，不扩大当前 32-binding 公共 ABI。
+
+每个 registration generation 内，CLOS 与 Fullmesh 分别拥有 local MR 和 remote import
+账本。Fullmesh 注册失败时按 remote import、local MR、device info 的顺序只清理 Fullmesh
+候选资源；清理完整后允许发布不带 Fullmesh capability 的 CLOS generation，Combine V2
+仍因 capability 缺失而拒绝启动。若 Fullmesh 局部清理失败，则整个候选 generation 失败并
+进入现有可重试清理流程。
 
 ## 4. 拓扑和 QP 选择
 
@@ -259,6 +269,10 @@ sqTail == submittedHead
 head - tail == 0
 ```
 
+CQ target 到达只是完成条件之一。Deferred CLOS grant-only CQ 消费后必须立即核对
+`tail == submittedHead` 和 `head == tail`；任何不一致都按 CQ 账本错误处理，不得进入下一
+step。
+
 至少连续运行三轮以覆盖 epoch 复用、SQ wrap、CQ owner cycle 和 direct QP 重用。
 
 ## 9. 与 Full-Sync 的关系
@@ -308,7 +322,9 @@ Kernel 仍执行必要的防御校验。Fullmesh CQ owner/status/substatus 检�
 | 失败点 | 行为 |
 |---|---|
 | RootInfo/topology/direct QP 建立失败 | rank-wide 清除 Fullmesh capability；Combine Host 拒绝 launch |
-| Fullmesh MR 注册或 remote import 不完整 | 不发布该 registration generation；Combine Host 拒绝 launch |
+| Fullmesh MR 注册或 remote import 不完整 | 清理 Fullmesh 候选资源，不发布 Fullmesh view；Combine Host 拒绝 launch |
+| Fullmesh 候选资源清理失败 | 放弃整个候选 registration generation，保留可重试清理账本 |
+| Fullmesh 初始化失败 | 先清 direct 队列，再精确回滚本阶段新增 context/token；已有 CLOS 句柄不动 |
 | Fullmesh SQ/WQ/CQ context 非法 | device 记录 invalid-config；不发送 grant |
 | Fullmesh CQ timeout/error | 记录首错误；不发送 grant；进入现有失败收敛 |
 | Deferred CLOS grant CQ timeout/error | 记录首错误；不得进入下一 step |
@@ -381,6 +397,9 @@ PrefetchWeight、ReduceGrad 的 active QP map 和 32-binding profile ABI不变�
 - Fullmesh WQE 全 UB 构造、MTE3 发布、`st_dev` doorbell 顺序正确；
 - same-node path 不调用 CLOS payload builder；
 - grant doorbell 的控制流严格受 Fullmesh CQ success 支配；
+- deferred grant CQ 完成后验证 `cqTail/cqTarget` 和 `head/tail/submittedHead` 闭环；
+- Fullmesh 注册失败不遗留 local MR、remote import 或 device info；
+- Fullmesh 初始化失败只回滚增量 context/token；
 - full-sync 自己产生并消费 CQ，不依赖后续 step；
 - Kernel signature、C++14 和 CANN 9.1 编译通过。
 

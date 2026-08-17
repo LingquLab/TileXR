@@ -96,7 +96,7 @@ int main()
     const std::string kernelEntry = Read(root +
         "/src/moonep/combine_v2/kernels/tilexr_moonep_combine_v2_kernel.cpp");
     const std::string kernelImpl = Read(root +
-        "/src/moonep/combine_v2/kernels/tilexr_moonep_combine_v2_kernel.h");
+        "/src/moonep/combine_v2/kernels/tilexr_moonep_combine_v2_group_kernel.h");
     const std::string profileHeader = Read(root +
         "/src/moonep/combine_v2/common/combine_v2_profile.h");
     const std::string hardwareProbe = Read(root +
@@ -133,53 +133,65 @@ int main()
         "inline void MoonEpCombineV2BuildFullSyncWqesVf(",
         "#endif");
     const std::string vectorSelection = Section(kernelImpl,
-        "__aicore__ inline uint32_t MoonEpCombineV2::SelectPeerIndices(",
-        "__aicore__ inline uint64_t MoonEpCombineV2::LoadToken(");
+        "__aicore__ inline uint32_t MoonEpCombineV2Group::SelectPeerIndices(",
+        "__aicore__ inline uint64_t MoonEpCombineV2Group::LoadToken(");
     const std::string submitPair = Section(kernelImpl,
-        "__aicore__ inline bool MoonEpCombineV2::SubmitPair(",
-        "__aicore__ inline bool MoonEpCombineV2::SendRemoteStep(");
+        "__aicore__ inline bool MoonEpCombineV2Group::SubmitPair(",
+        "__aicore__ inline bool MoonEpCombineV2Group::SendRemoteStep(");
     const std::string fullmeshSubmit = Section(kernelImpl,
-        "__aicore__ inline bool MoonEpCombineV2::SubmitFullmeshBatch(",
-        "__aicore__ inline bool MoonEpCombineV2::SendFullmeshStep(");
+        "__aicore__ inline bool MoonEpCombineV2Group::SubmitFullmeshBatch(",
+        "__aicore__ inline bool MoonEpCombineV2Group::SendFullmeshStep(");
     const std::string fullmeshSend = Section(kernelImpl,
-        "__aicore__ inline bool MoonEpCombineV2::SendFullmeshStep(",
-        "__aicore__ inline void MoonEpCombineV2::CopySelfRowsIn(");
+        "__aicore__ inline bool MoonEpCombineV2Group::SendFullmeshStep(",
+        "__aicore__ inline void MoonEpCombineV2Group::CopySelfRowsIn(");
     const std::string fullmeshWait = Section(kernelImpl,
-        "__aicore__ inline bool MoonEpCombineV2::WaitFullmeshCq(",
-        "__aicore__ inline bool MoonEpCombineV2::WaitStepGrant(");
+        "__aicore__ inline bool MoonEpCombineV2Group::WaitFullmeshCq(",
+        "__aicore__ inline bool MoonEpCombineV2Group::WaitStepGrant(");
     const std::string stepCqWait = Section(kernelImpl,
-        "__aicore__ inline bool MoonEpCombineV2::WaitStepCqs(",
-        "__aicore__ inline bool MoonEpCombineV2::WaitFullmeshCq(");
+        "__aicore__ inline bool MoonEpCombineV2Group::WaitStepCqs(",
+        "__aicore__ inline bool MoonEpCombineV2Group::WaitFullmeshCq(");
     const std::string selfStep = Section(kernelImpl,
-        "__aicore__ inline bool MoonEpCombineV2::SendSelfStep(",
-        "__aicore__ inline bool MoonEpCombineV2::WaitInboundDone(");
+        "__aicore__ inline bool MoonEpCombineV2Group::SendSelfStep(",
+        "__aicore__ inline bool MoonEpCombineV2Group::WaitInboundDone(");
     const std::string selfGrant = Section(kernelImpl,
-        "__aicore__ inline bool MoonEpCombineV2::SubmitSelfGrant(",
-        "__aicore__ inline bool MoonEpCombineV2::SendSelfStep(");
+        "__aicore__ inline bool MoonEpCombineV2Group::SubmitSelfGrant(",
+        "__aicore__ inline bool MoonEpCombineV2Group::SendSelfStep(");
     const std::string inboundDone = Section(kernelImpl,
-        "__aicore__ inline bool MoonEpCombineV2::WaitInboundDone()",
-        "__aicore__ inline void MoonEpCombineV2::InitReduceBuffers()");
+        "__aicore__ inline bool MoonEpCombineV2Group::WaitInboundDone()",
+        "__aicore__ inline void MoonEpCombineV2Group::InitReduceBuffers()");
     const std::string localGrant = Section(kernelImpl,
-        "__aicore__ inline void MoonEpCombineV2::PublishLocalGrant(",
-        "__aicore__ inline void MoonEpCombineV2::CopyIssueToSq(");
+        "__aicore__ inline void MoonEpCombineV2Group::PublishLocalGrant(",
+        "__aicore__ inline void MoonEpCombineV2Group::CopyIssueToSq(");
+    const std::string serverGrantPublisher = Section(kernelImpl,
+        "__aicore__ inline bool MoonEpCombineV2Group::PublishServerGrants(",
+        "__aicore__ inline bool MoonEpCombineV2Group::ServerGrantSignalMatches(");
+    const std::string serverGrantWait = Section(kernelImpl,
+        "__aicore__ inline bool MoonEpCombineV2Group::WaitServerGrantShard(",
+        "__aicore__ inline bool MoonEpCombineV2Group::WaitServerGrantDirect(");
+    const std::string directServerGrantWait = Section(kernelImpl,
+        "__aicore__ inline bool MoonEpCombineV2Group::WaitServerGrantDirect(",
+        "__aicore__ inline void MoonEpCombineV2Group::CopyIssueToSq(");
     const std::string process = Section(kernelImpl,
-        "__aicore__ inline void MoonEpCombineV2::Process()",
+        "__aicore__ inline void MoonEpCombineV2Group::Process()",
         "} // namespace");
     const std::string fullSyncPublisher = Section(kernelImpl,
-        "__aicore__ inline bool MoonEpCombineV2::PublishFullSyncBatch(",
-        "__aicore__ inline bool MoonEpCombineV2::WaitFullSyncCq(");
+        "__aicore__ inline bool MoonEpCombineV2Group::PublishFullSyncBatch(",
+        "__aicore__ inline bool MoonEpCombineV2Group::WaitFullSyncCq(");
     const std::string fullSyncWait = Section(kernelImpl,
-        "__aicore__ inline bool MoonEpCombineV2::WaitFullSyncCq(",
-        "__aicore__ inline bool MoonEpCombineV2::FullSyncSignalMatches(");
+        "__aicore__ inline bool MoonEpCombineV2Group::WaitFullSyncCq(",
+        "__aicore__ inline bool MoonEpCombineV2Group::FullSyncSignalMatches(");
     const std::string collectiveBegin = Section(kernelImpl,
-        "__aicore__ inline bool MoonEpCombineV2::BeginCollectiveStage(",
-        "__aicore__ inline bool MoonEpCombineV2::EndCollectiveStage(");
+        "__aicore__ inline bool MoonEpCombineV2Group::BeginCollectiveStage(",
+        "__aicore__ inline bool MoonEpCombineV2Group::EndCollectiveStage(");
     const std::string collectiveEnd = Section(kernelImpl,
-        "__aicore__ inline bool MoonEpCombineV2::EndCollectiveStage(",
-        "__aicore__ inline bool MoonEpCombineV2::RunGlobalBarrier(");
+        "__aicore__ inline bool MoonEpCombineV2Group::EndCollectiveStage(",
+        "__aicore__ inline bool MoonEpCombineV2Group::RunGlobalBarrier(");
     const std::string globalBarrier = Section(kernelImpl,
-        "__aicore__ inline bool MoonEpCombineV2::RunGlobalBarrier(",
-        "__aicore__ inline void MoonEpCombineV2::InitReduceBuffers(");
+        "__aicore__ inline bool MoonEpCombineV2Group::RunGlobalBarrier(",
+        "__aicore__ inline bool MoonEpCombineV2Group::RunServerGrantAdmission(");
+    const std::string serverGrantAdmission = Section(kernelImpl,
+        "__aicore__ inline bool MoonEpCombineV2Group::RunServerGrantAdmission(",
+        "__aicore__ inline void MoonEpCombineV2Group::InitReduceBuffers(");
     const std::string barrierServer = Section(hardwareProbe,
         "bool BarrierServer(", "bool BarrierClient(");
     const std::string timedBatch = Section(hardwareProbe,
@@ -219,7 +231,7 @@ int main()
         "Combine V2 does not own a standalone shared library");
     ok &= Require(v2Cmake, "tilexr_moonep_combine_v2_kernel.cpp",
         "Combine V2 kernel entry is not the build source");
-    ok &= Require(v2Cmake, "tilexr_moonep_combine_v2_kernel.h",
+    ok &= Require(v2Cmake, "tilexr_moonep_combine_v2_group_kernel.h",
         "Combine V2 kernel implementation is not a build dependency");
     ok &= Require(v2Cmake, "-DCATLASS_ARCH=3510",
         "Combine V2 CATLASS target is missing");
@@ -230,10 +242,12 @@ int main()
     ok &= Reject(v2Cmake, "/devlib",
         "Combine V2 links the toolkit stub library directory");
 
-    ok &= Require(kernelEntry, "#include \"tilexr_moonep_combine_v2_kernel.h\"",
+    ok &= Require(kernelEntry, "#include \"tilexr_moonep_combine_v2_group_kernel.h\"",
         "Combine V2 entry does not include its implementation header");
     ok &= Require(kernelEntry, "tilexr_moonep_combine_v2_kernel",
         "Combine V2 operator entry is missing");
+    ok &= Require(kernelEntry, "MoonEpCombineV2Group op;",
+        "Combine V2 entry does not select the Group implementation");
     ok &= Require(kernelEntry, "op.Init(",
         "Combine V2 entry does not initialize the implementation");
     ok &= Require(kernelEntry, "op.Process();",
@@ -252,7 +266,7 @@ int main()
         ok = false;
     }
 
-    ok &= Require(kernelImpl, "class MoonEpCombineV2",
+    ok &= Require(kernelImpl, "class MoonEpCombineV2Group",
         "Combine V2 implementation class is missing from the header");
     ok &= Require(kernelImpl, "TileXR::UDMA",
         "Combine V2 implementation does not use UDMA");
@@ -388,6 +402,78 @@ int main()
     ok &= Require(localGrant,
         "kMoonEpCombineV2GrantReceiveOffsetBytes",
         "Combine V2 local grant does not target the receive slot");
+    ok &= Require(serverGrantPublisher,
+        "kMoonEpCombineV2ServerGrantSourceOffsetBytes",
+        "Combine V2 Server-Grant publisher does not use the source partition");
+    ok &= Require(serverGrantPublisher,
+        "kMoonEpCombineV2ServerGrantReceiveOffsetBytes",
+        "Combine V2 Server-Grant publisher does not target receive slots");
+    ok &= Require(serverGrantPublisher,
+        "MoonEpCombineV2DirectGrantTargetRank(rank_, rankSize_)",
+        "Combine V2 Server-Grant publisher does not select one target");
+    ok &= Require(serverGrantPublisher,
+        "constexpr uint32_t remoteCount = 1U;",
+        "Combine V2 direct Grant publisher does not submit one WQE");
+    ok &= Require(serverGrantPublisher,
+        "AppendControlWqe(issue, 0U, state,",
+        "Combine V2 direct Grant publisher does not use its only WQE slot");
+    ok &= Require(serverGrantPublisher, "if (targetRank == rank_)",
+        "Combine V2 direct Grant publisher does not handle 32P locally");
+    ok &= Require(serverGrantPublisher,
+        "InitializeServerGrantSignal(localSignal, flatRound)",
+        "Combine V2 local direct Grant does not publish its signal");
+    ok &= Reject(serverGrantPublisher,
+        "MoonEpCombineV2ServerGrantTargetRank(",
+        "Combine V2 direct Grant publisher still uses broadcast mapping");
+    ok &= Reject(serverGrantPublisher, "for (",
+        "Combine V2 direct Grant publisher still loops over targets");
+    ok &= Require(serverGrantPublisher,
+        "TileXR::TILEXR_UDMA_SQE_FLAG_ORDERED_COMPLETION",
+        "Combine V2 Server-Grant publisher has no terminal completion");
+    ok &= Require(serverGrantPublisher,
+        "kMoonEpCombineV2ServerGrantSignalBytes",
+        "Combine V2 Server-Grant WQE does not transfer a full signal");
+    ok &= RequireBefore(serverGrantPublisher,
+        "SyncFunc<HardEvent::S_MTE3>();", "CopyIssueToSq(",
+        "Combine V2 Server-Grant does not order UB WQEs before MTE3");
+    ok &= RequireBefore(serverGrantPublisher,
+        "SyncFunc<HardEvent::MTE3_S>();", "st_dev(state.head",
+        "Combine V2 Server-Grant rings a doorbell before MTE3 completion");
+    ok &= Require(serverGrantWait,
+        "sourceCardLane < TileXRMoonEp::\n                    kMoonEpCombineV2ServerGrantSignalsPerCore",
+        "Combine V2 Server-Grant wait does not scan exactly four shards");
+    ok &= Require(serverGrantWait,
+        "MoonEpCombineV2ServerGrantOrdinal(\n                    sourceCardLane, core_)",
+        "Combine V2 Server-Grant wait does not use core-owned ordinals");
+    ok &= Reject(serverGrantWait,
+        "sourceCardLane < TileXRMoonEp::kMoonEpCombineV2ServerGrantSignalCount",
+        "Combine V2 Server-Grant core scans all 64 signals");
+    ok &= Require(serverGrantWait,
+        "MoonEpCombineV2ServerGrantSourceRank(",
+        "Combine V2 Server-Grant wait does not validate its publisher rank");
+    ok &= Require(serverGrantWait,
+        "ServerGrantSignalMatches(signal, flatRound, sourceRank,",
+        "Combine V2 Server-Grant wait does not validate the full signal");
+    ok &= Require(directServerGrantWait,
+        "MoonEpCombineV2DirectGrantSourceCardLane(\n            rank_, rankSize_)",
+        "Combine V2 direct Grant wait does not select one source card");
+    ok &= Require(directServerGrantWait,
+        "MoonEpCombineV2DirectGrantSourceRank(rank_, rankSize_)",
+        "Combine V2 direct Grant wait does not validate its source rank");
+    ok &= Require(directServerGrantWait,
+        "MoonEpCombineV2DirectGrantOrdinal(\n            rank_, core_, rankSize_)",
+        "Combine V2 direct Grant wait does not select one source/core ordinal");
+    ok &= Require(directServerGrantWait,
+        "ServerGrantSignalMatches(signal, flatRound, sourceRank,",
+        "Combine V2 direct Grant wait does not validate the full signal");
+    ok &= Reject(directServerGrantWait, "for (",
+        "Combine V2 direct Grant wait scans more than one signal");
+    ok &= Reject(directServerGrantWait, "BeginCollectiveStage(",
+        "Combine V2 direct Grant wait enters a collective stage");
+    ok &= Reject(directServerGrantWait, "EndCollectiveStage(",
+        "Combine V2 direct Grant wait exits through a collective stage");
+    ok &= Reject(directServerGrantWait, "AscendC::SyncAll<true>()",
+        "Combine V2 direct Grant wait contains a whole-card SyncAll");
     ok &= RequireBefore(selfGrant, "SyncFunc<HardEvent::S_MTE3>();",
         "CopyIssueToSq(",
         "Combine V2 Self grant does not establish MTE3 ordering");
@@ -463,6 +549,29 @@ int main()
     ok &= RequireBefore(process, "WaitStepCqs(step)",
         "WaitStepGrant(step)",
         "Combine V2 step loop does not wait CQ before grant");
+    ok &= RequireBefore(process, "WaitStepCqs(step)",
+        "PublishServerGrants(step)",
+        "Combine V2 publishes Server-Grant before data CQ drain");
+    ok &= RequireBefore(process, "PublishServerGrants(step)",
+        "WaitServerGrantDirect(step)",
+        "Combine V2 direct admission precedes Server-Grant publication");
+    ok &= RequireBefore(process, "WaitServerGrantDirect(step)",
+        "MoonEpCombineV2PhaseBarrierAfterRound(",
+        "Combine V2 phase handling precedes direct Grant admission");
+    ok &= Reject(process, "RunServerGrantAdmission(",
+        "Combine V2 hot step loop still uses collective Grant admission");
+    ok &= Reject(process, "MoonEpCombineV2RoundBoundary(",
+        "Combine V2 R8 still computes a per-round barrier boundary");
+    ok &= Reject(process, "MoonEpCombineV2RoundBarrierOrdinal(",
+        "Combine V2 R8 still computes a per-round barrier ordinal");
+    ok &= Reject(process, "MOONEP_COMBINE_V2_STEP_BARRIER_TIMEOUT",
+        "Combine V2 R8 still carries the active round barrier timeout");
+    ok &= Require(serverGrantAdmission, "BeginCollectiveStage(stageId)",
+        "Combine V2 Server-Grant admission has no convergent stage begin");
+    ok &= Require(serverGrantAdmission, "WaitServerGrantShard(flatRound)",
+        "Combine V2 Server-Grant admission does not wait the local shard");
+    ok &= Require(serverGrantAdmission, "EndCollectiveStage(",
+        "Combine V2 Server-Grant admission has no convergent stage end");
     ok &= Require(process,
         "activeWorker_ && localSucceeded && legacyGrantEnabled",
         "Combine V2 Process does not disable 32P+ Legacy Grant wait");
@@ -488,12 +597,16 @@ int main()
     ok &= Require(kernelImpl, "st_dev(",
         "Combine V2 implementation does not ring device doorbells");
     ok &= Require(kernelImpl, "rank_, 0U, core_, rankSize_",
-        "Combine V2 implementation does not use the runtime Ring schedule");
+        "Combine V2 implementation does not use the runtime schedule");
+    ok &= Require(kernelImpl,
+        "MOONEP_COMBINE_V2_SERVER_PAIR_PARITY",
+        "Combine V2 kernel did not activate parity Server-Pair mode");
     const std::size_t scheduleCallCount =
         CountOccurrences(kernelImpl, "MoonEpCombineV2Peer(") +
         CountOccurrences(kernelImpl, "MoonEpCombineV2Successor(") +
         CountOccurrences(kernelImpl, "MoonEpCombineV2ReceiveStep(") +
-        CountOccurrences(kernelImpl, "MoonEpCombineV2SenderCore(");
+        CountOccurrences(kernelImpl, "MoonEpCombineV2SenderCore(") +
+        CountOccurrences(kernelImpl, "MoonEpCombineV2ServerGrantEnabled(");
     if (CountOccurrences(kernelImpl, "kCombineV2ScheduleMode") !=
         scheduleCallCount + 1U) {
         std::cerr << "Combine V2 schedule mode is not passed to every "
@@ -540,8 +653,19 @@ int main()
     ok &= Require(globalBarrier,
         "MoonEpCombineV2FullSyncGeneration(\n                executionOrdinal)",
         "Combine V2 full-sync generation does not use execution order");
-    ok &= Require(process, "RunGlobalBarrier(boundaryId, step + 1U,",
-        "Combine V2 round barriers reuse generation across the reserved phase boundary");
+    ok &= Require(process, "MoonEpCombineV2PhaseBarrierAfterRound(",
+        "Combine V2 R8 phase barrier is not placed after phase0");
+    ok &= Require(process, "MoonEpCombineV2PhaseBoundary(rankSize_)",
+        "Combine V2 R4 phase barrier does not use the reserved boundary");
+    ok &= Require(process, "MoonEpCombineV2PhaseBarrierOrdinal(rankSize_)",
+        "Combine V2 R4 phase barrier does not use an execution ordinal");
+    ok &= Require(process, "MOONEP_COMBINE_V2_PHASE_BARRIER_TIMEOUT",
+        "Combine V2 R4 phase barrier is not independently diagnosable");
+    ok &= Require(process, "RunGlobalBarrier(0U, 0U,",
+        "Combine V2 R8 does not preserve the leading global barrier");
+    ok &= Require(process,
+        "RunGlobalBarrier(\n                phaseBoundaryId, phaseBarrierOrdinal,",
+        "Combine V2 R8 does not preserve the phase global barrier");
     ok &= RequireBefore(globalBarrier,
         "BuildFullSyncWqes(generation, &count)",
         "PrepareFullSyncSignal(boundaryId, generation)",
@@ -644,8 +768,8 @@ int main()
         "static_assert(sizeof(CombineV2KernelArgs) == 21U * sizeof(uint64_t)",
         "Combine V2 launch ABI does not contain exactly 21 64-bit slots");
     ok &= Require(kernelImpl,
-        "TileXRMoonEp::MOONEP_COMBINE_V2_BIDIRECTIONAL_RING;",
-        "Combine V2 R1 default schedule is not the existing ring");
+        "TileXRMoonEp::MOONEP_COMBINE_V2_SERVER_PAIR_PARITY;",
+        "Combine V2 R5 default schedule is not parity Server-Pair");
     ok &= Require(kernelImpl,
         "peer == TileXRMoonEp::kMoonEpCombineV2InvalidPeer",
         "Combine V2 invalid bidirectional peer does not use Self processing");
@@ -669,8 +793,8 @@ int main()
     ok &= Reject(process, "step < stepCount_ && succeeded",
         "Combine V2 step loop can diverge before a whole-launch barrier");
     ok &= RequireBefore(process, "WaitStepGrant(step)",
-        "RunGlobalBarrier(boundaryId",
-        "Combine V2 round barrier runs before Legacy Grant admission");
+        "MoonEpCombineV2PhaseBarrierAfterRound(",
+        "Combine V2 Legacy Grant wait does not precede phase handling");
     ok &= Reject(kernelImpl, "extern \"C\" __global__",
         "Combine V2 implementation header contains the operator entry");
     ok &= Reject(kernelImpl, "<<<",
@@ -783,6 +907,7 @@ int main()
         root + "/src/moonep/combine_v2/host/combine_v2_launch.cpp",
         root + "/src/moonep/combine_v2/host/tilexr_moonep_combine_v2.cpp",
         root + "/src/moonep/combine_v2/kernels/tilexr_moonep_combine_v2_kernel.h",
+        root + "/src/moonep/combine_v2/kernels/tilexr_moonep_combine_v2_group_kernel.h",
         root + "/src/moonep/combine_v2/kernels/tilexr_moonep_combine_v2_kernel.cpp",
         root + "/tools/moonep/run_combine_v2_perf_cluster.sh",
         root + "/tools/moonep/run_combine_v2_perf_multihost.sh",

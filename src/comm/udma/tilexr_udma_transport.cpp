@@ -143,6 +143,9 @@ struct TileXRUDMATransport::RegisteredRegionState {
     std::map<uint32_t, RegMemResultInfo> localRegistrations;
     std::map<std::tuple<int, uint32_t, uint32_t>, void*> remoteMemHandles;
     std::map<uint32_t, UDMAMemInfo> localMemInfoByEid;
+    std::map<uint32_t, RegMemResultInfo> fullmeshLocalRegistrations;
+    std::map<std::tuple<int, uint32_t, uint32_t>, void*>
+        fullmeshRemoteMemHandles;
 };
 
 struct TileXRUDMATransport::RegistrationState {
@@ -271,6 +274,8 @@ int TileXRUDMATransport::InitFullmeshDomain()
         options_.rankSize % options_.localRankSize != 0) {
         return TILEXR_ERROR_PARA_CHECK_FAIL;
     }
+    const std::map<uint32_t, void*> previousContexts = ctxHandleByEid_;
+    const std::map<uint32_t, void*> previousTokens = tokenHandleByEid_;
 
     int ret = BuildFullmeshRoutes();
     if (ret == TILEXR_SUCCESS) {
@@ -286,13 +291,32 @@ int TileXRUDMATransport::InitFullmeshDomain()
         ret = AgreeInitStatus(RefreshFullmeshInfo());
     }
     if (ret != TILEXR_SUCCESS) {
-        (void)CleanupFullmeshQueues();
-        (void)FreeDeviceInfo(baseFullmeshInfoDev_);
+        int queueCleanupRet = CleanupFullmeshQueues();
+        if (queueCleanupRet != TILEXR_SUCCESS) {
+            queueCleanupRet = CleanupFullmeshQueues();
+        }
+        const int infoCleanupRet = FreeDeviceInfo(baseFullmeshInfoDev_);
+        int contextCleanupRet = RollbackAddedContexts(
+            previousContexts, previousTokens);
+        if (contextCleanupRet != TILEXR_SUCCESS &&
+            queueCleanupRet == TILEXR_SUCCESS) {
+            contextCleanupRet = RollbackAddedContexts(
+                previousContexts, previousTokens);
+        }
         fullmeshInfoDev_ = nullptr;
         fullmeshInfoSize_ = 0U;
         fullmeshLocalRouteByPeer_.clear();
         fullmeshRemoteRouteByPeer_.clear();
         fullmeshValidPeerMask_ = 0U;
+        if (queueCleanupRet != TILEXR_SUCCESS) {
+            return queueCleanupRet;
+        }
+        if (infoCleanupRet != TILEXR_SUCCESS) {
+            return infoCleanupRet;
+        }
+        if (contextCleanupRet != TILEXR_SUCCESS) {
+            return contextCleanupRet;
+        }
         return ret;
     }
     fullmeshAvailable_ = true;
@@ -1975,10 +1999,19 @@ int TileXRUDMATransport::BuildRegistrationUDMAInfo(RegistrationState& registrati
 }
 
 int TileXRUDMATransport::RegisterMemoryOnContexts(
-    RegistrationState& registration, bool includeFullmesh)
+    RegistrationState& registration, bool fullmeshDomain)
 {
     std::map<uint32_t, bool> requiredEids;
-    if (explicitConfig_) {
+    if (fullmeshDomain) {
+        if (!fullmeshAvailable_) {
+            return TILEXR_ERROR_NOT_SUPPORT;
+        }
+        for (uint32_t eidIndex : fullmeshLocalRouteByPeer_) {
+            if (eidIndex != UINT32_MAX) {
+                requiredEids[eidIndex] = true;
+            }
+        }
+    } else if (explicitConfig_) {
         for (uint32_t eidIndex : localRouteByPeerQp_) {
             if (eidIndex != UINT32_MAX) {
                 requiredEids[eidIndex] = true;
@@ -1989,16 +2022,11 @@ int TileXRUDMATransport::RegisterMemoryOnContexts(
             requiredEids[route.second] = true;
         }
     }
-    if (includeFullmesh && fullmeshAvailable_) {
-        for (uint32_t eidIndex : fullmeshLocalRouteByPeer_) {
-            if (eidIndex != UINT32_MAX) {
-                requiredEids[eidIndex] = true;
-            }
-        }
-    }
 
     for (size_t regionIndex = 0; regionIndex < registration.regions.size(); ++regionIndex) {
         auto& region = registration.regions[regionIndex];
+        auto& localRegistrations = fullmeshDomain ?
+            region.fullmeshLocalRegistrations : region.localRegistrations;
         for (const auto& required : requiredEids) {
             const uint32_t eidIndex = required.first;
             const auto ctxIt = ctxHandleByEid_.find(eidIndex);
@@ -2046,8 +2074,10 @@ int TileXRUDMATransport::RegisterMemoryOnContexts(
             result.tokenIdHandle = tokenHandle;
             result.cacheable = 0;
             result.access = MEM_SEG_ACCESS_DEFAULT;
-            region.localRegistrations[eidIndex] = result;
-            region.localMemInfoByEid[eidIndex] = BuildMemInfo(result);
+            localRegistrations[eidIndex] = result;
+            if (!fullmeshDomain) {
+                region.localMemInfoByEid[eidIndex] = BuildMemInfo(result);
+            }
         }
     }
     return registration.regions.empty() ? TILEXR_ERROR_NOT_FOUND : TILEXR_SUCCESS;
@@ -2217,7 +2247,7 @@ int TileXRUDMATransport::PrepareFullmeshRegistration(
         return TILEXR_ERROR_NOT_SUPPORT;
     }
     auto& region = registration.regions[0];
-    if (region.localRegistrations.empty()) {
+    if (region.fullmeshLocalRegistrations.empty()) {
         return TILEXR_ERROR_NOT_INITIALIZED;
     }
 
@@ -2227,7 +2257,7 @@ int TileXRUDMATransport::PrepareFullmeshRegistration(
         RegMemResultInfo mr;
     };
     const uint32_t localCount = static_cast<uint32_t>(
-        region.localRegistrations.size());
+        region.fullmeshLocalRegistrations.size());
     std::vector<uint32_t> allCounts(options_.rankSize);
     int ret = options_.exchange->AllGather(
         &localCount, 1, allCounts.data());
@@ -2241,7 +2271,7 @@ int TileXRUDMATransport::PrepareFullmeshRegistration(
     }
     std::vector<ExchangedMrInfo> local(maxCount);
     uint32_t index = 0U;
-    for (const auto& entry : region.localRegistrations) {
+    for (const auto& entry : region.fullmeshLocalRegistrations) {
         local[index].eidIndex = entry.first;
         local[index].valid = 1U;
         local[index].mr = entry.second;
@@ -2286,7 +2316,7 @@ int TileXRUDMATransport::PrepareFullmeshRegistration(
             return TILEXR_ERROR_NOT_INITIALIZED;
         }
         const auto importKey = std::make_tuple(peer, localEid, remoteEid);
-        if (region.remoteMemHandles.count(importKey) == 0U) {
+        if (region.fullmeshRemoteMemHandles.count(importKey) == 0U) {
             MrImportInfoT importInfo {};
             importInfo.in.key = remote->mr.key;
             importInfo.in.ub.tokenValue = remote->mr.tokenValue;
@@ -2302,7 +2332,7 @@ int TileXRUDMATransport::PrepareFullmeshRegistration(
                                   << ", ret " << ret;
                 return TILEXR_ERROR_INTERNAL;
             }
-            region.remoteMemHandles[importKey] = remoteHandle;
+            region.fullmeshRemoteMemHandles[importKey] = remoteHandle;
         }
         const PerPeerQpState* state = GetFullmeshQpState(peer);
         if (state == nullptr || state->remoteQpHandle == nullptr) {
@@ -2349,8 +2379,8 @@ int TileXRUDMATransport::BuildFullmeshRegistrationUDMAInfo(
         }
         const uint32_t localEid = fullmeshLocalRouteByPeer_[peer];
         const auto registrationIt =
-            region.localRegistrations.find(localEid);
-        if (registrationIt == region.localRegistrations.end()) {
+            region.fullmeshLocalRegistrations.find(localEid);
+        if (registrationIt == region.fullmeshLocalRegistrations.end()) {
             return TILEXR_ERROR_NOT_INITIALIZED;
         }
         const uint32_t slot = static_cast<uint32_t>(
@@ -2426,8 +2456,7 @@ int TileXRUDMATransport::PrepareRegistration(const TileXRUDMAProfileDesc& desc,
         }
         registration->qpBindings.assign(desc.qpBindings,
             desc.qpBindings + desc.qpBindingCount);
-        localStatus = RegisterMemoryOnContexts(
-            *registration, prepareFullmesh);
+        localStatus = RegisterMemoryOnContexts(*registration, false);
     }
     int agreedStatus = AgreeRegistrationStatus(localStatus);
     if (agreedStatus != TILEXR_SUCCESS) {
@@ -2453,20 +2482,33 @@ int TileXRUDMATransport::PrepareRegistration(const TileXRUDMAProfileDesc& desc,
         return TILEXR_SUCCESS;
     }
 
-    localStatus = PrepareFullmeshRegistration(*registration);
+    localStatus = RegisterMemoryOnContexts(*registration, true);
     agreedStatus = AgreeRegistrationStatus(localStatus);
+    if (agreedStatus == TILEXR_SUCCESS) {
+        localStatus = PrepareFullmeshRegistration(*registration);
+        agreedStatus = AgreeRegistrationStatus(localStatus);
+    }
     if (agreedStatus == TILEXR_SUCCESS) {
         localStatus = BuildFullmeshRegistrationUDMAInfo(*registration);
         agreedStatus = AgreeRegistrationStatus(localStatus);
     }
     if (agreedStatus != TILEXR_SUCCESS) {
-        const int freeRet = FreeDeviceInfo(registration->fullmeshInfoDev);
-        registration->fullmeshMemoryImage.clear();
-        registration->fullmeshInfoSize = 0U;
-        registration->fullmeshReady = false;
+        const int fullmeshStatus = agreedStatus;
+        const int localCleanupStatus =
+            CleanupFullmeshRegistration(*registration);
+        const int cleanupStatus =
+            AgreeRegistrationStatus(localCleanupStatus);
+        if (cleanupStatus != TILEXR_SUCCESS) {
+            const int candidateCleanupStatus =
+                CleanupRegistrationPtr(registration);
+            const int agreedCandidateCleanupStatus =
+                AgreeRegistrationStatus(candidateCleanupStatus);
+            return agreedCandidateCleanupStatus == TILEXR_SUCCESS ?
+                cleanupStatus : agreedCandidateCleanupStatus;
+        }
         TILEXR_LOG(WARN) << "TileXR Fullmesh registration unavailable for this generation: "
-                         << agreedStatus;
-        return freeRet == TILEXR_SUCCESS ? TILEXR_SUCCESS : freeRet;
+                         << fullmeshStatus;
+        return TILEXR_SUCCESS;
     }
     return TILEXR_SUCCESS;
 }
@@ -2588,11 +2630,14 @@ int TileXRUDMATransport::CleanupLocalRegistrations(std::map<uint32_t, RegMemResu
     return firstError;
 }
 
-int TileXRUDMATransport::CleanupRemoteImports(RegistrationState& registration)
+int TileXRUDMATransport::CleanupRemoteImports(
+    RegistrationState& registration, bool fullmeshDomain)
 {
     int firstError = TILEXR_SUCCESS;
     for (size_t regionIndex = 0; regionIndex < registration.regions.size(); ++regionIndex) {
-        auto& handles = registration.regions[regionIndex].remoteMemHandles;
+        auto& region = registration.regions[regionIndex];
+        auto& handles = fullmeshDomain ?
+            region.fullmeshRemoteMemHandles : region.remoteMemHandles;
         for (auto it = handles.begin(); it != handles.end();) {
             if (it->second == nullptr) {
                 it = handles.erase(it);
@@ -2604,6 +2649,7 @@ int TileXRUDMATransport::CleanupRemoteImports(RegistrationState& registration)
             if (ctxIt == ctxHandleByEid_.end() || ctxIt->second == nullptr) {
                 TILEXR_LOG(ERROR) << "Cannot unimport UDMA remote memory for region "
                                   << regionIndex << ", peer " << peer
+                                  << ", Fullmesh " << fullmeshDomain
                                   << " without local eid context " << localEid;
                 if (firstError == TILEXR_SUCCESS) {
                     firstError = TILEXR_ERROR_INTERNAL;
@@ -2614,7 +2660,9 @@ int TileXRUDMATransport::CleanupRemoteImports(RegistrationState& registration)
             const int ret = loader_.RaCtxRmemUnimport(ctxIt->second, it->second);
             if (ret != 0) {
                 TILEXR_LOG(ERROR) << "RaCtxRmemUnimport failed for region " << regionIndex
-                                  << ", peer " << peer << ", ret " << ret;
+                                  << ", peer " << peer
+                                  << ", Fullmesh " << fullmeshDomain
+                                  << ", ret " << ret;
                 if (firstError == TILEXR_SUCCESS) {
                     firstError = TILEXR_ERROR_INTERNAL;
                 }
@@ -2642,10 +2690,43 @@ int TileXRUDMATransport::FreeDeviceInfo(GM_ADDR& infoDev) const
     return TILEXR_SUCCESS;
 }
 
+int TileXRUDMATransport::CleanupFullmeshRegistration(
+    RegistrationState& registration)
+{
+    registration.fullmeshReady = false;
+    int firstError = CleanupRemoteImports(registration, true);
+    for (auto& region : registration.regions) {
+        const int localRet = CleanupLocalRegistrations(
+            region.fullmeshLocalRegistrations);
+        if (firstError == TILEXR_SUCCESS && localRet != TILEXR_SUCCESS) {
+            firstError = localRet;
+        }
+    }
+    const int infoRet = FreeDeviceInfo(registration.fullmeshInfoDev);
+    if (firstError == TILEXR_SUCCESS && infoRet != TILEXR_SUCCESS) {
+        firstError = infoRet;
+    }
+    const bool resourcesClean = std::all_of(
+        registration.regions.begin(), registration.regions.end(),
+        [](const RegisteredRegionState& region) {
+            return region.fullmeshRemoteMemHandles.empty() &&
+                region.fullmeshLocalRegistrations.empty();
+        });
+    if (resourcesClean && registration.fullmeshInfoDev == nullptr) {
+        registration.fullmeshMemoryImage.clear();
+        registration.fullmeshInfoSize = 0U;
+    }
+    return firstError;
+}
+
 int TileXRUDMATransport::CleanupRegistration(RegistrationState& registration)
 {
     registration.cleanupPending = true;
-    int firstError = CleanupRemoteImports(registration);
+    int firstError = CleanupFullmeshRegistration(registration);
+    const int remoteRet = CleanupRemoteImports(registration, false);
+    if (firstError == TILEXR_SUCCESS && remoteRet != TILEXR_SUCCESS) {
+        firstError = remoteRet;
+    }
     for (auto& region : registration.regions) {
         const int localRet = CleanupLocalRegistrations(region.localRegistrations);
         if (firstError == TILEXR_SUCCESS && localRet != TILEXR_SUCCESS) {
@@ -2656,13 +2737,12 @@ int TileXRUDMATransport::CleanupRegistration(RegistrationState& registration)
     if (firstError == TILEXR_SUCCESS && infoRet != TILEXR_SUCCESS) {
         firstError = infoRet;
     }
-    const int fullmeshInfoRet = FreeDeviceInfo(registration.fullmeshInfoDev);
-    if (firstError == TILEXR_SUCCESS && fullmeshInfoRet != TILEXR_SUCCESS) {
-        firstError = fullmeshInfoRet;
-    }
     const bool resourcesClean = std::all_of(registration.regions.begin(), registration.regions.end(),
         [](const RegisteredRegionState& region) {
-            return region.remoteMemHandles.empty() && region.localRegistrations.empty();
+            return region.remoteMemHandles.empty() &&
+                region.localRegistrations.empty() &&
+                region.fullmeshRemoteMemHandles.empty() &&
+                region.fullmeshLocalRegistrations.empty();
         });
     if (resourcesClean && registration.infoDev == nullptr &&
         registration.fullmeshInfoDev == nullptr) {
@@ -3023,6 +3103,74 @@ int TileXRUDMATransport::CleanupFullmeshQueues()
                 return state == nullptr;
             })) {
         fullmeshQpStates_.clear();
+    }
+    return firstError;
+}
+
+int TileXRUDMATransport::RollbackAddedContexts(
+    const std::map<uint32_t, void*>& previousContexts,
+    const std::map<uint32_t, void*>& previousTokens)
+{
+    const auto contextInUse = [this](uint32_t eidIndex) {
+        return std::any_of(fullmeshQpStates_.begin(),
+            fullmeshQpStates_.end(),
+            [eidIndex](const std::unique_ptr<PerPeerQpState>& state) {
+                return state != nullptr && state->localEid == eidIndex;
+            });
+    };
+    int firstError = TILEXR_SUCCESS;
+    for (auto it = tokenHandleByEid_.begin();
+        it != tokenHandleByEid_.end();) {
+        const uint32_t eidIndex = it->first;
+        if (previousTokens.count(eidIndex) != 0U) {
+            ++it;
+            continue;
+        }
+        const auto ctxIt = ctxHandleByEid_.find(eidIndex);
+        if (contextInUse(eidIndex) || ctxIt == ctxHandleByEid_.end() ||
+            ctxIt->second == nullptr || it->second == nullptr) {
+            if (firstError == TILEXR_SUCCESS) {
+                firstError = TILEXR_ERROR_INTERNAL;
+            }
+            ++it;
+            continue;
+        }
+        const int ret = loader_.RaCtxTokenIdFree(
+            ctxIt->second, it->second);
+        if (ret != 0) {
+            if (firstError == TILEXR_SUCCESS) {
+                firstError = TILEXR_ERROR_INTERNAL;
+            }
+            ++it;
+            continue;
+        }
+        it = tokenHandleByEid_.erase(it);
+    }
+
+    for (auto it = ctxHandleByEid_.begin(); it != ctxHandleByEid_.end();) {
+        const uint32_t eidIndex = it->first;
+        if (previousContexts.count(eidIndex) != 0U) {
+            ++it;
+            continue;
+        }
+        if (contextInUse(eidIndex) ||
+            tokenHandleByEid_.count(eidIndex) != 0U ||
+            it->second == nullptr) {
+            if (firstError == TILEXR_SUCCESS) {
+                firstError = TILEXR_ERROR_INTERNAL;
+            }
+            ++it;
+            continue;
+        }
+        const int ret = loader_.RaCtxDeinit(it->second);
+        if (ret != 0) {
+            if (firstError == TILEXR_SUCCESS) {
+                firstError = TILEXR_ERROR_INTERNAL;
+            }
+            ++it;
+            continue;
+        }
+        it = ctxHandleByEid_.erase(it);
     }
     return firstError;
 }
