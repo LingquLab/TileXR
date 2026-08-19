@@ -111,6 +111,9 @@ void ConfigureRankSize(int rankSize, int rank = 0)
     registry.regionCount = 1;
     const TileXRMoonEp::CombineV2Params params = ValidParams();
     for (int peer = 0; peer < rankSize; ++peer) {
+        commArgs.creditMems[peer] = reinterpret_cast<GM_ADDR>(
+            uintptr_t {0x700000000ULL} +
+            static_cast<uintptr_t>(peer) * TileXR::CREDIT_IPC_BYTES);
         registry.regions[peer].base =
             static_cast<GM_ADDR>(params.registeredWorkspace);
         registry.regions[peer].bytes = 4194304U;
@@ -182,6 +185,14 @@ void TestValidLaunch()
 void TestValidation()
 {
     TileXRMoonEp::CombineV2Params params = ValidParams();
+
+    Reset();
+    commArgs.creditMems[commArgs.rankSize - 1] = nullptr;
+    CheckStatus(TileXRMoonEp::TileXRMoonEpRunCombineV2(params),
+        TILEXR_MOONEP_ERROR_NOT_SUPPORTED,
+        "missing Combine Credit IPC mapping accepted");
+    Check(magicCallCount == 0U,
+        "missing Combine Credit IPC mapping consumed a magic");
 
     Reset();
     commArgs.extraFlag &= ~TileXR::ExtraFlag::UDMA_SHARED_QP;

@@ -105,6 +105,9 @@ int main()
     const std::string schedule = Read(root +
         "/src/moonep/common/moonep_combine_schedule.h");
 
+    const std::string legacyProcess = Section(legacyKernel,
+        "__aicore__ inline void MoonEpCombineV2::Process()",
+        "} // namespace");
     const std::string process = Section(groupKernel,
         "__aicore__ inline void MoonEpCombineV2Group::Process()",
         "} // namespace");
@@ -125,7 +128,7 @@ int main()
         "__aicore__ inline bool MoonEpCombineV2Group::SendClosStep(");
     const std::string inboundDone = Section(groupKernel,
         "__aicore__ inline bool MoonEpCombineV2Group::WaitSingleInboundDone(",
-        "__aicore__ inline void MoonEpCombineV2Group::InitializeCreditSignal(");
+        "__aicore__ inline bool MoonEpCombineV2Group::PublishNextCredit(");
     const std::string publishCredit = Section(groupKernel,
         "__aicore__ inline bool MoonEpCombineV2Group::PublishNextCredit(",
         "__aicore__ inline bool MoonEpCombineV2Group::WaitStepCredit(");
@@ -136,6 +139,14 @@ int main()
         "for (uint32_t step", "stageReady = BeginCollectiveStage(");
     const std::string fullmeshStep = Section(stepLoop,
         "} else if (fullmeshStep) {", "} else {");
+    const std::string legacyPublishCredit = Section(legacyKernel,
+        "__aicore__ inline bool MoonEpCombineV2::PublishNextCredit(",
+        "__aicore__ inline bool MoonEpCombineV2::BuildPayloadWqes(");
+    const std::string legacyWaitCredit = Section(legacyKernel,
+        "__aicore__ inline bool MoonEpCombineV2::WaitStepCredit(",
+        "__aicore__ inline bool MoonEpCombineV2::PublishNextCredit(");
+    const std::string activeProtocolSource = legacyKernel + groupKernel +
+        schedule;
 
     bool ok = true;
     ok &= Require(rootCmake, "add_subdirectory(tests/moonep_combine_v2)",
@@ -182,11 +193,11 @@ int main()
         "Group implementation class is missing");
     ok &= Require(groupKernel, "args_->rankSize != 128",
         "Group implementation does not reject non-128P direct use");
-    ok &= Require(groupKernel, "(void)fullSyncReceiveOffset;",
+    ok &= Require(groupKernel, "(void)reservedSyncReceiveOffset;",
         "Group Init does not explicitly ignore the retired receive offset");
-    ok &= Require(groupKernel, "(void)fullSyncSourceOffset;",
+    ok &= Require(groupKernel, "(void)reservedSyncSourceOffset;",
         "Group Init does not explicitly ignore the retired source offset");
-    ok &= Require(groupKernel, "fullSyncBarrierBase_",
+    ok &= Require(groupKernel, "collectiveStatusBase_",
         "Group kernel dropped the card-local collective status workspace");
 
     ok &= Require(groupKernel,
@@ -213,8 +224,8 @@ int main()
         "Group kernel dropped final reduction support");
     ok &= Require(groupKernel, "__gm__ uint8_t *doneBase_",
         "Group kernel dropped future Done workspace state");
-    ok &= Require(groupKernel, "__gm__ uint8_t *grantBase_",
-        "Group kernel dropped future credit workspace state");
+    ok &= Reject(groupKernel, "__gm__ uint8_t *grantBase_",
+        "Group kernel retained the retired Grant workspace state");
     ok &= Require(groupKernel, "__gm__ uint8_t *controlSourceBase_",
         "Group kernel dropped future control source state");
     ok &= Require(groupKernel, "SyncFunc<HardEvent::S_MTE3>();",
@@ -230,12 +241,14 @@ int main()
         "Group send mapping helper is missing");
     ok &= Require(schedule, "MoonEpCombineV2GroupRecvSrcRank(",
         "Group receive mapping helper is missing");
-    ok &= Require(schedule, "struct alignas(64) MoonEpCombineV2GroupCreditSignal",
-        "Group Credit signal is missing");
-    ok &= Require(schedule,
-        "kMoonEpCombineV2GroupCreditWorkspaceBytes <=\n"
-        "        kMoonEpCombineV2LegacyGrantWorkspaceBytes",
-        "Group Credit is not bounded by the existing Grant workspace");
+    ok &= Require(schedule, "struct alignas(64) MoonEpCombineV2CreditSignal",
+        "Combine V2 Credit signal is missing");
+    ok &= Require(schedule, "kMoonEpCombineV2CreditBaseBytes",
+        "Combine V2 Credit IPC base is missing");
+    ok &= Require(schedule, "MoonEpCombineV2CreditReceiveOffset(",
+        "Combine V2 Credit IPC offset helper is missing");
+    ok &= Require(schedule, "MoonEpCombineV2ReceiveCore(",
+        "Combine V2 Credit receiver-core inverse is missing");
 
     ok &= RequireBefore(closStep, "WaitLaneCq(", "SubmitRemoteDone(peer, step)",
         "CLOS Done can be published before payload CQ completion");
@@ -257,14 +270,74 @@ int main()
         "Group Credit does not target the next step sender");
     ok &= Require(publishCredit, "MoonEpCombineV2GroupInnerIndex(rank_)",
         "Group Credit does not target the destination inner core");
-    ok &= Require(publishCredit, "SubmitClosControl(targetRank",
-        "Remote Group Credit is not published through CLOS");
-    ok &= Require(waitCredit, "signal->targetCore == core_",
-        "Group sender does not validate its single Credit target");
+    ok &= Require(publishCredit, "args_->creditMems[targetRank]",
+        "Group Credit publish does not use the target Credit IPC mapping");
+    ok &= Require(publishCredit,
+        "DataCopy(remoteCreditGlobal, creditLocal",
+        "Group Credit publish is not an MTE3 GM write");
+    ok &= Require(publishCredit, "SyncFunc<HardEvent::S_MTE3>();",
+        "Group Credit publish lacks scalar-to-MTE3 ordering");
+    ok &= Require(publishCredit, "SyncFunc<HardEvent::MTE3_S>();",
+        "Group Credit publish does not wait for MTE3 completion");
+    ok &= Require(waitCredit, "args_->creditMems[rank_]",
+        "Group Credit wait does not use the local Credit IPC mapping");
+    ok &= Require(waitCredit, "DataCopy(creditLocal, creditGlobal",
+        "Group Credit wait is not an MTE2 GM read");
+    ok &= Require(waitCredit, "SyncFunc<HardEvent::S_MTE2>();",
+        "Group Credit wait lacks scalar-to-MTE2 ordering");
+    ok &= Require(waitCredit, "SyncFunc<HardEvent::MTE2_S>();",
+        "Group Credit wait does not wait for MTE2 completion");
+    ok &= Require(waitCredit, "creditLocal.GetValue(4U)",
+        "Group sender does not validate its Credit target route");
+    ok &= Require(waitCredit,
+        "(static_cast<uint64_t>(core_) << 32U | rank_)",
+        "Group sender does not validate its rank/core Credit target");
     ok &= Require(waitCredit, "MOONEP_COMBINE_V2_CREDIT_TIMEOUT",
         "Group Credit wait is not bounded");
 
-    const char *retired[] = {
+    ok &= Require(legacyPublishCredit, "args_->creditMems[targetRank]",
+        "Legacy Credit publish does not use the target Credit IPC mapping");
+    ok &= Require(legacyPublishCredit,
+        "DataCopy(remoteCreditGlobal, creditLocal",
+        "Legacy Credit publish is not an MTE3 GM write");
+    ok &= Require(legacyPublishCredit, "SyncFunc<HardEvent::S_MTE3>();",
+        "Legacy Credit publish lacks scalar-to-MTE3 ordering");
+    ok &= Require(legacyPublishCredit, "SyncFunc<HardEvent::MTE3_S>();",
+        "Legacy Credit publish does not wait for MTE3 completion");
+    ok &= Require(legacyWaitCredit, "args_->creditMems[rank_]",
+        "Legacy Credit wait does not use the local Credit IPC mapping");
+    ok &= Require(legacyWaitCredit, "DataCopy(creditLocal, creditGlobal",
+        "Legacy Credit wait is not an MTE2 GM read");
+    ok &= Require(legacyWaitCredit, "SyncFunc<HardEvent::S_MTE2>();",
+        "Legacy Credit wait lacks scalar-to-MTE2 ordering");
+    ok &= Require(legacyWaitCredit, "SyncFunc<HardEvent::MTE2_S>();",
+        "Legacy Credit wait does not wait for MTE2 completion");
+    ok &= Require(legacyWaitCredit, "MOONEP_COMBINE_V2_CREDIT_TIMEOUT",
+        "Legacy Credit wait is not bounded");
+
+    const std::string creditSections = publishCredit + waitCredit +
+        legacyPublishCredit + legacyWaitCredit;
+    const char *forbiddenCreditTransport[] = {
+        "AppendControlWqe(",
+        "SubmitClosControl(",
+        "CopyIssueToSq(",
+        "PollCqOnce(",
+        "WaitLaneCq(",
+        "st_dev(",
+        "dbAddr",
+        "cqTarget",
+        "completionCount"
+    };
+    for (const char *symbol : forbiddenCreditTransport) {
+        if (!Reject(creditSections, symbol,
+                "Credit path retained a WQE, doorbell, or CQ dependency")) {
+            std::cerr << "forbidden Credit transport symbol: " << symbol
+                      << '\n';
+            ok = false;
+        }
+    }
+
+    const char *retiredProtocol[] = {
         "kEnableFullSync",
         "MoonEpCombineV2FullSyncBuildContext",
         "MoonEpCombineV2BuildFullSyncWqesVf",
@@ -274,22 +347,31 @@ int main()
         "SubmitSelfGrant(",
         "ServerGrant",
         "RunServerGrantAdmission(",
-        "WaitInboundDone(",
-        "sourcesPerCore_",
-        "SubmitPair(",
-        "SendRemoteStep(",
-        "MOONEP_COMBINE_V2_SERVER_PAIR_PARITY",
-        "kCombineV2ScheduleMode",
         "MoonEpCombineV2PhaseBarrierAfterRound(",
         "fullSyncReceiveBase_",
         "fullSyncSourceBase_",
         "fullSyncReceiveOffset_",
         "fullSyncStartCycles_"
     };
-    for (const char *symbol : retired) {
-        if (!Reject(groupKernel, symbol,
-                "Group kernel retained a retired protocol symbol")) {
+    for (const char *symbol : retiredProtocol) {
+        if (!Reject(activeProtocolSource, symbol,
+                "Combine V2 retained a retired protocol symbol")) {
             std::cerr << "retired symbol: " << symbol << '\n';
+            ok = false;
+        }
+    }
+    const char *retiredGroupSymbols[] = {
+        "WaitInboundDone(",
+        "sourcesPerCore_",
+        "SubmitPair(",
+        "SendRemoteStep(",
+        "MOONEP_COMBINE_V2_SERVER_PAIR_PARITY",
+        "kCombineV2ScheduleMode"
+    };
+    for (const char *symbol : retiredGroupSymbols) {
+        if (!Reject(groupKernel, symbol,
+                "Group kernel retained an obsolete implementation symbol")) {
+            std::cerr << "retired Group symbol: " << symbol << '\n';
             ok = false;
         }
     }
@@ -311,6 +393,18 @@ int main()
         "Group process does not wait for one pre-step Credit");
     ok &= Require(process, "PublishNextCredit(step)",
         "Group process does not publish one next-step Credit");
+    ok &= RequireBefore(stepLoop, "WaitStepCredit(step)",
+        "WaitSingleInboundDone(step, source)",
+        "Group process waits for inbound Done before pre-step Credit");
+    ok &= RequireBefore(stepLoop, "WaitSingleInboundDone(step, source)",
+        "PublishNextCredit(step)",
+        "Group process publishes Credit before inbound Done");
+    ok &= RequireBefore(legacyProcess, "WaitStepCredit(step)",
+        "WaitInboundDone(step)",
+        "Legacy process waits for inbound Done before pre-step Credit");
+    ok &= RequireBefore(legacyProcess, "WaitInboundDone(step)",
+        "PublishNextCredit(step)",
+        "Legacy process publishes Credit before inbound Done");
     ok &= RequireBefore(fullmeshStep,
         "localSucceeded = WaitFullmeshCq(step, peer);",
         "MOONEP_COMBINE_V2_DIAG_FULLMESH_CQ_SUCCESS",
@@ -333,6 +427,14 @@ int main()
     ok &= Require(launch,
         "static_assert(sizeof(CombineV2KernelArgs) == 21U * sizeof(uint64_t)",
         "Combine V2 launch ABI no longer has 21 64-bit slots");
+    ok &= Count(launch, "        0U,") >= 3U;
+    if (Count(launch, "        0U,") < 3U) {
+        std::cerr << "Combine V2 launch does not zero all retired ABI slots\n";
+    }
+    ok &= Require(launch, "context.layout.collectiveStatusOffset",
+        "Combine V2 launch dropped the card-local collective status offset");
+    ok &= Require(host, "commArgs.creditMems[peer] == nullptr",
+        "Combine V2 Host does not fail fast on a missing Credit mapping");
     ok &= Reject(hostHeader, "bool fullSync",
         "Combine V2 launch context exposes a retired full-sync switch");
     ok &= Require(registration, "kCombineV2KernelSignature",

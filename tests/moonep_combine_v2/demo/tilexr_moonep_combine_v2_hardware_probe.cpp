@@ -47,6 +47,8 @@ const char *const kProfileMetricNames[
     "remote_descriptor_us",
     "remote_wqe_build_us",
     "remote_submit_us",
+    "credit_wait_us",
+    "credit_publish_us",
 };
 
 struct HostPort {
@@ -83,8 +85,6 @@ struct ProfileSample {
     int64_t fullmeshWqeBuildEnd = 0;
     int64_t fullmeshSubmitEnd = 0;
     int64_t fullmeshCqSuccess = 0;
-    int64_t closGrantSubmit = 0;
-    int64_t closGrantCqSuccess = 0;
 };
 
 enum class OutputCheckResult {
@@ -701,19 +701,13 @@ void CaptureProfileSamples(int rank, int world, int iteration,
             MOONEP_COMBINE_V2_DIAG_FULLMESH_SUBMIT_END];
         sample.fullmeshCqSuccess = record.timePoint[TileXRMoonEp::
             MOONEP_COMBINE_V2_DIAG_FULLMESH_CQ_SUCCESS];
-        sample.closGrantSubmit = record.timePoint[TileXRMoonEp::
-            MOONEP_COMBINE_V2_DIAG_FULLMESH_GRANT_SUBMIT];
-        sample.closGrantCqSuccess = record.timePoint[TileXRMoonEp::
-            MOONEP_COMBINE_V2_DIAG_FULLMESH_GRANT_CQ_SUCCESS];
         const bool routeValid =
             (record.reserved &
                 TileXRMoonEp::kMoonEpCombineV2ProfileRouteValid) != 0U;
         if (!routeValid) {
             if (record.reserved != 0U || sample.fullmeshWqeBuildEnd != 0 ||
                 sample.fullmeshSubmitEnd != 0 ||
-                sample.fullmeshCqSuccess != 0 ||
-                sample.closGrantSubmit != 0 ||
-                sample.closGrantCqSuccess != 0) {
+                sample.fullmeshCqSuccess != 0) {
                 Abort(rank, "non-Fullmesh profile validation", 1);
             }
         } else {
@@ -750,12 +744,6 @@ void CaptureProfileSamples(int rank, int world, int iteration,
                 TileXRMoonEp::MoonEpCombineV2PackFullmeshProfileRoute(
                     sample.fullmeshStep, sample.fullmeshPeer,
                     sample.fullmeshSuccessor, sample.fullmeshLogicalQp);
-            const bool legacyGrantProfileAbsent =
-                sample.closGrantSubmit == 0 &&
-                sample.closGrantCqSuccess == 0;
-            const bool legacyGrantProfileValid =
-                sample.closGrantSubmit > sample.fullmeshCqSuccess &&
-                sample.closGrantCqSuccess > sample.closGrantSubmit;
             if (transport != TileXRMoonEp::
                     MOONEP_COMBINE_V2_PROFILE_TRANSPORT_FULLMESH ||
                 record.reserved != expectedRoute ||
@@ -773,8 +761,7 @@ void CaptureProfileSamples(int rank, int world, int iteration,
                         sample.fullmeshPeer, localRankSize) ||
                 sample.fullmeshWqeBuildEnd <= 0 ||
                 sample.fullmeshWqeBuildEnd >= sample.fullmeshSubmitEnd ||
-                sample.fullmeshSubmitEnd >= sample.fullmeshCqSuccess ||
-                (!legacyGrantProfileAbsent && !legacyGrantProfileValid)) {
+                sample.fullmeshSubmitEnd >= sample.fullmeshCqSuccess) {
                 Abort(rank, "Fullmesh profile validation", 1);
             }
         }
@@ -1051,10 +1038,7 @@ int main(int argc, char **argv)
                           static_cast<int64_t>(sample.fullmeshLogicalQp) : -1)
                       << " fm_wqe_build_end=" << sample.fullmeshWqeBuildEnd
                       << " fm_submit_end=" << sample.fullmeshSubmitEnd
-                      << " fm_cq_success=" << sample.fullmeshCqSuccess
-                      << " clos_grant_submit=" << sample.closGrantSubmit
-                      << " clos_grant_cq_success="
-                      << sample.closGrantCqSuccess;
+                      << " fm_cq_success=" << sample.fullmeshCqSuccess;
             for (uint32_t point = 0U;
                 point < TileXRMoonEp::kMoonEpCombineV2ProfileTimePointCount;
                 ++point) {

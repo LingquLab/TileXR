@@ -4,6 +4,8 @@
 #include <cstdint>
 #include <limits>
 
+#include "comm_args.h"
+
 #if defined(__CCE__) && defined(__CCE_IS_AICORE__)
 #define TILEXR_MOONEP_COMBINE_V2_INLINE \
     __attribute__((always_inline)) inline __aicore__
@@ -18,8 +20,6 @@ constexpr uint32_t kMoonEpCombineV2GroupSize = 8U;
 constexpr uint32_t kMoonEpCombineV2GroupCount = 16U;
 constexpr uint32_t kMoonEpCombineV2GroupsPerHalf = 8U;
 constexpr uint32_t kMoonEpCombineV2StepCount = 8U;
-constexpr uint32_t kMoonEpCombineV2GrantStepCount =
-    kMoonEpCombineV2StepCount;
 constexpr uint32_t kMoonEpCombineV2CoreCount = 16U;
 constexpr uint32_t kMoonEpCombineV2LaneCount = 2U;
 constexpr uint32_t kMoonEpCombineV2QpCount = 32U;
@@ -35,12 +35,18 @@ constexpr uint32_t kMoonEpCombineV2TwoPortRows = 32U;
 constexpr uint32_t kMoonEpCombineV2SelectionChunkRows = 8192U;
 constexpr uint32_t kMoonEpCombineV2MaxOutstanding = 16384U;
 constexpr uint32_t kMoonEpCombineV2MteBlockBytes = 32U;
-constexpr uint32_t kMoonEpCombineV2FullSyncSignalBytes = 64U;
-constexpr uint32_t kMoonEpCombineV2FullSyncSlotBytes = 64U;
-constexpr uint32_t kMoonEpCombineV2FullSyncGenerationSlotCount = 2U;
-constexpr uint32_t kMoonEpCombineV2FullSyncMaxPeersPerCore =
-    kMoonEpCombineV2StepCount;
+constexpr uint32_t kMoonEpCombineV2CreditTransitionCount =
+    kMoonEpCombineV2StepCount - 1U;
+constexpr uint64_t kMoonEpCombineV2CreditSignalBytes =
+    static_cast<uint64_t>(TileXR::COMBINE_CREDIT_IPC_SIGNAL_BYTES);
+constexpr uint64_t kMoonEpCombineV2CreditPlaneBytes =
+    static_cast<uint64_t>(TileXR::COMBINE_CREDIT_IPC_PLANE_BYTES);
+constexpr uint64_t kMoonEpCombineV2CreditBytes =
+    static_cast<uint64_t>(TileXR::COMBINE_CREDIT_IPC_BYTES);
+constexpr uint64_t kMoonEpCombineV2CreditBaseBytes =
+    static_cast<uint64_t>(TileXR::COMBINE_CREDIT_IPC_BASE);
 constexpr uint32_t kMoonEpCombineV2CollectiveStatusSlotCount = 16U;
+constexpr uint32_t kMoonEpCombineV2CollectiveStatusSlotBytes = 64U;
 constexpr int64_t kMoonEpCombineV2SmallBs = 8;
 constexpr int64_t kMoonEpCombineV2SmallSlots = 128;
 constexpr int64_t kMoonEpCombineV2TargetBs = 8192;
@@ -48,56 +54,8 @@ constexpr int64_t kMoonEpCombineV2TargetH = 3584;
 constexpr int64_t kMoonEpCombineV2TargetTopK = 16;
 constexpr int64_t kMoonEpCombineV2TargetSlots = 131072;
 constexpr uint64_t kMoonEpCombineV2TokenStrideBytes = 64U;
-constexpr uint64_t kMoonEpCombineV2GrantSlotBytes = 512U;
-constexpr uint64_t kMoonEpCombineV2GrantReceiveOffsetBytes = 0U;
-constexpr uint64_t kMoonEpCombineV2GrantSourceOffsetBytes = 64U;
-constexpr uint32_t kMoonEpCombineV2ServerGrantSourceCardCount = 4U;
-constexpr uint32_t kMoonEpCombineV2ServerGrantSignalCount =
-    kMoonEpCombineV2ServerGrantSourceCardCount * kMoonEpCombineV2CoreCount;
-constexpr uint32_t kMoonEpCombineV2ServerGrantSignalsPerCore =
-    kMoonEpCombineV2ServerGrantSignalCount / kMoonEpCombineV2CoreCount;
-constexpr uint32_t kMoonEpCombineV2ServerGrantRoundCount =
-    kMoonEpCombineV2StepCount;
-constexpr uint64_t kMoonEpCombineV2ServerGrantSignalBytes = 64U;
-constexpr uint64_t kMoonEpCombineV2ServerGrantReceiveOffsetBytes = 0U;
-constexpr uint64_t kMoonEpCombineV2ServerGrantReceiveBytes =
-    static_cast<uint64_t>(kMoonEpCombineV2EpochCount) *
-    kMoonEpCombineV2ServerGrantRoundCount *
-    kMoonEpCombineV2ServerGrantSignalCount *
-    kMoonEpCombineV2ServerGrantSignalBytes;
-constexpr uint64_t kMoonEpCombineV2ServerGrantSourceOffsetBytes =
-    kMoonEpCombineV2ServerGrantReceiveBytes;
-constexpr uint64_t kMoonEpCombineV2ServerGrantSourceBytes =
-    kMoonEpCombineV2ServerGrantReceiveBytes;
-constexpr uint64_t kMoonEpCombineV2ServerGrantWorkspaceBytes =
-    kMoonEpCombineV2ServerGrantReceiveBytes +
-    kMoonEpCombineV2ServerGrantSourceBytes;
-constexpr uint64_t kMoonEpCombineV2LegacyGrantWorkspaceBytes =
-    static_cast<uint64_t>(kMoonEpCombineV2EpochCount) *
-    kMoonEpCombineV2CoreCount * kMoonEpCombineV2LaneCount *
-    kMoonEpCombineV2GrantStepCount * kMoonEpCombineV2GrantSlotBytes;
-constexpr uint32_t kMoonEpCombineV2GroupCreditTransitionCount =
-    kMoonEpCombineV2StepCount - 1U;
-constexpr uint64_t kMoonEpCombineV2GroupCreditSignalBytes = 64U;
-constexpr uint64_t kMoonEpCombineV2GroupCreditSignalCount =
-    static_cast<uint64_t>(kMoonEpCombineV2EpochCount) *
-    kMoonEpCombineV2GroupCreditTransitionCount *
-    kMoonEpCombineV2CoreCount;
-constexpr uint64_t kMoonEpCombineV2GroupCreditReceiveOffsetBytes = 0U;
-constexpr uint64_t kMoonEpCombineV2GroupCreditReceiveBytes =
-    kMoonEpCombineV2GroupCreditSignalCount *
-    kMoonEpCombineV2GroupCreditSignalBytes;
-constexpr uint64_t kMoonEpCombineV2GroupCreditSourceOffsetBytes =
-    kMoonEpCombineV2GroupCreditReceiveBytes;
-constexpr uint64_t kMoonEpCombineV2GroupCreditSourceBytes =
-    kMoonEpCombineV2GroupCreditReceiveBytes;
-constexpr uint64_t kMoonEpCombineV2GroupCreditWorkspaceBytes =
-    kMoonEpCombineV2GroupCreditReceiveBytes +
-    kMoonEpCombineV2GroupCreditSourceBytes;
 constexpr uint32_t kMoonEpCombineV2FailureMarker = 0x47505632U;
-constexpr uint32_t kMoonEpCombineV2FullSyncMarker = 0x4653594EU; // FSYN
-constexpr uint32_t kMoonEpCombineV2ServerGrantMarker = 0x53475254U; // SGRT
-constexpr uint32_t kMoonEpCombineV2GroupCreditMarker = 0x43524454U; // CRDT
+constexpr uint32_t kMoonEpCombineV2CreditMarker = 0x43524454U; // CRDT
 constexpr uint32_t kMoonEpCombineV2CollectiveStatusMarker =
     0x43535453U; // CSTS
 constexpr uint64_t kMoonEpCombineV2MaxMagic =
@@ -125,27 +83,10 @@ enum MoonEpCombineV2FailureStatus : uint32_t {
     MOONEP_COMBINE_V2_OUTSTANDING_LIMIT = 3U,
     MOONEP_COMBINE_V2_CQ_TIMEOUT = 4U,
     MOONEP_COMBINE_V2_CQ_ERROR = 5U,
-    MOONEP_COMBINE_V2_GRANT_TIMEOUT = 6U,
     MOONEP_COMBINE_V2_DONE_TIMEOUT = 7U,
     MOONEP_COMBINE_V2_BAD_DESTINATION = 8U,
-    MOONEP_COMBINE_V2_FULL_SYNC_TIMEOUT = 9U,
-    MOONEP_COMBINE_V2_FULL_SYNC_BARRIER_TIMEOUT = 10U,
-    MOONEP_COMBINE_V2_STEP_BARRIER_TIMEOUT = 11U,
     MOONEP_COMBINE_V2_COLLECTIVE_STATUS_ERROR = 12U,
-    MOONEP_COMBINE_V2_PHASE_BARRIER_TIMEOUT = 13U,
     MOONEP_COMBINE_V2_CREDIT_TIMEOUT = 14U,
-};
-
-struct alignas(64) MoonEpCombineV2FullSyncSignal {
-    uint64_t magic;
-    uint32_t marker;
-    uint32_t boundaryId;
-    uint32_t sourceRank;
-    uint32_t sourceCore;
-    uint32_t rankSize;
-    uint32_t reserved0;
-    uint64_t guard;
-    uint64_t reserved[3];
 };
 
 struct alignas(64) MoonEpCombineV2CollectiveStatus {
@@ -158,19 +99,7 @@ struct alignas(64) MoonEpCombineV2CollectiveStatus {
     uint64_t reserved[4];
 };
 
-struct alignas(64) MoonEpCombineV2ServerGrantSignal {
-    uint64_t magic;
-    uint32_t marker;
-    uint32_t sourceRank;
-    uint32_t sourceCore;
-    uint32_t rankSize;
-    uint32_t flatRound;
-    uint32_t reserved0;
-    uint64_t guard;
-    uint64_t reserved[3];
-};
-
-struct alignas(64) MoonEpCombineV2GroupCreditSignal {
+struct alignas(64) MoonEpCombineV2CreditSignal {
     uint64_t magic;
     uint64_t guard;
     uint32_t marker;
@@ -217,32 +146,19 @@ struct MoonEpCombineV2ScheduleCoordinate {
 
 static_assert(sizeof(MoonEpCombineV2FailureRecord) == 64U,
     "MoonEP Combine V2 failure record ABI changed");
-static_assert(sizeof(MoonEpCombineV2FullSyncSignal) ==
-        kMoonEpCombineV2FullSyncSignalBytes,
-    "MoonEP Combine V2 full-sync signal ABI changed");
 static_assert(sizeof(MoonEpCombineV2CollectiveStatus) ==
-        kMoonEpCombineV2FullSyncSlotBytes,
+        kMoonEpCombineV2CollectiveStatusSlotBytes,
     "MoonEP Combine V2 collective status must occupy one cache line");
-static_assert(sizeof(MoonEpCombineV2ServerGrantSignal) ==
-        kMoonEpCombineV2ServerGrantSignalBytes,
-    "MoonEP Combine V2 Server-Grant signal must occupy one cache line");
-static_assert(sizeof(MoonEpCombineV2GroupCreditSignal) ==
-        kMoonEpCombineV2GroupCreditSignalBytes,
-    "MoonEP Combine V2 Group Credit signal must occupy one cache line");
-static_assert(kMoonEpCombineV2FullSyncSignalBytes <=
-        kMoonEpCombineV2FullSyncSlotBytes,
-    "MoonEP Combine V2 full-sync signal exceeds its cache-line slot");
-static_assert(kMoonEpCombineV2GrantSourceOffsetBytes + sizeof(uint64_t) <=
-        kMoonEpCombineV2GrantSlotBytes,
-    "MoonEP Combine V2 Grant source exceeds its slot");
-static_assert(kMoonEpCombineV2ServerGrantSignalsPerCore == 4U,
-    "MoonEP Combine V2 must shard four Server-Grants to each core");
-static_assert(kMoonEpCombineV2ServerGrantWorkspaceBytes <=
-        kMoonEpCombineV2LegacyGrantWorkspaceBytes,
-    "MoonEP Combine V2 Server-Grant exceeds the Legacy Grant union");
-static_assert(kMoonEpCombineV2GroupCreditWorkspaceBytes <=
-        kMoonEpCombineV2LegacyGrantWorkspaceBytes,
-    "MoonEP Combine V2 Group Credit exceeds the Legacy Grant union");
+static_assert(sizeof(MoonEpCombineV2CreditSignal) ==
+        kMoonEpCombineV2CreditSignalBytes,
+    "MoonEP Combine V2 Credit signal must occupy one cache line");
+static_assert(kMoonEpCombineV2CreditPlaneBytes ==
+        kMoonEpCombineV2CreditTransitionCount *
+            kMoonEpCombineV2CoreCount * kMoonEpCombineV2CreditSignalBytes,
+    "MoonEP Combine V2 Credit plane layout changed");
+static_assert(kMoonEpCombineV2CreditBytes ==
+        kMoonEpCombineV2EpochCount * kMoonEpCombineV2CreditPlaneBytes,
+    "MoonEP Combine V2 Credit epoch layout changed");
 
 TILEXR_MOONEP_COMBINE_V2_INLINE bool
 MoonEpCombineV2RankSizeSupported(uint32_t rankSize)
@@ -265,17 +181,39 @@ MoonEpCombineV2ActiveCoreCount(uint32_t rankSize)
         kMoonEpCombineV2CoreCount;
 }
 
-TILEXR_MOONEP_COMBINE_V2_INLINE bool
-MoonEpCombineV2LegacyGrantEnabled(uint32_t rankSize)
-{
-    return MoonEpCombineV2RankSizeSupported(rankSize) && rankSize <= 16U;
-}
-
 TILEXR_MOONEP_COMBINE_V2_INLINE uint32_t
 MoonEpCombineV2StepCount(uint32_t rankSize)
 {
     return rankSize <= kMoonEpCombineV2GroupSize ? 1U :
         rankSize / kMoonEpCombineV2CoreCount;
+}
+
+TILEXR_MOONEP_COMBINE_V2_INLINE uint32_t
+MoonEpCombineV2CreditTransitionCount(uint32_t rankSize)
+{
+    const uint32_t stepCount = MoonEpCombineV2StepCount(rankSize);
+    return MoonEpCombineV2RankSizeSupported(rankSize) && stepCount != 0U ?
+        stepCount - 1U : 0U;
+}
+
+TILEXR_MOONEP_COMBINE_V2_INLINE bool
+MoonEpCombineV2CreditRequiredBeforeStep(uint32_t step, uint32_t rankSize)
+{
+    return MoonEpCombineV2RankSizeSupported(rankSize) && step != 0U &&
+        step < MoonEpCombineV2StepCount(rankSize);
+}
+
+TILEXR_MOONEP_COMBINE_V2_INLINE bool
+MoonEpCombineV2CreditPublishedAfterStep(uint32_t step, uint32_t rankSize)
+{
+    return MoonEpCombineV2RankSizeSupported(rankSize) &&
+        step + 1U < MoonEpCombineV2StepCount(rankSize);
+}
+
+TILEXR_MOONEP_COMBINE_V2_INLINE uint32_t
+MoonEpCombineV2EffectivePeer(uint32_t peer, uint32_t sourceRank)
+{
+    return peer == kMoonEpCombineV2InvalidPeer ? sourceRank : peer;
 }
 
 TILEXR_MOONEP_COMBINE_V2_INLINE uint32_t
@@ -373,19 +311,6 @@ MoonEpCombineV2GroupRecvSrcRank(
         destinationParity ^ t1 ^ 1U, interCabinet ^ t2,
         sourceInnerIndex);
 }
-
-TILEXR_MOONEP_COMBINE_V2_INLINE bool
-MoonEpCombineV2GroupCreditRequiredBeforeStep(uint32_t step)
-{
-    return step > 0U && step < kMoonEpCombineV2StepCount;
-}
-
-TILEXR_MOONEP_COMBINE_V2_INLINE bool
-MoonEpCombineV2GroupCreditPublishedAfterStep(uint32_t step)
-{
-    return step < kMoonEpCombineV2StepCount - 1U;
-}
-
 TILEXR_MOONEP_COMBINE_V2_INLINE bool
 MoonEpCombineV2StepValid(uint32_t step, uint32_t rankSize)
 {
@@ -563,131 +488,6 @@ MoonEpCombineV2ServerPairSenderCore(
     return MoonEpCombineV2ServerPairReceive(
         destinationRank, sourceRank, rankSize, mode).core;
 }
-
-TILEXR_MOONEP_COMBINE_V2_INLINE uint32_t
-MoonEpCombineV2ServerGrantTargetServer(
-    uint32_t sourceRank, uint32_t rankSize)
-{
-    const uint32_t phaseStepCount =
-        MoonEpCombineV2ServerPairPhaseStepCount(rankSize);
-    if (!MoonEpCombineV2RankValid(sourceRank, rankSize) ||
-        phaseStepCount == 0U) {
-        return kMoonEpCombineV2InvalidPeer;
-    }
-    const uint32_t sourceServer = sourceRank / kMoonEpCombineV2GroupSize;
-    const uint32_t quarter = sourceServer / phaseStepCount;
-    const uint32_t serverInQuarter = sourceServer % phaseStepCount;
-    return quarter * phaseStepCount +
-        (serverInQuarter + phaseStepCount - 1U) % phaseStepCount;
-}
-
-TILEXR_MOONEP_COMBINE_V2_INLINE uint32_t
-MoonEpCombineV2ServerGrantSourceServer(
-    uint32_t targetRank, uint32_t rankSize)
-{
-    const uint32_t phaseStepCount =
-        MoonEpCombineV2ServerPairPhaseStepCount(rankSize);
-    if (!MoonEpCombineV2RankValid(targetRank, rankSize) ||
-        phaseStepCount == 0U) {
-        return kMoonEpCombineV2InvalidPeer;
-    }
-    const uint32_t targetServer = targetRank / kMoonEpCombineV2GroupSize;
-    const uint32_t quarter = targetServer / phaseStepCount;
-    const uint32_t serverInQuarter = targetServer % phaseStepCount;
-    return quarter * phaseStepCount +
-        (serverInQuarter + 1U) % phaseStepCount;
-}
-
-TILEXR_MOONEP_COMBINE_V2_INLINE uint32_t
-MoonEpCombineV2ServerGrantSourceCardLane(uint32_t rank, uint32_t rankSize)
-{
-    return MoonEpCombineV2RankValid(rank, rankSize) ?
-        (rank % kMoonEpCombineV2GroupSize) / 2U :
-        kMoonEpCombineV2InvalidPeer;
-}
-
-TILEXR_MOONEP_COMBINE_V2_INLINE uint32_t
-MoonEpCombineV2ServerGrantTargetRank(
-    uint32_t sourceRank, uint32_t targetCardLane, uint32_t rankSize)
-{
-    const uint32_t targetServer =
-        MoonEpCombineV2ServerGrantTargetServer(sourceRank, rankSize);
-    if (targetServer == kMoonEpCombineV2InvalidPeer ||
-        targetCardLane >= kMoonEpCombineV2ServerGrantSourceCardCount) {
-        return kMoonEpCombineV2InvalidPeer;
-    }
-    return targetServer * kMoonEpCombineV2GroupSize +
-        2U * targetCardLane + (sourceRank & 1U);
-}
-
-TILEXR_MOONEP_COMBINE_V2_INLINE uint32_t
-MoonEpCombineV2ServerGrantSourceRank(
-    uint32_t targetRank, uint32_t sourceCardLane, uint32_t rankSize)
-{
-    const uint32_t sourceServer =
-        MoonEpCombineV2ServerGrantSourceServer(targetRank, rankSize);
-    if (sourceServer == kMoonEpCombineV2InvalidPeer ||
-        sourceCardLane >= kMoonEpCombineV2ServerGrantSourceCardCount) {
-        return kMoonEpCombineV2InvalidPeer;
-    }
-    return sourceServer * kMoonEpCombineV2GroupSize +
-        2U * sourceCardLane + (targetRank & 1U);
-}
-
-TILEXR_MOONEP_COMBINE_V2_INLINE uint32_t
-MoonEpCombineV2ServerGrantOrdinal(
-    uint32_t sourceCardLane, uint32_t sourceCore)
-{
-    return sourceCardLane < kMoonEpCombineV2ServerGrantSourceCardCount &&
-            sourceCore < kMoonEpCombineV2CoreCount ?
-        sourceCardLane * kMoonEpCombineV2CoreCount + sourceCore :
-        kMoonEpCombineV2InvalidPeer;
-}
-
-TILEXR_MOONEP_COMBINE_V2_INLINE uint32_t
-MoonEpCombineV2DirectGrantSourceCardLane(
-    uint32_t targetRank, uint32_t rankSize)
-{
-    return MoonEpCombineV2ServerPairRankSize(rankSize) &&
-            MoonEpCombineV2RankValid(targetRank, rankSize) ?
-        MoonEpCombineV2ServerGrantSourceCardLane(targetRank, rankSize) :
-        kMoonEpCombineV2InvalidPeer;
-}
-
-TILEXR_MOONEP_COMBINE_V2_INLINE uint32_t
-MoonEpCombineV2DirectGrantSourceRank(
-    uint32_t targetRank, uint32_t rankSize)
-{
-    const uint32_t sourceCardLane =
-        MoonEpCombineV2DirectGrantSourceCardLane(targetRank, rankSize);
-    return sourceCardLane == kMoonEpCombineV2InvalidPeer ?
-        kMoonEpCombineV2InvalidPeer : MoonEpCombineV2ServerGrantSourceRank(
-            targetRank, sourceCardLane, rankSize);
-}
-
-TILEXR_MOONEP_COMBINE_V2_INLINE uint32_t
-MoonEpCombineV2DirectGrantTargetRank(
-    uint32_t sourceRank, uint32_t rankSize)
-{
-    const uint32_t sourceCardLane =
-        MoonEpCombineV2ServerGrantSourceCardLane(sourceRank, rankSize);
-    return !MoonEpCombineV2ServerPairRankSize(rankSize) ||
-            sourceCardLane == kMoonEpCombineV2InvalidPeer ?
-        kMoonEpCombineV2InvalidPeer : MoonEpCombineV2ServerGrantTargetRank(
-            sourceRank, sourceCardLane, rankSize);
-}
-
-TILEXR_MOONEP_COMBINE_V2_INLINE uint32_t
-MoonEpCombineV2DirectGrantOrdinal(
-    uint32_t targetRank, uint32_t targetCore, uint32_t rankSize)
-{
-    const uint32_t sourceCardLane =
-        MoonEpCombineV2DirectGrantSourceCardLane(targetRank, rankSize);
-    return sourceCardLane == kMoonEpCombineV2InvalidPeer ?
-        kMoonEpCombineV2InvalidPeer : MoonEpCombineV2ServerGrantOrdinal(
-            sourceCardLane, targetCore);
-}
-
 TILEXR_MOONEP_COMBINE_V2_INLINE bool
 MoonEpCombineV2MagicValid(uint64_t magic)
 {
@@ -920,15 +720,6 @@ MoonEpCombineV2ServerPairScheduleEnabled(
             mode == MOONEP_COMBINE_V2_SERVER_PAIR_PARITY) &&
         MoonEpCombineV2ServerPairRankSize(rankSize);
 }
-
-TILEXR_MOONEP_COMBINE_V2_INLINE bool
-MoonEpCombineV2ServerGrantEnabled(
-    uint32_t rankSize, MoonEpCombineV2ScheduleMode mode)
-{
-    return mode == MOONEP_COMBINE_V2_SERVER_PAIR_PARITY &&
-        MoonEpCombineV2ServerPairRankSize(rankSize);
-}
-
 TILEXR_MOONEP_COMBINE_V2_INLINE uint32_t
 MoonEpCombineV2BidirectionalPeer(
     uint32_t sourceRank, uint32_t step, uint32_t core, uint32_t rankSize)
@@ -1134,75 +925,80 @@ MoonEpCombineV2SenderCore(
     return kMoonEpCombineV2InvalidPeer;
 }
 
-TILEXR_MOONEP_COMBINE_V2_INLINE uint64_t
-MoonEpCombineV2RoundBoundary(uint32_t round, uint32_t rankSize)
+TILEXR_MOONEP_COMBINE_V2_INLINE uint32_t
+MoonEpCombineV2ReceiveSource(uint32_t destinationRank, uint32_t step,
+    uint32_t receiverCore, uint32_t rankSize,
+    MoonEpCombineV2ScheduleMode mode)
 {
-    if (!MoonEpCombineV2StepValid(round, rankSize)) {
+    if (!MoonEpCombineV2RankValid(destinationRank, rankSize) ||
+        !MoonEpCombineV2StepValid(step, rankSize) ||
+        !MoonEpCombineV2CoreValid(receiverCore, rankSize)) {
         return kMoonEpCombineV2InvalidPeer;
     }
-    if (rankSize < 32U) {
-        return 1U + round;
+    uint32_t matchedCount = 0U;
+    for (uint32_t sourceRank = 0U; sourceRank < rankSize; ++sourceRank) {
+        if (MoonEpCombineV2ReceiveStep(
+                destinationRank, sourceRank, rankSize, mode) != step) {
+            continue;
+        }
+        if (matchedCount == receiverCore) {
+            return sourceRank;
+        }
+        ++matchedCount;
     }
-    const uint32_t phaseStepCount = rankSize / 32U;
-    return round < phaseStepCount ? 1U + round : 2U + round;
+    return kMoonEpCombineV2InvalidPeer;
 }
 
 TILEXR_MOONEP_COMBINE_V2_INLINE uint32_t
-MoonEpCombineV2PhaseBoundary(uint32_t rankSize)
+MoonEpCombineV2ReceiveCore(uint32_t destinationRank, uint32_t sourceRank,
+    uint32_t step, uint32_t rankSize, MoonEpCombineV2ScheduleMode mode)
 {
-    const uint32_t phaseStepCount =
-        MoonEpCombineV2ServerPairPhaseStepCount(rankSize);
-    return phaseStepCount != 0U ?
-        1U + phaseStepCount : kMoonEpCombineV2InvalidPeer;
-}
-
-TILEXR_MOONEP_COMBINE_V2_INLINE uint32_t
-MoonEpCombineV2RoundBarrierOrdinal(uint32_t round, uint32_t rankSize)
-{
-    if (!MoonEpCombineV2StepValid(round, rankSize)) {
+    if (!MoonEpCombineV2RankValid(destinationRank, rankSize) ||
+        !MoonEpCombineV2RankValid(sourceRank, rankSize) ||
+        !MoonEpCombineV2StepValid(step, rankSize) ||
+        MoonEpCombineV2ReceiveStep(
+            destinationRank, sourceRank, rankSize, mode) != step) {
         return kMoonEpCombineV2InvalidPeer;
     }
-    const uint32_t phaseStepCount =
-        MoonEpCombineV2ServerPairPhaseStepCount(rankSize);
-    return 1U + round +
-        (phaseStepCount != 0U && round >= phaseStepCount ? 1U : 0U);
+    uint32_t receiverCore = 0U;
+    for (uint32_t candidate = 0U; candidate < rankSize; ++candidate) {
+        if (MoonEpCombineV2ReceiveStep(
+                destinationRank, candidate, rankSize, mode) != step) {
+            continue;
+        }
+        if (candidate == sourceRank) {
+            return receiverCore;
+        }
+        ++receiverCore;
+    }
+    return kMoonEpCombineV2InvalidPeer;
 }
 
 TILEXR_MOONEP_COMBINE_V2_INLINE uint32_t
-MoonEpCombineV2PhaseBarrierOrdinal(uint32_t rankSize)
+MoonEpCombineV2TransferCore(uint32_t sourceRank, uint32_t destinationRank,
+    uint32_t step, uint32_t rankSize, MoonEpCombineV2ScheduleMode mode)
 {
-    const uint32_t phaseStepCount =
-        MoonEpCombineV2ServerPairPhaseStepCount(rankSize);
-    return phaseStepCount != 0U ?
-        1U + phaseStepCount : kMoonEpCombineV2InvalidPeer;
+    if (!MoonEpCombineV2RankValid(sourceRank, rankSize) ||
+        !MoonEpCombineV2RankValid(destinationRank, rankSize) ||
+        !MoonEpCombineV2StepValid(step, rankSize)) {
+        return kMoonEpCombineV2InvalidPeer;
+    }
+    const uint32_t activeCoreCount = MoonEpCombineV2ActiveCoreCount(rankSize);
+    uint32_t matchedCore = kMoonEpCombineV2InvalidPeer;
+    for (uint32_t core = 0U; core < activeCoreCount; ++core) {
+        const uint32_t peer = MoonEpCombineV2EffectivePeer(
+            MoonEpCombineV2Peer(sourceRank, step, core, rankSize, mode),
+            sourceRank);
+        if (peer != destinationRank) {
+            continue;
+        }
+        if (matchedCore != kMoonEpCombineV2InvalidPeer) {
+            return kMoonEpCombineV2InvalidPeer;
+        }
+        matchedCore = core;
+    }
+    return matchedCore;
 }
-
-TILEXR_MOONEP_COMBINE_V2_INLINE bool
-MoonEpCombineV2PhaseBarrierAfterRound(uint32_t round, uint32_t rankSize)
-{
-    const uint32_t phaseStepCount =
-        MoonEpCombineV2ServerPairPhaseStepCount(rankSize);
-    return phaseStepCount != 0U && round + 1U == phaseStepCount;
-}
-
-TILEXR_MOONEP_COMBINE_V2_INLINE uint32_t
-MoonEpCombineV2FullSyncGeneration(uint32_t executionOrdinal)
-{
-    return executionOrdinal % kMoonEpCombineV2FullSyncGenerationSlotCount;
-}
-
-TILEXR_MOONEP_COMBINE_V2_INLINE uint64_t
-MoonEpCombineV2FullSyncGuard(uint64_t magic, uint32_t boundaryId,
-    uint32_t sourceRank, uint32_t sourceCore, uint32_t rankSize)
-{
-    return magic ^
-        (static_cast<uint64_t>(kMoonEpCombineV2FullSyncMarker) << 32U) ^
-        (static_cast<uint64_t>(boundaryId) << 48U) ^
-        (static_cast<uint64_t>(sourceRank) << 24U) ^
-        (static_cast<uint64_t>(sourceCore) << 16U) ^
-        static_cast<uint64_t>(rankSize);
-}
-
 TILEXR_MOONEP_COMBINE_V2_INLINE uint64_t
 MoonEpCombineV2CollectiveStatusGuard(uint64_t magic, uint32_t stageId)
 {
@@ -1211,21 +1007,8 @@ MoonEpCombineV2CollectiveStatusGuard(uint64_t magic, uint32_t stageId)
             32U) ^
         static_cast<uint64_t>(stageId);
 }
-
 TILEXR_MOONEP_COMBINE_V2_INLINE uint64_t
-MoonEpCombineV2ServerGrantGuard(uint64_t magic, uint32_t sourceRank,
-    uint32_t sourceCore, uint32_t rankSize, uint32_t flatRound)
-{
-    return magic ^
-        (static_cast<uint64_t>(kMoonEpCombineV2ServerGrantMarker) << 32U) ^
-        (static_cast<uint64_t>(flatRound) << 48U) ^
-        (static_cast<uint64_t>(sourceRank) << 24U) ^
-        (static_cast<uint64_t>(sourceCore) << 16U) ^
-        static_cast<uint64_t>(rankSize);
-}
-
-TILEXR_MOONEP_COMBINE_V2_INLINE uint64_t
-MoonEpCombineV2GroupCreditGuard(uint64_t magic, uint32_t transitionStep,
+MoonEpCombineV2CreditGuard(uint64_t magic, uint32_t transitionStep,
     uint32_t sourceRank, uint32_t sourceCore, uint32_t targetRank,
     uint32_t targetCore)
 {
@@ -1235,13 +1018,13 @@ MoonEpCombineV2GroupCreditGuard(uint64_t magic, uint32_t transitionStep,
         (static_cast<uint64_t>(targetCore) << 18U) |
         (static_cast<uint64_t>(transitionStep) << 22U);
     return magic ^
-        (static_cast<uint64_t>(kMoonEpCombineV2GroupCreditMarker) << 32U) ^
+        (static_cast<uint64_t>(kMoonEpCombineV2CreditMarker) << 32U) ^
         route;
 }
 
 TILEXR_MOONEP_COMBINE_V2_INLINE bool
-MoonEpCombineV2GroupCreditMatches(
-    const MoonEpCombineV2GroupCreditSignal &signal, uint64_t magic,
+MoonEpCombineV2CreditMatches(
+    const MoonEpCombineV2CreditSignal &signal, uint64_t magic,
     uint32_t transitionStep, uint32_t sourceRank, uint32_t sourceCore,
     uint32_t targetRank, uint32_t targetCore)
 {
@@ -1252,30 +1035,12 @@ MoonEpCombineV2GroupCreditMatches(
         targetRank < kMoonEpCombineV2RankCount &&
         targetCore < kMoonEpCombineV2CoreCount &&
         signal.magic == magic &&
-        signal.marker == kMoonEpCombineV2GroupCreditMarker &&
+        signal.marker == kMoonEpCombineV2CreditMarker &&
         signal.transitionStep == transitionStep &&
         signal.sourceRank == sourceRank && signal.sourceCore == sourceCore &&
         signal.targetRank == targetRank && signal.targetCore == targetCore &&
-        signal.guard == MoonEpCombineV2GroupCreditGuard(magic,
+        signal.guard == MoonEpCombineV2CreditGuard(magic,
             transitionStep, sourceRank, sourceCore, targetRank, targetCore);
-}
-
-TILEXR_MOONEP_COMBINE_V2_INLINE uint64_t
-MoonEpCombineV2FullSyncReceiveIndex(
-    uint32_t epoch, uint32_t generation, uint32_t sourceRank)
-{
-    return (static_cast<uint64_t>(epoch) *
-                kMoonEpCombineV2FullSyncGenerationSlotCount + generation) *
-        kMoonEpCombineV2RankCount + sourceRank;
-}
-
-TILEXR_MOONEP_COMBINE_V2_INLINE uint64_t
-MoonEpCombineV2FullSyncCoreIndex(
-    uint32_t epoch, uint32_t generation, uint32_t core)
-{
-    return (static_cast<uint64_t>(epoch) *
-                kMoonEpCombineV2FullSyncGenerationSlotCount + generation) *
-        kMoonEpCombineV2CoreCount + core;
 }
 
 TILEXR_MOONEP_COMBINE_V2_INLINE uint64_t
@@ -1291,14 +1056,6 @@ MoonEpCombineV2Token(
     uint64_t magic, uint32_t step)
 {
     return (magic << 3U) | static_cast<uint64_t>(step);
-}
-
-TILEXR_MOONEP_COMBINE_V2_INLINE uint64_t
-MoonEpCombineV2GrantToken(
-    uint64_t magic, uint32_t step, uint32_t stepCount)
-{
-    return MoonEpCombineV2Token(
-        magic, MoonEpCombineV2NextStep(step, stepCount));
 }
 
 TILEXR_MOONEP_COMBINE_V2_INLINE bool
@@ -1319,64 +1076,28 @@ MoonEpCombineV2DoneIndex(
 }
 
 TILEXR_MOONEP_COMBINE_V2_INLINE uint64_t
-MoonEpCombineV2GrantIndex(
-    uint32_t epoch, uint32_t core, uint32_t lane,
-    uint32_t transitionRound)
-{
-    return (((static_cast<uint64_t>(epoch) * kMoonEpCombineV2CoreCount +
-        core) * kMoonEpCombineV2LaneCount + lane) *
-        kMoonEpCombineV2GrantStepCount) + transitionRound;
-}
-
-TILEXR_MOONEP_COMBINE_V2_INLINE uint64_t
-MoonEpCombineV2GroupCreditSignalIndex(
-    uint32_t epoch, uint32_t transitionStep, uint32_t core)
+MoonEpCombineV2CreditSignalIndex(
+    uint32_t epoch, uint32_t transitionStep, uint32_t targetCore)
 {
     if (epoch >= kMoonEpCombineV2EpochCount || transitionStep == 0U ||
-        transitionStep >= kMoonEpCombineV2StepCount ||
-        core >= kMoonEpCombineV2CoreCount) {
+        transitionStep > kMoonEpCombineV2CreditTransitionCount ||
+        targetCore >= kMoonEpCombineV2CoreCount) {
         return UINT64_MAX;
     }
     return (static_cast<uint64_t>(epoch) *
-            kMoonEpCombineV2GroupCreditTransitionCount +
-        transitionStep - 1U) * kMoonEpCombineV2CoreCount + core;
+            kMoonEpCombineV2CreditTransitionCount + transitionStep - 1U) *
+        kMoonEpCombineV2CoreCount + targetCore;
 }
 
 TILEXR_MOONEP_COMBINE_V2_INLINE uint64_t
-MoonEpCombineV2GroupCreditReceiveOffset(
+MoonEpCombineV2CreditReceiveOffset(
     uint32_t epoch, uint32_t transitionStep, uint32_t targetCore)
 {
-    const uint64_t index = MoonEpCombineV2GroupCreditSignalIndex(
+    const uint64_t index = MoonEpCombineV2CreditSignalIndex(
         epoch, transitionStep, targetCore);
     return index == UINT64_MAX ? UINT64_MAX :
-        kMoonEpCombineV2GroupCreditReceiveOffsetBytes +
-            index * kMoonEpCombineV2GroupCreditSignalBytes;
-}
-
-TILEXR_MOONEP_COMBINE_V2_INLINE uint64_t
-MoonEpCombineV2GroupCreditSourceOffset(
-    uint32_t epoch, uint32_t transitionStep, uint32_t sourceCore)
-{
-    const uint64_t index = MoonEpCombineV2GroupCreditSignalIndex(
-        epoch, transitionStep, sourceCore);
-    return index == UINT64_MAX ? UINT64_MAX :
-        kMoonEpCombineV2GroupCreditSourceOffsetBytes +
-            index * kMoonEpCombineV2GroupCreditSignalBytes;
-}
-
-TILEXR_MOONEP_COMBINE_V2_INLINE uint64_t
-MoonEpCombineV2ServerGrantSignalIndex(
-    uint32_t epoch, uint32_t flatRound, uint32_t grantOrdinal)
-{
-    return (static_cast<uint64_t>(epoch) *
-            kMoonEpCombineV2ServerGrantRoundCount + flatRound) *
-        kMoonEpCombineV2ServerGrantSignalCount + grantOrdinal;
-}
-
-TILEXR_MOONEP_COMBINE_V2_INLINE uint32_t
-MoonEpCombineV2ServerGrantCollectiveStage(uint32_t flatRound)
-{
-    return kMoonEpCombineV2CollectiveStatusSlotCount + flatRound;
+        kMoonEpCombineV2CreditBaseBytes +
+            index * kMoonEpCombineV2CreditSignalBytes;
 }
 
 TILEXR_MOONEP_COMBINE_V2_INLINE uint64_t

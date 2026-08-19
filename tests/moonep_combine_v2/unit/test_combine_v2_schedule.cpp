@@ -175,15 +175,12 @@ void TestQpAndBatchContract()
 void TestGroupAllToAllSchedule()
 {
     using namespace TileXRMoonEp;
-    Check(sizeof(MoonEpCombineV2GroupCreditSignal) == 64U,
-        "Group Credit signal is not one cache line");
-    Check(kMoonEpCombineV2GroupCreditWorkspaceBytes <=
-            kMoonEpCombineV2LegacyGrantWorkspaceBytes,
-        "Group Credit does not fit the existing Grant workspace");
+    Check(sizeof(MoonEpCombineV2CreditSignal) == 64U,
+        "Credit signal is not one cache line");
 
     std::array<uint32_t,
         kMoonEpCombineV2RankCount *
-        kMoonEpCombineV2GroupCreditTransitionCount *
+        kMoonEpCombineV2CreditTransitionCount *
         kMoonEpCombineV2CoreCount> creditWriters {};
     for (uint32_t rank = 0U; rank < kMoonEpCombineV2RankCount; ++rank) {
         std::array<bool, kMoonEpCombineV2RankCount> sendSeen {};
@@ -241,7 +238,7 @@ void TestGroupAllToAllSchedule()
                         "Credit target does not send back to the writer rank");
                     const uint64_t flat =
                         (static_cast<uint64_t>(nextSender) *
-                            kMoonEpCombineV2GroupCreditTransitionCount +
+                            kMoonEpCombineV2CreditTransitionCount +
                             transitionStep - 1U) *
                             kMoonEpCombineV2CoreCount + targetCore;
                     ++creditWriters[flat];
@@ -285,44 +282,37 @@ void TestGroupAllToAllSchedule()
         "rank0/core0 step0 source changed");
     Check(MoonEpCombineV2GroupRecvSrcRank(0U, 1U, 0U) == 76U,
         "rank0/core0 step1 source changed");
-    Check(MoonEpCombineV2GroupCreditPublishedAfterStep(6U),
+    Check(MoonEpCombineV2CreditPublishedAfterStep(6U, 128U),
         "step6 must publish the step7 Credit");
-    Check(!MoonEpCombineV2GroupCreditPublishedAfterStep(7U),
+    Check(!MoonEpCombineV2CreditPublishedAfterStep(7U, 128U),
         "step7 must not publish Credit");
-    Check(!MoonEpCombineV2GroupCreditRequiredBeforeStep(0U) &&
-            MoonEpCombineV2GroupCreditRequiredBeforeStep(7U),
+    Check(!MoonEpCombineV2CreditRequiredBeforeStep(0U, 128U) &&
+            MoonEpCombineV2CreditRequiredBeforeStep(7U, 128U),
         "Group Credit admission boundary mismatch");
-    Check(MoonEpCombineV2GroupCreditReceiveOffset(0U, 0U, 0U) ==
-            UINT64_MAX &&
-            MoonEpCombineV2GroupCreditSourceOffset(0U, 8U, 0U) ==
-                UINT64_MAX,
+    Check(MoonEpCombineV2CreditReceiveOffset(0U, 0U, 0U) == UINT64_MAX &&
+            MoonEpCombineV2CreditReceiveOffset(0U, 8U, 0U) == UINT64_MAX,
         "invalid Group Credit transition accessed a slot");
-    const uint64_t finalReceiveOffset = MoonEpCombineV2GroupCreditReceiveOffset(
+    const uint64_t finalReceiveOffset = MoonEpCombineV2CreditReceiveOffset(
         1U, 7U, 15U);
-    const uint64_t finalSourceOffset = MoonEpCombineV2GroupCreditSourceOffset(
-        1U, 7U, 15U);
-    Check(finalReceiveOffset + kMoonEpCombineV2GroupCreditSignalBytes <=
-            kMoonEpCombineV2GroupCreditSourceOffsetBytes,
-        "Group Credit receive index exceeded its region");
-    Check(finalSourceOffset + kMoonEpCombineV2GroupCreditSignalBytes <=
-            kMoonEpCombineV2GroupCreditWorkspaceBytes,
-        "Group Credit source index exceeded its workspace");
+    Check(finalReceiveOffset + kMoonEpCombineV2CreditSignalBytes ==
+            static_cast<uint64_t>(TileXR::CREDIT_IPC_BYTES),
+        "Group Credit receive index exceeded IPC memory");
 
-    MoonEpCombineV2GroupCreditSignal signal {};
+    MoonEpCombineV2CreditSignal signal {};
     signal.magic = 19U;
-    signal.marker = kMoonEpCombineV2GroupCreditMarker;
+    signal.marker = kMoonEpCombineV2CreditMarker;
     signal.transitionStep = 1U;
     signal.sourceRank = 0U;
     signal.sourceCore = 0U;
     signal.targetRank = 76U;
     signal.targetCore = 0U;
-    signal.guard = MoonEpCombineV2GroupCreditGuard(19U, 1U,
+    signal.guard = MoonEpCombineV2CreditGuard(19U, 1U,
         signal.sourceRank, signal.sourceCore,
         signal.targetRank, signal.targetCore);
-    Check(MoonEpCombineV2GroupCreditMatches(signal, 19U, 1U,
+    Check(MoonEpCombineV2CreditMatches(signal, 19U, 1U,
             0U, 0U, 76U, 0U),
         "valid Group Credit signal rejected");
-    Check(!MoonEpCombineV2GroupCreditMatches(signal, 20U, 1U,
+    Check(!MoonEpCombineV2CreditMatches(signal, 20U, 1U,
             0U, 0U, 76U, 0U),
         "stale Group Credit magic accepted");
 }
@@ -353,8 +343,6 @@ void TestTokensAndShapes()
         "stale magic accepted");
     Check(!MoonEpCombineV2TokenMatches(token, magic, 6U, 64U),
         "step outside runtime schedule accepted");
-    Check(MoonEpCombineV2GrantIndex(1U, 0U, 0U, 0U) == 256U,
-        "grant epoch layout mismatch");
     Check(MoonEpCombineV2DestinationValid(0,
         kMoonEpCombineV2SmallSlots, 128U), "valid destination rejected");
     Check(MoonEpCombineV2DestinationValid(-1,
@@ -463,12 +451,6 @@ void TestWqeBatchHelpers()
         Check(finalBatch.sixPort == 98U && finalBatch.twoPort == 34U,
             "maximum final batch does not fit the 98/34 issue split");
     }
-}
-
-uint32_t EffectivePeer(uint32_t peer, uint32_t source)
-{
-    return peer == TileXRMoonEp::kMoonEpCombineV2InvalidPeer ?
-        source : peer;
 }
 
 void TestServerPairSchedule()
@@ -643,6 +625,135 @@ void TestServerPairSchedule()
     }
 }
 
+void TestCreditSchedule()
+{
+    using namespace TileXRMoonEp;
+    const uint32_t rankSizes[] = {2U, 3U, 4U, 5U, 6U, 7U, 8U,
+        16U, 32U, 64U, 128U};
+    const MoonEpCombineV2ScheduleMode modes[] = {
+        MOONEP_COMBINE_V2_SINGLE_RING,
+        MOONEP_COMBINE_V2_BIDIRECTIONAL_RING,
+        MOONEP_COMBINE_V2_SERVER_PAIR_SAME_CROSS,
+        MOONEP_COMBINE_V2_SERVER_PAIR_PARITY};
+
+    Check(TileXR::DISPATCH_CREDIT_IPC_BYTES == 131072,
+        "Dispatch Credit IPC layout changed");
+    Check(kMoonEpCombineV2CreditBaseBytes ==
+            static_cast<uint64_t>(TileXR::DISPATCH_CREDIT_IPC_BYTES),
+        "Combine Credit overlaps Dispatch Credit");
+    Check(kMoonEpCombineV2CreditBytes == 14336U &&
+            TileXR::CREDIT_IPC_BYTES == 145408,
+        "Combine Credit IPC size mismatch");
+
+    for (uint32_t rankSize : rankSizes) {
+        const uint32_t stepCount = MoonEpCombineV2StepCount(rankSize);
+        const uint32_t transitionCount =
+            MoonEpCombineV2CreditTransitionCount(rankSize);
+        Check(transitionCount == stepCount - 1U,
+            "Credit transition count mismatch");
+        Check(transitionCount == (rankSize == 32U ? 1U :
+                rankSize == 64U ? 3U : rankSize == 128U ? 7U : 0U),
+            "rank-size Credit transition contract mismatch");
+        Check(!MoonEpCombineV2CreditRequiredBeforeStep(0U, rankSize),
+            "step0 unexpectedly waits for Credit");
+
+        for (MoonEpCombineV2ScheduleMode mode : modes) {
+            const uint32_t activeCores =
+                MoonEpCombineV2ActiveCoreCount(rankSize);
+            std::vector<uint32_t> writers(
+                static_cast<size_t>(rankSize) * transitionCount *
+                    activeCores,
+                0U);
+            for (uint32_t source = 0U; source < rankSize; ++source) {
+                for (uint32_t step = 0U; step < stepCount; ++step) {
+                    for (uint32_t core = 0U; core < activeCores; ++core) {
+                        const uint32_t destination =
+                            MoonEpCombineV2EffectivePeer(
+                                MoonEpCombineV2Peer(source, step, core,
+                                    rankSize, mode),
+                                source);
+                        Check(destination < rankSize,
+                            "effective peer out of range");
+                        Check(MoonEpCombineV2TransferCore(source,
+                                destination, step, rankSize, mode) == core,
+                            "Credit transfer core does not invert peer");
+                        const uint32_t receiverCore =
+                            MoonEpCombineV2ReceiveCore(destination, source,
+                                step, rankSize, mode);
+                        Check(receiverCore < activeCores,
+                            "Credit receive core is invalid");
+                        Check(MoonEpCombineV2ReceiveSource(destination, step,
+                                receiverCore, rankSize, mode) == source,
+                            "Credit receive source does not invert peer");
+                    }
+                }
+            }
+
+            for (uint32_t destination = 0U;
+                destination < rankSize; ++destination) {
+                for (uint32_t transition = 1U;
+                    transition <= transitionCount; ++transition) {
+                    for (uint32_t receiverCore = 0U;
+                        receiverCore < activeCores; ++receiverCore) {
+                        const uint32_t nextSource =
+                            MoonEpCombineV2ReceiveSource(destination,
+                                transition, receiverCore, rankSize, mode);
+                        Check(MoonEpCombineV2ReceiveCore(destination,
+                                nextSource, transition, rankSize, mode) ==
+                                receiverCore,
+                            "Credit receiver core/source mapping is not inverse");
+                        const uint32_t targetCore =
+                            MoonEpCombineV2TransferCore(nextSource,
+                                destination, transition, rankSize, mode);
+                        Check(nextSource < rankSize &&
+                                targetCore < activeCores,
+                            "Credit publisher route is invalid");
+                        if (nextSource >= rankSize ||
+                            targetCore >= activeCores) {
+                            continue;
+                        }
+                        const size_t index =
+                            (static_cast<size_t>(nextSource) *
+                                transitionCount + transition - 1U) *
+                                activeCores + targetCore;
+                        ++writers[index];
+
+                        MoonEpCombineV2CreditSignal signal {};
+                        signal.magic = 19U;
+                        signal.marker = kMoonEpCombineV2CreditMarker;
+                        signal.transitionStep = transition;
+                        signal.sourceRank = destination;
+                        signal.sourceCore = receiverCore;
+                        signal.targetRank = nextSource;
+                        signal.targetCore = targetCore;
+                        signal.guard = MoonEpCombineV2CreditGuard(19U,
+                            transition, destination, receiverCore,
+                            nextSource, targetCore);
+                        Check(MoonEpCombineV2CreditMatches(signal, 19U,
+                                transition, destination, receiverCore,
+                                nextSource, targetCore),
+                            "Credit publisher/waiter route mismatch");
+                    }
+                }
+            }
+            for (uint32_t count : writers) {
+                Check(count == 1U,
+                    "Credit receive slot does not have one writer");
+            }
+        }
+    }
+
+    Check(MoonEpCombineV2CreditReceiveOffset(0U, 0U, 0U) == UINT64_MAX &&
+            MoonEpCombineV2CreditReceiveOffset(2U, 1U, 0U) == UINT64_MAX &&
+            MoonEpCombineV2CreditReceiveOffset(0U, 8U, 0U) == UINT64_MAX,
+        "invalid Credit slot accepted");
+    const uint64_t lastOffset =
+        MoonEpCombineV2CreditReceiveOffset(1U, 7U, 15U);
+    Check(lastOffset + kMoonEpCombineV2CreditSignalBytes ==
+            static_cast<uint64_t>(TileXR::CREDIT_IPC_BYTES),
+        "Combine Credit final slot exceeds IPC allocation");
+}
+
 void TestServerPairParitySchedule()
 {
     using namespace TileXRMoonEp;
@@ -799,299 +910,6 @@ void TestServerPairParitySchedule()
         }
     }
 }
-
-void TestServerGrantSchedule()
-{
-    using namespace TileXRMoonEp;
-    const uint32_t rankSizes[] = {32U, 64U, 128U};
-    Check(kMoonEpCombineV2ServerGrantSignalCount == 64U &&
-            kMoonEpCombineV2ServerGrantSignalsPerCore == 4U,
-        "Server-Grant signal or shard count mismatch");
-    Check(kMoonEpCombineV2ServerGrantReceiveBytes == 65536U &&
-            kMoonEpCombineV2ServerGrantSourceBytes == 65536U &&
-            kMoonEpCombineV2ServerGrantWorkspaceBytes == 131072U,
-        "Server-Grant workspace constants mismatch");
-    Check(!MoonEpCombineV2ServerGrantEnabled(
-            16U, MOONEP_COMBINE_V2_SERVER_PAIR_PARITY) &&
-            !MoonEpCombineV2ServerGrantEnabled(
-                32U, MOONEP_COMBINE_V2_SERVER_PAIR_SAME_CROSS) &&
-            MoonEpCombineV2ServerGrantEnabled(
-                32U, MOONEP_COMBINE_V2_SERVER_PAIR_PARITY),
-        "Server-Grant activation contract mismatch");
-
-    std::array<bool,
-        kMoonEpCombineV2ServerGrantRoundCount *
-            kMoonEpCombineV2ServerGrantSignalCount> epochSlots {};
-    for (uint32_t flatRound = 0U;
-        flatRound < kMoonEpCombineV2ServerGrantRoundCount; ++flatRound) {
-        for (uint32_t ordinal = 0U;
-            ordinal < kMoonEpCombineV2ServerGrantSignalCount; ++ordinal) {
-            const uint64_t index = MoonEpCombineV2ServerGrantSignalIndex(
-                0U, flatRound, ordinal);
-            Check(index < epochSlots.size() && !epochSlots[index],
-                "Server-Grant epoch slot overlaps");
-            epochSlots[index] = true;
-            Check(MoonEpCombineV2ServerGrantSignalIndex(
-                    1U, flatRound, ordinal) ==
-                    epochSlots.size() + index,
-                "Server-Grant epochs do not occupy disjoint slots");
-        }
-    }
-    for (bool seen : epochSlots) {
-        Check(seen, "Server-Grant epoch layout has a hole");
-    }
-
-    std::array<bool, kMoonEpCombineV2ServerGrantSignalCount> shardSeen {};
-    for (uint32_t core = 0U; core < kMoonEpCombineV2CoreCount; ++core) {
-        uint32_t shardCount = 0U;
-        for (uint32_t sourceCardLane = 0U;
-            sourceCardLane < kMoonEpCombineV2ServerGrantSourceCardCount;
-            ++sourceCardLane) {
-            const uint32_t ordinal = MoonEpCombineV2ServerGrantOrdinal(
-                sourceCardLane, core);
-            Check(ordinal == sourceCardLane * kMoonEpCombineV2CoreCount + core,
-                "Server-Grant core shard ordinal mismatch");
-            Check(ordinal < shardSeen.size() && !shardSeen[ordinal],
-                "Server-Grant core shards overlap");
-            shardSeen[ordinal] = true;
-            ++shardCount;
-        }
-        Check(shardCount == kMoonEpCombineV2ServerGrantSignalsPerCore,
-            "Server-Grant core does not own exactly four signals");
-    }
-    for (bool seen : shardSeen) {
-        Check(seen, "Server-Grant core shards do not cover all ordinals");
-    }
-
-    for (uint32_t rankSize : rankSizes) {
-        const uint32_t phaseStepCount = rankSize / 32U;
-        const uint32_t serverCount = rankSize / kMoonEpCombineV2GroupSize;
-        for (uint32_t sourceServer = 0U;
-            sourceServer < serverCount; ++sourceServer) {
-            const uint32_t sourceRank =
-                sourceServer * kMoonEpCombineV2GroupSize;
-            const uint32_t targetServer =
-                MoonEpCombineV2ServerGrantTargetServer(sourceRank, rankSize);
-            Check(targetServer < serverCount &&
-                    MoonEpCombineV2ServerGrantSourceServer(
-                        targetServer * kMoonEpCombineV2GroupSize,
-                        rankSize) == sourceServer,
-                "Server-Grant source/target server inverse mismatch");
-            Check(targetServer / phaseStepCount ==
-                    sourceServer / phaseStepCount,
-                "Server-Grant target escaped its quarter");
-            for (uint32_t phaseStep = 0U;
-                phaseStep < phaseStepCount; ++phaseStep) {
-                const uint32_t currentPair =
-                    (sourceServer % phaseStepCount + phaseStep) %
-                        phaseStepCount;
-                const uint32_t nextPhaseStep =
-                    (phaseStep + 1U) % phaseStepCount;
-                const uint32_t targetNextPair =
-                    (targetServer % phaseStepCount + nextPhaseStep) %
-                        phaseStepCount;
-                Check(currentPair == targetNextPair,
-                    "Server-Grant target violates next-step pair invariant");
-            }
-        }
-
-        for (uint32_t targetRank = 0U;
-            targetRank < rankSize; ++targetRank) {
-            const uint32_t expectedSourceServer =
-                MoonEpCombineV2ServerGrantSourceServer(targetRank, rankSize);
-            const uint32_t targetCardLane =
-                (targetRank % kMoonEpCombineV2GroupSize) / 2U;
-            std::array<bool, kMoonEpCombineV2ServerGrantSignalCount>
-                publishers {};
-            for (uint32_t sourceCardLane = 0U;
-                sourceCardLane < kMoonEpCombineV2ServerGrantSourceCardCount;
-                ++sourceCardLane) {
-                const uint32_t sourceRank =
-                    MoonEpCombineV2ServerGrantSourceRank(
-                        targetRank, sourceCardLane, rankSize);
-                Check(sourceRank / kMoonEpCombineV2GroupSize ==
-                        expectedSourceServer &&
-                        (sourceRank & 1U) == (targetRank & 1U),
-                    "Server-Grant publisher group mismatch");
-                Check(MoonEpCombineV2ServerGrantTargetRank(
-                        sourceRank, targetCardLane, rankSize) == targetRank,
-                    "Server-Grant publisher/waiter inverse mismatch");
-                Check(MoonEpCombineV2ServerGrantSourceCardLane(
-                        sourceRank, rankSize) == sourceCardLane,
-                    "Server-Grant source card lane mismatch");
-                for (uint32_t sourceCore = 0U;
-                    sourceCore < kMoonEpCombineV2CoreCount; ++sourceCore) {
-                    const uint32_t ordinal = MoonEpCombineV2ServerGrantOrdinal(
-                        sourceCardLane, sourceCore);
-                    Check(ordinal < publishers.size() && !publishers[ordinal],
-                        "Server-Grant target has a duplicate publisher");
-                    publishers[ordinal] = true;
-                }
-            }
-            for (bool published : publishers) {
-                Check(published,
-                    "Server-Grant target does not have 64 publishers");
-            }
-
-            const uint32_t directSourceCardLane =
-                MoonEpCombineV2DirectGrantSourceCardLane(
-                    targetRank, rankSize);
-            const uint32_t directSourceRank =
-                MoonEpCombineV2DirectGrantSourceRank(targetRank, rankSize);
-            const uint32_t directTargetRank =
-                MoonEpCombineV2DirectGrantTargetRank(
-                    directSourceRank, rankSize);
-            Check(directSourceCardLane == targetCardLane,
-                "direct Grant does not select the target card lane");
-            Check(directSourceRank < rankSize &&
-                    directSourceRank % kMoonEpCombineV2GroupSize ==
-                        targetRank % kMoonEpCombineV2GroupSize,
-                "direct Grant source does not preserve local rank");
-            Check(MoonEpCombineV2ServerGrantTargetRank(
-                    directSourceRank, targetCardLane, rankSize) == targetRank,
-                "direct Grant source/target mapping is not invertible");
-            Check(directTargetRank == targetRank,
-                "direct Grant does not have one target rank");
-            Check((rankSize == 32U) ==
-                    (directTargetRank == directSourceRank),
-                "direct Grant local/remote target contract mismatch");
-            Check(MoonEpCombineV2DirectGrantSourceRank(
-                    directTargetRank, rankSize) == directSourceRank,
-                "direct Grant target/source helper inverse mismatch");
-            for (uint32_t core = 0U;
-                core < kMoonEpCombineV2CoreCount; ++core) {
-                Check(MoonEpCombineV2DirectGrantOrdinal(
-                        targetRank, core, rankSize) ==
-                        directSourceCardLane *
-                            kMoonEpCombineV2CoreCount + core,
-                    "direct Grant ordinal does not select one source/core");
-            }
-        }
-
-
-        const auto mode = MOONEP_COMBINE_V2_SERVER_PAIR_PARITY;
-        for (uint32_t targetRank = 0U;
-            targetRank < rankSize; ++targetRank) {
-            const uint32_t directSourceRank =
-                MoonEpCombineV2DirectGrantSourceRank(targetRank, rankSize);
-            for (uint32_t phase = 0U; phase < 2U; ++phase) {
-                for (uint32_t phaseStep = 0U;
-                    phaseStep + 1U < phaseStepCount; ++phaseStep) {
-                    const uint32_t sourceRound =
-                        phase * phaseStepCount + phaseStep;
-                    const uint32_t targetRound = sourceRound + 1U;
-                    for (uint32_t core = 0U;
-                        core < kMoonEpCombineV2CoreCount; ++core) {
-                        Check(MoonEpCombineV2ServerPairPeer(
-                                directSourceRank, sourceRound, core,
-                                rankSize, mode) ==
-                                MoonEpCombineV2ServerPairPeer(
-                                    targetRank, targetRound, core,
-                                    rankSize, mode),
-                            "direct Grant does not preserve the next-step peer");
-                    }
-                }
-            }
-        }
-    }
-
-    Check(MoonEpCombineV2DirectGrantTargetRank(0U, 16U) ==
-            kMoonEpCombineV2InvalidPeer &&
-            MoonEpCombineV2DirectGrantTargetRank(32U, 32U) ==
-                kMoonEpCombineV2InvalidPeer,
-        "direct Grant target accepts an unsupported size or invalid rank");
-
-    const uint64_t guard = MoonEpCombineV2ServerGrantGuard(
-        17U, 23U, 7U, 128U, 6U);
-    Check(guard != MoonEpCombineV2ServerGrantGuard(
-            19U, 23U, 7U, 128U, 6U) &&
-            guard != MoonEpCombineV2ServerGrantGuard(
-                17U, 22U, 7U, 128U, 6U) &&
-            guard != MoonEpCombineV2ServerGrantGuard(
-                17U, 23U, 6U, 128U, 6U) &&
-            guard != MoonEpCombineV2ServerGrantGuard(
-                17U, 23U, 7U, 64U, 6U) &&
-            guard != MoonEpCombineV2ServerGrantGuard(
-                17U, 23U, 7U, 128U, 4U),
-        "Server-Grant guard omits a stale-rejection field");
-}
-
-void TestFullGrantRounds()
-{
-    using namespace TileXRMoonEp;
-    Check(kMoonEpCombineV2GrantStepCount == kMoonEpCombineV2StepCount,
-        "grant storage does not cover every data step");
-    Check(MoonEpCombineV2GrantIndex(0U, 0U, 0U, 0U) == 0U,
-        "first grant transition index mismatch");
-    Check(MoonEpCombineV2GrantIndex(0U, 0U, 0U, 7U) == 7U,
-        "terminal grant transition index mismatch");
-    Check(MoonEpCombineV2GrantIndex(0U, 0U, 1U, 0U) == 8U,
-        "grant lane stride mismatch");
-    Check(MoonEpCombineV2GrantIndex(1U, 0U, 0U, 0U) == 256U,
-        "grant epoch stride mismatch");
-    Check(MoonEpCombineV2NextStep(6U, 8U) == 7U,
-        "non-terminal next step mismatch");
-    Check(MoonEpCombineV2NextStep(7U, 8U) == 0U,
-        "terminal next step did not wrap");
-
-    const uint64_t magic = 17U;
-    Check(MoonEpCombineV2GrantToken(magic, 6U, 8U) ==
-            MoonEpCombineV2Token(magic, 7U),
-        "non-terminal grant token mismatch");
-    Check(MoonEpCombineV2GrantToken(magic, 7U, 8U) ==
-            MoonEpCombineV2Token(magic, 0U),
-        "terminal grant token did not wrap to step zero");
-    Check(MoonEpCombineV2ControlWqesPerLane(7U, 8U, true) == 2U,
-        "final data step does not reserve grant plus done controls");
-    Check(MoonEpCombineV2LegacyGrantEnabled(2U),
-        "2P must preserve Legacy Grant");
-    Check(MoonEpCombineV2LegacyGrantEnabled(16U),
-        "16P must preserve Legacy Grant");
-    Check(!MoonEpCombineV2LegacyGrantEnabled(32U),
-        "32P must disable Legacy Grant");
-    Check(!MoonEpCombineV2LegacyGrantEnabled(64U),
-        "64P must disable Legacy Grant");
-    Check(!MoonEpCombineV2LegacyGrantEnabled(128U),
-        "128P must disable Legacy Grant");
-    Check(!MoonEpCombineV2LegacyGrantEnabled(1U),
-        "unsupported rank sizes must not enable Legacy Grant");
-
-    const MoonEpCombineV2ScheduleMode modes[] = {
-        MOONEP_COMBINE_V2_SINGLE_RING,
-        MOONEP_COMBINE_V2_BIDIRECTIONAL_RING};
-    const uint32_t supported[] = {2U, 3U, 4U, 5U, 6U, 7U, 8U,
-        16U, 32U, 64U, 128U};
-    for (MoonEpCombineV2ScheduleMode mode : modes) {
-        for (uint32_t rankSize : supported) {
-            const uint32_t activeCores =
-                MoonEpCombineV2ActiveCoreCount(rankSize);
-            const uint32_t stepCount = MoonEpCombineV2StepCount(rankSize);
-            for (uint32_t source = 0U; source < rankSize; ++source) {
-                for (uint32_t step = 0U; step < stepCount; ++step) {
-                    const uint32_t nextStep =
-                        MoonEpCombineV2NextStep(step, stepCount);
-                    for (uint32_t core = 0U; core < activeCores; ++core) {
-                        const uint32_t currentPeer = EffectivePeer(
-                            MoonEpCombineV2Peer(
-                                source, step, core, rankSize, mode),
-                            source);
-                        const uint32_t successor = MoonEpCombineV2Successor(
-                            source, step, core, rankSize, mode);
-                        Check(successor < rankSize,
-                            "cyclic grant successor out of range");
-                        const uint32_t nextPeer = EffectivePeer(
-                            MoonEpCombineV2Peer(successor, nextStep, core,
-                                rankSize, mode),
-                            successor);
-                        Check(currentPeer == nextPeer,
-                            "cyclic grant successor invariant mismatch");
-                    }
-                }
-            }
-        }
-    }
-}
-
 void TestBidirectionalScheduleAnchors()
 {
     using namespace TileXRMoonEp;
@@ -1192,7 +1010,8 @@ void TestBidirectionalSchedule()
                         Check(rawPeer < rankSize,
                             "bidirectional peer out of range");
                     }
-                    const uint32_t peer = EffectivePeer(rawPeer, source);
+                    const uint32_t peer = MoonEpCombineV2EffectivePeer(
+                        rawPeer, source);
                     Check(!seen[peer], "bidirectional peer repeated");
                     seen[peer] = true;
                     if (peer == source) {
@@ -1216,7 +1035,8 @@ void TestBidirectionalSchedule()
                         const uint32_t nextRawPeer = MoonEpCombineV2Peer(
                             successor, step + 1U, core, rankSize,
                             bidirectional);
-                        Check(peer == EffectivePeer(nextRawPeer, successor),
+                        Check(peer == MoonEpCombineV2EffectivePeer(
+                                nextRawPeer, successor),
                             "bidirectional successor schedule mismatch");
                     }
                 }
@@ -1276,178 +1096,6 @@ void TestVectorSelectionReferenceModel()
         }
     }
 }
-
-void TestFullSyncScheduleContract()
-{
-    using namespace TileXRMoonEp;
-    const uint32_t supported[] = {2U, 3U, 4U, 5U, 6U, 7U, 8U,
-        16U, 32U, 64U, 128U};
-    const MoonEpCombineV2ScheduleMode mode =
-        MOONEP_COMBINE_V2_SERVER_PAIR_SAME_CROSS;
-
-    for (uint32_t rankSize : supported) {
-        const uint32_t activeCores = MoonEpCombineV2ActiveCoreCount(rankSize);
-        const uint32_t stepCount = MoonEpCombineV2StepCount(rankSize);
-        for (uint32_t rank = 0U; rank < rankSize; ++rank) {
-            std::array<bool, kMoonEpCombineV2RankCount> sent {};
-            std::array<bool, kMoonEpCombineV2RankCount> waited {};
-            uint32_t sendCount = 0U;
-            uint32_t waitCount = 0U;
-            for (uint32_t core = 0U; core < activeCores; ++core) {
-                std::array<bool, kMoonEpCombineV2RankCount> corePeers {};
-                uint32_t corePeerCount = 0U;
-                for (uint32_t step = 0U; step < stepCount; ++step) {
-                    const uint32_t peer = MoonEpCombineV2Peer(
-                        rank, step, core, rankSize, mode);
-                    if (peer == rank || peer == kMoonEpCombineV2InvalidPeer) {
-                        continue;
-                    }
-                    Check(peer < rankSize && !sent[peer],
-                        "full-sync send peer is invalid or repeated");
-                    sent[peer] = true;
-                    corePeers[peer] = true;
-                    ++corePeerCount;
-                    ++sendCount;
-                }
-                Check(corePeerCount <= kMoonEpCombineV2FullSyncMaxPeersPerCore,
-                    "full-sync core peer count exceeds SIMT batch capacity");
-
-                for (uint32_t peer = 0U; peer < rankSize; ++peer) {
-                    if (!corePeers[peer]) {
-                        continue;
-                    }
-                    Check(peer != rank && !waited[peer],
-                        "full-sync wait source is invalid or repeated");
-                    Check(MoonEpCombineV2SenderCore(
-                            peer, rank, rankSize, mode) < activeCores,
-                        "full-sync wait peer has no inverse sender core");
-                    waited[peer] = true;
-                    ++waitCount;
-                }
-            }
-            Check(sendCount == rankSize - 1U,
-                "full-sync send set does not cover every remote rank");
-            Check(waitCount == rankSize - 1U,
-                "full-sync wait set does not cover every remote rank");
-            Check(!sent[rank] && !waited[rank],
-                "full-sync send or wait set contains self");
-
-            for (uint32_t peer = 0U; peer < rankSize; ++peer) {
-                if (peer == rank) {
-                    Check(MoonEpCombineV2SenderCore(
-                            rank, peer, rankSize, mode) ==
-                            kMoonEpCombineV2InvalidPeer,
-                        "full-sync sender-core helper accepted self");
-                    continue;
-                }
-                const uint32_t senderCore = MoonEpCombineV2SenderCore(
-                    rank, peer, rankSize, mode);
-                Check(senderCore < activeCores,
-                    "full-sync sender-core helper returned invalid core");
-                uint32_t matches = 0U;
-                for (uint32_t step = 0U; step < stepCount; ++step) {
-                    matches += MoonEpCombineV2Peer(rank, step, senderCore,
-                        rankSize, mode) == peer ? 1U : 0U;
-                }
-                Check(matches == 1U,
-                    "full-sync sender-core helper does not invert peer mapping");
-            }
-        }
-    }
-
-    Check(MoonEpCombineV2FullSyncReceiveIndex(0U, 0U, 17U) == 17U &&
-        MoonEpCombineV2FullSyncReceiveIndex(0U, 1U, 17U) ==
-            kMoonEpCombineV2RankCount + 17U &&
-        MoonEpCombineV2FullSyncReceiveIndex(1U, 0U, 17U) ==
-            2U * kMoonEpCombineV2RankCount + 17U,
-        "full-sync receive epoch/generation index mismatch");
-    Check(MoonEpCombineV2FullSyncCoreIndex(0U, 0U, 7U) == 7U &&
-        MoonEpCombineV2FullSyncCoreIndex(0U, 1U, 7U) ==
-            kMoonEpCombineV2CoreCount + 7U &&
-        MoonEpCombineV2FullSyncCoreIndex(1U, 0U, 7U) ==
-            2U * kMoonEpCombineV2CoreCount + 7U,
-        "full-sync core epoch/generation index mismatch");
-    Check(MoonEpCombineV2RoundBoundary(0U, 128U) == 1U &&
-        MoonEpCombineV2RoundBoundary(3U, 128U) == 4U &&
-        MoonEpCombineV2RoundBoundary(4U, 128U) == 6U &&
-        MoonEpCombineV2RoundBoundary(7U, 128U) == 9U,
-        "128-rank boundary numbering mismatch");
-    Check(MoonEpCombineV2RoundBoundary(0U, 32U) == 1U &&
-        MoonEpCombineV2RoundBoundary(1U, 32U) == 3U &&
-        MoonEpCombineV2RoundBoundary(0U, 16U) == 1U,
-        "boundary numbering does not reserve the phase slot");
-    Check(MoonEpCombineV2PhaseBoundary(32U) == 2U &&
-            MoonEpCombineV2PhaseBoundary(64U) == 3U &&
-            MoonEpCombineV2PhaseBoundary(128U) == 5U &&
-            MoonEpCombineV2PhaseBoundary(16U) ==
-                kMoonEpCombineV2InvalidPeer,
-        "phase boundary numbering mismatch");
-    Check(MoonEpCombineV2PhaseBarrierOrdinal(128U) == 5U &&
-            MoonEpCombineV2RoundBarrierOrdinal(3U, 128U) == 4U &&
-            MoonEpCombineV2RoundBarrierOrdinal(4U, 128U) == 6U &&
-            MoonEpCombineV2RoundBarrierOrdinal(0U, 16U) == 1U &&
-            MoonEpCombineV2RoundBarrierOrdinal(8U, 128U) ==
-                kMoonEpCombineV2InvalidPeer,
-        "R4 barrier ordinal mismatch");
-    Check(MoonEpCombineV2PhaseBarrierAfterRound(0U, 32U) &&
-            MoonEpCombineV2PhaseBarrierAfterRound(1U, 64U) &&
-            MoonEpCombineV2PhaseBarrierAfterRound(3U, 128U) &&
-            !MoonEpCombineV2PhaseBarrierAfterRound(4U, 128U) &&
-            !MoonEpCombineV2PhaseBarrierAfterRound(0U, 16U),
-        "phase barrier insertion point mismatch");
-
-    const uint32_t phaseRankSizes[] = {32U, 64U, 128U};
-    for (uint32_t rankSize : phaseRankSizes) {
-        std::vector<uint32_t> boundaries {0U};
-        std::vector<uint32_t> ordinals {0U};
-        const uint32_t stepCount = MoonEpCombineV2StepCount(rankSize);
-        for (uint32_t round = 0U; round < stepCount; ++round) {
-            boundaries.push_back(static_cast<uint32_t>(
-                MoonEpCombineV2RoundBoundary(round, rankSize)));
-            ordinals.push_back(
-                MoonEpCombineV2RoundBarrierOrdinal(round, rankSize));
-            if (MoonEpCombineV2PhaseBarrierAfterRound(round, rankSize)) {
-                boundaries.push_back(MoonEpCombineV2PhaseBoundary(rankSize));
-                ordinals.push_back(
-                    MoonEpCombineV2PhaseBarrierOrdinal(rankSize));
-            }
-        }
-        Check(boundaries.size() == stepCount + 2U &&
-                ordinals.size() == boundaries.size(),
-            "R4 barrier sequence size mismatch");
-        for (uint32_t index = 0U; index < boundaries.size(); ++index) {
-            Check(boundaries[index] == index && ordinals[index] == index,
-                "R4 barrier identity and execution order diverged");
-            if (index != 0U) {
-                Check(MoonEpCombineV2FullSyncGeneration(ordinals[index]) !=
-                        MoonEpCombineV2FullSyncGeneration(
-                            ordinals[index - 1U]),
-                    "adjacent R4 barriers reuse one generation");
-            }
-            if (index >= 2U) {
-                Check(MoonEpCombineV2FullSyncGuard(
-                            17U, boundaries[index], 23U, 7U, rankSize) !=
-                        MoonEpCombineV2FullSyncGuard(
-                            17U, boundaries[index - 2U], 23U, 7U, rankSize),
-                    "R4 guard accepts a stale same-generation boundary");
-            }
-        }
-    }
-    const uint64_t boundaryGuard = MoonEpCombineV2FullSyncGuard(
-        17U, 6U, 23U, 7U, 128U);
-    Check(boundaryGuard != MoonEpCombineV2FullSyncGuard(
-            17U, 4U, 23U, 7U, 128U),
-        "full-sync guard accepts a stale same-generation boundary");
-    Check(MoonEpCombineV2CollectiveStatusIndex(0U, 17U) == 1U &&
-        MoonEpCombineV2CollectiveStatusIndex(1U, 17U) ==
-            kMoonEpCombineV2CollectiveStatusSlotCount + 1U,
-        "collective status slot reuse mismatch");
-    Check(MoonEpCombineV2Epoch(1U) == 1U &&
-        MoonEpCombineV2Epoch(2U) == 0U &&
-        MoonEpCombineV2Epoch(3U) == 1U,
-        "full-sync epoch sequence is not ping-pong");
-}
-
 void TestFullmeshRouting()
 {
     using namespace TileXRMoonEp;
@@ -1512,13 +1160,11 @@ int main()
     TestBidirectionalSchedule();
     TestServerPairSchedule();
     TestServerPairParitySchedule();
-    TestServerGrantSchedule();
-    TestFullGrantRounds();
+    TestCreditSchedule();
     TestQpAndBatchContract();
     TestTokensAndShapes();
     TestWqeBatchHelpers();
     TestVectorSelectionReferenceModel();
-    TestFullSyncScheduleContract();
     TestFullmeshRouting();
     return failures == 0 ? 0 : 1;
 }

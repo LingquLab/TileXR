@@ -299,6 +299,7 @@ export ASCEND_DRIVER_PATH=/usr/local/Ascend/driver
 export TILEXR_COMM_ID="${comm_id}"
 export TILEXR_DEMO_BARRIER_ADDR="${barrier_id}"
 export TILEXR_ENABLE_IPC=0
+export TILEXR_ENABLE_CREDIT_IPC=1
 export TILEXR_ENABLE_SDMA=0
 export LD_LIBRARY_PATH="${install_dir}/lib64:${cann_path}/aarch64-linux/lib64:${cann_path}/lib64:${ASCEND_DRIVER_PATH}/lib64:${ASCEND_DRIVER_PATH}/lib64/common:${ASCEND_DRIVER_PATH}/lib64/driver:${LD_LIBRARY_PATH:-}"
 timeout --signal=TERM --kill-after=30 "${rank_timeout}" \

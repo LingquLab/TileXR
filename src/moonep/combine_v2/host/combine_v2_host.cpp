@@ -123,6 +123,12 @@ int TileXRMoonEpPrepareCombineV2Launch(
         *context = CombineV2LaunchContext {};
         return TILEXR_MOONEP_ERROR_INVALID_ARGUMENT;
     }
+    for (int peer = 0; peer < commArgs.rankSize; ++peer) {
+        if (commArgs.creditMems[peer] == nullptr) {
+            *context = CombineV2LaunchContext {};
+            return TILEXR_MOONEP_ERROR_NOT_SUPPORTED;
+        }
+    }
     if ((commArgs.extraFlag & TileXR::ExtraFlag::UDMA) == 0 ||
         (commArgs.extraFlag & TileXR::ExtraFlag::UDMA_SHARED_QP) == 0 ||
         commArgs.udmaInfoPtr == nullptr || commArgs.udmaRegistryPtr == nullptr) {

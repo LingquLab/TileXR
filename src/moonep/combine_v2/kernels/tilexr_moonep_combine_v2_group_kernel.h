@@ -401,9 +401,9 @@ public:
         GM_ADDR registeredWorkspaceGM, GM_ADDR dstLocalGM,
         uint64_t profileOffset, uint64_t scratchEpoch0Offset,
         uint64_t scratchEpoch1Offset, uint64_t doneOffset,
-        uint64_t grantOffset, uint64_t controlSourceOffset,
-        uint64_t failureOffset, uint64_t fullSyncReceiveOffset,
-        uint64_t fullSyncSourceOffset, uint64_t fullSyncBarrierOffset,
+        uint64_t reservedCreditOffset, uint64_t controlSourceOffset,
+        uint64_t failureOffset, uint64_t reservedSyncReceiveOffset,
+        uint64_t reservedSyncSourceOffset, uint64_t collectiveStatusOffset,
         uint64_t outputOffset, int64_t bs,
         int64_t h, int64_t topK, int64_t nvS, uint64_t rowBytes,
         bool reduceHidden, int64_t magic, TPipe *pipe);
@@ -486,10 +486,6 @@ private:
     __aicore__ inline bool SendSelfStep(uint32_t peer, uint32_t step);
     __aicore__ inline bool WaitSingleInboundDone(
         uint32_t step, uint32_t source);
-    __aicore__ inline void InitializeCreditSignal(
-        __gm__ TileXRMoonEp::MoonEpCombineV2GroupCreditSignal *signal,
-        uint32_t transitionStep, uint32_t targetRank,
-        uint32_t targetCore);
     __aicore__ inline bool PublishNextCredit(uint32_t step);
     __aicore__ inline bool WaitStepCredit(uint32_t step);
     __aicore__ inline bool BeginCollectiveStage(uint32_t stageId);
@@ -520,14 +516,12 @@ private:
     __gm__ int32_t *dstGlobalAddr_{nullptr};
     __gm__ uint8_t *scratch_{nullptr};
     __gm__ uint8_t *doneBase_{nullptr};
-    __gm__ uint8_t *grantBase_{nullptr};
     __gm__ uint8_t *controlSourceBase_{nullptr};
     __gm__ uint8_t *failureBase_{nullptr};
-    __gm__ uint8_t *fullSyncBarrierBase_{nullptr};
+    __gm__ uint8_t *collectiveStatusBase_{nullptr};
     uint64_t scratchOffset_{0U};
     uint64_t profileOffset_{0U};
     uint64_t doneOffset_{0U};
-    uint64_t grantOffset_{0U};
     uint64_t failureOffset_{0U};
     uint64_t outputOffset_{0U};
     uint64_t slots_{0U};
@@ -585,15 +579,16 @@ __aicore__ inline void MoonEpCombineV2Group::Init(
     GM_ADDR commArgsGM, GM_ADDR registeredWorkspaceGM, GM_ADDR dstLocalGM,
     uint64_t profileOffset, uint64_t scratchEpoch0Offset,
     uint64_t scratchEpoch1Offset, uint64_t doneOffset,
-    uint64_t grantOffset, uint64_t controlSourceOffset,
-    uint64_t failureOffset, uint64_t fullSyncReceiveOffset,
-    uint64_t fullSyncSourceOffset, uint64_t fullSyncBarrierOffset,
+    uint64_t reservedCreditOffset, uint64_t controlSourceOffset,
+    uint64_t failureOffset, uint64_t reservedSyncReceiveOffset,
+    uint64_t reservedSyncSourceOffset, uint64_t collectiveStatusOffset,
     uint64_t outputOffset, int64_t bs,
     int64_t h, int64_t topK, int64_t nvS, uint64_t rowBytes,
     bool reduceHidden, int64_t magic, TPipe *pipe)
 {
-    (void)fullSyncReceiveOffset;
-    (void)fullSyncSourceOffset;
+    (void)reservedCreditOffset;
+    (void)reservedSyncReceiveOffset;
+    (void)reservedSyncSourceOffset;
 #if defined(TILEXR_MOONEP_COMBINE_V2_ENABLE_PROFILING)
     const uint64_t profileStartCycles =
         static_cast<uint64_t>(GetSystemCycle());
@@ -627,7 +622,7 @@ __aicore__ inline void MoonEpCombineV2Group::Init(
     profileOffset_ = profileOffset;
     failureOffset_ = failureOffset;
     failureBase_ = workspace_ + failureOffset;
-    fullSyncBarrierBase_ = workspace_ + fullSyncBarrierOffset;
+    collectiveStatusBase_ = workspace_ + collectiveStatusOffset;
     magic_ = magic > 0 ? static_cast<uint64_t>(magic) : 0U;
     epoch_ = TileXRMoonEp::MoonEpCombineV2Epoch(magic_);
     rank_ = args_->rank >= 0 ? static_cast<uint32_t>(args_->rank) : 0U;
@@ -684,6 +679,11 @@ __aicore__ inline void MoonEpCombineV2Group::Init(
         TileXRMoonEp::kMoonEpCombineV2FullmeshSlotCount) {
         return;
     }
+    for (uint32_t peer = 0U; peer < rankSize_; ++peer) {
+        if (args_->creditMems[peer] == nullptr) {
+            return;
+        }
+    }
     if (!TileXRMoonEp::MoonEpCombineV2MagicValid(magic_)) {
         return;
     }
@@ -697,12 +697,10 @@ __aicore__ inline void MoonEpCombineV2Group::Init(
         scratchEpoch1Offset;
     profileOffset_ = profileOffset;
     doneOffset_ = doneOffset;
-    grantOffset_ = grantOffset;
     failureOffset_ = failureOffset;
     outputOffset_ = outputOffset;
     scratch_ = workspace_ + scratchOffset_;
     doneBase_ = workspace_ + doneOffset;
-    grantBase_ = workspace_ + grantOffset;
     controlSourceBase_ = workspace_ + controlSourceOffset +
         static_cast<uint64_t>(core_) *
             TileXRMoonEp::kMoonEpCombineV2LaneCount *
@@ -2075,117 +2073,126 @@ __aicore__ inline bool MoonEpCombineV2Group::WaitSingleInboundDone(
     }
     return true;
 }
-
-__aicore__ inline void MoonEpCombineV2Group::InitializeCreditSignal(
-    __gm__ TileXRMoonEp::MoonEpCombineV2GroupCreditSignal *signal,
-    uint32_t transitionStep, uint32_t targetRank, uint32_t targetCore)
+__aicore__ inline bool MoonEpCombineV2Group::PublishNextCredit(uint32_t step)
 {
-    signal->magic = magic_;
-    signal->guard = TileXRMoonEp::MoonEpCombineV2GroupCreditGuard(
-        magic_, transitionStep, rank_, core_, targetRank, targetCore);
-    signal->marker = TileXRMoonEp::kMoonEpCombineV2GroupCreditMarker;
-    signal->transitionStep = transitionStep;
-    signal->sourceRank = rank_;
-    signal->sourceCore = core_;
-    signal->targetRank = targetRank;
-    signal->targetCore = targetCore;
-    for (uint32_t reserved = 0U; reserved < 3U; ++reserved) {
-        signal->reserved[reserved] = 0U;
-    }
-    TileXR::UDMACleanCacheLines(reinterpret_cast<__gm__ uint8_t *>(signal),
-        TileXRMoonEp::kMoonEpCombineV2GroupCreditSignalBytes);
-}
-
-__aicore__ inline bool MoonEpCombineV2Group::PublishNextCredit(
-    uint32_t step)
-{
-    if (!TileXRMoonEp::MoonEpCombineV2GroupCreditPublishedAfterStep(step)) {
+    if (!TileXRMoonEp::MoonEpCombineV2CreditPublishedAfterStep(
+            step, rankSize_)) {
         return true;
     }
+    const uint64_t profileStart = BeginProfileMetric();
     const uint32_t transitionStep = step + 1U;
     const uint32_t targetRank = TileXRMoonEp::MoonEpCombineV2GroupRecvSrcRank(
         rank_, transitionStep, core_);
     const uint32_t targetCore =
         TileXRMoonEp::MoonEpCombineV2GroupInnerIndex(rank_);
     const uint64_t receiveOffset =
-        TileXRMoonEp::MoonEpCombineV2GroupCreditReceiveOffset(
+        TileXRMoonEp::MoonEpCombineV2CreditReceiveOffset(
             epoch_, transitionStep, targetCore);
     if (targetRank >= rankSize_ || targetCore >= activeCoreCount_ ||
-        receiveOffset == UINT64_MAX) {
+        receiveOffset == UINT64_MAX || args_->creditMems[targetRank] == nullptr) {
         SetFailure(TileXRMoonEp::MOONEP_COMBINE_V2_INVALID_CONFIG,
             step, targetRank, TileXRMoonEp::MOONEP_COMBINE_V2_SIX_PORT);
+        EndProfileMetric(
+            TileXRMoonEp::MOONEP_COMBINE_V2_METRIC_CREDIT_PUBLISH,
+            profileStart);
         return false;
     }
-    if (targetRank == rank_) {
-        __gm__ TileXRMoonEp::MoonEpCombineV2GroupCreditSignal *receive =
-            reinterpret_cast<__gm__
-                TileXRMoonEp::MoonEpCombineV2GroupCreditSignal *>(
-                    grantBase_ + receiveOffset);
-        InitializeCreditSignal(
-            receive, transitionStep, targetRank, targetCore);
-        return true;
+
+    LocalTensor<uint64_t> creditLocal =
+        wqeIssueBuf_.Get<uint8_t>().ReinterpretCast<uint64_t>();
+    creditLocal.SetValue(0U, magic_);
+    creditLocal.SetValue(1U, TileXRMoonEp::MoonEpCombineV2CreditGuard(
+        magic_, transitionStep, rank_, core_, targetRank, targetCore));
+    creditLocal.SetValue(2U,
+        static_cast<uint64_t>(transitionStep) << 32U |
+            TileXRMoonEp::kMoonEpCombineV2CreditMarker);
+    creditLocal.SetValue(3U,
+        static_cast<uint64_t>(core_) << 32U | rank_);
+    creditLocal.SetValue(4U,
+        static_cast<uint64_t>(targetCore) << 32U | targetRank);
+    for (uint32_t word = 5U; word < 8U; ++word) {
+        creditLocal.SetValue(word, 0U);
     }
-    const uint64_t sourceOffset =
-        TileXRMoonEp::MoonEpCombineV2GroupCreditSourceOffset(
-            epoch_, transitionStep, core_);
-    if (sourceOffset == UINT64_MAX) {
-        SetFailure(TileXRMoonEp::MOONEP_COMBINE_V2_INVALID_CONFIG,
-            step, targetRank, TileXRMoonEp::MOONEP_COMBINE_V2_SIX_PORT);
-        return false;
-    }
-    __gm__ TileXRMoonEp::MoonEpCombineV2GroupCreditSignal *source =
-        reinterpret_cast<__gm__
-            TileXRMoonEp::MoonEpCombineV2GroupCreditSignal *>(
-                grantBase_ + sourceOffset);
-    InitializeCreditSignal(source, transitionStep, targetRank, targetCore);
-    return SubmitClosControl(targetRank, grantOffset_ + receiveOffset,
-        reinterpret_cast<__gm__ uint64_t *>(source),
-        TileXRMoonEp::kMoonEpCombineV2GroupCreditSignalBytes, step);
+    GlobalTensor<uint64_t> remoteCreditGlobal;
+    remoteCreditGlobal.SetGlobalBuffer(
+        reinterpret_cast<__gm__ uint64_t *>(
+            args_->creditMems[targetRank] + receiveOffset),
+        TileXRMoonEp::kMoonEpCombineV2CreditSignalBytes / sizeof(uint64_t));
+    SyncFunc<HardEvent::S_MTE3>();
+    DataCopy(remoteCreditGlobal, creditLocal,
+        TileXRMoonEp::kMoonEpCombineV2CreditSignalBytes / sizeof(uint64_t));
+    SyncFunc<HardEvent::MTE3_S>();
+    EndProfileMetric(TileXRMoonEp::MOONEP_COMBINE_V2_METRIC_CREDIT_PUBLISH,
+        profileStart);
+    return true;
 }
 
 __aicore__ inline bool MoonEpCombineV2Group::WaitStepCredit(uint32_t step)
 {
-    if (!TileXRMoonEp::MoonEpCombineV2GroupCreditRequiredBeforeStep(step)) {
+    if (!TileXRMoonEp::MoonEpCombineV2CreditRequiredBeforeStep(
+            step, rankSize_)) {
         return true;
     }
+    const uint64_t profileStart = BeginProfileMetric();
     const uint32_t sourceRank =
-        TileXRMoonEp::MoonEpCombineV2GroupSendDstRank(rank_, step, core_);
+        TileXRMoonEp::MoonEpCombineV2GroupSendDstRank(
+            rank_, step, core_);
     const uint32_t sourceCore =
         TileXRMoonEp::MoonEpCombineV2GroupInnerIndex(rank_);
     const uint64_t receiveOffset =
-        TileXRMoonEp::MoonEpCombineV2GroupCreditReceiveOffset(
+        TileXRMoonEp::MoonEpCombineV2CreditReceiveOffset(
             epoch_, step, core_);
     if (sourceRank >= rankSize_ || sourceCore >= activeCoreCount_ ||
-        receiveOffset == UINT64_MAX) {
+        receiveOffset == UINT64_MAX || args_->creditMems[rank_] == nullptr) {
         SetFailure(TileXRMoonEp::MOONEP_COMBINE_V2_INVALID_CONFIG,
             step, sourceRank, TileXRMoonEp::MOONEP_COMBINE_V2_SIX_PORT);
+        EndProfileMetric(TileXRMoonEp::MOONEP_COMBINE_V2_METRIC_CREDIT_WAIT,
+            profileStart);
         return false;
     }
-    __gm__ TileXRMoonEp::MoonEpCombineV2GroupCreditSignal *signal =
-        reinterpret_cast<__gm__
-            TileXRMoonEp::MoonEpCombineV2GroupCreditSignal *>(
-                grantBase_ + receiveOffset);
-    const uint64_t expectedGuard =
-        TileXRMoonEp::MoonEpCombineV2GroupCreditGuard(
-            magic_, step, sourceRank, sourceCore, rank_, core_);
+
+    __gm__ uint64_t *credit = reinterpret_cast<__gm__ uint64_t *>(
+        args_->creditMems[rank_] + receiveOffset);
+    GlobalTensor<uint64_t> creditGlobal;
+    creditGlobal.SetGlobalBuffer(credit,
+        TileXRMoonEp::kMoonEpCombineV2CreditSignalBytes / sizeof(uint64_t));
+    LocalTensor<uint64_t> creditLocal =
+        wqeIssueBuf_.Get<uint8_t>().ReinterpretCast<uint64_t>();
+    const uint64_t expectedGuard = TileXRMoonEp::MoonEpCombineV2CreditGuard(
+        magic_, step, sourceRank, sourceCore, rank_, core_);
+    uint64_t observedMagic = 0U;
     while (true) {
         TileXR::UDMACleanCacheLines(
-            reinterpret_cast<__gm__ uint8_t *>(signal),
-            TileXRMoonEp::kMoonEpCombineV2GroupCreditSignalBytes);
-        const uint64_t observedMagic = signal->magic;
+            reinterpret_cast<__gm__ uint8_t *>(credit),
+            TileXRMoonEp::kMoonEpCombineV2CreditSignalBytes);
+        PipeBarrier<PIPE_ALL>();
+        SyncFunc<HardEvent::S_MTE2>();
+        DataCopy(creditLocal, creditGlobal,
+            TileXRMoonEp::kMoonEpCombineV2CreditSignalBytes /
+                sizeof(uint64_t));
+        SyncFunc<HardEvent::MTE2_S>();
+        observedMagic = creditLocal.GetValue(0U);
         if (observedMagic == magic_ &&
-            signal->marker == TileXRMoonEp::kMoonEpCombineV2GroupCreditMarker &&
-            signal->transitionStep == step &&
-            signal->sourceRank == sourceRank &&
-            signal->sourceCore == sourceCore &&
-            signal->targetRank == rank_ && signal->targetCore == core_ &&
-            signal->guard == expectedGuard) {
+            creditLocal.GetValue(1U) == expectedGuard &&
+            creditLocal.GetValue(2U) ==
+                (static_cast<uint64_t>(step) << 32U |
+                    TileXRMoonEp::kMoonEpCombineV2CreditMarker) &&
+            creditLocal.GetValue(3U) ==
+                (static_cast<uint64_t>(sourceCore) << 32U | sourceRank) &&
+            creditLocal.GetValue(4U) ==
+                (static_cast<uint64_t>(core_) << 32U | rank_)) {
+            EndProfileMetric(
+                TileXRMoonEp::MOONEP_COMBINE_V2_METRIC_CREDIT_WAIT,
+                profileStart);
             return true;
         }
         if (TimedOut(operationStartCycles_)) {
             SetFailure(TileXRMoonEp::MOONEP_COMBINE_V2_CREDIT_TIMEOUT,
                 step, sourceRank, TileXRMoonEp::MOONEP_COMBINE_V2_SIX_PORT,
                 0U, magic_, observedMagic);
+            EndProfileMetric(
+                TileXRMoonEp::MOONEP_COMBINE_V2_METRIC_CREDIT_WAIT,
+                profileStart);
             return false;
         }
     }
@@ -2199,8 +2206,8 @@ __aicore__ inline bool MoonEpCombineV2Group::BeginCollectiveStage(
     __gm__ TileXRMoonEp::MoonEpCombineV2CollectiveStatus *status =
         reinterpret_cast<__gm__
             TileXRMoonEp::MoonEpCombineV2CollectiveStatus *>(
-                fullSyncBarrierBase_ + index *
-                    TileXRMoonEp::kMoonEpCombineV2FullSyncSlotBytes);
+                collectiveStatusBase_ + index *
+                    TileXRMoonEp::kMoonEpCombineV2CollectiveStatusSlotBytes);
     if (core_ == 0U) {
         status->magic = magic_;
         status->guard = TileXRMoonEp::MoonEpCombineV2CollectiveStatusGuard(
@@ -2214,11 +2221,11 @@ __aicore__ inline bool MoonEpCombineV2Group::BeginCollectiveStage(
         }
         TileXR::UDMACleanCacheLines(
             reinterpret_cast<__gm__ uint8_t *>(status),
-            TileXRMoonEp::kMoonEpCombineV2FullSyncSlotBytes);
+            TileXRMoonEp::kMoonEpCombineV2CollectiveStatusSlotBytes);
     }
     AscendC::SyncAll<true>();
     TileXR::UDMACleanCacheLines(reinterpret_cast<__gm__ uint8_t *>(status),
-        TileXRMoonEp::kMoonEpCombineV2FullSyncSlotBytes);
+        TileXRMoonEp::kMoonEpCombineV2CollectiveStatusSlotBytes);
     const bool ready = status->magic == magic_ &&
         status->marker == TileXRMoonEp::kMoonEpCombineV2CollectiveStatusMarker &&
         status->stageId == stageId &&
@@ -2241,8 +2248,8 @@ __aicore__ inline bool MoonEpCombineV2Group::EndCollectiveStage(
     __gm__ TileXRMoonEp::MoonEpCombineV2CollectiveStatus *status =
         reinterpret_cast<__gm__
             TileXRMoonEp::MoonEpCombineV2CollectiveStatus *>(
-                fullSyncBarrierBase_ + index *
-                    TileXRMoonEp::kMoonEpCombineV2FullSyncSlotBytes);
+                collectiveStatusBase_ + index *
+                    TileXRMoonEp::kMoonEpCombineV2CollectiveStatusSlotBytes);
     if (!localSucceeded) {
         if (failureStatus_ == TileXRMoonEp::MOONEP_COMBINE_V2_SUCCESS) {
             SetFailure(
@@ -2257,7 +2264,7 @@ __aicore__ inline bool MoonEpCombineV2Group::EndCollectiveStage(
     }
     AscendC::SyncAll<true>();
     TileXR::UDMACleanCacheLines(reinterpret_cast<__gm__ uint8_t *>(status),
-        TileXRMoonEp::kMoonEpCombineV2FullSyncSlotBytes);
+        TileXRMoonEp::kMoonEpCombineV2CollectiveStatusSlotBytes);
     const bool succeeded = status->magic == magic_ &&
         status->marker == TileXRMoonEp::kMoonEpCombineV2CollectiveStatusMarker &&
         status->stageId == stageId &&
@@ -2593,8 +2600,8 @@ __aicore__ inline void MoonEpCombineV2Group::Process()
     for (uint32_t step = 0U;
         step < TileXRMoonEp::kMoonEpCombineV2StepCount; ++step) {
         if (activeWorker_ && localSucceeded &&
-            TileXRMoonEp::MoonEpCombineV2GroupCreditRequiredBeforeStep(
-                step)) {
+            TileXRMoonEp::MoonEpCombineV2CreditRequiredBeforeStep(
+                step, rankSize_)) {
             localSucceeded = WaitStepCredit(step);
         }
         const uint32_t peer = activeWorker_ ?
@@ -2639,8 +2646,8 @@ __aicore__ inline void MoonEpCombineV2Group::Process()
             localSucceeded = WaitSingleInboundDone(step, source);
         }
         if (activeWorker_ && localSucceeded &&
-            TileXRMoonEp::MoonEpCombineV2GroupCreditPublishedAfterStep(
-                step)) {
+            TileXRMoonEp::MoonEpCombineV2CreditPublishedAfterStep(
+                step, rankSize_)) {
             localSucceeded = PublishNextCredit(step);
         }
         RecordProfilePoint(
@@ -2660,7 +2667,7 @@ __aicore__ inline void MoonEpCombineV2Group::Process()
     succeeded = EndCollectiveStage(kCollectiveDoneStage,
         !activeWorker_ || localSucceeded);
     RecordProfilePoint(
-        TileXRMoonEp::MOONEP_COMBINE_V2_TIME_INBOUND_DONE_END);
+        TileXRMoonEp::MOONEP_COMBINE_V2_TIME_COLLECTIVE_DONE_END);
 
     stageReady = BeginCollectiveStage(kCollectiveReduceStage);
     localSucceeded = succeeded && stageReady;

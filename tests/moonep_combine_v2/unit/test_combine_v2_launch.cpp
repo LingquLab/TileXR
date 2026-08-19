@@ -84,9 +84,7 @@ TileXRMoonEp::CombineV2LaunchContext ValidContext()
     context.devArgs = reinterpret_cast<GM_ADDR>(uintptr_t {0x4000});
     context.layout.scratchOffset[0] = 4096;
     context.layout.scratchOffset[1] = 8192;
-    context.layout.fullSyncReceiveOffset = 12288;
-    context.layout.fullSyncSourceOffset = 16384;
-    context.layout.fullSyncBarrierOffset = 20480;
+    context.layout.collectiveStatusOffset = 20480;
     context.layout.outputOffset = 24576;
     context.layout.rowBytes = 7168;
     context.magic = 1;
@@ -113,9 +111,9 @@ void TestConfiguresDynamicUb()
         "configured launch did not pass the device UB size");
     Check(capturedArgsSize == sizeof(capturedArgs),
         "configured launch used the wrong kernel ABI size");
-    Check(capturedArgs[10] == context.layout.fullSyncReceiveOffset &&
-        capturedArgs[11] == context.layout.fullSyncSourceOffset &&
-        capturedArgs[12] == context.layout.fullSyncBarrierOffset &&
+    Check(capturedArgs[7] == 0U && capturedArgs[10] == 0U &&
+        capturedArgs[11] == 0U &&
+        capturedArgs[12] == context.layout.collectiveStatusOffset &&
         capturedArgs[13] == context.layout.outputOffset &&
         capturedArgs[18] == context.layout.rowBytes &&
         capturedArgs[19] == 1U &&

@@ -30,3 +30,19 @@ bash "${source_dir}/tools/moonep/sync_combine_v2_perf_runtime.sh" \
     --hostfile "${hostfile}" \
     --install-dir "${install_dir}" \
     --ssh-user root |& tee "${log_dir}/sync_runtime_latest.log"
+
+mapfile -t hosts < <(awk -F: '!/^[[:space:]]*(#|$)/ {print $1}' "${hostfile}" | sort -u)
+for host in "${hosts[@]}"; do
+    ssh root@"${host}" bash -s <<'REMOTE'
+set -euo pipefail
+if [[ ! -s /etc/hccl_rootinfo.json ]]; then
+    command -v mindcluster-tools >/dev/null
+    tmp=/etc/hccl_rootinfo.json.tmp.$$
+    trap 'rm -f "${tmp}"' EXIT
+    mindcluster-tools rootinfo --output "${tmp}"
+    test -s "${tmp}"
+    mv "${tmp}" /etc/hccl_rootinfo.json
+    trap - EXIT
+fi
+REMOTE
+done

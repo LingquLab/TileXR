@@ -28,12 +28,12 @@ struct CombineV2KernelArgs {
     uint64_t scratchEpoch0Offset;
     uint64_t scratchEpoch1Offset;
     uint64_t doneOffset;
-    uint64_t grantOffset;
+    uint64_t reservedOffset0;
     uint64_t controlSourceOffset;
     uint64_t failureOffset;
-    uint64_t fullSyncReceiveOffset;
-    uint64_t fullSyncSourceOffset;
-    uint64_t fullSyncBarrierOffset;
+    uint64_t reservedSyncReceiveOffset;
+    uint64_t reservedSyncSourceOffset;
+    uint64_t collectiveStatusOffset;
     uint64_t outputOffset;
     int64_t bs;
     int64_t h;
@@ -81,12 +81,12 @@ int TileXRMoonEpLaunchCombineV2Kernel(
         context.layout.scratchOffset[0],
         context.layout.scratchOffset[1],
         context.layout.doneOffset,
-        context.layout.grantOffset,
+        0U,
         context.layout.controlSourceOffset,
         context.layout.failureOffset,
-        context.layout.fullSyncReceiveOffset,
-        context.layout.fullSyncSourceOffset,
-        context.layout.fullSyncBarrierOffset,
+        0U,
+        0U,
+        context.layout.collectiveStatusOffset,
         context.layout.outputOffset,
         params.bs,
         params.h,

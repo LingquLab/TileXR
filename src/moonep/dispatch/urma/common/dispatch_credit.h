@@ -24,7 +24,7 @@ constexpr uint64_t kDispatchCreditMaxMagic =
 constexpr uint64_t kDispatchCreditPlaneBytes =
     static_cast<uint64_t>(TileXR::CREDIT_IPC_SLOT_BYTES);
 constexpr uint64_t kDispatchCreditBytes =
-    static_cast<uint64_t>(TileXR::CREDIT_IPC_BYTES);
+    static_cast<uint64_t>(TileXR::DISPATCH_CREDIT_IPC_BYTES);
 constexpr uint32_t kDispatchCreditMaxGroupCount = 16U;
 constexpr uint64_t kDispatchCreditSourceStrideBytes = 64U;
 constexpr uint64_t kDispatchCreditSourceBytes =

@@ -89,6 +89,25 @@ leave a stale embedded kernel object during an incremental build. Source guards
 verify this wiring; only a target-toolchain kernel build validates Ascend C
 syntax and binary generation.
 
+For Combine V2 schedule, workspace, Host validation, launch ABI, public ABI,
+and source guards, run:
+
+```bash
+bash scripts/validate_combine_v2_host.sh
+```
+
+Set `TILEXR_CMAKE_BIN` when CMake is not on `PATH`, and
+`TILEXR_COMBINE_V2_HOST_BUILD_DIR` to keep the build outside the source tree.
+These tests verify Credit routing and source-level transport constraints, but
+do not validate Ascend C compilation, MTE ordering on hardware, or multi-rank
+correctness.
+
+Before a multi-rank MoonEP hardware run, execute the official HCCL Test on the
+same devices and data path. Check the per-rank correctness output as well as the
+process status: HCCL operation failures can still exit with status 0. Stop the
+TileXR run when the matching HCCL baseline reports an interface or correctness
+failure.
+
 Run the Host/source-only suite separately:
 
 ```bash
