@@ -228,9 +228,9 @@ void TestSharedQpDomainIsExplicit()
 
     CheckContains(apiPath, apiText, "TileXRCommInitRankWithSharedQpDomain");
     CheckContains(wrapperPath, wrapperText,
-        "commDomain, minBufferSize, rankSize, rank, true, comm");
+        "commDomain, minBufferSize, rankSize, rank, true, false, comm");
     CheckContains(wrapperPath, wrapperText,
-        "commDomain, bufferSize, rankSize, rank, false, comm");
+        "commDomain, bufferSize, rankSize, rank, false, false, comm");
     CheckContains(commPath, commText,
         "options.sharedQpDomain = sharedQpDomain_");
     CheckContains(contextPath, contextText,
