@@ -81,10 +81,19 @@ class FakeCDLLLoader:
             ctypes.cast(output, ctypes.POINTER(ctypes.c_void_p)).contents.value = 0x1234
             return 0
 
+        def init_rank_memory(domain, world, rank, output):
+            self.assert_scalar(domain, 1)
+            self.assert_scalar(world, 2)
+            self.assert_scalar(rank, 0)
+            ctypes.cast(output, ctypes.POINTER(ctypes.c_void_p)).contents.value = 0x2345
+            return 0
+
         def destroy(comm):
-            self.assert_scalar(comm, 0x1234)
+            value = comm.value if hasattr(comm, "value") else comm
+            if int(value) not in (0x1234, 0x2345):
+                raise AssertionError(f"unexpected communicator {int(value):#x}")
             self.destroy_calls += 1
-            self.lifecycle_calls.append("destroy")
+            self.lifecycle_calls.append(("destroy", int(value)))
             return 0
 
         def register(comm, address, byte_count, output):
@@ -115,6 +124,7 @@ class FakeCDLLLoader:
             return 0
 
         library.TileXRCommInitRankWithSharedQpDomain = FakeFunction(init_rank_shared)
+        library.TileXRCommInitRankMemoryDomain = FakeFunction(init_rank_memory)
         library.TileXRCommDestroy = FakeFunction(destroy)
         library.TileXRUDMARegister = FakeFunction(register)
         library.TileXRUDMAUnregister = FakeFunction(unregister)
@@ -167,7 +177,7 @@ class FakeCDLLLoader:
             return 0
 
         def stage(registered_workspace, registered_workspace_bytes, dst_local,
-                  comm, bs, h, topk, nv_s, aiv_core_num, hidden_nvsh,
+                  comm, weight_memory_comm, bs, h, topk, nv_s, aiv_core_num, hidden_nvsh,
                   hidden_sh, route_weights_nvs, route_weights_sk, dtype, stream):
             def scalar(value):
                 raw = value.value if hasattr(value, "value") else value
@@ -181,6 +191,7 @@ class FakeCDLLLoader:
                 "workspace": scalar(registered_workspace),
                 "workspace_bytes": scalar(registered_workspace_bytes),
                 "dst_local": scalar(dst_local),
+                "weight_memory_comm": scalar(weight_memory_comm),
                 "aiv_core_num": scalar(aiv_core_num),
                 "dtype": scalar(dtype),
                 "shapes": {
@@ -202,7 +213,8 @@ class FakeCDLLLoader:
             return 0
 
         library.TileXRMoonEpCombineGetWorkspaceSizeV2 = FakeFunction(workspace)
-        library.TileXRMoonEpCombineStageV2 = FakeFunction(stage)
+        library.TileXRMoonEpCombineStageV2 = FakeFunction(lambda *_args: 0)
+        library.TileXRMoonEpCombineStageV2Fused = FakeFunction(stage)
         return library
 
     def _moonep_library(self):
@@ -698,7 +710,7 @@ class FfiAbiTests(unittest.TestCase):
         self.assertEqual(runtime.capabilities.stub_mask, 0)
         self.assertTrue(runtime.capabilities.transport_correctness_valid)
         self.assertFalse(runtime.capabilities.transport_performance_valid)
-        self.assertEqual(loader.destroy_calls, 1)
+        self.assertEqual(loader.destroy_calls, 2)
         self.assertEqual(
             loader.lifecycle_calls,
             [
@@ -708,7 +720,8 @@ class FfiAbiTests(unittest.TestCase):
                 ("register", 2 * 1024 * 1024, 10),
                 ("register", 2 * 1024 * 1024, 11),
                 ("unregister", 11),
-                "destroy",
+                ("destroy", 0x2345),
+                ("destroy", 0x1234),
             ],
         )
         self.assertEqual(
@@ -727,7 +740,7 @@ class FfiAbiTests(unittest.TestCase):
         self.assertEqual(plan.dst_local_offset, 128)
         self.assertEqual(
             loader.combine_v2_workspace_records,
-            [(4, 8, 2, 12, 11), (4, 1, 2, 12, 4)],
+            [(4, 8, 2, 12, 11)],
         )
         self.assertEqual(
             [record["name"] for record in loader.stage_records],
@@ -745,6 +758,7 @@ class FfiAbiTests(unittest.TestCase):
         self.assertEqual(loader.stage_records[3]["shapes"]["routeWeightsSk"], (4, 2))
         self.assertEqual(loader.stage_records[3]["aiv_core_num"], 16)
         self.assertEqual(loader.stage_records[3]["dtype"], 11)
+        self.assertEqual(loader.stage_records[3]["weight_memory_comm"], 0x2345)
         self.assertEqual(
             loader.stage_records[3]["dst_local"],
             int(plan.workspace.data_ptr()) + 128,

@@ -32,6 +32,14 @@ int TileXRMoonEpCombineStageV2(void *registeredWorkspace,
     const float *routeWeightsNvs, float *routeWeightsSk,
     uint32_t dtype, aclrtStream stream);
 
+int TileXRMoonEpCombineStageV2Fused(void *registeredWorkspace,
+    uint64_t registeredWorkspaceBytes, const int32_t *dstLocal,
+    TileXRCommPtr comm, TileXRCommPtr weightMemoryComm,
+    int64_t bs, int64_t h, int64_t topK, int64_t nvS,
+    uint32_t aivCoreNum, const void *hiddenNvsh, void *hiddenSh,
+    const float *routeWeightsNvs, float *routeWeightsSk,
+    uint32_t dtype, aclrtStream stream);
+
 #ifdef __cplusplus
 }
 #endif

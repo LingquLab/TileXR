@@ -4,6 +4,7 @@
 
 #include "combine_v2_layout.h"
 #include "combine_v2_profile.h"
+#include "comm_args.h"
 #include "tilexr_moonep.h"
 
 namespace {
@@ -109,11 +110,49 @@ void TestSmallAndInvalidLayouts()
         TILEXR_MOONEP_ERROR_INVALID_ARGUMENT, "null layout");
 }
 
+void TestWeightMemoryLayout()
+{
+    using namespace TileXRMoonEp;
+    CombineV2WeightLayout layout {};
+    CheckStatus(TileXRMoonEpBuildCombineV2WeightLayout(131072, 64, &layout),
+        TILEXR_MOONEP_SUCCESS, "weight memory layout");
+    Check(layout.recordOffset == 0U &&
+        layout.recordEpochBytes == 131072U * 16U &&
+        layout.recordBytes == 2U * layout.recordEpochBytes,
+        "weight record layout mismatch");
+    Check(layout.doneOffset == layout.recordBytes &&
+        layout.doneEpochBytes == 64U * 64U &&
+        layout.doneBytes == 2U * layout.doneEpochBytes,
+        "weight done layout mismatch");
+    Check(layout.totalBytes == layout.doneOffset + layout.doneBytes,
+        "weight total layout mismatch");
+    CheckStatus(TileXRMoonEpBuildCombineV2WeightLayout(129, 8, &layout),
+        TILEXR_MOONEP_SUCCESS, "unaligned weight memory layout");
+    Check(layout.recordEpochBytes == 2112U &&
+        layout.recordBytes == 4224U && layout.doneOffset == 4224U &&
+        layout.doneOffset % 64U == 0U &&
+        layout.doneEpochBytes == 512U && layout.doneBytes == 1024U,
+        "weight record alignment mismatch");
+    CheckStatus(TileXRMoonEpBuildCombineV2WeightLayout(0, 64, &layout),
+        TILEXR_MOONEP_ERROR_INVALID_ARGUMENT, "zero weight slots");
+    CheckStatus(TileXRMoonEpBuildCombineV2WeightLayout(128, 0, &layout),
+        TILEXR_MOONEP_ERROR_INVALID_ARGUMENT, "zero weight world");
+    CheckStatus(TileXRMoonEpBuildCombineV2WeightLayout(128, 129, &layout),
+        TILEXR_MOONEP_ERROR_INVALID_ARGUMENT, "oversized weight world");
+    CheckStatus(TileXRMoonEpBuildCombineV2WeightLayout(
+        static_cast<int64_t>(TileXR::IPC_BUFF_MAX_SIZE / 16U), 128, &layout),
+        TILEXR_MOONEP_ERROR_INVALID_ARGUMENT,
+        "weight layout beyond IPC capacity");
+    CheckStatus(TileXRMoonEpBuildCombineV2WeightLayout(INT64_MAX, 128, &layout),
+        TILEXR_MOONEP_ERROR_INVALID_ARGUMENT, "overflowing weight layout");
+}
+
 } // namespace
 
 int main()
 {
     TestTargetLayout();
     TestSmallAndInvalidLayouts();
+    TestWeightMemoryLayout();
     return failures == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
 }

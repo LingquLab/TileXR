@@ -11,6 +11,7 @@ struct CombineV2Params {
     void *registeredWorkspace = nullptr;
     const int32_t *dstLocal = nullptr;
     TileXRCommPtr comm = nullptr;
+    TileXRCommPtr weightMemoryComm = nullptr;
     int64_t bs = 0;
     int64_t h = 0;
     int64_t topK = 0;
@@ -19,13 +20,19 @@ struct CombineV2Params {
     uint64_t *activeOutputOffset = nullptr;
     uint32_t dtype = 0;
     bool reduceHidden = false;
+    const float *routeWeightsNvs = nullptr;
+    float *routeWeightsSk = nullptr;
     aclrtStream stream = nullptr;
 };
 
 struct CombineV2LaunchContext {
     TileXR::CommArgs *hostArgs = nullptr;
     GM_ADDR devArgs = nullptr;
+    TileXR::CommArgs *weightMemoryHostArgs = nullptr;
+    GM_ADDR weightMemoryDevArgs = nullptr;
     CombineV2Layout layout {};
+    CombineV2WeightLayout weightLayout {};
+    uint64_t weightOutputElements = 0U;
     int64_t magic = 0;
 };
 

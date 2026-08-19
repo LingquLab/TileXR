@@ -175,6 +175,8 @@ reset 等单一变量。一次同时修改 Kernel、Host、timeout 和路由，�
 - forward 和 backward 都执行；
 - 同一个 plan 在 Combine 后被 Dispatch 复用；
 - 至少两轮 MR、QP、SQ/CQ 和 magic 复用；
+- 独立 Memory 通信域与 UDMA 域融合时，至少覆盖三个连续 magic，并包含本轮未覆盖的
+  route target，确认旧 record 不会泄漏到输出；
 - route 数覆盖 UB tile 和 SQ depth 边界；
 - QP 数覆盖 1/2/4/8/32；
 - SQ 位置覆盖 `depth-1`、`depth`、`depth+1`、`2*depth`；
@@ -199,7 +201,16 @@ reset 等单一变量。一次同时修改 Kernel、Host、timeout 和路由，�
 - 不要用 Python 异步 tensor 操作实现 Host/Kernel 协议同步。
 - 不要把 worker、QP、AIV block 和 rank 数视为同一种并行度。
 - 不要用 toy shape 证明生产规模的 UB/SQ 容量安全。
+- 多 rank 功能门禁要同时记录全局 shape 和每 peer 负载。2026-08-20 的 8P A/B 中，
+  `bs=8192, K=16` 的 hidden-only 与 fused 路径都在每 peer 16384 行时触发相同的 Fullmesh
+  中间 CQ 非法状态，而已验证的 `bs=128` hidden-only 和 fused 路径均通过。融合功能门禁
+  应使用已验证 shape；大 per-peer Fullmesh 回收边界必须作为独立问题验证，不能归因于
+  weight Memory 路径，也不能用小 shape 的通过覆盖。
 - 不要依赖已消费 SQE 的内容推导 CQ completion。
+- 不要在缺少跨 rank 初始化屏障时用“接收区清零”隔离轮次；远端 step 0 写入会与本地清零
+  竞争。完整 generation 与 payload 必须写入同一条 record，并在完成 token 后按 generation
+  过滤输出；若相邻 launch 可重叠，还必须为 record 和完成 token 使用双 epoch 物理区，避免
+  N+1 覆盖慢 rank 尚未消费的 N 数据。
 - 不要在调试运行和性能运行之间复用未审计的环境变量。
 - 多机 HCCL rank table 与 TileXR UDMA RootInfo 是两种不同配置：前者描述全局
   rank/topology，后者描述每台主机的本地 UDMA EID/port。不能用一个文件替代另一个；

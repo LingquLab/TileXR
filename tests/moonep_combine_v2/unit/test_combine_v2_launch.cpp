@@ -24,7 +24,7 @@ int registrationCalls = 0;
 int launchCalls = 0;
 uint32_t capturedBlockDim = 0;
 std::size_t capturedArgsSize = 0;
-uint64_t capturedArgs[21] = {};
+uint64_t capturedArgs[29] = {};
 rtTaskCfgInfo_t capturedCfg {};
 
 void Check(bool condition, const char *message)
@@ -117,7 +117,9 @@ void TestConfiguresDynamicUb()
         capturedArgs[13] == context.layout.outputOffset &&
         capturedArgs[18] == context.layout.rowBytes &&
         capturedArgs[19] == 1U &&
-        capturedArgs[20] == static_cast<uint64_t>(context.magic),
+        capturedArgs[20] == static_cast<uint64_t>(context.magic) &&
+        capturedArgs[21] == 0U && capturedArgs[22] == 0U &&
+        capturedArgs[23] == 0U && capturedArgs[28] == 0U,
         "configured launch did not pass kernel arguments");
     Check(activeOutputOffset == context.layout.scratchOffset[1],
         "configured launch did not publish the active epoch");
@@ -189,7 +191,7 @@ rtError_t rtKernelLaunchWithFlagV2(const void *, uint32_t blockDim,
         if (argsInfo->args != nullptr && argsInfo->argsSize ==
                 sizeof(capturedArgs)) {
             const uint64_t *args = static_cast<const uint64_t *>(argsInfo->args);
-            for (std::size_t index = 0; index < 21U; ++index) {
+            for (std::size_t index = 0; index < 29U; ++index) {
                 capturedArgs[index] = args[index];
             }
         }

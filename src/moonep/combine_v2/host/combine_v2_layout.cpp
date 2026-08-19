@@ -4,6 +4,7 @@
 #include <limits>
 
 #include "combine_v2_profile.h"
+#include "comm_args.h"
 #include "tilexr_moonep.h"
 
 namespace TileXRMoonEp {
@@ -129,6 +130,50 @@ int TileXRMoonEpBuildCombineV2Layout(int64_t bs, int64_t h,
     next.collectiveStatusBytes = collectiveStatusBytes;
     next.outputOffset = outputOffset;
     next.outputBytes = outputBytes;
+    next.totalBytes = totalBytes;
+    *layout = next;
+    return TILEXR_MOONEP_SUCCESS;
+}
+
+int TileXRMoonEpBuildCombineV2WeightLayout(
+    int64_t nvS, int32_t rankSize, CombineV2WeightLayout *layout)
+{
+    if (layout == nullptr || nvS <= 0 || rankSize <= 0 ||
+        rankSize > TileXR::TILEXR_MAX_RANK_SIZE) {
+        return TILEXR_MOONEP_ERROR_INVALID_ARGUMENT;
+    }
+
+    uint64_t recordPayloadBytes = 0U;
+    uint64_t recordEpochBytes = 0U;
+    uint64_t recordBytes = 0U;
+    uint64_t doneEpochBytes = 0U;
+    uint64_t doneBytes = 0U;
+    uint64_t requiredBytes = 0U;
+    uint64_t totalBytes = 0U;
+    if (!CheckedMultiply(static_cast<uint64_t>(nvS),
+            kMoonEpCombineV2WeightRecordBytes, &recordPayloadBytes) ||
+        !CheckedAlign(recordPayloadBytes, kCombineV2ScratchAlignmentBytes,
+            &recordEpochBytes) ||
+        !CheckedMultiply(recordEpochBytes, kMoonEpCombineV2EpochCount,
+            &recordBytes) ||
+        !CheckedMultiply(static_cast<uint64_t>(rankSize),
+            kMoonEpCombineV2WeightDoneStrideBytes, &doneEpochBytes) ||
+        !CheckedMultiply(doneEpochBytes, kMoonEpCombineV2EpochCount,
+            &doneBytes) ||
+        !CheckedAdd(recordBytes, doneBytes, &requiredBytes) ||
+        !CheckedAlign(requiredBytes, kCombineV2ScratchAlignmentBytes,
+            &totalBytes) ||
+        totalBytes > static_cast<uint64_t>(TileXR::IPC_BUFF_MAX_SIZE)) {
+        return TILEXR_MOONEP_ERROR_INVALID_ARGUMENT;
+    }
+
+    CombineV2WeightLayout next {};
+    next.recordOffset = 0U;
+    next.recordEpochBytes = recordEpochBytes;
+    next.recordBytes = recordBytes;
+    next.doneOffset = recordBytes;
+    next.doneEpochBytes = doneEpochBytes;
+    next.doneBytes = doneBytes;
     next.totalBytes = totalBytes;
     *layout = next;
     return TILEXR_MOONEP_SUCCESS;

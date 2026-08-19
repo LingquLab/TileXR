@@ -145,6 +145,21 @@ int main()
     const std::string legacyWaitCredit = Section(legacyKernel,
         "__aicore__ inline bool MoonEpCombineV2::WaitStepCredit(",
         "__aicore__ inline bool MoonEpCombineV2::PublishNextCredit(");
+    const std::string legacyWeightSend = Section(legacyKernel,
+        "__aicore__ inline bool MoonEpCombineV2::SendWeightMemoryStep(",
+        "__aicore__ inline bool MoonEpCombineV2::WaitInboundWeightDone(");
+    const std::string legacyInboundDone = Section(legacyKernel,
+        "__aicore__ inline bool MoonEpCombineV2::WaitInboundDone(",
+        "__aicore__ inline bool MoonEpCombineV2::BeginCollectiveStage(");
+    const std::string legacyWeightOutput = Section(legacyKernel,
+        "__aicore__ inline bool MoonEpCombineV2::CopyReceivedWeights()",
+        "__aicore__ inline bool MoonEpCombineV2::WaitInboundDone(");
+    const std::string groupWeightSend = Section(groupKernel,
+        "__aicore__ inline bool MoonEpCombineV2Group::SendWeightMemoryStep(",
+        "__aicore__ inline bool MoonEpCombineV2Group::WaitInboundWeightDone(");
+    const std::string groupWeightOutput = Section(groupKernel,
+        "__aicore__ inline bool MoonEpCombineV2Group::CopyReceivedWeights()",
+        "__aicore__ inline bool MoonEpCombineV2Group::WaitSingleInboundDone(");
     const std::string activeProtocolSource = legacyKernel + groupKernel +
         schedule;
 
@@ -405,6 +420,44 @@ int main()
     ok &= RequireBefore(legacyProcess, "WaitInboundDone(step)",
         "PublishNextCredit(step)",
         "Legacy process publishes Credit before inbound Done");
+    ok &= RequireBefore(legacyProcess, "SendWeightMemoryStep(peer, step)",
+        "WaitStepCqs(step)",
+        "Legacy process does not send weight before CQ waiting");
+    ok &= Require(legacyInboundDone,
+        "return WaitInboundWeightDone(step, source);",
+        "Legacy inbound completion does not include weight Done");
+    ok &= RequireBefore(stepLoop, "SendWeightMemoryStep(peer, step)",
+        "WaitSingleInboundDone(step, source)",
+        "Group process does not send weight before inbound waiting");
+    ok &= Require(inboundDone, "return WaitInboundWeightDone(step, source);",
+        "Group inbound completion does not include weight Done");
+    ok &= RequireBefore(legacyWeightSend, "DataCopyPad(destination, relay",
+        "DataCopyPad(done, relay",
+        "Legacy weight Done can be published before weight records");
+    ok &= RequireBefore(groupWeightSend, "DataCopyPad(destination, relay",
+        "DataCopyPad(done, relay",
+        "Group weight Done can be published before weight records");
+    ok &= Require(legacyWeightOutput, "words64.GetValue(1U) != magic_",
+        "Legacy weight output does not filter stale generations");
+    ok &= Require(legacyWeightOutput,
+        "relay.ReinterpretCast<uint32_t>().SetValue(0U, 0U)",
+        "Legacy stale weight output is not zeroed");
+    ok &= Require(groupWeightOutput, "words64.GetValue(1U) != magic_",
+        "Group weight output does not filter stale generations");
+    if (Count(legacyKernel, "weightRecordEpochStride_ +") < 2U ||
+        Count(legacyKernel, "weightDoneEpochStride_ +") < 2U) {
+        std::cerr << "Legacy weight record/Done accesses are not epoch isolated\n";
+        ok = false;
+    }
+    if (Count(groupKernel, "weightRecordEpochStride_ +") < 2U ||
+        Count(groupKernel, "weightDoneEpochStride_ +") < 2U) {
+        std::cerr << "Group weight record/Done accesses are not epoch isolated\n";
+        ok = false;
+    }
+    ok &= Reject(legacyWeightSend, "st_dev(",
+        "Legacy weight Memory path uses a device doorbell");
+    ok &= Reject(groupWeightSend, "st_dev(",
+        "Group weight Memory path uses a device doorbell");
     ok &= RequireBefore(fullmeshStep,
         "localSucceeded = WaitFullmeshCq(step, peer);",
         "MOONEP_COMBINE_V2_DIAG_FULLMESH_CQ_SUCCESS",
@@ -425,8 +478,8 @@ int main()
     ok &= Require(launch, "LaunchRegisteredMoonEpKernel",
         "Combine V2 does not use registered Runtime launch");
     ok &= Require(launch,
-        "static_assert(sizeof(CombineV2KernelArgs) == 21U * sizeof(uint64_t)",
-        "Combine V2 launch ABI no longer has 21 64-bit slots");
+        "static_assert(sizeof(CombineV2KernelArgs) == 29U * sizeof(uint64_t)",
+        "Combine V2 launch ABI no longer has 29 64-bit slots");
     ok &= Count(launch, "        0U,") >= 3U;
     if (Count(launch, "        0U,") < 3U) {
         std::cerr << "Combine V2 launch does not zero all retired ABI slots\n";
@@ -443,6 +496,8 @@ int main()
         "Combine V2 workspace API is missing");
     ok &= Require(publicHeader, "TileXRMoonEpCombineV2",
         "Combine V2 launch API is missing");
+    ok &= Require(publicHeader, "TileXRMoonEpCombineStageV2Fused",
+        "Combine V2 fused Stage API is missing");
 
     ok &= Reject(groupKernel, "extern \"C\" __global__",
         "Group implementation header contains the operator entry");

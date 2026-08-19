@@ -78,6 +78,7 @@ tilexr_add_moonep_kernel(tilexr_moonep_combine_v2_kernel
         "${CMAKE_CURRENT_SOURCE_DIR}/common/combine_v2_schedule.h"
         "${CMAKE_SOURCE_DIR}/src/moonep/common/moonep_combine_schedule.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/common/combine_v2_wqe_batch.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/common/combine_v2_weight.h"
         "${CMAKE_SOURCE_DIR}/src/include/comm_args.h"
         "${CMAKE_SOURCE_DIR}/src/include/tilexr_udma.h"
         "${CMAKE_SOURCE_DIR}/src/include/tilexr_udma_fullmesh.h"

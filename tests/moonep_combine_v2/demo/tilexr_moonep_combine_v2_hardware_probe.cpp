@@ -68,6 +68,7 @@ struct Options {
     int device = -1;
     bool profile = false;
     bool reduceHidden = false;
+    bool fusedWeight = false;
 };
 
 struct ProfileSample {
@@ -129,6 +130,7 @@ void Usage(std::ostream &out, const char *program)
         << "                         Deprecated no-op; launches are always continuous\n"
         << "  --profile              Capture per-AIV kernel cycle timestamps\n"
         << "  --reduce-hidden        Include BF16 TopK hidden reduction in the kernel\n"
+        << "  --fused-weight         Transfer and validate FP32 route weights in the same launch\n"
         << "  --help                 Show this help\n";
 }
 
@@ -199,6 +201,10 @@ bool ParseOptions(int argc, char **argv, Options *options, bool *showHelp,
         }
         if (argument == "--reduce-hidden") {
             options->reduceHidden = true;
+            continue;
+        }
+        if (argument == "--fused-weight") {
+            options->fusedWeight = true;
             continue;
         }
         if (index + 1 >= argc) {
@@ -290,6 +296,11 @@ bool ParseOptions(int argc, char **argv, Options *options, bool *showHelp,
         *error = "--rank and --world-size must identify a valid rank";
         return false;
     }
+    if (options->fusedWeight && options->commDomain ==
+            std::numeric_limits<int>::max()) {
+        *error = "--comm-domain leaves no distinct domain for fused weight";
+        return false;
+    }
     return true;
 }
 
@@ -306,6 +317,17 @@ uint16_t SourceValue(int sourceRank)
     const float value = 1.0F + static_cast<float>(sourceRank % 16) * 0.25F +
         static_cast<float>(sourceRank / 16) * 0.0625F;
     return FloatToBfloat16(value);
+}
+
+float WeightValue(int sourceRank, int64_t sourceSlot, uint32_t generation)
+{
+    const uint32_t payload = (static_cast<uint32_t>(sourceRank) * 131071U +
+        static_cast<uint32_t>(sourceSlot) + generation * 524287U) &
+        0x007FFFFFU;
+    const uint32_t bits = 0x3F000000U | payload;
+    float value = 0.0F;
+    std::memcpy(&value, &bits, sizeof(value));
+    return value;
 }
 
 void CheckAcl(int rank, const std::string &step, aclError status)
@@ -512,13 +534,14 @@ bool BarrierAll(int rank, int world, const std::string &step,
 }
 
 void LaunchCombine(int rank, void *workspace, const int32_t *dst,
-    TileXRCommPtr comm, int64_t bs, int64_t hiddenSize, aclrtStream stream,
-    bool reduceHidden, uint64_t reduceOutputOffset,
-    uint64_t *activeOutputOffset)
+    TileXRCommPtr comm, TileXRCommPtr weightMemoryComm, int64_t bs,
+    int64_t hiddenSize, aclrtStream stream, bool reduceHidden,
+    bool fusedWeight, const float *routeWeightsNvs, float *routeWeightsSk,
+    uint64_t reduceOutputOffset, uint64_t *activeOutputOffset)
 {
     const int64_t slots = bs * kTopK;
     int ret = TILEXR_MOONEP_SUCCESS;
-    if (reduceHidden) {
+    if (reduceHidden || fusedWeight) {
         TileXRMoonEp::CombineV2Params params {};
         params.registeredWorkspace = workspace;
         params.dstLocal = dst;
@@ -530,10 +553,13 @@ void LaunchCombine(int rank, void *workspace, const int32_t *dst,
         params.aivCoreNum = kAivCoreNum;
         params.activeOutputOffset = activeOutputOffset;
         params.dtype = TILEXR_MOONEP_DTYPE_BFLOAT16;
-        params.reduceHidden = true;
+        params.reduceHidden = reduceHidden;
+        params.weightMemoryComm = fusedWeight ? weightMemoryComm : nullptr;
+        params.routeWeightsNvs = fusedWeight ? routeWeightsNvs : nullptr;
+        params.routeWeightsSk = fusedWeight ? routeWeightsSk : nullptr;
         params.stream = stream;
         ret = TileXRMoonEp::TileXRMoonEpRunCombineV2(params);
-        if (ret == TILEXR_MOONEP_SUCCESS) {
+        if (ret == TILEXR_MOONEP_SUCCESS && reduceHidden) {
             *activeOutputOffset = reduceOutputOffset;
         }
     } else {
@@ -545,6 +571,35 @@ void LaunchCombine(int rank, void *workspace, const int32_t *dst,
         Abort(rank, reduceHidden ? "TileXRMoonEpRunCombineV2 reduce" :
             "TileXRMoonEpCombineV2", ret);
     }
+}
+
+bool CheckWeights(int rank, int world, int64_t bs,
+    const float *routeWeightsSk, uint32_t generation)
+{
+    const int64_t slots = bs * kTopK;
+    const int64_t slotsPerRank = slots / world;
+    std::vector<float> output(static_cast<std::size_t>(slots));
+    const std::size_t bytes = output.size() * sizeof(float);
+    CheckAcl(rank, "weight output D2H copy", aclrtMemcpy(output.data(), bytes,
+        routeWeightsSk, bytes, ACL_MEMCPY_DEVICE_TO_HOST));
+    for (int64_t targetSlot = 0; targetSlot < slots; ++targetSlot) {
+        const int sourceRank = static_cast<int>(targetSlot / slotsPerRank);
+        const int64_t sourceLocalIndex = targetSlot % slotsPerRank;
+        const int64_t sourceSlot = sourceLocalIndex * world + rank;
+        const float expected = WeightValue(
+            sourceRank, sourceSlot, generation);
+        if (output[static_cast<std::size_t>(targetSlot)] != expected) {
+            std::cerr << "[rank " << rank << "] weight mismatch"
+                      << " bs=" << bs
+                      << " target_slot=" << targetSlot
+                      << " source_rank=" << sourceRank
+                      << " source_slot=" << sourceSlot
+                      << " got=" << output[static_cast<std::size_t>(targetSlot)]
+                      << " expected=" << expected << std::endl;
+            return false;
+        }
+    }
+    return true;
 }
 
 OutputCheckResult CheckOutput(int rank, int world, int64_t bs,
@@ -842,6 +897,14 @@ int main(int argc, char **argv)
     if (ret != TileXR::TILEXR_SUCCESS) {
         Abort(rank, "TileXRCommInitRankWithSharedQpDomain", ret);
     }
+    TileXRCommPtr weightMemoryComm = nullptr;
+    if (options.fusedWeight) {
+        ret = TileXRCommInitRankMemoryDomain(
+            options.commDomain + 1, world, rank, &weightMemoryComm);
+        if (ret != TileXR::TILEXR_SUCCESS) {
+            Abort(rank, "TileXRCommInitRankMemoryDomain", ret);
+        }
+    }
 
     TileXR::CommArgs *commArgs = nullptr;
     uint32_t qpCount = 0;
@@ -873,13 +936,25 @@ int main(int argc, char **argv)
 
     void *workspace = nullptr;
     int32_t *dst = nullptr;
+    float *routeWeightsNvs = nullptr;
+    float *routeWeightsSk = nullptr;
     const std::size_t maxDstBytes = static_cast<std::size_t>(maxBs * kTopK) *
         sizeof(int32_t);
+    const std::size_t maxWeightBytes = static_cast<std::size_t>(maxBs * kTopK) *
+        sizeof(float);
     CheckAcl(rank, "aclrtMalloc workspace", aclrtMalloc(&workspace,
         static_cast<std::size_t>(maxWorkspaceBytes), ACL_MEM_MALLOC_HUGE_FIRST));
     CheckAcl(rank, "aclrtMalloc destinations", aclrtMalloc(
         reinterpret_cast<void **>(&dst), maxDstBytes,
         ACL_MEM_MALLOC_HUGE_FIRST));
+    if (options.fusedWeight) {
+        CheckAcl(rank, "aclrtMalloc route weights input", aclrtMalloc(
+            reinterpret_cast<void **>(&routeWeightsNvs), maxWeightBytes,
+            ACL_MEM_MALLOC_HUGE_FIRST));
+        CheckAcl(rank, "aclrtMalloc route weights output", aclrtMalloc(
+            reinterpret_cast<void **>(&routeWeightsSk), maxWeightBytes,
+            ACL_MEM_MALLOC_HUGE_FIRST));
+    }
     CheckAcl(rank, "aclrtMemset workspace", aclrtMemset(workspace,
         static_cast<std::size_t>(maxWorkspaceBytes), 0,
         static_cast<std::size_t>(maxWorkspaceBytes)));
@@ -904,6 +979,7 @@ int main(int argc, char **argv)
                   << " max_bs=" << maxBs
                   << " workspace_bytes=" << maxWorkspaceBytes
                   << " reduce=" << (options.reduceHidden ? "enabled" : "disabled")
+                  << " fused_weight=" << (options.fusedWeight ? "enabled" : "disabled")
                   << std::endl;
     }
 
@@ -932,6 +1008,10 @@ int main(int argc, char **argv)
             sizeof(int32_t);
         std::vector<uint16_t> source(sourceElements, SourceValue(rank));
         std::vector<int32_t> destinations(static_cast<std::size_t>(slots));
+        std::vector<float> routeWeights;
+        if (options.fusedWeight) {
+            routeWeights.resize(static_cast<std::size_t>(slots));
+        }
         const int64_t slotsPerRank = slots / world;
         for (int64_t slot = 0; slot < slots; ++slot) {
             const int64_t targetRank = slot % world;
@@ -939,6 +1019,10 @@ int main(int argc, char **argv)
                 slotsPerRank + slot / world;
             destinations[static_cast<std::size_t>(slot)] =
                 static_cast<int32_t>(targetRank * slots + targetSlot);
+            if (options.fusedWeight) {
+                routeWeights[static_cast<std::size_t>(slot)] =
+                    WeightValue(rank, slot, 0U);
+            }
         }
         CheckAcl(rank, "input H2D copy", aclrtMemcpy(workspace,
             static_cast<std::size_t>(maxWorkspaceBytes), source.data(),
@@ -946,32 +1030,69 @@ int main(int argc, char **argv)
         CheckAcl(rank, "destinations H2D copy", aclrtMemcpy(dst,
             maxDstBytes, destinations.data(), dstBytes,
             ACL_MEMCPY_HOST_TO_DEVICE));
+        if (options.fusedWeight) {
+            const std::size_t weightBytes = static_cast<std::size_t>(slots) *
+                sizeof(float);
+            CheckAcl(rank, "route weights H2D copy", aclrtMemcpy(
+                routeWeightsNvs, maxWeightBytes, routeWeights.data(),
+                weightBytes, ACL_MEMCPY_HOST_TO_DEVICE));
+            CheckAcl(rank, "route weights output clear", aclrtMemset(
+                routeWeightsSk, maxWeightBytes, 0, weightBytes));
+        }
         source.clear();
         source.shrink_to_fit();
         destinations.clear();
         destinations.shrink_to_fit();
+        routeWeights.clear();
+        routeWeights.shrink_to_fit();
         if (!BarrierAll(rank, world, "case inputs ready")) {
             Abort(rank, "case input barrier", 1);
         }
 
         uint64_t activeOutputOffset = 0;
-        LaunchCombine(rank, workspace, dst, comm, bs, options.hiddenSize, stream,
-            options.reduceHidden, caseLayout.outputOffset, &activeOutputOffset);
+        LaunchCombine(rank, workspace, dst, comm, weightMemoryComm, bs,
+            options.hiddenSize, stream, options.reduceHidden,
+            options.fusedWeight, routeWeightsNvs, routeWeightsSk,
+            caseLayout.outputOffset, &activeOutputOffset);
         CheckAcl(rank, "correctness stream synchronization",
             aclrtSynchronizeStream(stream));
         const OutputCheckResult outputResult = CheckOutput(
             rank, world, bs, options.hiddenSize, workspace,
             activeOutputOffset, options.reduceHidden);
+        bool weightResult = !options.fusedWeight ||
+            CheckWeights(rank, world, bs, routeWeightsSk, 0U);
         if (outputResult != OutputCheckResult::Passed) {
             ReportFirstKernelFailure(rank, workspace, caseLayout);
         }
-        if (!BarrierAll(rank, world, "correctness validation")) {
+        if (!BarrierAll(rank, world, "correctness validation",
+                outputResult == OutputCheckResult::Passed && weightResult)) {
             Abort(rank, "correctness validation barrier", 1);
         }
 
+        if (options.fusedWeight) {
+            const std::size_t weightBytes = static_cast<std::size_t>(slots) *
+                sizeof(float);
+            std::vector<float> continuousWeights(
+                static_cast<std::size_t>(slots));
+            for (int64_t slot = 0; slot < slots; ++slot) {
+                continuousWeights[static_cast<std::size_t>(slot)] =
+                    WeightValue(rank, slot, 1U);
+            }
+            CheckAcl(rank, "continuous route weights H2D copy", aclrtMemcpy(
+                routeWeightsNvs, maxWeightBytes, continuousWeights.data(),
+                weightBytes, ACL_MEMCPY_HOST_TO_DEVICE));
+            CheckAcl(rank, "continuous route weights output clear", aclrtMemset(
+                routeWeightsSk, maxWeightBytes, 0, weightBytes));
+        }
+        if (!BarrierAll(rank, world, "continuous inputs ready")) {
+            Abort(rank, "continuous input barrier", 1);
+        }
+
         for (int iteration = 0; iteration < options.warmup; ++iteration) {
-            LaunchCombine(rank, workspace, dst, comm, bs, options.hiddenSize, stream,
-                options.reduceHidden, caseLayout.outputOffset, &activeOutputOffset);
+            LaunchCombine(rank, workspace, dst, comm, weightMemoryComm, bs,
+                options.hiddenSize, stream, options.reduceHidden,
+                options.fusedWeight, routeWeightsNvs, routeWeightsSk,
+                caseLayout.outputOffset, &activeOutputOffset);
         }
         if (options.warmup > 0) {
             CheckAcl(rank, "warmup stream synchronization",
@@ -990,8 +1111,10 @@ int main(int argc, char **argv)
         CheckAcl(rank, "aclrtRecordEvent batch start",
             aclrtRecordEvent(startEvent, stream));
         for (int iteration = 0; iteration < options.iterations; ++iteration) {
-            LaunchCombine(rank, workspace, dst, comm, bs, options.hiddenSize, stream,
-                options.reduceHidden, caseLayout.outputOffset, &activeOutputOffset);
+            LaunchCombine(rank, workspace, dst, comm, weightMemoryComm, bs,
+                options.hiddenSize, stream, options.reduceHidden,
+                options.fusedWeight, routeWeightsNvs, routeWeightsSk,
+                caseLayout.outputOffset, &activeOutputOffset);
         }
         CheckAcl(rank, "aclrtRecordEvent batch stop",
             aclrtRecordEvent(stopEvent, stream));
@@ -1002,6 +1125,14 @@ int main(int argc, char **argv)
             aclrtEventElapsedTime(&batchElapsedMs, startEvent, stopEvent));
         const float averageMs = batchElapsedMs /
             static_cast<float>(options.iterations);
+        if (options.fusedWeight) {
+            weightResult = weightResult &&
+                CheckWeights(rank, world, bs, routeWeightsSk, 1U);
+        }
+        if (!BarrierAll(rank, world, "continuous weight validation",
+                weightResult)) {
+            Abort(rank, "continuous weight validation barrier", 1);
+        }
 
         if (options.profile) {
             const int finalIteration = options.iterations - 1;
@@ -1062,6 +1193,8 @@ int main(int argc, char **argv)
                   << " avg_ms=" << averageMs
                   << " timing_source=batch_acl_event"
                   << " reduce=" << (options.reduceHidden ? "enabled" : "disabled")
+                  << " fused_weight=" << (options.fusedWeight ? "enabled" : "disabled")
+                  << " weight_correctness=" << (weightResult ? "passed" : "failed")
                   << " correctness=" << OutputCheckName(outputResult)
                   << std::endl;
     }
@@ -1072,18 +1205,26 @@ int main(int argc, char **argv)
     const bool unregisterSynchronized = BarrierAll(rank, world,
         "workspace unregistration",
         unregisterRet == TileXR::TILEXR_SUCCESS);
+    const int destroyWeightRet = weightMemoryComm == nullptr ?
+        TileXR::TILEXR_SUCCESS : TileXRCommDestroy(weightMemoryComm);
     const int destroyRet = TileXRCommDestroy(comm);
     const aclError destroyStartRet = aclrtDestroyEvent(startEvent);
     const aclError destroyStopRet = aclrtDestroyEvent(stopEvent);
     const aclError freeDstRet = aclrtFree(dst);
+    const aclError freeWeightInputRet = routeWeightsNvs == nullptr ?
+        ACL_SUCCESS : aclrtFree(routeWeightsNvs);
+    const aclError freeWeightOutputRet = routeWeightsSk == nullptr ?
+        ACL_SUCCESS : aclrtFree(routeWeightsSk);
     const aclError freeWorkspaceRet = aclrtFree(workspace);
     const aclError destroyStreamRet = aclrtDestroyStream(stream);
     const aclError resetRet = aclrtResetDevice(device);
     const aclError finalizeRet = aclFinalize();
     const bool cleanupOk = unregisterRet == TileXR::TILEXR_SUCCESS &&
+        destroyWeightRet == TileXR::TILEXR_SUCCESS &&
         destroyRet == TileXR::TILEXR_SUCCESS &&
         destroyStartRet == ACL_SUCCESS && destroyStopRet == ACL_SUCCESS &&
-        freeDstRet == ACL_SUCCESS && freeWorkspaceRet == ACL_SUCCESS &&
+        freeDstRet == ACL_SUCCESS && freeWeightInputRet == ACL_SUCCESS &&
+        freeWeightOutputRet == ACL_SUCCESS && freeWorkspaceRet == ACL_SUCCESS &&
         destroyStreamRet == ACL_SUCCESS && resetRet == ACL_SUCCESS &&
         finalizeRet == ACL_SUCCESS;
     return casesSynchronized && unregisterSynchronized && cleanupOk ? 0 : 1;

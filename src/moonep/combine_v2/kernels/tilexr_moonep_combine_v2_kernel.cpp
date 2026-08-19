@@ -11,7 +11,11 @@ tilexr_moonep_combine_v2_kernel(GM_ADDR commArgs,
     uint64_t collectiveStatusOffset,
     uint64_t outputOffset, int64_t bs, int64_t h, int64_t topK,
     int64_t nvS, uint64_t rowBytes, uint64_t reduceHidden,
-    int64_t magic)
+    int64_t magic, GM_ADDR weightMemoryCommArgs,
+    GM_ADDR routeWeightsNvs, GM_ADDR routeWeightsSk,
+    uint64_t weightRecordOffset, uint64_t weightDoneOffset,
+    uint64_t weightWindowBytes, uint64_t weightOutputElements,
+    uint64_t hasRouteWeight)
 {
     AscendC::TPipe pipe;
     __gm__ TileXR::CommArgs *args =
@@ -23,7 +27,10 @@ tilexr_moonep_combine_v2_kernel(GM_ADDR commArgs,
     //         reservedOffset0, controlSourceOffset, failureOffset,
     //         reservedSyncReceiveOffset, reservedSyncSourceOffset,
     //         collectiveStatusOffset, outputOffset, bs, h,
-    //         topK, nvS, rowBytes, reduceHidden != 0U, magic, &pipe);
+    //         topK, nvS, rowBytes, reduceHidden != 0U, magic,
+    //         weightMemoryCommArgs, routeWeightsNvs, routeWeightsSk,
+    //         weightRecordOffset, weightDoneOffset, weightWindowBytes,
+    //         weightOutputElements, hasRouteWeight != 0U, &pipe);
     //     op.Process();
     //     return;
     // }
@@ -34,6 +41,9 @@ tilexr_moonep_combine_v2_kernel(GM_ADDR commArgs,
         reservedOffset0, controlSourceOffset, failureOffset,
         reservedSyncReceiveOffset, reservedSyncSourceOffset,
         collectiveStatusOffset, outputOffset, bs, h,
-        topK, nvS, rowBytes, reduceHidden != 0U, magic, &pipe);
+        topK, nvS, rowBytes, reduceHidden != 0U, magic,
+        weightMemoryCommArgs, routeWeightsNvs, routeWeightsSk,
+        weightRecordOffset, weightDoneOffset, weightWindowBytes,
+        weightOutputElements, hasRouteWeight != 0U, &pipe);
     op.Process();
 }

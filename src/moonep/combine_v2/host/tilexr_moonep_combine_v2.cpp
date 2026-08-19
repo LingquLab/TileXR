@@ -154,3 +154,74 @@ extern "C" int TileXRMoonEpCombineStageV2(void *registeredWorkspace,
     }
     return TILEXR_MOONEP_SUCCESS;
 }
+
+extern "C" int TileXRMoonEpCombineStageV2Fused(void *registeredWorkspace,
+    uint64_t registeredWorkspaceBytes, const int32_t *dstLocal,
+    TileXRCommPtr comm, TileXRCommPtr weightMemoryComm,
+    int64_t bs, int64_t h, int64_t topK, int64_t nvS,
+    uint32_t aivCoreNum, const void *hiddenNvsh, void *hiddenSh,
+    const float *routeWeightsNvs, float *routeWeightsSk,
+    uint32_t dtype, aclrtStream stream)
+{
+    if (registeredWorkspace == nullptr || registeredWorkspaceBytes == 0U ||
+        registeredWorkspaceBytes > std::numeric_limits<std::size_t>::max() ||
+        dstLocal == nullptr || comm == nullptr || hiddenNvsh == nullptr ||
+        hiddenSh == nullptr || stream == nullptr ||
+        dtype != TILEXR_MOONEP_DTYPE_BFLOAT16 ||
+        ((routeWeightsNvs == nullptr) != (routeWeightsSk == nullptr)) ||
+        (routeWeightsNvs != nullptr && weightMemoryComm == nullptr)) {
+        return TILEXR_MOONEP_ERROR_INVALID_ARGUMENT;
+    }
+
+    TileXRMoonEp::CombineV2Layout hiddenLayout {};
+    int ret = TileXRMoonEp::TileXRMoonEpBuildCombineV2Layout(
+        bs, h, topK, nvS, dtype, &hiddenLayout);
+    if (ret != TILEXR_MOONEP_SUCCESS ||
+        registeredWorkspaceBytes < hiddenLayout.totalBytes) {
+        return ret == TILEXR_MOONEP_SUCCESS ?
+            TILEXR_MOONEP_ERROR_INVALID_ARGUMENT : ret;
+    }
+
+    const std::size_t workspaceBytes = static_cast<std::size_t>(
+        registeredWorkspaceBytes);
+    const std::size_t hiddenInputBytes = static_cast<std::size_t>(
+        hiddenLayout.expertBytes);
+    const std::size_t hiddenOutputBytes = static_cast<std::size_t>(
+        hiddenLayout.outputBytes);
+    if (aclrtMemcpyAsync(registeredWorkspace, workspaceBytes, hiddenNvsh,
+            hiddenInputBytes, ACL_MEMCPY_DEVICE_TO_DEVICE, stream) !=
+            ACL_SUCCESS) {
+        return TILEXR_MOONEP_ERROR_INTERNAL;
+    }
+
+    uint64_t activeOutputOffset = 0U;
+    TileXRMoonEp::CombineV2Params params {};
+    params.registeredWorkspace = registeredWorkspace;
+    params.dstLocal = dstLocal;
+    params.comm = comm;
+    params.weightMemoryComm = weightMemoryComm;
+    params.bs = bs;
+    params.h = h;
+    params.topK = topK;
+    params.nvS = nvS;
+    params.aivCoreNum = aivCoreNum;
+    params.activeOutputOffset = &activeOutputOffset;
+    params.dtype = dtype;
+    params.reduceHidden = true;
+    params.routeWeightsNvs = routeWeightsNvs;
+    params.routeWeightsSk = routeWeightsSk;
+    params.stream = stream;
+    ret = TileXRMoonEp::TileXRMoonEpRunCombineV2(params);
+    if (ret != TILEXR_MOONEP_SUCCESS) {
+        return ret;
+    }
+
+    const uint8_t *hiddenOutput = static_cast<const uint8_t *>(
+        registeredWorkspace) + hiddenLayout.outputOffset;
+    if (aclrtMemcpyAsync(hiddenSh, hiddenOutputBytes, hiddenOutput,
+            hiddenOutputBytes, ACL_MEMCPY_DEVICE_TO_DEVICE, stream) !=
+            ACL_SUCCESS) {
+        return TILEXR_MOONEP_ERROR_INTERNAL;
+    }
+    return TILEXR_MOONEP_SUCCESS;
+}

@@ -209,6 +209,7 @@ class TileXRMoonEPRuntime:
         self.install_prefix = _resolve_install_prefix(install_prefix)
         self._closed = False
         self._comm = ctypes.c_void_p()
+        self._weight_memory_comm = ctypes.c_void_p()
         self._udma_qp_count = 0
         self._active_udma_owner: str | None = None
         self._active_udma_pointer = 0
@@ -260,6 +261,23 @@ class TileXRMoonEPRuntime:
             ret,
             f"rank={self.rank} world_size={self.world_size}",
         )
+        if self.combine_version == 2:
+            ret = self._comm_lib.TileXRCommInitRankMemoryDomain(
+                ctypes.c_int(1),
+                ctypes.c_int(self.world_size),
+                ctypes.c_int(self.rank),
+                ctypes.byref(self._weight_memory_comm),
+            )
+            if int(ret) != 0:
+                destroy_ret = self._comm_lib.TileXRCommDestroy(self._comm)
+                self._comm = ctypes.c_void_p()
+                if int(destroy_ret) != 0:
+                    self._check("TileXRCommDestroy", destroy_ret, "rollback main communicator")
+                self._check(
+                    "TileXRCommInitRankMemoryDomain",
+                    ret,
+                    f"rank={self.rank} world_size={self.world_size} domain=1",
+                )
         self._udma_qp_count = self._query_udma_qp_count()
         self.capabilities = self._query_capabilities()
 
@@ -271,6 +289,13 @@ class TileXRMoonEPRuntime:
             ctypes.POINTER(ctypes.c_void_p),
         ]
         self._comm_lib.TileXRCommInitRankWithSharedQpDomain.restype = ctypes.c_int
+        self._comm_lib.TileXRCommInitRankMemoryDomain.argtypes = [
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.POINTER(ctypes.c_void_p),
+        ]
+        self._comm_lib.TileXRCommInitRankMemoryDomain.restype = ctypes.c_int
         self._comm_lib.TileXRCommDestroy.argtypes = [ctypes.c_void_p]
         self._comm_lib.TileXRCommDestroy.restype = ctypes.c_int
         self._comm_lib.TileXRUDMARegister.argtypes = [
@@ -361,6 +386,25 @@ class TileXRMoonEPRuntime:
                 ctypes.c_void_p,
             ]
             self._combine_v2_lib.TileXRMoonEpCombineStageV2.restype = ctypes.c_int
+            self._combine_v2_lib.TileXRMoonEpCombineStageV2Fused.argtypes = [
+                ctypes.c_void_p,
+                ctypes.c_uint64,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_int64,
+                ctypes.c_int64,
+                ctypes.c_int64,
+                ctypes.c_int64,
+                ctypes.c_uint32,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_uint32,
+                ctypes.c_void_p,
+            ]
+            self._combine_v2_lib.TileXRMoonEpCombineStageV2Fused.restype = ctypes.c_int
         symbols = (
             ("TileXRMoonEpPlanningV1", TileXRMoonEPPlanningArgsV1),
             ("TileXRMoonEpDispatchV2", TileXRMoonEPDispatchArgsV2),
@@ -564,17 +608,13 @@ class TileXRMoonEPRuntime:
         )
         self._check("TileXRMoonEpDispatchGetWorkspaceSizeV2", ret)
         hidden_combine_bytes = 0
-        weight_combine_bytes = 0
         if self.combine_version == 2:
             hidden_combine_bytes = self._combine_v2_workspace_size(
                 context, int(context.hidden_size), dtype_code(context.dtype)
             )
-            weight_combine_bytes = self._combine_v2_workspace_size(
-                context, 1, int(TileXRMoonEPDType.FLOAT32)
-            )
         alignment = max(int(workspace_alignment.value), _UDMA_REGISTRATION_ALIGNMENT)
         required_bytes = max(
-            int(workspace_bytes.value), hidden_combine_bytes, weight_combine_bytes
+            int(workspace_bytes.value), hidden_combine_bytes
         )
         required_bytes = (required_bytes + alignment - 1) // alignment * alignment
         return required_bytes, alignment
@@ -863,11 +903,12 @@ class TileXRMoonEPRuntime:
             return
         if registered_workspace is None or int(registered_workspace_bytes) <= 0:
             raise ValueError("Combine V2 requires the registered Dispatch workspace")
-        ret = self._combine_v2_lib.TileXRMoonEpCombineStageV2(
+        ret = self._combine_v2_lib.TileXRMoonEpCombineStageV2Fused(
             void_p(registered_workspace),
             ctypes.c_uint64(registered_workspace_bytes),
             void_p(dst_local_ptr),
             void_p(self.comm_ptr),
+            void_p(int(self._weight_memory_comm.value or 0)),
             ctypes.c_int64(context.tokens_per_rank),
             ctypes.c_int64(context.hidden_size),
             ctypes.c_int64(context.topk),
@@ -881,7 +922,7 @@ class TileXRMoonEPRuntime:
             ctypes.c_uint32(dtype_code(context.dtype)),
             void_p(stream_ptr),
         )
-        self._check("TileXRMoonEpCombineStageV2", ret)
+        self._check("TileXRMoonEpCombineStageV2Fused", ret)
 
     def reduce_grad_workspace_info(
         self,
@@ -1031,6 +1072,14 @@ class TileXRMoonEPRuntime:
                 )
             if self._closed:
                 return
+            if self._weight_memory_comm.value:
+                ret = self._comm_lib.TileXRCommDestroy(self._weight_memory_comm)
+                self._check(
+                    "TileXRCommDestroy",
+                    ret,
+                    f"rank={self.rank} weight_memory_domain=1",
+                )
+                self._weight_memory_comm = ctypes.c_void_p()
             if self._comm.value:
                 self._deactivate_udma_region()
                 ret = self._comm_lib.TileXRCommDestroy(self._comm)

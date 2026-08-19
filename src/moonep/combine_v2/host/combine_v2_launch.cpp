@@ -42,9 +42,17 @@ struct CombineV2KernelArgs {
     uint64_t rowBytes;
     uint64_t reduceHidden;
     int64_t magic;
+    GM_ADDR weightMemoryCommArgs;
+    GM_ADDR routeWeightsNvs;
+    GM_ADDR routeWeightsSk;
+    uint64_t weightRecordOffset;
+    uint64_t weightDoneOffset;
+    uint64_t weightWindowBytes;
+    uint64_t weightOutputElements;
+    uint64_t hasRouteWeight;
 };
 
-static_assert(sizeof(CombineV2KernelArgs) == 21U * sizeof(uint64_t),
+static_assert(sizeof(CombineV2KernelArgs) == 29U * sizeof(uint64_t),
     "Combine V2 kernel argument ABI changed");
 
 int ConfigureCombineV2SimtMemory(rtTaskCfgInfo_t &cfgInfo)
@@ -94,7 +102,16 @@ int TileXRMoonEpLaunchCombineV2Kernel(
         params.nvS,
         context.layout.rowBytes,
         params.reduceHidden ? 1U : 0U,
-        context.magic
+        context.magic,
+        context.weightMemoryDevArgs,
+        reinterpret_cast<GM_ADDR>(const_cast<float *>(
+            params.routeWeightsNvs)),
+        reinterpret_cast<GM_ADDR>(params.routeWeightsSk),
+        context.weightLayout.recordOffset,
+        context.weightLayout.doneOffset,
+        context.weightLayout.totalBytes,
+        context.weightOutputElements,
+        params.routeWeightsNvs != nullptr ? 1U : 0U
     };
     rtTaskCfgInfo_t cfgInfo {};
     const int memoryRet = ConfigureCombineV2SimtMemory(cfgInfo);

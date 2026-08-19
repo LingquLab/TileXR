@@ -4,6 +4,7 @@
 #include <cstdint>
 
 #include "combine_v2_schedule.h"
+#include "combine_v2_weight.h"
 
 namespace TileXRMoonEp {
 
@@ -31,9 +32,22 @@ struct CombineV2Layout {
     uint64_t totalBytes = 0;
 };
 
+struct CombineV2WeightLayout {
+    uint64_t recordOffset = 0;
+    uint64_t recordEpochBytes = 0;
+    uint64_t recordBytes = 0;
+    uint64_t doneOffset = 0;
+    uint64_t doneEpochBytes = 0;
+    uint64_t doneBytes = 0;
+    uint64_t totalBytes = 0;
+};
+
 int TileXRMoonEpBuildCombineV2Layout(int64_t bs, int64_t h,
     int64_t topK, int64_t nvS, uint32_t dtype,
     CombineV2Layout *layout);
+
+int TileXRMoonEpBuildCombineV2WeightLayout(
+    int64_t nvS, int32_t rankSize, CombineV2WeightLayout *layout);
 
 } // namespace TileXRMoonEp
 

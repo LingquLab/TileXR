@@ -246,7 +246,7 @@ def test_full_flow_reuses_the_plan_after_forward_combine() -> None:
         / "tilexr_moonep"
         / "runtime.py"
     ).read_text(encoding="utf-8")
-    assert "self._combine_v2_lib.TileXRMoonEpCombineStageV2(" in runtime
+    assert "self._combine_v2_lib.TileXRMoonEpCombineStageV2Fused(" in runtime
 
 
 def test_single_node_launcher_accepts_dispatch_hot_loop_controls() -> None:

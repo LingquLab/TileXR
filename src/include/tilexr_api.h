@@ -38,6 +38,9 @@ int TileXRCommInitRankWithDomain(int commDomain, int rankSize, int rank, TileXRC
 // Use a commDomain distinct from every concurrently active non-shared communicator.
 int TileXRCommInitRankWithSharedQpDomain(int commDomain, int rankSize, int rank, TileXRCommPtr *comm);
 
+// Creates an isolated peer-memory domain without Credit, UDMA, Fullmesh, or SDMA resources.
+int TileXRCommInitRankMemoryDomain(int commDomain, int rankSize, int rank, TileXRCommPtr *comm);
+
 int TileXRGetCommArgsDev(TileXRCommPtr comm, GM_ADDR &commArgsPtr);
 
 int TileXRGetCommArgsHost(TileXRCommPtr comm, TileXR::CommArgs *&commArgsPtr);

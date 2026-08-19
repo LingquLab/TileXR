@@ -17,6 +17,7 @@ TIMEOUT_SECONDS=600
 LOG_FILE=""
 PROFILE=0
 REDUCE_HIDDEN=0
+FUSED_WEIGHT=0
 
 usage() {
     cat <<'EOF'
@@ -39,6 +40,7 @@ Options:
                          Deprecated no-op; launches are always continuous
   --profile              Capture per-AIV kernel cycle timestamps
   --reduce-hidden        Include BF16 TopK hidden reduction in the kernel
+  --fused-weight         Transfer and validate FP32 route weights in the same launch
   --help                 Show this help
 EOF
 }
@@ -62,6 +64,7 @@ while [[ $# -gt 0 ]]; do
         --skip-iteration-barriers) shift ;;
         --profile) PROFILE=1; shift ;;
         --reduce-hidden) REDUCE_HIDDEN=1; shift ;;
+        --fused-weight) FUSED_WEIGHT=1; shift ;;
         --help|-h) usage; exit 0 ;;
         *) echo "unknown argument: $1" >&2; usage >&2; exit 2 ;;
     esac
@@ -218,6 +221,9 @@ if (( PROFILE )); then
 fi
 if (( REDUCE_HIDDEN )); then
     benchmark_args+=(--reduce-hidden)
+fi
+if (( FUSED_WEIGHT )); then
+    benchmark_args+=(--fused-weight)
 fi
 job_id="combine_v2_${ranks}p_$(date +%Y%m%d_%H%M%S)_$$"
 remote_job_dir="$(cd "${INSTALL_DIR}/.." && pwd)/logs/.combine_v2_jobs/${job_id}"
