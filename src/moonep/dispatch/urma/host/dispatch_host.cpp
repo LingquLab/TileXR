@@ -15,6 +15,7 @@
 #include "../common/dispatch_wqe_batch.h"
 #include "tilexr_api.h"
 #include "tilexr_types.h"
+#include "tilexr_udma_fullmesh.h"
 #include "tilexr_udma_reg.h"
 #include "tilexr_udma_types.h"
 
@@ -261,6 +262,34 @@ int ValidateRegisteredWorkspace(TileXRCommPtr comm, const TileXR::CommArgs &comm
     return TILEXR_MOONEP_SUCCESS;
 }
 
+int ValidateFullmeshCapability(TileXRCommPtr comm,
+    const TileXR::CommArgs &commArgs)
+{
+    if (commArgs.rankSize == 1) {
+        return TILEXR_MOONEP_SUCCESS;
+    }
+    if (commArgs.localRankSize <= 1 ||
+        commArgs.localRank < 0 ||
+        commArgs.localRank >= commArgs.localRankSize ||
+        commArgs.rank % commArgs.localRankSize != commArgs.localRank ||
+        (commArgs.extraFlag & TileXR::ExtraFlag::UDMA_FULLMESH) == 0U ||
+        commArgs.udmaFullmeshPtr == nullptr ||
+        commArgs.udmaRegistrationGeneration == 0U) {
+        return TILEXR_MOONEP_ERROR_NOT_SUPPORTED;
+    }
+    TileXR::TileXRUDMAFullmeshHostView view {};
+    const int ret = TileXRUDMAFullmeshQuery(comm, &view);
+    if (ret != TileXR::TILEXR_SUCCESS ||
+        !TileXR::UDMAFullmeshHostViewValid(view,
+            static_cast<uint32_t>(commArgs.localRank),
+            static_cast<uint32_t>(commArgs.localRankSize),
+            commArgs.udmaRegistrationGeneration) ||
+        view.viewDev != commArgs.udmaFullmeshPtr) {
+        return TILEXR_MOONEP_ERROR_NOT_SUPPORTED;
+    }
+    return TILEXR_MOONEP_SUCCESS;
+}
+
 int ValidateAivCoreCount()
 {
     int32_t device = 0;
@@ -406,6 +435,12 @@ static int RunDispatchUrma(const TileXRMoonEpDispatchArgsV1 *args,
         args->routeWeightsSk != nullptr);
     if (ret != TILEXR_MOONEP_SUCCESS) {
         return ret;
+    }
+    if (DispatchPeerModeUsesGroups(static_cast<uint32_t>(peerConfig.mode))) {
+        ret = ValidateFullmeshCapability(args->comm, *commArgs);
+        if (ret != TILEXR_MOONEP_SUCCESS) {
+            return ret;
+        }
     }
 
     struct BufferRange {

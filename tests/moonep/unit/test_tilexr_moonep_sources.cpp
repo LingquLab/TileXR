@@ -241,9 +241,13 @@ int main()
     Contains("URMA dispatch kernel", dispatchUrmaKernel,
         "(!incomingAlreadyWaited &&");
     Contains("URMA dispatch kernel", dispatchUrmaKernel,
-        "magic, relayLocal);");
+        "DispatchCompletionLaneCount(");
+    Contains("URMA dispatch kernel", dispatchUrmaKernel,
+        "magic, completionTimeoutTicks,");
     Contains("URMA dispatch credit QP ownership", dispatchUrmaKernel,
-        "static_cast<uint32_t>(blockIdx), physicalQp[0], rank,");
+        "preparedPeer.fullmesh ?");
+    Contains("URMA dispatch credit QP ownership", dispatchUrmaKernel,
+        "(dedicatedCreditQp ? creditPhysicalQp : physicalQp[0])");
     Contains("URMA dispatch credit QP ownership", dispatchUrmaKernel,
         "args, wqeLocal, peer, physicalQpIdx,");
     Excludes("URMA dispatch credit QP ownership", dispatchUrmaKernel,
@@ -254,12 +258,42 @@ int main()
         "ReserveDispatchPeerChunkSq");
     Contains("URMA dispatch kernel", dispatchUrmaKernel,
         "state.stagedWqeCount += batchCount");
-    CheckOrdered("URMA dispatch shared-QP credit ordering", dispatchUrmaKernel, {
-        "if (previousPeerValid) {",
-        "TraceDrainDispatchPeerFinalCq(previousPeer,",
-        "previousPeerValid = false;",
-        "const bool published = PublishDispatchPeerCredit(",
-    });
+    Contains("URMA dispatch dedicated credit QP", dispatchUrmaKernel,
+        "DispatchCreditPhysicalQpIndex(");
+    Contains("URMA dispatch dedicated credit QP", dispatchUrmaKernel,
+        "InitDispatchCreditQpState(");
+    Contains("URMA dispatch dedicated credit QP", dispatchUrmaKernel,
+        "RecordDispatchCreditQpPost(creditQpState, peer)");
+    Contains("URMA dispatch per-peer credit CQ", dispatchUrmaKernel,
+        "DrainDispatchCreditQp(args, udmaInfo, peer,");
+    Excludes("URMA dispatch per-peer credit CQ", dispatchUrmaKernel,
+        "bool creditQpStateValid = false;");
+    Contains("URMA dispatch shared payload CQ handoff", dispatchUrmaKernel,
+        "SyncDispatchPreparedPeerCqState(");
+    Contains("URMA dispatch shared payload overlap", dispatchUrmaKernel,
+        "previousPeerValid && !dedicatedCreditQp");
+    Contains("URMA dispatch Fullmesh capability", dispatchUrmaKernel,
+        "DispatchFullmeshDeviceViewValid(");
+    Contains("URMA dispatch Fullmesh peer init", dispatchUrmaKernel,
+        "InitDispatchFullmeshWqeBatchState(");
+    Contains("URMA dispatch Fullmesh single lane", dispatchUrmaKernel,
+        "kDispatchQpSelectionSingleLane");
+    Contains("URMA dispatch Fullmesh credit", dispatchUrmaKernel,
+        "TileXR::UDMAOpcode::WRITE, true>(");
+    Contains("URMA dispatch Fullmesh credit accounting", dispatchUrmaKernel,
+        "RecordDispatchCreditQpPost(*fullmeshState, peer)");
+    Contains("URMA dispatch Fullmesh credit SQ capacity", dispatchUrmaKernel,
+        "(dedicatedCreditQp || preparedPeer.fullmesh)");
+    Contains("URMA dispatch per-peer QP count", dispatchUrmaKernel,
+        "qpIdx < peer.qpCount");
+    Contains("URMA dispatch same-server completion", dispatchUrmaKernel,
+        "DispatchCompletionLaneCount(");
+    Contains("URMA dispatch same-server credit drain", dispatchUrmaKernel,
+        "DispatchSameServer(\n                            rank, creditPeer,");
+    Contains("URMA dispatch Host Fullmesh validation", dispatchUrmaHost,
+        "ValidateFullmeshCapability(");
+    Contains("URMA dispatch Host Fullmesh validation", dispatchUrmaHost,
+        "UDMAFullmeshHostViewValid(view,");
     Contains("URMA dispatch kernel", dispatchUrmaKernel,
         "DispatchPayloadWqesPerRoute(hasWeight)");
     Contains("URMA dispatch kernel", dispatchUrmaKernel,

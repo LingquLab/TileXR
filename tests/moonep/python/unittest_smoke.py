@@ -21,6 +21,7 @@ for path in (ROOT, INTEGRATION, Path(__file__).resolve().parent):
 from fakes import FakeRuntime, FakeStream, FakeTensor, FakeTorch
 from tilexr_moonep import ProjectionBuffers, TileXRMoonEPBuffer, TileXRMoonEPContext
 from tools.moonep.config import BenchmarkCase, load_cases
+from tools.moonep.dispatch_hot_loop import run_case as run_dispatch_case
 from tools.moonep.benchmark import (
     _multi_node_stage_barrier,
     _oversubscribed_planning_barrier,
@@ -63,6 +64,75 @@ def make_buffer(*, write_status_markers=False, runtime=None, node_count=1):
 
 
 class MoonEPSmokeTests(unittest.TestCase):
+    def test_dispatch_hot_loop_uses_dispatch_only_workspace_and_closes_context(self):
+        torch = FakeTorch()
+        context = SimpleNamespace(closed=False)
+        context.close = lambda: setattr(context, "closed", True)
+        context_kwargs = {}
+
+        class ContextFactory:
+            @classmethod
+            def from_env(cls, **kwargs):
+                context_kwargs.update(kwargs)
+                return context
+
+        class FailingBuffer:
+            def __init__(self, *args, **kwargs):
+                raise RuntimeError("buffer construction failed")
+
+        case = SimpleNamespace(
+            case_id="dispatch-only-workspace",
+            tokens_per_rank=16384,
+            hidden_size=3584,
+            topk=16,
+            expert_count=128,
+            dtype="bfloat16",
+            iterations=1,
+        )
+        args = SimpleNamespace(
+            output_dir="unused",
+            dispatch_modes=("hidden",),
+            install_prefix=None,
+            wait_iterations=1,
+        )
+
+        with patch("tilexr_moonep.TileXRMoonEPContext", ContextFactory), patch(
+            "tilexr_moonep.TileXRMoonEPBuffer", FailingBuffer
+        ), self.assertRaisesRegex(RuntimeError, "buffer construction failed"):
+            run_dispatch_case(torch, case, args)
+
+        self.assertIs(context_kwargs["include_combine_workspace"], False)
+        self.assertTrue(context.closed)
+
+    def test_dispatch_only_context_rejects_combine_v2(self):
+        torch = FakeTorch()
+        context = TileXRMoonEPContext(
+            runtime=FakeRuntime(),
+            global_rank=0,
+            global_world_size=2,
+            node_rank=0,
+            node_count=1,
+            local_rank=0,
+            local_world_size=2,
+            planner_group_rank=0,
+            planner_group_size=2,
+            lane_group_rank=0,
+            lane_group_size=1,
+            device_index=0,
+            tokens_per_rank=4,
+            hidden_size=8,
+            topk=2,
+            expert_count=4,
+            dtype=torch.bfloat16,
+            include_combine_workspace=False,
+        )
+        buffer = TileXRMoonEPBuffer(context, torch_module=torch)
+
+        with self.assertRaisesRegex(RuntimeError, "excludes its workspace"):
+            buffer.combine()
+
+        buffer.close()
+
     def test_native_hidden_dtype_supports_float16_and_bfloat16(self):
         torch = FakeTorch()
         context = TileXRMoonEPContext(

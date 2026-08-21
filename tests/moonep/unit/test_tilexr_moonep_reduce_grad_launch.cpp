@@ -118,7 +118,7 @@ void TestLaunch()
     layout.projectionQpCounts[0] = 3;
     layout.projectionQpCounts[1] = 3;
     layout.projectionQpCounts[2] = 2;
-    layout.transportQpCount = 32;
+    layout.transportQpCount = 48;
     for (uint32_t lane = 0; lane < 8; ++lane) {
         layout.lanePhysicalQps[lane] = lane == 7 ? 16 : lane;
     }
@@ -191,7 +191,7 @@ void TestLaunch()
         "projection shape args mismatch");
     Check(g_args.projectionQpBase[1] == 3 &&
         g_args.projectionQpCounts[2] == 2 && g_args.qpCount == 8 &&
-        g_args.laneCount == 8 && g_args.transportQpCount == 32 &&
+        g_args.laneCount == 8 && g_args.transportQpCount == 48 &&
         g_args.lanePhysicalQps[7] == 16,
         "QP allocation args mismatch");
     Check(g_args.laneStateBytes == 32 && g_args.stagingOffset == 32 &&

@@ -118,7 +118,7 @@ UDMAQpConfigParseStatus ParseUDMAQpRouteSpec(
             return UDMAQpConfigParseStatus::INVALID;
         }
         if (config.routes.size() == TILEXR_UDMA_MAX_QP_COUNT) {
-            SetError(error, "UDMA QP route specification requests more than 32 QPs");
+            SetError(error, "UDMA QP route specification requests more than 48 QPs");
             config = {};
             return UDMAQpConfigParseStatus::INVALID;
         }
@@ -181,7 +181,7 @@ bool ValidateUDMASharedQpConfig(
     }
     if (!config.sharedQp || !config.explicitConfig ||
         config.routes.size() != TILEXR_UDMA_MAX_QP_COUNT) {
-        SetError(error, "shared UDMA domain requires the fixed 32-QP profile");
+        SetError(error, "shared UDMA domain requires the fixed 48-QP profile");
         return false;
     }
     for (uint32_t qp = 0; qp < TILEXR_UDMA_MAX_QP_COUNT; ++qp) {
@@ -274,7 +274,7 @@ bool ValidateUDMAQpConfigWireDescriptor(
     }
     if (descriptor.sharedQp != 0) {
         if (descriptor.qpCount != TILEXR_UDMA_MAX_QP_COUNT) {
-            SetError(error, "shared UDMA descriptor must contain the fixed 32-QP profile");
+            SetError(error, "shared UDMA descriptor must contain the fixed 48-QP profile");
             return false;
         }
         for (uint32_t qp = 0; qp < TILEXR_UDMA_MAX_QP_COUNT; ++qp) {

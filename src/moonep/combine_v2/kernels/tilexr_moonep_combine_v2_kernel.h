@@ -679,7 +679,7 @@ __aicore__ inline void MoonEpCombineV2::Init(
         rowBytes == 0U || rowBytes > UINT32_MAX ||
         (reduceHidden && rowBytes !=
             static_cast<uint64_t>(h) * sizeof(bfloat16_t)) ||
-        closInfo->qpNum != TileXRMoonEp::kMoonEpCombineV2QpCount ||
+        closInfo->qpNum < TileXRMoonEp::kMoonEpCombineV2QpCount ||
         fullmeshView_->magic != TileXR::TILEXR_UDMA_FULLMESH_MAGIC ||
         fullmeshView_->version != TileXR::TILEXR_UDMA_FULLMESH_VERSION ||
         fullmeshView_->slotCount !=

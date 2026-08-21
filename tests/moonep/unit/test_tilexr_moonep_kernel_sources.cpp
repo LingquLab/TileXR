@@ -198,7 +198,11 @@ int main()
     Contains("URMA Dispatch grouped convergence", dispatchUrmaKernel,
         "bool completionSubmitted = optimizedSignalSubmitted");
     Contains("URMA Dispatch grouped convergence", dispatchUrmaKernel,
-        "WaitDispatchIncomingPeerAndPublishCredit(args");
+        "WaitDispatchIncomingPeer(receiveFlags");
+    Contains("URMA Dispatch grouped convergence", dispatchUrmaKernel,
+        "PublishDispatchPeerCredit(");
+    Contains("URMA Dispatch grouped convergence", dispatchUrmaKernel,
+        "DispatchCompletionLaneCount(");
     Excludes("URMA Dispatch grouped convergence", dispatchUrmaKernel,
         "peerValue == rank || upstreamStatus !=");
     Excludes("URMA Dispatch WQE", dispatchUrmaKernel, "WRITE_WITH_NOTIFY");

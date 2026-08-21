@@ -20,8 +20,14 @@ constexpr uint32_t kDispatchQpCount = 2U;
 constexpr uint32_t kDispatchQpSplitPeriod = 4U;
 constexpr uint32_t kDispatchSqPollReserve = 10U;
 constexpr uint32_t kDispatchSharedQpCoreCount = 16U;
-constexpr uint32_t kDispatchSharedQpCount =
+constexpr uint32_t kDispatchSharedPayloadQpCount =
     kDispatchQpCount * kDispatchSharedQpCoreCount;
+constexpr uint32_t kDispatchSharedCreditQpBase =
+    kDispatchSharedPayloadQpCount;
+constexpr uint32_t kDispatchSharedCreditQpCount =
+    kDispatchSharedQpCoreCount;
+constexpr uint32_t kDispatchSharedQpCount =
+    kDispatchSharedPayloadQpCount + kDispatchSharedCreditQpCount;
 
 TILEXR_MOONEP_WQE_BATCH_INLINE uint32_t DispatchPayloadWqesPerRoute(
     bool hasWeight)
@@ -92,6 +98,16 @@ TILEXR_MOONEP_WQE_BATCH_INLINE uint32_t DispatchPhysicalQpIndex(
         return UINT32_MAX;
     }
     return logicalQpIdx * kDispatchSharedQpCoreCount + coreIdx;
+}
+
+TILEXR_MOONEP_WQE_BATCH_INLINE uint32_t DispatchCreditPhysicalQpIndex(
+    uint32_t coreIdx, bool sharedQp)
+{
+    if (!sharedQp) {
+        return 0U;
+    }
+    return coreIdx < kDispatchSharedQpCoreCount ?
+        kDispatchSharedCreditQpBase + coreIdx : UINT32_MAX;
 }
 
 TILEXR_MOONEP_WQE_BATCH_INLINE uint32_t DispatchWqeBatchCount(

@@ -728,9 +728,17 @@ def run_case(torch_module, case, args) -> None:
     context = TileXRMoonEPContext.from_env(tokens_per_rank=case.tokens_per_rank,
         hidden_size=case.hidden_size, topk=case.topk,
         expert_count=case.expert_count, dtype=_dtype(torch_module, case.dtype),
-        install_prefix=args.install_prefix, torch_module=torch_module)
-    buffer = TileXRMoonEPBuffer(context, wait_iterations=args.wait_iterations,
+        include_combine_workspace=False, install_prefix=args.install_prefix,
         torch_module=torch_module)
+    try:
+        buffer = TileXRMoonEPBuffer(context, wait_iterations=args.wait_iterations,
+            torch_module=torch_module)
+    except Exception:
+        try:
+            context.close()
+        except Exception:
+            pass
+        raise
     result = {"schema_version": 1, "benchmark_kind": "dispatch_hot_loop",
         "dispatch_modes": list(dispatch_modes),
         "status": "failed", "failure_reason": None, "mode": "benchmark",

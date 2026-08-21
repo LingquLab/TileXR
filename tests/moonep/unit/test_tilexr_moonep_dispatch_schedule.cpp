@@ -71,6 +71,18 @@ void CheckGroupedCoverage(
     }
 }
 
+void CheckServerLocality()
+{
+    CHECK_TRUE(TileXRMoonEp::DispatchSameServer(0, 7, 8));
+    CHECK_TRUE(TileXRMoonEp::DispatchSameServer(8, 15, 8));
+    CHECK_TRUE(!TileXRMoonEp::DispatchSameServer(7, 8, 8));
+    CHECK_TRUE(!TileXRMoonEp::DispatchSameServer(0, 1, 0));
+    CHECK_EQ(TileXRMoonEp::DispatchFullmeshSlot(15, 8), 7U);
+    CHECK_EQ(TileXRMoonEp::DispatchFullmeshSlot(-1, 8), UINT32_MAX);
+    CHECK_EQ(TileXRMoonEp::DispatchCompletionLaneCount(8, 15, 8), 1U);
+    CHECK_EQ(TileXRMoonEp::DispatchCompletionLaneCount(8, 16, 8), 2U);
+}
+
 void TestSchedule()
 {
     CHECK_EQ(TileXRMoonEp::DispatchGroupCount(1), 1);
@@ -477,8 +489,9 @@ void TestDualQpSplit()
     CHECK_TRUE(TileXRMoonEp::DispatchQpCountSupported(2U));
     CHECK_TRUE(TileXRMoonEp::DispatchQpCountSupported(32U));
     CHECK_TRUE(!TileXRMoonEp::DispatchQpCountSupported(2U, true));
-    CHECK_TRUE(TileXRMoonEp::DispatchQpCountSupported(32U, true));
-    CHECK_TRUE(!TileXRMoonEp::DispatchQpCountSupported(33U, true));
+    CHECK_TRUE(!TileXRMoonEp::DispatchQpCountSupported(32U, true));
+    CHECK_TRUE(TileXRMoonEp::DispatchQpCountSupported(48U, true));
+    CHECK_TRUE(!TileXRMoonEp::DispatchQpCountSupported(49U, true));
     CHECK_EQ(TileXRMoonEp::DispatchPeerCoreCount(64U, false), 64U);
     CHECK_EQ(TileXRMoonEp::DispatchPeerCoreCount(64U, true), 16U);
     CHECK_EQ(TileXRMoonEp::DispatchPeerCoreCount(8U, true), 8U);
@@ -486,8 +499,26 @@ void TestDualQpSplit()
     CHECK_EQ(TileXRMoonEp::DispatchPhysicalQpIndex(1U, 7U, false), 1U);
     CHECK_EQ(TileXRMoonEp::DispatchPhysicalQpIndex(0U, 7U, true), 7U);
     CHECK_EQ(TileXRMoonEp::DispatchPhysicalQpIndex(1U, 7U, true), 23U);
+    CHECK_EQ(TileXRMoonEp::DispatchCreditPhysicalQpIndex(7U, true), 39U);
+    CHECK_EQ(TileXRMoonEp::DispatchCreditPhysicalQpIndex(7U, false), 0U);
+    CHECK_EQ(TileXRMoonEp::DispatchCreditPhysicalQpIndex(16U, true), UINT32_MAX);
     CHECK_EQ(TileXRMoonEp::DispatchPhysicalQpIndex(0U, 16U, true), UINT32_MAX);
     CHECK_EQ(TileXRMoonEp::DispatchPhysicalQpIndex(2U, 0U, true), UINT32_MAX);
+    std::vector<uint32_t> sharedQpVisits(
+        TileXRMoonEp::kDispatchSharedQpCount, 0U);
+    for (uint32_t core = 0U;
+        core < TileXRMoonEp::kDispatchSharedQpCoreCount; ++core) {
+        for (uint32_t logicalQp = 0U;
+            logicalQp < TileXRMoonEp::kDispatchQpCount; ++logicalQp) {
+            ++sharedQpVisits[TileXRMoonEp::DispatchPhysicalQpIndex(
+                logicalQp, core, true)];
+        }
+        ++sharedQpVisits[TileXRMoonEp::DispatchCreditPhysicalQpIndex(
+            core, true)];
+    }
+    for (uint32_t visits : sharedQpVisits) {
+        CHECK_EQ(visits, 1U);
+    }
     for (uint32_t phase = 0U; phase < 4U; ++phase) {
         for (uint32_t count = 0U; count <= 257U; ++count) {
             const uint32_t qp0 = TileXRMoonEp::DispatchQpRouteCount(count, phase, 0U);
@@ -524,6 +555,7 @@ void TestDualQpSplit()
 
 int main()
 {
+    CheckServerLocality();
     TestSchedule();
     TestGroupedSchedule();
     TestSplit128GroupedSchedule();

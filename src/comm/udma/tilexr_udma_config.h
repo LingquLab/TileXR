@@ -15,8 +15,8 @@
 namespace TileXR {
 
 constexpr char TILEXR_UDMA_QP_ROUTE_SPEC_ENV[] = "TILEXR_UDMA_QP_ROUTE_SPEC";
-constexpr uint32_t TILEXR_UDMA_QP_CONFIG_WIRE_VERSION = 2;
-constexpr uint32_t TILEXR_UDMA_MAX_QP_COUNT = 32;
+constexpr uint32_t TILEXR_UDMA_QP_CONFIG_WIRE_VERSION = 3;
+constexpr uint32_t TILEXR_UDMA_MAX_QP_COUNT = 48;
 constexpr uint32_t TILEXR_UDMA_SHARED_QP_SIX_PORT_COUNT = 16;
 constexpr uint32_t TILEXR_UDMA_SHARED_QP_SIX_PORT_VALUE = 6;
 constexpr uint32_t TILEXR_UDMA_SHARED_QP_TWO_PORT_VALUE = 2;
@@ -55,7 +55,7 @@ struct UDMAQpConfigWireDescriptor {
     UDMAQpRouteWireRule routeRules[TILEXR_UDMA_MAX_QP_COUNT] = {};
 };
 
-static_assert(sizeof(UDMAQpConfigWireDescriptor) == 272,
+static_assert(sizeof(UDMAQpConfigWireDescriptor) == 400,
               "UDMA QP configuration wire descriptor layout changed");
 static_assert(std::is_standard_layout<UDMAQpConfigWireDescriptor>::value &&
                   std::is_trivially_copyable<UDMAQpConfigWireDescriptor>::value,

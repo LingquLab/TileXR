@@ -387,7 +387,7 @@ void TestUDMAMultiQpHostTransportContract()
 
     const std::string configPath = "src/comm/udma/tilexr_udma_config.h";
     const auto config = ReadFile(configPath);
-    CheckContains(configPath, config, "TILEXR_UDMA_MAX_QP_COUNT = 32");
+    CheckContains(configPath, config, "TILEXR_UDMA_MAX_QP_COUNT = 48");
     CheckContains(configPath, config, "BuildUDMASharedQpConfig");
     CheckNotContains(configPath, config, "TILEXR_UDMA_SHARED_QP_ENV");
 
@@ -698,7 +698,7 @@ void TestUDMAPersistentProfilesStayIndependent()
     const std::string registryPath = "src/include/tilexr_udma_reg.h";
     const auto registry = ReadFile(registryPath);
     CheckContains(registryPath, registry, "TILEXR_UDMA_PROFILE_MAX_REGIONS = 8U");
-    CheckContains(registryPath, registry, "TILEXR_UDMA_PROFILE_MAX_QP_BINDINGS = 32U");
+    CheckContains(registryPath, registry, "TILEXR_UDMA_PROFILE_MAX_QP_BINDINGS = 48U");
     CheckContains(registryPath, registry, "struct TileXRUDMAProfileQpBinding");
     CheckContains(registryPath, registry, "struct TileXRUDMAProfileView");
     CheckContains(registryPath, registry, "registrationBase");

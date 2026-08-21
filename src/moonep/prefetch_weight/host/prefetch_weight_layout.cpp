@@ -106,7 +106,7 @@ int TileXRMoonEpBuildPrefetchWeightQpMap(uint32_t workers, uint32_t qpNum,
 {
     if (physicalQpMap == nullptr || !SupportedWorkerCount(workers) ||
         workers > qpNum ||
-        (sharedQps && qpNum != kPrefetchWeightSharedQpCount)) {
+        (sharedQps && qpNum < kPrefetchWeightSharedQpCount)) {
         return TILEXR_MOONEP_ERROR_INVALID_ARGUMENT;
     }
 

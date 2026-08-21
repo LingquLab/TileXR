@@ -91,11 +91,11 @@ void TestSharedDomainUsesBoundedActiveLanes()
     const uint64_t rows[TileXRMoonEp::kReduceGradProjectionCount] = {
         UINT64_C(14) << 20, UINT64_C(14) << 20, UINT64_C(14) << 20};
     TileXRMoonEp::ReduceGradLayout layout {};
-    CheckStatus("32-QP shared-domain layout",
+    CheckStatus("48-QP shared-domain layout",
         TileXRMoonEp::TileXRMoonEpBuildReduceGradLayout(
-            0, 4, 4, 1, rows, 32, UINT64_C(8) << 20, &layout),
+            0, 4, 4, 1, rows, 48, UINT64_C(8) << 20, &layout),
         TileXR::TILEXR_SUCCESS);
-    Check(layout.transportQpCount == 32 && layout.qpCount == 3 &&
+    Check(layout.transportQpCount == 48 && layout.qpCount == 3 &&
         layout.laneCount == 3,
         "shared domain must expose all transport QPs and use three active lanes");
     Check(layout.lanePhysicalQps[0] == 0 && layout.lanePhysicalQps[1] == 1 &&
@@ -104,7 +104,7 @@ void TestSharedDomainUsesBoundedActiveLanes()
     Check(layout.projectionQpCounts[0] == 1 &&
         layout.projectionQpCounts[1] == 1 &&
         layout.projectionQpCounts[2] == 1,
-        "32-QP shared domain must allocate one active lane per projection");
+        "48-QP shared domain must allocate one active lane per projection");
     Check(layout.workspaceBytes == UINT64_C(194) << 20,
         "inactive shared-domain QPs must not increase ReduceGrad workspace");
 }

@@ -129,7 +129,7 @@ void Reset()
         TileXR::TILEXR_SUCCESS;
     launchReturn = TILEXR_MOONEP_SUCCESS;
     aclDeviceReturn = aclInfoReturn = ACL_SUCCESS;
-    qpCount = TileXRMoonEp::kMoonEpCombineV2QpCount;
+    qpCount = 48U;
     vectorCoreCount = TileXRMoonEp::kMoonEpCombineV2CoreCount;
     nextMagic = 17;
     magicCallCount = 0U;
@@ -219,7 +219,7 @@ void TestValidation()
     Reset();
     qpCount = 8;
     CheckStatus(TileXRMoonEp::TileXRMoonEpRunCombineV2(params),
-        TILEXR_MOONEP_ERROR_NOT_SUPPORTED, "32 QPs required");
+        TILEXR_MOONEP_ERROR_NOT_SUPPORTED, "at least 32 QPs required");
 
     Reset();
     commArgs.extraFlag &= ~TileXR::ExtraFlag::UDMA_FULLMESH;

@@ -178,7 +178,7 @@ reset 等单一变量。一次同时修改 Kernel、Host、timeout 和路由，�
 - 独立 Memory 通信域与 UDMA 域融合时，至少覆盖三个连续 magic，并包含本轮未覆盖的
   route target，确认旧 record 不会泄漏到输出；
 - route 数覆盖 UB tile 和 SQ depth 边界；
-- QP 数覆盖 1/2/4/8/32；
+- QP 数覆盖 1/2/4/8/32/48；
 - SQ 位置覆盖 `depth-1`、`depth`、`depth+1`、`2*depth`；
 - 同时覆盖 1-BB 和多 BB WQE；
 - balanced、model-skew、sparse 和 unique routing；
@@ -227,6 +227,10 @@ reset 等单一变量。一次同时修改 Kernel、Host、timeout 和路由，�
   rank 的 stage 到达顺序可能不同，使无标签注册 collective 串轮。可预测的工作区应合并
   到一个持久注册 arena，算子继续使用各自逻辑子区间；子区间激活必须命中已有 MR，不能
   再发起注册 collective。扩大 arena 后仍要分别验证初始化内存峰值和至少两轮模型数值。
+- shared-QP 只共享物理 QP 编号规划，不会把不同 peer 合并到同一套 SQ/CQ context。
+  `UDMAGetWQCtx` 和 `UDMAGetSCQCtx` 均按 `(peer, physicalQp)` 索引。独立 credit QP
+  必须为每个 peer 分别维护和回收 head、tail、cqTail；可以延迟 CQ 回收以覆盖 payload
+  准备，但必须在复用 credit source 或算子返回前逐 peer drain。
 - `npu-smi info` 在 950 上可能显示每卡无进程，但 HCCL Test 或其他加速器工作负载仍在
   使用设备。多机 idle gate 必须同时检查设备节点 owner 和已知加速器进程；发现外部作业
   只判 busy，不终止。连续模型启动后的 `EI0007/halSqCqAllocate` 表示驱动 stream/SQ-CQ
@@ -282,7 +286,7 @@ profiling ON 的阶段分析必须分开，不能把两个 payload record 伪装
   条件，用 legacy 路径证明 Hidden 和 Weight 的空 slot 都为零。
 - shared-QP 不能仅凭配置名推断。应同时确认 runtime 调用 shared-QP-domain 初始化、日志
   显示 domain 启用，且 communicator `extraFlag` 含 UDMA 与 `UDMA_SHARED_QP`；本次
-  Ascend950PR 单机 8 rank 证据对应固定 32 QP shared domain。
+  Ascend950PR 单机 8 rank 证据对应固定 48 QP shared domain。
 - 参考形状 `S=128,K=16,H=3584,NvS=2048` 的不重叠布局仍为 30 MiB；其他 shape
   必须使用 checked add/multiply 计算真实容量，并在扩大 workspace 绑定后重新检查全部
   active region 与 common tail 边界。

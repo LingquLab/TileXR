@@ -7,6 +7,8 @@
 #include "dispatch_host.h"
 #include "dispatch_launch.h"
 #include "tilexr_types.h"
+#include "tilexr_udma_fullmesh.h"
+#include "tilexr_udma_reg.h"
 
 namespace {
 
@@ -17,11 +19,29 @@ int launchCalls = 0;
 int memsetCalls = 0;
 int synchronizeCalls = 0;
 int launchReturn = TileXR::TILEXR_SUCCESS;
+int fullmeshReturn = TileXR::TILEXR_SUCCESS;
 aclError memsetReturn = ACL_SUCCESS;
 aclError synchronizeReturn = ACL_SUCCESS;
+uint32_t qpCount = 2U;
 TileXR::CommArgs commArgs {};
+TileXR::TileXRUDMARegistry registry {};
+TileXR::TileXRUDMAFullmeshHostView fullmeshView {};
 GM_ADDR devArgs = reinterpret_cast<GM_ADDR>(uintptr_t {0x9000});
 TileXRMoonEp::DispatchUrmaLaunchParams launchedParams {};
+
+void SetPeerMode(const char *value)
+{
+#if defined(_WIN32)
+    _putenv_s("TILEXR_MOONEP_DISPATCH_PEER_MODE",
+        value == nullptr ? "" : value);
+#else
+    if (value == nullptr) {
+        unsetenv("TILEXR_MOONEP_DISPATCH_PEER_MODE");
+    } else {
+        setenv("TILEXR_MOONEP_DISPATCH_PEER_MODE", value, 1);
+    }
+#endif
+}
 
 void Check(bool condition, const std::string &message)
 {
@@ -44,14 +64,51 @@ void Reset()
     hostArgsCalls = devArgsCalls = launchCalls = 0;
     memsetCalls = synchronizeCalls = 0;
     launchReturn = TileXR::TILEXR_SUCCESS;
+    fullmeshReturn = TileXR::TILEXR_SUCCESS;
     memsetReturn = synchronizeReturn = ACL_SUCCESS;
+    qpCount = 2U;
     commArgs = TileXR::CommArgs {};
     commArgs.rank = 0;
     commArgs.localRank = 0;
     commArgs.rankSize = 1;
     commArgs.localRankSize = 1;
+    registry = TileXR::TileXRUDMARegistry {};
+    fullmeshView = TileXR::TileXRUDMAFullmeshHostView {};
+    SetPeerMode(nullptr);
     devArgs = reinterpret_cast<GM_ADDR>(uintptr_t {0x9000});
     launchedParams = TileXRMoonEp::DispatchUrmaLaunchParams {};
+}
+
+void ConfigureGroupedTransport(void *workspace, uint64_t workspaceBytes)
+{
+    commArgs.rank = 0;
+    commArgs.rankSize = 2;
+    commArgs.localRank = 0;
+    commArgs.localRankSize = 2;
+    commArgs.extraFlag = TileXR::ExtraFlag::UDMA |
+        TileXR::ExtraFlag::UDMA_FULLMESH;
+    commArgs.udmaInfoPtr = reinterpret_cast<GM_ADDR>(uintptr_t {0xA000});
+    commArgs.udmaRegistryPtr = reinterpret_cast<GM_ADDR>(uintptr_t {0xB000});
+    commArgs.udmaFullmeshPtr = reinterpret_cast<GM_ADDR>(uintptr_t {0xC000});
+    commArgs.udmaRegistrationGeneration = 7U;
+
+    registry.rankSize = 2U;
+    registry.regionCount = 1U;
+    for (uint32_t rank = 0U; rank < registry.rankSize; ++rank) {
+        registry.regions[rank].base = static_cast<GM_ADDR>(workspace);
+        registry.regions[rank].bytes = workspaceBytes;
+    }
+
+    fullmeshView.slotCount = TileXR::TILEXR_UDMA_FULLMESH_SLOT_COUNT;
+    fullmeshView.connectedCount = 1U;
+    fullmeshView.localRank = 0U;
+    fullmeshView.validPeerMask = TileXR::UDMAFullmeshExpectedPeerMask(0U, 2U);
+    fullmeshView.registrationReady = 1U;
+    fullmeshView.registrationGeneration =
+        commArgs.udmaRegistrationGeneration;
+    fullmeshView.infoDev = reinterpret_cast<GM_ADDR>(uintptr_t {0xD000});
+    fullmeshView.viewDev = commArgs.udmaFullmeshPtr;
+    SetPeerMode("group");
 }
 
 TileXRMoonEpPlanV1 ValidPlan()
@@ -183,6 +240,57 @@ void TestHiddenOnlyAndFailureBoundaries()
     Check(launchCalls == 0, "reset failure must prevent launch");
 }
 
+void TestGroupedFullmeshCapability()
+{
+    Reset();
+    TileXRMoonEpPlanV1 plan = ValidPlan();
+    plan.r = 2;
+    plan.n = 128;
+    plan.nvS = 128;
+    TileXRMoonEpTensorV1 hiddenInput = Tensor(
+        reinterpret_cast<void *>(uintptr_t {0x4000}),
+        TILEXR_MOONEP_DTYPE_FLOAT16, 2, 64, 16, 1024);
+    TileXRMoonEpTensorV1 hiddenOutput = Tensor(
+        reinterpret_cast<void *>(uintptr_t {0x5000}),
+        TILEXR_MOONEP_DTYPE_FLOAT16, 2, 128, 16, 2048);
+    TileXRMoonEpDispatchArgsV2 args = Args(
+        &plan, &hiddenInput, nullptr, &hiddenOutput, nullptr);
+    aclrtStream stream = reinterpret_cast<aclrtStream>(uintptr_t {0x8000});
+    ConfigureGroupedTransport(
+        args.registeredWorkspace, args.registeredWorkspaceBytes);
+
+    CheckStatus("grouped fullmesh", TileXRMoonEp::TileXRMoonEpRunDispatchUrmaV2(
+        &args, stream), TILEXR_MOONEP_SUCCESS);
+    Check(launchCalls == 1, "valid grouped Fullmesh must launch Dispatch");
+
+    Reset();
+    ConfigureGroupedTransport(
+        args.registeredWorkspace, args.registeredWorkspaceBytes);
+    commArgs.extraFlag &= ~TileXR::ExtraFlag::UDMA_FULLMESH;
+    CheckStatus("missing fullmesh capability",
+        TileXRMoonEp::TileXRMoonEpRunDispatchUrmaV2(&args, stream),
+        TILEXR_MOONEP_ERROR_NOT_SUPPORTED);
+    Check(launchCalls == 0, "missing grouped Fullmesh must prevent launch");
+
+    Reset();
+    ConfigureGroupedTransport(
+        args.registeredWorkspace, args.registeredWorkspaceBytes);
+    fullmeshReturn = TileXR::TILEXR_ERROR_NOT_SUPPORT;
+    CheckStatus("fullmesh query failure",
+        TileXRMoonEp::TileXRMoonEpRunDispatchUrmaV2(&args, stream),
+        TILEXR_MOONEP_ERROR_NOT_SUPPORTED);
+
+    Reset();
+    ConfigureGroupedTransport(
+        args.registeredWorkspace, args.registeredWorkspaceBytes);
+    ++fullmeshView.registrationGeneration;
+    CheckStatus("fullmesh generation mismatch",
+        TileXRMoonEp::TileXRMoonEpRunDispatchUrmaV2(&args, stream),
+        TILEXR_MOONEP_ERROR_NOT_SUPPORTED);
+
+    SetPeerMode(nullptr);
+}
+
 } // namespace
 
 extern "C" int TileXRGetCommArgsHost(TileXRCommPtr, TileXR::CommArgs *&args)
@@ -202,16 +310,26 @@ extern "C" int TileXRGetCommArgsDev(TileXRCommPtr, GM_ADDR &args)
 extern "C" int TileXRUDMAGetQpCount(TileXRCommPtr, uint32_t *qpCount)
 {
     if (qpCount != nullptr) {
-        *qpCount = 2U;
+        *qpCount = ::qpCount;
     }
     return TileXR::TILEXR_SUCCESS;
+}
+
+extern "C" int TileXRUDMAFullmeshQuery(
+    TileXRCommPtr, TileXR::TileXRUDMAFullmeshHostView *view)
+{
+    if (view != nullptr) {
+        *view = fullmeshReturn == TileXR::TILEXR_SUCCESS ?
+            fullmeshView : TileXR::TileXRUDMAFullmeshHostView {};
+    }
+    return fullmeshReturn;
 }
 
 extern "C" int TileXRGetUDMARegistryHost(
     TileXRCommPtr, const TileXR::TileXRUDMARegistry **registry)
 {
     if (registry != nullptr) {
-        *registry = nullptr;
+        *registry = commArgs.rankSize > 1 ? &::registry : nullptr;
     }
     return TileXR::TILEXR_SUCCESS;
 }
@@ -259,5 +377,7 @@ int main()
 {
     TestPairedSingleLaunch();
     TestHiddenOnlyAndFailureBoundaries();
+    TestGroupedFullmeshCapability();
+    SetPeerMode(nullptr);
     return failures == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
 }
