@@ -316,7 +316,7 @@ void TestPreparationValidationAndCapability()
     g_commArgs.extraFlag |= TileXR::ExtraFlag::UDMA;
     g_qpCount = 2;
     (void)Query(&plan, &gate, &up, &down, TileXR::TILEXR_ERROR_NOT_SUPPORT);
-    g_qpCount = 32;
+    g_qpCount = 48;
     (void)Query(&plan, &gate, &up, &down, TileXR::TILEXR_ERROR_NOT_SUPPORT);
     g_commArgs.extraFlag |= TileXR::ExtraFlag::UDMA_SHARED_QP;
     info = Query(&plan, &gate, &up, &down, TileXR::TILEXR_SUCCESS);
@@ -326,7 +326,7 @@ void TestPreparationValidationAndCapability()
     CheckStatus("shared-domain prepare",
         TileXRMoonEpReduceGradPrepareV2(&prepare, &prepared),
         TileXR::TILEXR_SUCCESS);
-    Check(g_profileDesc.qpBindingCount == 32,
+    Check(g_profileDesc.qpBindingCount == 48,
         "persistent profile must bind every transport QP in the shared domain");
     Check(g_profileDesc.qpBindings[0].remoteRegion == 1 &&
         g_profileDesc.qpBindings[1].remoteRegion == 2 &&
@@ -335,7 +335,7 @@ void TestPreparationValidationAndCapability()
     CheckStatus("shared-domain destroy",
         TileXRMoonEpReduceGradDestroyPreparedV2(prepared), TileXR::TILEXR_SUCCESS);
     prepared = nullptr;
-    g_qpCount = 33;
+    g_qpCount = 49;
     (void)Query(&plan, &gate, &up, &down, TileXR::TILEXR_ERROR_NOT_SUPPORT);
     Check(g_qpCountCalls == 9,
         "UDMA-capable multi-rank queries must validate the current hardware QP count");

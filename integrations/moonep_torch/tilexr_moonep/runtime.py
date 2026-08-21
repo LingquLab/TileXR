@@ -608,7 +608,10 @@ class TileXRMoonEPRuntime:
         )
         self._check("TileXRMoonEpDispatchGetWorkspaceSizeV2", ret)
         hidden_combine_bytes = 0
-        if self.combine_version == 2:
+        if (
+            self.combine_version == 2
+            and getattr(context, "include_combine_workspace", True)
+        ):
             hidden_combine_bytes = self._combine_v2_workspace_size(
                 context, int(context.hidden_size), dtype_code(context.dtype)
             )
@@ -660,14 +663,15 @@ class TileXRMoonEPRuntime:
             return
         if owner is not None and self._active_udma_owner != owner:
             return
+        handle = self._active_udma_handle
         ret = self._comm_lib.TileXRUDMAUnregister(
-            void_p(self.comm_ptr), ctypes.c_uint32(self._active_udma_handle)
+            void_p(self.comm_ptr), ctypes.c_uint32(handle)
         )
-        self._check("TileXRUDMAUnregister", ret)
         self._active_udma_owner = None
         self._active_udma_pointer = 0
         self._active_udma_bytes = 0
         self._active_udma_handle = None
+        self._check("TileXRUDMAUnregister", ret)
 
     def unregister_dispatch_workspace(self, handle: int | None) -> None:
         if handle is None:
@@ -1073,18 +1077,20 @@ class TileXRMoonEPRuntime:
             if self._closed:
                 return
             if self._weight_memory_comm.value:
-                ret = self._comm_lib.TileXRCommDestroy(self._weight_memory_comm)
+                comm = self._weight_memory_comm
+                ret = self._comm_lib.TileXRCommDestroy(comm)
+                self._weight_memory_comm = ctypes.c_void_p()
                 self._check(
                     "TileXRCommDestroy",
                     ret,
                     f"rank={self.rank} weight_memory_domain=1",
                 )
-                self._weight_memory_comm = ctypes.c_void_p()
             if self._comm.value:
                 self._deactivate_udma_region()
-                ret = self._comm_lib.TileXRCommDestroy(self._comm)
-                self._check("TileXRCommDestroy", ret, f"rank={self.rank}")
+                comm = self._comm
+                ret = self._comm_lib.TileXRCommDestroy(comm)
                 self._comm = ctypes.c_void_p()
+                self._check("TileXRCommDestroy", ret, f"rank={self.rank}")
             self._closed = True
 
     def __enter__(self) -> "TileXRMoonEPRuntime":

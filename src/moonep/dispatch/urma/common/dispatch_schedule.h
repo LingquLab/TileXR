@@ -172,6 +172,27 @@ TILEXR_MOONEP_SCHEDULE_INLINE uint64_t DispatchGroupedAssignmentCount(
         groupWidth;
 }
 
+TILEXR_MOONEP_SCHEDULE_INLINE bool DispatchSameServer(
+    int64_t rank, int64_t peer, int64_t localRankSize)
+{
+    return rank >= 0 && peer >= 0 && localRankSize > 0 &&
+        rank / localRankSize == peer / localRankSize;
+}
+
+TILEXR_MOONEP_SCHEDULE_INLINE uint32_t DispatchFullmeshSlot(
+    int64_t peer, int64_t localRankSize)
+{
+    return peer < 0 || localRankSize <= 0 ? UINT32_MAX :
+        static_cast<uint32_t>(peer % localRankSize);
+}
+
+TILEXR_MOONEP_SCHEDULE_INLINE uint32_t DispatchCompletionLaneCount(
+    int64_t rank, int64_t peer, int64_t localRankSize)
+{
+    return DispatchSameServer(rank, peer, localRankSize) ? 1U :
+        2U;
+}
+
 TILEXR_MOONEP_SCHEDULE_INLINE uint32_t DispatchGroupedPeerWorkCount(
     int64_t rankSize, uint32_t groupWidth, uint32_t coreCount)
 {

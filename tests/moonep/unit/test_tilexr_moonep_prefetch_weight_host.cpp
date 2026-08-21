@@ -101,7 +101,7 @@ void TestLaunch()
         "prefetch UDMA layout mismatch");
 
     Reset();
-    qpNum = 32;
+    qpNum = 48;
     commArgs.extraFlag |= TileXR::ExtraFlag::UDMA_SHARED_QP;
     plan = Plan();
     gate = Weight(0x100000, 4, 8);
@@ -111,7 +111,7 @@ void TestLaunch()
     Status("prefetch shared-domain QPs",
         TileXRMoonEp::TileXRMoonEpRunPrefetchWeightV1(&args, stream),
         TILEXR_MOONEP_SUCCESS);
-    Check(launchCalls == 1 && seenContext.layout.qpNum == 32 &&
+    Check(launchCalls == 1 && seenContext.layout.qpNum == 48 &&
         seenContext.layout.blockDim == 4 &&
         TileXRMoonEp::TileXRMoonEpPrefetchWeightPhysicalQp(
             seenContext.layout.physicalQpMap, 0) == 0 &&
@@ -126,7 +126,7 @@ void TestLaunch()
     uint64_t physicalQpMap = 0;
     Status("prefetch eight-worker shared QP map",
         TileXRMoonEp::TileXRMoonEpBuildPrefetchWeightQpMap(
-            8, 32, true, &physicalQpMap), TILEXR_MOONEP_SUCCESS);
+            8, 48, true, &physicalQpMap), TILEXR_MOONEP_SUCCESS);
     const uint32_t expectedSharedQps[8] = {0, 1, 2, 3, 4, 5, 16, 17};
     for (uint32_t worker = 0; worker < 8; ++worker) {
         Check(TileXRMoonEp::TileXRMoonEpPrefetchWeightPhysicalQp(

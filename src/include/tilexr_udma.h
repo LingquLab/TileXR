@@ -25,7 +25,7 @@ constexpr uint32_t TILEXR_UDMA_STATUS_SUCCESS = 0U;
 constexpr uint32_t TILEXR_UDMA_STATUS_CQ_TIMEOUT = 0xFFU;
 constexpr uint32_t TILEXR_UDMA_STATUS_SQ_FULL = 0xFFFFFFFEU;
 constexpr uint32_t TILEXR_UDMA_STATUS_INVALID = 0xFFFFFFFFU;
-constexpr uint32_t TILEXR_UDMA_DEVICE_MAX_QP_COUNT = 32U;
+constexpr uint32_t TILEXR_UDMA_DEVICE_MAX_QP_COUNT = 48U;
 
 /**
  * @file tilexr_udma.h

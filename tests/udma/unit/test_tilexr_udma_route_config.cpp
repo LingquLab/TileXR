@@ -101,11 +101,12 @@ void TestNormalizedRules()
     CHECK_EQ(config.routes.size(), static_cast<size_t>(3));
     CHECK_EQ(config.routes[0].value, config.routes[1].value);
 
-    const std::string routes32 = RepeatedRouteSpec(32U);
-    CHECK_TRUE(ParseOk(routes32.c_str(), config));
-    CHECK_EQ(TileXR::UDMAQpConfigQpCount(config), 32U);
+    const std::string routes48 = RepeatedRouteSpec(48U);
+    CHECK_TRUE(ParseOk(routes48.c_str(), config));
+    CHECK_EQ(TileXR::UDMAQpConfigQpCount(config), 48U);
     CHECK_EQ(config.routes[15].value, 6U);
     CHECK_EQ(config.routes[16].value, 2U);
+    CHECK_EQ(config.routes[47].value, 2U);
 }
 
 void TestInvalidRules()
@@ -123,8 +124,8 @@ void TestInvalidRules()
     ExpectInvalid("port_count: 2");
     ExpectInvalid("port_count:2x");
     ExpectInvalid("port_count:4294967296");
-    const std::string routes33 = RepeatedRouteSpec(33U);
-    ExpectInvalid(routes33.c_str());
+    const std::string routes49 = RepeatedRouteSpec(49U);
+    ExpectInvalid(routes49.c_str());
 }
 
 void TestWireDescriptor()
@@ -152,7 +153,7 @@ void TestWireDescriptor()
     CHECK_TRUE(TileXR::UDMAQpConfigWireDescriptorsEqual(wire, wire));
 
     auto invalid = wire;
-    invalid.qpCount = 33;
+    invalid.qpCount = 49;
     CHECK_TRUE(!TileXR::ValidateUDMAQpConfigWireDescriptor(invalid));
     invalid = wire;
     invalid.routeRules[7].selectorKind = 99;

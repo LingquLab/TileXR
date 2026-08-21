@@ -34,7 +34,11 @@ from tilexr_moonep.abi import (
     TileXRMoonEPReduceGradWorkspaceQueryV2,
     TileXRMoonEPTensorV1,
 )
-from tilexr_moonep.runtime import TileXRMoonEPRuntime, _resolve_library
+from tilexr_moonep.runtime import (
+    TileXRMoonEPError,
+    TileXRMoonEPRuntime,
+    _resolve_library,
+)
 from tilexr_moonep.torch_api import _format_dispatch_completion_flags
 
 
@@ -438,6 +442,80 @@ def tensor(shape, dtype):
 
 
 class FfiAbiTests(unittest.TestCase):
+    def test_dispatch_only_workspace_skips_combine_v2_layout_query(self):
+        loader = FakeCDLLLoader()
+        runtime = TileXRMoonEPRuntime(
+            rank=0,
+            world_size=2,
+            library_paths={
+                "comm": "libtile-comm.so",
+                "planner": "libtilexr-moonep-planner.so",
+                "combine_v2": "libtilexr-moonep-combine-v2.so.2",
+                "moonep": "libtilexr-moonep.so.1",
+            },
+            cdll_loader=loader,
+        )
+        torch = FakeTorch()
+        context = SimpleNamespace(
+            tokens_per_rank=4,
+            hidden_size=8,
+            topk=2,
+            nv_s=12,
+            dtype=torch.bfloat16,
+            include_combine_workspace=False,
+        )
+
+        workspace_bytes, alignment = runtime.dispatch_workspace_size(context)
+
+        self.assertEqual(workspace_bytes, 2 * 1024 * 1024)
+        self.assertEqual(alignment, 2 * 1024 * 1024)
+        self.assertEqual(loader.combine_v2_workspace_records, [])
+        runtime.close()
+
+    def test_failed_native_cleanup_is_not_retried(self):
+        loader = FakeCDLLLoader()
+        runtime = TileXRMoonEPRuntime(
+            rank=0,
+            world_size=2,
+            library_paths={
+                "comm": "libtile-comm.so",
+                "planner": "libtilexr-moonep-planner.so",
+                "combine_v2": "libtilexr-moonep-combine-v2.so.2",
+                "moonep": "libtilexr-moonep.so.1",
+            },
+            cdll_loader=loader,
+        )
+        runtime._activate_udma_region(
+            0x200000, 2 * 1024 * 1024, "dispatch", "cleanup test"
+        )
+        failed_unregisters = []
+
+        def fail_unregister(comm, handle):
+            value = int(handle.value if hasattr(handle, "value") else handle)
+            failed_unregisters.append(value)
+            return -3
+
+        loader.comm.TileXRUDMAUnregister = FakeFunction(fail_unregister)
+        with self.assertRaises(TileXRMoonEPError):
+            runtime._deactivate_udma_region()
+        runtime._deactivate_udma_region()
+        self.assertEqual(failed_unregisters, [7])
+
+        failed_destroys = []
+
+        def fail_destroy(comm):
+            value = int(comm.value if hasattr(comm, "value") else comm)
+            failed_destroys.append(value)
+            return -3
+
+        loader.comm.TileXRCommDestroy = FakeFunction(fail_destroy)
+        with self.assertRaises(TileXRMoonEPError):
+            runtime.close()
+        with self.assertRaises(TileXRMoonEPError):
+            runtime.close()
+        runtime.close()
+        self.assertEqual(failed_destroys, [0x2345, 0x1234])
+
     def test_udma_arena_subregion_reuses_active_registration(self):
         loader = FakeCDLLLoader()
         runtime = TileXRMoonEPRuntime(

@@ -313,6 +313,7 @@ class TileXRMoonEPContext:
     dtype: Any
     token_padding: int = 1
     prefetch_slots: int | None = None
+    include_combine_workspace: bool = True
     _dispatch_workspace_owner: Any = field(init=False, default=None, repr=False)
     _dispatch_workspace_ptr: int = field(init=False, default=0, repr=False)
     _dispatch_workspace_bytes: int = field(init=False, default=0, repr=False)
@@ -385,6 +386,7 @@ class TileXRMoonEPContext:
         dtype,
         token_padding: int = 1,
         prefetch_slots: int | None = None,
+        include_combine_workspace: bool = True,
         runtime=None,
         install_prefix=None,
         torch_module=None,
@@ -429,6 +431,7 @@ class TileXRMoonEPContext:
             dtype=dtype,
             token_padding=int(token_padding),
             prefetch_slots=(None if prefetch_slots is None else int(prefetch_slots)),
+            include_combine_workspace=bool(include_combine_workspace),
         )
 
     def close(self) -> None:
@@ -1224,6 +1227,13 @@ class TileXRMoonEPBuffer:
             raise NotImplementedError(
                 "TileXR MoonEP does not support inter_rank_sync=False; "
                 "peer protocol synchronization is required"
+            )
+        if (
+            int(getattr(self.runtime, "combine_version", 2)) == 2
+            and not self.context.include_combine_workspace
+        ):
+            raise RuntimeError(
+                "Combine V2 is unavailable because this context excludes its workspace"
             )
         self._validate_plan(plan)
         c = self.context

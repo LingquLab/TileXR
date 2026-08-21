@@ -14,6 +14,7 @@
 #include "../common/dispatch_wqe_batch.h"
 #include "kernel_operator.h"
 #include "tilexr_udma.h"
+#include "tilexr_udma_fullmesh.h"
 
 namespace {
 
@@ -31,6 +32,7 @@ constexpr uint64_t kDeferredReclaimWqes =
     TileXR::TILEXR_UDMA_SQ_BB_COUNT / 4U;
 constexpr uint32_t kDispatchUdmaWqeBytes = 64U;
 constexpr uint32_t kDispatchWqeBuildThreads = 64U;
+constexpr uint32_t kDispatchQpSelectionSingleLane = 1U << 4U;
 constexpr uint32_t kDispatchSqPollReserve = 10U;
 constexpr uint32_t kDispatchPreparedPeerCapacity = 16U;
 constexpr uint32_t kDispatchCqePollBatchCapacity =
@@ -215,9 +217,11 @@ inline void DispatchPatchWriteWqeBatchVf(__ubuf__ uint8_t *wqeBytes,
             const uint32_t qpRouteIndex =
                 TileXRMoonEp::DispatchDataTaskRouteIndex(
                     dataTask, context->hasWeight != 0U);
-            const uint32_t qpIdx = context->qpSelection >> 2U;
+            const uint32_t qpIdx = (context->qpSelection >> 2U) & 1U;
             const uint32_t sequencePhase = context->qpSelection & 3U;
-            const uint32_t selectedIndex =
+            const bool singleLane =
+                (context->qpSelection & kDispatchQpSelectionSingleLane) != 0U;
+            const uint32_t selectedIndex = singleLane ? qpRouteIndex :
                 TileXRMoonEp::DispatchQpSelectedIndex(
                     qpRouteIndex, sequencePhase, qpIdx);
             const uint32_t routeInChunk = static_cast<uint16_t>(
@@ -455,6 +459,8 @@ __aicore__ inline void ReclaimDeferredSegment(const __gm__ TileXR::CommArgs *arg
 struct DispatchWqeBatchInitContext {
     const __gm__ TileXR::CommArgs *args;
     __gm__ TileXR::UDMAInfo *udmaInfo;
+    __gm__ TileXR::TileXRUDMAFullmeshDeviceView *fullmeshView;
+    __gm__ TileXR::UDMAInfo *fullmeshInfo;
     __gm__ TileXR::TileXRUDMARegistry *registry;
     uint64_t hiddenRemoteScratchOffset;
     uint64_t hiddenScratchBytes;
@@ -462,12 +468,15 @@ struct DispatchWqeBatchInitContext {
     uint64_t weightScratchBytes;
     uint64_t remoteFlagBase;
     uint32_t coreIdx;
+    int32_t rank;
+    int32_t localRankSize;
     bool sharedQp;
     bool hasWeight;
 };
 
 struct DispatchWqeBatchState {
     const __gm__ TileXR::CommArgs *args;
+    __gm__ TileXR::UDMAInfo *udmaInfo;
     __gm__ TileXR::UDMAWQCtx *qpCtxEntry;
     __gm__ TileXR::UDMACQCtx *cqCtxEntry;
     __gm__ uint8_t *hiddenRemoteScratchBase;
@@ -477,6 +486,7 @@ struct DispatchWqeBatchState {
     uint64_t rmtEidH;
     int32_t targetRank;
     uint32_t qpIdx;
+    uint32_t physicalQpIdx;
     uint32_t head;
     uint32_t wqeCount;
     uint32_t tail;
@@ -496,6 +506,7 @@ struct DispatchWqeBatchState {
     uint32_t doorbellPending;
     uint32_t finalStaged;
     uint32_t doorbellRung;
+    uint32_t singleLane;
 };
 
 struct DispatchPreparedPeer {
@@ -505,14 +516,48 @@ struct DispatchPreparedPeer {
     uint64_t firstDoorbellCycle;
     uint64_t tracePayloadBytes;
     uint32_t traceWqeCount;
+    uint32_t qpCount;
+    bool fullmesh;
     DispatchWqeBatchState qpState[TileXRMoonEp::kDispatchQpCount];
 };
+
+__aicore__ inline bool DispatchFullmeshDeviceViewValid(
+    const __gm__ TileXR::CommArgs *args,
+    __gm__ TileXR::TileXRUDMAFullmeshDeviceView *view)
+{
+    if (args == nullptr || view == nullptr || args->rankSize <= 1 ||
+        args->localRankSize <= 1 ||
+        args->localRankSize >
+            static_cast<int32_t>(TileXR::TILEXR_UDMA_FULLMESH_SLOT_COUNT) ||
+        args->localRank < 0 || args->localRank >= args->localRankSize ||
+        args->rank % args->localRankSize != args->localRank ||
+        view->magic != TileXR::TILEXR_UDMA_FULLMESH_MAGIC ||
+        view->version != TileXR::TILEXR_UDMA_FULLMESH_VERSION ||
+        view->slotCount != TileXR::TILEXR_UDMA_FULLMESH_SLOT_COUNT ||
+        view->localRank != static_cast<uint32_t>(args->localRank) ||
+        view->connectedCount + 1U !=
+            static_cast<uint32_t>(args->localRankSize) ||
+        view->validPeerMask != TileXR::UDMAFullmeshExpectedPeerMask(
+            static_cast<uint32_t>(args->localRank),
+            static_cast<uint32_t>(args->localRankSize)) ||
+        view->registrationReady == 0U ||
+        view->registrationGeneration == 0U ||
+        view->registrationGeneration != args->udmaRegistrationGeneration ||
+        view->infoPtr == 0U) {
+        return false;
+    }
+    auto info = reinterpret_cast<__gm__ TileXR::UDMAInfo *>(view->infoPtr);
+    return info != nullptr &&
+        info->qpNum == TileXR::TILEXR_UDMA_FULLMESH_SLOT_COUNT &&
+        info->sqPtr != 0U && info->scqPtr != 0U && info->memPtr != 0U;
+}
 
 __aicore__ inline bool InitDispatchWqeBatchInitContext(
     const __gm__ TileXR::CommArgs *args, uint64_t hiddenRemoteScratchOffset,
     uint64_t hiddenScratchBytes, uint64_t weightRemoteScratchOffset,
     uint64_t weightScratchBytes, uint64_t remoteFlagBase, uint32_t coreIdx,
-    bool hasWeight, DispatchWqeBatchInitContext &context)
+    bool hasWeight, bool allowFullmesh,
+    DispatchWqeBatchInitContext &context)
 {
     if (!TileXR::UDMARegistryEnabled(args)) {
         return false;
@@ -531,6 +576,19 @@ __aicore__ inline bool InitDispatchWqeBatchInitContext(
     }
     context.args = args;
     context.udmaInfo = udmaInfo;
+    context.fullmeshView = nullptr;
+    context.fullmeshInfo = nullptr;
+    if (allowFullmesh &&
+        (args->extraFlag & TileXR::ExtraFlag::UDMA_FULLMESH) != 0U &&
+        args->udmaFullmeshPtr != nullptr) {
+        auto fullmeshView = reinterpret_cast<__gm__
+            TileXR::TileXRUDMAFullmeshDeviceView *>(args->udmaFullmeshPtr);
+        if (DispatchFullmeshDeviceViewValid(args, fullmeshView)) {
+            context.fullmeshView = fullmeshView;
+            context.fullmeshInfo = reinterpret_cast<__gm__ TileXR::UDMAInfo *>(
+                fullmeshView->infoPtr);
+        }
+    }
     context.registry = registry;
     context.hiddenRemoteScratchOffset = hiddenRemoteScratchOffset;
     context.hiddenScratchBytes = hiddenScratchBytes;
@@ -538,6 +596,8 @@ __aicore__ inline bool InitDispatchWqeBatchInitContext(
     context.weightScratchBytes = weightScratchBytes;
     context.remoteFlagBase = remoteFlagBase;
     context.coreIdx = coreIdx;
+    context.rank = args->rank;
+    context.localRankSize = args->localRankSize;
     context.sharedQp = sharedQp;
     context.hasWeight = hasWeight;
     return true;
@@ -580,6 +640,7 @@ __aicore__ inline bool InitDispatchWqeBatchState(
         remoteMemInfo->eidAddr);
 
     state.args = context.args;
+    state.udmaInfo = context.udmaInfo;
     state.qpCtxEntry = qpCtxEntry;
     state.cqCtxEntry = cqCtxEntry;
     state.hiddenRemoteScratchBase = hiddenRemoteScratchBase;
@@ -589,6 +650,7 @@ __aicore__ inline bool InitDispatchWqeBatchState(
     state.rmtEidH = remoteEid[1];
     state.targetRank = targetRank;
     state.qpIdx = qpIdx;
+    state.physicalQpIdx = physicalQpIdx;
     state.head = ld_dev(reinterpret_cast<__gm__ uint32_t *>(
         qpCtxEntry->headAddr), 0);
     state.wqeCount = ld_dev(reinterpret_cast<__gm__ uint32_t *>(
@@ -613,8 +675,147 @@ __aicore__ inline bool InitDispatchWqeBatchState(
     state.doorbellPending = 0U;
     state.finalStaged = 0U;
     state.doorbellRung = 0U;
+    state.singleLane = 0U;
     return state.batchLimit != 0U &&
         state.outstanding < TileXR::TILEXR_UDMA_SQ_BB_COUNT;
+}
+
+__aicore__ inline bool InitDispatchFullmeshWqeBatchState(
+    const DispatchWqeBatchInitContext &context, int32_t targetRank,
+    __gm__ uint8_t *hiddenRemoteScratchBase,
+    __gm__ uint8_t *weightRemoteScratchBase,
+    __gm__ uint8_t *remoteSignalAddr, DispatchWqeBatchState &state)
+{
+    const uint32_t slot = TileXRMoonEp::DispatchFullmeshSlot(
+        targetRank, context.localRankSize);
+    if (context.fullmeshView == nullptr || context.fullmeshInfo == nullptr ||
+        !TileXRMoonEp::DispatchSameServer(
+            context.rank, targetRank, context.localRankSize) ||
+        slot >= TileXR::TILEXR_UDMA_FULLMESH_SLOT_COUNT ||
+        (context.fullmeshView->validPeerMask & (1U << slot)) == 0U) {
+        return false;
+    }
+    __gm__ TileXR::UDMAWQCtx *qpCtxEntry = TileXR::UDMAGetWQCtx(
+        context.fullmeshInfo, static_cast<uint32_t>(targetRank), slot);
+    __gm__ TileXR::UDMACQCtx *cqCtxEntry = TileXR::UDMAGetSCQCtx(
+        context.fullmeshInfo, static_cast<uint32_t>(targetRank), slot);
+    __gm__ TileXR::UDMAMemInfo *remoteMemInfo =
+        TileXR::UDMAGetRemoteMemInfo(
+            context.fullmeshInfo, static_cast<uint32_t>(targetRank), slot);
+    if (qpCtxEntry == nullptr || qpCtxEntry->baseBkShift >= 32U ||
+        (1U << qpCtxEntry->baseBkShift) != kDispatchUdmaWqeBytes ||
+        qpCtxEntry->depth != TileXR::TILEXR_UDMA_SQ_BB_COUNT ||
+        cqCtxEntry == nullptr || cqCtxEntry->baseBkShift >= 32U ||
+        (1U << cqCtxEntry->baseBkShift) != sizeof(TileXR::UDMACqeCtx) ||
+        cqCtxEntry->depth != TileXR::TILEXR_UDMA_CQ_DEPTH ||
+        remoteMemInfo == nullptr || remoteMemInfo->eidAddr == 0U) {
+        return false;
+    }
+    __gm__ uint64_t *remoteEid = reinterpret_cast<__gm__ uint64_t *>(
+        remoteMemInfo->eidAddr);
+    state.args = context.args;
+    state.udmaInfo = context.fullmeshInfo;
+    state.qpCtxEntry = qpCtxEntry;
+    state.cqCtxEntry = cqCtxEntry;
+    state.hiddenRemoteScratchBase = hiddenRemoteScratchBase;
+    state.weightRemoteScratchBase = weightRemoteScratchBase;
+    state.remoteSignalAddr = remoteSignalAddr;
+    state.rmtEidL = remoteEid[0];
+    state.rmtEidH = remoteEid[1];
+    state.targetRank = targetRank;
+    state.qpIdx = 0U;
+    state.physicalQpIdx = slot;
+    state.head = ld_dev(reinterpret_cast<__gm__ uint32_t *>(
+        qpCtxEntry->headAddr), 0);
+    state.wqeCount = ld_dev(reinterpret_cast<__gm__ uint32_t *>(
+        qpCtxEntry->wqeCntAddr), 0);
+    state.tail = ld_dev(reinterpret_cast<__gm__ uint32_t *>(
+        qpCtxEntry->tailAddr), 0);
+    state.cqTail = ld_dev(reinterpret_cast<__gm__ uint32_t *>(
+        cqCtxEntry->tailAddr), 0);
+    state.outstanding = state.head - state.tail;
+    state.batchCount = 0U;
+    state.batchLimit = TileXRMoonEp::DispatchWqeBatchCount(
+        UINT64_MAX, state.head, TileXR::TILEXR_UDMA_SQ_BB_COUNT);
+    state.tokenEn = remoteMemInfo->tokenValueValid;
+    state.rmtJettyType = remoteMemInfo->rmtJettyType;
+    state.targetHint = remoteMemInfo->targetHint;
+    state.tpId = remoteMemInfo->tpn;
+    state.rmtJettyOrSegId = remoteMemInfo->tid;
+    state.rmtTokenValue = remoteMemInfo->rmtTokenValue;
+    state.stagedDoorbellHead = state.head;
+    state.stagedWqeCount = 0U;
+    state.finalWqeCount = state.wqeCount;
+    state.doorbellPending = 0U;
+    state.finalStaged = 0U;
+    state.doorbellRung = 0U;
+    state.singleLane = 1U;
+    return state.batchLimit != 0U &&
+        state.outstanding < TileXR::TILEXR_UDMA_SQ_BB_COUNT;
+}
+
+__aicore__ inline bool InitDispatchCreditQpState(
+    const __gm__ TileXR::CommArgs *args, __gm__ TileXR::UDMAInfo *udmaInfo,
+    int32_t targetRank, uint32_t physicalQpIdx,
+    DispatchWqeBatchState &state)
+{
+    if (args == nullptr || udmaInfo == nullptr || targetRank < 0 ||
+        physicalQpIdx >= udmaInfo->qpNum) {
+        return false;
+    }
+    __gm__ TileXR::UDMAWQCtx *qpCtxEntry = TileXR::UDMAGetWQCtx(
+        udmaInfo, static_cast<uint32_t>(targetRank), physicalQpIdx);
+    __gm__ TileXR::UDMACQCtx *cqCtxEntry = TileXR::UDMAGetSCQCtx(
+        udmaInfo, static_cast<uint32_t>(targetRank), physicalQpIdx);
+    if (qpCtxEntry == nullptr || qpCtxEntry->baseBkShift >= 32U ||
+        (1U << qpCtxEntry->baseBkShift) != kDispatchUdmaWqeBytes ||
+        qpCtxEntry->depth != TileXR::TILEXR_UDMA_SQ_BB_COUNT ||
+        cqCtxEntry == nullptr || cqCtxEntry->baseBkShift >= 32U ||
+        (1U << cqCtxEntry->baseBkShift) != sizeof(TileXR::UDMACqeCtx) ||
+        cqCtxEntry->depth != TileXR::TILEXR_UDMA_CQ_DEPTH) {
+        return false;
+    }
+
+    state.args = args;
+    state.udmaInfo = udmaInfo;
+    state.qpCtxEntry = qpCtxEntry;
+    state.cqCtxEntry = cqCtxEntry;
+    state.targetRank = targetRank;
+    state.qpIdx = physicalQpIdx;
+    state.physicalQpIdx = physicalQpIdx;
+    state.head = ld_dev(reinterpret_cast<__gm__ uint32_t *>(
+        qpCtxEntry->headAddr), 0);
+    state.wqeCount = ld_dev(reinterpret_cast<__gm__ uint32_t *>(
+        qpCtxEntry->wqeCntAddr), 0);
+    state.tail = ld_dev(reinterpret_cast<__gm__ uint32_t *>(
+        qpCtxEntry->tailAddr), 0);
+    state.cqTail = ld_dev(reinterpret_cast<__gm__ uint32_t *>(
+        cqCtxEntry->tailAddr), 0);
+    state.outstanding = state.head - state.tail;
+    state.batchCount = 0U;
+    state.batchLimit = TileXRMoonEp::DispatchWqeBatchCount(
+        UINT64_MAX, state.head, TileXR::TILEXR_UDMA_SQ_BB_COUNT);
+    state.stagedDoorbellHead = state.head;
+    state.stagedWqeCount = 0U;
+    state.finalWqeCount = state.wqeCount;
+    state.doorbellPending = 0U;
+    state.finalStaged = 0U;
+    state.doorbellRung = 0U;
+    state.singleLane = 0U;
+    return state.batchLimit != 0U &&
+        state.outstanding < TileXR::TILEXR_UDMA_SQ_BB_COUNT;
+}
+
+__aicore__ inline void RecordDispatchCreditQpPost(
+    DispatchWqeBatchState &state, int32_t targetRank)
+{
+    state.targetRank = targetRank;
+    ++state.head;
+    ++state.wqeCount;
+    ++state.outstanding;
+    state.finalWqeCount = state.wqeCount;
+    state.batchLimit = TileXRMoonEp::DispatchWqeBatchCount(
+        UINT64_MAX, state.head, TileXR::TILEXR_UDMA_SQ_BB_COUNT);
 }
 
 __aicore__ inline bool InitDispatchPreparedPeer(
@@ -629,6 +830,11 @@ __aicore__ inline bool InitDispatchPreparedPeer(
     preparedPeer.firstDoorbellCycle = 0U;
     preparedPeer.tracePayloadBytes = 0U;
     preparedPeer.traceWqeCount = 0U;
+    preparedPeer.fullmesh = context.fullmeshInfo != nullptr &&
+        TileXRMoonEp::DispatchSameServer(
+            context.rank, targetRank, context.localRankSize);
+    preparedPeer.qpCount = preparedPeer.fullmesh ? 1U :
+        TileXRMoonEp::kDispatchQpCount;
     if (!TileXR::UDMARegisteredRangeValid(context.registry, targetRank,
             context.hiddenRemoteScratchOffset, context.hiddenScratchBytes) ||
         (context.hasWeight && !TileXR::UDMARegisteredRangeValid(
@@ -645,13 +851,22 @@ __aicore__ inline bool InitDispatchPreparedPeer(
             context.weightRemoteScratchOffset) : nullptr;
     __gm__ uint8_t *remoteFlagBase = TileXR::UDMARegisteredRemoteAddr(
         context.registry, targetRank, context.remoteFlagBase);
-    for (uint32_t qpIdx = 0U;
-        qpIdx < TileXRMoonEp::kDispatchQpCount; ++qpIdx) {
-        if (!InitDispatchWqeBatchState(context, targetRank, qpIdx,
+    if (preparedPeer.fullmesh) {
+        if (!InitDispatchFullmeshWqeBatchState(context, targetRank,
                 hiddenRemoteScratchBase, weightRemoteScratchBase,
-                remoteFlagBase + qpIdx * sizeof(uint64_t),
-                preparedPeer.qpState[qpIdx])) {
+                remoteFlagBase, preparedPeer.qpState[0])) {
             return false;
+        }
+        preparedPeer.qpState[1] = preparedPeer.qpState[0];
+    } else {
+        for (uint32_t qpIdx = 0U;
+            qpIdx < TileXRMoonEp::kDispatchQpCount; ++qpIdx) {
+            if (!InitDispatchWqeBatchState(context, targetRank, qpIdx,
+                    hiddenRemoteScratchBase, weightRemoteScratchBase,
+                    remoteFlagBase + qpIdx * sizeof(uint64_t),
+                    preparedPeer.qpState[qpIdx])) {
+                return false;
+            }
         }
     }
     preparedPeer.initialized = true;
@@ -880,7 +1095,8 @@ __aicore__ inline bool BuildDispatchWriteWqeBatch(
     context->hasWeight = hasWeight ? 1U : 0U;
     context->dataTaskStart = dataTaskStart;
     context->qpSelection =
-        (state.qpIdx << 2U) | (sequencePhase & 3U);
+        (state.qpIdx << 2U) | (sequencePhase & 3U) |
+        (state.singleLane != 0U ? kDispatchQpSelectionSingleLane : 0U);
     context->routePlanStart = routePlanStart;
 
 #if defined(CATLASS_ARCH) && CATLASS_ARCH == 3510
@@ -1010,7 +1226,7 @@ __aicore__ inline bool ReserveDispatchPeerChunkSq(
 {
     constexpr uint32_t usableSqEntries =
         TileXR::TILEXR_UDMA_SQ_BB_COUNT - kDispatchSqPollReserve;
-    for (uint32_t qpIdx = 0U; qpIdx < TileXRMoonEp::kDispatchQpCount;
+    for (uint32_t qpIdx = 0U; qpIdx < peer.qpCount;
         ++qpIdx) {
         const uint32_t chunkWqeCount = qpChunkWqeCount[qpIdx];
         if (chunkWqeCount == 0U) {
@@ -1020,6 +1236,21 @@ __aicore__ inline bool ReserveDispatchPeerChunkSq(
             !DispatchEnsureSqBatchCapacity(peer.qpState[qpIdx],
                 chunkWqeCount, cqeLocal, phase, dfxFlags,
                 firstQuietStatus, firstQuietPhase)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+__aicore__ inline bool DispatchPeerChunkFitsWithoutCq(
+    const DispatchPreparedPeer &peer,
+    const uint32_t qpChunkWqeCount[TileXRMoonEp::kDispatchQpCount])
+{
+    constexpr uint32_t usableSqEntries =
+        TileXR::TILEXR_UDMA_SQ_BB_COUNT - kDispatchSqPollReserve;
+    for (uint32_t qpIdx = 0U; qpIdx < peer.qpCount; ++qpIdx) {
+        if (static_cast<uint64_t>(peer.qpState[qpIdx].outstanding) +
+                qpChunkWqeCount[qpIdx] > usableSqEntries) {
             return false;
         }
     }
@@ -1216,6 +1447,28 @@ __aicore__ inline bool DispatchDrainSqToExpected(
     return true;
 }
 
+__aicore__ inline bool DrainDispatchCreditQp(
+    const __gm__ TileXR::CommArgs *args, __gm__ TileXR::UDMAInfo *udmaInfo,
+    int32_t targetRank, uint32_t physicalQpIdx,
+    AscendC::LocalTensor<uint8_t> cqeLocal, uint64_t timeoutTicks,
+    uint32_t phase, uint32_t &dfxFlags, uint32_t &firstQuietStatus,
+    uint32_t &firstQuietPhase, uint32_t &timeoutPeer,
+    uint32_t &timeoutPhase, uint64_t &timeoutObserved,
+    DispatchTraceContext &trace, DispatchWqeBatchState &state)
+{
+    const uint64_t beginCycle = DispatchTraceCycle(trace);
+    const bool ready = InitDispatchCreditQpState(
+            args, udmaInfo, targetRank, physicalQpIdx, state) &&
+        DispatchDrainSqToExpected(state, state.head, cqeLocal, timeoutTicks,
+            phase, dfxFlags, firstQuietStatus, firstQuietPhase, timeoutPeer,
+            timeoutPhase, timeoutObserved);
+    RecordDispatchTraceEvent(trace, TileXRMoonEp::kDispatchTraceCqWait,
+        targetRank, physicalQpIdx, phase,
+        TileXRMoonEp::kDispatchTraceNoChunk, 0U, 0U, ready ? 0U : 1U,
+        beginCycle, DispatchTraceCycle(trace));
+    return ready;
+}
+
 __aicore__ inline bool DispatchDrainHistoricalCq(
     DispatchPreparedPeer &peer, AscendC::LocalTensor<uint8_t> cqeLocal,
     uint64_t timeoutTicks, uint32_t &dfxFlags,
@@ -1223,7 +1476,7 @@ __aicore__ inline bool DispatchDrainHistoricalCq(
     uint32_t &timeoutPeer, uint32_t &timeoutPhase,
     uint64_t &timeoutObserved)
 {
-    for (uint32_t qpIdx = 0U; qpIdx < TileXRMoonEp::kDispatchQpCount; ++qpIdx) {
+    for (uint32_t qpIdx = 0U; qpIdx < peer.qpCount; ++qpIdx) {
         DispatchWqeBatchState &state = peer.qpState[qpIdx];
         if (!DispatchDrainSqToExpected(state, state.head, cqeLocal,
                 timeoutTicks, peer.issuePhase, dfxFlags, firstQuietStatus,
@@ -1355,13 +1608,30 @@ __aicore__ inline bool StageDispatchQpBatch(
     return state.batchLimit != 0U;
 }
 
+__aicore__ inline void SyncDispatchPreparedPeerCqState(
+    DispatchPreparedPeer &currentPeer,
+    const DispatchPreparedPeer &completedPeer)
+{
+    if (currentPeer.fullmesh || completedPeer.fullmesh ||
+        currentPeer.qpCount != completedPeer.qpCount) {
+        return;
+    }
+    for (uint32_t qpIdx = 0U; qpIdx < currentPeer.qpCount; ++qpIdx) {
+        DispatchWqeBatchState &current = currentPeer.qpState[qpIdx];
+        const DispatchWqeBatchState &completed = completedPeer.qpState[qpIdx];
+        current.tail = completed.tail;
+        current.cqTail = completed.cqTail;
+        current.outstanding = current.head - current.tail;
+    }
+}
+
 __aicore__ inline void RingDispatchPeerDoorbells(DispatchPreparedPeer &peer,
     DispatchTraceContext &trace, uint32_t group, uint32_t chunk)
 {
     const uint64_t beginCycle = DispatchTraceCycle(trace);
     uint32_t qpMask = 0U;
     uint32_t wqeCount = 0U;
-    for (uint32_t qpIdx = 0U; qpIdx < TileXRMoonEp::kDispatchQpCount; ++qpIdx) {
+    for (uint32_t qpIdx = 0U; qpIdx < peer.qpCount; ++qpIdx) {
         DispatchWqeBatchState &state = peer.qpState[qpIdx];
         if (state.doorbellPending == 0U) {
             continue;
@@ -1392,7 +1662,7 @@ __aicore__ inline bool DispatchDrainPeerFinalCq(
     uint32_t &timeoutPeer, uint32_t &timeoutPhase,
     uint64_t &timeoutObserved)
 {
-    for (uint32_t qpIdx = 0U; qpIdx < TileXRMoonEp::kDispatchQpCount; ++qpIdx) {
+    for (uint32_t qpIdx = 0U; qpIdx < peer.qpCount; ++qpIdx) {
         DispatchWqeBatchState &state = peer.qpState[qpIdx];
         if (state.finalStaged == 0U || state.doorbellRung == 0U ||
             !DispatchDrainSqToExpected(state, state.finalWqeCount, cqeLocal,
@@ -1711,7 +1981,8 @@ __aicore__ inline bool PublishDispatchPeerCredit(
     const __gm__ TileXR::CommArgs *args, __gm__ uint8_t *workspace,
     uint64_t creditOffset, uint64_t creditSourceOffset, uint32_t core,
     uint32_t physicalQpIdx, int32_t rank, int32_t peer, uint32_t group,
-    int64_t magic, AscendC::LocalTensor<uint8_t> wqeLocal)
+    int64_t magic, AscendC::LocalTensor<uint8_t> wqeLocal,
+    DispatchWqeBatchState *fullmeshState)
 {
     uint64_t token = 0U;
     const uint64_t planeOffset = TileXRMoonEp::DispatchCreditPlaneOffset(magic);
@@ -1732,6 +2003,24 @@ __aicore__ inline bool PublishDispatchPeerCredit(
     creditSource[0] = token;
     TileXR::UDMACleanCacheLines(
         reinterpret_cast<__gm__ uint8_t *>(creditSource), sizeof(uint64_t));
+    if (fullmeshState != nullptr) {
+        auto registry = TileXR::GetUDMARegistry(args);
+        auto remoteAddr = TileXR::UDMARegisteredRemoteAddr(
+            registry, peer, remoteCreditOffset);
+        const uint32_t status = TileXR::UDMAPostSend<
+            TileXR::UDMAOpcode::WRITE, true>(
+                fullmeshState->udmaInfo, wqeLocal, remoteAddr,
+                reinterpret_cast<__gm__ uint8_t *>(creditSource),
+                static_cast<uint32_t>(peer),
+                fullmeshState->physicalQpIdx, sizeof(uint64_t), nullptr,
+                TileXR::TILEXR_UDMA_SQE_FLAG_ORDERED_COMPLETION);
+        if (status != TileXR::TILEXR_UDMA_STATUS_SUCCESS) {
+            return false;
+        }
+        RecordDispatchCreditQpPost(*fullmeshState, peer);
+        fullmeshState->doorbellRung = 1U;
+        return true;
+    }
     return TileXR::UDMAPutNbiOnQp<uint64_t>(
         args, wqeLocal, peer, physicalQpIdx,
         creditSource, remoteCreditOffset, sizeof(uint64_t)) ==
@@ -1740,7 +2029,7 @@ __aicore__ inline bool PublishDispatchPeerCredit(
 
 __aicore__ inline bool WaitDispatchIncomingPeer(
     __gm__ uint64_t *receiveFlags, int32_t incomingPeer, uint32_t group,
-    uint64_t magic, uint64_t timeoutTicks,
+    uint32_t completionLaneCount, uint64_t magic, uint64_t timeoutTicks,
     AscendC::LocalTensor<uint8_t> relayLocal, uint32_t &dfxFlags,
     uint32_t &timeoutPeer, uint32_t &timeoutPhase,
     uint64_t &timeoutObserved, DispatchTraceContext &trace)
@@ -1749,7 +2038,12 @@ __aicore__ inline bool WaitDispatchIncomingPeer(
     const uint64_t traceWaitBegin = DispatchTraceCycle(trace);
     const uint64_t peerFlagBase = static_cast<uint64_t>(incomingPeer) *
         TileXRMoonEp::kDispatchQpCount;
-    for (uint32_t qpIdx = 0U; qpIdx < TileXRMoonEp::kDispatchQpCount; ++qpIdx) {
+    if (completionLaneCount == 0U ||
+        completionLaneCount > TileXRMoonEp::kDispatchQpCount) {
+        dfxFlags |= TileXRMoonEp::kDispatchDfxInvalidConfig;
+        return false;
+    }
+    for (uint32_t qpIdx = 0U; qpIdx < completionLaneCount; ++qpIdx) {
         uint64_t observed = 0U;
         if (!WaitCompletionFlag(receiveFlags + peerFlagBase + qpIdx,
                 static_cast<uint64_t>(magic), waitStart, timeoutTicks,
@@ -2088,11 +2382,15 @@ extern "C" __global__ __aicore__ void tilexr_moonep_dispatch_urma_kernel(
         const bool sharedQp =
             (args->extraFlag & TileXR::ExtraFlag::UDMA_SHARED_QP) != 0U;
         auto udmaInfo = localOnly ? nullptr : TileXR::GetUDMAInfo(args);
+        auto fullmeshView = localOnly ? nullptr : reinterpret_cast<__gm__
+            TileXR::TileXRUDMAFullmeshDeviceView *>(args->udmaFullmeshPtr);
         if (rankSize <= 0 || rankSize > TileXR::TILEXR_MAX_RANK_SIZE || rank < 0 ||
             rank >= rankSize || (!localOnly && (!TileXR::UDMARegistryEnabled(args) ||
                 udmaInfo == nullptr ||
                 !TileXRMoonEp::DispatchQpCountSupported(
-                    TileXR::UDMAQpCount(args), sharedQp)))) {
+                    TileXR::UDMAQpCount(args), sharedQp))) ||
+            (groupedPeerMode && !localOnly &&
+                !DispatchFullmeshDeviceViewValid(args, fullmeshView))) {
             return;
         }
 
@@ -2120,9 +2418,15 @@ extern "C" __global__ __aicore__ void tilexr_moonep_dispatch_urma_kernel(
                 0U, static_cast<uint32_t>(blockIdx), sharedQp),
             TileXRMoonEp::DispatchPhysicalQpIndex(
                 1U, static_cast<uint32_t>(blockIdx), sharedQp)};
+        const bool dedicatedCreditQp = sharedQp && creditPeerMode;
+        const uint32_t creditPhysicalQp =
+            TileXRMoonEp::DispatchCreditPhysicalQpIndex(
+                static_cast<uint32_t>(blockIdx), sharedQp);
         if (!localOnly && blockIdx < peerCoreCount &&
             (physicalQp[0] >= TileXR::UDMAQpCount(args) ||
-                physicalQp[1] >= TileXR::UDMAQpCount(args))) {
+                physicalQp[1] >= TileXR::UDMAQpCount(args) ||
+                (dedicatedCreditQp &&
+                    creditPhysicalQp >= TileXR::UDMAQpCount(args)))) {
             return;
         }
 
@@ -2287,7 +2591,7 @@ extern "C" __global__ __aicore__ void tilexr_moonep_dispatch_urma_kernel(
                 CopyBytesGmToGm(workspace + weightSourceOffset +
                         sourceRow * weightRowBytes,
                     weightInput + sourceRow * weightRowBytes,
-                    static_cast<uint32_t>(weightRowBytes), relayLocal);
+                static_cast<uint32_t>(weightRowBytes), relayLocal);
             }
         }
         const uint64_t stagingCopyEnd = DispatchTraceCycle(trace);
@@ -2407,7 +2711,7 @@ extern "C" __global__ __aicore__ void tilexr_moonep_dispatch_urma_kernel(
                     remoteHiddenScratchOffset, hiddenScratchSlotBytes,
                     remoteWeightScratchOffset, weightScratchSlotBytes,
                     remoteFlagBase, static_cast<uint32_t>(blockIdx),
-                    hasWeight, initContext));
+                    hasWeight, true, initContext));
             DispatchPreparedPeer previousPeer {};
             bool previousPeerValid = false;
 
@@ -2431,54 +2735,6 @@ extern "C" __global__ __aicore__ void tilexr_moonep_dispatch_urma_kernel(
                 const uint64_t putIssueStartCycle =
                     static_cast<uint64_t>(AscendC::GetSystemCycle());
 #endif
-                if (creditPeerMode &&
-                    TileXRMoonEp::DispatchCreditRequired(group)) {
-                    const int64_t previousIncomingPeer =
-                        TileXRMoonEp::DispatchGroupedPeer(
-                            rank, rankSize, group - 1U, lane, groupWidth);
-                    const bool incomingAlreadyWaited =
-                        previousPeerValid &&
-                        previousPeer.targetRank == previousIncomingPeer &&
-                        previousPeer.issuePhase == group - 1U;
-                    if (previousIncomingPeer < 0 ||
-                        (!incomingAlreadyWaited &&
-                         !WaitDispatchIncomingPeer(receiveFlags,
-                            static_cast<int32_t>(previousIncomingPeer),
-                            group - 1U, magic, completionTimeoutTicks,
-                            relayLocal, dfxFlags, timeoutPeer, timeoutPhase,
-                            timeoutObservedFlag, trace))) {
-                        if (previousIncomingPeer < 0) {
-                            dfxFlags |= TileXRMoonEp::kDispatchDfxInvalidConfig;
-                        }
-                        break;
-                    }
-                    if (previousPeerValid) {
-                        const bool previousCqOk =
-                            TraceDrainDispatchPeerFinalCq(previousPeer,
-                                relayLocal, completionTimeoutTicks, dfxFlags,
-                                firstQuietStatus, firstQuietPhase, timeoutPeer,
-                                timeoutPhase, timeoutObservedFlag, trace);
-                        previousPeerValid = false;
-                        if (!previousCqOk) {
-                            break;
-                        }
-                    }
-                    const uint64_t publishBegin = DispatchTraceCycle(trace);
-                    const bool published = PublishDispatchPeerCredit(
-                        args, workspace, creditOffset, creditSourceOffset,
-                        static_cast<uint32_t>(blockIdx), physicalQp[0], rank,
-                        peer, group, magic, relayLocal);
-                    RecordDispatchTraceEvent(trace,
-                        TileXRMoonEp::kDispatchTraceCreditPublishMte3,
-                        peer, 0U, group,
-                        TileXRMoonEp::kDispatchTraceNoChunk, 1U,
-                        sizeof(uint64_t), published ? 0U : 1U,
-                        publishBegin, DispatchTraceCycle(trace));
-                    if (!published) {
-                        dfxFlags |= TileXRMoonEp::kDispatchDfxInvalidConfig;
-                        break;
-                    }
-                }
                 DispatchPreparedPeer preparedPeer {};
                 const uint64_t peerInitBegin = DispatchTraceCycle(trace);
                 const bool peerInitialized = initContextValid &&
@@ -2492,9 +2748,101 @@ extern "C" __global__ __aicore__ void tilexr_moonep_dispatch_urma_kernel(
                     dfxFlags |= TileXRMoonEp::kDispatchDfxInvalidConfig;
                     break;
                 }
+                if (preparedPeer.fullmesh && !DispatchDrainHistoricalCq(
+                        preparedPeer, relayLocal, completionTimeoutTicks,
+                        dfxFlags, firstQuietStatus, firstQuietPhase,
+                        timeoutPeer, timeoutPhase, timeoutObservedFlag)) {
+                    dfxFlags |= TileXRMoonEp::kDispatchDfxCqError;
+                    break;
+                }
+                if (creditPeerMode &&
+                    TileXRMoonEp::DispatchCreditRequired(group)) {
+                    const int64_t previousIncomingPeer =
+                        TileXRMoonEp::DispatchGroupedPeer(
+                            rank, rankSize, group - 1U, lane, groupWidth);
+                    const bool incomingAlreadyWaited =
+                        previousPeerValid &&
+                        previousPeer.targetRank == previousIncomingPeer &&
+                        previousPeer.issuePhase == group - 1U;
+                    if (previousIncomingPeer < 0 ||
+                        (!incomingAlreadyWaited &&
+                         !WaitDispatchIncomingPeer(receiveFlags,
+                            static_cast<int32_t>(previousIncomingPeer),
+                            group - 1U,
+                            TileXRMoonEp::DispatchCompletionLaneCount(
+                                rank, previousIncomingPeer, args->localRankSize),
+                            magic, completionTimeoutTicks,
+                            relayLocal, dfxFlags, timeoutPeer, timeoutPhase,
+                            timeoutObservedFlag, trace))) {
+                        if (previousIncomingPeer < 0) {
+                            dfxFlags |= TileXRMoonEp::kDispatchDfxInvalidConfig;
+                        }
+                        break;
+                    }
+                    if (previousPeerValid && !dedicatedCreditQp) {
+                        const bool previousCqOk =
+                            TraceDrainDispatchPeerFinalCq(previousPeer,
+                                relayLocal, completionTimeoutTicks, dfxFlags,
+                                firstQuietStatus, firstQuietPhase, timeoutPeer,
+                                timeoutPhase, timeoutObservedFlag, trace);
+                        previousPeerValid = false;
+                        if (!previousCqOk) {
+                            break;
+                        }
+                    }
+                    DispatchWqeBatchState creditQpState {};
+                    if (dedicatedCreditQp && !preparedPeer.fullmesh) {
+                        if (!DrainDispatchCreditQp(args, udmaInfo, peer,
+                                creditPhysicalQp, relayLocal,
+                                completionTimeoutTicks, group, dfxFlags,
+                                firstQuietStatus, firstQuietPhase,
+                                timeoutPeer, timeoutPhase,
+                                timeoutObservedFlag, trace, creditQpState)) {
+                            dfxFlags |= TileXRMoonEp::kDispatchDfxCqError;
+                            break;
+                        }
+                    }
+                    DispatchWqeBatchState *creditState = preparedPeer.fullmesh ?
+                        &preparedPeer.qpState[0] : &creditQpState;
+                    if ((dedicatedCreditQp || preparedPeer.fullmesh) &&
+                        !DispatchEnsureSqBatchCapacity(*creditState, 1U,
+                            relayLocal, group, dfxFlags, firstQuietStatus,
+                            firstQuietPhase)) {
+                        break;
+                    }
+                    const uint64_t publishBegin = DispatchTraceCycle(trace);
+                    const bool published = PublishDispatchPeerCredit(
+                        args, workspace, creditOffset, creditSourceOffset,
+                        static_cast<uint32_t>(blockIdx),
+                        preparedPeer.fullmesh ?
+                            preparedPeer.qpState[0].physicalQpIdx :
+                            (dedicatedCreditQp ? creditPhysicalQp : physicalQp[0]),
+                        rank, peer, group, magic, relayLocal,
+                        preparedPeer.fullmesh ? &preparedPeer.qpState[0] : nullptr);
+                    if (published && dedicatedCreditQp &&
+                        !preparedPeer.fullmesh) {
+                        RecordDispatchCreditQpPost(creditQpState, peer);
+                    }
+                    RecordDispatchTraceEvent(trace,
+                        TileXRMoonEp::kDispatchTraceCreditPublishMte3,
+                        peer, preparedPeer.fullmesh ?
+                            preparedPeer.qpState[0].physicalQpIdx :
+                            (dedicatedCreditQp ? creditPhysicalQp : 0U), group,
+                        TileXRMoonEp::kDispatchTraceNoChunk, 1U,
+                        sizeof(uint64_t), published ? 0U : 1U,
+                        publishBegin, DispatchTraceCycle(trace));
+                    if (!published) {
+                        dfxFlags |= TileXRMoonEp::kDispatchDfxInvalidConfig;
+                        break;
+                    }
+                }
+                const bool previousCqTracked =
+                    dedicatedCreditQp && previousPeerValid &&
+                    !preparedPeer.fullmesh && !previousPeer.fullmesh;
                 const uint64_t historicalCqBegin = DispatchTraceCycle(trace);
-                const bool historicalCqOk = DispatchDrainHistoricalCq(
-                        preparedPeer, relayLocal,
+                const bool historicalCqOk = preparedPeer.fullmesh ||
+                    previousCqTracked ||
+                    DispatchDrainHistoricalCq(preparedPeer, relayLocal,
                         completionTimeoutTicks, dfxFlags, firstQuietStatus,
                         firstQuietPhase, timeoutPeer, timeoutPhase,
                         timeoutObservedFlag);
@@ -2558,17 +2906,36 @@ extern "C" __global__ __aicore__ void tilexr_moonep_dispatch_urma_kernel(
                     const bool appendSignal =
                         chunkStart + chunkElements == routeCount;
                     bool qpSignalPending[TileXRMoonEp::kDispatchQpCount] = {
-                        appendSignal, appendSignal};
+                        appendSignal,
+                        appendSignal && preparedPeer.qpCount > 1U};
                     uint32_t qpChunkWqeCount[
                         TileXRMoonEp::kDispatchQpCount] = {};
                     for (uint32_t qpIdx = 0U;
-                        qpIdx < TileXRMoonEp::kDispatchQpCount; ++qpIdx) {
-                        qpSelectedCount[qpIdx] = TileXRMoonEp::DispatchQpRouteCount(
-                            selectedCount, sequencePhase, qpIdx);
+                        qpIdx < preparedPeer.qpCount; ++qpIdx) {
+                        qpSelectedCount[qpIdx] = preparedPeer.fullmesh ?
+                            selectedCount : TileXRMoonEp::DispatchQpRouteCount(
+                                selectedCount, sequencePhase, qpIdx);
                         qpDataTaskCount[qpIdx] = qpSelectedCount[qpIdx] *
                             TileXRMoonEp::DispatchPayloadWqesPerRoute(hasWeight);
                         qpChunkWqeCount[qpIdx] = qpDataTaskCount[qpIdx] +
                             (qpSignalPending[qpIdx] ? 1U : 0U);
+                    }
+                    if (previousPeerValid && dedicatedCreditQp &&
+                        !preparedPeer.fullmesh && !previousPeer.fullmesh &&
+                        !DispatchPeerChunkFitsWithoutCq(
+                            preparedPeer, qpChunkWqeCount)) {
+                        sendOk = TraceDrainDispatchPeerFinalCq(previousPeer,
+                            relayLocal, completionTimeoutTicks, dfxFlags,
+                            firstQuietStatus, firstQuietPhase, timeoutPeer,
+                            timeoutPhase, timeoutObservedFlag, trace);
+                        if (sendOk) {
+                            SyncDispatchPreparedPeerCqState(
+                                preparedPeer, previousPeer);
+                        }
+                        previousPeerValid = false;
+                    }
+                    if (!sendOk) {
+                        break;
                     }
                     if (!ReserveDispatchPeerChunkSq(preparedPeer,
                             qpChunkWqeCount, relayLocal, group, dfxFlags,
@@ -2578,11 +2945,13 @@ extern "C" __global__ __aicore__ void tilexr_moonep_dispatch_urma_kernel(
                     }
                     while (sendOk &&
                         (qpDataTaskStart[0] < qpDataTaskCount[0] ||
-                         qpDataTaskStart[1] < qpDataTaskCount[1] ||
-                         qpSignalPending[0] || qpSignalPending[1])) {
+                         qpSignalPending[0] ||
+                         (preparedPeer.qpCount > 1U &&
+                            (qpDataTaskStart[1] < qpDataTaskCount[1] ||
+                             qpSignalPending[1])))) {
                         bool finalBatch[TileXRMoonEp::kDispatchQpCount] = {};
                         for (uint32_t qpIdx = 0U;
-                            sendOk && qpIdx < TileXRMoonEp::kDispatchQpCount;
+                            sendOk && qpIdx < preparedPeer.qpCount;
                             ++qpIdx) {
                             DispatchWqeBatchState &qpState =
                                 preparedPeer.qpState[qpIdx];
@@ -2610,7 +2979,7 @@ extern "C" __global__ __aicore__ void tilexr_moonep_dispatch_urma_kernel(
                                 DispatchTraceCycle(trace));
                         }
                         for (uint32_t qpIdx = 0U;
-                            sendOk && qpIdx < TileXRMoonEp::kDispatchQpCount;
+                            sendOk && qpIdx < preparedPeer.qpCount;
                             ++qpIdx) {
                             if (preparedPeer.qpState[qpIdx].batchCount == 0U) {
                                 continue;
@@ -2627,6 +2996,10 @@ extern "C" __global__ __aicore__ void tilexr_moonep_dispatch_urma_kernel(
                                 relayLocal, completionTimeoutTicks, dfxFlags,
                                 firstQuietStatus, firstQuietPhase, timeoutPeer,
                                 timeoutPhase, timeoutObservedFlag, trace);
+                            if (sendOk && dedicatedCreditQp) {
+                                SyncDispatchPreparedPeerCqState(
+                                    preparedPeer, previousPeer);
+                            }
                             previousPeerValid = false;
                         }
                         if (sendOk && firstLogicalBatch && creditPeerMode &&
@@ -2663,7 +3036,8 @@ extern "C" __global__ __aicore__ void tilexr_moonep_dispatch_urma_kernel(
 
                 const bool optimizedSignalSubmitted = sendOk &&
                     preparedPeer.qpState[0].finalStaged != 0U &&
-                    preparedPeer.qpState[1].finalStaged != 0U;
+                    (preparedPeer.qpCount == 1U ||
+                        preparedPeer.qpState[1].finalStaged != 0U);
                 bool completionSubmitted = optimizedSignalSubmitted;
                 if (!optimizedSignalSubmitted) {
                     if ((dfxFlags & (TileXRMoonEp::kDispatchDfxCreditTimeout |
@@ -2673,7 +3047,11 @@ extern "C" __global__ __aicore__ void tilexr_moonep_dispatch_urma_kernel(
                     requiresFinalQuiet = true;
                     completionSubmitted = true;
                     for (uint32_t qpIdx = 0U;
-                        qpIdx < TileXRMoonEp::kDispatchQpCount; ++qpIdx) {
+                        qpIdx < preparedPeer.qpCount; ++qpIdx) {
+                        if (preparedPeer.fullmesh) {
+                            completionSubmitted = false;
+                            break;
+                        }
                         const uint32_t signalStatus =
                             TileXR::UDMAPutNbiOnQpWithFlagDeferred<uint64_t>(
                                 args, qpIdx == 0U ? udmaIssueQp0Local :
@@ -2705,7 +3083,7 @@ extern "C" __global__ __aicore__ void tilexr_moonep_dispatch_urma_kernel(
                     (hiddenRowBytes + (hasWeight ? weightRowBytes : 0U));
                 issuedRouteCount += peerSelectedCount;
                 processedRouteCount += peerSelectedCount;
-                completionFlagCount += TileXRMoonEp::kDispatchQpCount;
+                completionFlagCount += preparedPeer.qpCount;
                 preparedPeer.tracePayloadBytes = MultiplyU32ToU64(
                     static_cast<uint32_t>(peerSelectedCount),
                     static_cast<uint32_t>(hiddenRowBytes +
@@ -2714,6 +3092,8 @@ extern "C" __global__ __aicore__ void tilexr_moonep_dispatch_urma_kernel(
                 previousPeerValid = true;
 
                 if (!WaitDispatchIncomingPeer(receiveFlags, peer, group,
+                        TileXRMoonEp::DispatchCompletionLaneCount(
+                            rank, peer, args->localRankSize),
                         magic, completionTimeoutTicks, relayLocal, dfxFlags,
                         timeoutPeer, timeoutPhase,
                         timeoutObservedFlag, trace)) {
@@ -2731,6 +3111,34 @@ extern "C" __global__ __aicore__ void tilexr_moonep_dispatch_urma_kernel(
                     timeoutPhase, timeoutObservedFlag, trace)) {
                 dfxFlags |= TileXRMoonEp::kDispatchDfxCqError;
             }
+            if (dedicatedCreditQp) {
+                for (uint32_t peerWork = 0U;
+                    peerWork < peerWorkCount; ++peerWork) {
+                    uint32_t creditGroup = UINT32_MAX;
+                    uint32_t creditLane = UINT32_MAX;
+                    const int64_t creditPeer =
+                        TileXRMoonEp::DispatchGroupedPeerForCore(
+                            rank, rankSize, groupWidth,
+                            static_cast<uint32_t>(blockIdx), peerCoreCount,
+                            peerWork, creditGroup, creditLane);
+                    if (creditPeer < 0 || creditPeer == rank ||
+                        !TileXRMoonEp::DispatchCreditRequired(creditGroup) ||
+                        TileXRMoonEp::DispatchSameServer(
+                            rank, creditPeer, args->localRankSize)) {
+                        continue;
+                    }
+                    DispatchWqeBatchState creditQpState {};
+                    if (!DrainDispatchCreditQp(args, udmaInfo,
+                            static_cast<int32_t>(creditPeer), creditPhysicalQp,
+                            relayLocal, completionTimeoutTicks, creditGroup,
+                            dfxFlags, firstQuietStatus, firstQuietPhase,
+                            timeoutPeer, timeoutPhase, timeoutObservedFlag,
+                            trace, creditQpState)) {
+                        dfxFlags |= TileXRMoonEp::kDispatchDfxCqError;
+                        break;
+                    }
+                }
+            }
         } else if (useVectorSlotSelect) {
             const uint64_t remoteHiddenScratchOffset = hiddenScratchOffset +
                 scratchIndex * hiddenScratchSlotBytes;
@@ -2745,7 +3153,7 @@ extern "C" __global__ __aicore__ void tilexr_moonep_dispatch_urma_kernel(
                     remoteHiddenScratchOffset, hiddenScratchSlotBytes,
                     remoteWeightScratchOffset, weightScratchSlotBytes,
                     remoteFlagBase, static_cast<uint32_t>(blockIdx), hasWeight,
-                    initContext);
+                    false, initContext);
             DispatchPreparedPeer peerBatch[kDispatchPreparedPeerCapacity] {};
             uint64_t peerCursor = 0U;
             const uint64_t totalPeerAssignments =
