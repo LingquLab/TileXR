@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import warnings
 from dataclasses import dataclass, field, replace
 from typing import Any
@@ -21,6 +22,19 @@ def _require_positive_int(name: str, value: Any) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise AssertionError(f"{name} must be a positive int, got {value}")
     return int(value)
+
+
+def _env_positive_int(name: str, default: int) -> int:
+    value = os.environ.get(name)
+    if value is None or value == "":
+        return default
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a positive integer, got {value!r}") from exc
+    if parsed <= 0:
+        raise ValueError(f"{name} must be a positive integer, got {value!r}")
+    return parsed
 
 
 class _CompletionEvent:
@@ -212,7 +226,11 @@ class Buffer:
             )
         try:
             self._native_buffer = TileXRMoonEPBuffer(
-                self._context, torch_module=self._torch
+                self._context,
+                wait_iterations=_env_positive_int(
+                    "TILEXR_MOONEP_PLANNER_WAIT_ITERATIONS", 1_000_000
+                ),
+                torch_module=self._torch,
             )
         except Exception:
             self._context.close()

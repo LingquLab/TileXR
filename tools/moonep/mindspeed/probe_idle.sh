@@ -16,8 +16,31 @@ if [[ ! "${devices}" =~ ^[1-9][0-9]*$ ]]; then
 fi
 
 mkdir -p "$(dirname "${log}")"
-accelerator_process_pattern='pretrain_gpt.py|torch.distributed.launch|hccl_test/bin/|all_reduce_test|alltoallv_test|tilexr_udma_dem'
-accelerator_processes=$(pgrep -fc "${accelerator_process_pattern}" || true)
+count_accelerator_processes() {
+    local pid comm args exe
+    local count=0
+    while read -r pid comm args; do
+        case "${comm}" in
+            all_reduce_test|alltoallv_test|tilexr_udma_dem|tilexr_udma_de)
+                count=$((count + 1))
+                continue
+                ;;
+            python|python[0-9]|python[0-9].*)
+                if [[ " ${args} " == *" pretrain_gpt.py "* ||
+                      " ${args} " == *" -m torch.distributed.launch "* ]]; then
+                    count=$((count + 1))
+                    continue
+                fi
+                ;;
+        esac
+        exe=$(readlink -f "/proc/${pid}/exe" 2>/dev/null || true)
+        if [[ "${exe}" == */hccl_test/bin/* ]]; then
+            count=$((count + 1))
+        fi
+    done < <(ps -eo pid=,comm=,args=)
+    echo "${count}"
+}
+accelerator_processes=$(count_accelerator_processes)
 if timeout 15s npu-smi info >"${log}" 2>&1; then
     idle=$(grep -c 'No running processes found in NPU' "${log}" || true)
     if [[ "${idle}" -eq "${devices}" && "${accelerator_processes}" -eq 0 ]]; then

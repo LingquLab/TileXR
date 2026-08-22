@@ -11,6 +11,7 @@ WARMUP=20
 ITERATIONS=80
 EXPERTS=64
 HIDDEN_SIZE=3584
+TOPK=16
 COMM_DOMAIN=141
 COMM_ID=""
 TIMEOUT_SECONDS=600
@@ -30,6 +31,7 @@ Options:
   --iterations N         Timed launches per BS (default: 80)
   --experts N            Total expert count (default: 64)
   --hidden-size N        Hidden size H (default: 3584)
+  --topk N               Router TopK K (default: 16)
   --comm-domain N        Shared-QP domain (default: 141)
   --comm-id IP:PORT      Bootstrap address (default: first host:10067)
   --cann-path PATH       CANN root
@@ -55,6 +57,7 @@ while [[ $# -gt 0 ]]; do
         --iterations) ITERATIONS="$2"; shift 2 ;;
         --experts) EXPERTS="$2"; shift 2 ;;
         --hidden-size) HIDDEN_SIZE="$2"; shift 2 ;;
+        --topk) TOPK="$2"; shift 2 ;;
         --comm-domain) COMM_DOMAIN="$2"; shift 2 ;;
         --comm-id) COMM_ID="$2"; shift 2 ;;
         --cann-path) CANN_PATH="$2"; shift 2 ;;
@@ -82,7 +85,7 @@ if [[ ! "${WARMUP}" =~ ^[0-9]+$ ]]; then
     echo "--warmup must be a non-negative integer" >&2
     exit 2
 fi
-for value in "${ITERATIONS}" "${EXPERTS}" "${HIDDEN_SIZE}" "${COMM_DOMAIN}" \
+for value in "${ITERATIONS}" "${EXPERTS}" "${HIDDEN_SIZE}" "${TOPK}" "${COMM_DOMAIN}" \
     "${TIMEOUT_SECONDS}"; do
     if [[ ! "${value}" =~ ^[1-9][0-9]*$ ]]; then
         echo "iterations, domains, and timeouts must be positive integers" >&2
@@ -209,6 +212,7 @@ benchmark_args=(
     --iterations "${ITERATIONS}"
     --experts "${EXPERTS}"
     --hidden-size "${HIDDEN_SIZE}"
+    --topk "${TOPK}"
     --comm-domain "${COMM_DOMAIN}"
 )
 if [[ -n "${BS}" ]]; then
@@ -383,7 +387,7 @@ trap cleanup_controller EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-echo "RUN job_id=${job_id} ranks=${ranks} experts=${EXPERTS} hidden_size=${HIDDEN_SIZE} comm_id=${COMM_ID} barrier_id=${BARRIER_ID} bs=${requested_bs} warmup=${WARMUP} iterations=${ITERATIONS}" | \
+echo "RUN job_id=${job_id} ranks=${ranks} experts=${EXPERTS} hidden_size=${HIDDEN_SIZE} topk=${TOPK} comm_id=${COMM_ID} barrier_id=${BARRIER_ID} bs=${requested_bs} warmup=${WARMUP} iterations=${ITERATIONS}" | \
     tee -a "${LOG_FILE}"
 run_active=1
 for ((rank = 0; rank < ranks; ++rank)); do
@@ -469,16 +473,16 @@ fi
 
 sort -n -k1,1 -k2,2 "${rank_averages_file}" | awk \
     -v ranks="${ranks}" -v iterations="${ITERATIONS}" \
-    -v experts="${EXPERTS}" -v hidden_size="${HIDDEN_SIZE}" \
+    -v experts="${EXPERTS}" -v hidden_size="${HIDDEN_SIZE}" -v topk="${TOPK}" \
     -v reduce="$((REDUCE_HIDDEN))" '
     function emit(    average, data_bytes, average_bandwidth, max_bandwidth) {
         if (count == 0) return
         if (count != ranks) exit 1
         average = total / count
-        data_bytes = current_bs * 16 * hidden_size * 2
+        data_bytes = current_bs * topk * hidden_size * 2
         average_bandwidth = data_bytes / average / 1000000
         max_bandwidth = data_bytes / maximum / 1000000
-        printf "COMBINE_V2_PERF bs=%s k=16 h=%d experts=%d dtype=bf16 ranks=%d iterations=%d avg_ms=%.6f avg_alg_bw_GBps=%.6f max_ms=%.6f max_alg_bw_GBps=%.6f reduce=%s correctness=%s\n", current_bs, hidden_size, experts, ranks, iterations, average, average_bandwidth, maximum, max_bandwidth, reduce ? "enabled" : "disabled", batch_correctness
+        printf "COMBINE_V2_PERF bs=%s k=%d h=%d experts=%d dtype=bf16 ranks=%d iterations=%d avg_ms=%.6f avg_alg_bw_GBps=%.6f max_ms=%.6f max_alg_bw_GBps=%.6f reduce=%s correctness=%s\n", current_bs, topk, hidden_size, experts, ranks, iterations, average, average_bandwidth, maximum, max_bandwidth, reduce ? "enabled" : "disabled", batch_correctness
     }
     current_bs != "" && $1 != current_bs {
         emit()

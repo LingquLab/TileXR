@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import base64
+import hashlib
+import json
 import os
+import zlib
 
 import moonep as upstream_moonep
 from tilexr_moonep import Buffer as TileXRBuffer
@@ -14,6 +18,47 @@ from .mindspeed_stage_barrier import optional_stage_barrier
 
 
 _UDMA_COMPAT_REGISTRATION_BYTES = 2 * 1024 * 1024
+_FRAMEWORK_OPS_PREWARMED = False
+
+
+def _prewarm_framework_ops():
+    global _FRAMEWORK_OPS_PREWARMED
+    if (
+        _FRAMEWORK_OPS_PREWARMED
+        or os.environ.get("TILEXR_MINDSPEED_PREWARM_FRAMEWORK_OPS", "0") != "1"
+    ):
+        return
+
+    import torch
+
+    # Load framework kernels before TileXR reserves its registered communication arena.
+    probe = torch.empty((1,), dtype=torch.float32, device="npu")
+    difference = probe - probe
+    equal = difference == probe
+    torch.all(equal)
+    torch.npu.synchronize()
+    _FRAMEWORK_OPS_PREWARMED = True
+    print("TILEXR_MINDSPEED_FRAMEWORK_OPS_PREWARM=complete", flush=True)
+
+
+def _retained_route_inputs(native_buffer, plan):
+    native_plan = plan._require_native()
+    for refs in reversed(native_buffer._pending_refs):
+        if len(refs) >= 3 and refs[0] is native_plan:
+            return refs[1], refs[2]
+    return None, None
+
+
+def _tensor_descriptor(tensor):
+    if tensor is None:
+        return None
+    return {
+        "shape": [int(value) for value in tensor.shape],
+        "stride": [int(value) for value in tensor.stride()],
+        "dtype": str(tensor.dtype),
+        "contiguous": bool(tensor.is_contiguous()),
+        "storage_offset": int(tensor.storage_offset()),
+    }
 
 
 def _reject_upstream_buffer_init(*args, **kwargs):
@@ -30,6 +75,8 @@ if not getattr(upstream_moonep.Buffer, "_tilexr_mindspeed_guard", False):
 
 class MindSpeedTileXRBuffer(TileXRBuffer):
     """MR3832 Buffer surface backed by TileXR communication resources."""
+
+    __mindspeed_external_communication_owner__ = True
 
     def __init__(self, *args, token_buffer_count=1, **kwargs):
         if isinstance(token_buffer_count, bool) or int(token_buffer_count) <= 0:
@@ -66,6 +113,8 @@ class MindSpeedTileXRBuffer(TileXRBuffer):
         self._plan_owner_token = object()
         self._dispatch_generation = 0
         self._finite_check_sequence = 0
+        self._route_capture_count = 0
+        self._route_capture_seen = 0
         self._ctx = self._require_ctx()
         if os.environ.get("TILEXR_MINDSPEED_TRACE", "0") == "1":
             print(
@@ -168,12 +217,119 @@ class MindSpeedTileXRBuffer(TileXRBuffer):
                 f"TileXR MindSpeed detected a non-finite checksum at {stage}.{name}"
             )
 
+    def _reserve_route_capture(self):
+        capture_dir = os.environ.get("TILEXR_MINDSPEED_ROUTE_CAPTURE_DIR")
+        if not capture_dir:
+            return None
+        try:
+            capture_skip = int(
+                os.environ.get("TILEXR_MINDSPEED_ROUTE_CAPTURE_SKIP_CALLS", "0")
+            )
+            capture_calls = int(
+                os.environ.get("TILEXR_MINDSPEED_ROUTE_CAPTURE_CALLS", "10")
+            )
+        except ValueError as exc:
+            raise ValueError("route capture skip/call counts must be integers") from exc
+        if capture_skip < 0 or capture_calls <= 0:
+            raise ValueError(
+                "route capture skip must be non-negative and calls must be positive"
+            )
+        source_call = self._route_capture_seen
+        self._route_capture_seen += 1
+        if source_call < capture_skip or self._route_capture_count >= capture_calls:
+            return None
+        call = self._route_capture_count
+        self._route_capture_count += 1
+        return capture_dir, call, source_call
+
+    def _write_route_capture(
+        self,
+        capture,
+        plan,
+        topk_experts,
+        tokens_per_expert,
+        hidden_input,
+    ):
+        if capture is None:
+            return
+        capture_dir, call, source_call = capture
+        rank = int(self._context.planner_group_rank)
+        topk_cpu = topk_experts.detach().to("cpu").contiguous()
+        tpe_cpu = tokens_per_expert.detach().to("cpu").contiguous()
+        topk_raw = topk_cpu.numpy().astype("<i4", copy=False).tobytes()
+        native_plan = plan._require_native() if plan is not None else None
+        capture_id = os.environ.get(
+            "TILEXR_MINDSPEED_ROUTE_CAPTURE_ID", "unknown"
+        )
+        seed_material = f"{capture_id}:{rank}:{call}:payload-v1".encode("utf-8")
+        payload = {
+            "schema_version": 1,
+            "complete": native_plan is not None,
+            "rank": rank,
+            "call": call,
+            "source_call": source_call,
+            "topk_shape": [int(value) for value in topk_cpu.shape],
+            "topk_dtype": str(topk_cpu.dtype),
+            "topk_encoding": "int32-le-zlib-base64",
+            "topk_zlib_base64": base64.b64encode(
+                zlib.compress(topk_raw)
+            ).decode("ascii"),
+            "topk_sha256": hashlib.sha256(topk_raw).hexdigest(),
+            "tokens_per_expert": [int(value) for value in tpe_cpu.tolist()],
+            "capture_id": capture_id,
+            "payload_seed": int.from_bytes(
+                hashlib.sha256(seed_material).digest()[:8], "little"
+            ),
+            "tensor_descriptors": {
+                "hidden": _tensor_descriptor(hidden_input),
+                "topk": _tensor_descriptor(topk_experts),
+                "tokens_per_expert": _tensor_descriptor(tokens_per_expert),
+            },
+        }
+        if native_plan is not None:
+            payload["remote_stats"] = [
+                int(value)
+                for value in native_plan.remote_stats.detach().cpu().tolist()
+            ]
+            payload["experts_to_copy"] = [
+                [int(value) for value in row]
+                for row in native_plan.experts_to_copy.detach().cpu().tolist()
+            ]
+        os.makedirs(capture_dir, exist_ok=True)
+        target = os.path.join(capture_dir, f"rank{rank}_call{call:02d}.json")
+        temporary = f"{target}.tmp.{os.getpid()}"
+        with open(temporary, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, target)
+
     def dispatch(self, *args, hidden_buffer=None, **kwargs):
         self._optional_stage_barrier()
         hidden_input = args[0] if args else kwargs.get("hidden_sh")
         self._require_finite("dispatch.input", kwargs.get("plan"), hidden=hidden_input)
         async_finish = bool(kwargs.pop("async_finish", False))
         zero_copy = bool(kwargs.pop("zero_copy", False))
+        input_plan = kwargs.get("plan")
+        if input_plan is None and len(args) > 4:
+            input_plan = args[4]
+        topk_experts = kwargs.get("topk_experts_sk")
+        tokens_per_expert = kwargs.get("tokens_per_expert")
+        if topk_experts is None and len(args) > 2:
+            topk_experts = args[2]
+        if tokens_per_expert is None and len(args) > 3:
+            tokens_per_expert = args[3]
+        capture = (
+            self._reserve_route_capture()
+            if input_plan is None
+            and topk_experts is not None
+            and tokens_per_expert is not None
+            else None
+        )
+        self._write_route_capture(
+            capture, None, topk_experts, tokens_per_expert, hidden_input
+        )
         result = super().dispatch(
             *args,
             async_finish=False,
@@ -181,6 +337,28 @@ class MindSpeedTileXRBuffer(TileXRBuffer):
             **kwargs,
         )
         hidden, route_weights, cu_seqlens, plan = result
+        if (
+            input_plan is None
+            and os.environ.get("TILEXR_MINDSPEED_ROUTE_CAPTURE_DIR")
+            and (topk_experts is None or tokens_per_expert is None)
+        ):
+            retained_topk, retained_tokens_per_expert = _retained_route_inputs(
+                self._native_buffer, plan
+            )
+            if topk_experts is None:
+                topk_experts = retained_topk
+            if tokens_per_expert is None:
+                tokens_per_expert = retained_tokens_per_expert
+        if (
+            input_plan is None
+            and capture is None
+            and topk_experts is not None
+            and tokens_per_expert is not None
+        ):
+            capture = self._reserve_route_capture()
+        self._write_route_capture(
+            capture, plan, topk_experts, tokens_per_expert, hidden_input
+        )
         self._require_finite(
             "dispatch.output", plan, hidden=hidden, route_weights=route_weights
         )
@@ -533,6 +711,7 @@ class MindSpeedTileXRBuffer(TileXRBuffer):
 
 
 def create_tilexr_moonep_backend(**kwargs):
+    _prewarm_framework_ops()
     kwargs["buffer_cls"] = MindSpeedTileXRBuffer
     return MoonEPBufferFlexBackend(**kwargs)
 

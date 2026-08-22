@@ -65,6 +65,18 @@ def test_runner_scripts_expose_the_supported_interface_and_validated_shape() -> 
     for option in (
         "--mode",
         "--backend",
+        "--seq-length",
+        "--hidden-size",
+        "--moe-router-topk",
+        "--route-capture-dir",
+        "--route-capture-id",
+        "--route-capture-skip-calls",
+        "--route-capture-calls",
+        "--performance-capture-dir",
+        "--performance-capture-id",
+        "--performance-capture-skip-operators",
+        "--performance-capture-operators",
+        "--collect-artifacts",
         "--profile",
         "--stage-barrier",
         "--configure",
@@ -82,14 +94,21 @@ def test_runner_scripts_expose_the_supported_interface_and_validated_shape() -> 
         "--master-addr",
         "--master-port",
         "--devices-per-node",
+        "--seq-length",
+        "--hidden-size",
+        "--moe-router-topk",
+        "--route-capture-dir",
+        "--route-capture-id",
+        "--performance-capture-dir",
+        "--performance-capture-id",
     ):
         assert option in node
 
     for argument in (
         "--num-layers 4",
-        "--seq-length 4096",
-        "--hidden-size 7168",
-        "--moe-router-topk 8",
+        '--seq-length "${sequence_length}"',
+        '--hidden-size "${hidden_size}"',
+        '--moe-router-topk "${router_topk}"',
         "--moonep-token-padding 1",
         "--train-iters 8",
     ):
@@ -99,10 +118,13 @@ def test_runner_scripts_expose_the_supported_interface_and_validated_shape() -> 
     assert "expert_count=$((((base_expert_count + ep_size - 1) / ep_size) * ep_size))" in node
     assert '--num-experts "${expert_count}"' in node
     assert "ep_size=${devices_per_node}" not in node
+    assert "dispatch_route_count=$((sequence_length * router_topk))" in node
+    assert "dispatch_route_count <= 32768" in node
     assert '"${node_count}" -gt 1' in node
     assert "ip -o -4 addr show dev data0.3001" in node
     assert "interface=data0.3001" in node
     assert "TILEXR_MOONEP_DISPATCH_PEER_MODE=group" in node
+    assert "TILEXR_MOONEP_DISPATCH_PEER_MODE=legacy" in node
     assert "TILEXR_MOONEP_DISPATCH_GROUP_WIDTH=16" in node
     assert "TILEXR_MOONEP_COMBINE_VERSION=2" in node
     assert "unset TILEXR_MOONEP_DISPATCH_TRANSPORT" in node
@@ -139,10 +161,100 @@ def test_runner_scripts_expose_the_supported_interface_and_validated_shape() -> 
     ):
         assert process_name in idle_probe
     assert "accelerator_processes" in idle_probe
+    assert "ps -eo pid=,comm=,args=" in idle_probe
+    assert 'readlink -f "/proc/${pid}/exe"' in idle_probe
+    assert "pgrep -fc" not in idle_probe
     assert "remote_idle_probe" in controller
     assert '"${profile_done}" -ne "${devices_per_node}"' in node
     assert 'set +u\n# Vendor and conda environment scripts' in node
     assert 'source "${native_env}"\nset -u' in node
+    assert "unset TILEXR_MINDSPEED_ROUTE_CAPTURE_DIR" in node
+    assert "export TILEXR_MINDSPEED_ROUTE_CAPTURE_DIR=${route_capture_dir}" in node
+    assert "export TILEXR_MOONEP_PERF_CAPTURE_DIR=${performance_capture_dir}" in node
+    assert "TILEXR_MINDSPEED_PREWARM_FRAMEWORK_OPS" in controller
+
+
+def test_scaled_model_shape_is_forwarded_to_every_node(tmp_path: Path) -> None:
+    config = tmp_path / "runner.env"
+    run = run_controller(
+        "--mode",
+        "multi",
+        "--backend",
+        "tilexr",
+        "--seq-length",
+        "8192",
+        "--hidden-size",
+        "3584",
+        "--moe-router-topk",
+        "16",
+        "--config",
+        str(config),
+        "--dry-run",
+        stdin=answers(),
+    )
+
+    assert run.returncode == 0, run.stderr
+    assert run.stdout.count("--seq-length 8192") == 2
+    assert run.stdout.count("--hidden-size 3584") == 2
+    assert run.stdout.count("--moe-router-topk 16") == 2
+
+
+def test_route_capture_contract_is_forwarded_to_every_node(tmp_path: Path) -> None:
+    config = tmp_path / "runner.env"
+    run = run_controller(
+        "--mode",
+        "multi",
+        "--backend",
+        "tilexr",
+        "--route-capture-dir",
+        "/srv/capture dir",
+        "--route-capture-id",
+        "capture-1",
+        "--route-capture-skip-calls",
+        "60",
+        "--route-capture-calls",
+        "10",
+        "--config",
+        str(config),
+        "--dry-run",
+        stdin=answers(),
+    )
+
+    assert run.returncode == 0, run.stderr
+    assert run.stdout.count("--route-capture-dir /srv/capture\\ dir") == 2
+    assert run.stdout.count("--route-capture-id capture-1") == 2
+    assert run.stdout.count("--route-capture-skip-calls 60") == 2
+    assert run.stdout.count("--route-capture-calls 10") == 2
+
+
+def test_lightweight_performance_capture_is_forwarded_to_every_node(
+    tmp_path: Path,
+) -> None:
+    config = tmp_path / "runner.env"
+    run = run_controller(
+        "--mode",
+        "multi",
+        "--backend",
+        "tilexr",
+        "--performance-capture-dir",
+        "/srv/performance dir",
+        "--performance-capture-id",
+        "performance-1",
+        "--performance-capture-skip-operators",
+        "330",
+        "--performance-capture-operators",
+        "55",
+        "--config",
+        str(config),
+        "--dry-run",
+        stdin=answers(),
+    )
+
+    assert run.returncode == 0, run.stderr
+    assert run.stdout.count("--performance-capture-dir /srv/performance\\ dir") == 2
+    assert run.stdout.count("--performance-capture-id performance-1") == 2
+    assert run.stdout.count("--performance-capture-skip-operators 330") == 2
+    assert run.stdout.count("--performance-capture-operators 55") == 2
 
 
 def test_stage_barrier_is_supported_for_native_and_tilexr_dry_runs(tmp_path: Path) -> None:
@@ -298,7 +410,9 @@ def test_scripts_do_not_invoke_file_transfer_tools_and_define_failure_cleanup() 
     node = NODE_RUNNER.read_text(encoding="utf-8")
     for script in (controller, node):
         assert "scp " not in script
-        assert "rsync " not in script
+        assert "--delete" not in script
+    assert "rsync -a --protect-args" in controller
+    assert "collect_model_artifacts" in controller
     assert "cleanup_remote_runs" in controller
     assert "wait_for_stable_idle" in controller
     assert 'probe_pids+=("$!")' in controller

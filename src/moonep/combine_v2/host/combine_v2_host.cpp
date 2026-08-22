@@ -5,8 +5,30 @@
 #include "tilexr_types.h"
 #include "tilexr_udma_reg.h"
 
+#include <cstdlib>
+#include <cstring>
+#include <iostream>
+#include <sstream>
+
 namespace TileXRMoonEp {
 namespace {
+
+bool CombineV2HostDfxEnabled()
+{
+    const char *value = std::getenv("TILEXR_MOONEP_COMBINE_V2_HOST_DFX");
+    return value != nullptr && value[0] != '\0' &&
+        std::strcmp(value, "0") != 0;
+}
+
+void LogCombineV2HostReject(const char *where, int ret,
+    const std::string &detail)
+{
+    if (!CombineV2HostDfxEnabled()) {
+        return;
+    }
+    std::cerr << "[TileXR][CombineV2HostDFX] " << where
+              << " ret=" << ret << ' ' << detail << std::endl;
+}
 
 bool CombineV2RankSizeSupported(int rankSize)
 {
@@ -23,10 +45,17 @@ int CombineV2ExpectedLocalRankSize(int rankSize)
 int ValidateAivCoreCount(uint32_t aivCoreNum)
 {
     if (aivCoreNum != kMoonEpCombineV2CoreCount) {
+        std::ostringstream detail;
+        detail << "aivCoreNum=" << aivCoreNum
+               << " expected=" << kMoonEpCombineV2CoreCount;
+        LogCombineV2HostReject("aiv_core_count.argument",
+            TILEXR_MOONEP_ERROR_INVALID_ARGUMENT, detail.str());
         return TILEXR_MOONEP_ERROR_INVALID_ARGUMENT;
     }
     int32_t deviceId = 0;
     if (aclrtGetDevice(&deviceId) != ACL_SUCCESS) {
+        LogCombineV2HostReject("aiv_core_count.device",
+            TILEXR_MOONEP_ERROR_INTERNAL, "aclrtGetDevice failed");
         return TILEXR_MOONEP_ERROR_INTERNAL;
     }
     int64_t vectorCoreCount = 0;
@@ -35,6 +64,12 @@ int ValidateAivCoreCount(uint32_t aivCoreNum)
         vectorCoreCount <= 0 ||
         static_cast<uint64_t>(vectorCoreCount) <
             kMoonEpCombineV2CoreCount) {
+        std::ostringstream detail;
+        detail << "device=" << deviceId
+               << " vectorCoreCount=" << vectorCoreCount
+               << " expected_at_least=" << kMoonEpCombineV2CoreCount;
+        LogCombineV2HostReject("aiv_core_count.unsupported",
+            TILEXR_MOONEP_ERROR_NOT_SUPPORTED, detail.str());
         return TILEXR_MOONEP_ERROR_NOT_SUPPORTED;
     }
     return TILEXR_MOONEP_SUCCESS;
@@ -46,16 +81,44 @@ int ValidateRegisteredWorkspace(const CombineV2Params &params,
     const TileXR::TileXRUDMARegistry *registry = nullptr;
     const int ret = TileXRGetUDMARegistryHost(params.comm, &registry);
     if (ret != TileXR::TILEXR_SUCCESS) {
+        std::ostringstream detail;
+        detail << "TileXRGetUDMARegistryHost ret=" << ret;
+        LogCombineV2HostReject("workspace.registry_query", ret, detail.str());
         return ret;
     }
     if (!TileXR::UDMARegistryValid(registry, context.hostArgs->rankSize) ||
         registry->regions[context.hostArgs->rank].base !=
             static_cast<GM_ADDR>(params.registeredWorkspace)) {
+        std::ostringstream detail;
+        detail << "rank=" << context.hostArgs->rank
+               << " rankSize=" << context.hostArgs->rankSize
+               << " registry=" << registry
+               << " registeredWorkspace="
+               << static_cast<const void *>(params.registeredWorkspace);
+        if (registry != nullptr &&
+            TileXR::UDMARegistryValid(registry, context.hostArgs->rankSize)) {
+            detail << " localBase="
+                   << static_cast<const void *>(
+                       registry->regions[context.hostArgs->rank].base)
+                   << " localBytes="
+                   << registry->regions[context.hostArgs->rank].bytes;
+        }
+        LogCombineV2HostReject("workspace.registry_base",
+            TILEXR_MOONEP_ERROR_INVALID_ARGUMENT, detail.str());
         return TILEXR_MOONEP_ERROR_INVALID_ARGUMENT;
     }
     for (int rank = 0; rank < context.hostArgs->rankSize; ++rank) {
         if (!TileXR::UDMARegionContains(
                 registry, rank, 0, context.layout.totalBytes)) {
+            std::ostringstream detail;
+            detail << "rank=" << context.hostArgs->rank
+                   << " peer=" << rank
+                   << " requiredBytes=" << context.layout.totalBytes
+                   << " peerBase="
+                   << static_cast<const void *>(registry->regions[rank].base)
+                   << " peerBytes=" << registry->regions[rank].bytes;
+            LogCombineV2HostReject("workspace.registry_capacity",
+                TILEXR_MOONEP_ERROR_INVALID_ARGUMENT, detail.str());
             return TILEXR_MOONEP_ERROR_INVALID_ARGUMENT;
         }
     }
@@ -68,6 +131,18 @@ int ValidateFullmeshCapability(const CombineV2Params &params,
     if ((commArgs.extraFlag & TileXR::ExtraFlag::UDMA_FULLMESH) == 0U ||
         commArgs.udmaFullmeshPtr == nullptr ||
         commArgs.udmaRegistrationGeneration == 0U) {
+        std::ostringstream detail;
+        detail << "rank=" << commArgs.rank
+               << " localRank=" << commArgs.localRank
+               << " rankSize=" << commArgs.rankSize
+               << " localRankSize=" << commArgs.localRankSize
+               << " extraFlag=" << commArgs.extraFlag
+               << " udmaFullmeshPtr="
+               << static_cast<const void *>(commArgs.udmaFullmeshPtr)
+               << " registrationGeneration="
+               << commArgs.udmaRegistrationGeneration;
+        LogCombineV2HostReject("fullmesh.flags",
+            TILEXR_MOONEP_ERROR_NOT_SUPPORTED, detail.str());
         return TILEXR_MOONEP_ERROR_NOT_SUPPORTED;
     }
     TileXR::TileXRUDMAFullmeshHostView view {};
@@ -78,6 +153,28 @@ int ValidateFullmeshCapability(const CombineV2Params &params,
             static_cast<uint32_t>(commArgs.localRankSize),
             commArgs.udmaRegistrationGeneration) ||
         view.viewDev != commArgs.udmaFullmeshPtr) {
+        std::ostringstream detail;
+        detail << "rank=" << commArgs.rank
+               << " localRank=" << commArgs.localRank
+               << " localRankSize=" << commArgs.localRankSize
+               << " queryRet=" << ret
+               << " view.version=" << view.version
+               << " view.slotCount=" << view.slotCount
+               << " view.connectedCount=" << view.connectedCount
+               << " view.localRank=" << view.localRank
+               << " view.validPeerMask=" << view.validPeerMask
+               << " view.registrationReady=" << view.registrationReady
+               << " view.registrationGeneration=" << view.registrationGeneration
+               << " expectedGeneration="
+               << commArgs.udmaRegistrationGeneration
+               << " view.infoDev="
+               << static_cast<const void *>(view.infoDev)
+               << " view.viewDev="
+               << static_cast<const void *>(view.viewDev)
+               << " comm.viewDev="
+               << static_cast<const void *>(commArgs.udmaFullmeshPtr);
+        LogCombineV2HostReject("fullmesh.query",
+            TILEXR_MOONEP_ERROR_NOT_SUPPORTED, detail.str());
         return TILEXR_MOONEP_ERROR_NOT_SUPPORTED;
     }
     return TILEXR_MOONEP_SUCCESS;
@@ -89,6 +186,9 @@ int ValidateWeightMemory(const CombineV2Params &params,
     const bool hasWeights = params.routeWeightsNvs != nullptr;
     if ((params.routeWeightsNvs == nullptr) !=
             (params.routeWeightsSk == nullptr)) {
+        LogCombineV2HostReject("weight.argument_pair",
+            TILEXR_MOONEP_ERROR_INVALID_ARGUMENT,
+            "routeWeightsNvs/routeWeightsSk mismatch");
         return TILEXR_MOONEP_ERROR_INVALID_ARGUMENT;
     }
     if (!hasWeights) {
@@ -96,12 +196,22 @@ int ValidateWeightMemory(const CombineV2Params &params,
     }
     if (params.weightMemoryComm == nullptr ||
         params.weightMemoryComm == params.comm) {
+        LogCombineV2HostReject("weight.memory_comm_argument",
+            TILEXR_MOONEP_ERROR_INVALID_ARGUMENT,
+            "weightMemoryComm is null or aliases hidden comm");
         return TILEXR_MOONEP_ERROR_INVALID_ARGUMENT;
     }
 
     TileXR::CommArgs *memoryArgs = nullptr;
     int ret = TileXRGetCommArgsHost(params.weightMemoryComm, memoryArgs);
     if (ret != TileXR::TILEXR_SUCCESS || memoryArgs == nullptr) {
+        std::ostringstream detail;
+        detail << "TileXRGetCommArgsHost ret=" << ret
+               << " memoryArgs=" << memoryArgs;
+        LogCombineV2HostReject("weight.memory_comm_query",
+            ret == TileXR::TILEXR_SUCCESS ?
+                TILEXR_MOONEP_ERROR_INTERNAL : ret,
+            detail.str());
         return ret == TileXR::TILEXR_SUCCESS ?
             TILEXR_MOONEP_ERROR_INTERNAL : ret;
     }
@@ -118,10 +228,29 @@ int ValidateWeightMemory(const CombineV2Params &params,
             TileXR::ExtraFlag::SDMA)) != 0U ||
         memoryArgs->peerMemBytes <=
             static_cast<uint64_t>(TileXR::IPC_DATA_OFFSET)) {
+        std::ostringstream detail;
+        detail << "rank=" << hiddenArgs.rank
+               << " hiddenLocalRank=" << hiddenArgs.localRank
+               << " hiddenLocalRankSize=" << hiddenArgs.localRankSize
+               << " hiddenDomain=" << hiddenArgs.commDomain
+               << " memoryRank=" << memoryArgs->rank
+               << " memoryRankSize=" << memoryArgs->rankSize
+               << " memoryLocalRank=" << memoryArgs->localRank
+               << " memoryLocalRankSize=" << memoryArgs->localRankSize
+               << " memoryDomain=" << memoryArgs->commDomain
+               << " memoryExtraFlag=" << memoryArgs->extraFlag
+               << " memoryPeerMemBytes=" << memoryArgs->peerMemBytes;
+        LogCombineV2HostReject("weight.memory_comm_contract",
+            TILEXR_MOONEP_ERROR_NOT_SUPPORTED, detail.str());
         return TILEXR_MOONEP_ERROR_NOT_SUPPORTED;
     }
     for (int peer = 0; peer < memoryArgs->rankSize; ++peer) {
         if (memoryArgs->peerMems[peer] == nullptr) {
+            std::ostringstream detail;
+            detail << "rank=" << hiddenArgs.rank << " peer=" << peer
+                   << " peerMem=null";
+            LogCombineV2HostReject("weight.peer_mem",
+                TILEXR_MOONEP_ERROR_NOT_SUPPORTED, detail.str());
             return TILEXR_MOONEP_ERROR_NOT_SUPPORTED;
         }
     }
@@ -129,11 +258,23 @@ int ValidateWeightMemory(const CombineV2Params &params,
     ret = TileXRMoonEpBuildCombineV2WeightLayout(
         params.nvS, memoryArgs->rankSize, &context->weightLayout);
     if (ret != TILEXR_MOONEP_SUCCESS) {
+        std::ostringstream detail;
+        detail << "nvS=" << params.nvS
+               << " rankSize=" << memoryArgs->rankSize
+               << " layoutRet=" << ret;
+        LogCombineV2HostReject("weight.layout", ret, detail.str());
         return ret;
     }
     const uint64_t dataCapacity = memoryArgs->peerMemBytes -
         static_cast<uint64_t>(TileXR::IPC_DATA_OFFSET);
     if (context->weightLayout.totalBytes > dataCapacity) {
+        std::ostringstream detail;
+        detail << "rank=" << hiddenArgs.rank
+               << " requiredBytes=" << context->weightLayout.totalBytes
+               << " dataCapacity=" << dataCapacity
+               << " peerMemBytes=" << memoryArgs->peerMemBytes;
+        LogCombineV2HostReject("weight.memory_capacity",
+            TILEXR_MOONEP_ERROR_INVALID_ARGUMENT, detail.str());
         return TILEXR_MOONEP_ERROR_INVALID_ARGUMENT;
     }
     const uint64_t bs = static_cast<uint64_t>(params.bs);
@@ -147,6 +288,14 @@ int ValidateWeightMemory(const CombineV2Params &params,
         params.weightMemoryComm, context->weightMemoryDevArgs);
     if (ret != TileXR::TILEXR_SUCCESS ||
         context->weightMemoryDevArgs == nullptr) {
+        std::ostringstream detail;
+        detail << "TileXRGetCommArgsDev ret=" << ret
+               << " weightMemoryDevArgs="
+               << static_cast<const void *>(context->weightMemoryDevArgs);
+        LogCombineV2HostReject("weight.memory_dev_args",
+            ret == TileXR::TILEXR_SUCCESS ?
+                TILEXR_MOONEP_ERROR_INTERNAL : ret,
+            detail.str());
         return ret == TileXR::TILEXR_SUCCESS ?
             TILEXR_MOONEP_ERROR_INTERNAL : ret;
     }
@@ -159,6 +308,8 @@ int TileXRMoonEpPrepareCombineV2Launch(
     const CombineV2Params &params, CombineV2LaunchContext *context)
 {
     if (context == nullptr) {
+        LogCombineV2HostReject("prepare.context",
+            TILEXR_MOONEP_ERROR_INVALID_ARGUMENT, "context=null");
         return TILEXR_MOONEP_ERROR_INVALID_ARGUMENT;
     }
     *context = CombineV2LaunchContext {};
@@ -166,21 +317,50 @@ int TileXRMoonEpPrepareCombineV2Launch(
         params.comm == nullptr || params.activeOutputOffset == nullptr ||
         params.stream == nullptr ||
         params.aivCoreNum != kMoonEpCombineV2CoreCount) {
+        std::ostringstream detail;
+        detail << "registeredWorkspace="
+               << static_cast<const void *>(params.registeredWorkspace)
+               << " dstLocal=" << static_cast<const void *>(params.dstLocal)
+               << " comm=" << params.comm
+               << " activeOutputOffset=" << params.activeOutputOffset
+               << " stream=" << params.stream
+               << " aivCoreNum=" << params.aivCoreNum
+               << " expectedAiv=" << kMoonEpCombineV2CoreCount;
+        LogCombineV2HostReject("prepare.arguments",
+            TILEXR_MOONEP_ERROR_INVALID_ARGUMENT, detail.str());
         return TILEXR_MOONEP_ERROR_INVALID_ARGUMENT;
     }
     if ((params.routeWeightsNvs == nullptr) !=
             (params.routeWeightsSk == nullptr)) {
+        LogCombineV2HostReject("prepare.weight_pair",
+            TILEXR_MOONEP_ERROR_INVALID_ARGUMENT,
+            "routeWeightsNvs/routeWeightsSk mismatch");
         return TILEXR_MOONEP_ERROR_INVALID_ARGUMENT;
     }
 
     int ret = TileXRMoonEpBuildCombineV2Layout(params.bs, params.h,
         params.topK, params.nvS, params.dtype, &context->layout);
     if (ret != TILEXR_MOONEP_SUCCESS) {
+        std::ostringstream detail;
+        detail << "bs=" << params.bs
+               << " h=" << params.h
+               << " topK=" << params.topK
+               << " nvS=" << params.nvS
+               << " dtype=" << params.dtype
+               << " layoutRet=" << ret;
+        LogCombineV2HostReject("prepare.layout", ret, detail.str());
         return ret;
     }
     ret = TileXRGetCommArgsHost(params.comm, context->hostArgs);
     if (ret != TileXR::TILEXR_SUCCESS || context->hostArgs == nullptr) {
         *context = CombineV2LaunchContext {};
+        std::ostringstream detail;
+        detail << "TileXRGetCommArgsHost ret=" << ret
+               << " hostArgs=" << context->hostArgs;
+        LogCombineV2HostReject("prepare.comm_args",
+            ret == TileXR::TILEXR_SUCCESS ?
+                TILEXR_MOONEP_ERROR_INTERNAL : ret,
+            detail.str());
         return ret == TileXR::TILEXR_SUCCESS ?
             TILEXR_MOONEP_ERROR_INTERNAL : ret;
     }
@@ -195,11 +375,24 @@ int TileXRMoonEpPrepareCombineV2Launch(
         commArgs.localRank >= commArgs.localRankSize ||
         commArgs.rank % commArgs.localRankSize != commArgs.localRank) {
         *context = CombineV2LaunchContext {};
+        std::ostringstream detail;
+        detail << "rank=" << commArgs.rank
+               << " rankSize=" << commArgs.rankSize
+               << " localRank=" << commArgs.localRank
+               << " localRankSize=" << commArgs.localRankSize
+               << " expectedLocalRankSize=" << expectedLocalRankSize;
+        LogCombineV2HostReject("prepare.rank_contract",
+            TILEXR_MOONEP_ERROR_INVALID_ARGUMENT, detail.str());
         return TILEXR_MOONEP_ERROR_INVALID_ARGUMENT;
     }
     for (int peer = 0; peer < commArgs.rankSize; ++peer) {
         if (commArgs.creditMems[peer] == nullptr) {
             *context = CombineV2LaunchContext {};
+            std::ostringstream detail;
+            detail << "rank=" << commArgs.rank << " peer=" << peer
+                   << " creditMem=null";
+            LogCombineV2HostReject("prepare.credit_mem",
+                TILEXR_MOONEP_ERROR_NOT_SUPPORTED, detail.str());
             return TILEXR_MOONEP_ERROR_NOT_SUPPORTED;
         }
     }
@@ -207,6 +400,15 @@ int TileXRMoonEpPrepareCombineV2Launch(
         (commArgs.extraFlag & TileXR::ExtraFlag::UDMA_SHARED_QP) == 0 ||
         commArgs.udmaInfoPtr == nullptr || commArgs.udmaRegistryPtr == nullptr) {
         *context = CombineV2LaunchContext {};
+        std::ostringstream detail;
+        detail << "rank=" << commArgs.rank
+               << " extraFlag=" << commArgs.extraFlag
+               << " udmaInfoPtr="
+               << static_cast<const void *>(commArgs.udmaInfoPtr)
+               << " udmaRegistryPtr="
+               << static_cast<const void *>(commArgs.udmaRegistryPtr);
+        LogCombineV2HostReject("prepare.udma_flags",
+            TILEXR_MOONEP_ERROR_NOT_SUPPORTED, detail.str());
         return TILEXR_MOONEP_ERROR_NOT_SUPPORTED;
     }
 
@@ -215,6 +417,15 @@ int TileXRMoonEpPrepareCombineV2Launch(
     if (ret != TileXR::TILEXR_SUCCESS ||
         qpCount != kMoonEpCombineV2QpCount) {
         *context = CombineV2LaunchContext {};
+        std::ostringstream detail;
+        detail << "rank=" << commArgs.rank
+               << " TileXRUDMAGetQpCount ret=" << ret
+               << " qpCount=" << qpCount
+               << " expected=" << kMoonEpCombineV2QpCount;
+        LogCombineV2HostReject("prepare.qp_count",
+            ret == TileXR::TILEXR_SUCCESS ?
+                TILEXR_MOONEP_ERROR_NOT_SUPPORTED : ret,
+            detail.str());
         return ret == TileXR::TILEXR_SUCCESS ?
             TILEXR_MOONEP_ERROR_NOT_SUPPORTED : ret;
     }

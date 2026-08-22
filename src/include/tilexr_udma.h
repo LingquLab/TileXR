@@ -322,6 +322,72 @@ __aicore__ inline uint32_t UDMAPollCQ(__gm__ UDMAInfo* udmaInfo, uint32_t pe, ui
     return TILEXR_UDMA_STATUS_SUCCESS;
 }
 
+__aicore__ inline uint32_t UDMAPollCQUntilSqTail(
+    __gm__ UDMAInfo* udmaInfo, uint32_t pe, uint32_t qpIdx, uint32_t sqTarget)
+{
+    if (udmaInfo == nullptr || udmaInfo->qpNum == 0U ||
+        udmaInfo->qpNum > TILEXR_UDMA_DEVICE_MAX_QP_COUNT || qpIdx >= udmaInfo->qpNum ||
+        udmaInfo->sqPtr == 0U || udmaInfo->scqPtr == 0U) {
+        return TILEXR_UDMA_STATUS_INVALID;
+    }
+    __gm__ UDMACQCtx* cqCtxEntry = UDMAGetSCQCtx(udmaInfo, pe, qpIdx);
+    __gm__ UDMAWQCtx* wqCtxEntry = UDMAGetWQCtx(udmaInfo, pe, qpIdx);
+    if (wqCtxEntry->bufAddr == 0U || wqCtxEntry->headAddr == 0U ||
+        wqCtxEntry->tailAddr == 0U || wqCtxEntry->depth != TILEXR_UDMA_SQ_BB_COUNT ||
+        wqCtxEntry->baseBkShift >= 32U ||
+        (1U << wqCtxEntry->baseBkShift) < sizeof(UDMASqeCtx) + sizeof(UDMASgeCtx) ||
+        cqCtxEntry->bufAddr == 0U || cqCtxEntry->tailAddr == 0U || cqCtxEntry->dbAddr == 0U ||
+        cqCtxEntry->depth != TILEXR_UDMA_CQ_DEPTH || cqCtxEntry->baseBkShift >= 32U ||
+        (1U << cqCtxEntry->baseBkShift) < sizeof(UDMACqeCtx)) {
+        return TILEXR_UDMA_STATUS_INVALID;
+    }
+    const uint32_t cqeSize = 1U << cqCtxEntry->baseBkShift;
+    uint32_t cqTail = ld_dev(reinterpret_cast<__gm__ uint32_t*>(cqCtxEntry->tailAddr), 0);
+    uint32_t sqTail = ld_dev(reinterpret_cast<__gm__ uint32_t*>(wqCtxEntry->tailAddr), 0);
+    if (sqTarget - sqTail > wqCtxEntry->depth) {
+        return TILEXR_UDMA_STATUS_INVALID;
+    }
+    while (sqTail != sqTarget) {
+        __gm__ UDMACqeCtx* cqeAddr = reinterpret_cast<__gm__ UDMACqeCtx*>(
+            cqCtxEntry->bufAddr + cqeSize * (cqTail & (TILEXR_UDMA_CQ_DEPTH - 1U)));
+        bool validOwner = ((cqTail / TILEXR_UDMA_CQ_DEPTH) & 1U) != 0U;
+        uint32_t times = 0U;
+        while ((validOwner ^ (cqeAddr->owner != 0)) == 0 && times < TILEXR_UDMA_MAX_RETRY_TIMES) {
+            UDMACleanCacheLines(reinterpret_cast<__gm__ uint8_t*>(cqeAddr), sizeof(UDMACqeCtx));
+            ++times;
+        }
+        if (times >= TILEXR_UDMA_MAX_RETRY_TIMES) {
+            return TILEXR_UDMA_STATUS_CQ_TIMEOUT;
+        }
+        uint8_t status = cqeAddr->status & 0xFF;
+        uint8_t subStatus = cqeAddr->substatus & 0xFF;
+        if (status != 0 || subStatus != 0) {
+            return (static_cast<uint32_t>(status) << 8) | subStatus;
+        }
+
+        const uint32_t sqHead = ld_dev(reinterpret_cast<__gm__ uint32_t*>(wqCtxEntry->headAddr), 0);
+        const uint32_t sqOutstanding = sqHead - sqTail;
+        const uint32_t remainingToTarget = sqTarget - sqTail;
+        if (sqOutstanding == 0U || sqOutstanding > wqCtxEntry->depth ||
+            remainingToTarget == 0U || remainingToTarget > sqOutstanding) {
+            return TILEXR_UDMA_STATUS_INVALID;
+        }
+        const uint32_t tailIndex = sqTail % wqCtxEntry->depth;
+        const uint32_t completedEntryIndex = cqeAddr->entryIdx % wqCtxEntry->depth;
+        const uint32_t completedBb =
+            (completedEntryIndex + wqCtxEntry->depth - tailIndex) %
+                wqCtxEntry->depth + 1U;
+        if (completedBb == 0U || completedBb > remainingToTarget ||
+            completedBb > sqOutstanding) {
+            return TILEXR_UDMA_STATUS_INVALID;
+        }
+        sqTail += completedBb;
+        ++cqTail;
+        UDMAPollCQUpdateInfo(cqTail, sqTail, cqCtxEntry, wqCtxEntry);
+    }
+    return TILEXR_UDMA_STATUS_SUCCESS;
+}
+
 __attribute__((always_inline)) inline __aicore__ bool UDMAWqeScratchValid(
     const AscendC::LocalTensor<uint8_t>& wqeScratch)
 {
@@ -792,10 +858,10 @@ __aicore__ inline uint32_t UDMAProfileCompletionFrontier(
     }
     __gm__ UDMAWQCtx* qpCtxEntry = UDMAGetWQCtx(
         udmaInfo, static_cast<uint32_t>(sourceRank), qpIdx);
-    if (qpCtxEntry == nullptr || qpCtxEntry->wqeCntAddr == 0U) {
+    if (qpCtxEntry == nullptr || qpCtxEntry->headAddr == 0U) {
         return 0U;
     }
-    return ld_dev(reinterpret_cast<__gm__ uint32_t*>(qpCtxEntry->wqeCntAddr), 0);
+    return ld_dev(reinterpret_cast<__gm__ uint32_t*>(qpCtxEntry->headAddr), 0);
 }
 
 __aicore__ inline uint32_t UDMAProfileFlushQpDoorbell(
@@ -834,16 +900,20 @@ __aicore__ inline uint32_t UDMAProfileQuietStatusOnQpUntil(
     }
     __gm__ UDMAWQCtx* qpCtxEntry = UDMAGetWQCtx(
         udmaInfo, static_cast<uint32_t>(sourceRank), qpIdx);
-    if (qpCtxEntry == nullptr || qpCtxEntry->wqeCntAddr == 0U ||
-        qpCtxEntry->depth != TILEXR_UDMA_SQ_BB_COUNT) {
+    if (qpCtxEntry == nullptr || qpCtxEntry->headAddr == 0U ||
+        qpCtxEntry->tailAddr == 0U || qpCtxEntry->depth != TILEXR_UDMA_SQ_BB_COUNT) {
         return TILEXR_UDMA_STATUS_INVALID;
     }
-    const uint32_t submitted = ld_dev(
-        reinterpret_cast<__gm__ uint32_t*>(qpCtxEntry->wqeCntAddr), 0);
-    if (submitted - completionFrontier > qpCtxEntry->depth) {
+    const uint32_t submittedHead = ld_dev(
+        reinterpret_cast<__gm__ uint32_t*>(qpCtxEntry->headAddr), 0);
+    const uint32_t submittedTail = ld_dev(
+        reinterpret_cast<__gm__ uint32_t*>(qpCtxEntry->tailAddr), 0);
+    if (submittedHead - submittedTail > qpCtxEntry->depth ||
+        completionFrontier - submittedTail > qpCtxEntry->depth ||
+        submittedHead - completionFrontier > qpCtxEntry->depth) {
         return TILEXR_UDMA_STATUS_INVALID;
     }
-    return UDMAPollCQ(udmaInfo, static_cast<uint32_t>(sourceRank), qpIdx,
+    return UDMAPollCQUntilSqTail(udmaInfo, static_cast<uint32_t>(sourceRank), qpIdx,
         completionFrontier);
 }
 

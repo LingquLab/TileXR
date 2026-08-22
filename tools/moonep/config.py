@@ -16,6 +16,7 @@ _ROUTING_PATTERNS = {
     "unique_destinations",
     "duplicate_destinations",
     "imbalanced_duplicates",
+    "model_replay",
 }
 _CASE_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 

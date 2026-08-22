@@ -31,7 +31,7 @@ namespace {
 constexpr int kDeviceCount = 8;
 constexpr int kDefaultCommDomain = 141;
 constexpr int64_t kDefaultHiddenSize = 3584;
-constexpr int64_t kTopK = 16;
+constexpr int64_t kDefaultTopK = 16;
 constexpr int kDefaultExpertCount = 64;
 constexpr uint32_t kAivCoreNum = 16;
 constexpr uint32_t kQpCount = 32;
@@ -62,6 +62,7 @@ struct Options {
     int iterations = 80;
     int experts = kDefaultExpertCount;
     int64_t hiddenSize = kDefaultHiddenSize;
+    int64_t topK = kDefaultTopK;
     int commDomain = kDefaultCommDomain;
     int rank = -1;
     int worldSize = 0;
@@ -122,6 +123,7 @@ void Usage(std::ostream &out, const char *program)
         << "  --iterations N         Timed launches per batch size (default: 80)\n"
         << "  --experts N            Total expert count (default: 64)\n"
         << "  --hidden-size N        Hidden size H (default: 3584)\n"
+        << "  --topk N               Router TopK K (default: 16)\n"
         << "  --comm-domain N        Shared-QP communication domain (default: 141)\n"
         << "  --rank N               Global rank (required)\n"
         << "  --world-size N         Global rank count (required)\n"
@@ -255,6 +257,13 @@ bool ParseOptions(int argc, char **argv, Options *options, bool *showHelp,
                 return false;
             }
             options->hiddenSize = parsed;
+        } else if (argument == "--topk") {
+            int64_t parsed = 0;
+            if (!ParseInteger(value, 1, 32, &parsed)) {
+                *error = "invalid TopK: " + value;
+                return false;
+            }
+            options->topK = parsed;
         } else if (argument == "--comm-domain") {
             int64_t parsed = 0;
             if (!ParseInteger(value, 1, std::numeric_limits<int>::max(),
@@ -535,11 +544,11 @@ bool BarrierAll(int rank, int world, const std::string &step,
 
 void LaunchCombine(int rank, void *workspace, const int32_t *dst,
     TileXRCommPtr comm, TileXRCommPtr weightMemoryComm, int64_t bs,
-    int64_t hiddenSize, aclrtStream stream, bool reduceHidden,
+    int64_t hiddenSize, int64_t topK, aclrtStream stream, bool reduceHidden,
     bool fusedWeight, const float *routeWeightsNvs, float *routeWeightsSk,
     uint64_t reduceOutputOffset, uint64_t *activeOutputOffset)
 {
-    const int64_t slots = bs * kTopK;
+    const int64_t slots = bs * topK;
     int ret = TILEXR_MOONEP_SUCCESS;
     if (reduceHidden || fusedWeight) {
         TileXRMoonEp::CombineV2Params params {};
@@ -548,7 +557,7 @@ void LaunchCombine(int rank, void *workspace, const int32_t *dst,
         params.comm = comm;
         params.bs = bs;
         params.h = hiddenSize;
-        params.topK = kTopK;
+        params.topK = topK;
         params.nvS = slots;
         params.aivCoreNum = kAivCoreNum;
         params.activeOutputOffset = activeOutputOffset;
@@ -564,7 +573,7 @@ void LaunchCombine(int rank, void *workspace, const int32_t *dst,
         }
     } else {
         ret = TileXRMoonEpCombineV2(workspace, dst, comm, bs,
-            hiddenSize, kTopK, slots, kAivCoreNum, activeOutputOffset,
+            hiddenSize, topK, slots, kAivCoreNum, activeOutputOffset,
             TILEXR_MOONEP_DTYPE_BFLOAT16, stream);
     }
     if (ret != TILEXR_MOONEP_SUCCESS) {
@@ -573,10 +582,10 @@ void LaunchCombine(int rank, void *workspace, const int32_t *dst,
     }
 }
 
-bool CheckWeights(int rank, int world, int64_t bs,
+bool CheckWeights(int rank, int world, int64_t bs, int64_t topK,
     const float *routeWeightsSk, uint32_t generation)
 {
-    const int64_t slots = bs * kTopK;
+    const int64_t slots = bs * topK;
     const int64_t slotsPerRank = slots / world;
     std::vector<float> output(static_cast<std::size_t>(slots));
     const std::size_t bytes = output.size() * sizeof(float);
@@ -603,10 +612,10 @@ bool CheckWeights(int rank, int world, int64_t bs,
 }
 
 OutputCheckResult CheckOutput(int rank, int world, int64_t bs,
-    int64_t hiddenSize, const void *workspace,
+    int64_t hiddenSize, int64_t topK, const void *workspace,
     uint64_t activeOutputOffset, bool reduceHidden)
 {
-    const int64_t slots = bs * kTopK;
+    const int64_t slots = bs * topK;
     const int64_t outputRows = reduceHidden ? bs : slots;
     const std::size_t outputElements = static_cast<std::size_t>(outputRows) *
         static_cast<std::size_t>(hiddenSize);
@@ -627,7 +636,7 @@ OutputCheckResult CheckOutput(int rank, int world, int64_t bs,
         const uint16_t expected = reduceHidden ? FloatToBfloat16(
             (1.0F + static_cast<float>(sourceRank % 16) * 0.25F +
                 static_cast<float>(sourceRank / 16) * 0.0625F) *
-                    static_cast<float>(kTopK)) : SourceValue(sourceRank);
+                    static_cast<float>(topK)) : SourceValue(sourceRank);
         const std::size_t rowOffset = static_cast<std::size_t>(row) *
             static_cast<std::size_t>(hiddenSize);
         for (int64_t column = 0; column < hiddenSize; ++column) {
@@ -874,7 +883,7 @@ int main(int argc, char **argv)
     }
     for (const int64_t bs : options.batchSizes) {
         if (bs % world != 0 || bs >
-            std::numeric_limits<int32_t>::max() / kTopK) {
+            std::numeric_limits<int32_t>::max() / options.topK) {
             Abort(rank, "batch size must be divisible by world size", 1);
         }
     }
@@ -924,8 +933,8 @@ int main(int argc, char **argv)
         uint64_t workspaceBytes = 0;
         uint64_t profileOffset = 0;
         uint64_t outputOffsets[2] = {};
-        ret = TileXRMoonEpCombineGetWorkspaceSizeV2(bs, options.hiddenSize, kTopK,
-            bs * kTopK, TILEXR_MOONEP_DTYPE_BFLOAT16, &workspaceBytes,
+        ret = TileXRMoonEpCombineGetWorkspaceSizeV2(bs, options.hiddenSize, options.topK,
+            bs * options.topK, TILEXR_MOONEP_DTYPE_BFLOAT16, &workspaceBytes,
             &profileOffset, &outputOffsets[0], &outputOffsets[1]);
         if (ret != TILEXR_MOONEP_SUCCESS || workspaceBytes == 0) {
             Abort(rank, "TileXRMoonEpCombineGetWorkspaceSizeV2", ret);
@@ -938,9 +947,9 @@ int main(int argc, char **argv)
     int32_t *dst = nullptr;
     float *routeWeightsNvs = nullptr;
     float *routeWeightsSk = nullptr;
-    const std::size_t maxDstBytes = static_cast<std::size_t>(maxBs * kTopK) *
+    const std::size_t maxDstBytes = static_cast<std::size_t>(maxBs * options.topK) *
         sizeof(int32_t);
-    const std::size_t maxWeightBytes = static_cast<std::size_t>(maxBs * kTopK) *
+    const std::size_t maxWeightBytes = static_cast<std::size_t>(maxBs * options.topK) *
         sizeof(float);
     CheckAcl(rank, "aclrtMalloc workspace", aclrtMalloc(&workspace,
         static_cast<std::size_t>(maxWorkspaceBytes), ACL_MEM_MALLOC_HUGE_FIRST));
@@ -972,7 +981,7 @@ int main(int argc, char **argv)
         std::cout << "COMBINE_V2_SETUP ranks=" << world
                   << " devices_per_host=" << kDeviceCount
                   << " experts=" << options.experts
-                  << " k=" << kTopK
+                  << " k=" << options.topK
                   << " h=" << options.hiddenSize
                   << " dtype=bf16"
                   << " qp_count=" << qpCount
@@ -984,19 +993,19 @@ int main(int argc, char **argv)
     }
 
     for (const int64_t bs : options.batchSizes) {
-        const int64_t slots = bs * kTopK;
+        const int64_t slots = bs * options.topK;
         uint64_t caseWorkspaceBytes = 0;
         uint64_t profileOffset = 0;
         uint64_t outputOffsets[2] = {};
         ret = TileXRMoonEpCombineGetWorkspaceSizeV2(bs, options.hiddenSize,
-            kTopK, slots, TILEXR_MOONEP_DTYPE_BFLOAT16, &caseWorkspaceBytes,
+            options.topK, slots, TILEXR_MOONEP_DTYPE_BFLOAT16, &caseWorkspaceBytes,
             &profileOffset, &outputOffsets[0], &outputOffsets[1]);
         if (ret != TILEXR_MOONEP_SUCCESS || caseWorkspaceBytes == 0) {
             Abort(rank, "TileXRMoonEpCombineGetWorkspaceSizeV2 profile", ret);
         }
         TileXRMoonEp::CombineV2Layout caseLayout {};
         ret = TileXRMoonEp::TileXRMoonEpBuildCombineV2Layout(
-            bs, options.hiddenSize, kTopK, slots,
+            bs, options.hiddenSize, options.topK, slots,
             TILEXR_MOONEP_DTYPE_BFLOAT16, &caseLayout);
         if (ret != TILEXR_MOONEP_SUCCESS) {
             Abort(rank, "TileXRMoonEpBuildCombineV2Layout", ret);
@@ -1051,16 +1060,16 @@ int main(int argc, char **argv)
 
         uint64_t activeOutputOffset = 0;
         LaunchCombine(rank, workspace, dst, comm, weightMemoryComm, bs,
-            options.hiddenSize, stream, options.reduceHidden,
+            options.hiddenSize, options.topK, stream, options.reduceHidden,
             options.fusedWeight, routeWeightsNvs, routeWeightsSk,
             caseLayout.outputOffset, &activeOutputOffset);
         CheckAcl(rank, "correctness stream synchronization",
             aclrtSynchronizeStream(stream));
         const OutputCheckResult outputResult = CheckOutput(
-            rank, world, bs, options.hiddenSize, workspace,
+            rank, world, bs, options.hiddenSize, options.topK, workspace,
             activeOutputOffset, options.reduceHidden);
         bool weightResult = !options.fusedWeight ||
-            CheckWeights(rank, world, bs, routeWeightsSk, 0U);
+            CheckWeights(rank, world, bs, options.topK, routeWeightsSk, 0U);
         if (outputResult != OutputCheckResult::Passed) {
             ReportFirstKernelFailure(rank, workspace, caseLayout);
         }
@@ -1090,7 +1099,7 @@ int main(int argc, char **argv)
 
         for (int iteration = 0; iteration < options.warmup; ++iteration) {
             LaunchCombine(rank, workspace, dst, comm, weightMemoryComm, bs,
-                options.hiddenSize, stream, options.reduceHidden,
+                options.hiddenSize, options.topK, stream, options.reduceHidden,
                 options.fusedWeight, routeWeightsNvs, routeWeightsSk,
                 caseLayout.outputOffset, &activeOutputOffset);
         }
@@ -1112,7 +1121,7 @@ int main(int argc, char **argv)
             aclrtRecordEvent(startEvent, stream));
         for (int iteration = 0; iteration < options.iterations; ++iteration) {
             LaunchCombine(rank, workspace, dst, comm, weightMemoryComm, bs,
-                options.hiddenSize, stream, options.reduceHidden,
+                options.hiddenSize, options.topK, stream, options.reduceHidden,
                 options.fusedWeight, routeWeightsNvs, routeWeightsSk,
                 caseLayout.outputOffset, &activeOutputOffset);
         }
@@ -1127,7 +1136,7 @@ int main(int argc, char **argv)
             static_cast<float>(options.iterations);
         if (options.fusedWeight) {
             weightResult = weightResult &&
-                CheckWeights(rank, world, bs, routeWeightsSk, 1U);
+                CheckWeights(rank, world, bs, options.topK, routeWeightsSk, 1U);
         }
         if (!BarrierAll(rank, world, "continuous weight validation",
                 weightResult)) {

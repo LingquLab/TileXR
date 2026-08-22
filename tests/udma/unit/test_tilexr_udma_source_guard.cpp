@@ -747,6 +747,7 @@ void TestUDMAPersistentProfilesStayIndependent()
     CheckContains(devicePath, device, "UDMAProfileCompletionFrontier(");
     CheckContains(devicePath, device, "UDMAProfileFlushQpDoorbell(");
     CheckContains(devicePath, device, "UDMAProfileQuietStatusOnQpUntil(");
+    CheckContains(devicePath, device, "UDMAPollCQUntilSqTail(");
 }
 
 } // namespace

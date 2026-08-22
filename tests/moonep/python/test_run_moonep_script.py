@@ -8,6 +8,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[3]
 SCRIPT = (ROOT / "scripts" / "run_moonep.sh").read_text(encoding="utf-8")
 LAUNCHER = (ROOT / "tools" / "moonep" / "launcher.py").read_text(encoding="utf-8")
+DIST_NODE = (ROOT / "tools" / "moonep" / "distributed_node.py").read_text(
+    encoding="utf-8"
+)
+MODEL_NODE = (
+    ROOT / "tools" / "moonep" / "mindspeed" / "run_model_node.sh"
+).read_text(encoding="utf-8")
 
 
 def test_script_exposes_tensor_dump_controls() -> None:
@@ -43,6 +49,26 @@ def test_script_exposes_validates_and_forwards_iteration_controls() -> None:
     assert 'distributed_args+=("--iterations" "${iterations}")' in SCRIPT
     assert 'launcher_args+=("--warmup" "${warmup}")' in SCRIPT
     assert 'launcher_args+=("--iterations" "${iterations}")' in SCRIPT
+
+
+def test_script_exposes_opt_in_auto_build_install() -> None:
+    assert "--auto-build-install" in SCRIPT
+    assert 'auto_build_install="${TILEXR_MOONEP_AUTO_BUILD_INSTALL:-false}"' in SCRIPT
+    assert 'auto_build_install="true"' in SCRIPT
+    assert "TILEXR_MOONEP_AUTO_BUILD_INSTALL must be boolean-like" in SCRIPT
+    assert 'build_dir="${TILEXR_MOONEP_BUILD_DIR:-${TILEXR_HOME}/build-moonep-auto}"' in SCRIPT
+    assert 'build_jobs="${TILEXR_MOONEP_BUILD_JOBS:-$(nproc)}"' in SCRIPT
+    assert "cmake was not found; cannot auto build/install TileXR" in SCRIPT
+    assert "TILEXR_MOONEP_BUILD_DIR must not be the source root" in SCRIPT
+    assert 'cmake -S "${TILEXR_HOME}" -B "${build_dir}"' in SCRIPT
+    assert '-DTILEXR_BUILD_MOONEP=ON' in SCRIPT
+    assert '-DTILEXR_BUILD_TESTS=OFF' in SCRIPT
+    assert '-DBUILD_TESTING=OFF' in SCRIPT
+    assert 'cmake --install "${build_dir}"' in SCRIPT
+    assert "Use --auto-build-install to build and install it automatically." in SCRIPT
+    assert SCRIPT.index('timeout_sec="${TILEXR_MOONEP_TIMEOUT_SEC:-600}"') < SCRIPT.index(
+        "auto_build_tilexr_install"
+    )
 
 
 def test_script_accepts_visible_devices_and_defaults_from_device_zero() -> None:
@@ -149,7 +175,7 @@ def test_usage_describes_rank_size_and_rank_per_device_for_every_case() -> None:
         "\n\nEnvironment:", 1
     )[0]
     descriptions = [line for line in usage_cases.splitlines() if line.strip()]
-    assert len(descriptions) == 16
+    assert len(descriptions) == 20
     assert all("rank_size=" in line for line in descriptions)
     assert all("rank_per_dev=" in line for line in descriptions)
 
@@ -200,6 +226,11 @@ def test_usage_describes_eight_and_sixteen_rank_cases() -> None:
         SCRIPT,
         re.MULTILINE,
     )
+    assert re.search(
+        r"^  17\s+model-flow-8rank-4k-ep8-mindspeed\s+8-rank MindSpeed model-iteration replay .+10 forward, 5 backward.+S=4096, K=8, E=32, H=7168, Hf=2048, B=4, P=1\)$",
+        SCRIPT,
+        re.MULTILINE,
+    )
 
 
 def test_case_15_selects_hidden_only_grouped_urma_dispatch_hot_loop() -> None:
@@ -227,6 +258,47 @@ def test_case_16_selects_grouped_urma_full_flow_with_plan_reuse() -> None:
     assert 'export TILEXR_MOONEP_DISPATCH_GROUP_WIDTH="16"' in SCRIPT
 
 
+def test_case_17_selects_mindspeed_model_flow_without_changing_case_16() -> None:
+    assert 'model_flow_case_id="model-flow-8rank-4k-ep8-mindspeed"' in SCRIPT
+    assert 'benchmark_kind="model_flow"' in SCRIPT
+    assert 'TILEXR_MOONEP_UDMA_ARENA_RESERVE_BYTES' in SCRIPT
+    assert '768 * 1024 * 1024' in SCRIPT
+    case_16 = SCRIPT.split(
+        'elif [[ "${case_id}" == "${plan_reuse_repro_case_id}" ]]', 1
+    )[1].split("fi", 1)[0]
+    assert 'warmup="${warmup:-0}"' in case_16
+    assert 'iterations="${iterations:-8}"' in case_16
+
+
+def test_case_18_through_20_select_rank_matched_model_flows() -> None:
+    for number, case_id, rank_size, node_count in (
+        (18, "model-flow-16rank-4k-ep16-mindspeed", 16, 2),
+        (19, "model-flow-8rank-8k-k16-ep8-mindspeed", 8, 1),
+        (20, "model-flow-16rank-8k-k16-ep16-mindspeed", 16, 2),
+    ):
+        assert re.search(
+            rf"^  {number}\s+{re.escape(case_id)}\s+.+rank_size={rank_size}, "
+            rf"rank_per_dev=1.+P=1\)$",
+            SCRIPT,
+            re.MULTILINE,
+        )
+    assert '--benchmark-kind "${benchmark_kind}"' in SCRIPT
+    assert 'choices=("flow", "model_flow", "dispatch_hot_loop")' in (
+        ROOT / "tools" / "moonep" / "distributed_node.py"
+    ).read_text(encoding="utf-8")
+    assert (
+        '"${model_flow_scaled_8rank_case_id}"|'
+        '"${model_flow_scaled_16rank_case_id}")'
+        in SCRIPT
+    )
+    assert (
+        'model_flow_scaled_16rank_case_id="model-flow-16rank-8k-k16-ep16-mindspeed"'
+        in SCRIPT
+    )
+    assert 'export TILEXR_MOONEP_DISPATCH_PEER_MODE="legacy"' in SCRIPT
+    assert 'TILEXR_MOONEP_DIAGNOSTIC_FLOW:-0' in SCRIPT
+
+
 def test_full_flow_reuses_the_plan_after_forward_combine() -> None:
     benchmark = (ROOT / "tools" / "moonep" / "benchmark.py").read_text(
         encoding="utf-8"
@@ -251,7 +323,7 @@ def test_full_flow_reuses_the_plan_after_forward_combine() -> None:
 
 def test_single_node_launcher_accepts_dispatch_hot_loop_controls() -> None:
     assert '"--benchmark-kind"' in LAUNCHER
-    assert 'choices=("flow", "dispatch_hot_loop")' in LAUNCHER
+    assert 'choices=("flow", "model_flow", "dispatch_hot_loop")' in LAUNCHER
     assert '"--dispatch-modes"' in LAUNCHER
 
 
@@ -262,15 +334,95 @@ def test_script_exposes_managed_multinode_three_mode_launch() -> None:
     assert 'python -m tools.moonep.distributed_node' in SCRIPT
     assert 'distributed_args+=("--dump-stage-tensors")' in SCRIPT
     assert '--mode "${mode}"' in SCRIPT
-    assert '--benchmark-kind flow' in SCRIPT
+    assert '--benchmark-kind "${benchmark_kind}"' in SCRIPT
     assert "multi-node runs require --mode reference" not in SCRIPT
     assert "multi-node runs require exactly one rank per visible NPU" in SCRIPT
+
+
+def test_script_exposes_model_replay_shape_and_cache_controls() -> None:
+    for option in (
+        "--model-replay",
+        "--model-replay-from",
+        "--model-replay-cache-dir",
+        "--model-replay-stage-summary-only",
+        "--s",
+        "--k",
+        "--hidden-size",
+        "--ep",
+    ):
+        assert option in SCRIPT
+    assert "python -m tools.moonep.model_replay_cli" in SCRIPT
+    assert '[[ -t 0 ]]' in SCRIPT
+    assert 'model_replay="false"' in SCRIPT
+    assert 'model_replay_from="cache"' in SCRIPT
+    assert 'case "${model_replay_from}" in' in SCRIPT
+    assert 'cache|meta|model)' in SCRIPT
+    assert 'model_replay_args+=(--model-replay-from "${model_replay_from}")' in SCRIPT
+    assert "model_replay_required_sources=(" in SCRIPT
+    assert "TileXR model replay sources are incomplete" in SCRIPT
+    assert "tools/moonep/model_replay_cli.py" in SCRIPT
+    assert "tools/moonep/model_replay_orchestrator.py" in SCRIPT
+    assert "tools/moonep/model_replay_meta.py" in SCRIPT
+    assert "integrations/moonep_torch/tilexr_moonep/torch_api.py" in SCRIPT
+    assert "python -m tools.moonep.model_replay_orchestrator" in SCRIPT
+    assert 'source "${model_replay_result_env}"' in SCRIPT
+    assert 'case_file="${MODEL_REPLAY_CASE_FILE}"' in SCRIPT
+    assert 'case_id="${MODEL_REPLAY_CASE_ID}"' in SCRIPT
+    assert "TILEXR_MOONEP_MODEL_ROUTE_REPLAY" in SCRIPT
+    assert "TILEXR_MOONEP_MODEL_PERFORMANCE" in SCRIPT
+    assert '--node-rank "${node_rank}"' in SCRIPT
+    assert "model_replay_collect_multinode" in SCRIPT
+    assert "rsync -a --protect-args" in SCRIPT
+    assert "--delete" not in SCRIPT
+    assert 'if [[ "${node_rank}" -ne 0 ]]; then' in SCRIPT
+    assert "python -m tools.moonep.model_replay_compare" in SCRIPT
+    assert "compare_args+=(--stage-summary-only)" in SCRIPT
+    assert 'model_runner_config_explicit="false"' in SCRIPT
+    assert 'model_runner_config_explicit="true"' in SCRIPT
+    assert 'TILEXR_MODEL_RUNNER_CONFIG:-' in SCRIPT
+    assert 'output_dir}/generated/model_runner.env' in SCRIPT
+    assert "TILEXR_MOONEP_MODEL_REPLAY_META_ROOT" in SCRIPT
+
+
+def test_model_replay_manages_multinode_followers_and_shared_environment() -> None:
+    assert 'original_args=("$@")' in SCRIPT
+    assert "model_replay_prepare_shared_environment" in SCRIPT
+    assert "from tools.moonep.rendezvous import offset_host_port" in SCRIPT
+    assert 'TILEXR_MOONEP_LAUNCH_SECRET="$(python -' in SCRIPT
+    assert "model_replay_launch_followers" in SCRIPT
+    assert 'TILEXR_MOONEP_MODEL_REPLAY_MANAGED_MULTINODE=0' in SCRIPT
+    assert '"${original_args[@]}" --node-rank "${index}"' in SCRIPT
+    assert "model_replay_wait_followers" in SCRIPT
+    assert 'model_replay_follower_logs+=("${log_path}")' in SCRIPT
+    assert "TILEXR_MINDSPEED_PREWARM_FRAMEWORK_OPS" in SCRIPT
+    assert "MODEL_REPLAY_CACHE_GENERATION" in SCRIPT
+    assert "TILEXR_MOONEP_MODEL_REPLAY_GENERATION" in SCRIPT
+
+
+def test_multinode_model_replay_defaults_model_and_replay_to_legacy_dispatch() -> None:
+    preparation = SCRIPT.index("python -m tools.moonep.model_replay_orchestrator")
+    default_mode = SCRIPT.index(
+        'export TILEXR_MOONEP_DISPATCH_PEER_MODE="${TILEXR_MOONEP_DISPATCH_PEER_MODE:-legacy}"'
+    )
+    assert default_mode < preparation
+    assert (
+        'export TILEXR_MOONEP_PLANNER_WAIT_ITERATIONS="${TILEXR_MOONEP_PLANNER_WAIT_ITERATIONS:-100000000}"'
+        in SCRIPT
+    )
+    assert '{ (( node_count > 1 )) || (( model_s * model_k > 32768 )); }' in SCRIPT
 
 
 def test_single_node_native_launcher_defaults_to_two_udma_qps() -> None:
     assert 'if args.mode in ("benchmark", "correctness"):' in LAUNCHER
     assert '"TILEXR_UDMA_QP_ROUTE_SPEC", "port_count:6,port_count:2"' in LAUNCHER
+    assert 'base_env.setdefault("TILEXR_ENABLE_CREDIT_IPC", "1")' in LAUNCHER
     assert "base_env.setdefault(" in LAUNCHER
+
+
+def test_moonep_cascade_and_model_default_to_credit_ipc() -> None:
+    assert 'export TILEXR_ENABLE_CREDIT_IPC="${TILEXR_ENABLE_CREDIT_IPC:-1}"' in SCRIPT
+    assert 'base_env.setdefault("TILEXR_ENABLE_CREDIT_IPC", "1")' in DIST_NODE
+    assert "export TILEXR_ENABLE_CREDIT_IPC=${TILEXR_ENABLE_CREDIT_IPC:-1}" in MODEL_NODE
 
 
 def test_script_exposes_merged_multinode_global_aggregation() -> None:

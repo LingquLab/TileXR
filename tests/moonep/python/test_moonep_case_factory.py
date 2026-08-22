@@ -30,12 +30,20 @@ RUNNER_WORLD_SIZES = {
     "planning-128rank-single-route": 128,
     "dispatch-8rank-4k-ep8-grouped-urma": 8,
     "flow-8rank-4k-ep8-grouped-urma-plan-reuse": 8,
+    "model-flow-8rank-4k-ep8-mindspeed": 8,
+    "model-flow-16rank-4k-ep16-mindspeed": 16,
+    "model-flow-8rank-8k-k16-ep8-mindspeed": 8,
+    "model-flow-16rank-8k-k16-ep16-mindspeed": 16,
 }
 
 DISPATCH_ONLY_REPRO_CASE = "dispatch-8rank-4k-ep8-grouped-urma"
 PRODUCTION_SCALE_REPRO_CASES = {
     DISPATCH_ONLY_REPRO_CASE,
     "flow-8rank-4k-ep8-grouped-urma-plan-reuse",
+    "model-flow-8rank-4k-ep8-mindspeed",
+    "model-flow-16rank-4k-ep16-mindspeed",
+    "model-flow-8rank-8k-k16-ep8-mindspeed",
+    "model-flow-16rank-8k-k16-ep16-mindspeed",
 }
 
 
@@ -325,8 +333,8 @@ def test_runner_cases_support_one_based_numeric_selection() -> None:
     for number, case in enumerate(cases, start=1):
         assert select_cases(cases, str(number)) == [case]
     assert select_cases(cases, "1,16") == [cases[0], cases[15]]
-    for invalid in ("0", "17"):
-        with pytest.raises(ValueError, match=r"case number must be in \[1, 16\]"):
+    for invalid in ("0", "21"):
+        with pytest.raises(ValueError, match=r"case number must be in \[1, 20\]"):
             select_cases(cases, invalid)
 
 
@@ -334,7 +342,7 @@ def test_case_14_is_the_two_node_one_rank_per_device_case() -> None:
     root = Path(__file__).resolve().parents[3]
     cases = load_cases(root / "tools" / "moonep" / "cases" / "correctness.json")
 
-    assert len(cases) == 16
+    assert len(cases) == 20
     case = cases[13]
     assert case.case_id == "planning-16rank-16card-single-route"
     assert (
@@ -413,4 +421,77 @@ def test_case_16_matches_the_4k_ep8_grouped_urma_plan_reuse_repro() -> None:
         "rank_shifted_uniform",
         0,
         8,
+    )
+
+
+def test_case_17_matches_the_mindspeed_model_iteration() -> None:
+    root = Path(__file__).resolve().parents[3]
+    cases = load_cases(root / "tools" / "moonep" / "cases" / "correctness.json")
+
+    case = cases[16]
+    assert case.case_id == "model-flow-8rank-4k-ep8-mindspeed"
+    assert (
+        case.tokens_per_rank,
+        case.topk,
+        case.expert_count,
+        case.hidden_size,
+        case.intermediate_size,
+        case.prefetch_slots,
+        case.token_padding,
+        case.routing_pattern,
+        case.warmup,
+        case.iterations,
+    ) == (
+        4096,
+        8,
+        32,
+        7168,
+        2048,
+        4,
+        1,
+        "model_replay",
+        5,
+        20,
+    )
+
+
+@pytest.mark.parametrize(
+    ("case_number", "case_id", "expected"),
+    [
+        (
+            18,
+            "model-flow-16rank-4k-ep16-mindspeed",
+            (4096, 8, 32, 7168, 2048, 2),
+        ),
+        (
+            19,
+            "model-flow-8rank-8k-k16-ep8-mindspeed",
+            (8192, 16, 32, 3584, 2048, 4),
+        ),
+        (
+            20,
+            "model-flow-16rank-8k-k16-ep16-mindspeed",
+            (8192, 16, 32, 3584, 2048, 2),
+        ),
+    ],
+)
+def test_model_flow_scale_cases(case_number: int, case_id: str, expected) -> None:
+    root = Path(__file__).resolve().parents[3]
+    cases = load_cases(root / "tools" / "moonep" / "cases" / "correctness.json")
+
+    case = cases[case_number - 1]
+    assert case.case_id == case_id
+    assert (
+        case.tokens_per_rank,
+        case.topk,
+        case.expert_count,
+        case.hidden_size,
+        case.intermediate_size,
+        case.prefetch_slots,
+    ) == expected
+    assert (case.token_padding, case.routing_pattern, case.warmup, case.iterations) == (
+        1,
+        "model_replay",
+        5,
+        20,
     )

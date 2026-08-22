@@ -90,8 +90,11 @@ root-cause oracle。
 2. grouped oracle：H=7168、model-skew、Prefetch、Combine V2、5 个额外 plan 和 plan reuse，
    8 rank exact comparison。
 3. 完整正确性模型 `tilexr_urma_correctness_4k_8p_ep8_0812_015220`：8/8 迭代通过。
-4. 关闭 DFX、trace、dump 和 profiler 后运行
+4. 当时关闭 DFX、trace、dump 和 profiler 后运行
    `tilexr_urma_perf_v2_4k_8p_ep8_0812_095543`：8/8 迭代、退出码 0、无 skip/NaN。
+
+该条是历史实验身份，不是当前性能基线。当前 MoonEP 模型/replay 对比必须保留框架 NPU
+profiler 和 Dispatch/Combine stage barrier，并保证两侧状态一致。
 
 完整模型通过只能证明该组合路径闭环，不能替代单算子对边界语义的证明；单算子通过也
 不能证明 plan reuse、前反向和多轮资源复用。
@@ -183,9 +186,9 @@ reset 等单一变量。一次同时修改 Kernel、Host、timeout 和路由，�
 - 同时覆盖 1-BB 和多 BB WQE；
 - balanced、model-skew、sparse 和 unique routing；
 - `S=4096`、`K=8`、`H=7168`、EP8 的生产规模；
-- 正确性运行可按需开启失败时 DFX。纯吞吐性能运行关闭 trace、dump、DFX 和 profiler；
-  需要算子耗时统计时，保持 trace、dump、DFX、调试同步和 stage barrier 关闭，只开启
-  框架 NPU profiler，并单独标注为 profiling-on 数据。
+- 正确性运行可按需开启失败时 DFX。性能基线关闭 trace、dump、Kernel 编译期 DFX/profile、
+  调试同步和 framework prewarm；框架 NPU profiler 与 Dispatch/Combine stage barrier 必须
+  保留，并在模型和 replay 两侧保持一致。报告中同时记录两者状态。
 
 性能复测不能只检查运行时环境变量。Dispatch DFX 和部分 profiling 是编译期 CMake
 选项；即使 provenance 显示 trace/dump/profile 都关闭，已嵌入 `.so` 的 AICore binary
@@ -227,10 +230,33 @@ reset 等单一变量。一次同时修改 Kernel、Host、timeout 和路由，�
   rank 的 stage 到达顺序可能不同，使无标签注册 collective 串轮。可预测的工作区应合并
   到一个持久注册 arena，算子继续使用各自逻辑子区间；子区间激活必须命中已有 MR，不能
   再发起注册 collective。扩大 arena 后仍要分别验证初始化内存峰值和至少两轮模型数值。
+- Combine V2 的 shared-QP/fullmesh 路径还依赖 credit IPC。`extraFlag` 中同时存在 UDMA、
+  `UDMA_SHARED_QP` 和 `UDMA_FULLMESH`，以及 UDMA 初始化成功日志，都不能证明
+  `CommArgs::creditMems[]` 已初始化。若 `TileXRMoonEpCombineStageV2Fused` 在 launch 前
+  同步返回 `-6`，先用 Host DFX 或最小 A/B 检查 `creditMems[]`；单独
+  `TILEXR_ENABLE_CREDIT_IPC=1` 使同一 case 从失败变为通过时，应把缺省环境修在 launcher/
+  model runner，而不是修改 Combine Kernel。
 - `npu-smi info` 在 950 上可能显示每卡无进程，但 HCCL Test 或其他加速器工作负载仍在
   使用设备。多机 idle gate 必须同时检查设备节点 owner 和已知加速器进程；发现外部作业
   只判 busy，不终止。连续模型启动后的 `EI0007/halSqCqAllocate` 表示驱动 stream/SQ-CQ
   资源尚未回收，应等待并用最小 stream 探针确认恢复，不能改算子代码规避。
+- idle gate 识别已知加速器进程时不能用 `pgrep -f` 扫描任意命令文本；远端诊断 shell、
+  监控 agent 或用户提示中包含 `pretrain_gpt.py` 也会造成所有节点长期假 busy。应按真实
+  `comm`、Python entry/module 和 `/proc/<pid>/exe` 分类，并与 `npu-smi` 和设备节点 owner
+  交叉验证。通过 PowerShell 发远端命令时也不能把 `$(...)` 放在双引号参数中，否则会先在
+  Windows 本地展开，污染所记录的远端身份。
+- 反过来，脚本级 `probe_idle` 返回 `8/8` 也不能单独证明机器可用于大模型。2026-08-20
+  的 2 机 16 rank model-replay 调试中，`.195` 的 idle gate 连续通过，但 `npu-smi info`
+  显示每卡仍有外部 `sglangschedul` 进程占用约 102 GiB HBM；TileXR 模型在首次 Planner
+  附近表现为跨节点 peer 超时，开启 stage barrier 后进一步暴露为每卡追加 11.6 GiB 分配
+  失败。多机模型定位前应同时保存 idle gate、`npu-smi` HBM/进程表和已知加速器进程检查；
+  发现外部作业时只记录 busy 并更换/等待机器，不要修改 MoonEP kernel 或清理非本任务进程。
+- `probe_idle=8/8` 只证明没有检测到 owner，也不能覆盖设备运行时健康。2026-08-21 的
+  32-rank 启动中，多台机器各有一张卡显示 `Critical`、零功耗和零 HBM，且无进程或设备节点
+  owner；对应 rank 和独立 B131 探针都在 `torch.npu.set_device` 返回 `507033/TsdOpen failed`。
+  多节点启动前应对全部入选设备同时检查 health，并至少完成一次逐设备 `set_device` 探针；
+  `Alarm` 按项目规则仍可用，但 `Critical` 且探针失败必须判为环境边界，停止算子侧定位并等待
+  修复或更换机器，不能以重试 Kernel、放宽 idle gate 或重置共享设备规避。
 
 ## Combine V2 共享 scratch 的 completion 约束
 
@@ -269,8 +295,9 @@ quiet 每个 fused epoch 只执行一轮。发生上游或设备错误后可以�
 
 诊断仍保留独立 Hidden/Weight Profile 与 DFX，但共享阶段只能有一个 owner。paired
 以 Weight record 承载 route scan、flag wait、credit、CQ 和 quiet；Hidden record 的共享
-耗时为零，并由 kernel status 的 fused feature bit 明确标识。profiling OFF 的延迟运行与
-profiling ON 的阶段分析必须分开，不能把两个 payload record 伪装成两轮独立通信。
+耗时为零，并由 kernel status 的 fused feature bit 明确标识。Kernel 编译期 profiling OFF
+与 ON 的运行必须分开，且两者都保留框架 NPU profiler；不能把两个 payload record 伪装成
+两轮独立通信。
 
 实机验证时还要注意以下边界：
 
@@ -289,7 +316,173 @@ profiling ON 的阶段分析必须分开，不能把两个 payload record 伪装
 
 这些 Host/mock/source guard 只能证明 ABI、布局和源码协议不变量。只有相同 CANN、设备、
 拓扑上的 HCCL baseline 和 Ascend950 实机逐元素多轮结果，才能证明 UDMA 数据面；性能结论
-还必须使用同 shape、同 pair 模式、同 warmup/迭代和独立 profiling-off 构建做 A/B。
+还必须使用同 shape、同 pair 模式、同 warmup/迭代和独立 Kernel profiling-off 构建做 A/B；
+框架 NPU profiler 与 stage barrier 仍按项目规则保留。
+
+## 8K/K16/H3584/EP8 模型 replay 调试证据边界
+
+2026-08-16 至 2026-08-19 在 `S=8192,K=16,H=3584,EP=8,R=8` 单机 8 rank
+模型 replay/cache 路径上，问题先后暴露在 Prefetch、Combine V2 和反向 Dispatch
+边界。该规模截至记录时没有形成可交付修复；以下内容只作为后续定位经验，不能把临时
+诊断补丁当作已验证方案保留。
+
+保留的运行身份和边界证据：
+
+- 目标机器为 `141.61.49.223` 单机 8 卡，CANN `/home/pkg/b131/cann-9.1.0`，
+  conda 环境 `ai_moe_test`，TileXR 安装树
+  `/home/c30061605/ai/TileXR-model-replay-cache-stage-20260817`。
+- `model-replay-cq-owner-8k-ep8-20260819-run1` 中，epoch-1 Prefetch 全 rank
+  返回 `4000`；rank0 Combine V2 在 `InitLaneStates()` 报 `invalid_config(1)`，
+  `core=5 peer=5 lane=0 qp=5`，`expected=34657 observed=34656`，
+  `cq_status=0x80000000`。CQE owner 已 ready，entryIdx 等于旧 tail，说明残留 SQ
+  entry 已完成但没有被回收，而不是仍在飞行。
+- `model-replay-dispatch-status-8k-ep8-20260819-retry1` 没有进入 MoonEP 边界，
+  训练开始前 HCCL allreduce/stream setup 报 `halSqCqAllocate drvRetCode=17`，
+  之后最小 NPU stream probe 和 8/8 idle gate 通过；该结果应按环境资源瞬态处理，
+  不能归因到算子。
+- `model-replay-dispatch-status-8k-ep8-20260819-retry2` 进入 MoonEP 后，epoch1
+  全 rank Dispatch 为 `0`、Prefetch/Combine 为 `4000`，但诊断读取的 Combine V2
+  failure-record 区域同时出现 `outstanding_limit(3)`、`done_timeout(7)` 记录。这说明
+  failure-record 读取必须先证明当前 launch、magic、收敛轮次和成功路径清理语义，不能把
+  旧记录或非最终记录直接当作首失败。
+- 同一 `retry2` 后续 epoch 出现 `dispatch_forward_complete status=2004`，
+  Prefetch `0xd700ffff/0xd708ffff`，Combine V2 记录中多处
+  `invalid_config(1)` 且 `cq_status=0x80000000`；部分记录的
+  `expected - observed = 16384`，正好是一个 SQ depth/cycle。最终反向 Dispatch 在
+  `_check_plan_status` 处显式失败，如 rank4/rank5：
+  `actual -687800321, expected 4000`。因此该次模型已从“卡死”收敛为
+  “共享 QP/CQ completion 回收或诊断记录生命周期”问题。
+
+已被证据约束或否定的方向：
+
+- 单纯增加 timeout 没有意义；多次日志显示状态已经进入错误分支或队列字段不满足协议。
+- route 内容不是充分条件。使用 call0/call1 真实捕获路由拼出的 55-stage case19 replay
+  曾在 8 rank 全部通过，说明完整模型调度、跨 stage 资源复用或共享队列生命周期仍需单独
+  证明。
+- HCCL stage barrier A/B 对 TileXR backend 不可靠：当 barrier 仍走
+  `torch.distributed.barrier()` 时，可能在 MoonEP 边界前卡在 HCCL collective，不能用于
+  证明 TileXR stage skew。
+- failure-record 诊断只能作为定位工具。若成功状态和 failure-record 同时出现，下一步应先
+  验证记录清理、magic 选择和 converged-success 语义，再决定是否改 Kernel 协议。
+
+后续若恢复该规模，应从最小可证伪边界继续：先用只读诊断确认 Combine V2
+`PublishFailureAndConverge()` 成功路径是否会留下可被下一轮误读的 poison/marker，再确认
+共享 QP 的 SQ head/tail、CQ tail、entryIdx、owner/cycle 与 generic helper 的回收口径是否
+一致。不要在未证明归属前同时修改 Prefetch、Combine 和 Dispatch。
+
+## 4K/K8/H7168/EP8 model replay 共享队列 frontier 经验
+
+2026-08-20 在 `S=4096,K=8,H=7168,EP=8,R=8` 单机 8 rank model replay 级联中，
+故障从 PrefetchWeight CQ invalid 推进到首次 ReduceGrad：`epoch 6` 的
+`reduce_grad_status` 返回 `1/3`，而相同 shape 的 ReduceGrad 单算子 correctness 通过。
+这说明 ReduceGrad 自身基本路径健康，级联前序 stage 留下的共享 QP/SQ/CQ 状态才是首要
+边界。
+
+本次根因是 profile UDMA helper 仍把 `wqeCntAddr` 当作 completion frontier 传给
+`UDMAPollCQ()`。在 shared-QP 中，前序 Dispatch/Combine 可能提交不产生 CQE 的 WQE；
+`wqeCntAddr` 会累计这些 WQE，但 CQ tail 只按实际 CQE 前进。后续 ReduceGrad READ 只产生
+一个 CQE 时，应按该 CQE 的 `entryIdx` 推进 SQ tail，跨过历史无 CQE WQE，而不是等待
+`wqeCntAddr - cqTail` 个 CQE。修复后：
+
+- `UDMAProfileCompletionFrontier()` 返回 SQ `headAddr`；
+- `UDMAProfileQuietStatusOnQpUntil()` 使用 SQ-tail frontier，通过 CQE `entryIdx` 推进
+  SQ tail；
+- mock 覆盖“历史无 CQE SQ gap + 一个 READ CQE”场景；
+- `.223` 上 ReduceGrad 单算子 correctness 通过，8rank 级联 replay 通过，输出目录为
+  `/home/c30061605/ai/TileXR/run/moonep/case17-cascade-sqfrontier-parser-20260820-080256`。
+
+同一轮还暴露了 profiler 解析边界：当前 CombineV2 replay 的实际 kernel 数是 15
+（10 次 forward combine + 5 次 backward combine），旧解析器只接受历史 20 次
+（backward 双 launch）形态。性能解析应以实际 launch 形态分支处理，不能把 kernel
+count mismatch 误判为算子失败。
+
+## 双机 16 rank reverse Dispatch 与 rendezvous 端口经验
+
+2026-08-21 在 C02-A04 两台 Ascend950DT、B131、
+`S=4096,K=8,H=7168,EP=16,R=16` model replay 中，group 模式的模型在
+ReduceGrad 调用前报告 `epoch 6: actual 2007, expected 0`。该异常由
+`check_pending_status()` 暴露，真正 owner 是前序 reverse Dispatch，而不是抛错位置的
+ReduceGrad。Dispatch DFX 进一步记录 `flags=0x80` 和 `quiet=0xfffffffc`；后者来自 final
+SQ drain 观察到 `pending >= TILEXR_UDMA_SQ_BB_COUNT`。因此 grouped shared-QP 的 SQ
+completion frontier 是未闭环边界，不能通过改 ReduceGrad、扩大 buffer 或继续增加
+Planner timeout 来规避。
+
+只改变 `TILEXR_MOONEP_DISPATCH_PEER_MODE=legacy` 后，两节点模型均退出 0；使用同一份
+真实路由缓存的 16 rank 级联也全部通过并完成全局汇总。短期 launcher fallback 应同时
+作用于模型采集和 replay，显式 peer-mode 环境仍优先。该结果没有证明 grouped Kernel
+已修复，也没有覆盖 64/128 rank。
+
+同一次验证还暴露了多通信域端口约束。UDMA communicator 使用 `TILEXR_COMM_ID` 时，
+memory-only communicator 会使用相邻端口；把 `TILEXR_MOONEP_BARRIER_ADDR` 手工设为
+communicator port + 1，会使所有算子和 profiler 都完成，但多数 rank 卡在最终 Host
+rendezvous。barrier 必须通过 `tools.moonep.rendezvous.offset_host_port()` 生成；当前标准
+偏移为 113。修正后 16/16 rank 生成结果和 node completion 标记，controller 汇总退出 0。
+多节点一键 launcher 还必须在所有节点共享 `TILEXR_COMM_ID`、barrier address、launch ID
+和 HMAC secret；只设置 launch ID 不足以进入 worker。
+
+在 C02-A04 的 `.150/.83` 上，node0-managed launcher 已用同一缓存完成一次 16-rank 实机
+闭环：node0 为 `hit`、远端自动拉起节点为 `follower-hit`，两个 node completion 标记和
+16 个 rank 结果均完成，最终全局汇总退出 0。该验证没有手工注入 communicator、barrier、
+secret、peer mode、Planner wait 或 follower 命令；只覆盖 B131 和该两节点拓扑，不能外推
+到 64/128 rank。
+
+## 多节点 model replay cache 发布与部署闭包
+
+2026-08-21 在 `141.61.49.223/.192`、B131、
+`S=4096,K=8,H=7168,EP=16,R=16` 验证中，leader 已完成两节点模型采集并把
+generation 同步到 follower，但 follower 一直停在 `wait_for_replay_cache()`，导致 leader
+仅启动 ranks 0-7 并等待不存在的 ranks 8-15。只读诊断证明两台机器的
+`/usr/local/Ascend/driver/version.info` 哈希不同：leader cache key 为 `81c79c...`，
+follower 本地重算为 `846def...`。generation、completion marker 和 artifact 校验本身均
+完整，首失败边界是多节点 cache handoff，而不是级联 Kernel 或通信数据面。
+
+多节点 managed launcher 必须把 leader 已发布的 generation 路径显式传给 follower。
+follower 应校验路径位于 cache root、目录 key 与 manifest 一致、artifact 完整，并比较
+shape、runner、adapter、Kernel 模式和执行控制等共享契约；`driver/firmware/soc` 这类
+主机局部 provenance 不应参与 follower 对 leader generation 的重新寻址。不能改成扫描
+“最新 generation”或放宽全部 identity 校验，否则可能复用错误 shape 或二进制的输入。
+显式设置的 Dispatch peer mode 也必须进入 provenance；实际 `legacy` 不能按 shape
+默认值误记成 `group`。
+
+修复后 `.192` 单机 8 rank 完成两轮模型、8/8 profiler 和 55-stage replay；`.223/.192`
+双机 16 rank 生成两个 node completion、16 个 rank 结果并通过全局汇总。该结论仅覆盖
+上述主机、B131、Ascend950PR 和 `legacy` Dispatch peer mode。
+
+同一轮首次双机启动还暴露了部署闭包问题：模型目录中的 `MindSpeed`、
+`MindSpeed-LLM` 和 `shmem` 是指向 `temp/moonep_mindspeed` 的绝对 symlink，只同步链接本身
+会在远端得到 `Required path not found`。部署检查必须解析绝对链接并同步其真实目标目录；
+Linux 间使用 `rsync -a` 保留链接语义，但不能把“链接存在”当作依赖已闭包，也不要使用
+`--delete`。
+
+## model replay meta 的跨机器兼容性边界
+
+可上库的 replay meta 必须把路由可复用性和性能可比性分开判断。同一 `S/K/H/EP/R/E/Hf/P`、
+55-call 契约、adapter/runner、model stack 和 Kernel 契约下，TopK 路由可以在另一台同规模
+机器上解压并重建 runtime cache，不应因为主机名、IP、driver 文件哈希或拓扑地址变化而重新
+跑模型。相反，历史性能只有在 CANN、driver、firmware、SoC、拓扑、rank mapping、profiler
+和 stage barrier 等完整 provenance 一致时才是 direct baseline；否则必须标成
+`checked-in reference`。不要为了复用路由而放宽性能标签，也不要为了性能 provenance 的
+主机差异而阻止路由 replay。
+
+隐私扫描 IP 时必须要求完整点分数字 token 边界。固件版本 `9.0.0.200.200` 包含四段数字
+子串，但不是 IP；把它误拒绝会发生在模型和 profiler 均已完成后的 meta 发布边界。扫描器应
+继续拒绝嵌入文本的真实 IPv4，同时用回归测试覆盖五段固件版本。
+
+重复使用同一个显式输出目录会让 Case 17 profiler 同时发现旧、新两份
+`kernel_details.csv`，所有 rank 即使已生成完整 `result.json` 也会在汇总阶段失败。实机 A/B
+应给每次运行分配唯一输出目录；不要把多 CSV 解析错误归因于级联 Kernel，也不要通过删除
+不属于当前运行的 profiler 数据规避。2026-08-21 的 B131 单机 8 rank 验证中，强制
+`model` 完成 8/8 模型迭代并发布 meta；随后在模型启动器设为 `/bin/false` 时，强制 `meta`
+从空 runtime cache 重建 generation 并通过 55-stage replay，强制 `cache` 再次命中并通过。
+该 bundle 包含 80 个 rank-call、40 个唯一 TopK，三个文件合计 1,075,429 bytes。
+
+同日 B131 双机 16 rank、`S=4096,K=8,H=7168,EP=16,R=16` 也完成了相同的
+`model -> meta -> cache` 闭环。`meta` 使用独立空 runtime root，并把模型启动器设为
+`/bin/false`，仍从上库数据重建 generation、完成 16 rank 55-stage replay；随后 `cache`
+命中同一 generation。该 bundle 包含 160 个 rank-call、80 个唯一 TopK，expert ID 范围
+为 0..31，解压后路由为 2,621,440 bytes，三个文件合计 2,092,469 bytes。meta 反建结果
+除 capture/source provenance 外与模型生成的 runtime route 语义字段完全一致；比较完整 JSON
+时应分别校验两类 provenance，不能要求新 generation 伪装成原 capture。
 
 ## 当前实现状态说明
 

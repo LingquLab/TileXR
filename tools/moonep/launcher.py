@@ -142,7 +142,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--mode", choices=("benchmark", "reference", "correctness"), default="benchmark"
     )
     parser.add_argument(
-        "--benchmark-kind", choices=("flow", "dispatch_hot_loop"), default="flow"
+        "--benchmark-kind",
+        choices=("flow", "model_flow", "dispatch_hot_loop"),
+        default="flow",
     )
     parser.add_argument(
         "--dispatch-modes",
@@ -177,7 +179,7 @@ def _process_command(args: argparse.Namespace) -> list[str]:
         str(args.wait_iterations),
     ]
     if not dispatch_hot_loop:
-        command.extend(("--mode", args.mode))
+        command.extend(("--mode", args.mode, "--benchmark-kind", args.benchmark_kind))
     if args.case_ids:
         command.extend(("--case-ids", args.case_ids))
     if args.install_prefix:
@@ -212,7 +214,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.mode == "benchmark" and args.dump_stage_tensors:
         raise ValueError("--dump-stage-tensors is only valid in reference/correctness mode")
     if args.mode != "benchmark" and args.benchmark_kind != "flow":
-        raise ValueError("--benchmark-kind dispatch_hot_loop requires --mode benchmark")
+        raise ValueError("non-flow benchmark kinds require --mode benchmark")
     topology = resolve_topology(
         physical_device_count=args.physical_device_count,
         ranks_per_device=args.ranks_per_device,
@@ -291,6 +293,7 @@ def main(argv: list[str] | None = None) -> int:
         base_env.setdefault(
             "TILEXR_UDMA_QP_ROUTE_SPEC", "port_count:6,port_count:2"
         )
+        base_env.setdefault("TILEXR_ENABLE_CREDIT_IPC", "1")
 
     command = _process_command(args)
     processes: list[tuple[int, subprocess.Popen, object]] = []

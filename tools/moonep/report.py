@@ -5,6 +5,7 @@ import csv
 import json
 import math
 import os
+import statistics
 from pathlib import Path
 from typing import Iterable, Mapping
 
@@ -39,6 +40,24 @@ FLOW_STAGE_LABELS = {
     "prefetch_weight": "PrefetchWeight",
     "expert": "Expert",
     "combine": "Combine",
+    "reduce_grad": "ReduceGrad",
+}
+MODEL_STAGE_ORDER = (
+    "planning",
+    "dispatch_forward",
+    "dispatch_backward",
+    "prefetch_weight",
+    "combine_forward",
+    "combine_backward",
+    "reduce_grad",
+)
+MODEL_STAGE_LABELS = {
+    "planning": "Planning",
+    "dispatch_forward": "Dispatch forward",
+    "dispatch_backward": "Dispatch backward",
+    "prefetch_weight": "PrefetchWeight",
+    "combine_forward": "Combine forward",
+    "combine_backward": "Combine backward",
     "reduce_grad": "ReduceGrad",
 }
 
@@ -393,6 +412,109 @@ def format_stage_performance(summary: Mapping[str, object]) -> str:
     )
 
 
+def _model_triplet(values: Mapping[str, object] | None, *, precision: int) -> str:
+    if values is None:
+        return "N/A"
+    return " / ".join(
+        _format_number(float(values[name]), precision=precision)
+        for name in ("median", "max", "min")
+    )
+
+
+def _format_table(headers: tuple[str, ...], rows: list[tuple[str, ...]], left: int) -> str:
+    widths = [
+        max(len(headers[index]), *(len(row[index]) for row in rows))
+        for index in range(len(headers))
+    ]
+
+    def format_row(row: tuple[str, ...]) -> str:
+        return "  ".join(
+            value.ljust(widths[index]) if index < left else value.rjust(widths[index])
+            for index, value in enumerate(row)
+        )
+
+    return "\n".join(
+        (
+            format_row(headers),
+            format_row(tuple("-" * width for width in widths)),
+            *(format_row(row) for row in rows),
+        )
+    )
+
+
+def format_model_flow_performance(summary: Mapping[str, object]) -> str:
+    if summary.get("benchmark_kind") != "model_flow":
+        raise ValueError("summary is not a model-flow report")
+    operators = summary.get("model_operator_performance")
+    stages = summary.get("model_stage_performance")
+    if not isinstance(operators, list) or len(operators) != 55:
+        raise ValueError("model-flow summary must contain 55 ordered operators")
+    if not isinstance(stages, dict) or set(stages) != set(MODEL_STAGE_ORDER):
+        raise ValueError("model-flow summary has invalid stage performance")
+
+    operator_headers = (
+        "Seq",
+        "Phase",
+        "Layer",
+        "Stage",
+        "Native",
+        "Kernel version",
+        "Launches",
+        "Median / max / min us",
+        "Algorithm bytes",
+        "Median / max / min GB/s",
+    )
+    operator_rows = []
+    for item in operators:
+        operator_rows.append(
+            (
+                str(int(item["sequence"]) + 1),
+                str(item["phase"]),
+                str(item["layer"]),
+                MODEL_STAGE_LABELS[str(item["stage"])],
+                "Yes",
+                str(item["kernel_name"]),
+                str(item["kernel_launches_per_call"]),
+                _model_triplet(item["latency_us"], precision=3),
+                _model_triplet(item["algorithm_bytes"], precision=0),
+                _model_triplet(item["algorithm_bandwidth_GBps"], precision=6),
+            )
+        )
+
+    stage_headers = (
+        "Stage",
+        "Calls/rank",
+        "Kernel version",
+        "Median / max / min us",
+        "Algorithm bytes",
+        "Median / max / min GB/s",
+    )
+    stage_rows = []
+    for stage in MODEL_STAGE_ORDER:
+        item = stages[stage]
+        stage_rows.append(
+            (
+                MODEL_STAGE_LABELS[stage],
+                str(item["calls_per_rank"]),
+                str(item["kernel_name"]),
+                _model_triplet(item["latency_us"], precision=3),
+                _model_triplet(item["algorithm_bytes"], precision=0),
+                _model_triplet(item["algorithm_bandwidth_GBps"], precision=6),
+            )
+        )
+    return "\n".join(
+        (
+            _format_benchmark_inputs(summary),
+            "Profile timing: torch-npu Kernel duration; statistics are "
+            "median/max/min across rank means",
+            "",
+            "MoonEP model operator performance (model execution order)",
+            _format_table(operator_headers, operator_rows, 6),
+            "",
+            "MoonEP model stage summary",
+            _format_table(stage_headers, stage_rows, 3),
+        )
+    )
 def format_dispatch_performance(summary: Mapping[str, object]) -> str:
     if summary.get("benchmark_kind") != "dispatch_hot_loop":
         raise ValueError("summary is not a Dispatch hot-loop report")
@@ -505,6 +627,301 @@ def _write_stage_csv(
             )
 
 
+def _rank_distribution(values: list[float]) -> dict[str, float]:
+    if not values:
+        raise ValueError("rank distribution requires at least one value")
+    return {
+        "median": statistics.median(values),
+        "max": max(values),
+        "min": min(values),
+    }
+
+
+def _model_metric(
+    rank_values: list[list[object]],
+) -> tuple[dict[str, float] | None, list[float] | None]:
+    flattened = [value for values in rank_values for value in values]
+    if all(value is None for value in flattened):
+        return None, None
+    if any(value is None for value in flattened):
+        raise ValueError("model metric mixes numeric and N/A values")
+    rank_means = [
+        statistics.fmean(float(value) for value in values) for values in rank_values
+    ]
+    return _rank_distribution(rank_means), rank_means
+
+
+def _write_model_csvs(root: Path, summary: Mapping[str, object]) -> None:
+    operator_fields = (
+        "sequence",
+        "phase",
+        "layer",
+        "stage",
+        "kernel_name",
+        "kernel_launches_per_call",
+        "latency_median_us",
+        "latency_max_us",
+        "latency_min_us",
+        "algorithm_bytes_median",
+        "algorithm_bytes_max",
+        "algorithm_bytes_min",
+        "bandwidth_median_GBps",
+        "bandwidth_max_GBps",
+        "bandwidth_min_GBps",
+    )
+    with (root / "model_operator_summary.csv").open(
+        "w", encoding="utf-8", newline=""
+    ) as handle:
+        writer = csv.DictWriter(handle, fieldnames=operator_fields)
+        writer.writeheader()
+        for item in summary["model_operator_performance"]:
+            latency = item["latency_us"]
+            byte_values = item["algorithm_bytes"]
+            bandwidth = item["algorithm_bandwidth_GBps"]
+            writer.writerow(
+                {
+                    "sequence": item["sequence"],
+                    "phase": item["phase"],
+                    "layer": item["layer"],
+                    "stage": item["stage"],
+                    "kernel_name": item["kernel_name"],
+                    "kernel_launches_per_call": item["kernel_launches_per_call"],
+                    "latency_median_us": latency["median"],
+                    "latency_max_us": latency["max"],
+                    "latency_min_us": latency["min"],
+                    "algorithm_bytes_median": (
+                        "" if byte_values is None else byte_values["median"]
+                    ),
+                    "algorithm_bytes_max": (
+                        "" if byte_values is None else byte_values["max"]
+                    ),
+                    "algorithm_bytes_min": (
+                        "" if byte_values is None else byte_values["min"]
+                    ),
+                    "bandwidth_median_GBps": (
+                        "" if bandwidth is None else bandwidth["median"]
+                    ),
+                    "bandwidth_max_GBps": (
+                        "" if bandwidth is None else bandwidth["max"]
+                    ),
+                    "bandwidth_min_GBps": (
+                        "" if bandwidth is None else bandwidth["min"]
+                    ),
+                }
+            )
+
+    stage_fields = (
+        "stage",
+        "calls_per_rank",
+        "kernel_name",
+        "latency_median_us",
+        "latency_max_us",
+        "latency_min_us",
+        "algorithm_bytes_median",
+        "algorithm_bytes_max",
+        "algorithm_bytes_min",
+        "bandwidth_median_GBps",
+        "bandwidth_max_GBps",
+        "bandwidth_min_GBps",
+    )
+    with (root / "model_stage_summary.csv").open(
+        "w", encoding="utf-8", newline=""
+    ) as handle:
+        writer = csv.DictWriter(handle, fieldnames=stage_fields)
+        writer.writeheader()
+        for stage in MODEL_STAGE_ORDER:
+            item = summary["model_stage_performance"][stage]
+            latency = item["latency_us"]
+            byte_values = item["algorithm_bytes"]
+            bandwidth = item["algorithm_bandwidth_GBps"]
+            writer.writerow(
+                {
+                    "stage": stage,
+                    "calls_per_rank": item["calls_per_rank"],
+                    "kernel_name": item["kernel_name"],
+                    "latency_median_us": latency["median"],
+                    "latency_max_us": latency["max"],
+                    "latency_min_us": latency["min"],
+                    "algorithm_bytes_median": (
+                        "" if byte_values is None else byte_values["median"]
+                    ),
+                    "algorithm_bytes_max": (
+                        "" if byte_values is None else byte_values["max"]
+                    ),
+                    "algorithm_bytes_min": (
+                        "" if byte_values is None else byte_values["min"]
+                    ),
+                    "bandwidth_median_GBps": (
+                        "" if bandwidth is None else bandwidth["median"]
+                    ),
+                    "bandwidth_max_GBps": (
+                        "" if bandwidth is None else bandwidth["max"]
+                    ),
+                    "bandwidth_min_GBps": (
+                        "" if bandwidth is None else bandwidth["min"]
+                    ),
+                }
+            )
+
+
+def _aggregate_model_flow_artifacts(
+    root: Path,
+    rank_results: list[dict[str, object]],
+    *,
+    world_size: int,
+) -> dict[str, object]:
+    profiles = []
+    for rank in range(world_size):
+        with (root / f"rank_{rank}" / "model_profile.json").open(
+            "r", encoding="utf-8"
+        ) as handle:
+            profile = json.load(handle)
+        if profile.get("schema_version") != 1:
+            raise ValueError(f"rank {rank} has an unsupported model profile schema")
+        if profile.get("timing_source") != "torch_npu_profiler_kernel_details":
+            raise ValueError(f"rank {rank} has an invalid model profile timing source")
+        profiles.append(profile)
+
+    reference = rank_results[0]
+    reference_operators = profiles[0].get("operators")
+    if not isinstance(reference_operators, list) or len(reference_operators) != 55:
+        raise ValueError("model profile must contain 55 ordered operators")
+    operator_performance = []
+    metadata_keys = (
+        "sequence",
+        "phase",
+        "layer",
+        "stage",
+        "stage_occurrence",
+        "kernel_name",
+        "kernel_launches_per_call",
+    )
+    for sequence, reference_operator in enumerate(reference_operators):
+        rank_operators = [profile["operators"][sequence] for profile in profiles]
+        metadata = {name: reference_operator[name] for name in metadata_keys}
+        for rank, operator in enumerate(rank_operators[1:], start=1):
+            if {name: operator[name] for name in metadata_keys} != metadata:
+                raise ValueError(
+                    f"rank {rank} model operator {sequence} metadata differs from rank 0"
+                )
+        latency, latency_rank_means = _model_metric(
+            [operator["values_us"] for operator in rank_operators]
+        )
+        byte_values, byte_rank_means = _model_metric(
+            [operator["algorithm_bytes"] for operator in rank_operators]
+        )
+        if latency is None or latency_rank_means is None:
+            raise ValueError("model operator latency cannot be N/A")
+        bandwidth = None
+        if byte_rank_means is not None:
+            bandwidth = _rank_distribution(
+                [
+                    byte_count / duration / 1000.0
+                    for byte_count, duration in zip(byte_rank_means, latency_rank_means)
+                ]
+            )
+        operator_performance.append(
+            {
+                **metadata,
+                "latency_us": latency,
+                "algorithm_bytes": byte_values,
+                "algorithm_bandwidth_GBps": bandwidth,
+            }
+        )
+
+    stage_performance = {}
+    for stage in MODEL_STAGE_ORDER:
+        rank_latency_values = []
+        rank_byte_values = []
+        kernel_names = set()
+        calls_per_rank = None
+        for profile in profiles:
+            operators = [
+                operator for operator in profile["operators"] if operator["stage"] == stage
+            ]
+            latency_values = [
+                float(value)
+                for operator in operators
+                for value in operator["values_us"]
+            ]
+            byte_values = [
+                value
+                for operator in operators
+                for value in operator["algorithm_bytes"]
+            ]
+            rank_latency_values.append(latency_values)
+            rank_byte_values.append(byte_values)
+            kernel_names.update(str(operator["kernel_name"]) for operator in operators)
+            if calls_per_rank is None:
+                calls_per_rank = len(latency_values)
+            elif calls_per_rank != len(latency_values):
+                raise ValueError(f"model stage {stage} call count differs across ranks")
+        latency, latency_rank_means = _model_metric(rank_latency_values)
+        byte_values, byte_rank_means = _model_metric(rank_byte_values)
+        if latency is None or latency_rank_means is None or len(kernel_names) != 1:
+            raise ValueError(f"model stage {stage} has invalid profile data")
+        bandwidth = None
+        if byte_rank_means is not None:
+            bandwidth = _rank_distribution(
+                [
+                    byte_count / duration / 1000.0
+                    for byte_count, duration in zip(byte_rank_means, latency_rank_means)
+                ]
+            )
+        stage_performance[stage] = {
+            "calls_per_rank": calls_per_rank,
+            "kernel_name": next(iter(kernel_names)),
+            "latency_us": latency,
+            "algorithm_bytes": byte_values,
+            "algorithm_bandwidth_GBps": bandwidth,
+        }
+
+    first = reference
+    topology = first["topology"]
+    capabilities = first["capabilities"]
+    summary = {
+        "schema_version": 1,
+        "benchmark_kind": "model_flow",
+        "status": "passed",
+        "mode": first.get("mode", "benchmark"),
+        "case": first["case"],
+        "logical_world_size": world_size,
+        "node_count": topology.get("node_count"),
+        "visible_devices": topology.get("visible_devices"),
+        "physical_device_count": topology.get("physical_device_count"),
+        "ranks_per_device": topology.get("ranks_per_device"),
+        "oversubscribed": topology.get("oversubscribed"),
+        "planner_block_dim": topology.get("planner_block_dim"),
+        "planner_block_dim_source": topology.get("planner_block_dim_source"),
+        "dispatch_aiv_core_count": topology.get("dispatch_aiv_core_count"),
+        "dispatch_aiv_core_count_source": topology.get(
+            "dispatch_aiv_core_count_source"
+        ),
+        "udma_qp_route_spec": topology.get("udma_qp_route_spec"),
+        "capabilities": capabilities,
+        "environment": first.get("environment"),
+        "benchmark_config": first.get("benchmark_config"),
+        "stage_execution": first.get("stage_execution"),
+        "route_provenance": first.get("route_provenance"),
+        "projection_shapes": first.get("projection_shapes"),
+        "profile_timing_source": first.get("profile_timing_source"),
+        "performance_scope": "model_kernel_profile",
+        "transport_correctness_valid": bool(
+            capabilities.get("transport_correctness_valid", False)
+        ),
+        "transport_performance_valid": True,
+        "validation": {
+            "passed": all(bool(result["validation"]["passed"]) for result in rank_results),
+            "mode": "model_order_status_checksum_and_kernel_profile",
+        },
+        "model_operator_performance": operator_performance,
+        "model_stage_performance": stage_performance,
+    }
+    write_json(root / "summary.json", summary)
+    _write_model_csvs(root, summary)
+    return summary
+
+
 def aggregate_rank_artifacts(
     case_dir: str | Path,
     *,
@@ -517,7 +934,8 @@ def aggregate_rank_artifacts(
         rank_dir = root / f"rank_{rank}"
         with (rank_dir / "result.json").open("r", encoding="utf-8") as handle:
             result = json.load(handle)
-        samples = read_jsonl(rank_dir / "samples.jsonl")
+        samples_path = rank_dir / "samples.jsonl"
+        samples = read_jsonl(samples_path) if samples_path.is_file() else []
         if result.get("status") != "passed":
             raise RuntimeError(f"rank {rank} failed: {result.get('failure_reason', 'unknown')}")
         if int(result.get("rank", rank)) != rank:
@@ -586,6 +1004,11 @@ def aggregate_rank_artifacts(
         topology = {key: result["topology"].get(key) for key in topology_keys}
         if topology != reference_topology:
             raise ValueError(f"rank {rank} topology metadata differs from rank 0")
+
+    if reference.get("benchmark_kind") == "model_flow":
+        return _aggregate_model_flow_artifacts(
+            root, rank_results, world_size=world_size
+        )
 
     iteration_count = next(iter(counts))
     if iteration_count == 0:
@@ -980,11 +1403,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.summary is not None:
         with Path(args.summary).open("r", encoding="utf-8") as handle:
             summary = json.load(handle)
-        formatter = (
-            format_dispatch_performance
-            if summary.get("benchmark_kind") == "dispatch_hot_loop"
-            else format_stage_performance
-        )
+        benchmark_kind = summary.get("benchmark_kind")
+        if benchmark_kind == "dispatch_hot_loop":
+            formatter = format_dispatch_performance
+        elif benchmark_kind == "model_flow":
+            formatter = format_model_flow_performance
+        else:
+            formatter = format_stage_performance
         print(formatter(summary))
         return 0
     if not args.case_ids or args.node_count is None or args.world_size is None:

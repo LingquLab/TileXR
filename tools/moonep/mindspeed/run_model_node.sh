@@ -9,12 +9,18 @@ This non-interactive node runner is normally invoked by run_model.sh.
 
 Required options:
   --backend tilexr|native
+  --seq-length COUNT --hidden-size COUNT --moe-router-topk COUNT
   --node-count COUNT --node-rank RANK --master-addr ADDRESS --master-port PORT
   --devices-per-node COUNT --tilexr-home PATH --model-root PATH
   --install-prefix PATH --cann-env PATH --conda-sh PATH --conda-env NAME
   --native-env PATH --tokenizer-path PATH --data-path PATH --run-tag TAG
 
 Optional: --profile --stage-barrier --hccl-inter-hccs-disable true|false
+          --route-capture-dir PATH --route-capture-id ID
+          --route-capture-skip-calls COUNT --route-capture-calls COUNT
+          --performance-capture-dir PATH --performance-capture-id ID
+          --performance-capture-skip-operators COUNT
+          --performance-capture-operators COUNT
           --rank-table-file PATH --timeout SECONDS
           --udma-rootinfo-path PATH
 Internal cleanup: --stop --backend BACKEND --node-rank RANK
@@ -23,6 +29,17 @@ EOF
 }
 
 backend=
+sequence_length=4096
+hidden_size=7168
+router_topk=8
+route_capture_dir=""
+route_capture_id=""
+route_capture_skip_calls=60
+route_capture_calls=10
+performance_capture_dir=""
+performance_capture_id=""
+performance_capture_skip_operators=330
+performance_capture_operators=55
 node_count=
 node_rank=
 master_addr=
@@ -49,6 +66,41 @@ stop=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --backend) backend=${2:?--backend requires a value}; shift 2 ;;
+        --seq-length) sequence_length=${2:?--seq-length requires a value}; shift 2 ;;
+        --hidden-size) hidden_size=${2:?--hidden-size requires a value}; shift 2 ;;
+        --moe-router-topk) router_topk=${2:?--moe-router-topk requires a value}; shift 2 ;;
+        --route-capture-dir)
+            route_capture_dir=${2:?--route-capture-dir requires a value}
+            shift 2
+            ;;
+        --route-capture-id)
+            route_capture_id=${2:?--route-capture-id requires a value}
+            shift 2
+            ;;
+        --route-capture-skip-calls)
+            route_capture_skip_calls=${2:?--route-capture-skip-calls requires a value}
+            shift 2
+            ;;
+        --route-capture-calls)
+            route_capture_calls=${2:?--route-capture-calls requires a value}
+            shift 2
+            ;;
+        --performance-capture-dir)
+            performance_capture_dir=${2:?--performance-capture-dir requires a value}
+            shift 2
+            ;;
+        --performance-capture-id)
+            performance_capture_id=${2:?--performance-capture-id requires a value}
+            shift 2
+            ;;
+        --performance-capture-skip-operators)
+            performance_capture_skip_operators=${2:?--performance-capture-skip-operators requires a value}
+            shift 2
+            ;;
+        --performance-capture-operators)
+            performance_capture_operators=${2:?--performance-capture-operators requires a value}
+            shift 2
+            ;;
         --node-count) node_count=${2:?--node-count requires a value}; shift 2 ;;
         --node-rank) node_rank=${2:?--node-rank requires a value}; shift 2 ;;
         --master-addr) master_addr=${2:?--master-addr requires a value}; shift 2 ;;
@@ -146,7 +198,10 @@ for variable in "${required_values[@]}"; do
         exit 2
     fi
 done
-for variable in node_count node_rank master_port devices_per_node timeout_sec; do
+for variable in node_count node_rank master_port devices_per_node timeout_sec \
+    sequence_length hidden_size router_topk route_capture_skip_calls \
+    route_capture_calls performance_capture_skip_operators \
+    performance_capture_operators; do
     if [[ ! "${!variable}" =~ ^[0-9]+$ ]]; then
         printf '%s must be an integer\n' "${variable}" >&2
         exit 2
@@ -156,6 +211,36 @@ if (( node_count < 1 || node_rank >= node_count || devices_per_node < 1 || \
       master_port < 1 || master_port > 65535 || timeout_sec < 1 )); then
     echo "invalid distributed launcher dimensions" >&2
     exit 2
+fi
+if (( sequence_length < 1 || hidden_size < 1 || hidden_size % 128 != 0 || \
+      router_topk < 1 || router_topk > 32 || route_capture_skip_calls < 0 || \
+      route_capture_calls < 1 || performance_capture_skip_operators < 0 || \
+      performance_capture_operators < 1 )); then
+    echo "invalid model shape or route capture dimensions" >&2
+    exit 2
+fi
+
+pass_TILEXR_MOONEP_DUMP_DFX_ON_ERROR=${TILEXR_MOONEP_DUMP_DFX_ON_ERROR:-}
+pass_TILEXR_MOONEP_DISPATCH_GROUP_WIDTH=${TILEXR_MOONEP_DISPATCH_GROUP_WIDTH:-}
+pass_TILEXR_MOONEP_DISPATCH_PEER_MODE=${TILEXR_MOONEP_DISPATCH_PEER_MODE:-}
+pass_TILEXR_MOONEP_FLAG_DUMP_DIR=${TILEXR_MOONEP_FLAG_DUMP_DIR:-}
+pass_TILEXR_MOONEP_FLAG_DUMP_MODE=${TILEXR_MOONEP_FLAG_DUMP_MODE:-}
+pass_TILEXR_MOONEP_PLANNER_WAIT_ITERATIONS=${TILEXR_MOONEP_PLANNER_WAIT_ITERATIONS:-}
+if [[ -n "${performance_capture_dir}" || -n "${performance_capture_id}" ]]; then
+    if [[ "${backend}" != "tilexr" || -z "${performance_capture_dir}" ||
+          -z "${performance_capture_id}" ||
+          ! "${performance_capture_id}" =~ ^[A-Za-z0-9_.-]+$ ]]; then
+        echo "performance capture requires TileXR, a directory, and a safe capture ID" >&2
+        exit 2
+    fi
+fi
+if [[ -n "${route_capture_dir}" || -n "${route_capture_id}" ]]; then
+    if [[ "${backend}" != "tilexr" || -z "${route_capture_dir}" ||
+          -z "${route_capture_id}" ||
+          ! "${route_capture_id}" =~ ^[A-Za-z0-9_.-]+$ ]]; then
+        echo "route capture requires TileXR, a directory, and a safe capture ID" >&2
+        exit 2
+    fi
 fi
 for path in "${cann_env}" "${conda_sh}" "${native_env}"; do
     [[ -f "${path}" ]] || { printf 'Required file not found: %s\n' "${path}" >&2; exit 1; }
@@ -259,6 +344,33 @@ unset TILEXR_MINDSPEED_FORCE_DUMMY_UDMA ASCEND_LAUNCH_BLOCKING
 unset PROFILING_MODE PROFILING_OPTIONS ASCEND_MOONEP_DISPATCH_ENABLE_DFX
 unset ASCEND_MOONEP_DISPATCH_ENABLE_TRACE ASCEND_MOONEP_DISPATCH_TRACE
 unset TILEXR_MINDSPEED_FINITE_CHECK
+[[ -n "${pass_TILEXR_MOONEP_DUMP_DFX_ON_ERROR}" ]] && \
+    export TILEXR_MOONEP_DUMP_DFX_ON_ERROR=${pass_TILEXR_MOONEP_DUMP_DFX_ON_ERROR}
+[[ -n "${pass_TILEXR_MOONEP_FLAG_DUMP_DIR}" ]] && \
+    export TILEXR_MOONEP_FLAG_DUMP_DIR=${pass_TILEXR_MOONEP_FLAG_DUMP_DIR}
+[[ -n "${pass_TILEXR_MOONEP_FLAG_DUMP_MODE}" ]] && \
+    export TILEXR_MOONEP_FLAG_DUMP_MODE=${pass_TILEXR_MOONEP_FLAG_DUMP_MODE}
+[[ -n "${pass_TILEXR_MOONEP_PLANNER_WAIT_ITERATIONS}" ]] && \
+    export TILEXR_MOONEP_PLANNER_WAIT_ITERATIONS=${pass_TILEXR_MOONEP_PLANNER_WAIT_ITERATIONS}
+unset TILEXR_MINDSPEED_ROUTE_CAPTURE_DIR TILEXR_MINDSPEED_ROUTE_CAPTURE_ID
+unset TILEXR_MINDSPEED_ROUTE_CAPTURE_SKIP_CALLS TILEXR_MINDSPEED_ROUTE_CAPTURE_CALLS
+if [[ -n "${route_capture_dir}" ]]; then
+    mkdir -p "${route_capture_dir}"
+    export TILEXR_MINDSPEED_ROUTE_CAPTURE_DIR=${route_capture_dir}
+    export TILEXR_MINDSPEED_ROUTE_CAPTURE_ID=${route_capture_id}
+    export TILEXR_MINDSPEED_ROUTE_CAPTURE_SKIP_CALLS=${route_capture_skip_calls}
+    export TILEXR_MINDSPEED_ROUTE_CAPTURE_CALLS=${route_capture_calls}
+fi
+unset TILEXR_MOONEP_PERF_CAPTURE_DIR TILEXR_MOONEP_PERF_CAPTURE_ID
+unset TILEXR_MOONEP_PERF_CAPTURE_SKIP_OPERATORS
+unset TILEXR_MOONEP_PERF_CAPTURE_OPERATORS
+if [[ -n "${performance_capture_dir}" ]]; then
+    mkdir -p "${performance_capture_dir}"
+    export TILEXR_MOONEP_PERF_CAPTURE_DIR=${performance_capture_dir}
+    export TILEXR_MOONEP_PERF_CAPTURE_ID=${performance_capture_id}
+    export TILEXR_MOONEP_PERF_CAPTURE_SKIP_OPERATORS=${performance_capture_skip_operators}
+    export TILEXR_MOONEP_PERF_CAPTURE_OPERATORS=${performance_capture_operators}
+fi
 
 world_size=$((node_count * devices_per_node))
 global_batch_size=${world_size}
@@ -277,11 +389,33 @@ if [[ "${backend}" == tilexr ]]; then
     export LD_LIBRARY_PATH="${install_prefix}/lib64:${shmem_backend}:${LD_LIBRARY_PATH:-}"
     export TILEXR_INSTALL_PREFIX=${install_prefix}
     export TILEXR_UDMA_QP_ROUTE_SPEC=port_count:6,port_count:2
+    export TILEXR_ENABLE_CREDIT_IPC=${TILEXR_ENABLE_CREDIT_IPC:-1}
     export TILEXR_UDMA_ATTACH_EXISTING_RA=1
-    export TILEXR_MOONEP_DISPATCH_PEER_MODE=group
-    export TILEXR_MOONEP_DISPATCH_GROUP_WIDTH=16
+    dispatch_route_count=$((sequence_length * router_topk))
+    if [[ -n "${pass_TILEXR_MOONEP_DISPATCH_PEER_MODE}" ]]; then
+        case "${pass_TILEXR_MOONEP_DISPATCH_PEER_MODE}" in
+            legacy)
+                export TILEXR_MOONEP_DISPATCH_PEER_MODE=legacy
+                unset TILEXR_MOONEP_DISPATCH_GROUP_WIDTH
+                ;;
+            group|group_credit)
+                export TILEXR_MOONEP_DISPATCH_PEER_MODE=${pass_TILEXR_MOONEP_DISPATCH_PEER_MODE}
+                export TILEXR_MOONEP_DISPATCH_GROUP_WIDTH=${pass_TILEXR_MOONEP_DISPATCH_GROUP_WIDTH:-16}
+                ;;
+            *)
+                echo "Invalid TILEXR_MOONEP_DISPATCH_PEER_MODE=${pass_TILEXR_MOONEP_DISPATCH_PEER_MODE}" >&2
+                exit 2
+                ;;
+        esac
+    elif (( dispatch_route_count <= 32768 )); then
+        export TILEXR_MOONEP_DISPATCH_PEER_MODE=group
+        export TILEXR_MOONEP_DISPATCH_GROUP_WIDTH=16
+    else
+        export TILEXR_MOONEP_DISPATCH_PEER_MODE=legacy
+        unset TILEXR_MOONEP_DISPATCH_GROUP_WIDTH
+    fi
     export TILEXR_MOONEP_COMBINE_VERSION=2
-    export TILEXR_MOONEP_UDMA_ARENA_RESERVE_BYTES=$((192 * 1024 * 1024))
+    export TILEXR_MOONEP_UDMA_ARENA_RESERVE_BYTES=${TILEXR_MOONEP_UDMA_ARENA_RESERVE_BYTES:-$((768 * 1024 * 1024))}
     unset TILEXR_MOONEP_DISPATCH_TRANSPORT
     export TILEXR_COMM_ID="${master_addr}:$((master_port + 10000))"
     backend_args+=(
@@ -327,8 +461,8 @@ fi
         "${rank_table_file:-disabled}" "${rank_table_sha256}"
     printf 'udma_rootinfo_path=%s\nudma_rootinfo_sha256=%s\n' \
         "${udma_rootinfo_path:-disabled}" "${udma_rootinfo_sha256}"
-    printf 'shape=4K/8P layers=4 hidden=7168 experts=%s token_padding=1 iterations=8\n' \
-        "${expert_count}"
+    printf 'shape=S%s/K%s/H%s layers=4 experts=%s token_padding=1 iterations=8\n' \
+        "${sequence_length}" "${router_topk}" "${hidden_size}" "${expert_count}"
     printf 'finite_check=%s flag_dump=disabled plan_dump=disabled\n' \
         "${TILEXR_MINDSPEED_FINITE_CHECK:-disabled}"
     env | grep -E '^(TILEXR_|MOONEP_|ASCEND_MOONEP_|HCCL_|GLOO_SOCKET)' | sort
@@ -360,12 +494,12 @@ python -m torch.distributed.launch \
     --context-parallel-size 1 \
     --context-parallel-algo ulysses_cp_algo \
     --num-layers 4 \
-    --hidden-size 7168 \
+    --hidden-size "${hidden_size}" \
     --ffn-hidden-size 18432 \
     --num-attention-heads 128 \
     --tokenizer-type PretrainedFromHF \
     --tokenizer-name-or-path "${tokenizer_path}" \
-    --seq-length 4096 \
+    --seq-length "${sequence_length}" \
     --max-position-embeddings 163840 \
     --micro-batch-size 1 \
     --global-batch-size "${global_batch_size}" \
@@ -393,7 +527,7 @@ python -m torch.distributed.launch \
     --moe-grouped-gemm --moe-token-dispatcher-type flex \
     --first-k-dense-replace 0 --moe-enable-moonep --moe-layer-freq 1 \
     --moe-shared-expert-intermediate-size 2048 --num-experts "${expert_count}" \
-    --moe-router-topk 8 --moe-ffn-hidden-size 2048 \
+    --moe-router-topk "${router_topk}" --moe-ffn-hidden-size 2048 \
     --moe-router-load-balancing-type seq_aux_loss \
     --moe-router-num-groups 8 --moe-router-group-topk 4 \
     --moe-router-topk-scaling-factor 2.5 --moe-aux-loss-coeff 0.0001 \

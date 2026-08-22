@@ -143,3 +143,127 @@ SSH authentication is owned by the system client. Configure a key, agent,
 terminal password prompt, or askpass outside this tool. The runner does not copy
 the repository: deploy identical code and builds to every node with Mutagen
 before starting a multi-node run.
+
+## Model input replay cache
+
+`scripts/run_moonep.sh --model-replay` captures the exact compressed TopK routes
+from a TileXR MindSpeed model iteration, caches them with their execution
+provenance, then replays the 55 MoonEP calls in model order. The controller prints
+the cached model timings and the cascade timings together. This mode is
+shape-driven; provide `S`, `K`, hidden size, expert parallel size, and rank size:
+
+```bash
+bash scripts/run_moonep.sh \
+    --mode benchmark --rank-size 8 \
+    --model-replay \
+    --s 4096 --k 8 --hidden-size 7168 --ep 8
+```
+
+When stdin is a terminal, omitted shape values are prompted. A non-interactive
+run fails before CANN or device initialization unless all five values are
+present. `--model-replay-from` selects the first allowed input source. Its
+default, `cache`, tries runtime cache, compatible checked-in meta, then one model
+capture. `meta` skips runtime cache and tries meta before model capture; `model`
+skips both persisted sources and captures new route and performance data. Use
+`--model-replay-cache-dir` to relocate the ignored runtime cache and
+`--model-runner-config` only when a specific saved `model_runner.env` must be
+used.
+
+The runner creates the per-run replay files automatically:
+
+- `model_replay_case.json` in the selected output directory;
+- `model_replay_result.env` in the selected output directory;
+- route replay and model performance cache generations under
+  `run/moonep/model_replay_cache`;
+- for single-node replay only, a temporary `generated/model_runner.env` when no
+  configured model runner env is found.
+
+After a model capture it also writes a compact source bundle under
+`tools/moonep/model_replay_meta/<case-id>/`:
+
+```text
+meta.json
+routes.u8.zst
+performance.json
+```
+
+The route blob stores globally deduplicated, range-checked uint8 expert IDs with
+standard zstd level 3 compression. `meta.json` retains every rank/call reference,
+source call, plan metadata, tensor descriptor, checksum, shape, and sanitized
+provenance. `performance.json` retains all-rank 55-stage data. Override the source
+root with `TILEXR_MOONEP_MODEL_REPLAY_META_ROOT`. Meta materialization always creates
+a validated runtime generation under `run/moonep/model_replay_cache`; the cascade
+consumer never reads checked-in files directly.
+
+When the synchronized source replica intentionally omits `.git`, set
+`TILEXR_MODEL_REPLAY_TILEXR_GIT_SHA` to the 7-64 digit hexadecimal source revision.
+The runner rejects other values so checked-in provenance cannot silently use an
+arbitrary label.
+
+For single-node replay, the script generates a per-run `model_runner.env` under
+the selected output directory unless `--model-runner-config` or
+`TILEXR_MODEL_RUNNER_CONFIG` is set explicitly. This keeps cache refreshes and
+misses tied to the current `TILEXR_INSTALL_PREFIX` instead of silently reusing a
+stale persistent model-runner config. Multi-node replay still requires an
+explicit preconfigured model runner env because node order and remote deployment
+paths cannot be inferred safely.
+
+For repeatable server-side comparison, add
+`--model-replay-stage-summary-only`. The replay still runs the cascade benchmark,
+but the terminal output is limited to the model-vs-replay stage table instead of
+the longer per-operator report. A cache hit does not launch the model again:
+
+```bash
+base=${TILEXR_HOME:-$PWD}
+install_prefix=${TILEXR_INSTALL_PREFIX:-$base/install-clean-b131}
+if [[ ! -d "${install_prefix}" ]]; then
+    install_prefix=$base/install
+fi
+out=$base/run/moonep/model-replay-$(date +%Y%m%d-%H%M%S)
+cd "$base"
+
+TILEXR_INSTALL_PREFIX=$install_prefix \
+TILEXR_MOONEP_CONDA_ENV=ai_moe_test \
+TILEXR_MOONEP_OUTPUT_DIR=$out \
+bash scripts/run_moonep.sh \
+    --mode benchmark --rank-size 8 \
+    --auto-build-install \
+    --model-replay --model-replay-stage-summary-only \
+    --s 4096 --k 8 --hidden-size 7168 --ep 8 \
+    --warmup 5 --iterations 20
+```
+
+Add `--model-replay-from model` to force recapturing and replacing the model
+route, compact meta, and runtime cache before replaying the same shape. Use
+`--model-replay-from meta` to ignore a suspect runtime cache while still avoiding
+a model run when compatible meta exists. `--auto-build-install` is optional;
+when the selected `TILEXR_INSTALL_PREFIX` already exists it is skipped, and when
+it is missing the script configures, builds, and installs the MoonEP runtime into
+that prefix before launching the benchmark. Override its build directory and
+parallelism with `TILEXR_MOONEP_BUILD_DIR` and `TILEXR_MOONEP_BUILD_JOBS`.
+
+The cache identity covers the shape, 55-call contract, source and adapter hashes,
+model stack, backend/kernel selection, CANN, driver, SoC, topology, and device
+mapping. Each capture is published as an immutable generation only after every
+rank record and checksum validates. Interrupted, partial, stale, or mismatched
+generations are not consumed. Full hidden and weight tensors are intentionally
+regenerated from cached deterministic descriptors and seeds instead of being
+stored as multi-gigabyte artifacts.
+
+Route and performance sampling share one model launch. Route capture skips 60
+forward calls, which selects the ten forward calls in profiler step 6.
+Profiler-off performance capture skips 330 operators, or six complete 55-operator
+iterations, before timing the next complete iteration with NPU Events. Framework
+profiling is the default comparison source; pass `--no-model-replay-profile` for
+the lightweight NPU Event path. Keep profiler-on and profiler-off results labeled
+separately.
+Model replay also enables the Dispatch/Combine stage barrier by default. Project
+validation and performance comparisons keep both the framework profiler and
+stage barrier enabled on the model and replay sides; explicit off modes are
+diagnostic A/Bs, not the performance baseline.
+
+For multi-node runs, node 0 is the cache publisher and distributes the completed
+generation with `rsync -a --protect-args`. Followers wait for that validated
+generation. Replay rank artifacts are collected back to node 0 with the same
+non-destructive rsync options before aggregation; no synchronization path uses
+delete semantics.

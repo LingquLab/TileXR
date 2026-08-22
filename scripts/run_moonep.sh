@@ -17,6 +17,26 @@ Options:
                          Comma-separated physical NPU IDs (default: start at 0)
       --warmup COUNT     Untimed warmup iterations (default for benchmark: 5)
       --iterations COUNT Measured iterations (default for benchmark: 20)
+      --auto-build-install
+                         Build and install TileXR when TILEXR_INSTALL_PREFIX is missing
+      --model-replay     Capture/cache real model inputs and replay model-order stages
+      --model-replay-from SOURCE
+                          Start with cache, meta, or model (default: cache); fall through in that order
+      --model-replay-cache-dir PATH
+                         Runtime cache root (default: run/moonep/model_replay_cache)
+      --model-runner-config PATH
+                         MindSpeed model runner configuration override
+      --model-replay-profile
+                         Enable framework profiling for the model comparison (default)
+      --no-model-replay-profile
+                         Capture/replay without framework profiling
+      --model-replay-stage-summary-only
+                         Print only the aggregated model-vs-replay stage comparison
+      --s COUNT          Model tokens per rank; required by --model-replay
+      --k COUNT          Model router TopK; required by --model-replay
+      --hidden-size COUNT
+                         Model hidden size; required by --model-replay
+      --ep COUNT         Model expert parallel size; required by --model-replay
       --node-count COUNT Number of servers participating in a multi-node launch (default: 1)
       --node-rank RANK   Zero-based server rank (default: 0)
       --aggregate-only   Aggregate already merged multi-node rank artifacts; do not launch workers
@@ -51,15 +71,25 @@ Available case IDs:
   14 planning-16rank-16card-single-route 16-rank, 2 nodes x 8 NPUs single route (rank_size=16, rank_per_dev=1, S=8, K=1, E=16, H=8, Hf=4, B=1, P=1)
   15 dispatch-8rank-4k-ep8-grouped-urma 8-rank Dispatch-only grouped-URMA repro (rank_size=8, rank_per_dev=1, S=4096, K=8, E=32, H=7168, Hf=2048, B=4, P=1)
   16 flow-8rank-4k-ep8-grouped-urma-plan-reuse 8-rank full flow with Combine V2 then saved-plan backward Dispatch (rank_size=8, rank_per_dev=1, S=4096, K=8, E=32, H=7168, Hf=2048, B=4, P=1)
+  17 model-flow-8rank-4k-ep8-mindspeed 8-rank MindSpeed model-iteration replay (10 forward, 5 backward; rank_size=8, rank_per_dev=1, S=4096, K=8, E=32, H=7168, Hf=2048, B=4, P=1)
+  18 model-flow-16rank-4k-ep16-mindspeed 16-rank, 2-node MindSpeed model-iteration replay (10 forward, 5 backward; rank_size=16, rank_per_dev=1, S=4096, K=8, E=32, H=7168, Hf=2048, B=2, P=1)
+  19 model-flow-8rank-8k-k16-ep8-mindspeed 8-rank scaled MindSpeed model-iteration replay (10 forward, 5 backward; rank_size=8, rank_per_dev=1, S=8192, K=16, E=32, H=3584, Hf=2048, B=4, P=1)
+  20 model-flow-16rank-8k-k16-ep16-mindspeed 16-rank, 2-node scaled MindSpeed model-iteration replay (10 forward, 5 backward; rank_size=16, rank_per_dev=1, S=8192, K=16, E=32, H=3584, Hf=2048, B=2, P=1)
 
 Environment:
   ASCEND_RT_VISIBLE_DEVICES    Legacy fallback when --visible-devices is omitted
   HCCL_NPU_SOCKET_PORT_RANGE   Legacy fallback when the port option is omitted
   TILEXR_INSTALL_PREFIX        TileXR installation prefix
+  TILEXR_MOONEP_AUTO_BUILD_INSTALL
+                               Set to 1/true/yes/on to enable --auto-build-install
+  TILEXR_MOONEP_BUILD_DIR      CMake build directory used by --auto-build-install
+  TILEXR_MOONEP_BUILD_JOBS     CMake build parallelism (default: nproc)
   TILEXR_MOONEP_CONDA_ENV      Conda environment (default: ai_moe_test)
   TILEXR_MOONEP_OUTPUT_DIR     Result directory (default: timestamped run/moonep directory)
   TILEXR_MOONEP_TIMEOUT_SEC    Launcher timeout in seconds (default: 600)
   TILEXR_MOONEP_LAUNCH_ID      Shared non-secret launch ID (required for multi-node)
+  TILEXR_MOONEP_MODEL_REPLAY_META_ROOT
+                               Checked-in replay meta root (default: tools/moonep/model_replay_meta)
   TILEXR_MOONEP_TENSOR_PREVIEW_ELEMENTS
                                Default number of values printed per tensor
 EOF
@@ -70,20 +100,36 @@ if [[ $# -eq 0 ]]; then
     exit 0
 fi
 
+original_args=("$@")
+
 mode=""
 rank_size=""
 case_id="planning-no-dedup"
+case_id_explicit="false"
 dump_stage_tensors=""
 generate_flowcharts="false"
 tensor_preview_elements="${TILEXR_MOONEP_TENSOR_PREVIEW_ELEMENTS:-8}"
 visible_device_spec=""
 warmup=""
 iterations=""
+auto_build_install="${TILEXR_MOONEP_AUTO_BUILD_INSTALL:-false}"
 node_count=1
 node_rank=0
 aggregate_only="false"
 master_addr=""
 master_port=""
+model_replay="false"
+model_replay_from="cache"
+model_replay_from_explicit="false"
+model_replay_cache_dir=""
+model_runner_config=""
+model_runner_config_explicit="false"
+model_replay_profile="true"
+model_replay_stage_summary_only="false"
+model_s=""
+model_k=""
+model_h=""
+model_ep=""
 hccl_npu_socket_port_range="47000-47100"
 if [[ -n "${HCCL_NPU_SOCKET_PORT_RANGE:-}" ]]; then
     hccl_npu_socket_port_range="${HCCL_NPU_SOCKET_PORT_RANGE}"
@@ -115,6 +161,7 @@ while [[ $# -gt 0 ]]; do
                 exit 2
             fi
             case_id="$2"
+            case_id_explicit="true"
             shift 2
             ;;
         -v|--visible-devices)
@@ -142,6 +189,84 @@ while [[ $# -gt 0 ]]; do
                 exit 2
             fi
             iterations="$2"
+            shift 2
+            ;;
+        --auto-build-install)
+            auto_build_install="true"
+            shift
+            ;;
+        --model-replay)
+            model_replay="true"
+            shift
+            ;;
+        --model-replay-from)
+            if [[ $# -lt 2 ]]; then
+                echo "Missing value for --model-replay-from" >&2
+                exit 2
+            fi
+            model_replay_from="$2"
+            model_replay_from_explicit="true"
+            shift 2
+            ;;
+        --model-replay-cache-dir)
+            if [[ $# -lt 2 ]]; then
+                echo "Missing value for --model-replay-cache-dir" >&2
+                exit 2
+            fi
+            model_replay_cache_dir="$2"
+            shift 2
+            ;;
+        --model-runner-config)
+            if [[ $# -lt 2 ]]; then
+                echo "Missing value for --model-runner-config" >&2
+                exit 2
+            fi
+            model_runner_config="$2"
+            model_runner_config_explicit="true"
+            shift 2
+            ;;
+        --model-replay-profile)
+            model_replay_profile="true"
+            shift
+            ;;
+        --no-model-replay-profile)
+            model_replay_profile="false"
+            shift
+            ;;
+        --model-replay-stage-summary-only)
+            model_replay_stage_summary_only="true"
+            shift
+            ;;
+        --s)
+            if [[ $# -lt 2 ]]; then
+                echo "Missing value for --s" >&2
+                exit 2
+            fi
+            model_s="$2"
+            shift 2
+            ;;
+        --k)
+            if [[ $# -lt 2 ]]; then
+                echo "Missing value for --k" >&2
+                exit 2
+            fi
+            model_k="$2"
+            shift 2
+            ;;
+        --hidden-size)
+            if [[ $# -lt 2 ]]; then
+                echo "Missing value for --hidden-size" >&2
+                exit 2
+            fi
+            model_h="$2"
+            shift 2
+            ;;
+        --ep)
+            if [[ $# -lt 2 ]]; then
+                echo "Missing value for --ep" >&2
+                exit 2
+            fi
+            model_ep="$2"
             shift 2
             ;;
         --node-count)
@@ -222,9 +347,85 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-if [[ -z "${mode}" || -z "${rank_size}" ]]; then
+case "${model_replay_from}" in
+    cache|meta|model) ;;
+    *)
+        echo "--model-replay-from must be cache, meta, or model: ${model_replay_from}" >&2
+        exit 2
+        ;;
+esac
+
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+tilexr_source_root="$(cd -- "${script_dir}/.." && pwd)"
+
+if [[ "${model_replay}" == "true" ]]; then
+    model_replay_required_sources=(
+        tools/moonep/model_replay_cli.py
+        tools/moonep/model_replay_orchestrator.py
+        tools/moonep/model_replay_cache.py
+        tools/moonep/model_replay_meta.py
+        tools/moonep/model_replay_compare.py
+        tools/moonep/model_flow.py
+        tools/moonep/mindspeed/build_route_replay.py
+        tools/moonep/mindspeed/collect_model_performance.py
+        tools/moonep/mindspeed/run_model.sh
+        tools/moonep/mindspeed/run_model_node.sh
+        tools/moonep/mindspeed/tilexr_mindspeed_adapter.py
+        integrations/moonep_torch/tilexr_moonep/torch_api.py
+    )
+    missing_model_replay_sources=()
+    for relative_path in "${model_replay_required_sources[@]}"; do
+        if [[ ! -f "${tilexr_source_root}/${relative_path}" ]]; then
+            missing_model_replay_sources+=("${relative_path}")
+        fi
+    done
+    if (( ${#missing_model_replay_sources[@]} > 0 )); then
+        echo "TileXR model replay sources are incomplete in ${tilexr_source_root}:" >&2
+        printf '  missing %s\n' "${missing_model_replay_sources[@]}" >&2
+        echo "Sync the full model-replay-cache worktree to this deployment before running --model-replay." >&2
+        exit 1
+    fi
+fi
+
+if [[ -z "${mode}" || ( -z "${rank_size}" && "${model_replay}" != "true" ) ]]; then
     echo "Both --mode and --rank-size are required" >&2
     usage >&2
+    exit 2
+fi
+
+if [[ "${model_replay}" == "true" ]]; then
+    if [[ "${mode}" != "benchmark" ]]; then
+        echo "--model-replay requires --mode benchmark" >&2
+        exit 2
+    fi
+    if [[ "${case_id_explicit}" == "true" ]]; then
+        echo "--model-replay is shape-driven and cannot be combined with --case-id" >&2
+        exit 2
+    fi
+    interactive_args=()
+    if [[ -t 0 ]]; then
+        interactive_args+=(--interactive)
+    fi
+    if ! shape_values="$(
+        PYTHONPATH="${tilexr_source_root}${PYTHONPATH:+:${PYTHONPATH}}" \
+            python -m tools.moonep.model_replay_cli \
+                --s "${model_s}" \
+                --k "${model_k}" \
+                --hidden-size "${model_h}" \
+                --ep "${model_ep}" \
+                --rank-size "${rank_size}" \
+                "${interactive_args[@]}"
+    )"; then
+        exit 2
+    fi
+    read -r model_s model_k model_h model_ep rank_size \
+        model_e model_hf model_b model_p model_forward_calls <<<"${shape_values}"
+    case_id="model-replay-s${model_s}-k${model_k}-h${model_h}-ep${model_ep}-r${rank_size}"
+elif [[ "${model_replay_from_explicit}" == "true" ||
+        -n "${model_replay_cache_dir}" ||
+        -n "${model_s}${model_k}${model_h}${model_ep}" ||
+        "${model_replay_stage_summary_only}" == "true" ]]; then
+    echo "model replay shape/cache options require --model-replay" >&2
     exit 2
 fi
 
@@ -284,7 +485,9 @@ if (( node_count > 1 )); then
         echo "multi-node runs require --master-addr and a valid --master-port" >&2
         exit 2
     fi
-    if [[ "${aggregate_only}" != "true" && -z "${TILEXR_MOONEP_LAUNCH_ID:-}" ]]; then
+    if [[ "${aggregate_only}" != "true" &&
+          "${model_replay}" != "true" &&
+          -z "${TILEXR_MOONEP_LAUNCH_ID:-}" ]]; then
         echo "multi-node runs require TILEXR_MOONEP_LAUNCH_ID" >&2
         exit 2
     fi
@@ -335,14 +538,26 @@ if (( 10#${hccl_port_start} < 1024 || 10#${hccl_port_end} > 65535 || 10#${hccl_p
     echo "HCCL NPU socket ports must satisfy 1024 <= START <= END <= 65535: ${hccl_npu_socket_port_range}" >&2
     exit 2
 fi
+case "${auto_build_install}" in
+    1|true|TRUE|yes|YES|on|ON)
+        auto_build_install="true"
+        ;;
+    0|false|FALSE|no|NO|off|OFF)
+        auto_build_install="false"
+        ;;
+    *)
+        echo "TILEXR_MOONEP_AUTO_BUILD_INSTALL must be boolean-like: ${auto_build_install}" >&2
+        exit 2
+        ;;
+esac
 
-script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
 source "${script_dir}/common_env.sh"
 
 if [[ "${rank_size}" == "1" ]]; then
     export TILEXR_ENABLE_UDMA=0
 fi
+export TILEXR_ENABLE_CREDIT_IPC="${TILEXR_ENABLE_CREDIT_IPC:-1}"
 
 for conda_setup in \
     /home/miniconda3/etc/profile.d/conda.sh \
@@ -362,8 +577,107 @@ fi
 conda activate "${TILEXR_MOONEP_CONDA_ENV:-ai_moe_test}"
 set -u
 
+install_prefix="${TILEXR_INSTALL_PREFIX:-${TILEXR_HOME}/install-moonep-b131-20260805}"
+timeout_sec="${TILEXR_MOONEP_TIMEOUT_SEC:-600}"
+if [[ ! "${timeout_sec}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "TILEXR_MOONEP_TIMEOUT_SEC must be a positive integer: ${timeout_sec}" >&2
+    exit 2
+fi
+
+auto_build_tilexr_install() {
+    local build_dir build_jobs
+    build_dir="${TILEXR_MOONEP_BUILD_DIR:-${TILEXR_HOME}/build-moonep-auto}"
+    build_jobs="${TILEXR_MOONEP_BUILD_JOBS:-$(nproc)}"
+    if [[ ! "${build_jobs}" =~ ^[1-9][0-9]*$ ]]; then
+        echo "TILEXR_MOONEP_BUILD_JOBS must be a positive integer: ${build_jobs}" >&2
+        exit 2
+    fi
+    if ! command -v cmake >/dev/null 2>&1; then
+        echo "cmake was not found; cannot auto build/install TileXR" >&2
+        exit 1
+    fi
+    if [[ "$(realpath -m "${build_dir}")" == "$(realpath -m "${TILEXR_HOME}")" ]]; then
+        echo "TILEXR_MOONEP_BUILD_DIR must not be the source root: ${build_dir}" >&2
+        exit 2
+    fi
+    echo "TileXR installation prefix not found: ${install_prefix}"
+    echo "Auto build/install enabled. Build dir: ${build_dir}"
+    cmake -S "${TILEXR_HOME}" -B "${build_dir}" \
+        -DCMAKE_INSTALL_PREFIX="${install_prefix}" \
+        -DTILEXR_BUILD_MOONEP=ON \
+        -DTILEXR_BUILD_TESTS=OFF \
+        -DBUILD_TESTING=OFF
+    cmake --build "${build_dir}" -j"${build_jobs}"
+    cmake --install "${build_dir}"
+}
+if [[ ! -d "${install_prefix}" ]]; then
+    if [[ "${auto_build_install}" == "true" ]]; then
+        auto_build_tilexr_install
+    else
+        echo "TileXR installation prefix not found: ${install_prefix}" >&2
+        echo "Use --auto-build-install to build and install it automatically." >&2
+        exit 1
+    fi
+fi
+
 output_dir="${TILEXR_MOONEP_OUTPUT_DIR:-${TILEXR_HOME}/run/moonep/tilexr-moonep-${mode}-${rank_size}r-$(date +%Y%m%d-%H%M%S)-$$}"
 case_file="${TILEXR_HOME}/tools/moonep/cases/correctness.json"
+if [[ "${model_replay}" == "true" ]]; then
+    if (( node_count > 1 )); then
+        export TILEXR_MOONEP_DISPATCH_PEER_MODE="${TILEXR_MOONEP_DISPATCH_PEER_MODE:-legacy}"
+        export TILEXR_MOONEP_PLANNER_WAIT_ITERATIONS="${TILEXR_MOONEP_PLANNER_WAIT_ITERATIONS:-100000000}"
+    fi
+    model_replay_cache_dir="${model_replay_cache_dir:-${TILEXR_HOME}/run/moonep/model_replay_cache}"
+    model_replay_result_env="${output_dir}/model_replay_result.env"
+    model_replay_case_file="${output_dir}/model_replay_case.json"
+    if [[ "${model_runner_config_explicit}" != "true" ]]; then
+        if [[ -n "${TILEXR_MODEL_RUNNER_CONFIG:-}" ]]; then
+            model_runner_config="${TILEXR_MODEL_RUNNER_CONFIG}"
+        else
+            model_runner_config="${output_dir}/generated/model_runner.env"
+        fi
+    fi
+    model_replay_args=(
+        --source-root "${TILEXR_HOME}"
+        --cache-root "${model_replay_cache_dir}"
+        --case-file "${model_replay_case_file}"
+        --result-env-file "${model_replay_result_env}"
+        --s "${model_s}"
+        --k "${model_k}"
+        --hidden-size "${model_h}"
+        --ep "${model_ep}"
+        --rank-size "${rank_size}"
+        --node-count "${node_count}"
+        --node-rank "${node_rank}"
+        --warmup "${effective_warmup}"
+        --iterations "${effective_iterations}"
+    )
+    model_replay_args+=(--model-runner-config "${model_runner_config}")
+    model_replay_args+=(--model-replay-from "${model_replay_from}")
+    if [[ "${model_replay_profile}" == "true" ]]; then
+        model_replay_args+=(--profile)
+    else
+        model_replay_args+=(--no-profile)
+    fi
+    if [[ -n "${TILEXR_MOONEP_MODEL_REPLAY_GENERATION:-}" ]]; then
+        model_replay_args+=(
+            --cache-generation "${TILEXR_MOONEP_MODEL_REPLAY_GENERATION}"
+        )
+    fi
+    python -m tools.moonep.model_replay_orchestrator "${model_replay_args[@]}"
+    if [[ ! -f "${model_replay_result_env}" ]]; then
+        echo "Model replay result environment not found: ${model_replay_result_env}" >&2
+        exit 1
+    fi
+    # shellcheck disable=SC1090
+    source "${model_replay_result_env}"
+    export TILEXR_MOONEP_MODEL_REPLAY_GENERATION="${MODEL_REPLAY_CACHE_GENERATION}"
+    case_file="${MODEL_REPLAY_CASE_FILE}"
+    case_id="${MODEL_REPLAY_CASE_ID}"
+    export TILEXR_MOONEP_MODEL_ROUTE_REPLAY="${MODEL_REPLAY_ROUTE_REPLAY}"
+    export TILEXR_MOONEP_MODEL_PERFORMANCE="${MODEL_REPLAY_MODEL_PERFORMANCE}"
+    echo "Model replay cache: ${MODEL_REPLAY_CACHE_STATUS} (${MODEL_REPLAY_CACHE_KEY})"
+fi
 if [[ ! -f "${case_file}" ]]; then
     echo "Required file not found: ${case_file}" >&2
     exit 1
@@ -393,19 +707,79 @@ benchmark_kind="flow"
 dispatch_modes=()
 dispatch_repro_case_id="dispatch-8rank-4k-ep8-grouped-urma"
 plan_reuse_repro_case_id="flow-8rank-4k-ep8-grouped-urma-plan-reuse"
+model_flow_case_id="model-flow-8rank-4k-ep8-mindspeed"
+model_flow_16rank_case_id="model-flow-16rank-4k-ep16-mindspeed"
+model_flow_scaled_8rank_case_id="model-flow-8rank-8k-k16-ep8-mindspeed"
+model_flow_scaled_16rank_case_id="model-flow-16rank-8k-k16-ep16-mindspeed"
+is_model_flow="false"
+case "${case_id}" in
+    "${model_flow_case_id}"|"${model_flow_16rank_case_id}"|\
+    "${model_flow_scaled_8rank_case_id}"|"${model_flow_scaled_16rank_case_id}")
+        is_model_flow="true"
+        ;;
+esac
+if [[ "${model_replay}" == "true" ]]; then
+    is_model_flow="true"
+fi
 if [[ "${case_id}" == "${dispatch_repro_case_id}" ||
-      "${case_id}" == "${plan_reuse_repro_case_id}" ]]; then
+      "${case_id}" == "${plan_reuse_repro_case_id}" ||
+      "${is_model_flow}" == "true" ]]; then
     if [[ "${mode}" != "benchmark" ]]; then
         echo "${case_id} requires --mode benchmark" >&2
         exit 2
     fi
-    if [[ "${rank_size}" != "8" || "${node_count}" != "1" ]]; then
-        echo "${case_id} requires --rank-size 8 on one node" >&2
+    if [[ "${case_id}" == "${dispatch_repro_case_id}" ||
+          "${case_id}" == "${plan_reuse_repro_case_id}" ]]; then
+        if [[ "${rank_size}" != "8" || "${node_count}" != "1" ]]; then
+            echo "${case_id} requires --rank-size 8 on one node" >&2
+            exit 2
+        fi
+    elif [[ "${case_id}" == "${model_flow_case_id}" ||
+            "${case_id}" == "${model_flow_scaled_8rank_case_id}" ]]; then
+        if [[ "${rank_size}" != "8" || "${node_count}" != "1" ]]; then
+            echo "${case_id} requires --rank-size 8 on one node" >&2
+            exit 2
+        fi
+    elif [[ "${model_replay}" == "true" ]]; then
+        :
+    elif [[ "${rank_size}" != "16" || "${node_count}" != "2" ]]; then
+        echo "${case_id} requires --rank-size 16 on two nodes" >&2
         exit 2
     fi
+    requested_dispatch_peer_mode="${TILEXR_MOONEP_DISPATCH_PEER_MODE:-}"
+    requested_dispatch_group_width="${TILEXR_MOONEP_DISPATCH_GROUP_WIDTH:-}"
     unset TILEXR_MOONEP_DISPATCH_TRANSPORT
-    export TILEXR_MOONEP_DISPATCH_PEER_MODE="group"
-    export TILEXR_MOONEP_DISPATCH_GROUP_WIDTH="16"
+    if [[ -n "${requested_dispatch_peer_mode}" ]]; then
+        case "${requested_dispatch_peer_mode}" in
+            legacy)
+                export TILEXR_MOONEP_DISPATCH_PEER_MODE="legacy"
+                unset TILEXR_MOONEP_DISPATCH_GROUP_WIDTH
+                ;;
+            group|group_credit)
+                export TILEXR_MOONEP_DISPATCH_PEER_MODE="${requested_dispatch_peer_mode}"
+                export TILEXR_MOONEP_DISPATCH_GROUP_WIDTH="${requested_dispatch_group_width:-16}"
+                ;;
+            *)
+                echo "Invalid TILEXR_MOONEP_DISPATCH_PEER_MODE=${requested_dispatch_peer_mode}" >&2
+                exit 2
+                ;;
+        esac
+    elif [[ "${model_replay}" == "true" ]] &&
+         { (( node_count > 1 )) || (( model_s * model_k > 32768 )); }; then
+        export TILEXR_MOONEP_DISPATCH_PEER_MODE="legacy"
+        unset TILEXR_MOONEP_DISPATCH_GROUP_WIDTH
+    else
+        case "${case_id}" in
+            "${model_flow_scaled_8rank_case_id}"|"${model_flow_scaled_16rank_case_id}")
+                export TILEXR_MOONEP_DISPATCH_PEER_MODE="legacy"
+                unset TILEXR_MOONEP_DISPATCH_GROUP_WIDTH
+                ;;
+            *)
+                export TILEXR_MOONEP_DISPATCH_PEER_MODE="group"
+                export TILEXR_MOONEP_DISPATCH_GROUP_WIDTH="16"
+                ;;
+        esac
+    fi
 fi
 if [[ "${case_id}" == "${dispatch_repro_case_id}" ]]; then
     benchmark_kind="dispatch_hot_loop"
@@ -413,6 +787,13 @@ if [[ "${case_id}" == "${dispatch_repro_case_id}" ]]; then
 elif [[ "${case_id}" == "${plan_reuse_repro_case_id}" ]]; then
     warmup="${warmup:-0}"
     iterations="${iterations:-8}"
+elif [[ "${is_model_flow}" == "true" ]]; then
+    benchmark_kind="model_flow"
+    export TILEXR_MOONEP_UDMA_ARENA_RESERVE_BYTES="${TILEXR_MOONEP_UDMA_ARENA_RESERVE_BYTES:-$((768 * 1024 * 1024))}"
+fi
+if [[ "${TILEXR_MOONEP_DIAGNOSTIC_FLOW:-0}" == "1" &&
+      "${is_model_flow}" == "true" ]]; then
+    benchmark_kind="flow"
 fi
 summary_file="${output_dir}/${case_id}/summary.json"
 
@@ -517,18 +898,6 @@ else
     exit 2
 fi
 
-install_prefix="${TILEXR_INSTALL_PREFIX:-${TILEXR_HOME}/install-moonep-b131-20260805}"
-timeout_sec="${TILEXR_MOONEP_TIMEOUT_SEC:-600}"
-
-if [[ ! "${timeout_sec}" =~ ^[1-9][0-9]*$ ]]; then
-    echo "TILEXR_MOONEP_TIMEOUT_SEC must be a positive integer: ${timeout_sec}" >&2
-    exit 2
-fi
-if [[ ! -d "${install_prefix}" ]]; then
-    echo "TileXR installation prefix not found: ${install_prefix}" >&2
-    exit 1
-fi
-
 export TILEXR_INSTALL_PREFIX="${install_prefix}"
 export LD_LIBRARY_PATH="${install_prefix}/lib64:${install_prefix}/lib:${LD_LIBRARY_PATH:-}"
 if [[ "${mode}" != "benchmark" ]]; then
@@ -557,15 +926,219 @@ if [[ "${dump_stage_tensors}" == "true" ]]; then
 fi
 echo "Flowcharts: ${generate_flowcharts}"
 
+model_replay_collect_multinode() {
+    local node_spec index target marker deadline rsync_ssh
+    local nodes=()
+    local ssh_options=(
+        -o ConnectTimeout=15
+        -o ServerAliveInterval=30
+        -o ServerAliveCountMax=3
+    )
+    # shellcheck disable=SC1090
+    source "${model_runner_config}"
+    node_spec=${MODEL_RUNNER_NODES//,/ }
+    read -r -a nodes <<<"${node_spec}"
+    if (( ${#nodes[@]} < node_count )); then
+        echo "Model runner config does not contain ${node_count} nodes" >&2
+        return 1
+    fi
+    rsync_ssh="ssh ${ssh_options[*]}"
+    deadline=$((SECONDS + timeout_sec))
+    for ((index = 1; index < node_count; index++)); do
+        target=${MODEL_RUNNER_SSH_USER:-root}@${nodes[${index}]}
+        marker=${output_dir}/node_${index}_complete.json
+        while ! ssh "${ssh_options[@]}" "${target}" \
+            "test -f $(printf '%q' "${marker}")"; do
+            if (( SECONDS >= deadline )); then
+                echo "Timed out waiting for ${target}:${marker}" >&2
+                return 1
+            fi
+            sleep 2
+        done
+        rsync -a --protect-args -e "${rsync_ssh}" \
+            "${target}:${output_dir}/${case_id}/" \
+            "${output_dir}/${case_id}/"
+        rsync -a --protect-args -e "${rsync_ssh}" \
+            "${target}:${marker}" "${output_dir}/"
+    done
+    python -m tools.moonep.report \
+        --aggregate-output-dir "${output_dir}" \
+        --case-id "${case_id}" \
+        --node-count "${node_count}" \
+        --world-size "${rank_size}" \
+        --mode "${mode}"
+}
+
+quote_command() {
+    local quoted=()
+    local value
+    for value in "$@"; do
+        printf -v value '%q' "${value}"
+        quoted+=("${value}")
+    done
+    local IFS=' '
+    printf '%s' "${quoted[*]}"
+}
+
+model_replay_follower_pids=()
+model_replay_follower_logs=()
+
+model_replay_prepare_shared_environment() {
+    local comm_port
+    if [[ -z "${master_addr}" || ! "${master_port}" =~ ^[1-9][0-9]*$ ]] ||
+       (( master_port > 65535 )); then
+        echo "managed multi-node model replay requires --master-addr and a valid --master-port" >&2
+        return 2
+    fi
+    if [[ -z "${TILEXR_COMM_ID:-}" ]]; then
+        comm_port=$((master_port + 10000))
+        if (( comm_port > 65422 )); then
+            comm_port=$((master_port - 10000))
+        fi
+        if (( comm_port < 1024 )); then
+            echo "cannot derive a valid TileXR communicator port from --master-port ${master_port}" >&2
+            return 2
+        fi
+        export TILEXR_COMM_ID="${master_addr}:${comm_port}"
+    fi
+    if [[ -z "${TILEXR_MOONEP_BARRIER_ADDR:-}" ]]; then
+        TILEXR_MOONEP_BARRIER_ADDR="$(
+            python - "${TILEXR_COMM_ID}" <<'PY'
+import sys
+
+from tools.moonep.rendezvous import offset_host_port
+
+print(offset_host_port(sys.argv[1]))
+PY
+        )"
+        export TILEXR_MOONEP_BARRIER_ADDR
+    fi
+    export TILEXR_MOONEP_LAUNCH_ID="${TILEXR_MOONEP_LAUNCH_ID:-model-replay-$(date +%Y%m%d-%H%M%S)-$$}"
+    if [[ -z "${TILEXR_MOONEP_LAUNCH_SECRET:-}" ]]; then
+        TILEXR_MOONEP_LAUNCH_SECRET="$(python - <<'PY'
+import secrets
+
+print(secrets.token_hex(32))
+PY
+        )"
+        export TILEXR_MOONEP_LAUNCH_SECRET
+    fi
+}
+
+model_replay_launch_followers() {
+    local index log_path name node_spec remote_command remote_script target
+    local nodes=()
+    local remote_env=()
+    local remote_env_names=(
+        ASCEND_RT_VISIBLE_DEVICES
+        HCCL_NPU_SOCKET_PORT_RANGE
+        TILEXR_CANN_HOME
+        TILEXR_COMM_ID
+        TILEXR_ENABLE_CREDIT_IPC
+        TILEXR_INSTALL_PREFIX
+        TILEXR_LOG_LEVEL
+        TILEXR_MODEL_RUNNER_CONFIG
+        TILEXR_MOONEP_AUTO_BUILD_INSTALL
+        TILEXR_MOONEP_BARRIER_ADDR
+        TILEXR_MOONEP_CONDA_ENV
+        TILEXR_MOONEP_DISPATCH_GROUP_WIDTH
+        TILEXR_MOONEP_DISPATCH_PEER_MODE
+        TILEXR_MOONEP_DUMP_DFX_ON_ERROR
+        TILEXR_MOONEP_FLAG_DUMP_DIR
+        TILEXR_MOONEP_FLAG_DUMP_MODE
+        TILEXR_MOONEP_LAUNCH_ID
+        TILEXR_MOONEP_LAUNCH_SECRET
+        TILEXR_MOONEP_MODEL_REPLAY_GENERATION
+        TILEXR_MOONEP_MODEL_REPLAY_META_ROOT
+        TILEXR_MOONEP_OUTPUT_DIR
+        TILEXR_MOONEP_PLANNER_WAIT_ITERATIONS
+        TILEXR_MOONEP_TIMEOUT_SEC
+        TILEXR_MOONEP_UDMA_ARENA_RESERVE_BYTES
+        TILEXR_MINDSPEED_PREWARM_FRAMEWORK_OPS
+        TILEXR_UDMA_ATTACH_EXISTING_RA
+        TILEXR_UDMA_QP_ROUTE_SPEC
+    )
+    local ssh_options=(
+        -o ConnectTimeout=15
+        -o ServerAliveInterval=30
+        -o ServerAliveCountMax=3
+    )
+    # shellcheck disable=SC1090
+    source "${model_runner_config}"
+    node_spec=${MODEL_RUNNER_NODES//,/ }
+    read -r -a nodes <<<"${node_spec}"
+    if (( ${#nodes[@]} < node_count )); then
+        echo "Model runner config does not contain ${node_count} nodes" >&2
+        return 1
+    fi
+    remote_script="${MODEL_RUNNER_TILEXR_HOME}/scripts/run_moonep.sh"
+    for name in "${remote_env_names[@]}"; do
+        if [[ -n "${!name:-}" ]]; then
+            remote_env+=("${name}=${!name}")
+        fi
+    done
+    remote_env+=(
+        "TILEXR_INSTALL_PREFIX=${install_prefix}"
+        "TILEXR_MODEL_RUNNER_CONFIG=${model_runner_config}"
+        "TILEXR_MOONEP_MODEL_REPLAY_MANAGED_MULTINODE=0"
+        "TILEXR_MOONEP_OUTPUT_DIR=${output_dir}"
+        "TILEXR_MOONEP_TIMEOUT_SEC=${timeout_sec}"
+    )
+    mkdir -p "${output_dir}/controller"
+    for ((index = 1; index < node_count; index++)); do
+        target=${MODEL_RUNNER_SSH_USER:-root}@${nodes[${index}]}
+        remote_command="$(quote_command env -C "${MODEL_RUNNER_TILEXR_HOME}" \
+            "${remote_env[@]}" bash "${remote_script}" \
+            "${original_args[@]}" --node-rank "${index}")"
+        log_path="${output_dir}/controller/follower_${index}.log"
+        model_replay_follower_logs+=("${log_path}")
+        ssh "${ssh_options[@]}" "${target}" "${remote_command}" \
+            >"${log_path}" 2>&1 &
+        model_replay_follower_pids+=("$!")
+    done
+}
+
+model_replay_stop_followers() {
+    local pid
+    for pid in "${model_replay_follower_pids[@]}"; do
+        if kill -0 "${pid}" 2>/dev/null; then
+            kill -TERM "${pid}" 2>/dev/null || true
+        fi
+    done
+    for pid in "${model_replay_follower_pids[@]}"; do
+        wait "${pid}" 2>/dev/null || true
+    done
+}
+
+model_replay_wait_followers() {
+    local failed=0 index status
+    for index in "${!model_replay_follower_pids[@]}"; do
+        status=0
+        wait "${model_replay_follower_pids[${index}]}" || status=$?
+        if [[ "${status}" -ne 0 ]]; then
+            echo "Model replay follower failed with exit ${status}:" \
+                "${model_replay_follower_logs[${index}]}" >&2
+            failed=1
+        fi
+    done
+    return "${failed}"
+}
+
 cd "${TILEXR_HOME}"
 if (( node_count > 1 )); then
+    managed_model_replay="${TILEXR_MOONEP_MODEL_REPLAY_MANAGED_MULTINODE:-1}"
+    if [[ "${model_replay}" == "true" && "${node_rank}" -eq 0 &&
+          "${managed_model_replay}" != "0" ]]; then
+        model_replay_prepare_shared_environment
+        model_replay_launch_followers
+    fi
     if [[ "${mode}" != "benchmark" ]]; then
         export MASTER_ADDR="${master_addr}"
         export MASTER_PORT="${master_port}"
     fi
     distributed_args=(
         --mode "${mode}"
-        --benchmark-kind flow
+        --benchmark-kind "${benchmark_kind}"
         --cases "${case_file}"
         --case-ids "${case_id}"
         --node-count "${node_count}"
@@ -586,37 +1159,54 @@ if (( node_count > 1 )); then
     if [[ -n "${iterations}" ]]; then
         distributed_args+=("--iterations" "${iterations}")
     fi
-    python -m tools.moonep.distributed_node "${distributed_args[@]}"
+    distributed_status=0
+    python -m tools.moonep.distributed_node "${distributed_args[@]}" || distributed_status=$?
+    if [[ "${distributed_status}" -ne 0 ]]; then
+        model_replay_stop_followers
+        exit "${distributed_status}"
+    fi
     echo "Node ${node_rank} result: ${output_dir}/node_${node_rank}_complete.json"
-    exit 0
+    if [[ "${model_replay}" != "true" ]]; then
+        exit 0
+    fi
+    if [[ "${node_rank}" -ne 0 ]]; then
+        exit 0
+    fi
+    if (( ${#model_replay_follower_pids[@]} > 0 )); then
+        if ! model_replay_wait_followers; then
+            exit 1
+        fi
+    fi
+    model_replay_collect_multinode
+else
+    launcher_args=(
+        --mode "${mode}"
+        --benchmark-kind "${benchmark_kind}"
+        --cases "${case_file}"
+        --case-ids "${case_id}"
+        --world-size "${rank_size}"
+        --physical-device-count "${physical_device_count}"
+        --ranks-per-device "${ranks_per_device}"
+        --install-prefix "${install_prefix}"
+        --output-dir "${output_dir}"
+        --timeout-sec "${timeout_sec}"
+    )
+    if [[ "${benchmark_kind}" == "dispatch_hot_loop" ]]; then
+        launcher_args+=("--dispatch-modes" "${dispatch_modes[@]}")
+    fi
+    if [[ "${dump_stage_tensors}" == "true" ]]; then
+        launcher_args+=("--dump-stage-tensors")
+        launcher_args+=("--tensor-preview-elements" "${tensor_preview_elements}")
+    fi
+    if [[ -n "${warmup}" ]]; then
+        launcher_args+=("--warmup" "${warmup}")
+    fi
+    if [[ -n "${iterations}" ]]; then
+        launcher_args+=("--iterations" "${iterations}")
+    fi
+    echo "ASCEND_PROCESS_LOG_PATH: ${ASCEND_PROCESS_LOG_PATH}"
+    python -m tools.moonep.launcher "${launcher_args[@]}"
 fi
-launcher_args=(
-    --mode "${mode}"
-    --benchmark-kind "${benchmark_kind}"
-    --cases "${case_file}"
-    --case-ids "${case_id}"
-    --world-size "${rank_size}"
-    --physical-device-count "${physical_device_count}"
-    --ranks-per-device "${ranks_per_device}"
-    --install-prefix "${install_prefix}"
-    --output-dir "${output_dir}"
-    --timeout-sec "${timeout_sec}"
-)
-if [[ "${benchmark_kind}" == "dispatch_hot_loop" ]]; then
-    launcher_args+=("--dispatch-modes" "${dispatch_modes[@]}")
-fi
-if [[ "${dump_stage_tensors}" == "true" ]]; then
-    launcher_args+=("--dump-stage-tensors")
-    launcher_args+=("--tensor-preview-elements" "${tensor_preview_elements}")
-fi
-if [[ -n "${warmup}" ]]; then
-    launcher_args+=("--warmup" "${warmup}")
-fi
-if [[ -n "${iterations}" ]]; then
-    launcher_args+=("--iterations" "${iterations}")
-fi
-echo "ASCEND_PROCESS_LOG_PATH: ${ASCEND_PROCESS_LOG_PATH}"
-python -m tools.moonep.launcher "${launcher_args[@]}"
 
 if [[ ! -f "${summary_file}" ]]; then
     echo "Summary file not found: ${summary_file}" >&2
@@ -704,5 +1294,18 @@ if [[ "${dump_stage_tensors}" == "true" ]]; then
 fi
 
 if [[ "${mode}" == "benchmark" ]]; then
-    python -m tools.moonep.report --summary "${summary_file}"
+    if [[ "${model_replay}" != "true" ||
+          "${model_replay_stage_summary_only}" != "true" ]]; then
+        python -m tools.moonep.report --summary "${summary_file}"
+    fi
+    if [[ "${model_replay}" == "true" ]]; then
+        compare_args=(
+            --model "${TILEXR_MOONEP_MODEL_PERFORMANCE}"
+            --replay "${summary_file}"
+        )
+        if [[ "${model_replay_stage_summary_only}" == "true" ]]; then
+            compare_args+=(--stage-summary-only)
+        fi
+        python -m tools.moonep.model_replay_compare "${compare_args[@]}"
+    fi
 fi

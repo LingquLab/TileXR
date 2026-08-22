@@ -46,6 +46,7 @@ Optional CMake switches are `TILEXR_BUILD_COLLECTIVES`, `TILEXR_BUILD_EP`, `TILE
 
 - Before debugging TileXR, read [docs/moonep/MINDSPEED_DEBUGGING_EXPERIENCE.md](docs/moonep/MINDSPEED_DEBUGGING_EXPERIENCE.md) and use its evidence-driven workflow, test ladder, and state, queue, and ownership checklists to guide the investigation.
 - Treat the historical root causes in that document as hypotheses rather than conclusions. Reproduce the current failure, identify the first failing boundary, and verify the actual source and binary provenance before changing code.
+- When PowerShell drives a Linux host, never embed remote shell logic containing `$VAR`, `$()`, redirections, pipelines, or nested quoting in an inline SSH command. Put non-trivial remote logic in a task-scoped `.sh` file, synchronize it from Windows with Mutagen, and have PowerShell invoke only the fixed remote script path with fixed positional arguments. This prevents PowerShell from expanding or rewriting Linux syntax before it reaches the target host.
 
 ## Architecture
 
@@ -68,6 +69,7 @@ Optional CMake switches are `TILEXR_BUILD_COLLECTIVES`, `TILEXR_BUILD_EP`, `TILE
 - Never put `${ASCEND_HOME_PATH}/${ARCH}-linux/devlib` in runtime RPATH/RUNPATH; runtime must resolve the real driver HAL.
 - Never use Host wrappers that launch Ascend C kernels with `kernel<<<...>>>` syntax. Build and embed pure AICore binaries, register them with `rtDevBinaryRegister` and `rtFunctionRegister`, then launch the registered signature with `rtKernelLaunchWithFlagV2`.
 - MoonEP source changes must preserve the API contract consumed by `tools/moonep/test_npu_e2e.py`; do not change that test's calls to accommodate an implementation change. Preserve the `Buffer` and `MoonEPCommPlan` names, method signatures and keyword arguments, return tuple arity and order, exposed plan fields, and async-event and zero-copy call contracts exercised by the test.
+- MoonEP model and replay validation, including performance comparison, must keep the framework NPU profiler and the Dispatch/Combine stage barrier enabled. Do not classify either as a performance feature to disable; use the same profiler and barrier state on the model and replay sides and record that provenance. Kernel compile-time profiling/DFX, trace, flag or plan dumps, error dumps, and other diagnostics remain separate and should be disabled for the performance baseline unless they are the explicit subject of an A/B test.
 - Host, simulator, and 910B fallback tests do not prove UDMA data-plane transfer. Keep validation claims scoped to the hardware actually exercised.
 
 ### Communication Environment Baseline

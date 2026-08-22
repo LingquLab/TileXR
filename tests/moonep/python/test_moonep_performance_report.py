@@ -8,11 +8,13 @@ import pytest
 import torch
 
 from tools.moonep.benchmark import algorithm_bytes, stage_execution_metadata
+from tools.moonep.model_flow import model_operator_order
 from tools.moonep.report import (
     FLOW_STAGE_ORDER,
     aggregate_distributed_artifacts,
     aggregate_rank_artifacts,
     format_dispatch_performance,
+    format_model_flow_performance,
     format_stage_performance,
     main as report_main,
     write_json,
@@ -362,6 +364,162 @@ def test_flow_report_uses_stage_critical_rank_and_its_bytes(tmp_path: Path) -> N
     write_json(rank_one_result, mixed)
     with pytest.raises(ValueError, match="stage execution metadata differs"):
         aggregate_rank_artifacts(case_dir, world_size=2)
+
+
+def test_model_flow_report_preserves_operator_order_and_rank_distributions(
+    tmp_path: Path, capsys
+) -> None:
+    case_dir = tmp_path / "model-flow"
+    order = model_operator_order()
+    for rank in range(2):
+        result = _result(rank, 2, 1)
+        result["benchmark_kind"] = "model_flow"
+        result["case"].update(
+            {
+                "case_id": "model-flow-8rank-4k-ep8-mindspeed",
+                "warmup": 5,
+                "iterations": 2,
+                "routing_pattern": "model_replay",
+            }
+        )
+        result["profile_timing_source"] = "torch_npu_profiler_kernel_details"
+        result["route_provenance"] = {"run_id": "model-profile"}
+        result["model_operator_order"] = order
+        rank_dir = case_dir / f"rank_{rank}"
+        write_json(rank_dir / "result.json", result)
+        operators = []
+        for item in order:
+            sequence = int(item["sequence"])
+            data_moving = item["stage"] != "planning"
+            operators.append(
+                {
+                    **item,
+                    "kernel_name": f"kernel_{item['stage']}",
+                    "kernel_launches_per_call": (
+                        2 if item["stage"] == "combine_backward" else 1
+                    ),
+                    "values_us": [
+                        float(sequence + rank + 1),
+                        float(sequence + rank + 3),
+                    ],
+                    "algorithm_bytes": [1000, 1000] if data_moving else [None, None],
+                }
+            )
+        write_json(
+            rank_dir / "model_profile.json",
+            {
+                "schema_version": 1,
+                "timing_source": "torch_npu_profiler_kernel_details",
+                "iterations": 2,
+                "operators": operators,
+            },
+        )
+
+    summary = aggregate_rank_artifacts(case_dir, world_size=2)
+
+    assert summary["benchmark_kind"] == "model_flow"
+    assert len(summary["model_operator_performance"]) == 55
+    first = summary["model_operator_performance"][0]
+    assert first["latency_us"] == {
+        "median": 2.5,
+        "max": 3.0,
+        "min": 2.0,
+    }
+    assert summary["model_stage_performance"]["planning"]["calls_per_rank"] == 20
+    assert summary["model_stage_performance"]["dispatch_forward"][
+        "calls_per_rank"
+    ] == 20
+    assert (case_dir / "model_operator_summary.csv").is_file()
+    assert (case_dir / "model_stage_summary.csv").is_file()
+
+    table = format_model_flow_performance(summary)
+    assert table.index("MoonEP model operator performance") < table.index(
+        "MoonEP model stage summary"
+    )
+    assert "initial_forward" in table
+    assert "recompute_backward" in table
+    assert "median/max/min across rank means" in table
+    assert "kernel_combine_backward" in table
+    summary_path = case_dir / "summary.json"
+    assert report_main(["--summary", str(summary_path)]) == 0
+    assert "MoonEP model operator performance" in capsys.readouterr().out
+
+
+def test_two_node_model_flow_artifacts_aggregate_all_global_ranks(tmp_path: Path) -> None:
+    output_dir = tmp_path / "run"
+    case_id = "model-flow-16rank-4k-ep16-mindspeed"
+    case_dir = output_dir / case_id
+    order = model_operator_order()
+    for node_rank in range(2):
+        write_json(
+            output_dir / f"node_{node_rank}_complete.json",
+            {
+                "schema_version": 1,
+                "status": "passed",
+                "mode": "benchmark",
+                "launch_id": "model-flow-launch",
+                "case_ids": [case_id],
+                "topology": {
+                    "node_count": 2,
+                    "node_rank": node_rank,
+                    "world_size": 4,
+                    "first_global_rank": node_rank * 2,
+                    "local_world_size": 2,
+                },
+            },
+        )
+    for rank in range(4):
+        result = _result(rank, 4, 2)
+        result["launch_id"] = "model-flow-launch"
+        result["benchmark_kind"] = "model_flow"
+        result["case"].update(
+            {
+                "case_id": case_id,
+                "warmup": 5,
+                "iterations": 1,
+                "routing_pattern": "model_replay",
+            }
+        )
+        result["profile_timing_source"] = "torch_npu_profiler_kernel_details"
+        result["route_provenance"] = {"run_id": "two-node-model"}
+        result["model_operator_order"] = order
+        rank_dir = case_dir / f"rank_{rank}"
+        write_json(rank_dir / "result.json", result)
+        write_json(
+            rank_dir / "model_profile.json",
+            {
+                "schema_version": 1,
+                "timing_source": "torch_npu_profiler_kernel_details",
+                "iterations": 1,
+                "operators": [
+                    {
+                        **item,
+                        "kernel_name": f"kernel_{item['stage']}",
+                        "kernel_launches_per_call": 1,
+                        "values_us": [float(item["sequence"] + rank + 1)],
+                        "algorithm_bytes": (
+                            [None] if item["stage"] == "planning" else [2048]
+                        ),
+                    }
+                    for item in order
+                ],
+            },
+        )
+
+    summaries = aggregate_distributed_artifacts(
+        output_dir,
+        case_ids=(case_id,),
+        node_count=2,
+        world_size=4,
+        mode="benchmark",
+    )
+
+    summary = summaries[case_id]
+    assert summary["benchmark_kind"] == "model_flow"
+    assert summary["logical_world_size"] == 4
+    dispatch = summary["model_stage_performance"]["dispatch_forward"]
+    assert dispatch["latency_us"]["max"] > dispatch["latency_us"]["min"]
+    assert dispatch["algorithm_bandwidth_GBps"]["median"] > 0
 
 
 def test_flow_report_means_use_all_twenty_measured_iterations(tmp_path: Path) -> None:

@@ -198,7 +198,9 @@ int main()
     Contains("URMA Dispatch grouped convergence", dispatchUrmaKernel,
         "bool completionSubmitted = optimizedSignalSubmitted");
     Contains("URMA Dispatch grouped convergence", dispatchUrmaKernel,
-        "WaitDispatchIncomingPeerAndPublishCredit(args");
+        "WaitDispatchIncomingPeer(receiveFlags");
+    Contains("URMA Dispatch grouped convergence", dispatchUrmaKernel,
+        "PublishDispatchPeerCredit(");
     Excludes("URMA Dispatch grouped convergence", dispatchUrmaKernel,
         "peerValue == rank || upstreamStatus !=");
     Excludes("URMA Dispatch WQE", dispatchUrmaKernel, "WRITE_WITH_NOTIFY");
@@ -270,15 +272,18 @@ int main()
     Contains("prefetch kernel", prefetchKernel, "localExpert");
     Excludes("prefetch kernel", prefetchKernel, "e_ + slot");
     Contains("prefetch kernel", prefetchKernel, "UDMAGetNbiOnQp");
-    Contains("prefetch kernel", prefetchKernel, "UDMAQuietStatusOnQpUntil");
+    Contains("prefetch kernel", prefetchKernel, "PollSqUntil");
+    Contains("prefetch kernel", prefetchKernel, "UDMAPollCQUpdateInfo");
+    Contains("prefetch kernel", prefetchKernel, "UDMAGetSCQCtx");
+    Contains("prefetch kernel", prefetchKernel, "cqCtxEntry->tailAddr");
     Contains("prefetch kernel", prefetchKernel, "physicalQp_");
     Contains("prefetch kernel", prefetchKernel,
         "owner, physicalQp_, destination");
     Contains("prefetch kernel", prefetchKernel,
-        "peer, physicalQp_, completionTargets[queue]");
+        "peer, physicalQp_, sqTargets[queue]");
     Contains("prefetch kernel", prefetchKernel, "completionQueueIds");
     Contains("prefetch kernel", prefetchKernel,
-        "++completionTargets[completionQueue]");
+        "++sqTargets[completionQueue]");
     Contains("prefetch kernel", prefetchKernel, "DataCacheCleanAndInvalid");
     Excludes("prefetch kernel", prefetchKernel, "<<<");
     Excludes("prefetch launch", prefetchLaunch, "launch_tilexr_moonep_prefetch_weight_kernel");

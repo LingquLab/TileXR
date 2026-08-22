@@ -12,6 +12,24 @@ Usage: run_model.sh [options]
 Options:
   --mode single|multi       Launch locally or orchestrate all nodes over SSH.
   --backend tilexr|native   Select the MoonEP backend (default: tilexr).
+  --seq-length COUNT        Model sequence length (default: 4096).
+  --hidden-size COUNT       Model hidden size (default: 7168).
+  --moe-router-topk COUNT   MoE router top-k (default: 8).
+  --route-capture-dir PATH  Capture exact model routes into this host-local path.
+  --route-capture-id ID     Stable capture ID paired with --route-capture-dir.
+  --route-capture-skip-calls COUNT
+                            Forward calls skipped before capture (default: 60).
+  --route-capture-calls COUNT
+                            Forward calls captured per rank (default: 10).
+  --performance-capture-dir PATH
+                            Write lightweight per-rank NPU Event timings here.
+  --performance-capture-id ID
+                            Stable ID paired with --performance-capture-dir.
+  --performance-capture-skip-operators COUNT
+                            Operators skipped before timing (default: 330).
+  --performance-capture-operators COUNT
+                            Operators timed per rank (default: 55).
+  --collect-artifacts       Collect every node's profile/capture files on node 0.
   --profile                 Enable the one-iteration NPU profiler window.
   --stage-barrier           Add diagnostic world barriers before Dispatch/Combine.
   --hccl-inter-hccs-disable true|false
@@ -35,6 +53,18 @@ EOF
 
 mode=single
 backend=tilexr
+sequence_length=4096
+hidden_size=7168
+router_topk=8
+route_capture_dir=""
+route_capture_id=""
+route_capture_skip_calls=60
+route_capture_calls=10
+performance_capture_dir=""
+performance_capture_id=""
+performance_capture_skip_operators=330
+performance_capture_operators=55
+collect_artifacts=0
 profile=0
 stage_barrier=0
 hccl_inter_hccs_disable=""
@@ -52,6 +82,42 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --mode) mode=${2:?--mode requires a value}; shift 2 ;;
         --backend) backend=${2:?--backend requires a value}; shift 2 ;;
+        --seq-length) sequence_length=${2:?--seq-length requires a value}; shift 2 ;;
+        --hidden-size) hidden_size=${2:?--hidden-size requires a value}; shift 2 ;;
+        --moe-router-topk) router_topk=${2:?--moe-router-topk requires a value}; shift 2 ;;
+        --route-capture-dir)
+            route_capture_dir=${2:?--route-capture-dir requires a value}
+            shift 2
+            ;;
+        --route-capture-id)
+            route_capture_id=${2:?--route-capture-id requires a value}
+            shift 2
+            ;;
+        --route-capture-skip-calls)
+            route_capture_skip_calls=${2:?--route-capture-skip-calls requires a value}
+            shift 2
+            ;;
+        --route-capture-calls)
+            route_capture_calls=${2:?--route-capture-calls requires a value}
+            shift 2
+            ;;
+        --performance-capture-dir)
+            performance_capture_dir=${2:?--performance-capture-dir requires a value}
+            shift 2
+            ;;
+        --performance-capture-id)
+            performance_capture_id=${2:?--performance-capture-id requires a value}
+            shift 2
+            ;;
+        --performance-capture-skip-operators)
+            performance_capture_skip_operators=${2:?--performance-capture-skip-operators requires a value}
+            shift 2
+            ;;
+        --performance-capture-operators)
+            performance_capture_operators=${2:?--performance-capture-operators requires a value}
+            shift 2
+            ;;
+        --collect-artifacts) collect_artifacts=1; shift ;;
         --profile) profile=1; shift ;;
         --stage-barrier) stage_barrier=1; shift ;;
         --hccl-inter-hccs-disable)
@@ -77,6 +143,44 @@ done
 
 case "${mode}" in single|multi) ;; *) printf 'Invalid mode: %s\n' "${mode}" >&2; exit 2 ;; esac
 case "${backend}" in tilexr|native) ;; *) printf 'Invalid backend: %s\n' "${backend}" >&2; exit 2 ;; esac
+for value in sequence_length hidden_size router_topk route_capture_calls \
+    performance_capture_operators; do
+    if [[ ! "${!value}" =~ ^[1-9][0-9]*$ ]]; then
+        printf '%s must be a positive integer\n' "${value}" >&2
+        exit 2
+    fi
+done
+if [[ ! "${route_capture_skip_calls}" =~ ^[0-9]+$ ||
+      ! "${performance_capture_skip_operators}" =~ ^[0-9]+$ ]]; then
+    echo "capture skip counts must be non-negative integers" >&2
+    exit 2
+fi
+if [[ -n "${performance_capture_dir}" || -n "${performance_capture_id}" ]]; then
+    if [[ "${backend}" != "tilexr" || -z "${performance_capture_dir}" ||
+          -z "${performance_capture_id}" ||
+          ! "${performance_capture_id}" =~ ^[A-Za-z0-9_.-]+$ ]]; then
+        echo "performance capture requires TileXR, a directory, and a safe capture ID" >&2
+        exit 2
+    fi
+fi
+if (( hidden_size % 128 != 0 || router_topk > 32 )); then
+    echo "hidden-size must be divisible by 128 and moe-router-topk must be <= 32" >&2
+    exit 2
+fi
+if [[ -n "${route_capture_dir}" || -n "${route_capture_id}" ]]; then
+    if [[ -z "${route_capture_dir}" || -z "${route_capture_id}" ]]; then
+        echo "--route-capture-dir and --route-capture-id must be provided together" >&2
+        exit 2
+    fi
+    if [[ "${backend}" != "tilexr" ]]; then
+        echo "route capture requires --backend tilexr" >&2
+        exit 2
+    fi
+    if [[ ! "${route_capture_id}" =~ ^[A-Za-z0-9_.-]+$ ]]; then
+        echo "unsafe route capture ID: ${route_capture_id}" >&2
+        exit 2
+    fi
+fi
 case "${hccl_inter_hccs_disable}" in ""|true|false) ;;
     *) printf 'Invalid HCCL inter-HCCS value: %s\n' "${hccl_inter_hccs_disable}" >&2; exit 2 ;;
 esac
@@ -204,12 +308,37 @@ quote_command() {
     printf '%s' "${quoted[*]}"
 }
 
+node_env_prefix() {
+    local env_args=()
+    local name
+    local pass_through=(
+        TILEXR_MOONEP_DUMP_DFX_ON_ERROR
+        TILEXR_MOONEP_DISPATCH_GROUP_WIDTH
+        TILEXR_MOONEP_DISPATCH_PEER_MODE
+        TILEXR_MOONEP_FLAG_DUMP_DIR
+        TILEXR_MOONEP_FLAG_DUMP_MODE
+        TILEXR_MOONEP_PLANNER_WAIT_ITERATIONS
+        TILEXR_MINDSPEED_PREWARM_FRAMEWORK_OPS
+    )
+    for name in "${pass_through[@]}"; do
+        if [[ -n "${!name:-}" ]]; then
+            env_args+=("${name}=${!name}")
+        fi
+    done
+    if [[ "${#env_args[@]}" -gt 0 ]]; then
+        quote_command env "${env_args[@]}"
+    fi
+}
+
 node_arguments() {
     local node_count=$1
     local node_rank=$2
     local master_addr=$3
     local args=(
         --backend "${backend}"
+        --seq-length "${sequence_length}"
+        --hidden-size "${hidden_size}"
+        --moe-router-topk "${router_topk}"
         --node-count "${node_count}"
         --node-rank "${node_rank}"
         --master-addr "${master_addr}"
@@ -229,6 +358,23 @@ node_arguments() {
     )
     [[ "${profile}" -eq 1 ]] && args+=(--profile)
     [[ "${stage_barrier}" -eq 1 ]] && args+=(--stage-barrier)
+    if [[ -n "${route_capture_dir}" ]]; then
+        args+=(
+            --route-capture-dir "${route_capture_dir}"
+            --route-capture-id "${route_capture_id}"
+            --route-capture-skip-calls "${route_capture_skip_calls}"
+            --route-capture-calls "${route_capture_calls}"
+        )
+    fi
+    if [[ -n "${performance_capture_dir}" ]]; then
+        args+=(
+            --performance-capture-dir "${performance_capture_dir}"
+            --performance-capture-id "${performance_capture_id}"
+            --performance-capture-skip-operators \
+                "${performance_capture_skip_operators}"
+            --performance-capture-operators "${performance_capture_operators}"
+        )
+    fi
     [[ -n "${hccl_inter_hccs_disable}" ]] && \
         args+=(--hccl-inter-hccs-disable "${hccl_inter_hccs_disable}")
     [[ -n "${rank_table_file}" ]] && args+=(--rank-table-file "${rank_table_file}")
@@ -245,6 +391,8 @@ ssh_options=(-o ConnectTimeout=15 -o ServerAliveInterval=30 -o ServerAliveCountM
 if [[ "${mode}" == single ]]; then
     args=$(node_arguments 1 0 127.0.0.1)
     command=$(quote_command bash "${local_runner}")
+    env_prefix=$(node_env_prefix)
+    [[ -n "${env_prefix}" ]] && command="${env_prefix} ${command}"
     command+=" ${args}"
     if [[ "${dry_run}" -eq 1 ]]; then
         printf 'mode=single local=1 node_rank=0\n%s\n' "${command}"
@@ -262,6 +410,8 @@ for node_rank in "${!nodes[@]}"; do
     target=${MODEL_RUNNER_SSH_USER}@${nodes[${node_rank}]}
     args=$(node_arguments "${node_count}" "${node_rank}" "${master_addr}")
     command=$(quote_command bash "${remote_runner}")
+    env_prefix=$(node_env_prefix)
+    [[ -n "${env_prefix}" ]] && command="${env_prefix} ${command}"
     command+=" ${args}"
     targets+=("${target}")
     commands+=("${command}")
@@ -412,5 +562,33 @@ fi
 if [[ "${failed}" -ne 0 ]]; then
     printf 'Multi-node model failed; see %s\n' "${controller_dir}" >&2
     exit 1
+fi
+collect_model_artifacts() {
+    local collected_root model_root index source target rsync_ssh
+    collected_root=${default_tilexr_home}/run/moonep/mindspeed/${run_tag}/collected
+    model_root=${MODEL_RUNNER_TILEXR_HOME}/run/moonep/mindspeed/${run_tag}/${backend}
+    mkdir -p "${collected_root}"
+    source=${model_root}/node_0/
+    rsync -a --protect-args "${source}" "${collected_root}/node_0/"
+    rsync_ssh="ssh ${ssh_options[*]}"
+    for ((index = 1; index < node_count; index++)); do
+        target=${targets[${index}]}:${model_root}/node_${index}/
+        rsync -a --protect-args -e "${rsync_ssh}" \
+            "${target}" "${collected_root}/node_${index}/"
+        if [[ -n "${route_capture_dir}" ]]; then
+            target=${targets[${index}]}:${route_capture_dir}/
+            rsync -a --protect-args -e "${rsync_ssh}" \
+                "${target}" "${route_capture_dir}/"
+        fi
+        if [[ -n "${performance_capture_dir}" ]]; then
+            target=${targets[${index}]}:${performance_capture_dir}/
+            rsync -a --protect-args -e "${rsync_ssh}" \
+                "${target}" "${performance_capture_dir}/"
+        fi
+    done
+    printf 'Collected model artifacts: %s\n' "${collected_root}"
+}
+if [[ "${collect_artifacts}" -eq 1 ]]; then
+    collect_model_artifacts
 fi
 printf 'Multi-node model completed: %s\n' "${controller_dir}"

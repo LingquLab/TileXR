@@ -66,7 +66,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--candidate-backend", default=None, metavar="MODULE:FACTORY")
     parser.add_argument("--dump-stage-tensors", action="store_true")
     parser.add_argument("--tensor-preview-elements", type=int, default=8)
-    parser.add_argument("--benchmark-kind", choices=("flow", "dispatch_hot_loop"),
+    parser.add_argument("--benchmark-kind", choices=("flow", "model_flow", "dispatch_hot_loop"),
         default="dispatch_hot_loop")
     parser.add_argument("--dispatch-modes", nargs="+",
         choices=("hidden", "weight", "pair"), default=("hidden",))
@@ -148,6 +148,7 @@ def main(argv: list[str] | None = None) -> int:
         base_env.setdefault(
             "TILEXR_UDMA_QP_ROUTE_SPEC", "port_count:6,port_count:2"
         )
+        base_env.setdefault("TILEXR_ENABLE_CREDIT_IPC", "1")
     command = _process_command(args)
     write_json(output_dir / f"node_{args.node_rank}_metadata.json", {
         "schema_version": 1,

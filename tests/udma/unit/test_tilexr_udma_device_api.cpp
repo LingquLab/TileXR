@@ -453,6 +453,36 @@ void TestDeferredProfileGetAndCompletionFrontier()
         "second QP selects its bound remote region");
 }
 
+void TestProfileQuietUsesSqFrontierAcrossNonCompletionGap()
+{
+    Fixture fixture;
+    auto scratch = fixture.Scratch();
+
+    fixture.sqHead[0] = 4U;
+    fixture.wqeCount[0] = 20U;
+    Check(UDMAProfileGetNbiOnQpDeferred(&fixture.args, &fixture.info,
+        &fixture.profileRegistry, scratch, 1, 0U, 0U, 8U, 1U, 16U, 32U) ==
+        TILEXR_UDMA_STATUS_SUCCESS,
+        "profile GET after a non-completion SQ gap succeeds");
+    const uint32_t frontier = UDMAProfileCompletionFrontier(&fixture.args,
+        &fixture.info, &fixture.profileRegistry, 1, 0U);
+    Check(frontier == 5U && fixture.wqeCount[0] == 21U,
+        "profile completion frontier is the SQ head, not the WQE counter");
+    Check(UDMAProfileFlushQpDoorbell(&fixture.args, &fixture.info,
+        &fixture.profileRegistry, 1, 0U) == TILEXR_UDMA_STATUS_SUCCESS,
+        "profile flush accepts the outstanding SQ gap");
+    Check(fixture.sqDoorbell[0] == 5U,
+        "profile flush rings the doorbell with the SQ head frontier");
+
+    fixture.Cqe(0U, 0U)->owner = 1U;
+    fixture.Cqe(0U, 0U)->entryIdx = 4U;
+    Check(UDMAProfileQuietStatusOnQpUntil(&fixture.args, &fixture.info,
+        &fixture.profileRegistry, 1, 0U, frontier) == TILEXR_UDMA_STATUS_SUCCESS,
+        "profile quiet consumes one CQE that covers the historical SQ gap");
+    Check(fixture.sqTail[0] == 5U && fixture.cqTail[0] == 1U,
+        "profile quiet advances SQ by entryIdx while advancing CQ by one");
+}
+
 void TestExplicitCompletionTargetDoesNotRereadPublishedCount()
 {
     Fixture fixture;
@@ -687,6 +717,7 @@ int main()
     TestImmediatePutReclaimsCompletedFullSq();
     TestGetAndLegacyQp0Wrappers();
     TestDeferredProfileGetAndCompletionFrontier();
+    TestProfileQuietUsesSqFrontierAcrossNonCompletionGap();
     TestExplicitCompletionTargetDoesNotRereadPublishedCount();
     TestWriteNotifyWrapsWithinSqRing();
     TestWriteNotifyCompletionUsesFinalBbIndex();

@@ -55,13 +55,13 @@ public:
         uint64_t usedPeers[kUsedPeerWordCount] = {};
         uint64_t completionQueueIds[kMaxTrackedRankSize] = {};
         int32_t completionQueuePeers[kMaxTrackedRankSize] = {};
-        uint32_t completionTargets[kMaxTrackedRankSize] = {};
+        uint32_t sqTargets[kMaxTrackedRankSize] = {};
         uint32_t completionQueueCount = 0U;
         uint32_t workerStatus = ValidateRuntime();
         if (workerStatus == 0) {
             SubmitReads(usedPeers, completionQueueIds, completionQueuePeers,
-                completionTargets, completionQueueCount, workerStatus);
-            CompleteReads(usedPeers, completionQueuePeers, completionTargets,
+                sqTargets, completionQueueCount, workerStatus);
+            CompleteReads(usedPeers, completionQueuePeers, sqTargets,
                 completionQueueCount, workerStatus);
         }
         if (workerStatus != 0) {
@@ -130,7 +130,7 @@ private:
         uint64_t usedPeers[kUsedPeerWordCount],
         uint64_t completionQueueIds[kMaxTrackedRankSize],
         int32_t completionQueuePeers[kMaxTrackedRankSize],
-        uint32_t completionTargets[kMaxTrackedRankSize],
+        uint32_t sqTargets[kMaxTrackedRankSize],
         uint32_t &completionQueueCount, uint32_t &workerStatus)
     {
         auto wqeScratch = wqeBuf_.Get<uint8_t>();
@@ -158,12 +158,16 @@ private:
             const int32_t localExpert =
                 expert % static_cast<int32_t>(expertsPerRank_);
             MarkPeer(usedPeers, owner);
-            __gm__ TileXR::UDMAWQCtx *queue = TileXR::UDMAGetWQCtx(
-                TileXR::GetUDMAInfo(args_), static_cast<uint32_t>(owner),
-                physicalQp_);
+            __gm__ TileXR::UDMAWQCtx *workQueueCtx =
+                TileXR::UDMAGetWQCtx(TileXR::GetUDMAInfo(args_),
+                    static_cast<uint32_t>(owner), physicalQp_);
+            __gm__ TileXR::UDMACQCtx *completionQueueCtx =
+                TileXR::UDMAGetSCQCtx(TileXR::GetUDMAInfo(args_),
+                    static_cast<uint32_t>(owner), physicalQp_);
             const uint32_t completionQueue = TrackCompletionQueue(
-                queue->wqeCntAddr, owner, completionQueueIds, completionQueuePeers,
-                completionTargets, completionQueueCount, workerStatus);
+                workQueueCtx, completionQueueCtx, owner, completionQueueIds,
+                completionQueuePeers, sqTargets, completionQueueCount,
+                workerStatus);
             if (completionQueue >= kMaxTrackedRankSize) {
                 continue;
             }
@@ -181,19 +185,22 @@ private:
                     workerStatus = kPrefetchWeightStatusSubmitErrorBase +
                         (submitStatus & 0xFFU);
                 } else if (submitStatus == TileXR::TILEXR_UDMA_STATUS_SUCCESS) {
-                    ++completionTargets[completionQueue];
+                    ++sqTargets[completionQueue];
                 }
             }
         }
     }
 
     __aicore__ inline uint32_t TrackCompletionQueue(
-        uint64_t queueId, int32_t peer,
+        __gm__ TileXR::UDMAWQCtx *wqCtxEntry,
+        __gm__ TileXR::UDMACQCtx *cqCtxEntry, int32_t peer,
         uint64_t completionQueueIds[kMaxTrackedRankSize],
         int32_t completionQueuePeers[kMaxTrackedRankSize],
-        uint32_t completionTargets[kMaxTrackedRankSize],
+        uint32_t sqTargets[kMaxTrackedRankSize],
         uint32_t &completionQueueCount, uint32_t &workerStatus) const
     {
+        const uint64_t queueId = wqCtxEntry == nullptr ? 0U :
+            (wqCtxEntry->headAddr ^ (wqCtxEntry->tailAddr << 1U));
         for (uint32_t queue = 0U; queue < completionQueueCount; ++queue) {
             if (completionQueueIds[queue] == queueId) {
                 return queue;
@@ -208,15 +215,15 @@ private:
         const uint32_t queue = completionQueueCount++;
         completionQueueIds[queue] = queueId;
         completionQueuePeers[queue] = peer;
-        completionTargets[queue] = ld_dev(
-            reinterpret_cast<__gm__ uint32_t *>(queueId), 0);
+        sqTargets[queue] = ld_dev(
+            reinterpret_cast<__gm__ uint32_t *>(wqCtxEntry->headAddr), 0);
         return queue;
     }
 
     __aicore__ inline void CompleteReads(
         const uint64_t usedPeers[kUsedPeerWordCount],
         const int32_t completionQueuePeers[kMaxTrackedRankSize],
-        const uint32_t completionTargets[kMaxTrackedRankSize],
+        const uint32_t sqTargets[kMaxTrackedRankSize],
         uint32_t completionQueueCount, uint32_t &workerStatus)
     {
         for (uint32_t queue = 0U; queue < completionQueueCount; ++queue) {
@@ -227,10 +234,12 @@ private:
                 }
                 continue;
             }
-            const uint32_t cqStatus = TileXR::UDMAQuietStatusOnQpUntil(
-                args_, peer, physicalQp_, completionTargets[queue]);
+            const uint32_t cqStatus = PollSqUntil(
+                peer, physicalQp_, sqTargets[queue]);
             if (cqStatus != 0 && workerStatus == 0) {
-                workerStatus = kPrefetchWeightStatusCqErrorBase + (cqStatus & 0xFFU);
+                workerStatus = cqStatus == TileXR::TILEXR_UDMA_STATUS_INVALID
+                    ? ClassifyQuietInvalid(peer, physicalQp_, sqTargets[queue])
+                    : kPrefetchWeightStatusCqErrorBase + (cqStatus & 0xFFU);
             }
         }
         if (completionQueueCount != 0U) {
@@ -240,6 +249,161 @@ private:
                 AscendC::CacheLine::ENTIRE_DATA_CACHE,
                 AscendC::DcciDst::CACHELINE_OUT>(cache);
         }
+    }
+
+    __aicore__ inline uint32_t PollSqUntil(
+        int32_t peer, uint32_t qpIdx, uint32_t sqTarget) const
+    {
+        if (!TileXR::TILEXR_UDMA_ARCH_SUPPORTED ||
+            !TileXR::UDMAQueueOperationValid(args_, peer, qpIdx)) {
+            return TileXR::TILEXR_UDMA_STATUS_INVALID;
+        }
+        __gm__ TileXR::UDMAInfo *info = TileXR::GetUDMAInfo(args_);
+        if (info == nullptr || info->qpNum == 0U ||
+            info->qpNum > TileXR::TILEXR_UDMA_DEVICE_MAX_QP_COUNT ||
+            qpIdx >= info->qpNum || info->sqPtr == 0U || info->scqPtr == 0U) {
+            return TileXR::TILEXR_UDMA_STATUS_INVALID;
+        }
+        __gm__ TileXR::UDMACQCtx *cqCtxEntry =
+            TileXR::UDMAGetSCQCtx(info, static_cast<uint32_t>(peer), qpIdx);
+        __gm__ TileXR::UDMAWQCtx *wqCtxEntry =
+            TileXR::UDMAGetWQCtx(info, static_cast<uint32_t>(peer), qpIdx);
+        if (wqCtxEntry == nullptr || cqCtxEntry == nullptr ||
+            wqCtxEntry->headAddr == 0U || wqCtxEntry->tailAddr == 0U ||
+            wqCtxEntry->depth != TileXR::TILEXR_UDMA_SQ_BB_COUNT ||
+            cqCtxEntry->bufAddr == 0U || cqCtxEntry->tailAddr == 0U ||
+            cqCtxEntry->dbAddr == 0U ||
+            cqCtxEntry->depth != TileXR::TILEXR_UDMA_CQ_DEPTH ||
+            cqCtxEntry->baseBkShift >= 32U ||
+            (1U << cqCtxEntry->baseBkShift) < sizeof(TileXR::UDMACqeCtx)) {
+            return TileXR::TILEXR_UDMA_STATUS_INVALID;
+        }
+
+        uint32_t cqTail = ld_dev(
+            reinterpret_cast<__gm__ uint32_t *>(cqCtxEntry->tailAddr), 0);
+        uint32_t sqTail = ld_dev(
+            reinterpret_cast<__gm__ uint32_t *>(wqCtxEntry->tailAddr), 0);
+        if (sqTarget - sqTail > wqCtxEntry->depth) {
+            return TileXR::TILEXR_UDMA_STATUS_INVALID;
+        }
+        const uint32_t cqeSize = 1U << cqCtxEntry->baseBkShift;
+        while (sqTail != sqTarget) {
+            __gm__ TileXR::UDMACqeCtx *cqeAddr =
+                reinterpret_cast<__gm__ TileXR::UDMACqeCtx *>(
+                    cqCtxEntry->bufAddr +
+                    cqeSize * (cqTail & (TileXR::TILEXR_UDMA_CQ_DEPTH - 1U)));
+            const bool validOwner =
+                ((cqTail / TileXR::TILEXR_UDMA_CQ_DEPTH) & 1U) != 0U;
+            uint32_t times = 0U;
+            while ((validOwner ^ (cqeAddr->owner != 0)) == 0 &&
+                times < TileXR::TILEXR_UDMA_MAX_RETRY_TIMES) {
+                TileXR::UDMACleanCacheLines(
+                    reinterpret_cast<__gm__ uint8_t *>(cqeAddr),
+                    sizeof(TileXR::UDMACqeCtx));
+                ++times;
+            }
+            if (times >= TileXR::TILEXR_UDMA_MAX_RETRY_TIMES) {
+                return TileXR::TILEXR_UDMA_STATUS_CQ_TIMEOUT;
+            }
+            const uint32_t status = static_cast<uint32_t>(cqeAddr->status) & 0xFFU;
+            const uint32_t subStatus =
+                static_cast<uint32_t>(cqeAddr->substatus) & 0xFFU;
+            if (status != 0U || subStatus != 0U) {
+                return (status << 8U) | subStatus;
+            }
+
+            const uint32_t sqHead = ld_dev(
+                reinterpret_cast<__gm__ uint32_t *>(wqCtxEntry->headAddr), 0);
+            const uint32_t sqOutstanding = sqHead - sqTail;
+            const uint32_t remainingToTarget = sqTarget - sqTail;
+            if (sqOutstanding == 0U || sqOutstanding > wqCtxEntry->depth ||
+                remainingToTarget == 0U || remainingToTarget > sqOutstanding) {
+                return TileXR::TILEXR_UDMA_STATUS_INVALID;
+            }
+            const uint32_t tailIndex = sqTail % wqCtxEntry->depth;
+            const uint32_t completedEntryIndex =
+                static_cast<uint32_t>(cqeAddr->entryIdx) % wqCtxEntry->depth;
+            const uint32_t completedBb =
+                (completedEntryIndex + wqCtxEntry->depth - tailIndex) %
+                    wqCtxEntry->depth + 1U;
+            if (completedBb == 0U || completedBb > remainingToTarget ||
+                completedBb > sqOutstanding) {
+                return TileXR::TILEXR_UDMA_STATUS_INVALID;
+            }
+            sqTail += completedBb;
+            ++cqTail;
+            TileXR::UDMAPollCQUpdateInfo(
+                cqTail, sqTail, cqCtxEntry, wqCtxEntry);
+        }
+        return TileXR::TILEXR_UDMA_STATUS_SUCCESS;
+    }
+
+    __aicore__ inline uint32_t ClassifyQuietInvalid(
+        int32_t peer, uint32_t qpIdx, uint32_t sqTarget) const
+    {
+        if (!TileXR::TILEXR_UDMA_ARCH_SUPPORTED) {
+            return kPrefetchWeightStatusCqInvalidUnsupported;
+        }
+        if (!TileXR::UDMAQueueOperationValid(args_, peer, qpIdx)) {
+            return kPrefetchWeightStatusCqInvalidQueue;
+        }
+        __gm__ TileXR::UDMAInfo *info = TileXR::GetUDMAInfo(args_);
+        if (info == nullptr || info->qpNum == 0U ||
+            info->qpNum > TileXR::TILEXR_UDMA_DEVICE_MAX_QP_COUNT ||
+            qpIdx >= info->qpNum || info->sqPtr == 0U || info->scqPtr == 0U) {
+            return kPrefetchWeightStatusCqInvalidInfo;
+        }
+        __gm__ TileXR::UDMACQCtx *cqCtxEntry =
+            TileXR::UDMAGetSCQCtx(info, static_cast<uint32_t>(peer), qpIdx);
+        __gm__ TileXR::UDMAWQCtx *wqCtxEntry =
+            TileXR::UDMAGetWQCtx(info, static_cast<uint32_t>(peer), qpIdx);
+        if (wqCtxEntry == nullptr || cqCtxEntry == nullptr ||
+            wqCtxEntry->bufAddr == 0U || wqCtxEntry->headAddr == 0U ||
+            wqCtxEntry->tailAddr == 0U ||
+            wqCtxEntry->depth != TileXR::TILEXR_UDMA_SQ_BB_COUNT ||
+            wqCtxEntry->baseBkShift >= 32U ||
+            (1U << wqCtxEntry->baseBkShift) <
+                sizeof(TileXR::UDMASqeCtx) + sizeof(TileXR::UDMASgeCtx) ||
+            cqCtxEntry->bufAddr == 0U || cqCtxEntry->tailAddr == 0U ||
+            cqCtxEntry->dbAddr == 0U ||
+            cqCtxEntry->depth != TileXR::TILEXR_UDMA_CQ_DEPTH ||
+            cqCtxEntry->baseBkShift >= 32U ||
+            (1U << cqCtxEntry->baseBkShift) < sizeof(TileXR::UDMACqeCtx)) {
+            return kPrefetchWeightStatusCqInvalidContext;
+        }
+
+        const uint32_t cqTail = ld_dev(
+            reinterpret_cast<__gm__ uint32_t *>(cqCtxEntry->tailAddr), 0);
+        const uint32_t sqTail = ld_dev(
+            reinterpret_cast<__gm__ uint32_t *>(wqCtxEntry->tailAddr), 0);
+        const uint32_t completionCount = sqTarget - sqTail;
+        if (completionCount > wqCtxEntry->depth) {
+            return kPrefetchWeightStatusCqInvalidCompletionDepth;
+        }
+        const uint32_t sqHead = ld_dev(
+            reinterpret_cast<__gm__ uint32_t *>(wqCtxEntry->headAddr), 0);
+        const uint32_t sqOutstanding = sqHead - sqTail;
+        if (sqOutstanding == 0U || sqOutstanding > wqCtxEntry->depth) {
+            return kPrefetchWeightStatusCqInvalidSqOutstanding;
+        }
+        if (completionCount == 0U) {
+            return kPrefetchWeightStatusCqInvalidUnknown;
+        }
+        const uint32_t cqeSize = 1U << cqCtxEntry->baseBkShift;
+        __gm__ TileXR::UDMACqeCtx *cqeAddr =
+            reinterpret_cast<__gm__ TileXR::UDMACqeCtx *>(
+                cqCtxEntry->bufAddr +
+                cqeSize * (cqTail & (TileXR::TILEXR_UDMA_CQ_DEPTH - 1U)));
+        const uint32_t tailIndex = sqTail % wqCtxEntry->depth;
+        const uint32_t completedEntryIndex = cqeAddr->entryIdx % wqCtxEntry->depth;
+        const uint32_t completedBb =
+            (completedEntryIndex + wqCtxEntry->depth - tailIndex) %
+                wqCtxEntry->depth + 1U;
+        if (completedBb > TileXR::TILEXR_UDMA_MAX_SQE_BB_NUM ||
+            completedBb > sqOutstanding) {
+            return kPrefetchWeightStatusCqInvalidCompletedBb;
+        }
+        return kPrefetchWeightStatusCqInvalidUnknown;
     }
 
     __gm__ TileXR::CommArgs *args_ = nullptr;

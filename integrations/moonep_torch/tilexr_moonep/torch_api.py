@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import json
+import math
 import os
 import struct
+import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -26,6 +29,13 @@ _DISPATCH_COMMON_TAIL_BYTES = (
     + 2 * _DISPATCH_DFX_BYTES
     + _DISPATCH_KERNEL_STATUS_BYTES
 )
+_PERF_KERNEL_VERSIONS = {
+    "planning": "tilexr_ep_plan_kernel",
+    "dispatch_forward": "tilexr_moonep_dispatch_urma_kernel",
+    "dispatch_backward": "tilexr_moonep_dispatch_urma_kernel",
+    "prefetch_weight": "tilexr_moonep_prefetch_weight_kernel",
+    "reduce_grad": "tilexr_moonep_reduce_grad_kernel",
+}
 def _format_dispatch_completion_flags(data: bytes, rank_size: int) -> str:
     rows = tuple(struct.iter_unpack("<QQ", data))
     if len(rows) != _DISPATCH_COMPLETION_FLAG_RANKS:
@@ -598,6 +608,7 @@ class TileXRMoonEPBuffer:
         if self.requested_udma_chunk_bytes < 0:
             raise ValueError("requested_udma_chunk_bytes must be non-negative")
         self._torch = torch_module or _torch()
+        self._initialize_perf_capture()
         self._closed = False
         self._epoch = 0
         self._dispatch_call_count = 0
@@ -661,6 +672,122 @@ class TileXRMoonEPBuffer:
                 f"[TileXR MoonEP rank {self.context.global_rank}] {stage}",
                 flush=True,
             )
+
+    def _initialize_perf_capture(self) -> None:
+        self._perf_capture_dir = os.environ.get("TILEXR_MOONEP_PERF_CAPTURE_DIR")
+        self._perf_capture_id = os.environ.get("TILEXR_MOONEP_PERF_CAPTURE_ID", "")
+        self._perf_capture_seen = 0
+        self._perf_capture_records: list[dict[str, Any]] = []
+        if not self._perf_capture_dir:
+            self._perf_capture_skip = 0
+            self._perf_capture_limit = 0
+            return
+        try:
+            self._perf_capture_skip = int(
+                os.environ.get("TILEXR_MOONEP_PERF_CAPTURE_SKIP_OPERATORS", "0")
+            )
+            self._perf_capture_limit = int(
+                os.environ.get("TILEXR_MOONEP_PERF_CAPTURE_OPERATORS", "55")
+            )
+        except ValueError as exc:
+            raise ValueError("performance capture counts must be integers") from exc
+        if (
+            self._perf_capture_skip < 0
+            or self._perf_capture_limit <= 0
+            or not self._perf_capture_id
+        ):
+            raise ValueError(
+                "performance capture requires a non-negative skip, positive limit, and ID"
+            )
+
+    def _begin_perf_capture(self, stage: str):
+        if not self._perf_capture_dir:
+            return None
+        source_operator = self._perf_capture_seen
+        self._perf_capture_seen += 1
+        if (
+            source_operator < self._perf_capture_skip
+            or len(self._perf_capture_records) >= self._perf_capture_limit
+        ):
+            return None
+        event_type = getattr(self._torch.npu, "Event", None)
+        if event_type is None:
+            raise RuntimeError("torch.npu does not expose timing events")
+        start = event_type(enable_timing=True)
+        start.record(self._torch.npu.current_stream())
+        return source_operator, stage, start
+
+    def _end_perf_capture(self, token) -> None:
+        if token is None:
+            return
+        source_operator, stage, start = token
+        end = self._torch.npu.Event(enable_timing=True)
+        end.record(self._torch.npu.current_stream())
+        self._perf_capture_records.append(
+            {
+                "source_operator": source_operator,
+                "stage": stage,
+                "start": start,
+                "end": end,
+            }
+        )
+
+    def _perf_kernel_version(self, stage: str) -> tuple[str, int]:
+        if stage in ("combine_forward", "combine_backward"):
+            version = int(getattr(self.runtime, "combine_version", 2))
+            launches = 2 if stage == "combine_backward" and version == 2 else 1
+            return f"tilexr_moonep_combine_v{version}_kernel", launches
+        try:
+            return _PERF_KERNEL_VERSIONS[stage], 1
+        except KeyError as exc:
+            raise ValueError(f"unknown performance capture stage: {stage}") from exc
+
+    def _write_perf_capture(self) -> None:
+        if not self._perf_capture_dir:
+            return
+        if len(self._perf_capture_records) != self._perf_capture_limit:
+            raise RuntimeError(
+                "performance capture is incomplete: "
+                f"got {len(self._perf_capture_records)}, "
+                f"expected {self._perf_capture_limit} operators"
+            )
+        operators = []
+        for sequence, record in enumerate(self._perf_capture_records):
+            latency_us = float(record["start"].elapsed_time(record["end"])) * 1000.0
+            if not math.isfinite(latency_us) or latency_us <= 0.0:
+                raise RuntimeError(
+                    f"performance capture operator {sequence} has invalid latency"
+                )
+            kernel_version, launches = self._perf_kernel_version(record["stage"])
+            operators.append(
+                {
+                    "sequence": sequence,
+                    "source_operator": record["source_operator"],
+                    "stage": record["stage"],
+                    "kernel_version": kernel_version,
+                    "kernel_launches_per_call": launches,
+                    "latency_us": latency_us,
+                }
+            )
+        payload = {
+            "schema_version": 1,
+            "capture_id": self._perf_capture_id,
+            "rank": int(self.context.global_rank),
+            "timing_source": "torch_npu_event",
+            "operators": operators,
+        }
+        os.makedirs(self._perf_capture_dir, exist_ok=True)
+        target = os.path.join(
+            self._perf_capture_dir,
+            f"rank{int(self.context.global_rank)}_performance.json",
+        )
+        temporary = f"{target}.tmp.{os.getpid()}.{uuid.uuid4().hex}"
+        with open(temporary, "w", encoding="utf-8", newline="\n") as handle:
+            json.dump(payload, handle, indent=2, sort_keys=True, allow_nan=False)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, target)
 
     def _retain(self, plan: MoonEPPlan, *values: Any) -> None:
         self._quiesced = False
@@ -975,15 +1102,19 @@ class TileXRMoonEPBuffer:
             dst_local_offset=dst_local_offset,
         )
         self._trace_stage("planning_kernel_launch_begin")
-        self.runtime.planning(
-            c,
-            topk_experts,
-            tokens_per_expert,
-            plan,
-            cu_seqlens,
-            self._stream_ptr(),
-            self.wait_iterations,
-        )
+        perf_token = self._begin_perf_capture("planning")
+        try:
+            self.runtime.planning(
+                c,
+                topk_experts,
+                tokens_per_expert,
+                plan,
+                cu_seqlens,
+                self._stream_ptr(),
+                self.wait_iterations,
+            )
+        finally:
+            self._end_perf_capture(perf_token)
         self._trace_stage("planning_kernel_launch_end")
         self._plans_needing_dedup[id(plan)] = plan
         self._retain(plan, topk_experts, tokens_per_expert, cu_seqlens)
@@ -1080,19 +1211,25 @@ class TileXRMoonEPBuffer:
                 dispatch_direction, plan
             )
         self._trace_stage("dispatch_kernel_launch_begin")
-        self.runtime.dispatch(
-            c,
-            plan,
-            hidden_sh,
-            hidden_nvsh,
-            stream_ptr,
-            route_weights_sk,
-            route_weights_nvs,
-            build_dedup=False,
-            inter_rank_sync=bool(inter_rank_sync),
-            registered_workspace=self.context.dispatch_workspace[0],
-            registered_workspace_bytes=self.context.dispatch_workspace[1],
+        perf_token = self._begin_perf_capture(
+            "dispatch_forward" if inline_plan else "dispatch_backward"
         )
+        try:
+            self.runtime.dispatch(
+                c,
+                plan,
+                hidden_sh,
+                hidden_nvsh,
+                stream_ptr,
+                route_weights_sk,
+                route_weights_nvs,
+                build_dedup=False,
+                inter_rank_sync=bool(inter_rank_sync),
+                registered_workspace=self.context.dispatch_workspace[0],
+                registered_workspace_bytes=self.context.dispatch_workspace[1],
+            )
+        finally:
+            self._end_perf_capture(perf_token)
         self._trace_stage("dispatch_kernel_launch_end")
         if (
             flag_dump_enabled
@@ -1200,9 +1337,13 @@ class TileXRMoonEPBuffer:
         self._synchronize_device()
         projections.udma_handle = self.runtime.udma_register(projections.backing)
         self._retain(plan, projections)
-        self.runtime.prefetch_weight(
-            self.context, plan, projections, self._stream_ptr()
-        )
+        perf_token = self._begin_perf_capture("prefetch_weight")
+        try:
+            self.runtime.prefetch_weight(
+                self.context, plan, projections, self._stream_ptr()
+            )
+        finally:
+            self._end_perf_capture(perf_token)
         self._expect_status(plan, _PREFETCH_WEIGHT_STATUS_SUCCESS)
         return self._record_event() if async_finish else projections
 
@@ -1258,19 +1399,25 @@ class TileXRMoonEPBuffer:
         self._retain(plan, hidden_nvsh, hidden_sh, route_weights_nvs, route_weights_sk)
         combine_version = int(getattr(self.runtime, "combine_version", 2))
         self._trace_stage(f"combine_v{combine_version}_launch_begin")
-        self.runtime.combine(
-            c,
-            plan,
-            hidden_nvsh,
-            hidden_sh,
-            self._stream_ptr(),
-            route_weights_nvs,
-            route_weights_sk,
-            inter_rank_sync=bool(inter_rank_sync),
-            flags=0,
-            registered_workspace=self.context.dispatch_workspace[0],
-            registered_workspace_bytes=self.context.dispatch_workspace[1],
+        perf_token = self._begin_perf_capture(
+            "combine_backward" if route_weights_nvs is not None else "combine_forward"
         )
+        try:
+            self.runtime.combine(
+                c,
+                plan,
+                hidden_nvsh,
+                hidden_sh,
+                self._stream_ptr(),
+                route_weights_nvs,
+                route_weights_sk,
+                inter_rank_sync=bool(inter_rank_sync),
+                flags=0,
+                registered_workspace=self.context.dispatch_workspace[0],
+                registered_workspace_bytes=self.context.dispatch_workspace[1],
+            )
+        finally:
+            self._end_perf_capture(perf_token)
         self._trace_stage(f"combine_v{combine_version}_launch_end")
         if combine_version == 1:
             self._expect_status(plan, 0)
@@ -1430,16 +1577,20 @@ class TileXRMoonEPBuffer:
             retained = True
             if all(existing is not plan for existing in self._pending_reduce_plans):
                 self._pending_reduce_plans.append(plan)
-            self.runtime.reduce_grad(
-                self.context,
-                plan,
-                gradients,
-                sources,
-                source_registrations,
-                self._reduce_grad_prepared,
-                self._stream_ptr(),
-                self.wait_iterations,
-            )
+            perf_token = self._begin_perf_capture("reduce_grad")
+            try:
+                self.runtime.reduce_grad(
+                    self.context,
+                    plan,
+                    gradients,
+                    sources,
+                    source_registrations,
+                    self._reduce_grad_prepared,
+                    self._stream_ptr(),
+                    self.wait_iterations,
+                )
+            finally:
+                self._end_perf_capture(perf_token)
             self._reduce_grad_inflight = True
             return self._record_event() if async_finish else None
         except Exception:
@@ -1614,6 +1765,11 @@ class TileXRMoonEPBuffer:
             self.check_pending_status()
         except Exception as exc:
             sync_error = exc
+        if sync_error is None:
+            try:
+                self._write_perf_capture()
+            except Exception as exc:
+                sync_error = exc
         try:
             try:
                 self.runtime.destroy_reduce_grad(self._reduce_grad_prepared)

@@ -1203,6 +1203,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--mode", choices=("benchmark", "reference", "correctness"), default="benchmark"
     )
+    parser.add_argument(
+        "--benchmark-kind", choices=("flow", "model_flow"), default="flow"
+    )
     parser.add_argument("--candidate-backend", default=None, metavar="MODULE:FACTORY")
     parser.add_argument(
         "--dump-stage-tensors",
@@ -1219,6 +1222,8 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError("wait_iterations and tensor_preview_elements must be positive")
     if args.mode == "benchmark" and args.dump_stage_tensors:
         raise ValueError("--dump-stage-tensors is only valid in reference/correctness mode")
+    if args.mode != "benchmark" and args.benchmark_kind != "flow":
+        raise ValueError("--benchmark-kind model_flow requires --mode benchmark")
     if (
         int(os.environ.get("WORLD_SIZE", "1")) > 1
         and os.environ.get("TILEXR_MOONEP_MANAGED_LAUNCH") != "1"
@@ -1256,7 +1261,12 @@ def main(argv: list[str] | None = None) -> int:
     try:
         for case in cases:
             if args.mode == "benchmark":
-                run_case(torch, case, args, root)
+                if args.benchmark_kind == "model_flow":
+                    from .model_flow import run_model_case
+
+                    run_model_case(torch, case, args, root)
+                else:
+                    run_case(torch, case, args, root)
             else:
                 run_correctness_case(torch, case, args, root)
     finally:
